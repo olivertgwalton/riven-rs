@@ -1,0 +1,22 @@
+[package]
+name = "riven-vfs"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+riven-core = { path = "../riven-core" }
+riven-db = { path = "../riven-db" }
+sqlx = { workspace = true }
+fuser = { workspace = true }
+tokio = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+lru = { workspace = true }
+parking_lot = { workspace = true }
+dashmap = { workspace = true }
+libc = { workspace = true }
+chrono = { workspace = true }
+futures = { workspace = true }
+regex = { workspace = true }
