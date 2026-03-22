@@ -1,0 +1,125 @@
+use figment::{
+    providers::{Env, Serialized},
+    Figment,
+};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+
+/// Core application settings, loaded from environment variables.
+/// Prefix: RIVEN_SETTING__
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RivenSettings {
+    pub database_url: String,
+    pub redis_url: String,
+    pub vfs_mount_path: String,
+    pub vfs_debug_logging: bool,
+    pub unsafe_clear_queues_on_startup: bool,
+    pub unsafe_refresh_database_on_startup: bool,
+    pub log_level: String,
+    pub log_directory: String,
+    pub logging_enabled: bool,
+    pub gql_port: u16,
+    pub dubbed_anime_only: bool,
+    pub minimum_average_bitrate_movies: Option<u32>,
+    pub minimum_average_bitrate_episodes: Option<u32>,
+
+    /// Retry items that have been stuck (failed_attempts > 0) for longer than
+    /// this many seconds. 0 = disabled. Default: 86400 (24 h).
+    pub retry_interval_secs: u64,
+
+    /// Bearer token / API key required on the GraphQL endpoint.
+    /// Empty string means no authentication is enforced.
+    pub api_key: String,
+
+    /// VFS in-memory chunk cache capacity in MB. 0 = use default (1 024 MB).
+    pub vfs_cache_max_size_mb: u64,
+}
+
+impl Default for RivenSettings {
+    fn default() -> Self {
+        Self {
+            database_url: "postgresql://localhost/riven".into(),
+            redis_url: "redis://localhost:6379".into(),
+            vfs_mount_path: "/mnt/riven".into(),
+            vfs_debug_logging: false,
+            unsafe_clear_queues_on_startup: false,
+            unsafe_refresh_database_on_startup: false,
+            log_level: "info".into(),
+            log_directory: "./logs".into(),
+            logging_enabled: true,
+            gql_port: 3000,
+            dubbed_anime_only: false,
+            minimum_average_bitrate_movies: None,
+            minimum_average_bitrate_episodes: None,
+            retry_interval_secs: 86400,
+            api_key: String::new(),
+            vfs_cache_max_size_mb: 0,
+        }
+    }
+}
+
+impl RivenSettings {
+    pub fn load() -> anyhow::Result<Self> {
+        let settings: Self = Figment::new()
+            .merge(Serialized::defaults(Self::default()))
+            .merge(Env::prefixed("RIVEN_SETTING__").split("__"))
+            .extract()?;
+        Ok(settings)
+    }
+}
+
+/// Per-plugin settings, loaded from environment variables.
+/// Prefix: RIVEN_PLUGIN_SETTING__{PLUGIN_PREFIX}__{KEY}
+#[derive(Debug, Clone)]
+pub struct PluginSettings {
+    prefix: String,
+    values: HashMap<String, String>,
+}
+
+impl PluginSettings {
+    pub fn load(prefix: &str) -> Self {
+        let env_prefix = format!("RIVEN_PLUGIN_SETTING__{prefix}__");
+        let mut values = HashMap::new();
+
+        for (key, value) in std::env::vars() {
+            if let Some(suffix) = key.strip_prefix(&env_prefix) {
+                values.insert(suffix.to_lowercase(), value);
+            }
+        }
+
+        Self {
+            prefix: prefix.to_string(),
+            values,
+        }
+    }
+
+    pub fn get(&self, key: &str) -> Option<&str> {
+        self.values
+            .get(&key.to_lowercase())
+            .map(|s| s.as_str())
+            .filter(|s| !s.is_empty())
+    }
+
+    pub fn get_or(&self, key: &str, default: &str) -> String {
+        self.get(key).unwrap_or(default).to_string()
+    }
+
+    pub fn get_list(&self, key: &str) -> Vec<String> {
+        self.get(key)
+            .map(|v| {
+                serde_json::from_str::<Vec<String>>(v).unwrap_or_else(|_| {
+                    v.split(',').map(|s| s.trim().to_string()).collect()
+                })
+            })
+            .unwrap_or_default()
+    }
+
+    pub fn prefix(&self) -> &str {
+        &self.prefix
+    }
+
+    pub fn has(&self, key: &str) -> bool {
+        self.get(key).is_some()
+    }
+}

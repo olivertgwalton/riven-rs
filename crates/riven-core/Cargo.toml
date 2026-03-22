@@ -1,0 +1,20 @@
+[package]
+name = "riven-core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+reqwest = { workspace = true }
+async-trait = { workspace = true }
+async-graphql = { workspace = true }
+chrono = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+figment = { workspace = true }
+inventory = { workspace = true }
+parking_lot = { workspace = true }
+redis = { workspace = true }
+sqlx = { workspace = true }
