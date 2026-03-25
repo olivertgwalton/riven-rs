@@ -6,7 +6,7 @@ use riven_db::entities::MediaItem;
 use riven_db::repo;
 use riven_rank::{ParsedData, RankSettings};
 
-use crate::{DownloadJob, JobQueue, ScrapeJob};
+use crate::{JobQueue, ScrapeJob};
 use super::load_item_or_log;
 
 /// Validate that a parsed torrent is a plausible match for the given item.
@@ -98,8 +98,6 @@ pub async fn run(id: i64, job: &ScrapeJob, queue: &JobQueue) {
 
     let _ = repo::clear_blacklisted_streams(&queue.db_pool, id).await;
 
-    // Reconstruct the event for plugin dispatch
-    // Reconstruct the event for plugin dispatch
     let event = RivenEvent::MediaItemScrapeRequested {
         id,
         item_type: job.item_type,
@@ -261,21 +259,6 @@ pub async fn run(id: i64, job: &ScrapeJob, queue: &JobQueue) {
 
     tracing::info!(id, stream_count, "scrape flow completed");
 
-    // Immediately queue download after successful scraping — mirrors riven-ts
-    // `requestDownload`, which is called for ALL item types on scrape success.
-    //
-    // For Season items, download_item::persist_season handles the season pack
-    // by iterating episodes and matching each file via file_matches_episode.
-    // fan_out_download is only called on failure paths (no new streams,
-    // partial-success, download error), matching riven-ts fanOutDownload.
-    if let Ok(Some(stream)) = riven_db::repo::get_best_stream(&queue.db_pool, id).await {
-        let magnet = format!("magnet:?xt=urn:btih:{}", stream.info_hash);
-        queue
-            .push_download(DownloadJob {
-                id,
-                info_hash: stream.info_hash.clone(),
-                magnet,
-            })
-            .await;
-    }
+    // Immediately queue download after successful scraping.
+    queue.push_download_from_best_stream(id).await;
 }

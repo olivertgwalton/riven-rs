@@ -6,8 +6,10 @@ use riven_db::entities::MediaItem;
 use riven_db::repo;
 
 use crate::JobQueue;
-use super::helpers::{handle_bitrate_failure, load_item_or_err};
-
+use super::helpers::{
+    episode_vfs_path, handle_bitrate_failure, load_item_or_err, matches_episode,
+    parse_file_path, select_episode_files,
+};
 
 /// Persist a movie download result. Returns `true` on success.
 pub async fn persist_movie(
@@ -26,11 +28,10 @@ pub async fn persist_movie(
     let mut video_files: Vec<(&DownloadFile, riven_rank::ParsedData)> = dl
         .files
         .iter()
-        .map(|f| (f, super::helpers::parse_file_path(&f.filename)))
+        .map(|f| (f, parse_file_path(&f.filename)))
         .filter(|(_, parsed)| parsed.media_type() == "movie")
         .collect();
 
-    // Sort by size descending
     video_files.sort_by_key(|(f, _)| std::cmp::Reverse(f.file_size));
 
     let file = if let Some(first) = video_files.first() {
@@ -112,11 +113,10 @@ pub async fn persist_episode(
         }
     };
 
-    let season =
-        match load_item_or_err(season_id, queue, "could not load parent season").await {
-            Some(s) => s,
-            None => return false,
-        };
+    let season = match load_item_or_err(season_id, queue, "could not load parent season").await {
+        Some(s) => s,
+        None => return false,
+    };
 
     let show_id = match season.parent_id {
         Some(sid) => sid,
@@ -132,11 +132,10 @@ pub async fn persist_episode(
         }
     };
 
-    let show: MediaItem =
-        match load_item_or_err(show_id, queue, "could not load parent show").await {
-            Some(s) => s,
-            None => return false,
-        };
+    let show = match load_item_or_err(show_id, queue, "could not load parent show").await {
+        Some(s) => s,
+        None => return false,
+    };
 
     let season_number = season.season_number.unwrap_or(1);
     let episode_number = item.episode_number.unwrap_or(1);
@@ -149,19 +148,13 @@ pub async fn persist_episode(
     let matched: Vec<(&DownloadFile, riven_rank::ParsedData)> = dl
         .files
         .iter()
-        .map(|f| (f, super::helpers::parse_file_path(&f.filename)))
-        .filter(|(_, parsed)| {
-            parsed.seasons.contains(&season_number)
-                && (parsed.episodes.contains(&episode_number)
-                    || item.absolute_number.map_or(false, |abs| parsed.episodes.contains(&abs)))
-        })
+        .map(|f| (f, parse_file_path(&f.filename)))
+        .filter(|(_, p)| matches_episode(p, season_number, episode_number, item.absolute_number))
         .collect();
 
     if matched.is_empty() {
         tracing::info!(
-            id,
-            season = season_number,
-            episode = episode_number,
+            id, season = season_number, episode = episode_number,
             info_hash = %info_hash,
             "no torrent file matched episode — blacklisting stream"
         );
@@ -175,46 +168,42 @@ pub async fn persist_episode(
         return false;
     }
 
-    let file = matched.iter().max_by_key(|(f, _)| f.file_size).unwrap().0;
-
+    let largest = matched.iter().max_by_key(|(f, _)| f.file_size).unwrap().0;
     let config = queue.downloader_config.read().await;
-    if !config.episode_passes(file.file_size, item.runtime) {
+    if !config.episode_passes(largest.file_size, item.runtime) {
         drop(config);
-        handle_bitrate_failure(id, info_hash, file.file_size, item.runtime, "episode", queue)
+        handle_bitrate_failure(id, info_hash, largest.file_size, item.runtime, "episode", queue)
             .await;
         return false;
     }
     drop(config);
 
     let show_name = show.pretty_name();
-    let vfs_filename = format!(
-        "{} - s{:02}e{:02}.mkv",
-        show_name, season_number, episode_number
-    );
-    let path = format!("/shows/{show_name}/Season {season_number:02}/{vfs_filename}");
-
-    if let Err(e) = repo::create_media_entry(
-        &queue.db_pool,
-        id,
-        &path,
-        file.file_size as i64,
-        &file.filename,
-        file.download_url.as_deref(),
-        file.stream_url.as_deref(),
-        &dl.plugin_name,
-        dl.provider.as_deref(),
-    )
-    .await
-    {
-        tracing::error!(error = %e, "failed to create media entry");
-        queue
-            .notify(RivenEvent::MediaItemDownloadError {
-                id,
-                title: item.title.clone(),
-                error: e.to_string(),
-            })
-            .await;
-        return false;
+    for (file, part) in select_episode_files(&matched) {
+        let path = episode_vfs_path(&show_name, season_number, episode_number, part);
+        if let Err(e) = repo::create_media_entry(
+            &queue.db_pool,
+            id,
+            &path,
+            file.file_size as i64,
+            &file.filename,
+            file.download_url.as_deref(),
+            file.stream_url.as_deref(),
+            &dl.plugin_name,
+            dl.provider.as_deref(),
+        )
+        .await
+        {
+            tracing::error!(error = %e, "failed to create media entry");
+            queue
+                .notify(RivenEvent::MediaItemDownloadError {
+                    id,
+                    title: item.title.clone(),
+                    error: e.to_string(),
+                })
+                .await;
+            return false;
+        }
     }
 
     true
@@ -247,11 +236,10 @@ pub async fn persist_season(
         }
     };
 
-    let show: MediaItem =
-        match load_item_or_err(show_id, queue, "could not load parent show").await {
-            Some(s) => s,
-            None => return false,
-        };
+    let show = match load_item_or_err(show_id, queue, "could not load parent show").await {
+        Some(s) => s,
+        None => return false,
+    };
 
     let episodes = match repo::list_episodes(&queue.db_pool, id).await {
         Ok(eps) => eps,
@@ -279,67 +267,58 @@ pub async fn persist_season(
         let matched: Vec<(&DownloadFile, riven_rank::ParsedData)> = dl
             .files
             .iter()
-            .map(|f| (f, super::helpers::parse_file_path(&f.filename)))
-            .filter(|(_, parsed)| {
-                parsed.seasons.contains(&season_number)
-                    && (parsed.episodes.contains(&episode_number)
-                        || ep.absolute_number.map_or(false, |abs| parsed.episodes.contains(&abs)))
-            })
+            .map(|f| (f, parse_file_path(&f.filename)))
+            .filter(|(_, p)| matches_episode(p, season_number, episode_number, ep.absolute_number))
             .collect();
 
         if matched.is_empty() {
             continue;
         }
 
-        let file = matched.iter().max_by_key(|(f, _)| f.file_size).unwrap().0;
-
-        if !config.episode_passes(file.file_size, ep.runtime) {
+        let largest = matched.iter().max_by_key(|(f, _)| f.file_size).unwrap().0;
+        if !config.episode_passes(largest.file_size, ep.runtime) {
             tracing::info!(
-                id = ep.id,
-                file_size = file.file_size,
-                runtime = ?ep.runtime,
+                id = ep.id, file_size = largest.file_size, runtime = ?ep.runtime,
                 info_hash = %info_hash,
                 "episode failed bitrate check in season download — blacklisting stream for episode"
             );
             if !info_hash.is_empty() {
-                let _ =
-                    repo::blacklist_stream_by_hash(&queue.db_pool, ep.id, info_hash).await;
-                let _ =
-                    repo::update_stream_file_size(&queue.db_pool, info_hash, file.file_size).await;
+                let _ = repo::blacklist_stream_by_hash(&queue.db_pool, ep.id, info_hash).await;
+                let _ = repo::update_stream_file_size(&queue.db_pool, info_hash, largest.file_size).await;
             }
             continue;
         }
 
-        let vfs_filename = format!(
-            "{} - s{:02}e{:02}.mkv",
-            show_name, season_number, episode_number
-        );
-        let path = format!("/shows/{show_name}/Season {season_number:02}/{vfs_filename}");
-
-        match repo::create_media_entry(
-            &queue.db_pool,
-            ep.id,
-            &path,
-            file.file_size as i64,
-            &file.filename,
-            file.download_url.as_deref(),
-            file.stream_url.as_deref(),
-            &dl.plugin_name,
-            dl.provider.as_deref(),
-        )
-        .await
-        {
-            Ok(_) => {
-                if let Err(e) =
-                    repo::update_media_item_state(&queue.db_pool, ep.id, MediaItemState::Completed)
-                        .await
-                {
-                    tracing::error!(error = %e, ep_id = ep.id, "failed to update episode state");
+        for (file, part) in select_episode_files(&matched) {
+            let path = episode_vfs_path(&show_name, season_number, episode_number, part);
+            match repo::create_media_entry(
+                &queue.db_pool,
+                ep.id,
+                &path,
+                file.file_size as i64,
+                &file.filename,
+                file.download_url.as_deref(),
+                file.stream_url.as_deref(),
+                &dl.plugin_name,
+                dl.provider.as_deref(),
+            )
+            .await
+            {
+                Ok(_) => {
+                    if let Err(e) = repo::update_media_item_state(
+                        &queue.db_pool,
+                        ep.id,
+                        MediaItemState::Completed,
+                    )
+                    .await
+                    {
+                        tracing::error!(error = %e, ep_id = ep.id, "failed to update episode state");
+                    }
+                    any_matched = true;
                 }
-                any_matched = true;
-            }
-            Err(e) => {
-                tracing::error!(error = %e, ep_id = ep.id, "failed to create media entry for episode");
+                Err(e) => {
+                    tracing::error!(error = %e, ep_id = ep.id, "failed to create media entry for episode");
+                }
             }
         }
     }
@@ -348,9 +327,7 @@ pub async fn persist_season(
 
     if !any_matched {
         tracing::info!(
-            id,
-            season = season_number,
-            info_hash = %info_hash,
+            id, season = season_number, info_hash = %info_hash,
             "no episodes matched in season download — blacklisting stream"
         );
         if !info_hash.is_empty() {

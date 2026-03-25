@@ -90,15 +90,7 @@ pub async fn run(queue: &JobQueue) {
             Ok((item, was_created)) => {
                 if was_created {
                     new_items += 1;
-                    queue
-                        .push_index(IndexJob {
-                            id: item.id,
-                            item_type: MediaItemType::Movie,
-                            imdb_id: item.imdb_id.clone(),
-                            tvdb_id: None,
-                            tmdb_id: item.tmdb_id.clone(),
-                        })
-                        .await;
+                    queue.push_index(IndexJob::from_item(&item)).await;
                 } else {
                     updated_items += 1;
                 }
@@ -148,15 +140,7 @@ pub async fn run(queue: &JobQueue) {
             Ok((item, was_created)) => {
                 if was_created {
                     new_items += 1;
-                    queue
-                        .push_index(IndexJob {
-                            id: item.id,
-                            item_type: MediaItemType::Show,
-                            imdb_id: item.imdb_id.clone(),
-                            tvdb_id: item.tvdb_id.clone(),
-                            tmdb_id: None,
-                        })
-                        .await;
+                    queue.push_index(IndexJob::from_item(&item)).await;
                 } else {
                     updated_items += 1;
                 }

@@ -14,6 +14,7 @@ pub use riven_core::downloader::DownloaderConfig;
 use riven_core::events::RivenEvent;
 use riven_core::plugin::PluginRegistry;
 use riven_core::types::MediaItemType;
+use riven_db::entities::MediaItem;
 
 // ── Job types ────────────────────────────────────────────────────────────────
 
@@ -32,6 +33,18 @@ pub struct IndexJob {
     pub tmdb_id: Option<String>,
 }
 
+impl IndexJob {
+    pub fn from_item(item: &MediaItem) -> Self {
+        Self {
+            id: item.id,
+            item_type: item.item_type,
+            imdb_id: item.imdb_id.clone(),
+            tvdb_id: item.tvdb_id.clone(),
+            tmdb_id: item.tmdb_id.clone(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScrapeJob {
     pub id: i64,
@@ -40,6 +53,30 @@ pub struct ScrapeJob {
     pub title: String,
     pub season: Option<i32>,
     pub episode: Option<i32>,
+}
+
+impl ScrapeJob {
+    pub fn for_movie(item: &MediaItem) -> Self {
+        Self {
+            id: item.id,
+            item_type: item.item_type,
+            imdb_id: item.imdb_id.clone(),
+            title: item.title.clone(),
+            season: None,
+            episode: None,
+        }
+    }
+
+    pub fn for_season(season: &MediaItem, show_title: String, show_imdb_id: Option<String>) -> Self {
+        Self {
+            id: season.id,
+            item_type: season.item_type,
+            imdb_id: show_imdb_id,
+            title: show_title,
+            season: season.season_number,
+            episode: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -225,6 +262,26 @@ impl JobQueue {
     }
 
     // ── Private helpers ──────────────────────────────────────────────────────
+
+    /// Fetch the best non-blacklisted stream for `id` and push a DownloadJob.
+    /// Returns `true` if a stream was found, `false` if none remain.
+    pub async fn push_download_from_best_stream(&self, id: i64) -> bool {
+        if let Some(stream) = riven_db::repo::get_best_stream(&self.db_pool, id)
+            .await
+            .ok()
+            .flatten()
+        {
+            self.push_download(DownloadJob {
+                id,
+                magnet: format!("magnet:?xt=urn:btih:{}", stream.info_hash),
+                info_hash: stream.info_hash,
+            })
+            .await;
+            true
+        } else {
+            false
+        }
+    }
 
     /// SET NX with EX. Returns true if the key was set (acquired), false if already set (duplicate).
     async fn set_nx(&self, key: &str, ttl_secs: usize) -> bool {
