@@ -4,246 +4,170 @@ pub mod worker;
 use std::sync::Arc;
 
 use anyhow::Result;
-use tokio::sync::mpsc;
+use apalis::layers::WorkerBuilderExt;
+use apalis::prelude::*;
+use apalis_redis::RedisStorage;
+use serde::{Deserialize, Serialize};
+use tokio::sync::{broadcast, RwLock};
 
-use riven_core::events::{HookResponse, RivenEvent};
+pub use riven_core::downloader::DownloaderConfig;
+use riven_core::events::RivenEvent;
 use riven_core::plugin::PluginRegistry;
+use riven_core::types::MediaItemType;
 
-/// File-size / bitrate filtering applied after a download response is received.
-///
-/// Minimum size is computed as `runtime_seconds × bitrate_kbps × 125` (bytes).
-/// If either field is `None` or the item has no runtime, the check is skipped.
-#[derive(Clone, Default)]
-pub struct DownloaderConfig {
-    /// Minimum average bitrate for movies (kbps). `None` = disabled.
-    pub minimum_average_bitrate_movies: Option<u32>,
-    /// Minimum average bitrate for episodes (kbps). `None` = disabled.
-    pub minimum_average_bitrate_episodes: Option<u32>,
+// ── Job types ────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContentServiceJob {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub _dummy: Option<bool>,
 }
 
-impl DownloaderConfig {
-    /// Returns `true` if the file passes the movie bitrate gate.
-    pub fn movie_passes(&self, file_size: u64, runtime_minutes: Option<i32>) -> bool {
-        let Some(kbps) = self.minimum_average_bitrate_movies else {
-            return true;
-        };
-        let Some(mins) = runtime_minutes else {
-            return true; // can't compute without runtime
-        };
-        let min_bytes = mins as u64 * 60 * kbps as u64 * 125;
-        file_size >= min_bytes
-    }
-
-    /// Returns `true` if the file passes the episode bitrate gate.
-    pub fn episode_passes(&self, file_size: u64, runtime_minutes: Option<i32>) -> bool {
-        let Some(kbps) = self.minimum_average_bitrate_episodes else {
-            return true;
-        };
-        let Some(mins) = runtime_minutes else {
-            return true;
-        };
-        let min_bytes = mins as u64 * 60 * kbps as u64 * 125;
-        file_size >= min_bytes
-    }
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IndexJob {
+    pub id: i64,
+    pub item_type: MediaItemType,
+    pub imdb_id: Option<String>,
+    pub tvdb_id: Option<String>,
+    pub tmdb_id: Option<String>,
 }
 
-/// The main event bus that distributes events to the plugin system and flow workers.
-pub struct EventBus {
-    event_tx: mpsc::Sender<RivenEvent>,
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScrapeJob {
+    pub id: i64,
+    pub item_type: MediaItemType,
+    pub imdb_id: Option<String>,
+    pub title: String,
+    pub season: Option<i32>,
+    pub episode: Option<i32>,
 }
 
-impl EventBus {
-    pub fn new(
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DownloadJob {
+    pub id: i64,
+    pub info_hash: String,
+    pub magnet: String,
+}
+
+// ── JobQueue ─────────────────────────────────────────────────────────────────
+
+pub struct JobQueue {
+    pub index_storage: RedisStorage<IndexJob>,
+    pub scrape_storage: RedisStorage<ScrapeJob>,
+    pub download_storage: RedisStorage<DownloadJob>,
+    pub content_storage: RedisStorage<ContentServiceJob>,
+    pub redis: redis::aio::ConnectionManager,
+    pub registry: Arc<PluginRegistry>,
+    pub notification_tx: broadcast::Sender<String>,
+    pub db_pool: sqlx::PgPool,
+    pub downloader_config: Arc<RwLock<DownloaderConfig>>,
+}
+
+impl JobQueue {
+    pub async fn new(
+        redis_url: &str,
         registry: Arc<PluginRegistry>,
+        notification_tx: broadcast::Sender<String>,
         db_pool: sqlx::PgPool,
         downloader_config: DownloaderConfig,
-    ) -> (Self, EventBusHandle) {
-        let (event_tx, event_rx) = mpsc::channel(1024);
-        let handle = EventBusHandle {
-            event_rx,
+    ) -> Result<Self> {
+        // apalis-redis uses its own ConnectionManager for storages
+        let apalis_conn = apalis_redis::connect(redis_url).await?;
+
+        let index_storage = RedisStorage::new(apalis_conn.clone());
+        let scrape_storage = RedisStorage::new(apalis_conn.clone());
+        let download_storage = RedisStorage::new(apalis_conn.clone());
+        let content_storage = RedisStorage::new(apalis_conn);
+
+        // Separate redis ConnectionManager for dedup SET NX operations
+        let redis_client = redis::Client::open(redis_url)?;
+        let redis = redis::aio::ConnectionManager::new(redis_client).await?;
+
+        Ok(Self {
+            index_storage,
+            scrape_storage,
+            download_storage,
+            content_storage,
+            redis,
             registry,
+            notification_tx,
             db_pool,
-            downloader_config,
-        };
-        (Self { event_tx }, handle)
+            downloader_config: Arc::new(RwLock::new(downloader_config)),
+        })
     }
 
-    pub async fn publish(&self, event: RivenEvent) -> Result<()> {
-        self.event_tx.send(event).await?;
-        Ok(())
-    }
-
-    pub fn publisher(&self) -> mpsc::Sender<RivenEvent> {
-        self.event_tx.clone()
-    }
-}
-
-pub struct EventBusHandle {
-    event_rx: mpsc::Receiver<RivenEvent>,
-    registry: Arc<PluginRegistry>,
-    db_pool: sqlx::PgPool,
-    downloader_config: DownloaderConfig,
-}
-
-impl EventBusHandle {
-    /// Run the event loop, dispatching events to plugins and processing flows.
-    pub async fn run(mut self, event_tx: mpsc::Sender<RivenEvent>) -> Result<()> {
-        tracing::info!("event bus started");
-
-        while let Some(event) = self.event_rx.recv().await {
-            let event_type = event.event_type();
-            tracing::debug!(?event_type, "processing event");
-
-            // Dispatch to plugins
-            let results = self.registry.dispatch(&event).await;
-
-            for (plugin_name, result) in results {
-                match result {
-                    Ok(response) => {
-                        // Process hook responses into follow-up events
-                        if let Some(follow_up) = self
-                            .process_hook_response(&event, plugin_name, response)
-                            .await
-                        {
-                            if let Err(e) = event_tx.send(follow_up).await {
-                                tracing::error!(error = %e, "failed to send follow-up event");
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        tracing::error!(plugin = plugin_name, error = %e, "plugin hook failed");
-                    }
-                }
+    /// Push an IndexJob with Redis SET NX dedup (TTL 300s).
+    pub async fn push_index(&self, job: IndexJob) {
+        let key = format!("riven:dedup:index:{}", job.id);
+        if self.set_nx(&key, 300).await {
+            let mut storage = self.index_storage.clone();
+            if let Err(e) = storage.push(job).await {
+                tracing::error!(error = %e, "failed to push IndexJob");
             }
-
-            // Run flow processors for certain events
-            self.run_flow(&event, &event_tx).await;
         }
-
-        Ok(())
     }
 
-    async fn process_hook_response(
-        &self,
-        _event: &RivenEvent,
-        _plugin_name: &str,
-        _response: HookResponse,
-    ) -> Option<RivenEvent> {
-        // Hook responses generate follow-up events
-        // The flow system handles aggregation
-        None
+    /// Push a ScrapeJob with Redis SET NX dedup (TTL 300s).
+    pub async fn push_scrape(&self, job: ScrapeJob) {
+        let key = format!("riven:dedup:scrape:{}", job.id);
+        if self.set_nx(&key, 300).await {
+            let mut storage = self.scrape_storage.clone();
+            if let Err(e) = storage.push(job).await {
+                tracing::error!(error = %e, "failed to push ScrapeJob");
+            }
+        }
     }
 
-    async fn run_flow(&self, event: &RivenEvent, event_tx: &mpsc::Sender<RivenEvent>) {
-        match event {
-            RivenEvent::ContentServiceRequested => {
-                flows::request_content::run(&self.registry, &self.db_pool, event_tx).await;
+    /// Push a DownloadJob with Redis SET NX dedup (TTL 300s).
+    pub async fn push_download(&self, job: DownloadJob) {
+        let key = format!("riven:dedup:download:{}", job.id);
+        if self.set_nx(&key, 300).await {
+            let mut storage = self.download_storage.clone();
+            if let Err(e) = storage.push(job).await {
+                tracing::error!(error = %e, "failed to push DownloadJob");
             }
-            RivenEvent::MediaItemIndexRequested { id, .. } => {
-                flows::index_item::run(*id, &self.registry, &self.db_pool, event_tx).await;
-            }
-            RivenEvent::MediaItemScrapeRequested { id, .. } => {
-                flows::scrape_item::run(
-                    *id,
-                    event,
-                    &self.registry,
-                    &self.db_pool,
-                    event_tx,
-                )
-                .await;
-            }
-            RivenEvent::MediaItemDownloadRequested { id, .. } => {
-                flows::download_item::run(
-                    *id,
-                    event,
-                    &self.registry,
-                    &self.db_pool,
-                    event_tx,
-                    &self.downloader_config,
-                )
-                .await;
-            }
-            RivenEvent::MediaItemIndexSuccess { id, .. } => {
-                // Immediately queue scraping after successful indexing
-                if let Ok(Some(item)) = riven_db::repo::get_media_item(&self.db_pool, *id).await {
-                    match item.item_type {
-                        riven_core::types::MediaItemType::Movie | riven_core::types::MediaItemType::Episode => {
-                            let _ = event_tx
-                                .send(RivenEvent::MediaItemScrapeRequested {
-                                    id: item.id,
-                                    item_type: item.item_type,
-                                    imdb_id: item.imdb_id.clone(),
-                                    title: item.title.clone(),
-                                    season: item.season_number,
-                                    episode: item.episode_number,
-                                })
-                                .await;
-                        }
-                        riven_core::types::MediaItemType::Show => {
-                            // After a show is indexed, queue scraping for each requested season
-                            // (riven-ts: requestScrape → requestScrape.actor → fans out to requestedSeasons).
-                            let show_imdb_id = item.imdb_id.clone();
-                            if let Ok(seasons) = riven_db::repo::get_requested_seasons_for_show(&self.db_pool, item.id).await {
-                                for season in seasons {
-                                    let _ = event_tx
-                                        .send(RivenEvent::MediaItemScrapeRequested {
-                                            id: season.id,
-                                            item_type: season.item_type,
-                                            imdb_id: show_imdb_id.clone(),
-                                            title: season.title.clone(),
-                                            season: season.season_number,
-                                            episode: None,
-                                        })
-                                        .await;
-                                }
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            RivenEvent::MediaItemScrapeSuccess { id, .. } => {
-                // Immediately queue download after successful scraping
-                if let Ok(Some(stream)) = riven_db::repo::get_best_stream(&self.db_pool, *id).await
-                {
-                    let magnet = format!("magnet:?xt=urn:btih:{}", stream.info_hash);
-                    let _ = event_tx
-                        .send(RivenEvent::MediaItemDownloadRequested {
-                            id: *id,
-                            info_hash: stream.info_hash.clone(),
-                            magnet,
-                        })
-                        .await;
-                }
-            }
+        }
+    }
 
-            RivenEvent::MediaItemScrapeErrorNoNewStreams { id, .. } => {
-                // No streams found — fan out to lower-level scraping as fallback
-                // (riven-ts: scrape.error.no-new-streams → fanOutDownload).
-                self.fan_out_download(*id, event_tx).await;
-            }
+    /// Push a ContentServiceJob (no dedup needed).
+    pub async fn push_content_service(&self) {
+        let mut storage = self.content_storage.clone();
+        if let Err(e) = storage.push(ContentServiceJob { _dummy: None }).await {
+            tracing::error!(error = %e, "failed to push ContentServiceJob");
+        }
+    }
 
-            RivenEvent::MediaItemDownloadPartialSuccess { id } => {
-                // Stream was already blacklisted in the download flow.
-                // Fan out to re-scrape at a lower level (riven-ts: download.partial-success → fanOutDownload).
-                self.fan_out_download(*id, event_tx).await;
-            }
+    /// Release the dedup key for a job, allowing it to be re-queued.
+    pub async fn release_dedup(&self, prefix: &str, id: i64) {
+        let key = format!("riven:dedup:{}:{}", prefix, id);
+        let mut conn = self.redis.clone();
+        let _: Result<(), _> = redis::cmd("DEL")
+            .arg(&key)
+            .query_async(&mut conn)
+            .await;
+    }
 
-            RivenEvent::MediaItemDownloadError { id, .. } => {
-                // Transient failure — fan out to re-scrape (riven-ts: download.error → fanOutDownload).
-                self.fan_out_download(*id, event_tx).await;
+    /// Dispatch a notification event to plugins and (if notable) to the UI broadcast channel.
+    pub async fn notify(&self, event: RivenEvent) {
+        let results = self.registry.dispatch(&event).await;
+        for (plugin_name, result) in results {
+            if let Err(e) = result {
+                tracing::error!(plugin = plugin_name, error = %e, "plugin hook failed");
             }
-
-            _ => {}
+        }
+        if event.is_notable() {
+            if let Ok(json) = serde_json::to_string(&event) {
+                let _ = self.notification_tx.send(json);
+            }
         }
     }
 
     /// Fan out to re-scrape at a lower level when scraping/downloading fails.
-    /// Mirrors riven-ts fanOutDownload.actor:
-    ///   Show   → request scrape for each requested season
-    ///   Season → request scrape for each incomplete (indexed/scraped/ongoing) episode
-    ///   Other  → no-op (item stays in current state; retryLibrary will pick it up)
-    async fn fan_out_download(&self, id: i64, event_tx: &mpsc::Sender<RivenEvent>) {
+    /// Mirrors riven-ts fanOutDownload.actor exactly:
+    ///   Show  → push ScrapeJobs for each requested season
+    ///   Season → push ScrapeJobs for each incomplete episode
+    ///   Movie/Episode → do nothing (retry library handles re-download)
+    pub async fn fan_out_download(&self, id: i64) {
         let item = match riven_db::repo::get_media_item(&self.db_pool, id).await {
             Ok(Some(item)) => item,
             _ => return,
@@ -252,18 +176,19 @@ impl EventBusHandle {
         match item.item_type {
             riven_core::types::MediaItemType::Show => {
                 let show_imdb_id = item.imdb_id.clone();
-                if let Ok(seasons) = riven_db::repo::get_requested_seasons_for_show(&self.db_pool, id).await {
+                if let Ok(seasons) =
+                    riven_db::repo::get_requested_seasons_for_show(&self.db_pool, id).await
+                {
                     for season in seasons {
-                        let _ = event_tx
-                            .send(RivenEvent::MediaItemScrapeRequested {
-                                id: season.id,
-                                item_type: season.item_type,
-                                imdb_id: show_imdb_id.clone(),
-                                title: season.title.clone(),
-                                season: season.season_number,
-                                episode: None,
-                            })
-                            .await;
+                        self.push_scrape(ScrapeJob {
+                            id: season.id,
+                            item_type: season.item_type,
+                            imdb_id: show_imdb_id.clone(),
+                            title: season.title.clone(),
+                            season: season.season_number,
+                            episode: None,
+                        })
+                        .await;
                     }
                 }
             }
@@ -277,22 +202,119 @@ impl EventBusHandle {
                 } else {
                     None
                 };
-                if let Ok(episodes) = riven_db::repo::get_incomplete_episodes_for_season(&self.db_pool, id).await {
+                if let Ok(episodes) =
+                    riven_db::repo::get_incomplete_episodes_for_season(&self.db_pool, id).await
+                {
                     for ep in episodes {
-                        let _ = event_tx
-                            .send(RivenEvent::MediaItemScrapeRequested {
-                                id: ep.id,
-                                item_type: ep.item_type,
-                                imdb_id: show_imdb_id.clone(),
-                                title: ep.title.clone(),
-                                season: ep.season_number,
-                                episode: ep.episode_number,
-                            })
-                            .await;
+                        self.push_scrape(ScrapeJob {
+                            id: ep.id,
+                            item_type: ep.item_type,
+                            imdb_id: show_imdb_id.clone(),
+                            title: ep.title.clone(),
+                            season: ep.season_number,
+                            episode: ep.episode_number,
+                        })
+                        .await;
                     }
                 }
             }
+            // Movie and Episode: do nothing — riven-ts fanOutDownload has no handler
+            // for these types. The retry library re-attempts the download.
             _ => {}
         }
     }
+
+    // ── Private helpers ──────────────────────────────────────────────────────
+
+    /// SET NX with EX. Returns true if the key was set (acquired), false if already set (duplicate).
+    async fn set_nx(&self, key: &str, ttl_secs: usize) -> bool {
+        let mut conn = self.redis.clone();
+        let result: Option<String> = redis::cmd("SET")
+            .arg(key)
+            .arg("1")
+            .arg("NX")
+            .arg("EX")
+            .arg(ttl_secs)
+            .query_async(&mut conn)
+            .await
+            .unwrap_or(None);
+        result.is_some()
+    }
+}
+
+// ── Apalis worker handlers ────────────────────────────────────────────────────
+
+async fn handle_index_job(job: IndexJob, queue: Data<Arc<JobQueue>>) -> Result<(), BoxDynError> {
+    let id = job.id;
+    flows::index_item::run(id, &queue).await;
+    queue.release_dedup("index", id).await;
+    Ok(())
+}
+
+async fn handle_scrape_job(job: ScrapeJob, queue: Data<Arc<JobQueue>>) -> Result<(), BoxDynError> {
+    let id = job.id;
+    flows::scrape_item::run(id, &job, &queue).await;
+    queue.release_dedup("scrape", id).await;
+    Ok(())
+}
+
+async fn handle_download_job(job: DownloadJob, queue: Data<Arc<JobQueue>>) -> Result<(), BoxDynError> {
+    let id = job.id;
+    flows::download_item::run(id, &job, &queue).await;
+    queue.release_dedup("download", id).await;
+    Ok(())
+}
+
+async fn handle_content_service_job(
+    _job: ContentServiceJob,
+    queue: Data<Arc<JobQueue>>,
+) -> Result<(), BoxDynError> {
+    flows::request_content::run(&queue).await;
+    Ok(())
+}
+
+// ── Monitor factory ───────────────────────────────────────────────────────────
+
+pub fn start_workers(queue: Arc<JobQueue>) -> Monitor {
+    Monitor::new()
+        .register({
+            let q = queue.clone();
+            move |_| {
+                WorkerBuilder::new("riven-index")
+                    .backend(q.index_storage.clone())
+                    .concurrency(10)
+                    .data(q.clone())
+                    .build(handle_index_job)
+            }
+        })
+        .register({
+            let q = queue.clone();
+            move |_| {
+                WorkerBuilder::new("riven-scrape")
+                    .backend(q.scrape_storage.clone())
+                    .concurrency(20)
+                    .data(q.clone())
+                    .build(handle_scrape_job)
+            }
+        })
+        .register({
+            let q = queue.clone();
+            move |_| {
+                WorkerBuilder::new("riven-download")
+                    .backend(q.download_storage.clone())
+                    .concurrency(10)
+                    .data(q.clone())
+                    .build(handle_download_job)
+            }
+        })
+        .register({
+            let q = queue.clone();
+            move |_| {
+                WorkerBuilder::new("riven-content")
+                    .backend(q.content_storage.clone())
+                    .concurrency(1)
+                    .data(q.clone())
+                    .build(handle_content_service_job)
+            }
+        })
 }

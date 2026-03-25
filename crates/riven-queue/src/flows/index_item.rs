@@ -1,27 +1,17 @@
 use riven_core::events::{HookResponse, RivenEvent};
-use riven_core::plugin::PluginRegistry;
 use riven_core::types::*;
 use riven_db::repo;
-use tokio::sync::mpsc;
+
+use crate::JobQueue;
+use crate::ScrapeJob;
+
+use super::load_item_or_log;
 
 /// Run the index item flow.
 /// Dispatches to indexer plugins (TMDB, TVDB), merges results, and persists.
-pub async fn run(
-    id: i64,
-    registry: &PluginRegistry,
-    db_pool: &sqlx::PgPool,
-    event_tx: &mpsc::Sender<RivenEvent>,
-) {
-    let item = match repo::get_media_item(db_pool, id).await {
-        Ok(Some(item)) => item,
-        Ok(None) => {
-            tracing::error!(id, "media item not found for indexing");
-            return;
-        }
-        Err(e) => {
-            tracing::error!(id, error = %e, "failed to fetch media item for indexing");
-            return;
-        }
+pub async fn run(id: i64, queue: &JobQueue) {
+    let Some(item) = load_item_or_log(id, &queue.db_pool, "indexing").await else {
+        return;
     };
 
     let event = RivenEvent::MediaItemIndexRequested {
@@ -32,7 +22,7 @@ pub async fn run(
         tmdb_id: item.tmdb_id.clone(),
     };
 
-    let results = registry.dispatch(&event).await;
+    let results = queue.registry.dispatch(&event).await;
 
     let mut merged = IndexedMediaItem::default();
     let mut got_response = false;
@@ -40,9 +30,9 @@ pub async fn run(
     for (plugin_name, result) in results {
         match result {
             Ok(HookResponse::Index(indexed)) => {
-                tracing::info!(plugin = plugin_name, id, "indexer responded");
+                tracing::debug!(plugin = plugin_name, id, "indexer responded");
                 got_response = true;
-                merged = merged.merge(indexed);
+                merged = merged.merge(*indexed);
             }
             Ok(_) => {}
             Err(e) => {
@@ -52,8 +42,8 @@ pub async fn run(
     }
 
     if !got_response {
-        let _ = event_tx
-            .send(RivenEvent::MediaItemIndexError {
+        queue
+            .notify(RivenEvent::MediaItemIndexError {
                 id,
                 error: "no indexer plugin responded".into(),
             })
@@ -62,9 +52,9 @@ pub async fn run(
     }
 
     // Persist indexed data
-    if let Err(e) = repo::update_media_item_index(db_pool, id, &merged).await {
-        let _ = event_tx
-            .send(RivenEvent::MediaItemIndexError {
+    if let Err(e) = repo::update_media_item_index(&queue.db_pool, id, &merged).await {
+        queue
+            .notify(RivenEvent::MediaItemIndexError {
                 id,
                 error: e.to_string(),
             })
@@ -72,14 +62,22 @@ pub async fn run(
         return;
     }
 
+    // For movies, check if the release date is in the future and mark Unreleased.
+    if item.item_type == MediaItemType::Movie {
+        if let Some(aired_at) = merged.aired_at {
+            if aired_at > chrono::Utc::now().date_naive() {
+                let _ =
+                    repo::update_media_item_state(&queue.db_pool, id, MediaItemState::Unreleased)
+                        .await;
+            }
+        }
+    }
+
     // For shows, create seasons and episodes
     if item.item_type == MediaItemType::Show {
         if let Some(seasons) = &merged.seasons {
-            // Gap 1: season filtering — only mark seasons/episodes as requested when
-            // the item request explicitly lists them. An absent seasons list means
-            // "all seasons requested".
             let requested_seasons: Option<Vec<i32>> = if let Some(req_id) = item.item_request_id {
-                repo::get_item_request_by_id(db_pool, req_id)
+                repo::get_item_request_by_id(&queue.db_pool, req_id)
                     .await
                     .ok()
                     .flatten()
@@ -90,7 +88,6 @@ pub async fn run(
             };
 
             for season_data in seasons {
-                // Season 0 (specials) is never marked as requested unless explicitly asked.
                 let season_requested = if season_data.number == 0 {
                     requested_seasons
                         .as_ref()
@@ -100,11 +97,11 @@ pub async fn run(
                     requested_seasons
                         .as_ref()
                         .map(|s| s.contains(&season_data.number))
-                        .unwrap_or(true) // no filter → all requested
+                        .unwrap_or(true)
                 };
 
                 let season = match repo::create_season(
-                    db_pool,
+                    &queue.db_pool,
                     id,
                     season_data.number,
                     season_data.title.as_deref(),
@@ -124,7 +121,7 @@ pub async fn run(
 
                 for ep_data in &season_data.episodes {
                     if let Err(e) = repo::create_episode(
-                        db_pool,
+                        &queue.db_pool,
                         season.id,
                         ep_data.number,
                         ep_data.title.as_deref(),
@@ -142,30 +139,108 @@ pub async fn run(
                     }
                 }
 
-                // After creating all episodes, cascade their states up through the
-                // season so that fully-unreleased seasons get state = Unreleased
-                // rather than staying Indexed.
-                if let Ok(season_state) = repo::compute_state(db_pool, &season).await {
+                if let Ok(season_state) = repo::compute_state(&queue.db_pool, &season).await {
                     if season_state != season.state {
-                        let _ = repo::update_media_item_state(db_pool, season.id, season_state).await;
+                        let _ = repo::update_media_item_state(&queue.db_pool, season.id, season_state).await;
                     }
                 }
             }
         }
 
-        // Cascade season states up to the show.
-        if let Ok(Some(show_item)) = repo::get_media_item(db_pool, id).await {
-            if let Ok(show_state) = repo::compute_state(db_pool, &show_item).await {
+        if let Ok(Some(show_item)) = repo::get_media_item(&queue.db_pool, id).await {
+            if let Ok(show_state) = repo::compute_state(&queue.db_pool, &show_item).await {
                 if show_state != show_item.state {
-                    let _ = repo::update_media_item_state(db_pool, id, show_state).await;
+                    let _ =
+                        repo::update_media_item_state(&queue.db_pool, id, show_state).await;
                 }
             }
         }
     }
 
     let title = merged.title.clone().unwrap_or_else(|| item.title.clone());
-    let _ = event_tx
-        .send(RivenEvent::MediaItemIndexSuccess { id, title, item_type: item.item_type })
+    queue
+        .notify(RivenEvent::MediaItemIndexSuccess {
+            id,
+            title: title.clone(),
+            item_type: item.item_type,
+        })
         .await;
     tracing::info!(id, "index flow completed");
+
+    // Re-fetch the item from the DB so all ScrapeJob fields (especially imdb_id
+    // and title) reflect what the indexer wrote — mirroring riven-ts where
+    // persistMovieIndexerData / persistShowIndexerData creates the entity with
+    // full data before requestScrape is triggered.
+    let fresh_item = match repo::get_media_item(&queue.db_pool, id).await {
+        Ok(Some(i)) => i,
+        _ => {
+            tracing::error!(id, "could not re-fetch item after indexing");
+            return;
+        }
+    };
+
+    // Immediately queue scraping after successful indexing
+    match fresh_item.item_type {
+        MediaItemType::Movie => {
+            queue
+                .push_scrape(ScrapeJob {
+                    id: fresh_item.id,
+                    item_type: fresh_item.item_type,
+                    imdb_id: fresh_item.imdb_id.clone(),
+                    title: fresh_item.title.clone(),
+                    season: fresh_item.season_number,
+                    episode: fresh_item.episode_number,
+                })
+                .await;
+        }
+        MediaItemType::Episode => {
+            let show_imdb_id = if let Some(parent_id) = fresh_item.parent_id {
+                if let Ok(Some(season)) = repo::get_media_item(&queue.db_pool, parent_id).await {
+                    if let Some(show_id) = season.parent_id {
+                        repo::get_media_item(&queue.db_pool, show_id)
+                            .await
+                            .ok()
+                            .flatten()
+                            .and_then(|s| s.imdb_id)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            queue
+                .push_scrape(ScrapeJob {
+                    id: fresh_item.id,
+                    item_type: fresh_item.item_type,
+                    imdb_id: show_imdb_id.or(fresh_item.imdb_id.clone()),
+                    title: title.clone(),
+                    season: fresh_item.season_number,
+                    episode: fresh_item.episode_number,
+                })
+                .await;
+        }
+        MediaItemType::Show => {
+            let show_imdb_id = fresh_item.imdb_id.clone();
+            if let Ok(seasons) =
+                riven_db::repo::get_requested_seasons_for_show(&queue.db_pool, fresh_item.id).await
+            {
+                for season in seasons {
+                    queue
+                        .push_scrape(ScrapeJob {
+                            id: season.id,
+                            item_type: season.item_type,
+                            imdb_id: show_imdb_id.clone(),
+                            title: title.clone(),
+                            season: season.season_number,
+                            episode: None,
+                        })
+                        .await;
+                }
+            }
+        }
+        _ => {}
+    }
 }
