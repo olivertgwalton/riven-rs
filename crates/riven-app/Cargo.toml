@@ -1,0 +1,42 @@
+[package]
+name = "riven-app"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "riven"
+path = "src/main.rs"
+
+[dependencies]
+riven-core = { path = "../riven-core" }
+riven-db = { path = "../riven-db" }
+riven-vfs = { path = "../riven-vfs" }
+riven-api = { path = "../riven-api" }
+riven-queue = { path = "../riven-queue" }
+riven-rank = { path = "../riven-rank" }
+plugin-tmdb = { path = "../plugin-tmdb" }
+plugin-tvdb = { path = "../plugin-tvdb" }
+plugin-comet = { path = "../plugin-comet" }
+plugin-torrentio = { path = "../plugin-torrentio" }
+plugin-stremthru = { path = "../plugin-stremthru" }
+plugin-plex = { path = "../plugin-plex" }
+plugin-seerr = { path = "../plugin-seerr" }
+plugin-listrr = { path = "../plugin-listrr" }
+plugin-mdblist = { path = "../plugin-mdblist" }
+plugin-notifications = { path = "../plugin-notifications" }
+plugin-emby-jellyfin = { path = "../plugin-emby-jellyfin" }
+plugin-calendar = { path = "../plugin-calendar" }
+plugin-trakt = { path = "../plugin-trakt" }
+plugin-dashboard = { path = "../plugin-dashboard" }
+plugin-logs = { path = "../plugin-logs" }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+tracing-appender = { workspace = true }
+anyhow = { workspace = true }
+figment = { workspace = true }
+sqlx = { workspace = true }
+redis = { workspace = true }
+reqwest = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
