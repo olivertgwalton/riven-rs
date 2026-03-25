@@ -65,30 +65,28 @@ fn check_exclude(data: &ParsedData, settings: &RankSettings, failed: &mut Vec<St
     true
 }
 
+const LANG_ANIME: &[&str]     = &["ja", "zh", "ko"];
+const LANG_NON_ANIME: &[&str] = &[
+    "de", "es", "hi", "ta", "ru", "ua", "th", "it", "ar", "pt", "fr", "pl", "nl", "sv",
+    "no", "da", "fi", "tr", "cs", "hu", "ro", "bg", "hr", "sr", "sk", "sl", "el", "he",
+    "id", "ms", "vi", "bn", "fa", "uk", "ca", "eu",
+];
+const LANG_COMMON: &[&str]    = &["de", "es", "hi", "ta", "ru", "ua", "th", "it", "zh", "ar", "fr"];
+
+fn add_langs(set: &mut HashSet<String>, codes: &[&str]) {
+    set.extend(codes.iter().copied().map(String::from));
+}
+
 /// Expand language group names into individual language codes.
 fn populate_langs(langs: &[String]) -> HashSet<String> {
     let mut result = HashSet::new();
-
-    let anime = ["ja", "zh", "ko"];
-    let non_anime = [
-        "de", "es", "hi", "ta", "ru", "ua", "th", "it", "ar", "pt", "fr", "pl", "nl", "sv",
-        "no", "da", "fi", "tr", "cs", "hu", "ro", "bg", "hr", "sr", "sk", "sl", "el", "he",
-        "id", "ms", "vi", "bn", "fa", "uk", "ca", "eu",
-    ];
-    let common = ["de", "es", "hi", "ta", "ru", "ua", "th", "it", "zh", "ar", "fr"];
-
     for lang in langs {
         match lang.to_lowercase().as_str() {
-            "anime" => result.extend(anime.iter().map(|s| s.to_string())),
-            "non_anime" => result.extend(non_anime.iter().map(|s| s.to_string())),
-            "common" => result.extend(common.iter().map(|s| s.to_string())),
-            "all" => {
-                result.extend(anime.iter().map(|s| s.to_string()));
-                result.extend(non_anime.iter().map(|s| s.to_string()));
-            }
-            other => {
-                result.insert(other.to_string());
-            }
+            "anime"     => add_langs(&mut result, LANG_ANIME),
+            "non_anime" => add_langs(&mut result, LANG_NON_ANIME),
+            "common"    => add_langs(&mut result, LANG_COMMON),
+            "all"       => { add_langs(&mut result, LANG_ANIME); add_langs(&mut result, LANG_NON_ANIME); }
+            other       => { result.insert(other.to_string()); }
         }
     }
     result

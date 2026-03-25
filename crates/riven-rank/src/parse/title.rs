@@ -124,41 +124,27 @@ pub(crate) fn normalize_title(title: &str) -> String {
 /// Normalize edition strings to canonical forms.
 pub(crate) fn normalize_edition(edition: &str) -> String {
     let lower = edition.to_lowercase();
-    if lower.contains("anniversary") {
-        "Anniversary Edition".to_string()
-    } else if lower.contains("ultimate") {
-        "Ultimate Edition".to_string()
-    } else if lower.contains("diamond") {
-        "Diamond Edition".to_string()
-    } else if lower.contains("collector") {
-        "Collectors Edition".to_string()
-    } else if lower.contains("special") && lower.contains("edition") {
-        "Special Edition".to_string()
-    } else if lower.contains("director") {
-        "Directors Cut".to_string()
-    } else if lower.contains("extended") && lower.contains("cut") {
-        "Extended Cut".to_string()
-    } else if lower.contains("extended") && lower.contains("edition") {
-        "Extended Edition".to_string()
-    } else if lower.contains("theatrical") {
-        "Theatrical".to_string()
-    } else if lower.contains("uncut") {
-        "Uncut".to_string()
-    } else if lower.contains("imax") {
-        "IMAX".to_string()
-    } else if lower.contains("remaster") {
-        "Remastered".to_string()
-    } else if lower.contains("criterion") {
-        "Criterion Collection".to_string()
-    } else if lower.contains("final") && lower.contains("cut") {
-        "Final Cut".to_string()
-    } else if lower.contains("limited") {
-        "Limited Edition".to_string()
-    } else if lower.contains("deluxe") {
-        "Deluxe Edition".to_string()
-    } else {
-        edition.to_string()
-    }
+    const TABLE: &[(&[&str], &str)] = &[
+        (&["anniversary"],           "Anniversary Edition"),
+        (&["ultimate"],              "Ultimate Edition"),
+        (&["diamond"],               "Diamond Edition"),
+        (&["collector"],             "Collectors Edition"),
+        (&["special", "edition"],    "Special Edition"),
+        (&["director"],              "Directors Cut"),
+        (&["extended", "cut"],       "Extended Cut"),
+        (&["extended", "edition"],   "Extended Edition"),
+        (&["theatrical"],            "Theatrical"),
+        (&["uncut"],                 "Uncut"),
+        (&["imax"],                  "IMAX"),
+        (&["remaster"],              "Remastered"),
+        (&["criterion"],             "Criterion Collection"),
+        (&["final", "cut"],          "Final Cut"),
+        (&["limited"],               "Limited Edition"),
+        (&["deluxe"],                "Deluxe Edition"),
+    ];
+    TABLE.iter()
+        .find(|(keys, _)| keys.iter().all(|k| lower.contains(k)))
+        .map_or_else(|| edition.to_string(), |(_, name)| name.to_string())
 }
 
 /// Remove accents / diacritics via manual mapping of common characters.

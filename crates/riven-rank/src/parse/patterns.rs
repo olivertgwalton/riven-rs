@@ -69,6 +69,17 @@ pub(crate) static RE_EPISODE_CROSSREF: LazyLock<Regex> =
 pub(crate) static RE_EPISODE_RANGE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)\bE(\d{1,4})\s*-\s*E(\d{1,4})\b").unwrap());
 
+// Consecutive multi-episode without separator: S01E01E02E03
+pub(crate) static RE_EPISODE_CONSECUTIVE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)S\d{1,4}((?:E\d{1,4}){2,})").unwrap());
+// Bare E## extractor — only used on consecutive blocks
+pub(crate) static RE_EP_NUM_BARE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)E(\d{1,4})").unwrap());
+
+// Part number: "Part 1", "Pt.2", "Part.1"
+pub(crate) static RE_PART: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)\b(?:Part|Pt)\.?\s*(\d{1,2})\b").unwrap());
+
 // ---------------------------------------------------------------------------
 // Quality (ordered per PTT handler order)
 // ---------------------------------------------------------------------------

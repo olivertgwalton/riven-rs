@@ -57,6 +57,7 @@ pub struct ParsedData {
     pub documentary: bool,
     pub commentary: bool,
     pub episode_code: Option<String>,
+    pub part: Option<i32>,
     pub country: Option<String>,
     pub container: Option<String>,
     pub extension: Option<String>,
@@ -74,107 +75,57 @@ impl ParsedData {
         }
     }
 
-    /// Merge another ParsedData into this one, preferring the other's non-empty/Some values.
+    /// Merge another ParsedData into this one, preferring non-empty/Some values from self.
     pub fn merge(&mut self, other: ParsedData) {
         if self.parsed_title.is_empty() {
             self.parsed_title = other.parsed_title;
             self.normalized_title = other.normalized_title;
         }
-        if self.year.is_none() {
-            self.year = other.year;
-        }
         if self.resolution == "unknown" {
             self.resolution = other.resolution;
         }
-        if self.quality.is_none() {
-            self.quality = other.quality;
-        }
-        if self.codec.is_none() {
-            self.codec = other.codec;
-        }
-        if self.bit_depth.is_none() {
-            self.bit_depth = other.bit_depth;
-        }
-        if self.bitrate.is_none() {
-            self.bitrate = other.bitrate;
-        }
-        if self.container.is_none() {
-            self.container = other.container;
-        }
-        if self.extension.is_none() {
-            self.extension = other.extension;
-        }
-        if self.group.is_none() {
-            self.group = other.group;
-        }
-        if self.edition.is_none() {
-            self.edition = other.edition;
-        }
-        if self.region.is_none() {
-            self.region = other.region;
-        }
-        if self.network.is_none() {
-            self.network = other.network;
-        }
-        if self.site.is_none() {
-            self.site = other.site;
-        }
-        if self.country.is_none() {
-            self.country = other.country;
-        }
+        self.year      = self.year.or(other.year);
+        self.quality   = self.quality.take().or(other.quality);
+        self.codec     = self.codec.take().or(other.codec);
+        self.bit_depth = self.bit_depth.take().or(other.bit_depth);
+        self.bitrate   = self.bitrate.take().or(other.bitrate);
+        self.container = self.container.take().or(other.container);
+        self.extension = self.extension.take().or(other.extension);
+        self.group     = self.group.take().or(other.group);
+        self.edition   = self.edition.take().or(other.edition);
+        self.region    = self.region.take().or(other.region);
+        self.network   = self.network.take().or(other.network);
+        self.site      = self.site.take().or(other.site);
+        self.country   = self.country.take().or(other.country);
+        self.part      = self.part.or(other.part);
 
-        // Extend vectors
-        self.seasons.extend(other.seasons);
-        self.seasons.sort();
-        self.seasons.dedup();
+        extend_sorted(&mut self.seasons,   other.seasons);
+        extend_sorted(&mut self.episodes,  other.episodes);
+        extend_sorted(&mut self.volumes,   other.volumes);
+        extend_sorted(&mut self.languages, other.languages);
+        extend_sorted(&mut self.audio,     other.audio);
+        extend_sorted(&mut self.hdr,       other.hdr);
+        extend_sorted(&mut self.channels,  other.channels);
+        extend_sorted(&mut self.extras,    other.extras);
 
-        self.episodes.extend(other.episodes);
-        self.episodes.sort();
-        self.episodes.dedup();
-
-        self.volumes.extend(other.volumes);
-        self.volumes.sort();
-        self.volumes.dedup();
-
-        self.languages.extend(other.languages);
-        self.languages.sort();
-        self.languages.dedup();
-
-        self.audio.extend(other.audio);
-        self.audio.sort();
-        self.audio.dedup();
-
-        self.hdr.extend(other.hdr);
-        self.hdr.sort();
-        self.hdr.dedup();
-
-        self.channels.extend(other.channels);
-        self.channels.sort();
-        self.channels.dedup();
-
-        self.extras.extend(other.extras);
-        self.extras.sort();
-        self.extras.dedup();
-
-        // Boolean Flags (OR-ed)
-        self.trash |= other.trash;
-        self.adult |= other.adult;
-        self.complete |= other.complete;
-        self.dubbed |= other.dubbed;
-        self.subbed |= other.subbed;
-        self.extended |= other.extended;
-        self.converted |= other.converted;
-        self.hardcoded |= other.hardcoded;
-        self.proper |= other.proper;
-        self.repack |= other.repack;
-        self.retail |= other.retail;
-        self.upscaled |= other.upscaled;
-        self.remastered |= other.remastered;
-        self.unrated |= other.unrated;
-        self.uncensored |= other.uncensored;
+        self.trash       |= other.trash;
+        self.adult       |= other.adult;
+        self.complete    |= other.complete;
+        self.dubbed      |= other.dubbed;
+        self.subbed      |= other.subbed;
+        self.extended    |= other.extended;
+        self.converted   |= other.converted;
+        self.hardcoded   |= other.hardcoded;
+        self.proper      |= other.proper;
+        self.repack      |= other.repack;
+        self.retail      |= other.retail;
+        self.upscaled    |= other.upscaled;
+        self.remastered  |= other.remastered;
+        self.unrated     |= other.unrated;
+        self.uncensored  |= other.uncensored;
         self.documentary |= other.documentary;
-        self.commentary |= other.commentary;
-        self.scene |= other.scene;
+        self.commentary  |= other.commentary;
+        self.scene       |= other.scene;
     }
 }
 
@@ -182,6 +133,12 @@ fn push_unique(vec: &mut Vec<String>, val: &str) {
     if !vec.iter().any(|v| v == val) {
         vec.push(val.to_string());
     }
+}
+
+fn extend_sorted<T: Ord>(dst: &mut Vec<T>, src: Vec<T>) {
+    dst.extend(src);
+    dst.sort_unstable();
+    dst.dedup();
 }
 
 /// Extract numbers from a regex with capture groups 1 (required) and 2 (optional range end).
@@ -339,7 +296,7 @@ fn detect_audio(raw: &str, audio: &mut Vec<String>) {
     if RE_AUDIO_DTS_LOSSLESS.is_match(raw) {
         push_unique(audio, "DTS Lossless");
     }
-    if RE_AUDIO_DTS_LOSSY.is_match(raw) && !audio.contains(&"DTS Lossless".to_string()) {
+    if RE_AUDIO_DTS_LOSSY.is_match(raw) && !audio.iter().any(|a| a == "DTS Lossless") {
         push_unique(audio, "DTS Lossy");
     }
     if RE_AUDIO_ATMOS.is_match(raw) {
@@ -354,7 +311,7 @@ fn detect_audio(raw: &str, audio: &mut Vec<String>) {
     if RE_AUDIO_DD_PLUS.is_match(raw) {
         push_unique(audio, "Dolby Digital Plus");
     }
-    if RE_AUDIO_DD.is_match(raw) && !audio.contains(&"Dolby Digital Plus".to_string()) {
+    if RE_AUDIO_DD.is_match(raw) && !audio.iter().any(|a| a == "Dolby Digital Plus") {
         push_unique(audio, "Dolby Digital");
     }
     if RE_AUDIO_AAC.is_match(raw) {
@@ -379,7 +336,7 @@ fn detect_hdr(raw: &str, hdr: &mut Vec<String>) {
     if RE_HDR_HDR10PLUS.is_match(raw) {
         push_unique(hdr, "HDR10+");
     }
-    if RE_HDR_HDR.is_match(raw) && !hdr.contains(&"HDR10+".to_string()) {
+    if RE_HDR_HDR.is_match(raw) && !hdr.iter().any(|h| h == "HDR10+") {
         push_unique(hdr, "HDR");
     }
     if RE_HDR_SDR.is_match(raw) {
@@ -474,8 +431,22 @@ pub fn parse(raw_title: &str) -> ParsedData {
             }
         }
     }
+    // Catch consecutive episodes without separator: S01E01E02E03
+    // RE_EPISODE_SE only captures the first episode in this case; fill the rest.
+    for cap in RE_EPISODE_CONSECUTIVE.captures_iter(raw) {
+        for ep_cap in RE_EP_NUM_BARE.captures_iter(&cap[1]) {
+            if let Ok(n) = ep_cap[1].parse::<i32>() {
+                if !data.episodes.contains(&n) {
+                    data.episodes.push(n);
+                }
+            }
+        }
+    }
     data.episodes.sort();
     data.episodes.dedup();
+
+    // Part number (e.g. "Part 1", "Pt.2")
+    data.part = RE_PART.captures(raw).and_then(|c| c[1].parse().ok());
 
     // Audio, HDR, channels
     detect_audio(raw, &mut data.audio);
