@@ -1,8 +1,11 @@
+pub mod cache;
 pub mod chunks;
 pub mod detect;
+pub mod fetcher;
 pub mod filesystem;
 pub mod path_info;
 pub mod prefetch;
+pub mod readdir;
 pub mod stream;
 
 use std::path::Path;
@@ -42,6 +45,39 @@ pub fn mount(
 
     if !mount_path.exists() {
         std::fs::create_dir_all(mount_path)?;
+    } else {
+        // Attempt lazy unmount only if a FUSE filesystem is already mounted here,
+        // to avoid accidentally unmounting a legitimate bind mount (e.g. Docker's
+        // rshared bind mount), which would break mount propagation to the host.
+        let path_str = mount_path.to_str().unwrap_or_default();
+        let is_fuse_mounted = std::fs::read_to_string("/proc/self/mounts")
+            .map(|m| {
+                m.lines().any(|line| {
+                    let mut parts = line.splitn(4, ' ');
+                    let _ = parts.next(); // device
+                    let mountpoint = parts.next().unwrap_or("");
+                    let fstype = parts.next().unwrap_or("");
+                    mountpoint == path_str && fstype.starts_with("fuse")
+                })
+            })
+            .unwrap_or(false);
+
+        if is_fuse_mounted {
+            let ok = std::process::Command::new("fusermount")
+                .args(["-u", "-z", path_str])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+            if !ok {
+                let _ = std::process::Command::new("umount")
+                    .args(["-l", path_str])
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status();
+            }
+        }
     }
 
     let fs = RivenFs::new(db_pool, http_client, link_request_tx, debug_logging, cache_max_size_mb);

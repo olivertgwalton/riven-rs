@@ -1,7 +1,8 @@
 use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::Arc;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use dashmap::DashMap;
 use fuser::{
@@ -15,14 +16,17 @@ use tokio::sync::mpsc;
 use riven_core::config::vfs::*;
 use riven_db::repo;
 
+use crate::cache::ChunkCache;
 use crate::chunks::{calculate_file_chunks, FileChunks};
 use crate::detect::{detect_read_type, ReadType};
+use crate::fetcher::{serve_read, ReadOutcome, ReadParams, resolve_stream_url};
 use crate::path_info::{parse_path, PathType};
 use crate::prefetch::Prefetch;
-use crate::stream::create_stream_request;
+use crate::readdir::{populate_entries, DirEntry};
 use crate::LinkRequest;
 
 const TTL: Duration = Duration::from_secs(300);
+const READDIR_CACHE_TTL: Duration = Duration::from_secs(30);
 const ROOT_INO: u64 = 1;
 const MOVIES_INO: u64 = 2;
 const SHOWS_INO: u64 = 3;
@@ -50,7 +54,6 @@ fn make_attr(ino: u64, kind: FileType, size: u64, mtime: SystemTime) -> FileAttr
 }
 
 fn dir_attr(ino: u64) -> FileAttr {
-    // Directories use a fixed epoch — they never change from Jellyfin's perspective.
     make_attr(ino, FileType::Directory, 0, UNIX_EPOCH)
 }
 
@@ -59,22 +62,20 @@ fn file_attr(ino: u64, size: u64, mtime: SystemTime) -> FileAttr {
 }
 
 fn entry_mtime(entry: &riven_db::entities::FileSystemEntry) -> SystemTime {
-    // Use the entry's creation time as a stable mtime so Jellyfin doesn't
-    // re-probe files on every scan.  Falls back to UNIX_EPOCH if conversion fails.
     let ts = entry.updated_at.unwrap_or(entry.created_at);
     UNIX_EPOCH + std::time::Duration::from_secs(ts.timestamp().max(0) as u64)
 }
 
 /// Metadata for an open file handle.
 struct FileHandle {
-    path: String,
+    ino: u64,
+    path: Arc<str>,
     stream_url: String,
     file_size: u64,
     chunks: FileChunks,
     previous_read_pos: Option<u64>,
     has_scanned_footer: bool,
     /// Background prefetch task + buffer for sequential body playback.
-    /// Replaced (task aborted automatically) whenever a seek is detected.
     prefetch: Option<Prefetch>,
 }
 
@@ -89,13 +90,16 @@ pub struct RivenFs {
     next_fd: AtomicU64,
     file_handles: DashMap<u64, FileHandle>,
 
-    // Inode mapping: path -> inode
-    path_to_ino: DashMap<String, u64>,
-    ino_to_path: DashMap<u64, String>,
+    // Inode mapping: path -> inode (Arc<str> shared between both maps)
+    path_to_ino: DashMap<Arc<str>, u64>,
+    ino_to_path: DashMap<u64, Arc<str>>,
     next_ino: AtomicU64,
 
-    // Chunk cache: "filename:start-end" -> bytes
-    chunk_cache: Mutex<LruCache<String, Vec<u8>>>,
+    // Chunk cache: (ino, start, end) -> bytes
+    chunk_cache: ChunkCache,
+
+    // Readdir cache: ino -> (entries, cached_at)
+    readdir_cache: DashMap<u64, (Vec<DirEntry>, Instant)>,
 }
 
 impl RivenFs {
@@ -106,8 +110,6 @@ impl RivenFs {
         debug_logging: bool,
         cache_max_size_mb: u64,
     ) -> Self {
-        // Each LRU entry holds one CHUNK_SIZE (1 MB) block.
-        // Default to 1 024 entries (1 GB) when the setting is 0.
         let mb = if cache_max_size_mb == 0 { 1024 } else { cache_max_size_mb };
         let max_cache_entries = std::num::NonZeroUsize::new(mb as usize).unwrap();
 
@@ -123,6 +125,7 @@ impl RivenFs {
             ino_to_path: DashMap::new(),
             next_ino: AtomicU64::new(FIRST_DYNAMIC_INO),
             chunk_cache: Mutex::new(LruCache::new(max_cache_entries)),
+            readdir_cache: DashMap::new(),
         }
     }
 
@@ -131,27 +134,28 @@ impl RivenFs {
             return *ino;
         }
         let ino = self.next_ino.fetch_add(1, Ordering::SeqCst);
-        self.path_to_ino.insert(path.to_string(), ino);
-        self.ino_to_path.insert(ino, path.to_string());
+        let arc: Arc<str> = Arc::from(path);
+        self.path_to_ino.insert(Arc::clone(&arc), ino);
+        self.ino_to_path.insert(ino, arc);
         ino
     }
 
-    fn resolve_path(&self, parent_ino: u64, name: &str) -> String {
-        let parent_path = match parent_ino {
-            ROOT_INO => "/".to_string(),
-            MOVIES_INO => "/movies".to_string(),
-            SHOWS_INO => "/shows".to_string(),
+    fn resolve_path(&self, parent_ino: u64, name: &str) -> Arc<str> {
+        let parent_path: Arc<str> = match parent_ino {
+            ROOT_INO => Arc::from("/"),
+            MOVIES_INO => Arc::from("/movies"),
+            SHOWS_INO => Arc::from("/shows"),
             _ => self
                 .ino_to_path
                 .get(&parent_ino)
-                .map(|p| p.clone())
-                .unwrap_or_else(|| "/".to_string()),
+                .map(|p| Arc::clone(&p))
+                .unwrap_or_else(|| Arc::from("/")),
         };
 
-        if parent_path == "/" {
-            format!("/{name}")
+        if &*parent_path == "/" {
+            Arc::from(format!("/{name}").as_str())
         } else {
-            format!("{parent_path}/{name}")
+            Arc::from(format!("{parent_path}/{name}").as_str())
         }
     }
 }
@@ -177,20 +181,14 @@ impl Filesystem for RivenFs {
                 reply.entry(&TTL, &dir_attr(ino), 0);
             }
             PathType::MovieFile { .. } | PathType::EpisodeFile { .. } => {
-                // Look up file size from DB
                 let pool = self.db_pool.clone();
-                let path_clone = path.clone();
-                match self.runtime.block_on(async {
-                    repo::get_media_entry_by_path(&pool, &path_clone).await
-                }) {
+                match self.runtime.block_on(repo::get_media_entry_by_path(&pool, &*path)) {
                     Ok(Some(entry)) => {
                         let ino = self.get_or_create_ino(&path);
                         let mtime = entry_mtime(&entry);
                         reply.entry(&TTL, &file_attr(ino, entry.file_size as u64, mtime), 0);
                     }
-                    _ => {
-                        reply.error(libc::ENOENT);
-                    }
+                    _ => reply.error(libc::ENOENT),
                 }
             }
         }
@@ -212,10 +210,8 @@ impl Filesystem for RivenFs {
                         }
                         PathType::MovieFile { .. } | PathType::EpisodeFile { .. } => {
                             let pool = self.db_pool.clone();
-                            let p = path.clone();
-                            match self.runtime.block_on(async {
-                                repo::get_media_entry_by_path(&pool, &p).await
-                            }) {
+                            let p = Arc::clone(&path);
+                            match self.runtime.block_on(repo::get_media_entry_by_path(&pool, &*p)) {
                                 Ok(Some(entry)) => {
                                     let mtime = entry_mtime(&entry);
                                     reply.attr(&TTL, &file_attr(ino, entry.file_size as u64, mtime));
@@ -241,151 +237,44 @@ impl Filesystem for RivenFs {
         mut reply: ReplyDirectory,
     ) {
         tracing::debug!(ino = ino, offset = offset, "readdir");
-        let mut entries: Vec<(u64, FileType, String)> = vec![
-            (ino, FileType::Directory, ".".into()),
-            (ino, FileType::Directory, "..".into()),
-        ];
 
-        let pool = self.db_pool.clone();
+        // Check cache first (skip for offset > 0 since entries already built).
+        let cached = self.readdir_cache.get(&ino).and_then(|entry| {
+            if entry.1.elapsed() < READDIR_CACHE_TTL {
+                Some(entry.0.clone())
+            } else {
+                None
+            }
+        });
 
-        match ino {
-            ROOT_INO => {
-                entries.push((MOVIES_INO, FileType::Directory, "movies".into()));
-                entries.push((SHOWS_INO, FileType::Directory, "shows".into()));
-            }
-            MOVIES_INO => {
-                if let Ok(movies) = self.runtime.block_on(repo::list_movies(&pool)) {
-                    for movie in movies {
-                        let name = movie.pretty_name();
-                        let child_ino =
-                            self.get_or_create_ino(&format!("/movies/{name}"));
-                        entries.push((child_ino, FileType::Directory, name));
-                    }
-                }
-            }
-            SHOWS_INO => {
-                if let Ok(shows) = self.runtime.block_on(repo::list_shows(&pool)) {
-                    for show in shows {
-                        let name = show.pretty_name();
-                        let child_ino =
-                            self.get_or_create_ino(&format!("/shows/{name}"));
-                        entries.push((child_ino, FileType::Directory, name));
-                    }
-                }
-            }
-            _ => {
-                if let Some(path) = self.ino_to_path.get(&ino).map(|p| p.clone()) {
-                    let info = parse_path(&path);
-                    match info.path_type {
-                        PathType::MovieDir { ref tmdb_id, .. } => {
-                            if let Some(tmdb_id) = tmdb_id {
-                                if let Ok(Some(movie)) = self.runtime.block_on(
-                                    repo::get_media_item_by_tmdb(&pool, tmdb_id),
-                                ) {
-                                    if let Ok(fse) = self.runtime.block_on(
-                                        repo::get_media_entries(&pool, movie.id),
-                                    ) {
-                                        for entry in fse {
-                                            let fname = entry.vfs_filename(&movie.pretty_name());
-                                            let file_path =
-                                                format!("{path}/{fname}");
-                                            let child_ino =
-                                                self.get_or_create_ino(&file_path);
-                                            entries.push((
-                                                child_ino,
-                                                FileType::RegularFile,
-                                                fname,
-                                            ));
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        PathType::ShowDir { ref tvdb_id, .. } => {
-                            if let Some(tvdb_id) = tvdb_id {
-                                if let Ok(Some(show)) = self.runtime.block_on(
-                                    repo::get_media_item_by_tvdb(&pool, tvdb_id),
-                                ) {
-                                    if let Ok(seasons) = self
-                                        .runtime
-                                        .block_on(repo::list_seasons(&pool, show.id))
-                                    {
-                                        for season in seasons {
-                                            let num = season.season_number.unwrap_or(0);
-                                            let name = format!("Season {num:02}");
-                                            let season_path = format!("{path}/{name}");
-                                            let child_ino =
-                                                self.get_or_create_ino(&season_path);
-                                            entries.push((
-                                                child_ino,
-                                                FileType::Directory,
-                                                name,
-                                            ));
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        PathType::SeasonDir {
-                            ref tvdb_id,
-                            season_number,
-                            ..
-                        } => {
-                            if let Some(tvdb_id) = tvdb_id {
-                                if let Ok(Some(show)) = self.runtime.block_on(
-                                    repo::get_media_item_by_tvdb(&pool, tvdb_id),
-                                ) {
-                                    if let Ok(seasons) = self
-                                        .runtime
-                                        .block_on(repo::list_seasons(&pool, show.id))
-                                    {
-                                        if let Some(season) = seasons
-                                            .iter()
-                                            .find(|s| s.season_number == Some(season_number))
-                                        {
-                                            if let Ok(episodes) = self.runtime.block_on(
-                                                repo::list_episodes(&pool, season.id),
-                                            ) {
-                                                for ep in episodes {
-                                                    let ep_num = ep.episode_number.unwrap_or(0);
-                                                    let fname = format!(
-                                                        "{} - s{:02}e{:02}.mkv",
-                                                        show.pretty_name(),
-                                                        season_number,
-                                                        ep_num
-                                                    );
-                                                    let ep_path =
-                                                        format!("{path}/{fname}");
-                                                    let child_ino =
-                                                        self.get_or_create_ino(&ep_path);
-                                                    entries.push((
-                                                        child_ino,
-                                                        FileType::RegularFile,
-                                                        fname,
-                                                    ));
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-            }
-        }
+        let deduped = if let Some(entries) = cached {
+            entries
+        } else {
+            let mut entries: Vec<DirEntry> = vec![
+                (ino, FileType::Directory, ".".into()),
+                (ino, FileType::Directory, "..".into()),
+            ];
 
-        tracing::debug!(ino = ino, count = entries.len(), "readdir returning entries");
-        // Deduplicate entries by name (keep first occurrence)
-        let mut seen = HashSet::new();
-        let deduped: Vec<_> = entries
-            .into_iter()
-            .filter(|(_, _, name)| seen.insert(name.clone()))
-            .collect();
+            let pool = self.db_pool.clone();
+            let ino_to_path = self.ino_to_path.get(&ino).map(|p| Arc::clone(&p));
+            let mut get_ino = |path: &str| self.get_or_create_ino(path);
 
-        for (i, (ino, kind, name)) in deduped.iter().enumerate().skip(offset as usize) {
-            if reply.add(*ino, (i + 1) as i64, *kind, name) {
+            let ino_to_path_str = ino_to_path.as_deref();
+            populate_entries(ino, ino_to_path_str, &pool, &self.runtime, &mut entries, &mut get_ino);
+
+            tracing::debug!(ino = ino, count = entries.len(), "readdir populating cache");
+            let mut seen = HashSet::new();
+            let deduped: Vec<DirEntry> = entries
+                .into_iter()
+                .filter(|(_, _, name)| seen.insert(name.clone()))
+                .collect();
+
+            self.readdir_cache.insert(ino, (deduped.clone(), Instant::now()));
+            deduped
+        };
+
+        for (i, (entry_ino, kind, name)) in deduped.iter().enumerate().skip(offset as usize) {
+            if reply.add(*entry_ino, (i + 1) as i64, *kind, name) {
                 break;
             }
         }
@@ -394,11 +283,8 @@ impl Filesystem for RivenFs {
 
     fn open(&mut self, _req: &Request, ino: u64, _flags: i32, reply: ReplyOpen) {
         let path = match self.ino_to_path.get(&ino) {
-            Some(p) => p.clone(),
-            None => {
-                reply.error(libc::ENOENT);
-                return;
-            }
+            Some(p) => Arc::clone(&p),
+            None => { reply.error(libc::ENOENT); return; }
         };
 
         if self.debug_logging {
@@ -406,65 +292,41 @@ impl Filesystem for RivenFs {
         }
 
         let pool = self.db_pool.clone();
-        let entry = match self
-            .runtime
-            .block_on(repo::get_media_entry_by_path(&pool, &path))
-        {
+        let entry = match self.runtime.block_on(repo::get_media_entry_by_path(&pool, &*path)) {
             Ok(Some(e)) => e,
-            _ => {
-                reply.error(libc::ENOENT);
-                return;
-            }
+            _ => { reply.error(libc::ENOENT); return; }
         };
 
-        // Always generate a fresh stream URL via the plugin system when a download_url
-        // is available (mirrors riven-ts behaviour — cached stream URLs expire).
-        // Fall back to the cached stream_url only if no download_url is stored.
-        let stream_url = if let Some(ref download_url) = entry.download_url {
-            let (tx, rx) = tokio::sync::oneshot::channel();
-            let link_req = LinkRequest {
-                download_url: download_url.clone(),
-                response_tx: tx,
-            };
-            if self.link_request_tx.blocking_send(link_req).is_err() {
-                reply.error(libc::EIO);
+        let stream_url = match resolve_stream_url(
+            entry.download_url.as_deref(),
+            entry.stream_url.as_deref(),
+            &self.link_request_tx,
+            &pool,
+            entry.id,
+            &self.runtime,
+        ) {
+            Some(url) => url,
+            None => {
+                let code = if entry.download_url.is_some() { libc::EIO } else { libc::ENOENT };
+                reply.error(code);
                 return;
             }
-            match self.runtime.block_on(rx) {
-                Ok(Some(url)) => {
-                    let _ = self
-                        .runtime
-                        .block_on(repo::update_stream_url(&pool, entry.id, &url));
-                    url
-                }
-                _ => {
-                    reply.error(libc::EIO);
-                    return;
-                }
-            }
-        } else if let Some(ref url) = entry.stream_url {
-            url.clone()
-        } else {
-            reply.error(libc::ENOENT);
-            return;
         };
 
         let file_size = entry.file_size as u64;
         let chunks = calculate_file_chunks(file_size);
         let fd = self.next_fd.fetch_add(1, Ordering::SeqCst);
 
-        self.file_handles.insert(
-            fd,
-            FileHandle {
-                path,
-                stream_url,
-                file_size,
-                chunks,
-                previous_read_pos: None,
-                has_scanned_footer: false,
-                prefetch: None,
-            },
-        );
+        self.file_handles.insert(fd, FileHandle {
+            ino,
+            path,
+            stream_url,
+            file_size,
+            chunks,
+            previous_read_pos: None,
+            has_scanned_footer: false,
+            prefetch: None,
+        });
 
         reply.opened(fd, 0);
     }
@@ -485,10 +347,7 @@ impl Filesystem for RivenFs {
 
         let mut handle = match self.file_handles.get_mut(&fh) {
             Some(h) => h,
-            None => {
-                reply.error(libc::EBADF);
-                return;
-            }
+            None => { reply.error(libc::EBADF); return; }
         };
 
         if start >= handle.file_size {
@@ -499,13 +358,7 @@ impl Filesystem for RivenFs {
         let end = end.min(handle.file_size - 1);
         let needed_chunks = handle.chunks.chunks_for_range(start, end);
 
-        // Check cache for all chunks
-        let all_cached = {
-            let cache = self.chunk_cache.lock();
-            needed_chunks
-                .iter()
-                .all(|c| cache.contains(&c.cache_key(&handle.path)))
-        };
+        let all_cached = crate::cache::all_chunks_cached(&self.chunk_cache, &needed_chunks, handle.ino);
 
         let read_type = detect_read_type(
             start,
@@ -518,148 +371,41 @@ impl Filesystem for RivenFs {
         );
 
         if self.debug_logging {
-            tracing::debug!(
-                path = %handle.path,
-                offset = start,
-                size = size,
-                read_type = ?read_type,
-                "read"
-            );
+            tracing::debug!(path = %handle.path, offset = start, size, read_type = ?read_type, "read");
         }
 
         handle.previous_read_pos = Some(start);
+        if read_type == ReadType::FooterScan {
+            handle.has_scanned_footer = true;
+        }
 
-        match read_type {
-            ReadType::CacheHit => {
-                let mut buf = Vec::with_capacity(size as usize);
-                let mut cache = self.chunk_cache.lock();
-                for chunk in &needed_chunks {
-                    if let Some(data) = cache.get(&chunk.cache_key(&handle.path)) {
-                        let chunk_offset = start.saturating_sub(chunk.start) as usize;
-                        let chunk_end =
-                            ((end - chunk.start + 1) as usize).min(data.len());
-                        if chunk_offset < data.len() {
-                            buf.extend_from_slice(
-                                &data[chunk_offset..chunk_end.min(data.len())],
-                            );
-                        }
-                    }
-                }
-                reply.data(&buf);
-            }
+        let stream_url = handle.stream_url.clone();
+        let params = ReadParams {
+            read_type,
+            start,
+            end,
+            size,
+            ino: handle.ino,
+            stream_url: &stream_url,
+            needed_chunks: &needed_chunks,
+        };
 
-            ReadType::HeaderScan => {
-                let url = handle.stream_url.clone();
-                let client = self.http_client.clone();
-                let path = handle.path.clone();
+        let outcome = serve_read(
+            &params,
+            &self.chunk_cache,
+            &self.http_client,
+            &self.runtime,
+            &mut handle.prefetch,
+            self.debug_logging,
+        );
 
-                let fetch_start = needed_chunks.first().map(|c| c.start).unwrap_or(start);
-                let fetch_end = needed_chunks.last().map(|c| c.end).unwrap_or(end);
-
-                match self.runtime.block_on(async {
-                    let resp =
-                        create_stream_request(&client, &url, fetch_start, Some(fetch_end))
-                            .await?;
-                    let bytes = resp.bytes().await?;
-                    Ok::<_, anyhow::Error>(bytes.to_vec())
-                }) {
-                    Ok(data) => {
-                        for chunk in &needed_chunks {
-                            let chunk_start_in_data =
-                                (chunk.start - fetch_start) as usize;
-                            let chunk_end_in_data =
-                                ((chunk.end - fetch_start + 1) as usize).min(data.len());
-                            if chunk_start_in_data < data.len() {
-                                let chunk_data =
-                                    data[chunk_start_in_data..chunk_end_in_data].to_vec();
-                                let mut cache = self.chunk_cache.lock();
-                                cache.put(chunk.cache_key(&path), chunk_data);
-                            }
-                        }
-                        let ret_start = (start - fetch_start) as usize;
-                        let ret_end = ret_start + (end - start + 1) as usize;
-                        reply.data(&data[ret_start..ret_end.min(data.len())]);
-                    }
-                    Err(e) => {
-                        tracing::error!(error = %e, "stream read failed");
-                        reply.error(libc::EIO);
-                    }
-                }
-            }
-
-            ReadType::FooterScan | ReadType::GeneralScan => {
-                // Random / probe reads (ffprobe seeking, player seeking).
-                // Abort any running prefetch — the next BodyRead will restart it
-                // at the correct sequential position.
-                handle.prefetch = None;
-
-                let url = handle.stream_url.clone();
-                let client = self.http_client.clone();
-                let path = handle.path.clone();
-
-                if read_type == ReadType::FooterScan {
-                    handle.has_scanned_footer = true;
-                }
-
-                let exact_key = format!("{path}:{start}-{end}");
-                let cached = {
-                    let mut cache = self.chunk_cache.lock();
-                    cache.get(&exact_key).cloned()
-                };
-
-                if let Some(data) = cached {
-                    reply.data(&data);
-                } else {
-                    match self.runtime.block_on(async {
-                        let resp = create_stream_request(&client, &url, start, Some(end)).await?;
-                        let bytes = resp.bytes().await?;
-                        Ok::<_, anyhow::Error>(bytes.to_vec())
-                    }) {
-                        Ok(data) => {
-                            let mut cache = self.chunk_cache.lock();
-                            cache.put(exact_key, data.clone());
-                            reply.data(&data);
-                        }
-                        Err(e) => {
-                            tracing::error!(error = %e, "stream read failed");
-                            reply.error(libc::EIO);
-                        }
-                    }
-                }
-            }
-
-            ReadType::BodyRead | ReadType::FooterRead => {
-                let bytes_needed = (end - start + 1) as usize;
-                let url = handle.stream_url.clone();
-                let client = self.http_client.clone();
-
-                // (Re)start the prefetch task if we don't have one or it can no
-                // longer serve this position (e.g. after a user-initiated seek).
-                let need_restart = handle
-                    .prefetch
-                    .as_ref()
-                    .map(|p| !p.is_valid_for(start))
-                    .unwrap_or(true);
-
-                if need_restart {
-                    if self.debug_logging {
-                        tracing::debug!(position = start, "starting prefetch task");
-                    }
-                    handle.prefetch =
-                        Some(Prefetch::start(client, url, start, &self.runtime));
-                }
-
-                // The prefetch task is racing ahead on the HTTP stream. Reading
-                // from it is usually instant once the buffer is primed.
-                let prefetch = handle.prefetch.as_mut().unwrap();
-                match prefetch.read(start, bytes_needed, &self.runtime) {
-                    Ok(data) => reply.data(&data),
-                    Err(e) => {
-                        tracing::error!(error = %e, "prefetch read failed");
-                        handle.prefetch = None; // force reconnect on next read
-                        reply.error(libc::EIO);
-                    }
-                }
+        match outcome {
+            ReadOutcome::Data(buf) => reply.data(&buf),
+            ReadOutcome::Empty => reply.data(&[]),
+            ReadOutcome::Error(code) => reply.error(code),
+            ReadOutcome::UsePrefetch { .. } => {
+                // serve_read handles prefetch internally; this arm is unreachable.
+                reply.error(libc::EIO);
             }
         }
     }

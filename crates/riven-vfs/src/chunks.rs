@@ -8,8 +8,8 @@ pub struct Chunk {
 }
 
 impl Chunk {
-    pub fn cache_key(&self, filename: &str) -> String {
-        format!("{filename}:{}-{}", self.start, self.end)
+    pub fn cache_key(&self, ino: u64) -> (u64, u64, u64) {
+        (ino, self.start, self.end)
     }
 }
 
@@ -26,7 +26,7 @@ pub struct FileChunks {
 impl FileChunks {
     /// Find all chunks that overlap the given byte range.
     pub fn chunks_for_range(&self, start: u64, end: u64) -> Vec<Chunk> {
-        let mut result = Vec::new();
+        let mut result = Vec::with_capacity(self.body_chunks.len() + 2);
 
         if start <= self.header_chunk.end && end >= self.header_chunk.start {
             result.push(self.header_chunk);
