@@ -237,8 +237,8 @@ pub async fn mark_seasons_requested_and_get_episodes(
     .execute(pool)
     .await?;
 
-    // Mark episodes as requested and return the indexed ones directly via RETURNING *.
-    Ok(sqlx::query_as::<_, MediaItem>(
+    // Mark all episodes as requested, then return the indexed ones (those needing a scrape).
+    sqlx::query!(
         r#"UPDATE media_items
            SET is_requested = true, updated_at = NOW()
            WHERE parent_id IN (
@@ -247,9 +247,23 @@ pub async fn mark_seasons_requested_and_get_episodes(
                  AND item_type = 'season'
                  AND season_number = ANY($2)
            )
+             AND item_type = 'episode'"#,
+        show_id,
+        season_numbers
+    )
+    .execute(pool)
+    .await?;
+
+    Ok(sqlx::query_as::<_, MediaItem>(
+        r#"SELECT * FROM media_items
+           WHERE parent_id IN (
+               SELECT id FROM media_items
+               WHERE parent_id = $1
+                 AND item_type = 'season'
+                 AND season_number = ANY($2)
+           )
              AND item_type = 'episode'
-             AND state = 'indexed'
-           RETURNING *"#,
+             AND state = 'indexed'"#,
     )
     .bind(show_id)
     .bind(season_numbers)

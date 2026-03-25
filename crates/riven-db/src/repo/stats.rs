@@ -32,10 +32,10 @@ pub async fn get_stats(pool: &PgPool) -> Result<MediaStats> {
                )
            )
            SELECT
-             COUNT(*) FILTER (WHERE item_type = 'movie') AS "total_movies!: i64",
-             COUNT(*) FILTER (WHERE item_type = 'show') AS "total_shows!: i64",
-             COUNT(*) FILTER (WHERE item_type = 'season') AS "total_seasons!: i64",
-             COUNT(*) FILTER (WHERE item_type = 'episode') AS "total_episodes!: i64",
+             COUNT(*) FILTER (WHERE item_type = 'movie' AND is_requested = true) AS "total_movies!: i64",
+             COUNT(*) FILTER (WHERE item_type = 'show' AND is_requested = true) AS "total_shows!: i64",
+             COUNT(*) FILTER (WHERE item_type = 'season' AND is_requested = true) AS "total_seasons!: i64",
+             COUNT(*) FILTER (WHERE item_type = 'episode' AND is_requested = true) AS "total_episodes!: i64",
              COUNT(*) FILTER (WHERE is_requested = true AND state = 'completed') AS "completed!: i64",
              COUNT(*) FILTER (WHERE is_requested = true AND state = 'scraped') AS "scraped!: i64",
              COUNT(*) FILTER (WHERE is_requested = true AND state = 'indexed') AS "indexed!: i64",

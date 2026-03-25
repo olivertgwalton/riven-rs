@@ -104,10 +104,10 @@ fn aggregate_child_states(children: &[MediaItem]) -> Result<MediaItemState> {
     if any_scraped {
         return Ok(MediaItemState::Scraped);
     }
-    if any_unreleased {
-        return Ok(MediaItemState::Unreleased);
-    }
 
+    // Do NOT return Unreleased here — if some episodes are Indexed (aired and available),
+    // the season must stay Indexed so scraping is not skipped. The all-Unreleased case
+    // is already handled above.
     Ok(MediaItemState::Indexed)
 }
 
