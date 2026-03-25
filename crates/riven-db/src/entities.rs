@@ -144,6 +144,9 @@ pub struct Stream {
     #[sqlx(json)]
     pub parsed_data: Option<serde_json::Value>,
     pub rank: Option<i64>,
+    /// Actual file size in bytes, recorded after the first download attempt.
+    /// `None` means the size is not yet known (stream has never been tried).
+    pub file_size_bytes: Option<i64>,
 }
 
 // ── Item Request ──
