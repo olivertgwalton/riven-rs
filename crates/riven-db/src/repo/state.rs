@@ -11,31 +11,20 @@ use super::media::{get_media_item, update_media_item_state};
 pub async fn compute_state(pool: &PgPool, item: &MediaItem) -> Result<MediaItemState> {
     match item.item_type {
         MediaItemType::Movie | MediaItemType::Episode => {
-            let has_media = sqlx::query_scalar::<_, bool>(
-                "SELECT EXISTS(SELECT 1 FROM filesystem_entries WHERE media_item_id = $1 AND entry_type = 'media')",
+            let row = sqlx::query!(
+                r#"SELECT
+                     EXISTS(SELECT 1 FROM filesystem_entries WHERE media_item_id = $1 AND entry_type = 'media') AS has_media,
+                     EXISTS(SELECT 1 FROM media_item_streams ms WHERE ms.media_item_id = $1 AND ms.stream_id NOT IN (SELECT stream_id FROM media_item_blacklisted_streams WHERE media_item_id = $1)) AS has_streams"#,
+                item.id
             )
-            .bind(item.id)
             .fetch_one(pool)
             .await?;
 
-            if has_media {
+            if row.has_media.unwrap_or(false) {
                 return Ok(MediaItemState::Completed);
             }
 
-            let has_streams = sqlx::query_scalar::<_, bool>(
-                r#"SELECT EXISTS(
-                    SELECT 1 FROM media_item_streams ms
-                    WHERE ms.media_item_id = $1
-                    AND ms.stream_id NOT IN (
-                        SELECT stream_id FROM media_item_blacklisted_streams WHERE media_item_id = $1
-                    )
-                )"#,
-            )
-            .bind(item.id)
-            .fetch_one(pool)
-            .await?;
-
-            if has_streams {
+            if row.has_streams.unwrap_or(false) {
                 return Ok(MediaItemState::Scraped);
             }
 
@@ -84,38 +73,37 @@ fn aggregate_child_states(children: &[MediaItem]) -> Result<MediaItemState> {
         return Ok(MediaItemState::Indexed);
     }
 
+    let (any_completed, any_unreleased, any_ongoing, any_scraped) =
+        children.iter().fold((false, false, false, false), |(ac, au, ao, asc), c| {
+            (
+                ac || matches!(
+                    c.state,
+                    MediaItemState::Completed | MediaItemState::PartiallyCompleted | MediaItemState::Ongoing
+                ),
+                au || c.state == MediaItemState::Unreleased,
+                ao || c.state == MediaItemState::Ongoing,
+                asc || c.state == MediaItemState::Scraped,
+            )
+        });
+
     if children.iter().all(|c| c.state == MediaItemState::Completed) {
         return Ok(MediaItemState::Completed);
     }
-
     if children.iter().all(|c| c.state == MediaItemState::Unreleased) {
         return Ok(MediaItemState::Unreleased);
     }
-
-    let any_completed = children.iter().any(|c| {
-        matches!(
-            c.state,
-            MediaItemState::Completed | MediaItemState::PartiallyCompleted | MediaItemState::Ongoing
-        )
-    });
-    let any_unreleased = children.iter().any(|c| c.state == MediaItemState::Unreleased);
-
     if any_completed && any_unreleased {
         return Ok(MediaItemState::Ongoing);
     }
-
     if any_completed {
         return Ok(MediaItemState::PartiallyCompleted);
     }
-
-    if children.iter().any(|c| c.state == MediaItemState::Ongoing) {
+    if any_ongoing {
         return Ok(MediaItemState::Ongoing);
     }
-
-    if children.iter().any(|c| c.state == MediaItemState::Scraped) {
+    if any_scraped {
         return Ok(MediaItemState::Scraped);
     }
-
     if any_unreleased {
         return Ok(MediaItemState::Unreleased);
     }

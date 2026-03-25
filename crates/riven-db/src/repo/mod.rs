@@ -38,18 +38,17 @@ pub async fn pause_items_by_ids(pool: &PgPool, ids: Vec<i64>) -> Result<u64> {
 }
 
 pub async fn unpause_items_by_ids(pool: &PgPool, ids: Vec<i64>) -> Result<u64> {
-    let result = sqlx::query(
+    let result = sqlx::query!(
         "UPDATE media_items SET state = 'indexed', updated_at = NOW() WHERE id = ANY($1) AND state = 'paused'",
+        &ids[..]
     )
-    .bind(ids)
     .execute(pool)
     .await?;
     Ok(result.rows_affected())
 }
 
 pub async fn delete_items_by_ids(pool: &PgPool, ids: Vec<i64>) -> Result<u64> {
-    let result = sqlx::query("DELETE FROM media_items WHERE id = ANY($1)")
-        .bind(ids)
+    let result = sqlx::query!("DELETE FROM media_items WHERE id = ANY($1)", &ids[..])
         .execute(pool)
         .await?;
     Ok(result.rows_affected())

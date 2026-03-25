@@ -6,15 +6,25 @@ use sqlx::PgPool;
 use crate::entities::*;
 
 pub async fn list_seasons(pool: &PgPool, show_id: i64) -> Result<Vec<MediaItem>> {
-    Ok(sqlx::query_as::<_, MediaItem>(
-        "SELECT * FROM media_items WHERE item_type = 'season' AND parent_id = $1 ORDER BY season_number",
-    ).bind(show_id).fetch_all(pool).await?)
+    Ok(
+        sqlx::query_as::<_, MediaItem>(
+            "SELECT * FROM media_items WHERE item_type = 'season' AND parent_id = $1 ORDER BY season_number",
+        )
+        .bind(show_id)
+        .fetch_all(pool)
+        .await?,
+    )
 }
 
 pub async fn list_episodes(pool: &PgPool, season_id: i64) -> Result<Vec<MediaItem>> {
-    Ok(sqlx::query_as::<_, MediaItem>(
-        "SELECT * FROM media_items WHERE item_type = 'episode' AND parent_id = $1 ORDER BY episode_number",
-    ).bind(season_id).fetch_all(pool).await?)
+    Ok(
+        sqlx::query_as::<_, MediaItem>(
+            "SELECT * FROM media_items WHERE item_type = 'episode' AND parent_id = $1 ORDER BY episode_number",
+        )
+        .bind(season_id)
+        .fetch_all(pool)
+        .await?,
+    )
 }
 
 pub async fn create_season(
@@ -99,7 +109,7 @@ pub async fn create_episode(
     )
     .bind(title_str)
     .bind(tvdb_id)
-    .bind(state)
+    .bind(state as MediaItemState)
     .bind(number)
     .bind(absolute_number)
     .bind(runtime)
@@ -150,27 +160,32 @@ pub async fn get_indexed_seasons_for_show(pool: &PgPool, show_id: i64) -> Result
 /// Fetch incomplete (indexed/scraped/ongoing) requested episodes for a season.
 pub async fn get_incomplete_episodes_for_season(pool: &PgPool, season_id: i64) -> Result<Vec<MediaItem>> {
     Ok(sqlx::query_as::<_, MediaItem>(
-        r#"SELECT * FROM media_items
-           WHERE parent_id = $1
-             AND item_type = 'episode'
-             AND is_requested = true
-             AND state = ANY(ARRAY['indexed'::media_item_state, 'scraped'::media_item_state, 'ongoing'::media_item_state])
-           ORDER BY episode_number ASC"#,
-    ).bind(season_id).fetch_all(pool).await?)
+        "SELECT * FROM media_items
+         WHERE parent_id = $1
+           AND item_type = 'episode'
+           AND is_requested = true
+           AND state = ANY(ARRAY['indexed'::media_item_state, 'scraped'::media_item_state, 'ongoing'::media_item_state])
+         ORDER BY episode_number ASC",
+    )
+    .bind(season_id)
+    .fetch_all(pool)
+    .await?)
 }
 
 /// Fetch indexed, requested episodes ready for scraping, with the parent show's
 /// imdb_id filled in via JOIN.
 pub async fn get_episodes_ready_for_scraping(pool: &PgPool, limit: i64) -> Result<Vec<MediaItem>> {
-    Ok(sqlx::query_as::<_, MediaItem>(
+    Ok(sqlx::query_as!(
+        MediaItem,
         r#"SELECT
                e.id, e.title, e.full_title,
                COALESCE(e.imdb_id, show_item.imdb_id) AS imdb_id,
                e.tvdb_id, e.tmdb_id, e.poster_path,
                e.created_at, e.updated_at, e.indexed_at, e.scraped_at, e.scraped_times,
                e.aliases, e.network, e.country, e.language, e.aired_at, e.year, e.genres,
-               e.rating, e.content_rating, e.state, e.failed_attempts, e.item_type,
-               e.is_requested, e.show_status, e.season_number, e.is_special, e.parent_id,
+               e.rating, e.content_rating AS "content_rating: _", e.state AS "state: _",
+               e.failed_attempts, e.item_type AS "item_type: _",
+               e.is_requested, e.show_status AS "show_status: _", e.season_number, e.is_special, e.parent_id,
                e.episode_number, e.absolute_number, e.runtime, e.item_request_id, e.active_stream_id
            FROM media_items e
            LEFT JOIN media_items season_item ON e.parent_id = season_item.id AND season_item.item_type = 'season'
@@ -181,20 +196,26 @@ pub async fn get_episodes_ready_for_scraping(pool: &PgPool, limit: i64) -> Resul
              AND (e.failed_attempts = 0 OR e.updated_at IS NULL OR e.updated_at < NOW() - INTERVAL '1 hour')
            ORDER BY e.failed_attempts ASC, e.created_at ASC
            LIMIT $1"#,
-    ).bind(limit).fetch_all(pool).await?)
+        limit
+    )
+    .fetch_all(pool)
+    .await?)
 }
 
 /// Fetch all indexed, requested episodes that belong to a given show.
 pub async fn get_indexed_episodes_for_show(pool: &PgPool, show_id: i64) -> Result<Vec<MediaItem>> {
     Ok(sqlx::query_as::<_, MediaItem>(
-        r#"SELECT e.* FROM media_items e
-           JOIN media_items s ON e.parent_id = s.id
-           WHERE s.parent_id = $1
-             AND s.item_type = 'season'
-             AND e.item_type = 'episode'
-             AND e.state = 'indexed'
-             AND e.is_requested = true"#,
-    ).bind(show_id).fetch_all(pool).await?)
+        "SELECT e.* FROM media_items e
+         JOIN media_items s ON e.parent_id = s.id
+         WHERE s.parent_id = $1
+           AND s.item_type = 'season'
+           AND e.item_type = 'episode'
+           AND e.state = 'indexed'
+           AND e.is_requested = true",
+    )
+    .bind(show_id)
+    .fetch_all(pool)
+    .await?)
 }
 
 /// Mark specific seasons of a show as requested and return their indexed episodes.
@@ -203,19 +224,21 @@ pub async fn mark_seasons_requested_and_get_episodes(
     show_id: i64,
     season_numbers: &[i32],
 ) -> Result<Vec<MediaItem>> {
-    sqlx::query(
+    // Mark the seasons themselves as requested.
+    sqlx::query!(
         r#"UPDATE media_items
            SET is_requested = true, updated_at = NOW()
            WHERE parent_id = $1
              AND item_type = 'season'
              AND season_number = ANY($2)"#,
+        show_id,
+        season_numbers
     )
-    .bind(show_id)
-    .bind(season_numbers)
     .execute(pool)
     .await?;
 
-    sqlx::query(
+    // Mark episodes as requested and return the indexed ones directly via RETURNING *.
+    Ok(sqlx::query_as::<_, MediaItem>(
         r#"UPDATE media_items
            SET is_requested = true, updated_at = NOW()
            WHERE parent_id IN (
@@ -224,23 +247,14 @@ pub async fn mark_seasons_requested_and_get_episodes(
                  AND item_type = 'season'
                  AND season_number = ANY($2)
            )
-             AND item_type = 'episode'"#,
+             AND item_type = 'episode'
+             AND state = 'indexed'
+           RETURNING *"#,
     )
     .bind(show_id)
     .bind(season_numbers)
-    .execute(pool)
-    .await?;
-
-    Ok(sqlx::query_as::<_, MediaItem>(
-        r#"SELECT e.* FROM media_items e
-           JOIN media_items s ON e.parent_id = s.id
-           WHERE s.parent_id = $1
-             AND s.item_type = 'season'
-             AND s.season_number = ANY($2)
-             AND e.item_type = 'episode'
-             AND e.state = 'indexed'
-             AND e.is_requested = true"#,
-    ).bind(show_id).bind(season_numbers).fetch_all(pool).await?)
+    .fetch_all(pool)
+    .await?)
 }
 
 fn apply_item_filters(

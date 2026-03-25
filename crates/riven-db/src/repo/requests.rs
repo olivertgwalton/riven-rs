@@ -10,25 +10,28 @@ pub async fn get_external_request_ids_for_items(
     pool: &PgPool,
     media_item_ids: &[i64],
 ) -> Result<Vec<String>> {
-    let rows: Vec<(String,)> = sqlx::query_as(
+    Ok(sqlx::query_scalar!(
         r#"SELECT ir.external_request_id
            FROM media_items mi
            JOIN item_requests ir ON ir.id = mi.item_request_id
            WHERE mi.id = ANY($1)
              AND ir.external_request_id IS NOT NULL"#,
+        media_item_ids
     )
-    .bind(media_item_ids)
     .fetch_all(pool)
-    .await?;
-    Ok(rows.into_iter().map(|(id,)| id).collect())
+    .await?
+    .into_iter()
+    .flatten()
+    .collect())
 }
 
 pub async fn get_item_request_by_id(pool: &PgPool, id: i64) -> Result<Option<ItemRequest>> {
-    let request = sqlx::query_as::<_, ItemRequest>("SELECT * FROM item_requests WHERE id = $1")
-        .bind(id)
-        .fetch_optional(pool)
-        .await?;
-    Ok(request)
+    Ok(
+        sqlx::query_as::<_, ItemRequest>("SELECT * FROM item_requests WHERE id = $1")
+            .bind(id)
+            .fetch_optional(pool)
+            .await?,
+    )
 }
 
 /// Find an existing item request by any matching external ID.
@@ -38,19 +41,18 @@ pub async fn find_existing_item_request(
     tmdb_id: Option<&str>,
     tvdb_id: Option<&str>,
 ) -> Result<Option<ItemRequest>> {
-    let request = sqlx::query_as::<_, ItemRequest>(
-        r#"SELECT * FROM item_requests
-           WHERE (imdb_id = $1 AND $1 IS NOT NULL)
-              OR (tmdb_id = $2 AND $2 IS NOT NULL)
-              OR (tvdb_id = $3 AND $3 IS NOT NULL)
-           LIMIT 1"#,
+    Ok(sqlx::query_as::<_, ItemRequest>(
+        "SELECT * FROM item_requests
+         WHERE (imdb_id = $1 AND $1 IS NOT NULL)
+            OR (tmdb_id = $2 AND $2 IS NOT NULL)
+            OR (tvdb_id = $3 AND $3 IS NOT NULL)
+         LIMIT 1",
     )
     .bind(imdb_id)
     .bind(tmdb_id)
     .bind(tvdb_id)
     .fetch_optional(pool)
-    .await?;
-    Ok(request)
+    .await?)
 }
 
 pub async fn create_item_request(
@@ -99,14 +101,14 @@ pub async fn create_item_request(
 
     let seasons_json = seasons.map(|s| serde_json::to_value(s).unwrap_or_default());
     let request = sqlx::query_as::<_, ItemRequest>(
-        r#"INSERT INTO item_requests (imdb_id, tmdb_id, tvdb_id, request_type, requested_by, external_request_id, seasons)
-           VALUES ($1, $2, $3, $4, $5, $6, $7)
-           RETURNING *"#,
+        "INSERT INTO item_requests (imdb_id, tmdb_id, tvdb_id, request_type, requested_by, external_request_id, seasons) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7) \
+         RETURNING *",
     )
     .bind(imdb_id)
     .bind(tmdb_id)
     .bind(tvdb_id)
-    .bind(request_type)
+    .bind(request_type as ItemRequestType)
     .bind(requested_by)
     .bind(external_request_id)
     .bind(seasons_json)

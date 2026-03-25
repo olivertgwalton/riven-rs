@@ -21,22 +21,40 @@ pub struct MediaStats {
 }
 
 pub async fn get_stats(pool: &PgPool) -> Result<MediaStats> {
-    Ok(sqlx::query_as::<_, MediaStats>(
-        r#"SELECT
-             COUNT(*) FILTER (WHERE item_type = 'movie') AS total_movies,
-             COUNT(*) FILTER (WHERE item_type = 'show') AS total_shows,
-             COUNT(*) FILTER (WHERE item_type = 'season') AS total_seasons,
-             COUNT(*) FILTER (WHERE item_type = 'episode') AS total_episodes,
-             COUNT(*) FILTER (WHERE state = 'completed') AS completed,
-             COUNT(*) FILTER (WHERE state = 'scraped') AS scraped,
-             COUNT(*) FILTER (WHERE state = 'indexed') AS indexed,
-             COUNT(*) FILTER (WHERE state = 'failed') AS failed,
-             COUNT(*) FILTER (WHERE state = 'paused') AS paused,
-             COUNT(*) FILTER (WHERE state = 'ongoing') AS ongoing,
-             COUNT(*) FILTER (WHERE state = 'partially_completed') AS partially_completed,
-             COUNT(*) FILTER (WHERE state = 'unreleased') AS unreleased
-           FROM media_items"#,
-    ).fetch_one(pool).await?)
+    Ok(sqlx::query_as!(
+        MediaStats,
+        r#"WITH ongoing_season_ids AS (
+               SELECT id FROM media_items
+               WHERE item_type = 'season'
+               AND parent_id IN (
+                   SELECT id FROM media_items
+                   WHERE item_type = 'show' AND state = 'ongoing'
+               )
+           )
+           SELECT
+             COUNT(*) FILTER (WHERE item_type = 'movie') AS "total_movies!: i64",
+             COUNT(*) FILTER (WHERE item_type = 'show') AS "total_shows!: i64",
+             COUNT(*) FILTER (WHERE item_type = 'season') AS "total_seasons!: i64",
+             COUNT(*) FILTER (WHERE item_type = 'episode') AS "total_episodes!: i64",
+             COUNT(*) FILTER (WHERE is_requested = true AND state = 'completed') AS "completed!: i64",
+             COUNT(*) FILTER (WHERE is_requested = true AND state = 'scraped') AS "scraped!: i64",
+             COUNT(*) FILTER (WHERE is_requested = true AND state = 'indexed') AS "indexed!: i64",
+             COUNT(*) FILTER (WHERE is_requested = true AND state = 'failed') AS "failed!: i64",
+             COUNT(*) FILTER (WHERE is_requested = true AND state = 'paused') AS "paused!: i64",
+             COUNT(*) FILTER (WHERE is_requested = true AND (
+                 state = 'ongoing'
+                 OR (state = 'unreleased' AND item_type = 'episode'
+                     AND parent_id IN (SELECT id FROM ongoing_season_ids))
+             )) AS "ongoing!: i64",
+             COUNT(*) FILTER (WHERE is_requested = true AND state = 'partially_completed') AS "partially_completed!: i64",
+             COUNT(*) FILTER (WHERE is_requested = true AND state = 'unreleased'
+                 AND NOT (item_type = 'episode'
+                     AND parent_id IN (SELECT id FROM ongoing_season_ids))
+             ) AS "unreleased!: i64"
+           FROM media_items"#
+    )
+    .fetch_one(pool)
+    .await?)
 }
 
 /// Returns a map of ISO date strings (YYYY-MM-DD) to count of items that
@@ -65,11 +83,11 @@ pub async fn get_activity(pool: &PgPool) -> Result<std::collections::HashMap<Str
 pub async fn get_year_releases(pool: &PgPool) -> Result<Vec<(i32, i64)>> {
     let rows: Vec<(i32, i64)> = sqlx::query_as(
         r#"SELECT
-               COALESCE(year, EXTRACT(YEAR FROM aired_at)::int) AS year,
+               COALESCE(year, EXTRACT(YEAR FROM aired_at)::integer)::integer AS year,
                COUNT(*)::bigint AS count
            FROM media_items
            WHERE item_type IN ('movie', 'episode')
-             AND COALESCE(year, EXTRACT(YEAR FROM aired_at)::int) IS NOT NULL
+             AND COALESCE(year, EXTRACT(YEAR FROM aired_at)::integer) IS NOT NULL
            GROUP BY 1
            ORDER BY 1 ASC"#,
     )
@@ -83,11 +101,12 @@ pub async fn get_calendar_entries(
     pool: &PgPool,
     limit: i64,
 ) -> Result<Vec<crate::entities::CalendarRow>> {
-    let rows = sqlx::query_as::<_, crate::entities::CalendarRow>(
+    let rows = sqlx::query_as!(
+        crate::entities::CalendarRow,
         r#"SELECT
                mi.id,
-               mi.item_type,
-               mi.state,
+               mi.item_type AS "item_type: _",
+               mi.state AS "state: _",
                mi.title,
                COALESCE(
                    CASE
@@ -95,7 +114,7 @@ pub async fn get_calendar_entries(
                        WHEN mi.item_type = 'season'  THEN parent.title
                    END,
                    mi.title
-               ) AS show_title,
+               ) AS "show_title!: String",
                mi.aired_at,
                mi.season_number,
                mi.episode_number,
@@ -120,8 +139,8 @@ pub async fn get_calendar_entries(
              AND mi.state = 'unreleased'
            ORDER BY mi.aired_at ASC
            LIMIT $1"#,
+        limit
     )
-    .bind(limit)
     .fetch_all(pool)
     .await?;
     Ok(rows)
@@ -129,55 +148,45 @@ pub async fn get_calendar_entries(
 
 /// Fetch all requested items with a future air date as full MediaItem rows.
 pub async fn get_upcoming_unreleased(pool: &PgPool, limit: i64) -> Result<Vec<MediaItem>> {
-    let items = sqlx::query_as::<_, MediaItem>(
-        r#"SELECT * FROM media_items
-           WHERE aired_at > CURRENT_DATE
-             AND state = 'unreleased'
-           ORDER BY aired_at ASC
-           LIMIT $1"#,
+    Ok(sqlx::query_as::<_, MediaItem>(
+        "SELECT * FROM media_items
+         WHERE aired_at > CURRENT_DATE AND state = 'unreleased'
+         ORDER BY aired_at ASC
+         LIMIT $1",
     )
     .bind(limit)
     .fetch_all(pool)
-    .await?;
-    Ok(items)
+    .await?)
 }
 
 pub async fn get_setting(pool: &PgPool, key: &str) -> Result<Option<serde_json::Value>> {
-    let row = sqlx::query_scalar::<_, serde_json::Value>(
+    Ok(sqlx::query_scalar!(
         "SELECT value FROM settings WHERE key = $1",
+        key
     )
-    .bind(key)
     .fetch_optional(pool)
-    .await?;
-    Ok(row)
+    .await?)
 }
 
 pub async fn set_setting(pool: &PgPool, key: &str, value: serde_json::Value) -> Result<()> {
-    sqlx::query(
+    sqlx::query!(
         r#"INSERT INTO settings (key, value, updated_at)
            VALUES ($1, $2, NOW())
            ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = EXCLUDED.updated_at"#,
+        key,
+        value
     )
-    .bind(key)
-    .bind(value)
     .execute(pool)
     .await?;
     Ok(())
 }
 
 pub async fn get_all_settings(pool: &PgPool) -> Result<serde_json::Value> {
-    use sqlx::Row as _;
-    let rows = sqlx::query("SELECT key, value FROM settings")
-        .fetch_all(pool)
-        .await?;
-
-    let mut map = serde_json::Map::new();
-    for row in rows {
-        let key: String = row.try_get("key")?;
-        let value: serde_json::Value = row.try_get("value")?;
-        map.insert(key, value);
-    }
-    Ok(serde_json::Value::Object(map))
+    let rows: Vec<(String, serde_json::Value)> =
+        sqlx::query_as("SELECT key, value FROM settings")
+            .fetch_all(pool)
+            .await?;
+    Ok(serde_json::Value::Object(rows.into_iter().collect()))
 }
 
 pub async fn set_all_settings(
