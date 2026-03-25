@@ -1,0 +1,16 @@
+[package]
+name = "riven-db"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+riven-core = { path = "../riven-core" }
+riven-rank = { path = "../riven-rank" }
+sqlx = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+async-graphql = { workspace = true }

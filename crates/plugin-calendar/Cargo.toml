@@ -1,0 +1,16 @@
+[package]
+name = "plugin-calendar"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+riven-core = { path = "../riven-core" }
+riven-db = { path = "../riven-db" }
+async-trait = { workspace = true }
+async-graphql = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+inventory = { workspace = true }
+redis = { workspace = true }
+chrono = { workspace = true }
+sqlx = { workspace = true }
