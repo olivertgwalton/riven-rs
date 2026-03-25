@@ -69,6 +69,10 @@ pub enum EventType {
     // Item streaming
     #[serde(rename = "riven.media-item.stream-link.requested")]
     MediaItemStreamLinkRequested,
+
+    // Item deletion
+    #[serde(rename = "riven.media-item.deleted")]
+    MediaItemsDeleted,
 }
 
 /// A concrete event with its payload.
@@ -162,7 +166,6 @@ pub enum RivenEvent {
         year: Option<i32>,
         imdb_id: Option<String>,
         tmdb_id: Option<String>,
-        tvdb_id: Option<String>,
         poster_path: Option<String>,
         plugin_name: String,
         provider: Option<String>,
@@ -175,9 +178,31 @@ pub enum RivenEvent {
         magnet: String,
         info_hash: String,
     },
+
+    // Deletion — carries the external content-service request IDs so plugins
+    // (e.g. Seerr) can cancel/delete the corresponding requests.
+    #[serde(rename = "riven.media-item.deleted")]
+    MediaItemsDeleted {
+        external_request_ids: Vec<String>,
+    },
 }
 
 impl RivenEvent {
+    /// Returns true for events that should be shown as UI notifications.
+    pub fn is_notable(&self) -> bool {
+        matches!(
+            self,
+            Self::MediaItemDownloadSuccess { .. }
+                | Self::MediaItemScrapeSuccess { .. }
+                | Self::MediaItemIndexSuccess { .. }
+                | Self::MediaItemDownloadError { .. }
+                | Self::MediaItemScrapeError { .. }
+                | Self::MediaItemScrapeErrorNoNewStreams { .. }
+                | Self::ItemRequestCreateSuccess { .. }
+                | Self::ItemRequestCreateError { .. }
+        )
+    }
+
     pub fn event_type(&self) -> EventType {
         match self {
             Self::CoreStarted => EventType::CoreStarted,
@@ -204,6 +229,7 @@ impl RivenEvent {
             Self::MediaItemDownloadProviderListRequested => EventType::MediaItemDownloadProviderListRequested,
             Self::MediaItemDownloadSuccess { .. } => EventType::MediaItemDownloadSuccess,
             Self::MediaItemStreamLinkRequested { .. } => EventType::MediaItemStreamLinkRequested,
+            Self::MediaItemsDeleted { .. } => EventType::MediaItemsDeleted,
         }
     }
 }
@@ -211,10 +237,14 @@ impl RivenEvent {
 /// Typed responses that hooks can return.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum HookResponse {
-    ContentService(ContentServiceResponse),
-    Index(IndexedMediaItem),
+    ContentService(Box<ContentServiceResponse>),
+    Index(Box<IndexedMediaItem>),
     Scrape(ScrapeResponse),
-    Download(DownloadResult),
+    Download(Box<DownloadResult>),
+    /// The plugin reached the debrid store but the torrent is not available
+    /// (not cached, rejected, etc.). The download flow should blacklist this
+    /// stream and try the next best candidate rather than scheduling a retry.
+    DownloadStreamUnavailable,
     CacheCheck(Vec<CacheCheckResult>),
     ProviderList(Vec<ProviderInfo>),
     StreamLink(StreamLinkResponse),

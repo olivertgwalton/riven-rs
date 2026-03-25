@@ -14,6 +14,7 @@ pub enum MediaItemType {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, sqlx::Type, async_graphql::Enum)]
 #[sqlx(type_name = "media_item_state", rename_all = "snake_case")]
+#[graphql(rename_items = "PascalCase")]
 pub enum MediaItemState {
     Indexed,
     Unreleased,

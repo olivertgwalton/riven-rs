@@ -21,8 +21,14 @@ pub struct RivenSettings {
     pub logging_enabled: bool,
     pub gql_port: u16,
     pub dubbed_anime_only: bool,
+    /// Minimum average bitrate for movies (Mbps). `None` = disabled.
     pub minimum_average_bitrate_movies: Option<u32>,
+    /// Minimum average bitrate for episodes (Mbps). `None` = disabled.
     pub minimum_average_bitrate_episodes: Option<u32>,
+    /// Maximum average bitrate for movies (Mbps). `None` = disabled.
+    pub maximum_average_bitrate_movies: Option<u32>,
+    /// Maximum average bitrate for episodes (Mbps). `None` = disabled.
+    pub maximum_average_bitrate_episodes: Option<u32>,
 
     /// Retry items that have been stuck (failed_attempts > 0) for longer than
     /// this many seconds. 0 = disabled. Default: 86400 (24 h).
@@ -52,6 +58,8 @@ impl Default for RivenSettings {
             dubbed_anime_only: false,
             minimum_average_bitrate_movies: None,
             minimum_average_bitrate_episodes: None,
+            maximum_average_bitrate_movies: None,
+            maximum_average_bitrate_episodes: None,
             retry_interval_secs: 86400,
             api_key: String::new(),
             vfs_cache_max_size_mb: 0,
@@ -121,5 +129,32 @@ impl PluginSettings {
 
     pub fn has(&self, key: &str) -> bool {
         self.get(key).is_some()
+    }
+
+    /// Merge DB-stored settings (JSON object of string values) on top of env vars.
+    /// DB values win for any key they provide.
+    pub fn merge_db_override(&mut self, db_value: &serde_json::Value) {
+        if let Some(obj) = db_value.as_object() {
+            for (k, v) in obj {
+                let val = match v {
+                    serde_json::Value::String(s) if !s.is_empty() => s.clone(),
+                    serde_json::Value::Bool(b) => b.to_string(),
+                    serde_json::Value::Number(n) => n.to_string(),
+                    serde_json::Value::Array(_) => v.to_string(),
+                    _ => continue,
+                };
+                self.values.insert(k.to_lowercase(), val);
+            }
+        }
+    }
+
+    /// Serialize the active settings to a JSON object (string values).
+    pub fn to_json(&self) -> serde_json::Value {
+        let map: serde_json::Map<String, serde_json::Value> = self
+            .values
+            .iter()
+            .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
+            .collect();
+        serde_json::Value::Object(map)
     }
 }

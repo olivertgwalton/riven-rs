@@ -2,9 +2,59 @@ use std::any::Any;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use serde::Serialize;
+use tokio::sync::RwLock;
 
 use crate::events::{EventType, HookResponse, RivenEvent};
 use crate::settings::PluginSettings;
+
+/// Describes one configurable setting field for a plugin.
+/// Used to render the settings UI dynamically on the frontend.
+#[derive(Debug, Clone, Serialize)]
+pub struct SettingField {
+    pub key: &'static str,
+    pub label: &'static str,
+    /// Input type hint: "text" | "password" | "url" | "number" | "boolean" | "textarea"
+    #[serde(rename = "type")]
+    pub field_type: &'static str,
+    pub required: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_value: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub placeholder: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<&'static str>,
+}
+
+impl SettingField {
+    pub const fn new(key: &'static str, label: &'static str, field_type: &'static str) -> Self {
+        Self {
+            key,
+            label,
+            field_type,
+            required: false,
+            default_value: None,
+            placeholder: None,
+            description: None,
+        }
+    }
+    pub const fn required(mut self) -> Self {
+        self.required = true;
+        self
+    }
+    pub const fn with_default(mut self, v: &'static str) -> Self {
+        self.default_value = Some(v);
+        self
+    }
+    pub const fn with_placeholder(mut self, v: &'static str) -> Self {
+        self.placeholder = Some(v);
+        self
+    }
+    pub const fn with_description(mut self, v: &'static str) -> Self {
+        self.description = Some(v);
+        self
+    }
+}
 
 /// The core plugin trait. All plugins implement this.
 #[async_trait]
@@ -27,6 +77,12 @@ pub trait Plugin: Send + Sync + 'static {
         event: &RivenEvent,
         ctx: &PluginContext,
     ) -> anyhow::Result<HookResponse>;
+
+    /// Describe the configurable settings this plugin accepts.
+    /// Returned to the frontend so it can render the settings form dynamically.
+    fn settings_schema(&self) -> Vec<SettingField> {
+        vec![]
+    }
 
     /// Return the GraphQL schema fragment for this plugin's queries.
     /// Plugins register their resolvers via the schema builder.
@@ -91,6 +147,14 @@ pub struct PluginRegistration {
 
 inventory::collect!(PluginRegistration);
 
+/// Lightweight plugin metadata for the settings API.
+pub struct PluginInfo {
+    pub name: String,
+    pub version: String,
+    pub valid: bool,
+    pub schema: Vec<SettingField>,
+}
+
 /// Collect all registered plugins.
 pub fn collect_plugins() -> Vec<Box<dyn Plugin>> {
     inventory::iter::<PluginRegistration>
@@ -108,18 +172,18 @@ pub struct ActivePlugin {
 
 /// The plugin registry holds all plugins and dispatches events.
 pub struct PluginRegistry {
-    plugins: Vec<ActivePlugin>,
+    plugins: RwLock<Vec<ActivePlugin>>,
 }
 
 impl PluginRegistry {
     pub fn new() -> Self {
         Self {
-            plugins: Vec::new(),
+            plugins: RwLock::new(Vec::new()),
         }
     }
 
     pub async fn register(
-        &mut self,
+        &self,
         plugin: Box<dyn Plugin>,
         settings: PluginSettings,
         http_client: reqwest::Client,
@@ -141,40 +205,84 @@ impl PluginRegistry {
             redis,
         });
 
-        self.plugins.push(ActivePlugin {
+        self.plugins.write().await.push(ActivePlugin {
             plugin,
             context,
             valid,
         });
     }
 
-    /// Dispatch an event to all valid plugins that subscribe to it.
-    pub async fn dispatch(&self, event: &RivenEvent) -> Vec<(&str, anyhow::Result<HookResponse>)> {
-        let event_type = event.event_type();
-        let mut results = Vec::new();
-
-        for active in &self.plugins {
-            if !active.valid {
-                continue;
+    /// Re-apply DB settings override for a plugin and re-run its validate().
+    /// Returns the new valid status. No-op if the plugin name is not found.
+    pub async fn revalidate_plugin(&self, name: &str, db_override: &serde_json::Value) -> bool {
+        let mut plugins = self.plugins.write().await;
+        if let Some(active) = plugins.iter_mut().find(|p| p.plugin.name() == name) {
+            let mut new_settings = active.context.settings.clone();
+            new_settings.merge_db_override(db_override);
+            let valid = active.plugin.validate(&new_settings).await.unwrap_or(false);
+            active.context = Arc::new(PluginContext {
+                settings: new_settings,
+                http_client: active.context.http_client.clone(),
+                db_pool: active.context.db_pool.clone(),
+                redis: active.context.redis.clone(),
+            });
+            active.valid = valid;
+            if valid {
+                tracing::info!(plugin = name, "plugin revalidated successfully");
+            } else {
+                tracing::warn!(plugin = name, "plugin revalidation failed");
             }
-            if !active.plugin.subscribed_events().contains(&event_type) {
-                continue;
-            }
-
-            let name = active.plugin.name();
-            let result = active.plugin.handle_event(event, &active.context).await;
-            results.push((name, result));
+            valid
+        } else {
+            false
         }
+    }
+
+    /// Dispatch an event to all valid plugins that subscribe to it, running them concurrently.
+    pub async fn dispatch(&self, event: &RivenEvent) -> Vec<(String, anyhow::Result<HookResponse>)> {
+        let event_type = event.event_type();
+        let plugins = self.plugins.read().await;
+
+        let futures: Vec<_> = plugins
+            .iter()
+            .filter(|a| a.valid && a.plugin.subscribed_events().contains(&event_type))
+            .map(|active| {
+                let name = active.plugin.name().to_string();
+                async move { (name, active.plugin.handle_event(event, &active.context).await) }
+            })
+            .collect();
+
+        let results = futures::future::join_all(futures).await;
 
         results
     }
 
-    pub fn valid_plugins(&self) -> impl Iterator<Item = &ActivePlugin> {
-        self.plugins.iter().filter(|p| p.valid)
+    pub async fn all_plugins_info(&self) -> Vec<PluginInfo> {
+        self.plugins
+            .read()
+            .await
+            .iter()
+            .map(|p| PluginInfo {
+                name: p.plugin.name().to_string(),
+                version: p.plugin.version().to_string(),
+                valid: p.valid,
+                schema: p.plugin.settings_schema(),
+            })
+            .collect()
     }
 
-    pub fn all_plugins(&self) -> &[ActivePlugin] {
-        &self.plugins
+    pub async fn valid_plugin_names(&self) -> Vec<String> {
+        self.plugins
+            .read()
+            .await
+            .iter()
+            .filter(|p| p.valid)
+            .map(|p| p.plugin.name().to_string())
+            .collect()
+    }
+
+    pub async fn plugin_count(&self) -> usize {
+        self.plugins.read().await.len()
     }
 }
 
@@ -184,7 +292,7 @@ macro_rules! register_plugin {
     ($plugin_type:ty) => {
         inventory::submit! {
             $crate::plugin::PluginRegistration {
-                create: || Box::new(<$plugin_type>::new()),
+                create: || Box::new(<$plugin_type>::default()),
             }
         }
     };
