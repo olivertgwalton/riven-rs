@@ -2,6 +2,9 @@ use async_graphql::*;
 use riven_core::types::*;
 use riven_db::entities::*;
 use riven_db::repo;
+use std::sync::Arc;
+use riven_core::plugin::{PluginRegistry, SettingField};
+use riven_core::settings::RivenSettings;
 
 use super::helpers::derive_media_metadata;
 use super::types::*;
@@ -57,9 +60,8 @@ impl CoreQuery {
         tmdb_id: String,
     ) -> Result<Option<MediaItemFull>> {
         let pool = ctx.data::<sqlx::PgPool>()?;
-        let item = match repo::get_media_item_by_tmdb(pool, &tmdb_id).await? {
-            Some(i) => i,
-            None => return Ok(None),
+        let Some(item) = repo::get_media_item_by_tmdb(pool, &tmdb_id).await? else {
+            return Ok(None);
         };
         self.media_item_full_inner(pool, item).await.map(Some)
     }
@@ -71,9 +73,8 @@ impl CoreQuery {
         tvdb_id: String,
     ) -> Result<Option<MediaItemFull>> {
         let pool = ctx.data::<sqlx::PgPool>()?;
-        let item = match repo::get_media_item_by_tvdb(pool, &tvdb_id).await? {
-            Some(i) => i,
-            None => return Ok(None),
+        let Some(item) = repo::get_media_item_by_tvdb(pool, &tvdb_id).await? else {
+            return Ok(None);
         };
         self.media_item_full_inner(pool, item).await.map(Some)
     }
@@ -85,10 +86,10 @@ impl CoreQuery {
         id: i64,
     ) -> Result<Option<MediaItemFull>> {
         let pool = ctx.data::<sqlx::PgPool>()?;
-        match repo::get_media_item(pool, id).await? {
-            Some(item) => self.media_item_full_inner(pool, item).await.map(Some),
-            None => Ok(None),
-        }
+        let Some(item) = repo::get_media_item(pool, id).await? else {
+            return Ok(None);
+        };
+        self.media_item_full_inner(pool, item).await.map(Some)
     }
 
     /// List all movies.
@@ -195,8 +196,6 @@ impl CoreQuery {
 
     /// Get info about all registered plugins.
     async fn plugin_info(&self, ctx: &Context<'_>) -> Result<Vec<PluginInfo>> {
-        use riven_core::plugin::PluginRegistry;
-        use std::sync::Arc;
         let registry = ctx.data::<Arc<PluginRegistry>>()?;
         Ok(registry
             .all_plugins_info()
@@ -227,7 +226,6 @@ impl CoreQuery {
 
     /// Return the SettingField schema for the general (non-plugin) settings.
     async fn general_settings_schema(&self) -> Result<serde_json::Value> {
-        use riven_core::plugin::SettingField;
         let schema: Vec<SettingField> = vec![
             SettingField::new("dubbed_anime_only", "Dubbed anime only", "boolean")
                 .with_description("Only fetch dubbed versions of anime titles."),
@@ -252,7 +250,6 @@ impl CoreQuery {
 
     /// Get general (non-plugin) settings. Returns defaults merged with DB values.
     async fn general_settings(&self, ctx: &Context<'_>) -> Result<serde_json::Value> {
-        use riven_core::settings::RivenSettings;
         let pool = ctx.data::<sqlx::PgPool>()?;
         let defaults = RivenSettings::default();
         let mut result = serde_json::json!({

@@ -48,7 +48,6 @@ impl Plugin for TmdbPlugin {
     ) -> anyhow::Result<HookResponse> {
         match event {
             RivenEvent::MediaItemIndexRequested {
-                id: _,
                 item_type,
                 imdb_id,
                 tmdb_id,

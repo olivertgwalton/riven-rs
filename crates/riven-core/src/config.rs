@@ -34,14 +34,10 @@ pub mod vfs {
     pub const SEQUENTIAL_READ_TOLERANCE_BLOCKS: u64 = 10;
 
     /// Scan tolerance in bytes.
-    pub const fn scan_tolerance_bytes() -> u64 {
-        SCAN_TOLERANCE_BLOCKS * BLOCK_SIZE
-    }
+    pub const SCAN_TOLERANCE_BYTES: u64 = SCAN_TOLERANCE_BLOCKS * BLOCK_SIZE;
 
     /// Sequential read tolerance in bytes.
-    pub const fn sequential_read_tolerance() -> u64 {
-        SEQUENTIAL_READ_TOLERANCE_BLOCKS * BLOCK_SIZE
-    }
+    pub const SEQUENTIAL_READ_TOLERANCE_BYTES: u64 = SEQUENTIAL_READ_TOLERANCE_BLOCKS * BLOCK_SIZE;
 
     /// Calculate footer size for a given file size.
     pub fn footer_size(file_size: u64) -> u64 {

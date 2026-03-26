@@ -1,10 +1,13 @@
 use async_graphql::*;
+use riven_core::downloader::DownloaderConfig;
 use riven_core::events::RivenEvent;
+use riven_core::plugin::PluginRegistry;
 use riven_core::types::*;
 use riven_db::entities::*;
 use riven_db::repo;
 use riven_queue::{IndexJob, JobQueue, ScrapeJob};
 use std::sync::Arc;
+use tokio::sync::RwLock;
 
 // ── Mutation root ──
 
@@ -89,9 +92,6 @@ impl MutationRoot {
         plugin: String,
         settings: serde_json::Value,
     ) -> Result<serde_json::Value> {
-        use riven_core::plugin::PluginRegistry;
-        use std::sync::Arc;
-
         let pool = ctx.data::<sqlx::PgPool>()?;
         let key = format!("plugin.{plugin}");
         repo::set_setting(pool, &key, settings.clone()).await?;
@@ -108,30 +108,16 @@ impl MutationRoot {
         ctx: &Context<'_>,
         settings: serde_json::Value,
     ) -> Result<serde_json::Value> {
-        use riven_core::downloader::DownloaderConfig;
-        use tokio::sync::RwLock;
-
         let pool = ctx.data::<sqlx::PgPool>()?;
         repo::set_setting(pool, "general", settings.clone()).await?;
 
         let cfg = ctx.data::<std::sync::Arc<RwLock<DownloaderConfig>>>()?;
         let mut cfg = cfg.write().await;
-        cfg.minimum_average_bitrate_movies = settings
-            .get("minimum_average_bitrate_movies")
-            .and_then(|v| v.as_u64())
-            .map(|v| v as u32);
-        cfg.minimum_average_bitrate_episodes = settings
-            .get("minimum_average_bitrate_episodes")
-            .and_then(|v| v.as_u64())
-            .map(|v| v as u32);
-        cfg.maximum_average_bitrate_movies = settings
-            .get("maximum_average_bitrate_movies")
-            .and_then(|v| v.as_u64())
-            .map(|v| v as u32);
-        cfg.maximum_average_bitrate_episodes = settings
-            .get("maximum_average_bitrate_episodes")
-            .and_then(|v| v.as_u64())
-            .map(|v| v as u32);
+        let mbps = |key: &str| settings.get(key).and_then(|v| v.as_u64()).map(|v| v as u32);
+        cfg.minimum_average_bitrate_movies   = mbps("minimum_average_bitrate_movies");
+        cfg.minimum_average_bitrate_episodes = mbps("minimum_average_bitrate_episodes");
+        cfg.maximum_average_bitrate_movies   = mbps("maximum_average_bitrate_movies");
+        cfg.maximum_average_bitrate_episodes = mbps("maximum_average_bitrate_episodes");
 
         Ok(settings)
     }
@@ -255,7 +241,7 @@ impl MutationRoot {
         )
         .await?;
 
-        let (item, _was_created) = match item_type {
+        let (item, _) = match item_type {
             MediaItemType::Movie => {
                 repo::create_movie(pool, &title, imdb_id.as_deref(), tmdb_id.as_deref(), Some(request.id)).await?
             }

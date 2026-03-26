@@ -52,16 +52,14 @@ impl Plugin for TorrentioPlugin {
     ) -> anyhow::Result<HookResponse> {
         match event {
             RivenEvent::MediaItemScrapeRequested {
-                id: _,
                 item_type,
                 imdb_id,
                 season,
                 episode,
                 ..
             } => {
-                let imdb_id = match imdb_id {
-                    Some(id) => id,
-                    None => return Ok(HookResponse::Empty),
+                let Some(imdb_id) = imdb_id else {
+                    return Ok(HookResponse::Empty);
                 };
 
                 let filter = ctx.settings.get_or("filter", DEFAULT_FILTER);

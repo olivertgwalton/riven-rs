@@ -132,11 +132,9 @@ pub struct SchemaBuilder {
     pub query_fields: Vec<Box<dyn Any + Send + Sync>>,
 }
 
-impl SchemaBuilder {
-    pub fn new() -> Self {
-        Self {
-            query_fields: Vec::new(),
-        }
+impl Default for SchemaBuilder {
+    fn default() -> Self {
+        Self { query_fields: Vec::new() }
     }
 }
 
@@ -175,11 +173,15 @@ pub struct PluginRegistry {
     plugins: RwLock<Vec<ActivePlugin>>,
 }
 
+impl Default for PluginRegistry {
+    fn default() -> Self {
+        Self { plugins: RwLock::new(Vec::new()) }
+    }
+}
+
 impl PluginRegistry {
     pub fn new() -> Self {
-        Self {
-            plugins: RwLock::new(Vec::new()),
-        }
+        Self::default()
     }
 
     pub async fn register(
@@ -252,9 +254,7 @@ impl PluginRegistry {
             })
             .collect();
 
-        let results = futures::future::join_all(futures).await;
-
-        results
+        futures::future::join_all(futures).await
     }
 
     pub async fn all_plugins_info(&self) -> Vec<PluginInfo> {

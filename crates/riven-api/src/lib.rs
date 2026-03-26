@@ -21,26 +21,33 @@ use tower_http::services::{ServeDir, ServeFile};
 use apalis_board_api::framework::{ApiBuilder, RegisterRoute};
 use apalis_board_api::ui::ServeUI;
 
-// ── Board asset handler ──
+// ── Board asset middleware ──
+// The board WASM SPA requests its hashed assets at root-level absolute paths
+// (e.g. /apalis-board-web-<hash>.js). This middleware intercepts any such
+// request before it reaches the frontend fallback, without hardcoding filenames.
 
-async fn serve_board_asset(uri: axum::http::Uri) -> Response {
-    let path = uri.path().to_owned();
-    match ServeUI::get_file(&path) {
-        Some(file) => {
-            let bytes: Vec<u8> = file.contents().to_vec();
-            let content_type = ServeUI::content_type(&path);
+async fn board_assets_middleware(
+    uri: axum::http::Uri,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let path = uri.path();
+    if path.contains('.') {
+        if let Some(file) = ServeUI::get_file(path) {
+            let bytes = file.contents().to_vec();
+            let content_type = ServeUI::content_type(path);
             let mut builder = axum::http::Response::builder()
                 .status(200)
                 .header("content-type", content_type);
-            if let Some(cc) = ServeUI::cache_control(&path) {
+            if let Some(cc) = ServeUI::cache_control(path) {
                 builder = builder.header("cache-control", cc);
             }
-            builder
+            return builder
                 .body(axum::body::Body::from(bytes))
-                .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+                .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
         }
-        None => StatusCode::NOT_FOUND.into_response(),
     }
+    next.run(req).await
 }
 use riven_core::plugin::PluginRegistry;
 use riven_queue::JobQueue;
@@ -100,6 +107,24 @@ async fn seerr_webhook(State(state): State<ApiState>) -> impl IntoResponse {
     StatusCode::OK
 }
 
+/// Convert a broadcast receiver into an SSE stream, labelling each event with `event_name`.
+/// Silently skips lagged messages and terminates when the channel closes.
+fn broadcast_to_sse(
+    rx: broadcast::Receiver<String>,
+    event_name: &'static str,
+) -> impl futures::Stream<Item = Result<Event, Infallible>> {
+    futures::stream::unfold(rx, move |mut rx| async move {
+        let data = loop {
+            match rx.recv().await {
+                Ok(line) => break line,
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Closed) => return None,
+            }
+        };
+        Some((Ok(Event::default().event(event_name).data(data)), rx))
+    })
+}
+
 // ── SSE: live logs ──
 
 async fn logs_stream_handler(
@@ -110,21 +135,10 @@ async fn logs_stream_handler(
         return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
     }
 
-    let rx = state.log_tx.subscribe();
     let ping = futures::stream::once(async {
         Ok::<Event, Infallible>(Event::default().event("connected").data("ok"))
     });
-    let rest = futures::stream::unfold(rx, |mut rx| async move {
-        let data = loop {
-            match rx.recv().await {
-                Ok(line) => break line,
-                Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                Err(broadcast::error::RecvError::Closed) => return None,
-            }
-        };
-        Some((Ok::<Event, Infallible>(Event::default().event("log").data(data)), rx))
-    });
-
+    let rest = broadcast_to_sse(state.log_tx.subscribe(), "log");
     Sse::new(ping.chain(rest))
         .keep_alive(KeepAlive::new().interval(std::time::Duration::from_secs(3)))
         .into_response()
@@ -140,19 +154,7 @@ async fn notifications_stream_handler(
         return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
     }
 
-    let rx = state.notification_tx.subscribe();
-    let stream = futures::stream::unfold(rx, |mut rx| async move {
-        let data = loop {
-            match rx.recv().await {
-                Ok(line) => break line,
-                Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                Err(broadcast::error::RecvError::Closed) => return None,
-            }
-        };
-        Some((Ok::<Event, Infallible>(Event::default().event("notification").data(data)), rx))
-    });
-
-    Sse::new(stream)
+    Sse::new(broadcast_to_sse(state.notification_tx.subscribe(), "notification"))
         .keep_alive(KeepAlive::default())
         .into_response()
 }
@@ -184,8 +186,6 @@ pub async fn start_server(
         .register(job_queue.download_storage.clone())
         .register(job_queue.content_storage.clone())
         .build();
-    // The board SPA (WASM) is served under /board but makes API calls to
-    // absolute paths /api/v1/... — so board_api must live at root /api/v1.
     let board_ui = Router::new().fallback_service(ServeUI::new());
 
     let static_dir = std::env::var("RIVEN_STATIC_DIR").unwrap_or_else(|_| "./frontend/dist".to_string());
@@ -200,12 +200,7 @@ pub async fn start_server(
         notification_tx,
     };
 
-    // The board SPA references assets at root-level absolute paths.
-    // Register them explicitly so they're reachable when the board is nested at /board.
     let app = Router::new()
-        .route("/apalis-board-web-4f06dae1128a9b0a.js", get(serve_board_asset))
-        .route("/apalis-board-web-4f06dae1128a9b0a_bg.wasm", get(serve_board_asset))
-        .route("/input-341faa0de831bcfb.css", get(serve_board_asset))
         .nest("/api/v1", board_api.with_state(()))
         .route("/graphql", get(graphiql).post(graphql_handler))
         .route("/webhook/seerr", post(seerr_webhook))
@@ -213,6 +208,7 @@ pub async fn start_server(
         .route("/notifications/stream", get(notifications_stream_handler))
         .nest("/board", board_ui.with_state(()))
         .fallback_service(serve_frontend)
+        .layer(axum::middleware::from_fn(board_assets_middleware))
         .layer(CorsLayer::permissive())
         .with_state(state);
 

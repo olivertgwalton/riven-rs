@@ -1,10 +1,9 @@
 use std::sync::Arc;
 
 use riven_core::plugin::{collect_plugins, PluginRegistry};
-use riven_core::settings::{PluginSettings, RivenSettings};
+use riven_core::settings::PluginSettings;
 
 pub async fn register_plugins(
-    settings: &RivenSettings,
     http_client: reqwest::Client,
     db_pool: sqlx::PgPool,
     redis_conn: redis::aio::ConnectionManager,
@@ -36,6 +35,5 @@ pub async fn register_plugins(
             .await;
     }
 
-    let _ = settings;
     Arc::new(registry)
 }

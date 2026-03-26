@@ -31,7 +31,7 @@ impl TvdbPlugin {
             }
         }
 
-        let resp: TvdbLoginResponse = client
+        let resp: TvdbResponse<TvdbLoginData> = client
             .post(format!("{TVDB_BASE_URL}login"))
             .json(&serde_json::json!({ "apikey": api_key }))
             .send()
@@ -140,7 +140,7 @@ async fn fetch_series(
     let genres = series
         .genres
         .as_ref()
-        .map(|g| g.iter().filter_map(|genre| genre.name.clone()).collect());
+        .map(|g| g.iter().filter_map(|n| n.name.clone()).collect());
 
     let country = series
         .original_country
@@ -239,10 +239,7 @@ async fn fetch_series(
         year,
         genres,
         country,
-        network: series
-            .original_network
-            .as_ref()
-            .and_then(|n| n.name.clone()),
+        network: series.original_network.as_ref().and_then(|n| n.name.clone()),
         content_rating,
         status,
         aliases,
@@ -324,11 +321,6 @@ struct TvdbLinks {
 }
 
 #[derive(Deserialize)]
-struct TvdbLoginResponse {
-    data: TvdbLoginData,
-}
-
-#[derive(Deserialize)]
 struct TvdbLoginData {
     token: String,
 }
@@ -344,18 +336,14 @@ struct TvdbSeries {
     original_country: Option<String>,
     country: Option<String>,
     #[serde(rename = "originalNetwork")]
-    original_network: Option<TvdbNetwork>,
-    genres: Option<Vec<TvdbGenre>>,
-    status: Option<TvdbStatus>,
+    original_network: Option<Named>,
+    genres: Option<Vec<Named>>,
+    status: Option<Named>,
     aliases: Option<Vec<TvdbAlias>>,
     #[serde(rename = "remoteIds")]
     remote_ids: Option<Vec<TvdbRemoteId>>,
     #[serde(rename = "contentRatings")]
     content_ratings: Option<Vec<TvdbContentRating>>,
-    // TVDB v4 returns nameTranslations as a Vec<String> of language codes, not a map.
-    // We don't use this directly — translated names come from `translations.nameTranslations`.
-    #[serde(rename = "nameTranslations", default)]
-    _name_translations: Option<Vec<String>>,
     translations: Option<TvdbTranslations>,
 }
 
@@ -371,18 +359,9 @@ struct TvdbTranslation {
     name: String,
 }
 
+/// Generic single-`name` object used for network, genre, status, etc.
 #[derive(Deserialize)]
-struct TvdbNetwork {
-    name: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct TvdbGenre {
-    name: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct TvdbStatus {
+struct Named {
     name: Option<String>,
 }
 

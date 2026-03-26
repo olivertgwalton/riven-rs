@@ -85,7 +85,7 @@ async fn main() -> Result<()> {
         .timeout(std::time::Duration::from_secs(30))
         .build()?;
 
-    let registry = setup::register_plugins(&settings, http_client.clone(), db_pool.clone(), redis_conn).await;
+    let registry = setup::register_plugins(http_client.clone(), db_pool.clone(), redis_conn).await;
 
     // ── Create notification broadcast channel ──
     let (notification_tx, _) = broadcast::channel::<String>(512);
@@ -160,11 +160,7 @@ async fn main() -> Result<()> {
     let gql_log_tx = log_tx.clone();
     let gql_notification_tx = notification_tx.clone();
     let gql_handle = tokio::spawn(async move {
-        let api_key = if settings.api_key.is_empty() {
-            None
-        } else {
-            Some(settings.api_key.clone())
-        };
+        let api_key = (!settings.api_key.is_empty()).then(|| settings.api_key.clone());
         if let Err(e) = riven_api::start_server(
             gql_port,
             gql_pool,
@@ -200,6 +196,19 @@ async fn main() -> Result<()> {
     );
 
     // ── Wait for shutdown signal ──
+    // Handle both SIGINT (Ctrl+C) and SIGTERM (docker stop / systemd).
+    // Without SIGTERM handling the process is SIGKILL'd before drop(vfs) runs,
+    // leaving a stale FUSE mount that causes media servers to wipe their library.
+    #[cfg(unix)]
+    {
+        use signal::unix::{SignalKind, signal as unix_signal};
+        let mut sigterm = unix_signal(SignalKind::terminate())?;
+        tokio::select! {
+            _ = signal::ctrl_c() => {},
+            _ = sigterm.recv() => {},
+        }
+    }
+    #[cfg(not(unix))]
     signal::ctrl_c().await?;
     tracing::info!("shutdown signal received");
 
