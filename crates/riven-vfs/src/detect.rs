@@ -1,55 +1,31 @@
 use riven_core::config::vfs::*;
 
-/// Types of reads detected by the VFS.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReadType {
-    /// Reading file header (first 256 KB).
-    HeaderScan,
-    /// Detecting footer (jump to near end).
-    FooterScan,
-    /// Sequential footer read after scan.
-    FooterRead,
-    /// Sequential body playback.
-    BodyRead,
-    /// All chunks already cached.
-    CacheHit,
-    /// Random access / scan read.
-    GeneralScan,
+    /// Sequential read — served from the stream reader.
+    Sequential,
+    /// Non-sequential read (header, footer, seek) — single range fetch, cached.
+    RangeFetch,
 }
 
-/// Determine the read type based on position and history.
 pub fn detect_read_type(
     start: u64,
-    _size: u64,
     previous_position: Option<u64>,
-    _file_size: u64,
-    footer_start: u64,
-    all_chunks_cached: bool,
-    has_scanned_footer: bool,
+    header_end: u64,
 ) -> ReadType {
-    if all_chunks_cached {
-        return ReadType::CacheHit;
+    // Header reads are always range fetches (players re-read headers).
+    if start < header_end {
+        return ReadType::RangeFetch;
     }
 
-    if start <= HEADER_SIZE {
-        return ReadType::HeaderScan;
-    }
-
+    // First read or large jump = range fetch.
     let jump = previous_position
         .map(|prev| start.abs_diff(prev))
         .unwrap_or(u64::MAX);
 
-    if jump > SCAN_TOLERANCE_BYTES && start >= footer_start && !has_scanned_footer {
-        return ReadType::FooterScan;
-    }
-
     if jump > SCAN_TOLERANCE_BYTES {
-        return ReadType::GeneralScan;
+        return ReadType::RangeFetch;
     }
 
-    if start >= footer_start {
-        return ReadType::FooterRead;
-    }
-
-    ReadType::BodyRead
+    ReadType::Sequential
 }

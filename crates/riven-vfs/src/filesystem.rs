@@ -16,10 +16,10 @@ use tokio::sync::mpsc;
 use riven_core::config::vfs::*;
 use riven_db::repo;
 
-use crate::cache::ChunkCache;
-use crate::chunks::{calculate_file_chunks, FileChunks};
-use crate::detect::{detect_read_type, ReadType};
-use crate::fetcher::{serve_read, ReadOutcome, ReadParams, resolve_stream_url};
+use crate::cache::RangeCache;
+use crate::chunks::FileLayout;
+use crate::detect::detect_read_type;
+use crate::fetcher::{serve_read, ReadOutcome, resolve_stream_url};
 use crate::path_info::{parse_path, PathType};
 use crate::prefetch::Prefetch;
 use crate::readdir::{populate_entries, DirEntry};
@@ -66,16 +66,13 @@ fn entry_mtime(entry: &riven_db::entities::FileSystemEntry) -> SystemTime {
     UNIX_EPOCH + std::time::Duration::from_secs(ts.timestamp().max(0) as u64)
 }
 
-/// Metadata for an open file handle.
 struct FileHandle {
     ino: u64,
     path: Arc<str>,
     stream_url: String,
     file_size: u64,
-    chunks: FileChunks,
+    layout: FileLayout,
     previous_read_pos: Option<u64>,
-    has_scanned_footer: bool,
-    /// Background prefetch task + buffer for sequential body playback.
     prefetch: Option<Prefetch>,
 }
 
@@ -86,19 +83,14 @@ pub struct RivenFs {
     debug_logging: bool,
     runtime: tokio::runtime::Handle,
 
-    // File handle tracking
     next_fd: AtomicU64,
     file_handles: DashMap<u64, FileHandle>,
 
-    // Inode mapping: path -> inode (Arc<str> shared between both maps)
     path_to_ino: DashMap<Arc<str>, u64>,
     ino_to_path: DashMap<u64, Arc<str>>,
     next_ino: AtomicU64,
 
-    // Chunk cache: (ino, start, end) -> bytes
-    chunk_cache: ChunkCache,
-
-    // Readdir cache: ino -> (entries, cached_at)
+    range_cache: RangeCache,
     readdir_cache: DashMap<u64, (Vec<DirEntry>, Instant)>,
 }
 
@@ -110,8 +102,8 @@ impl RivenFs {
         debug_logging: bool,
         cache_max_size_mb: u64,
     ) -> Self {
-        let mb = if cache_max_size_mb == 0 { 1024 } else { cache_max_size_mb };
-        let max_cache_entries = std::num::NonZeroUsize::new(mb as usize).unwrap();
+        let entries = if cache_max_size_mb == 0 { 256 } else { cache_max_size_mb as usize };
+        let max_cache_entries = std::num::NonZeroUsize::new(entries).unwrap();
 
         Self {
             db_pool,
@@ -124,7 +116,7 @@ impl RivenFs {
             path_to_ino: DashMap::new(),
             ino_to_path: DashMap::new(),
             next_ino: AtomicU64::new(FIRST_DYNAMIC_INO),
-            chunk_cache: Mutex::new(LruCache::new(max_cache_entries)),
+            range_cache: Mutex::new(LruCache::new(max_cache_entries)),
             readdir_cache: DashMap::new(),
         }
     }
@@ -236,7 +228,6 @@ impl Filesystem for RivenFs {
     ) {
         tracing::debug!(ino = ino, offset = offset, "readdir");
 
-        // Check cache first (skip for offset > 0 since entries already built).
         let cached = self.readdir_cache.get(&ino).and_then(|entry| {
             if entry.1.elapsed() < READDIR_CACHE_TTL {
                 Some(entry.0.clone())
@@ -312,7 +303,7 @@ impl Filesystem for RivenFs {
         };
 
         let file_size = entry.file_size as u64;
-        let chunks = calculate_file_chunks(file_size);
+        let layout = FileLayout::new(file_size);
         let fd = self.next_fd.fetch_add(1, Ordering::SeqCst);
 
         self.file_handles.insert(fd, FileHandle {
@@ -320,9 +311,8 @@ impl Filesystem for RivenFs {
             path,
             stream_url,
             file_size,
-            chunks,
+            layout,
             previous_read_pos: None,
-            has_scanned_footer: false,
             prefetch: None,
         });
 
@@ -354,18 +344,11 @@ impl Filesystem for RivenFs {
         }
 
         let end = end.min(handle.file_size - 1);
-        let needed_chunks = handle.chunks.chunks_for_range(start, end);
-
-        let all_cached = crate::cache::all_chunks_cached(&self.chunk_cache, &needed_chunks, handle.ino);
 
         let read_type = detect_read_type(
             start,
-            size as u64,
             handle.previous_read_pos,
-            handle.file_size,
-            handle.chunks.footer_start,
-            all_cached,
-            handle.has_scanned_footer,
+            handle.layout.header_end,
         );
 
         if self.debug_logging {
@@ -373,24 +356,16 @@ impl Filesystem for RivenFs {
         }
 
         handle.previous_read_pos = Some(start);
-        if read_type == ReadType::FooterScan {
-            handle.has_scanned_footer = true;
-        }
 
         let stream_url = handle.stream_url.clone();
-        let params = ReadParams {
-            read_type,
-            start,
-            end,
-            size,
-            ino: handle.ino,
-            stream_url: &stream_url,
-            needed_chunks: &needed_chunks,
-        };
 
         let outcome = serve_read(
-            &params,
-            &self.chunk_cache,
+            read_type,
+            handle.ino,
+            start,
+            end,
+            &stream_url,
+            &self.range_cache,
             &self.http_client,
             &self.runtime,
             &mut handle.prefetch,
@@ -399,7 +374,6 @@ impl Filesystem for RivenFs {
 
         match outcome {
             ReadOutcome::Data(buf) => reply.data(&buf),
-            ReadOutcome::Empty => reply.data(&[]),
             ReadOutcome::Error(code) => reply.error(code),
         }
     }
