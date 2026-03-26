@@ -8,7 +8,8 @@ use sqlx::PgPool;
 
 pub async fn connect(database_url: &str) -> Result<PgPool> {
     let pool = PgPoolOptions::new()
-        .max_connections(20)
+        .max_connections(5)
+        .min_connections(1)
         .connect(database_url)
         .await?;
 
