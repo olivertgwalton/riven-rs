@@ -1,0 +1,83 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/riven-core",
+    "crates/riven-vfs",
+    "crates/riven-db",
+    "crates/riven-api",
+    "crates/riven-queue",
+    "crates/riven-rank",
+    "crates/riven-app",
+    "crates/plugin-tmdb",
+    "crates/plugin-tvdb",
+    "crates/plugin-comet",
+    "crates/plugin-torrentio",
+    "crates/plugin-stremthru",
+    "crates/plugin-plex",
+    "crates/plugin-seerr",
+    "crates/plugin-listrr",
+    "crates/plugin-mdblist",
+    "crates/plugin-notifications",
+    "crates/plugin-emby-jellyfin",
+    "crates/plugin-calendar",
+    "crates/plugin-trakt",
+    "crates/plugin-dashboard",
+    "crates/plugin-logs",
+]
+
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time", "net", "signal"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# HTTP client
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+
+# Database
+sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "postgres", "chrono", "json", "migrate"] }
+
+# GraphQL
+async-graphql = { version = "7", features = ["chrono"] }
+async-graphql-axum = "7"
+
+# Web framework
+axum = { version = "0.8", features = ["json"] }
+tower-http = { version = "0.6", features = ["cors"] }
+
+# Redis
+redis = { version = "0.27", features = ["tokio-comp", "connection-manager"] }
+
+# Job queue
+apalis = { version = "1.0.0-rc.6", features = ["limit"] }
+apalis-redis = { version = "1.0.0-rc.6" }
+apalis-board-api = { version = "1.0.0-rc.6", features = ["axum", "ui"] }
+
+# FUSE
+fuser = "0.15"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+tracing-appender = "0.2"
+
+# Error handling
+anyhow = "1"
+thiserror = "2"
+
+# Config
+figment = { version = "0.10", features = ["env"] }
+
+# Utilities
+chrono = { version = "0.4", features = ["serde"] }
+regex = "1"
+strsim = "0.11"
+lru = "0.12"
+async-trait = "0.1"
+futures = "0.3"
+parking_lot = "0.12"
+dashmap = "6"
+inventory = "0.3"
+libc = "0.2"
