@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE media_items\n           SET is_requested = true, updated_at = NOW()\n           WHERE parent_id IN (\n               SELECT id FROM media_items\n               WHERE parent_id = $1\n                 AND item_type = 'season'\n                 AND season_number = ANY($2)\n           )\n             AND item_type = 'episode'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int4Array"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "2758f0fdad0da3d69686f8867c9e9689871c9fd244d87c75e635377a53af3dfb"
+}

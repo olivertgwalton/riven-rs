@@ -1,0 +1,104 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT\n               mi.id,\n               mi.item_type AS \"item_type: _\",\n               mi.state AS \"state: _\",\n               mi.title,\n               COALESCE(\n                   CASE\n                       WHEN mi.item_type = 'episode' THEN grandparent.title\n                       WHEN mi.item_type = 'season'  THEN parent.title\n                   END,\n                   mi.title\n               ) AS \"show_title!: String\",\n               mi.aired_at,\n               mi.season_number,\n               mi.episode_number,\n               COALESCE(\n                   CASE\n                       WHEN mi.item_type = 'episode' THEN grandparent.tmdb_id\n                       WHEN mi.item_type = 'season'  THEN parent.tmdb_id\n                   END,\n                   mi.tmdb_id\n               ) AS tmdb_id,\n               COALESCE(\n                   CASE\n                       WHEN mi.item_type = 'episode' THEN grandparent.tvdb_id\n                       WHEN mi.item_type = 'season'  THEN parent.tvdb_id\n                   END,\n                   mi.tvdb_id\n               ) AS tvdb_id\n           FROM media_items mi\n           LEFT JOIN media_items parent      ON parent.id = mi.parent_id\n           LEFT JOIN media_items grandparent ON grandparent.id = parent.parent_id\n           WHERE mi.aired_at > CURRENT_DATE\n             AND mi.state = 'unreleased'\n           ORDER BY mi.aired_at ASC\n           LIMIT $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "item_type: _",
+        "type_info": {
+          "Custom": {
+            "name": "media_item_type",
+            "kind": {
+              "Enum": [
+                "movie",
+                "show",
+                "season",
+                "episode"
+              ]
+            }
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "state: _",
+        "type_info": {
+          "Custom": {
+            "name": "media_item_state",
+            "kind": {
+              "Enum": [
+                "indexed",
+                "unreleased",
+                "scraped",
+                "ongoing",
+                "partially_completed",
+                "completed",
+                "paused",
+                "failed"
+              ]
+            }
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "title",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "show_title!: String",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "aired_at",
+        "type_info": "Date"
+      },
+      {
+        "ordinal": 6,
+        "name": "season_number",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 7,
+        "name": "episode_number",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 8,
+        "name": "tmdb_id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 9,
+        "name": "tvdb_id",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      null,
+      true,
+      true,
+      true,
+      null,
+      null
+    ]
+  },
+  "hash": "910ae53239c885c619b171c20904219e4ac369477aac5140947cebdb7ab189ba"
+}

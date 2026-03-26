@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE streams SET file_size_bytes = $1 WHERE info_hash = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "7ba631b49bcf0b86d82b6fd1a0859552760e3f00e2b0b3536bddfeaa4005bfaf"
+}

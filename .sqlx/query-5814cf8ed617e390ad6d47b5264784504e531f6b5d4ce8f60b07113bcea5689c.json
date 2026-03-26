@@ -1,0 +1,86 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "WITH ongoing_season_ids AS (\n               SELECT id FROM media_items\n               WHERE item_type = 'season'\n               AND parent_id IN (\n                   SELECT id FROM media_items\n                   WHERE item_type = 'show' AND state = 'ongoing'\n               )\n           )\n           SELECT\n             COUNT(*) FILTER (WHERE item_type = 'movie' AND is_requested = true) AS \"total_movies!: i64\",\n             COUNT(*) FILTER (WHERE item_type = 'show' AND is_requested = true) AS \"total_shows!: i64\",\n             COUNT(*) FILTER (WHERE item_type = 'season' AND is_requested = true) AS \"total_seasons!: i64\",\n             COUNT(*) FILTER (WHERE item_type = 'episode' AND is_requested = true) AS \"total_episodes!: i64\",\n             COUNT(*) FILTER (WHERE is_requested = true AND state = 'completed') AS \"completed!: i64\",\n             COUNT(*) FILTER (WHERE is_requested = true AND state = 'scraped') AS \"scraped!: i64\",\n             COUNT(*) FILTER (WHERE is_requested = true AND state = 'indexed') AS \"indexed!: i64\",\n             COUNT(*) FILTER (WHERE is_requested = true AND state = 'failed') AS \"failed!: i64\",\n             COUNT(*) FILTER (WHERE is_requested = true AND state = 'paused') AS \"paused!: i64\",\n             COUNT(*) FILTER (WHERE is_requested = true AND (\n                 state = 'ongoing'\n                 OR (state = 'unreleased' AND item_type = 'episode'\n                     AND parent_id IN (SELECT id FROM ongoing_season_ids))\n             )) AS \"ongoing!: i64\",\n             COUNT(*) FILTER (WHERE is_requested = true AND state = 'partially_completed') AS \"partially_completed!: i64\",\n             COUNT(*) FILTER (WHERE is_requested = true AND state = 'unreleased'\n                 AND NOT (item_type = 'episode'\n                     AND parent_id IN (SELECT id FROM ongoing_season_ids))\n             ) AS \"unreleased!: i64\"\n           FROM media_items",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "total_movies!: i64",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "total_shows!: i64",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 2,
+        "name": "total_seasons!: i64",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 3,
+        "name": "total_episodes!: i64",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 4,
+        "name": "completed!: i64",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 5,
+        "name": "scraped!: i64",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 6,
+        "name": "indexed!: i64",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 7,
+        "name": "failed!: i64",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 8,
+        "name": "paused!: i64",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 9,
+        "name": "ongoing!: i64",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 10,
+        "name": "partially_completed!: i64",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 11,
+        "name": "unreleased!: i64",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "5814cf8ed617e390ad6d47b5264784504e531f6b5d4ce8f60b07113bcea5689c"
+}

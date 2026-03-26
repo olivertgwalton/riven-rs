@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT\n                     EXISTS(SELECT 1 FROM filesystem_entries WHERE media_item_id = $1 AND entry_type = 'media') AS has_media,\n                     EXISTS(SELECT 1 FROM media_item_streams ms WHERE ms.media_item_id = $1 AND ms.stream_id NOT IN (SELECT stream_id FROM media_item_blacklisted_streams WHERE media_item_id = $1)) AS has_streams",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "has_media",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 1,
+        "name": "has_streams",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      null,
+      null
+    ]
+  },
+  "hash": "43eff3b26f975e4ce54abc826bc7443bd2706729cd5711231571c69f59146dbd"
+}

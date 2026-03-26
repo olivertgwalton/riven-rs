@@ -1,0 +1,277 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT\n               e.id, e.title, e.full_title,\n               COALESCE(e.imdb_id, show_item.imdb_id) AS imdb_id,\n               e.tvdb_id, e.tmdb_id, e.poster_path,\n               e.created_at, e.updated_at, e.indexed_at, e.scraped_at, e.scraped_times,\n               e.aliases, e.network, e.country, e.language, e.aired_at, e.year, e.genres,\n               e.rating, e.content_rating AS \"content_rating: _\", e.state AS \"state: _\",\n               e.failed_attempts, e.item_type AS \"item_type: _\",\n               e.is_requested, e.show_status AS \"show_status: _\", e.season_number, e.is_special, e.parent_id,\n               e.episode_number, e.absolute_number, e.runtime, e.item_request_id, e.active_stream_id\n           FROM media_items e\n           LEFT JOIN media_items season_item ON e.parent_id = season_item.id AND season_item.item_type = 'season'\n           LEFT JOIN media_items show_item ON season_item.parent_id = show_item.id AND show_item.item_type = 'show'\n           WHERE e.state = 'indexed'\n             AND e.item_type = 'episode'\n             AND e.is_requested = true\n             AND (e.failed_attempts = 0 OR e.updated_at IS NULL OR e.updated_at < NOW() - INTERVAL '1 hour')\n           ORDER BY e.failed_attempts ASC, e.created_at ASC\n           LIMIT $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "title",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "full_title",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "imdb_id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "tvdb_id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "tmdb_id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "poster_path",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 7,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 8,
+        "name": "updated_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 9,
+        "name": "indexed_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 10,
+        "name": "scraped_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 11,
+        "name": "scraped_times",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 12,
+        "name": "aliases",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 13,
+        "name": "network",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 14,
+        "name": "country",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 15,
+        "name": "language",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 16,
+        "name": "aired_at",
+        "type_info": "Date"
+      },
+      {
+        "ordinal": 17,
+        "name": "year",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 18,
+        "name": "genres",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 19,
+        "name": "rating",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 20,
+        "name": "content_rating: _",
+        "type_info": {
+          "Custom": {
+            "name": "content_rating",
+            "kind": {
+              "Enum": [
+                "G",
+                "PG",
+                "PG-13",
+                "R",
+                "NC-17",
+                "TV-Y",
+                "TV-Y7",
+                "TV-G",
+                "TV-PG",
+                "TV-14",
+                "TV-MA"
+              ]
+            }
+          }
+        }
+      },
+      {
+        "ordinal": 21,
+        "name": "state: _",
+        "type_info": {
+          "Custom": {
+            "name": "media_item_state",
+            "kind": {
+              "Enum": [
+                "indexed",
+                "unreleased",
+                "scraped",
+                "ongoing",
+                "partially_completed",
+                "completed",
+                "paused",
+                "failed"
+              ]
+            }
+          }
+        }
+      },
+      {
+        "ordinal": 22,
+        "name": "failed_attempts",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 23,
+        "name": "item_type: _",
+        "type_info": {
+          "Custom": {
+            "name": "media_item_type",
+            "kind": {
+              "Enum": [
+                "movie",
+                "show",
+                "season",
+                "episode"
+              ]
+            }
+          }
+        }
+      },
+      {
+        "ordinal": 24,
+        "name": "is_requested",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 25,
+        "name": "show_status: _",
+        "type_info": {
+          "Custom": {
+            "name": "show_status",
+            "kind": {
+              "Enum": [
+                "continuing",
+                "ended"
+              ]
+            }
+          }
+        }
+      },
+      {
+        "ordinal": 26,
+        "name": "season_number",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 27,
+        "name": "is_special",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 28,
+        "name": "parent_id",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 29,
+        "name": "episode_number",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 30,
+        "name": "absolute_number",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 31,
+        "name": "runtime",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 32,
+        "name": "item_request_id",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 33,
+        "name": "active_stream_id",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      null,
+      true,
+      true,
+      true,
+      false,
+      true,
+      true,
+      true,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "23ac59e4f906d35c3f4a47b2ebff07679105751d113da2612bb1a558be589403"
+}

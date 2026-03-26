@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT ir.external_request_id\n           FROM media_items mi\n           JOIN item_requests ir ON ir.id = mi.item_request_id\n           WHERE mi.id = ANY($1)\n             AND ir.external_request_id IS NOT NULL",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "external_request_id",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8Array"
+      ]
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "551ae868398f762ef631e0296346047cb1b1b1c95f48039538599e6686f94a1d"
+}

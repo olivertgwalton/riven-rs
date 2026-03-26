@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT path FROM filesystem_entries WHERE path LIKE $1 AND entry_type = 'media'",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "path",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "609d0c5a3cdb3af8df581d51e83c65dccd5257e4b7152e26cc744318512cd713"
+}

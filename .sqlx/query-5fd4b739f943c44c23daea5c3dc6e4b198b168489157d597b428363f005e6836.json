@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM media_item_blacklisted_streams WHERE media_item_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "5fd4b739f943c44c23daea5c3dc6e4b198b168489157d597b428363f005e6836"
+}
