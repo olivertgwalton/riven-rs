@@ -36,20 +36,14 @@ pub fn detect_read_type(
     }
 
     let jump = previous_position
-        .map(|prev| {
-            if start > prev {
-                start - prev
-            } else {
-                prev - start
-            }
-        })
+        .map(|prev| start.abs_diff(prev))
         .unwrap_or(u64::MAX);
 
-    if jump > scan_tolerance_bytes() && start >= footer_start && !has_scanned_footer {
+    if jump > SCAN_TOLERANCE_BYTES && start >= footer_start && !has_scanned_footer {
         return ReadType::FooterScan;
     }
 
-    if jump > scan_tolerance_bytes() {
+    if jump > SCAN_TOLERANCE_BYTES {
         return ReadType::GeneralScan;
     }
 

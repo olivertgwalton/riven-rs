@@ -102,10 +102,8 @@ fn push_file_entries(
 ) {
     if let Ok(paths) = runtime.block_on(repo::list_vfs_file_paths(pool, dir_path)) {
         for file_path in paths {
-            let fname = match file_path.rsplit('/').next() {
-                Some(f) => f.to_string(),
-                None => continue,
-            };
+            let Some((_, fname)) = file_path.rsplit_once('/') else { continue };
+            let fname = fname.to_string();
             let ino = get_ino(&file_path);
             entries.push((ino, FileType::RegularFile, fname));
         }

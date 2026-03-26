@@ -1,13 +1,6 @@
 use regex::Regex;
 use std::sync::LazyLock;
 
-/// Parsed path information from a VFS path.
-#[derive(Debug, Clone)]
-pub struct PathInfo {
-    pub path_type: PathType,
-    pub raw: String,
-}
-
 #[derive(Debug, Clone)]
 pub enum PathType {
     Root,
@@ -43,7 +36,7 @@ static RE_TMDB: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\{tmdb-(\d+)\}")
 static RE_TVDB: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\{tvdb-(\d+)\}").unwrap());
 static RE_SEASON: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^Season (\d{2})$").unwrap());
 
-pub fn parse_path(path: &str) -> PathInfo {
+pub fn parse_path(path: &str) -> PathType {
     let parts: Vec<&str> = path
         .trim_start_matches('/')
         .split('/')
@@ -88,12 +81,10 @@ pub fn parse_path(path: &str) -> PathInfo {
                 season_number,
             }
         }
-        ["shows", dir, _season_str, file] => {
+        ["shows", dir, season_str, file] => {
             let tvdb_id = RE_TVDB.captures(dir).map(|c| c[1].to_string());
-            // Extract season from path
-            let season_number = parts
-                .get(2)
-                .and_then(|s| RE_SEASON.captures(s))
+            let season_number = RE_SEASON
+                .captures(season_str)
                 .and_then(|c| c[1].parse().ok())
                 .unwrap_or(0);
             PathType::EpisodeFile {
@@ -106,8 +97,5 @@ pub fn parse_path(path: &str) -> PathInfo {
         _ => PathType::Root,
     };
 
-    PathInfo {
-        path_type,
-        raw: path.to_string(),
-    }
+    path_type
 }

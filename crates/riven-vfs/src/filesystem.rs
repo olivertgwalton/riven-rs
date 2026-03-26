@@ -169,8 +169,7 @@ impl Filesystem for RivenFs {
             tracing::debug!(path = %path, "lookup");
         }
 
-        let info = parse_path(&path);
-        match info.path_type {
+        match parse_path(&path) {
             PathType::Root => reply.entry(&TTL, &dir_attr(ROOT_INO), 0),
             PathType::AllMovies => reply.entry(&TTL, &dir_attr(MOVIES_INO), 0),
             PathType::AllShows => reply.entry(&TTL, &dir_attr(SHOWS_INO), 0),
@@ -201,8 +200,7 @@ impl Filesystem for RivenFs {
             SHOWS_INO => reply.attr(&TTL, &dir_attr(SHOWS_INO)),
             _ => {
                 if let Some(path) = self.ino_to_path.get(&ino) {
-                    let info = parse_path(&path);
-                    match info.path_type {
+                    match parse_path(&path) {
                         PathType::MovieDir { .. }
                         | PathType::ShowDir { .. }
                         | PathType::SeasonDir { .. } => {
@@ -403,10 +401,6 @@ impl Filesystem for RivenFs {
             ReadOutcome::Data(buf) => reply.data(&buf),
             ReadOutcome::Empty => reply.data(&[]),
             ReadOutcome::Error(code) => reply.error(code),
-            ReadOutcome::UsePrefetch { .. } => {
-                // serve_read handles prefetch internally; this arm is unreachable.
-                reply.error(libc::EIO);
-            }
         }
     }
 

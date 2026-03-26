@@ -35,14 +35,11 @@ pub enum ReadOutcome {
     Empty,
     /// FUSE error code (libc constant).
     Error(i32),
-    /// Caller should start/resume a prefetch and read from it.
-    UsePrefetch { bytes_needed: usize },
 }
 
-/// Serve a non-prefetch read variant (CacheHit, HeaderScan, FooterScan, GeneralScan).
+/// Serve a read request, dispatching on read type.
 ///
-/// Returns `ReadOutcome::UsePrefetch` for the BodyRead/FooterRead variants so
-/// the caller (which owns `FileHandle`) can drive the `Prefetch` object.
+/// Handles CacheHit, HeaderScan, FooterScan, GeneralScan, BodyRead, and FooterRead.
 pub fn serve_read(
     params: &ReadParams<'_>,
     chunk_cache: &ChunkCache,
