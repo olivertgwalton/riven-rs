@@ -28,7 +28,6 @@ pub fn serve_read(
             if let Some(data) = cache_get(cache, key) {
                 return ReadOutcome::Data(data);
             }
-
             match runtime.block_on(fetch_range(client, stream_url, start, end)) {
                 Ok(data) => {
                     cache_put(cache, key, data.clone());
@@ -43,36 +42,26 @@ pub fn serve_read(
 
         ReadType::Sequential => {
             let bytes_needed = (end - start + 1) as usize;
-            let need_restart = prefetch
-                .as_ref()
-                .map(|p| !p.is_valid_for(start))
-                .unwrap_or(true);
+            let need_restart = prefetch.as_ref().map(|p| !p.is_valid_for(start)).unwrap_or(true);
 
             if need_restart {
                 if debug_logging {
                     tracing::debug!(position = start, "starting stream reader");
                 }
-                *prefetch = Prefetch::start(
-                    client.clone(),
-                    stream_url.to_string(),
-                    start,
-                    runtime,
-                );
+                *prefetch = Prefetch::start(client.clone(), stream_url.to_string(), start, runtime);
             }
 
-            let pf = match prefetch.as_mut() {
-                Some(pf) => pf,
+            match prefetch.as_mut() {
+                Some(pf) => match pf.read(start, bytes_needed, runtime) {
+                    Ok(data) => ReadOutcome::Data(data),
+                    Err(e) => {
+                        tracing::error!(error = %e, "stream read failed");
+                        *prefetch = None;
+                        ReadOutcome::Error(libc::EIO)
+                    }
+                },
                 None => {
                     tracing::error!("failed to start stream reader");
-                    return ReadOutcome::Error(libc::EIO);
-                }
-            };
-
-            match pf.read(start, bytes_needed, runtime) {
-                Ok(data) => ReadOutcome::Data(data),
-                Err(e) => {
-                    tracing::error!(error = %e, "stream read failed");
-                    *prefetch = None;
                     ReadOutcome::Error(libc::EIO)
                 }
             }
@@ -80,31 +69,25 @@ pub fn serve_read(
     }
 }
 
+/// Fetch a fresh stream URL from the debrid service for the given entry.
+/// Updates the DB with the resolved URL and returns it.
 pub fn resolve_stream_url(
     download_url: Option<&str>,
-    stream_url: Option<&str>,
     link_request_tx: &tokio::sync::mpsc::Sender<crate::LinkRequest>,
     pool: &sqlx::PgPool,
     entry_id: i64,
     runtime: &tokio::runtime::Handle,
 ) -> Option<String> {
-    if let Some(dl_url) = download_url {
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        let link_req = crate::LinkRequest {
-            download_url: dl_url.to_string(),
-            response_tx: tx,
-        };
-        if link_request_tx.blocking_send(link_req).is_err() {
-            return None;
+    let dl_url = download_url?;
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    if link_request_tx.blocking_send(crate::LinkRequest { download_url: dl_url.to_string(), response_tx: tx }).is_err() {
+        return None;
+    }
+    match runtime.block_on(rx) {
+        Ok(Some(url)) => {
+            let _ = runtime.block_on(riven_db::repo::update_stream_url(pool, entry_id, &url));
+            Some(url)
         }
-        match runtime.block_on(rx) {
-            Ok(Some(url)) => {
-                let _ = runtime.block_on(riven_db::repo::update_stream_url(pool, entry_id, &url));
-                Some(url)
-            }
-            _ => None,
-        }
-    } else {
-        stream_url.map(|s| s.to_string())
+        _ => None,
     }
 }

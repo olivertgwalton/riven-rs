@@ -54,7 +54,7 @@ impl Default for RivenSettings {
             log_level: "info".into(),
             log_directory: "./logs".into(),
             logging_enabled: true,
-            gql_port: 3000,
+            gql_port: 8080,
             dubbed_anime_only: false,
             minimum_average_bitrate_movies: None,
             minimum_average_bitrate_episodes: None,
