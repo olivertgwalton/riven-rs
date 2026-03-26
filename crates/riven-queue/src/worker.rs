@@ -87,6 +87,10 @@ impl Scheduler {
                 Ok(seasons) => {
                     for season in seasons {
                         self.job_queue.push_download_from_best_stream(season.id).await;
+                        // Also fan out to individually scrape any episodes still at Indexed
+                        // within this season (e.g. double-episode finales that the pack
+                        // download couldn't match).
+                        self.job_queue.fan_out_download(season.id).await;
                     }
                 }
                 Err(e) => tracing::error!(error = %e, show_id = show.id, "failed to fetch retryable seasons"),

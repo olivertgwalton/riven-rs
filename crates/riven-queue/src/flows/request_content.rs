@@ -18,6 +18,7 @@ pub async fn run(queue: &JobQueue) {
     let mut all_shows = Vec::new();
     let mut seen_movie_ids = HashSet::new();
     let mut seen_show_ids = HashSet::new();
+    let mut any_plugin_errored = false;
 
     for (plugin_name, result) in results {
         match result {
@@ -44,6 +45,7 @@ pub async fn run(queue: &JobQueue) {
             Ok(_) => {}
             Err(e) => {
                 tracing::error!(plugin = plugin_name, error = %e, "content service hook failed");
+                any_plugin_errored = true;
             }
         }
     }
@@ -152,13 +154,15 @@ pub async fn run(queue: &JobQueue) {
     }
 
     // Delete items no longer present in any content service.
+    // Skip if any plugin errored — a partial response must not be treated as complete,
+    // or items from the failed plugin would be incorrectly removed from the library.
     let active_external_ids: Vec<String> = all_movies
         .iter()
         .filter_map(|m| m.external_request_id.clone())
         .chain(all_shows.iter().filter_map(|s| s.external_request_id.clone()))
         .collect();
 
-    if !active_external_ids.is_empty() {
+    if !active_external_ids.is_empty() && !any_plugin_errored {
         match repo::delete_items_removed_from_content_services(
             &queue.db_pool,
             &active_external_ids,

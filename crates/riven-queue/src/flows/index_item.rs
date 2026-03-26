@@ -42,6 +42,7 @@ pub async fn run(id: i64, queue: &JobQueue) {
     }
 
     if !got_response {
+        tracing::warn!(id, "no indexer plugin responded — item will stay at Indexed and be retried");
         queue
             .notify(RivenEvent::MediaItemIndexError {
                 id,
@@ -53,6 +54,7 @@ pub async fn run(id: i64, queue: &JobQueue) {
 
     // Persist indexed data
     if let Err(e) = repo::update_media_item_index(&queue.db_pool, id, &merged).await {
+        tracing::error!(id, error = %e, "failed to persist indexed data — item will stay at Indexed");
         queue
             .notify(RivenEvent::MediaItemIndexError {
                 id,
