@@ -1,0 +1,17 @@
+[package]
+name = "plugin-plex"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+riven-core = { path = "../riven-core" }
+riven-db = { path = "../riven-db" }
+sqlx = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
+async-graphql = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+inventory = { workspace = true }
