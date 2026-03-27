@@ -47,7 +47,7 @@ impl Default for RivenSettings {
         Self {
             database_url: "postgresql://localhost/riven".into(),
             redis_url: "redis://localhost:6379".into(),
-            vfs_mount_path: "/mnt/riven".into(),
+            vfs_mount_path: String::new(),
             vfs_debug_logging: false,
             unsafe_clear_queues_on_startup: false,
             unsafe_refresh_database_on_startup: false,
