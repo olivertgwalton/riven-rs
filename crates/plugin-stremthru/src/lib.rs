@@ -54,6 +54,7 @@ impl Plugin for StremthruPlugin {
             EventType::MediaItemDownloadProviderListRequested,
             EventType::MediaItemScrapeRequested,
             EventType::MediaItemStreamLinkRequested,
+            EventType::DebridUserInfoRequested,
         ]
     }
 
@@ -292,6 +293,17 @@ impl Plugin for StremthruPlugin {
                 anyhow::bail!("no store could generate a stream link")
             }
 
+            RivenEvent::DebridUserInfoRequested => {
+                let mut infos = Vec::new();
+                for (store, api_key) in &stores {
+                    match fetch_user_info(&ctx.http_client, &base_url, store, api_key).await {
+                        Ok(info) => infos.push(info),
+                        Err(e) => tracing::warn!(store, error = %e, "failed to fetch debrid user info"),
+                    }
+                }
+                Ok(HookResponse::UserInfo(infos))
+            }
+
             _ => Ok(HookResponse::Empty),
         }
     }
@@ -478,6 +490,98 @@ async fn generate_link(
     Ok(resp.data.link)
 }
 
+async fn fetch_user_info(
+    client: &reqwest::Client,
+    base_url: &str,
+    store: &str,
+    api_key: &str,
+) -> anyhow::Result<riven_core::types::DebridUserInfo> {
+    let url = format!("{base_url}v0/store/user");
+    let resp: StremthruResponse<StremthruUser> = client
+        .get(&url)
+        .header("x-stremthru-store-name", store)
+        .header("x-stremthru-store-authorization", format!("Bearer {api_key}"))
+        .send()
+        .await?
+        .json()
+        .await?;
+
+    let premium_until = fetch_premium_until(client, store, api_key).await
+        .inspect_err(|e| tracing::debug!(store, error = %e, "could not fetch premium_until"))
+        .ok()
+        .flatten();
+
+    Ok(riven_core::types::DebridUserInfo {
+        store: store.to_string(),
+        email: resp.data.email,
+        subscription_status: resp.data.subscription_status,
+        premium_until,
+    })
+}
+
+/// Fetch an expiry date (ISO 8601) from each store's native API where supported.
+///
+/// Each entry is `(url, bearer_token, json_pointer, is_unix_timestamp)`.
+/// `json_pointer` uses RFC 6901 syntax (`/field/nested`) to locate the expiry
+/// value inside the parsed response, avoiding per-store struct definitions.
+async fn fetch_premium_until(
+    client: &reqwest::Client,
+    store: &str,
+    api_key: &str,
+) -> anyhow::Result<Option<String>> {
+    let (url, bearer, pointer, is_unix): (String, Option<String>, &str, bool) = match store {
+        "realdebrid" => (
+            "https://api.real-debrid.com/rest/1.0/user".into(),
+            Some(format!("Bearer {api_key}")),
+            "/expiration",
+            false,
+        ),
+        "torbox" => (
+            "https://api.torbox.app/v1/api/user/me".into(),
+            Some(format!("Bearer {api_key}")),
+            "/data/expiration",
+            false,
+        ),
+        "alldebrid" => (
+            "https://api.alldebrid.com/v4/user".into(),
+            Some(format!("Bearer {api_key}")),
+            "/data/user/premiumUntil",
+            true,
+        ),
+        "debridlink" => (
+            "https://debrid-link.com/api/v2/account/infos".into(),
+            Some(format!("Bearer {api_key}")),
+            "/value/accountExpirationDate",
+            true,
+        ),
+        "premiumize" => (
+            format!("https://www.premiumize.me/api/account/info?apikey={api_key}"),
+            None,
+            "/premium_until",
+            true,
+        ),
+        _ => return Ok(None),
+    };
+
+    let mut req = client.get(&url);
+    if let Some(token) = bearer {
+        req = req.header("Authorization", token);
+    }
+    let body: serde_json::Value = req.send().await?.json().await?;
+
+    let expiry = body.pointer(pointer).and_then(|v| {
+        if is_unix {
+            v.as_i64()
+                .and_then(|ts| chrono::DateTime::from_timestamp(ts, 0))
+                .map(|dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string())
+        } else {
+            v.as_str().map(str::to_owned)
+        }
+    });
+
+    Ok(expiry)
+}
+
 fn parse_torrent_status(s: &str) -> TorrentStatus {
     match s {
         "cached" => TorrentStatus::Cached,
@@ -567,4 +671,10 @@ struct StremthruCacheFile {
 #[derive(Deserialize)]
 struct StremthruLink {
     link: String,
+}
+
+#[derive(Deserialize)]
+struct StremthruUser {
+    email: Option<String>,
+    subscription_status: Option<String>,
 }
