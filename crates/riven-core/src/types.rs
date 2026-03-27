@@ -200,6 +200,16 @@ pub struct ProviderInfo {
     pub store: String,
 }
 
+// ── Debrid user info ──
+
+#[derive(Debug, Clone, Serialize, Deserialize, async_graphql::SimpleObject)]
+pub struct DebridUserInfo {
+    pub store: String,
+    pub email: Option<String>,
+    pub subscription_status: Option<String>,
+    pub premium_until: Option<String>,
+}
+
 // ── Index response ──
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

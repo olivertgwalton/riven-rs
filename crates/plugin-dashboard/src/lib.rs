@@ -1,10 +1,12 @@
 use async_graphql::{Context, Object, Result as GqlResult, SimpleObject};
 use async_trait::async_trait;
 use riven_core::events::{EventType, HookResponse, RivenEvent};
-use riven_core::plugin::{Plugin, PluginContext};
+use riven_core::plugin::{Plugin, PluginContext, PluginRegistry};
 use riven_core::register_plugin;
 use riven_core::settings::PluginSettings;
+use riven_core::types::DebridUserInfo;
 use riven_db::repo;
+use std::sync::Arc;
 
 #[derive(Default)]
 pub struct DashboardPlugin;
@@ -101,5 +103,18 @@ impl DashboardQuery {
             .into_iter()
             .map(|(year, count)| YearRelease { year, count })
             .collect())
+    }
+
+    /// Get debrid account information for all configured stores.
+    async fn debrid_account_info(&self, ctx: &Context<'_>) -> GqlResult<Vec<DebridUserInfo>> {
+        let registry = ctx.data::<Arc<PluginRegistry>>()?;
+        let results = registry.dispatch(&RivenEvent::DebridUserInfoRequested).await;
+        let mut infos = Vec::new();
+        for (_, result) in results {
+            if let Ok(HookResponse::UserInfo(user_infos)) = result {
+                infos.extend(user_infos);
+            }
+        }
+        Ok(infos)
     }
 }

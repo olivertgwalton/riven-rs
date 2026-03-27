@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::types::{
-    CacheCheckResult, ContentServiceResponse, DownloadResult, IndexedMediaItem,
+    CacheCheckResult, ContentServiceResponse, DebridUserInfo, DownloadResult, IndexedMediaItem,
     MediaItemType, ProviderInfo, ScrapeResponse, StreamLinkResponse,
 };
 
@@ -73,6 +73,10 @@ pub enum EventType {
     // Item deletion
     #[serde(rename = "riven.media-item.deleted")]
     MediaItemsDeleted,
+
+    // Debrid account info
+    #[serde(rename = "riven.debrid.user-info.requested")]
+    DebridUserInfoRequested,
 }
 
 /// A concrete event with its payload.
@@ -185,6 +189,10 @@ pub enum RivenEvent {
     MediaItemsDeleted {
         external_request_ids: Vec<String>,
     },
+
+    // Debrid account info
+    #[serde(rename = "riven.debrid.user-info.requested")]
+    DebridUserInfoRequested,
 }
 
 impl RivenEvent {
@@ -230,6 +238,7 @@ impl RivenEvent {
             Self::MediaItemDownloadSuccess { .. } => EventType::MediaItemDownloadSuccess,
             Self::MediaItemStreamLinkRequested { .. } => EventType::MediaItemStreamLinkRequested,
             Self::MediaItemsDeleted { .. } => EventType::MediaItemsDeleted,
+            Self::DebridUserInfoRequested => EventType::DebridUserInfoRequested,
         }
     }
 }
@@ -248,5 +257,6 @@ pub enum HookResponse {
     CacheCheck(Vec<CacheCheckResult>),
     ProviderList(Vec<ProviderInfo>),
     StreamLink(StreamLinkResponse),
+    UserInfo(Vec<DebridUserInfo>),
     Empty,
 }
