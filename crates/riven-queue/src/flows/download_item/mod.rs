@@ -12,12 +12,6 @@ use helpers::load_item_or_err;
 use persist::{persist_episode, persist_movie, persist_season};
 
 /// Run the download item flow.
-///
-/// Mirrors riven-ts `findValidTorrentProcessor`:
-/// - Iterates ALL non-blacklisted streams in ranked order (one job = one full pass).
-/// - `DownloadStreamUnavailable` (not cached in debrid) → skip without blacklisting.
-/// - Genuine failures (wrong files, bitrate) are blacklisted inside `persist_*`.
-/// - If all streams fail → fan_out_download (which re-scrapes seasons/shows).
 pub async fn run(id: i64, _job: &DownloadJob, queue: &JobQueue) {
     let start_time = Instant::now();
     tracing::debug!(id, "running download flow");
@@ -32,8 +26,6 @@ pub async fn run(id: i64, _job: &DownloadJob, queue: &JobQueue) {
         return;
     }
 
-    // Fetch all non-blacklisted streams in ranked order — mirrors riven-ts iterating
-    // `rankedStreams` and skipping `failedInfoHashes`.
     let streams = match repo::get_non_blacklisted_streams(&queue.db_pool, id).await {
         Ok(s) => s,
         Err(e) => {
@@ -203,17 +195,8 @@ pub async fn run(id: i64, _job: &DownloadJob, queue: &JobQueue) {
             continue;
         }
 
-        // Success — update state and notify.
-        if let Err(e) =
-            repo::update_media_item_state(&queue.db_pool, id, MediaItemState::Completed).await
-        {
-            tracing::error!(error = %e, "failed to update state after download");
-        }
-
-        if item.item_type == MediaItemType::Episode {
-            if let Err(e) = repo::cascade_state_update(&queue.db_pool, &item).await {
-                tracing::error!(error = %e, "failed to cascade state update");
-            }
+        if let Err(e) = repo::refresh_state_cascade(&queue.db_pool, &item).await {
+            tracing::error!(error = %e, "failed to refresh state after download");
         }
 
         let duration = start_time.elapsed();

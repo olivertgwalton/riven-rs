@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Result;
 use tokio::signal;
@@ -111,10 +112,11 @@ async fn main() -> Result<()> {
     );
 
     // ── Start apalis workers ──
-    let monitor = riven_queue::start_workers(job_queue.clone());
+    let monitor_jq = job_queue.clone();
 
-    // ── Start scheduler ──
-    let scheduler = Scheduler::new(db_pool.clone(), job_queue.clone());
+    // ── Start scheduler (self-restarting) ──
+    let scheduler_db   = db_pool.clone();
+    let scheduler_jq   = job_queue.clone();
 
     // ── Start VFS ──
     let (link_tx, mut link_rx) = tokio::sync::mpsc::channel(64);
@@ -183,11 +185,30 @@ async fn main() -> Result<()> {
 
     // ── Run everything ──
     let monitor_task = tokio::spawn(async move {
-        if let Err(e) = monitor.run().await {
-            tracing::error!(error = %e, "apalis monitor error");
+        loop {
+            let result = tokio::spawn(riven_queue::start_workers(monitor_jq.clone()).run()).await;
+            match result {
+                Ok(Ok(())) => tracing::warn!("apalis monitor exited, restarting"),
+                Ok(Err(e)) => tracing::error!(error = %e, "apalis monitor error, restarting in 5s"),
+                Err(e) if e.is_panic() => tracing::error!("apalis monitor panicked, restarting in 5s"),
+                Err(e) => tracing::error!(error = ?e, "apalis monitor task failed, restarting in 5s"),
+            }
+            tokio::time::sleep(Duration::from_secs(5)).await;
         }
     });
-    let scheduler_task = tokio::spawn(scheduler.run());
+    let scheduler_task = tokio::spawn(async move {
+        loop {
+            let result = tokio::spawn(
+                Scheduler::new(scheduler_db.clone(), scheduler_jq.clone()).run()
+            ).await;
+            match result {
+                Ok(_) => tracing::warn!("scheduler exited unexpectedly, restarting"),
+                Err(e) if e.is_panic() => tracing::error!("scheduler panicked, restarting in 5s"),
+                Err(e) => tracing::error!(error = ?e, "scheduler task failed, restarting in 5s"),
+            }
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        }
+    });
 
     tracing::info!(
         gql_port = gql_port,

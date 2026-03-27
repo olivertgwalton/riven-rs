@@ -7,7 +7,7 @@ use crate::entities::*;
 use super::hierarchy::{list_episodes, list_seasons};
 use super::media::{get_media_item, update_media_item_state};
 
-/// Compute the correct state for a media item based on its children/entries.
+/// Derive the correct state for an item from its persisted data.
 pub async fn compute_state(pool: &PgPool, item: &MediaItem) -> Result<MediaItemState> {
     match item.item_type {
         MediaItemType::Movie | MediaItemType::Episode => {
@@ -39,17 +39,40 @@ pub async fn compute_state(pool: &PgPool, item: &MediaItem) -> Result<MediaItemS
 
         MediaItemType::Season => {
             let episodes = list_episodes(pool, item.id).await?;
-            if episodes.is_empty() {
-                return Ok(MediaItemState::Indexed);
+            let ep_state = if episodes.is_empty() {
+                MediaItemState::Indexed
+            } else {
+                aggregate_child_states(&episodes)?
+            };
+
+            // If all episodes are Indexed, check for a season-level stream pack.
+            if ep_state == MediaItemState::Indexed {
+                let has_own_streams: bool = sqlx::query_scalar::<_, bool>(
+                    "SELECT EXISTS(
+                        SELECT 1 FROM media_item_streams ms
+                        WHERE ms.media_item_id = $1
+                          AND ms.stream_id NOT IN (
+                              SELECT stream_id FROM media_item_blacklisted_streams
+                              WHERE media_item_id = $1
+                          )
+                    )",
+                )
+                .bind(item.id)
+                .fetch_one(pool)
+                .await
+                .unwrap_or(false);
+
+                if has_own_streams {
+                    return Ok(MediaItemState::Scraped);
+                }
             }
-            aggregate_child_states(&episodes)
+
+            Ok(ep_state)
         }
 
         MediaItemType::Show => {
             let seasons = list_seasons(pool, item.id).await?;
-            // Only consider requested seasons — Season 0 (specials) and any other
-            // non-requested seasons are excluded from the show's completion state,
-            // matching TS's getStandardSeasons() behaviour.
+            // Specials and non-requested seasons are excluded from show state.
             let requested: Vec<_> = seasons
                 .into_iter()
                 .filter(|s| s.is_requested)
@@ -105,27 +128,33 @@ fn aggregate_child_states(children: &[MediaItem]) -> Result<MediaItemState> {
         return Ok(MediaItemState::Scraped);
     }
 
-    // Do NOT return Unreleased here — if some episodes are Indexed (aired and available),
-    // the season must stay Indexed so scraping is not skipped. The all-Unreleased case
-    // is already handled above.
+    // Mixed Indexed+Unreleased stays Indexed so scraping is not skipped.
     Ok(MediaItemState::Indexed)
 }
 
-/// Cascade state updates from an episode up through season and show.
+/// Compute and persist state without cascading to parents.
+pub async fn refresh_state(pool: &PgPool, item: &MediaItem) -> Result<MediaItemState> {
+    let state = compute_state(pool, item).await?;
+    update_media_item_state(pool, item.id, state).await?;
+    Ok(state)
+}
+
+/// Compute and persist state, then cascade up through parents.
+pub async fn refresh_state_cascade(pool: &PgPool, item: &MediaItem) -> Result<()> {
+    refresh_state(pool, item).await?;
+    cascade_state_update(pool, item).await?;
+    Ok(())
+}
+
+/// Cascade state updates from an item up through its parents.
 pub async fn cascade_state_update(pool: &PgPool, item: &MediaItem) -> Result<()> {
     if item.item_type == MediaItemType::Episode {
         if let Some(season_id) = item.parent_id {
             if let Some(season) = get_media_item(pool, season_id).await? {
-                let new_state = compute_state(pool, &season).await?;
-                if new_state != season.state {
-                    update_media_item_state(pool, season.id, new_state).await?;
-                    if let Some(show_id) = season.parent_id {
-                        if let Some(show) = get_media_item(pool, show_id).await? {
-                            let show_state = compute_state(pool, &show).await?;
-                            if show_state != show.state {
-                                update_media_item_state(pool, show.id, show_state).await?;
-                            }
-                        }
+                refresh_state(pool, &season).await?;
+                if let Some(show_id) = season.parent_id {
+                    if let Some(show) = get_media_item(pool, show_id).await? {
+                        refresh_state(pool, &show).await?;
                     }
                 }
             }
@@ -133,10 +162,7 @@ pub async fn cascade_state_update(pool: &PgPool, item: &MediaItem) -> Result<()>
     } else if item.item_type == MediaItemType::Season {
         if let Some(show_id) = item.parent_id {
             if let Some(show) = get_media_item(pool, show_id).await? {
-                let show_state = compute_state(pool, &show).await?;
-                if show_state != show.state {
-                    update_media_item_state(pool, show.id, show_state).await?;
-                }
+                refresh_state(pool, &show).await?;
             }
         }
     }

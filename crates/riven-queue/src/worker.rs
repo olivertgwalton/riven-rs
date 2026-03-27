@@ -7,8 +7,7 @@ use riven_db::repo;
 
 use crate::{IndexJob, JobQueue, ScrapeJob};
 
-/// Periodic scheduler: content service every 120 s, library retry every 60 s,
-/// unreleased check once per day.
+/// Periodic scheduler.
 pub struct Scheduler {
     db_pool: sqlx::PgPool,
     job_queue: Arc<JobQueue>,
@@ -33,88 +32,43 @@ impl Scheduler {
         }
     }
 
+    /// Retry pending top-level items.
     async fn retry_library(&self) {
-        // Indexed movies → re-index if fresh, else scrape
-        for movie in self.fetch_ready(MediaItemState::Indexed, MediaItemType::Movie, 50, "indexed movies").await {
-            if movie.indexed_at.is_none() {
-                self.job_queue.push_index(IndexJob::from_item(&movie)).await;
-            } else {
-                self.job_queue.push_scrape(ScrapeJob::for_movie(&movie)).await;
-            }
-        }
+        for item_type in [MediaItemType::Movie, MediaItemType::Show] {
+            let items = match repo::get_pending_items_for_retry(&self.db_pool, item_type, 50).await {
+                Ok(items) => items,
+                Err(e) => { tracing::error!(error = %e, "failed to fetch pending items for retry"); vec![] }
+            };
 
-        // Scraped movies → download or reset
-        for movie in self.fetch_ready(MediaItemState::Scraped, MediaItemType::Movie, 20, "scraped movies").await {
-            if !self.job_queue.push_download_from_best_stream(movie.id).await {
-                tracing::info!(id = movie.id, "no remaining streams; resetting to indexed");
-                let _ = repo::update_media_item_state(&self.db_pool, movie.id, MediaItemState::Indexed).await;
-            }
-        }
-
-        // Indexed shows → re-index if fresh, else scrape requested seasons
-        for show in self.fetch_ready(MediaItemState::Indexed, MediaItemType::Show, 20, "indexed shows").await {
-            if show.indexed_at.is_none() {
-                self.job_queue.push_index(IndexJob::from_item(&show)).await;
-            } else {
-                self.push_scrape_seasons_for_show(&show, "fetch seasons for retry").await;
-            }
-        }
-
-        // Scraped shows → download each scraped season or reset
-        for show in self.fetch_ready(MediaItemState::Scraped, MediaItemType::Show, 20, "scraped shows").await {
-            match repo::get_scraped_seasons_for_show(&self.db_pool, show.id).await {
-                Ok(seasons) => {
-                    for season in seasons {
-                        if !self.job_queue.push_download_from_best_stream(season.id).await {
-                            tracing::info!(id = season.id, "no remaining streams; resetting to indexed");
-                            let _ = repo::update_media_item_state(&self.db_pool, season.id, MediaItemState::Indexed).await;
-                        }
+            for item in items {
+                match item.state {
+                    MediaItemState::Indexed if item.indexed_at.is_none() => {
+                        self.job_queue.push_index(IndexJob::from_item(&item)).await;
                     }
+                    MediaItemState::Indexed | MediaItemState::PartiallyCompleted => {
+                        self.push_scrape(&item).await;
+                    }
+                    MediaItemState::Scraped => {
+                        self.push_download(&item).await;
+                    }
+                    _ => {}
                 }
-                Err(e) => tracing::error!(error = %e, show_id = show.id, "failed to fetch scraped seasons"),
             }
         }
 
-        self.retry_partial_shows().await;
         self.retry_ongoing().await;
     }
 
-    async fn retry_partial_shows(&self) {
-        for show in self.fetch_ready(MediaItemState::PartiallyCompleted, MediaItemType::Show, 20, "partially completed shows").await {
-            self.push_scrape_seasons_for_show_indexed(&show).await;
-
-            match repo::get_retryable_seasons_for_show(&self.db_pool, show.id).await {
-                Ok(seasons) => {
-                    for season in seasons {
-                        self.job_queue.push_download_from_best_stream(season.id).await;
-                        // Also fan out to individually scrape any episodes still at Indexed
-                        // within this season (e.g. double-episode finales that the pack
-                        // download couldn't match).
-                        self.job_queue.fan_out_download(season.id).await;
-                    }
-                }
-                Err(e) => tracing::error!(error = %e, show_id = show.id, "failed to fetch retryable seasons"),
-            }
-        }
-    }
-
+    /// Retry items stuck in Ongoing (partially completed with some unreleased episodes).
     async fn retry_ongoing(&self) {
         for item_type in [MediaItemType::Movie, MediaItemType::Season] {
             let items = match repo::get_stuck_ongoing_items(&self.db_pool, item_type, 10, 20).await {
                 Ok(items) => items,
                 Err(e) => { tracing::error!(error = %e, "failed to fetch stuck ongoing items"); vec![] }
             };
-            for item in items {
+            for item in &items {
                 if !self.job_queue.push_download_from_best_stream(item.id).await {
-                    if item.item_type == MediaItemType::Season {
-                        if let Ok(computed) = repo::compute_state(&self.db_pool, &item).await {
-                            if computed != MediaItemState::Ongoing {
-                                let _ = repo::update_media_item_state(&self.db_pool, item.id, computed).await;
-                            }
-                        }
-                    } else {
-                        let _ = repo::update_media_item_state(&self.db_pool, item.id, MediaItemState::Scraped).await;
-                    }
+                    let _ = repo::refresh_state_cascade(&self.db_pool, item).await;
                 }
             }
         }
@@ -142,27 +96,67 @@ impl Scheduler {
         }
     }
 
-    /// Push a ScrapeJob for every requested season of a show.
-    async fn push_scrape_seasons_for_show(&self, show: &MediaItem, err_label: &str) {
-        match repo::get_requested_seasons_for_show(&self.db_pool, show.id).await {
-            Ok(seasons) => {
-                for season in seasons {
-                    self.job_queue.push_scrape(ScrapeJob::for_season(&season, show.title.clone(), show.imdb_id.clone())).await;
+    async fn push_scrape(&self, item: &MediaItem) {
+        match item.item_type {
+            MediaItemType::Movie => {
+                self.job_queue.push_scrape(ScrapeJob::for_movie(item)).await;
+            }
+            MediaItemType::Show => {
+                match repo::get_requested_seasons_for_show(&self.db_pool, item.id).await {
+                    Ok(seasons) => {
+                        for season in seasons {
+                            if season.state == MediaItemState::PartiallyCompleted {
+                                // Season pack exists but some episodes missing — scrape episodes individually.
+                                match repo::get_incomplete_episodes_for_season(&self.db_pool, season.id).await {
+                                    Ok(episodes) => {
+                                        for ep in episodes {
+                                            self.job_queue.push_scrape(ScrapeJob {
+                                                id: ep.id,
+                                                item_type: ep.item_type,
+                                                imdb_id: item.imdb_id.clone(),
+                                                title: item.title.clone(),
+                                                season: ep.season_number,
+                                                episode: ep.episode_number,
+                                            }).await;
+                                        }
+                                    }
+                                    Err(e) => tracing::error!(error = %e, season_id = season.id, "failed to fetch incomplete episodes"),
+                                }
+                            } else {
+                                self.job_queue.push_scrape(
+                                    ScrapeJob::for_season(&season, item.title.clone(), item.imdb_id.clone())
+                                ).await;
+                            }
+                        }
+                    }
+                    Err(e) => tracing::error!(error = %e, show_id = item.id, "failed to fetch seasons for scrape"),
                 }
             }
-            Err(e) => tracing::error!(error = %e, show_id = show.id, "{err_label}"),
+            _ => {}
         }
     }
 
-    /// Push a ScrapeJob for every indexed season of a show.
-    async fn push_scrape_seasons_for_show_indexed(&self, show: &MediaItem) {
-        match repo::get_indexed_seasons_for_show(&self.db_pool, show.id).await {
-            Ok(seasons) => {
-                for season in seasons {
-                    self.job_queue.push_scrape(ScrapeJob::for_season(&season, show.title.clone(), show.imdb_id.clone())).await;
+    /// Push download for movies directly; for shows, fan out to scraped seasons.
+    async fn push_download(&self, item: &MediaItem) {
+        match item.item_type {
+            MediaItemType::Movie => {
+                if !self.job_queue.push_download_from_best_stream(item.id).await {
+                    let _ = repo::refresh_state_cascade(&self.db_pool, item).await;
                 }
             }
-            Err(e) => tracing::error!(error = %e, show_id = show.id, "failed to fetch indexed seasons"),
+            MediaItemType::Show => {
+                match repo::get_scraped_seasons_for_show(&self.db_pool, item.id).await {
+                    Ok(seasons) => {
+                        for season in &seasons {
+                            if !self.job_queue.push_download_from_best_stream(season.id).await {
+                                let _ = repo::refresh_state_cascade(&self.db_pool, season).await;
+                            }
+                        }
+                    }
+                    Err(e) => tracing::error!(error = %e, show_id = item.id, "failed to fetch scraped seasons"),
+                }
+            }
+            _ => {}
         }
     }
 }

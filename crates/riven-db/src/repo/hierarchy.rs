@@ -124,16 +124,20 @@ pub async fn create_episode(
     Ok(item)
 }
 
+/// Base season query. Excludes specials (Season 0).
 async fn seasons_for_show(pool: &PgPool, show_id: i64, state_filter: &str) -> Result<Vec<MediaItem>> {
     let sql = format!(
-        "SELECT * FROM media_items WHERE parent_id = $1 AND item_type = 'season' AND is_requested = true AND {state_filter} ORDER BY season_number ASC"
+        "SELECT * FROM media_items \
+         WHERE parent_id = $1 AND item_type = 'season' AND is_requested = true \
+           AND is_special = false AND {state_filter} \
+         ORDER BY season_number ASC"
     );
     Ok(sqlx::query_as::<_, MediaItem>(&sql).bind(show_id).fetch_all(pool).await?)
 }
 
 /// Fetch all requested, non-completed seasons for a show.
 pub async fn get_requested_seasons_for_show(pool: &PgPool, show_id: i64) -> Result<Vec<MediaItem>> {
-    seasons_for_show(pool, show_id, "state != 'completed'").await
+    seasons_for_show(pool, show_id, "state NOT IN ('completed', 'unreleased')").await
 }
 
 /// Fetch requested seasons in scraped state for a show.
@@ -141,21 +145,6 @@ pub async fn get_scraped_seasons_for_show(pool: &PgPool, show_id: i64) -> Result
     seasons_for_show(pool, show_id, "state = 'scraped'").await
 }
 
-/// Fetch requested seasons that still need a download attempt: scraped or partially_completed.
-/// Used to retry partial season downloads.
-pub async fn get_retryable_seasons_for_show(pool: &PgPool, show_id: i64) -> Result<Vec<MediaItem>> {
-    seasons_for_show(
-        pool,
-        show_id,
-        "state = ANY(ARRAY['scraped'::media_item_state, 'partially_completed'::media_item_state])",
-    )
-    .await
-}
-
-/// Fetch requested seasons that have no streams yet (indexed), needing a scrape.
-pub async fn get_indexed_seasons_for_show(pool: &PgPool, show_id: i64) -> Result<Vec<MediaItem>> {
-    seasons_for_show(pool, show_id, "state = 'indexed'").await
-}
 
 /// Fetch incomplete (indexed/scraped/ongoing) requested episodes for a season.
 pub async fn get_incomplete_episodes_for_season(pool: &PgPool, season_id: i64) -> Result<Vec<MediaItem>> {

@@ -6,7 +6,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use apalis::layers::WorkerBuilderExt;
 use apalis::prelude::*;
-use apalis_redis::RedisStorage;
+use apalis_redis::{RedisConfig, RedisStorage};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, RwLock};
 
@@ -111,10 +111,10 @@ impl JobQueue {
         // apalis-redis uses its own ConnectionManager for storages
         let apalis_conn = apalis_redis::connect(redis_url).await?;
 
-        let index_storage = RedisStorage::new(apalis_conn.clone());
-        let scrape_storage = RedisStorage::new(apalis_conn.clone());
-        let download_storage = RedisStorage::new(apalis_conn.clone());
-        let content_storage = RedisStorage::new(apalis_conn);
+        let index_storage    = RedisStorage::new_with_config(apalis_conn.clone(), RedisConfig::new("riven:index"));
+        let scrape_storage   = RedisStorage::new_with_config(apalis_conn.clone(), RedisConfig::new("riven:scrape"));
+        let download_storage = RedisStorage::new_with_config(apalis_conn.clone(), RedisConfig::new("riven:download"));
+        let content_storage  = RedisStorage::new_with_config(apalis_conn,         RedisConfig::new("riven:content"));
 
         // Separate redis ConnectionManager for dedup SET NX operations
         let redis_client = redis::Client::open(redis_url)?;
@@ -200,10 +200,6 @@ impl JobQueue {
     }
 
     /// Fan out to re-scrape at a lower level when scraping/downloading fails.
-    /// Mirrors riven-ts fanOutDownload.actor exactly:
-    ///   Show  → push ScrapeJobs for each requested season
-    ///   Season → push ScrapeJobs for each incomplete episode
-    ///   Movie/Episode → do nothing (retry library handles re-download)
     pub async fn fan_out_download(&self, id: i64) {
         let item = match riven_db::repo::get_media_item(&self.db_pool, id).await {
             Ok(Some(item)) => item,
@@ -255,8 +251,6 @@ impl JobQueue {
                     }
                 }
             }
-            // Movie and Episode: do nothing — riven-ts fanOutDownload has no handler
-            // for these types. The retry library re-attempts the download.
             _ => {}
         }
     }

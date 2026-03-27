@@ -230,11 +230,11 @@ pub async fn run(id: i64, job: &ScrapeJob, queue: &JobQueue) {
         tracing::error!(error = %e, "failed to update scraped timestamp");
     }
 
-    if let Err(e) =
-        repo::update_media_item_state(&queue.db_pool, id, MediaItemState::Scraped).await
-    {
-        tracing::error!(error = %e, "failed to update media item state");
+    if let Err(e) = repo::refresh_state_cascade(&queue.db_pool, &item).await {
+        tracing::error!(error = %e, "failed to refresh state after scrape");
     }
+
+    tracing::info!(id, stream_count, "scrape flow completed");
 
     if all_streams.is_empty() {
         let _ = repo::increment_failed_attempts(&queue.db_pool, id).await;
@@ -255,10 +255,7 @@ pub async fn run(id: i64, job: &ScrapeJob, queue: &JobQueue) {
                 stream_count,
             })
             .await;
+        // Immediately queue download after successful scraping.
+        queue.push_download_from_best_stream(id).await;
     }
-
-    tracing::info!(id, stream_count, "scrape flow completed");
-
-    // Immediately queue download after successful scraping.
-    queue.push_download_from_best_stream(id).await;
 }

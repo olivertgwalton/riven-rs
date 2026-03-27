@@ -64,18 +64,13 @@ pub async fn run(id: i64, queue: &JobQueue) {
         return;
     }
 
-    // For movies, check if the release date is in the future and mark Unreleased.
     if item.item_type == MediaItemType::Movie {
-        if let Some(aired_at) = merged.aired_at {
-            if aired_at > chrono::Utc::now().date_naive() {
-                let _ =
-                    repo::update_media_item_state(&queue.db_pool, id, MediaItemState::Unreleased)
-                        .await;
-            }
+        if let Ok(Some(fresh)) = repo::get_media_item(&queue.db_pool, id).await {
+            let _ = repo::refresh_state(&queue.db_pool, &fresh).await;
         }
     }
 
-    // For shows, create seasons and episodes
+    // For shows, create seasons and episodes then refresh state for each.
     if item.item_type == MediaItemType::Show {
         if let Some(seasons) = &merged.seasons {
             let requested_seasons: Option<Vec<i32>> = if let Some(req_id) = item.item_request_id {
@@ -141,21 +136,12 @@ pub async fn run(id: i64, queue: &JobQueue) {
                     }
                 }
 
-                if let Ok(season_state) = repo::compute_state(&queue.db_pool, &season).await {
-                    if season_state != season.state {
-                        let _ = repo::update_media_item_state(&queue.db_pool, season.id, season_state).await;
-                    }
-                }
+                let _ = repo::refresh_state(&queue.db_pool, &season).await;
             }
         }
 
         if let Ok(Some(show_item)) = repo::get_media_item(&queue.db_pool, id).await {
-            if let Ok(show_state) = repo::compute_state(&queue.db_pool, &show_item).await {
-                if show_state != show_item.state {
-                    let _ =
-                        repo::update_media_item_state(&queue.db_pool, id, show_state).await;
-                }
-            }
+            let _ = repo::refresh_state(&queue.db_pool, &show_item).await;
         }
     }
 
@@ -169,10 +155,7 @@ pub async fn run(id: i64, queue: &JobQueue) {
         .await;
     tracing::info!(id, "index flow completed");
 
-    // Re-fetch the item from the DB so all ScrapeJob fields (especially imdb_id
-    // and title) reflect what the indexer wrote — mirroring riven-ts where
-    // persistMovieIndexerData / persistShowIndexerData creates the entity with
-    // full data before requestScrape is triggered.
+    // Re-fetch so ScrapeJob fields reflect what the indexer persisted.
     let fresh_item = match repo::get_media_item(&queue.db_pool, id).await {
         Ok(Some(i)) => i,
         _ => {

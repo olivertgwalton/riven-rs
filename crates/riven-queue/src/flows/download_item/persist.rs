@@ -305,14 +305,8 @@ pub async fn persist_season(
             .await
             {
                 Ok(_) => {
-                    if let Err(e) = repo::update_media_item_state(
-                        &queue.db_pool,
-                        ep.id,
-                        MediaItemState::Completed,
-                    )
-                    .await
-                    {
-                        tracing::error!(error = %e, ep_id = ep.id, "failed to update episode state");
+                    if let Err(e) = repo::refresh_state(&queue.db_pool, ep).await {
+                        tracing::error!(error = %e, ep_id = ep.id, "failed to refresh episode state");
                     }
                     any_matched = true;
                 }
@@ -340,10 +334,7 @@ pub async fn persist_season(
         return false;
     }
 
-    if let Ok(season_state) = repo::compute_state(&queue.db_pool, item).await {
-        let _ = repo::update_media_item_state(&queue.db_pool, id, season_state).await;
-    }
-    let _ = repo::cascade_state_update(&queue.db_pool, item).await;
+    let _ = repo::refresh_state_cascade(&queue.db_pool, item).await;
 
     let duration = start_time.elapsed();
     let display_title = format!("{} - {}", show.title, item.title);

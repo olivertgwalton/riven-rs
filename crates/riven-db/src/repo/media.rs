@@ -108,8 +108,8 @@ pub async fn get_items_by_state(
     .await?)
 }
 
-/// Fetch items ready for processing, respecting is_requested and a simple
-/// backoff: items with failed_attempts > 0 are only retried once per hour.
+/// Fetch items ready for processing by a single state. Used for Ongoing shows
+/// and other single-state lookups.
 pub async fn get_items_ready_for_processing(
     pool: &PgPool,
     state: MediaItemState,
@@ -123,6 +123,26 @@ pub async fn get_items_ready_for_processing(
          LIMIT $3",
     )
     .bind(state)
+    .bind(item_type)
+    .bind(limit)
+    .fetch_all(pool)
+    .await?)
+}
+
+/// Fetch all pending top-level items needing a retry: Indexed, Scraped, or PartiallyCompleted.
+pub async fn get_pending_items_for_retry(
+    pool: &PgPool,
+    item_type: MediaItemType,
+    limit: i64,
+) -> Result<Vec<MediaItem>> {
+    Ok(sqlx::query_as::<_, MediaItem>(
+        "SELECT * FROM media_items
+         WHERE state = ANY(ARRAY['indexed'::media_item_state, 'scraped'::media_item_state, 'partially_completed'::media_item_state])
+           AND item_type = $1
+           AND is_requested = true
+         ORDER BY failed_attempts ASC, created_at ASC
+         LIMIT $2",
+    )
     .bind(item_type)
     .bind(limit)
     .fetch_all(pool)

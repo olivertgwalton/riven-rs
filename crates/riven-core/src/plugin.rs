@@ -271,6 +271,16 @@ impl PluginRegistry {
             .collect()
     }
 
+    /// Return the effective (env + DB merged) settings for a plugin, or `None` if not found.
+    pub async fn get_plugin_settings_json(&self, name: &str) -> Option<serde_json::Value> {
+        self.plugins
+            .read()
+            .await
+            .iter()
+            .find(|p| p.plugin.name() == name)
+            .map(|p| p.context.settings.to_json())
+    }
+
     pub async fn valid_plugin_names(&self) -> Vec<String> {
         self.plugins
             .read()
