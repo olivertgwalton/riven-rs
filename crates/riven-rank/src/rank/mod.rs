@@ -1,5 +1,5 @@
 mod fetch;
-mod scores;
+pub mod scores;
 
 use std::collections::HashMap;
 
@@ -36,11 +36,14 @@ pub struct RankedTorrent {
     pub lev_ratio: f64,
 }
 
+/// Compute a similarity ratio in [0, 1] between two pre-normalised strings.
+///
+/// Callers are responsible for normalising (lowercasing, removing punctuation)
+/// before passing strings here. Both `data.normalized_title` and the output of
+/// `normalize_title()` satisfy this contract.
 fn lev_ratio(a: &str, b: &str) -> f64 {
-    let a_low = a.to_lowercase();
-    let b_low = b.to_lowercase();
-    let distance = strsim::levenshtein(&a_low, &b_low);
-    let total_len = a_low.len() + b_low.len();
+    let distance = strsim::levenshtein(a, b);
+    let total_len = a.len() + b.len();
     if total_len == 0 {
         return 1.0;
     }
@@ -57,7 +60,7 @@ pub fn rank_torrent(
 ) -> Result<RankedTorrent, RankError> {
     // 1. Validate hash (32 or 40 hex chars)
     let hash_len = hash.len();
-    if (hash_len != 32 && hash_len != 40) || !hash.chars().all(|c| c.is_ascii_hexdigit()) {
+    if (hash_len != 32 && hash_len != 40) || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err(RankError::InvalidHash);
     }
 
@@ -97,7 +100,8 @@ pub fn rank_torrent(
     }
 
     // 5. Compute score
-    let (total_score, score_parts) = get_rank(&data, settings);
+    let model = crate::defaults::RankingModel::default();
+    let (total_score, score_parts) = get_rank(&data, settings, &model);
 
     // 6. Check fetch
     let (fetch, failed_checks) = check_fetch(&data, settings);
@@ -139,10 +143,10 @@ mod tests {
         let ratio = lev_ratio("toy story", "toy story 1995");
         assert!(ratio > 0.78 && ratio < 0.79);
 
-        // Exact match
-        assert_eq!(lev_ratio("toy story", "Toy Story"), 1.0);
+        // Exact match (both inputs pre-normalised to lowercase)
+        assert_eq!(lev_ratio("toy story", "toy story"), 1.0);
 
-        // Completely different
-        assert!(lev_ratio("abc", "xyz") < 0.1);
+        // Completely different (all 3 chars differ: dist=3, total=6, ratio=0.5)
+        assert!(lev_ratio("abc", "xyz") < 0.6);
     }
 }

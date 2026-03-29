@@ -1,7 +1,5 @@
 use std::collections::HashSet;
 
-use regex::Regex;
-
 use crate::parse::ParsedData;
 use crate::settings::RankSettings;
 
@@ -36,42 +34,64 @@ fn adult_handler(data: &ParsedData, settings: &RankSettings, failed: &mut Vec<St
     true
 }
 
-fn check_required(data: &ParsedData, settings: &RankSettings) -> Option<bool> {
+/// Returns `true` if a required pattern matches the raw title.
+///   `fetch: failed.size === 0 || checkRequired(data, settings)`
+fn required_matches(data: &ParsedData, settings: &RankSettings) -> bool {
     if settings.require.is_empty() {
-        return None;
+        return false;
     }
-    if settings
-        .require
-        .iter()
-        .filter_map(|p| Regex::new(p).ok())
-        .any(|re| re.is_match(&data.raw_title))
-    {
-        Some(true)
+    if !settings.require_compiled.is_empty() {
+        settings
+            .require_compiled
+            .iter()
+            .any(|re| re.is_match(&data.raw_title))
     } else {
-        None
+        debug_assert!(
+            false,
+            "RankSettings::prepare() was not called — regex compiled per-torrent"
+        );
+        settings
+            .require
+            .iter()
+            .filter_map(|p| regex::Regex::new(p).ok())
+            .any(|re| re.is_match(&data.raw_title))
     }
 }
 
 fn check_exclude(data: &ParsedData, settings: &RankSettings, failed: &mut Vec<String>) -> bool {
-    if settings
-        .exclude
-        .iter()
-        .filter_map(|p| Regex::new(p).ok())
-        .any(|re| re.is_match(&data.raw_title))
-    {
+    let excluded = if !settings.exclude_compiled.is_empty() {
+        settings
+            .exclude_compiled
+            .iter()
+            .any(|re| re.is_match(&data.raw_title))
+    } else {
+        settings
+            .exclude
+            .iter()
+            .filter_map(|p| regex::Regex::new(p).ok())
+            .any(|re| re.is_match(&data.raw_title))
+    };
+    if excluded {
         failed.push("excluded_pattern".into());
         return false;
     }
     true
 }
 
-const LANG_ANIME: &[&str]     = &["ja", "zh", "ko"];
+const LANG_ANIME: &[&str] = &["ja", "zh", "ko"];
 const LANG_NON_ANIME: &[&str] = &[
-    "de", "es", "hi", "ta", "ru", "ua", "th", "it", "ar", "pt", "fr", "pl", "nl", "sv",
-    "no", "da", "fi", "tr", "cs", "hu", "ro", "bg", "hr", "sr", "sk", "sl", "el", "he",
-    "id", "ms", "vi", "bn", "fa", "uk", "ca", "eu",
+    "de", "es", "hi", "ta", "ru", "ua", "th", "it", "ar", "pt", "fr",
+    // South/Southeast Asian
+    "pa", "mr", "gu", "te", "kn", "ml", "vi", "id", "ms", "bn",
+    // Middle East / Central Asia
+    "tr", "he", "fa", // European
+    "el", "lt", "lv", "et", "pl", "cs", "sk", "hu", "ro", "bg", "sr", "hr", "sl", "nl", "da", "fi",
+    "sv", "no", // Additional (riven-rs extensions beyond RTN)
+    "uk", "ca", "eu",
 ];
-const LANG_COMMON: &[&str]    = &["de", "es", "hi", "ta", "ru", "ua", "th", "it", "zh", "ar", "fr"];
+const LANG_COMMON: &[&str] = &[
+    "de", "es", "hi", "ta", "ru", "ua", "th", "it", "zh", "ar", "fr",
+];
 
 fn add_langs(set: &mut HashSet<String>, codes: &[&str]) {
     set.extend(codes.iter().copied().map(String::from));
@@ -82,11 +102,16 @@ fn populate_langs(langs: &[String]) -> HashSet<String> {
     let mut result = HashSet::new();
     for lang in langs {
         match lang.to_lowercase().as_str() {
-            "anime"     => add_langs(&mut result, LANG_ANIME),
+            "anime" => add_langs(&mut result, LANG_ANIME),
             "non_anime" => add_langs(&mut result, LANG_NON_ANIME),
-            "common"    => add_langs(&mut result, LANG_COMMON),
-            "all"       => { add_langs(&mut result, LANG_ANIME); add_langs(&mut result, LANG_NON_ANIME); }
-            other       => { result.insert(other.to_string()); }
+            "common" => add_langs(&mut result, LANG_COMMON),
+            "all" => {
+                add_langs(&mut result, LANG_ANIME);
+                add_langs(&mut result, LANG_NON_ANIME);
+            }
+            other => {
+                result.insert(other.to_string());
+            }
         }
     }
     result
@@ -124,12 +149,13 @@ fn language_handler(data: &ParsedData, settings: &RankSettings, failed: &mut Vec
 }
 
 fn fetch_resolution(data: &ParsedData, settings: &RankSettings, failed: &mut Vec<String>) -> bool {
+    // Aliases mirror RTN's res_map: 1440p→1080p bucket, 576p→480p, 240p→360p.
     let enabled = match data.resolution.as_str() {
         "2160p" => settings.resolutions.r2160p,
-        "1080p" => settings.resolutions.r1080p,
+        "1080p" | "1440p" => settings.resolutions.r1080p,
         "720p" => settings.resolutions.r720p,
-        "480p" => settings.resolutions.r480p,
-        "360p" => settings.resolutions.r360p,
+        "480p" | "576p" => settings.resolutions.r480p,
+        "360p" | "240p" => settings.resolutions.r360p,
         _ => settings.resolutions.unknown,
     };
     if !enabled {
@@ -198,11 +224,12 @@ fn fetch_codec(data: &ParsedData, settings: &RankSettings, failed: &mut Vec<Stri
 
 fn fetch_other(data: &ParsedData, settings: &RankSettings, failed: &mut Vec<String>) -> bool {
     let cr = &settings.custom_ranks;
-    let mut ok = true;
+    let speed = settings.options.enable_fetch_speed_mode;
 
     let checks: &[(bool, &crate::settings::CustomRank, &str)] = &[
         (data.three_d, &cr.extras.three_d, "three_d"),
         (data.converted, &cr.extras.converted, "converted"),
+        (data.commentary, &cr.extras.commentary, "commentary"),
         (data.documentary, &cr.extras.documentary, "documentary"),
         (data.dubbed, &cr.extras.dubbed, "dubbed"),
         (data.edition.is_some(), &cr.extras.edition, "edition"),
@@ -219,51 +246,56 @@ fn fetch_other(data: &ParsedData, settings: &RankSettings, failed: &mut Vec<Stri
         (data.size.is_some(), &cr.trash.size, "size"),
     ];
 
+    let initial_len = failed.len();
     for &(cond, rank, name) in checks {
         if cond && !rank.fetch {
             failed.push(name.into());
-            ok = false;
+            if speed {
+                return false;
+            }
         }
     }
-    ok
+    failed.len() == initial_len
 }
 
 /// Check whether the torrent should be fetched based on settings.
+///
+///   `fetch: failed.size === 0 || checkRequired(data, settings)`
+///
+/// Required patterns are checked **last** as an unconditional override — a
+/// matching `require` pattern accepts the torrent even if other checks failed.
+///
+/// When `options.enable_fetch_speed_mode` is `true` (default) the pipeline
+/// short-circuits on the first failure, but still applies the required-pattern
+/// override before returning. When `false`, all checks run and every failure
+/// reason is collected — useful for diagnostics.
 pub fn check_fetch(data: &ParsedData, settings: &RankSettings) -> (bool, Vec<String>) {
     let mut failed = Vec::new();
+    let speed = settings.options.enable_fetch_speed_mode;
 
-    // Fail-fast pipeline
-    let handlers: &[fn(&ParsedData, &RankSettings, &mut Vec<String>) -> bool] = &[
-        trash_handler,
-        adult_handler,
-    ];
-    for handler in handlers {
-        if !handler(data, settings, &mut failed) {
-            return (false, failed);
-        }
+    macro_rules! run {
+        ($fn:expr) => {{
+            let ok = $fn(data, settings, &mut failed);
+            if speed && !ok {
+                // Required patterns override even a speed-mode early exit.
+                return (required_matches(data, settings), failed);
+            }
+        }};
     }
 
-    // Required pattern bypass
-    if let Some(true) = check_required(data, settings) {
-        return (true, failed);
-    }
+    run!(trash_handler);
+    run!(adult_handler);
+    run!(check_exclude);
+    run!(language_handler);
+    run!(fetch_resolution);
+    run!(fetch_quality);
+    run!(fetch_audio);
+    run!(fetch_hdr);
+    run!(fetch_codec);
+    run!(fetch_other);
 
-    // Remaining checks — all fail-fast
-    let checks: &[fn(&ParsedData, &RankSettings, &mut Vec<String>) -> bool] = &[
-        check_exclude,
-        language_handler,
-        fetch_resolution,
-        fetch_quality,
-        fetch_audio,
-        fetch_hdr,
-        fetch_codec,
-        fetch_other,
-    ];
-    for check in checks {
-        if !check(data, settings, &mut failed) {
-            return (false, failed);
-        }
-    }
-
-    (failed.is_empty(), failed)
+    (
+        failed.is_empty() || required_matches(data, settings),
+        failed,
+    )
 }

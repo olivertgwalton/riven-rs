@@ -15,19 +15,78 @@ pub struct MutationRoot;
 
 #[Object]
 impl MutationRoot {
-    /// Update rank settings. Accepts a full or partial JSON object that will be
-    /// merged with defaults. Returns the saved settings.
+    /// Save a custom profile. If `id` is provided the existing profile is
+    /// updated; otherwise a new one is created. Built-in profiles cannot be
+    /// modified through this mutation — use `setProfileEnabled` instead.
+    async fn save_custom_profile(
+        &self,
+        ctx: &Context<'_>,
+        id: Option<i32>,
+        name: String,
+        settings: serde_json::Value,
+        enabled: Option<bool>,
+    ) -> Result<serde_json::Value> {
+        let validated: riven_rank::RankSettings = serde_json::from_value(settings)
+            .map_err(|e| Error::new(format!("invalid rank settings: {e}")))?;
+        let canonical = serde_json::to_value(&validated)
+            .map_err(|e| Error::new(format!("failed to serialise rank settings: {e}")))?;
+
+        let pool = ctx.data::<sqlx::PgPool>()?;
+        let profile = repo::upsert_ranking_profile(pool, id, &name, canonical, enabled.unwrap_or(false)).await?;
+        Ok(serde_json::to_value(profile)?)
+    }
+
+    /// Delete a custom ranking profile by ID. Built-in profiles cannot be deleted.
+    async fn delete_custom_profile(&self, ctx: &Context<'_>, id: i32) -> Result<bool> {
+        let pool = ctx.data::<sqlx::PgPool>()?;
+        Ok(repo::delete_ranking_profile(pool, id).await?)
+    }
+
+    /// Enable or disable a ranking profile (built-in or custom) by name.
+    /// Enabled profiles are used for multi-version scraping and downloading.
+    async fn set_profile_enabled(
+        &self,
+        ctx: &Context<'_>,
+        name: String,
+        enabled: bool,
+    ) -> Result<bool> {
+        let pool = ctx.data::<sqlx::PgPool>()?;
+        Ok(repo::set_profile_enabled(pool, &name, enabled).await?)
+    }
+
+    /// Update settings for any profile (built-in or custom) by name.
+    /// For built-in profiles these are stored as overrides that get merged on
+    /// top of the Rust defaults at load time.
+    async fn update_profile_settings(
+        &self,
+        ctx: &Context<'_>,
+        name: String,
+        settings: serde_json::Value,
+    ) -> Result<bool> {
+        // Validate that the JSON is a valid RankSettings shape.
+        let _validated: riven_rank::RankSettings = serde_json::from_value(settings.clone())
+            .map_err(|e| Error::new(format!("invalid rank settings: {e}")))?;
+
+        let pool = ctx.data::<sqlx::PgPool>()?;
+        Ok(repo::update_profile_settings(pool, &name, settings).await?)
+    }
+
+    /// Update rank settings. Deserialises into [`RankSettings`] (applying
+    /// serde defaults for any missing fields), then re-serialises the
+    /// canonical form — ensuring the Rust schema is the source of truth.
     async fn update_rank_settings(
         &self,
         ctx: &Context<'_>,
         settings: serde_json::Value,
     ) -> Result<serde_json::Value> {
-        let _: riven_rank::RankSettings = serde_json::from_value(settings.clone())
+        let validated: riven_rank::RankSettings = serde_json::from_value(settings)
             .map_err(|e| Error::new(format!("invalid rank settings: {e}")))?;
+        let canonical = serde_json::to_value(&validated)
+            .map_err(|e| Error::new(format!("failed to serialise rank settings: {e}")))?;
 
         let pool = ctx.data::<sqlx::PgPool>()?;
-        repo::set_setting(pool, "rank_settings", settings.clone()).await?;
-        Ok(settings)
+        repo::set_setting(pool, "rank_settings", canonical.clone()).await?;
+        Ok(canonical)
     }
 
     /// Update all settings. Accepts a JSON object of key/value pairs.
@@ -38,6 +97,13 @@ impl MutationRoot {
     ) -> Result<serde_json::Value> {
         let pool = ctx.data::<sqlx::PgPool>()?;
         Ok(repo::set_all_settings(pool, settings).await?)
+    }
+
+    /// Delete a specific filesystem entry (a single downloaded version) by its ID.
+    /// Returns true if the entry was found and deleted.
+    async fn delete_filesystem_entry(&self, ctx: &Context<'_>, id: i64) -> Result<bool> {
+        let pool = ctx.data::<sqlx::PgPool>()?;
+        Ok(repo::delete_filesystem_entry(pool, id).await?)
     }
 
     /// Reset items to Indexed state and clear failed_attempts.

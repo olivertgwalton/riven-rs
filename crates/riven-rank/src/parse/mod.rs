@@ -6,7 +6,7 @@ mod title;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
-use detect::{detect_network, detect_trash, is_false_group};
+use detect::{detect_anime, detect_network, detect_scene, detect_trash, is_false_group};
 use languages::LANG_PATTERNS;
 use patterns::*;
 pub(crate) use title::normalize_title;
@@ -19,6 +19,7 @@ pub struct ParsedData {
     pub normalized_title: String,
     pub trash: bool,
     pub adult: bool,
+    pub anime: bool,
     pub year: Option<i32>,
     pub resolution: String,
     pub seasons: Vec<i32>,
@@ -84,48 +85,49 @@ impl ParsedData {
         if self.resolution == "unknown" {
             self.resolution = other.resolution;
         }
-        self.year      = self.year.or(other.year);
-        self.quality   = self.quality.take().or(other.quality);
-        self.codec     = self.codec.take().or(other.codec);
+        self.year = self.year.or(other.year);
+        self.quality = self.quality.take().or(other.quality);
+        self.codec = self.codec.take().or(other.codec);
         self.bit_depth = self.bit_depth.take().or(other.bit_depth);
-        self.bitrate   = self.bitrate.take().or(other.bitrate);
+        self.bitrate = self.bitrate.take().or(other.bitrate);
         self.container = self.container.take().or(other.container);
         self.extension = self.extension.take().or(other.extension);
-        self.group     = self.group.take().or(other.group);
-        self.edition   = self.edition.take().or(other.edition);
-        self.region    = self.region.take().or(other.region);
-        self.network   = self.network.take().or(other.network);
-        self.site      = self.site.take().or(other.site);
-        self.country   = self.country.take().or(other.country);
-        self.part      = self.part.or(other.part);
+        self.group = self.group.take().or(other.group);
+        self.edition = self.edition.take().or(other.edition);
+        self.region = self.region.take().or(other.region);
+        self.network = self.network.take().or(other.network);
+        self.site = self.site.take().or(other.site);
+        self.country = self.country.take().or(other.country);
+        self.part = self.part.or(other.part);
 
-        extend_sorted(&mut self.seasons,   other.seasons);
-        extend_sorted(&mut self.episodes,  other.episodes);
-        extend_sorted(&mut self.volumes,   other.volumes);
+        extend_sorted(&mut self.seasons, other.seasons);
+        extend_sorted(&mut self.episodes, other.episodes);
+        extend_sorted(&mut self.volumes, other.volumes);
         extend_sorted(&mut self.languages, other.languages);
-        extend_sorted(&mut self.audio,     other.audio);
-        extend_sorted(&mut self.hdr,       other.hdr);
-        extend_sorted(&mut self.channels,  other.channels);
-        extend_sorted(&mut self.extras,    other.extras);
+        extend_sorted(&mut self.audio, other.audio);
+        extend_sorted(&mut self.hdr, other.hdr);
+        extend_sorted(&mut self.channels, other.channels);
+        extend_sorted(&mut self.extras, other.extras);
 
-        self.trash       |= other.trash;
-        self.adult       |= other.adult;
-        self.complete    |= other.complete;
-        self.dubbed      |= other.dubbed;
-        self.subbed      |= other.subbed;
-        self.extended    |= other.extended;
-        self.converted   |= other.converted;
-        self.hardcoded   |= other.hardcoded;
-        self.proper      |= other.proper;
-        self.repack      |= other.repack;
-        self.retail      |= other.retail;
-        self.upscaled    |= other.upscaled;
-        self.remastered  |= other.remastered;
-        self.unrated     |= other.unrated;
-        self.uncensored  |= other.uncensored;
+        self.trash |= other.trash;
+        self.adult |= other.adult;
+        self.anime |= other.anime;
+        self.complete |= other.complete;
+        self.dubbed |= other.dubbed;
+        self.subbed |= other.subbed;
+        self.extended |= other.extended;
+        self.converted |= other.converted;
+        self.hardcoded |= other.hardcoded;
+        self.proper |= other.proper;
+        self.repack |= other.repack;
+        self.retail |= other.retail;
+        self.upscaled |= other.upscaled;
+        self.remastered |= other.remastered;
+        self.unrated |= other.unrated;
+        self.uncensored |= other.uncensored;
         self.documentary |= other.documentary;
-        self.commentary  |= other.commentary;
-        self.scene       |= other.scene;
+        self.commentary |= other.commentary;
+        self.scene |= other.scene;
     }
 }
 
@@ -183,10 +185,19 @@ fn detect_resolution(raw: &str) -> String {
         }
     }
 
+    // Typo correction: "4800p" → "480p", "10800p" → "1080p"
+    if let Some(cap) = RE_RES_TYPO.captures(raw) {
+        return format!("{}p", &cap[1]);
+    }
+
     // Generic: use last occurrence (e.g., "720p...1080p" → "1080p")
     if let Some(last) = RE_RES_GENERIC.find_iter(raw).last() {
         let lower = last.as_str().to_lowercase();
-        return if lower == "4k" { "2160p".to_string() } else { lower };
+        return if lower == "4k" {
+            "2160p".to_string()
+        } else {
+            lower
+        };
     }
 
     // Digit-based (e.g., "1080i")
@@ -263,8 +274,16 @@ fn detect_quality(raw: &str) -> Option<String> {
     if RE_Q_CAM.is_match(raw) && !RE_Q_CAM_FALSE.is_match(raw) {
         return Some("CAM".into());
     }
+    // S-print → CAM
+    if RE_SPRINT.is_match(raw) {
+        return Some("CAM".into());
+    }
     if RE_Q_PDTV.is_match(raw) {
         return Some("PDTV".into());
+    }
+    // DVB → HDTV
+    if RE_DVB.is_match(raw) {
+        return Some("HDTV".into());
     }
     if RE_Q_HDTV.is_match(raw) {
         return Some("HDTV".into());
@@ -282,10 +301,17 @@ fn detect_codec(raw: &str) -> Option<String> {
         (&RE_CODEC_AV1, "av1"),
         (&RE_CODEC_MPEG, "mpeg"),
     ];
-    checks
-        .iter()
-        .find(|(re, _)| re.is_match(raw))
-        .map(|(_, name)| name.to_string())
+    if let Some((_, name)) = checks.iter().find(|(re, _)| re.is_match(raw)) {
+        return Some(name.to_string());
+    }
+    // Bare 264/265
+    if RE_CODEC_264_BARE.is_match(raw) {
+        return Some("avc".into());
+    }
+    if RE_CODEC_265_BARE.is_match(raw) {
+        return Some("hevc".into());
+    }
+    None
 }
 
 /// Detect audio formats from raw title string.
@@ -302,7 +328,7 @@ fn detect_audio(raw: &str, audio: &mut Vec<String>) {
     if RE_AUDIO_ATMOS.is_match(raw) {
         push_unique(audio, "Atmos");
     }
-    if RE_AUDIO_TRUEHD.is_match(raw) {
+    if RE_AUDIO_TRUEHD.is_match(raw) || RE_AUDIO_TRUEHD_BARE.is_match(raw) {
         push_unique(audio, "TrueHD");
     }
     if RE_AUDIO_FLAC.is_match(raw) {
@@ -360,6 +386,85 @@ fn detect_channels(raw: &str, channels: &mut Vec<String>) {
     }
 }
 
+/// Detect bit depth from raw title string.
+fn detect_bit_depth(raw: &str) -> Option<String> {
+    if RE_BIT_DEPTH_12.is_match(raw) {
+        Some("12bit".into())
+    } else if RE_BIT_DEPTH_10.is_match(raw) {
+        Some("10bit".into())
+    } else if RE_BIT_DEPTH_8.is_match(raw) {
+        Some("8bit".into())
+    } else {
+        None
+    }
+}
+
+/// Detect date from raw title string, trying multiple formats.
+fn detect_date(raw: &str) -> Option<String> {
+    // YYYY-MM-DD / YYYY.MM.DD
+    if let Some(cap) = RE_DATE_YMD.captures(raw) {
+        return Some(format!("{}-{}-{}", &cap[1], &cap[2], &cap[3]));
+    }
+    // DD-MM-YYYY
+    if let Some(cap) = RE_DATE_DMY.captures(raw) {
+        return Some(format!("{}-{}-{}", &cap[3], &cap[2], &cap[1]));
+    }
+    // YYYYMMDD (compact)
+    if let Some(cap) = RE_DATE_COMPACT.captures(raw) {
+        return Some(format!("{}-{}-{}", &cap[1], &cap[2], &cap[3]));
+    }
+    None
+}
+
+/// Detect episode code (CRC32 hash) from raw title.
+fn detect_episode_code(raw: &str) -> Option<String> {
+    if let Some(cap) = RE_EPISODE_CODE_HEX.captures(raw) {
+        return Some(cap[1].to_uppercase());
+    }
+    if let Some(cap) = RE_EPISODE_CODE_NUM.captures(raw) {
+        return Some(cap[1].to_uppercase());
+    }
+    None
+}
+
+/// Detect anime extras from raw title.
+fn detect_anime_extras(raw: &str, extras: &mut Vec<String>) {
+    if RE_EXTRAS_NCED.is_match(raw) {
+        push_unique(extras, "NCED");
+    }
+    if RE_EXTRAS_NCOP.is_match(raw) {
+        push_unique(extras, "NCOP");
+    }
+    if RE_EXTRAS_NC.is_match(raw)
+        && !extras.iter().any(|e| e == "NCED" || e == "NCOP")
+    {
+        push_unique(extras, "NC");
+    }
+    if RE_EXTRAS_OVA.is_match(raw) {
+        push_unique(extras, "OVA");
+    }
+    if RE_EXTRAS_ED.is_match(raw) {
+        push_unique(extras, "ED");
+    }
+    if RE_EXTRAS_OP.is_match(raw) {
+        push_unique(extras, "OP");
+    }
+}
+
+/// Detect site from additional patterns beyond the prefix pattern.
+fn detect_site_extra(raw: &str) -> Option<String> {
+    if let Some(m) = RE_SITE_KNOWN.find(raw) {
+        return Some(m.as_str().to_lowercase());
+    }
+    if let Some(cap) = RE_SITE_BRACKET.captures(raw) {
+        return Some(cap[1].to_string());
+    }
+    if let Some(m) = RE_SITE_DOMAIN.find(raw) {
+        return Some(m.as_str().to_string());
+    }
+    None
+}
+
 pub fn parse(raw_title: &str) -> ParsedData {
     let mut data = ParsedData {
         raw_title: raw_title.to_string(),
@@ -376,29 +481,79 @@ pub fn parse(raw_title: &str) -> ParsedData {
     };
     let raw = &working_title;
 
-    // Simple captures
-    data.extension = RE_EXTENSION.captures(raw).map(|c| c[1].to_lowercase());
-    data.container = RE_CONTAINER.captures(raw).map(|c| c[1].to_lowercase());
-    data.size = RE_SIZE.captures(raw).map(|c| c[1].to_string());
-    data.bitrate = RE_BITRATE.captures(raw).map(|c| c[1].to_string());
-    data.date = RE_DATE
+    // Extension & container
+    data.extension = RE_EXTENSION
         .captures(raw)
-        .map(|c| format!("{}-{}-{}", &c[1], &c[2], &c[3]));
-    data.year = RE_YEAR.captures(raw).and_then(|c| c[1].parse().ok());
+        .map(|c| c[1].to_lowercase());
+    data.container = RE_CONTAINER
+        .captures(raw)
+        .map(|c| c[1].to_lowercase());
+    data.size = RE_SIZE.captures(raw).map(|c| c[1].to_string());
+    data.bitrate = RE_BITRATE
+        .captures(raw)
+        .map(|c| c[1].to_lowercase());
+
+    // Torrent flag
+    data.torrent = raw.to_lowercase().ends_with(".torrent")
+        || data.extension.as_deref() == Some("torrent");
+
+    // Date (try multiple formats)
+    data.date = detect_date(raw);
+
+    // Year — try year range first (for complete detection), then standalone
+    if let Some(cap) = RE_YEAR_RANGE.captures(raw) {
+        if let Ok(y) = cap[1].parse::<i32>() {
+            data.year = Some(y);
+            data.complete = true;
+        }
+    } else if let Some(cap) = RE_YEAR_RANGE_SHORT.captures(raw) {
+        if let Ok(y) = cap[1].parse::<i32>() {
+            data.year = Some(y);
+            data.complete = true;
+        }
+    }
+    if data.year.is_none() {
+        // Skip a year at the very start of the string — it's part of the title (e.g. "2019 After...")
+        for cap in RE_YEAR.captures_iter(raw) {
+            let start = cap.get(0).map_or(0, |m| m.start());
+            if start > 0 {
+                if let Ok(y) = cap[1].parse::<i32>() {
+                    data.year = Some(y);
+                }
+                break;
+            }
+        }
+        // If no year found after position 0, fall back to the year at position 0
+        if data.year.is_none() {
+            data.year = RE_YEAR.captures(raw).and_then(|c| c[1].parse().ok());
+        }
+    }
+
+    // Episode code (CRC32)
+    data.episode_code = detect_episode_code(raw);
 
     // Resolution, quality, codec
     data.resolution = detect_resolution(raw);
     data.quality = detect_quality(raw);
     data.codec = detect_codec(raw);
 
-    // Seasons (try each pattern in priority order, stop when found)
+    // Seasons (try each pattern in priority order)
     extract_numbers(&RE_SEASON_RANGE, raw, &mut data.seasons);
     if data.seasons.is_empty() {
         extract_numbers(&RE_SEASON_SE, raw, &mut data.seasons);
     }
     extract_numbers(&RE_SEASON_MULTI, raw, &mut data.seasons);
     extract_numbers(&RE_SEASON_FULL, raw, &mut data.seasons);
-    // Cross-reference format: group 1 = season (no range)
+    // Ordinal: "1st season", "2nd season"
+    extract_numbers(&RE_SEASON_ORDINAL, raw, &mut data.seasons);
+    // Russian formats
+    extract_numbers(&RE_SEASON_RUSSIAN, raw, &mut data.seasons);
+    extract_numbers(&RE_SEASON_RUSSIAN2, raw, &mut data.seasons);
+    // Portuguese
+    extract_numbers(&RE_SEASON_PT, raw, &mut data.seasons);
+    // ТВ-N
+    extract_numbers(&RE_SEASON_TV, raw, &mut data.seasons);
+    // Cross-reference format: group 1 = season
     for cap in RE_EPISODE_CROSSREF.captures_iter(raw) {
         if let Ok(s) = cap[1].parse::<i32>() {
             if !data.seasons.contains(&s) {
@@ -409,7 +564,7 @@ pub fn parse(raw_title: &str) -> ParsedData {
     data.seasons.sort();
     data.seasons.dedup();
 
-    // Episodes (try each pattern in priority order, stop when found)
+    // Episodes (try each pattern in priority order)
     extract_numbers(&RE_EPISODE_RANGE, raw, &mut data.episodes);
     if data.episodes.is_empty() {
         extract_numbers(&RE_EPISODE_SE, raw, &mut data.episodes);
@@ -421,8 +576,27 @@ pub fn parse(raw_title: &str) -> ParsedData {
         extract_numbers(&RE_EPISODE_FULL, raw, &mut data.episodes);
     }
     if data.episodes.is_empty() {
-        // Cross-reference: episode is in group 2, but extract_numbers reads group 1.
-        // Handle manually.
+        // "X of Y" pattern
+        if let Some(cap) = RE_EPISODE_OF.captures(raw) {
+            if let Ok(n) = cap[1].parse::<i32>() {
+                data.episodes.push(n);
+            }
+        }
+    }
+    if data.episodes.is_empty() {
+        // Russian "Серии: N of M"
+        if let Some(cap) = RE_EPISODE_RUSSIAN_OF.captures(raw) {
+            if let Ok(n) = cap[1].parse::<i32>() {
+                data.episodes.push(n);
+            }
+        }
+    }
+    if data.episodes.is_empty() {
+        // Russian episodes
+        extract_numbers(&RE_EPISODE_RUSSIAN, raw, &mut data.episodes);
+    }
+    if data.episodes.is_empty() {
+        // Cross-reference: episode is in group 2
         for cap in RE_EPISODE_CROSSREF.captures_iter(raw) {
             if let Ok(e) = cap[2].parse::<i32>() {
                 if !data.episodes.contains(&e) {
@@ -431,8 +605,7 @@ pub fn parse(raw_title: &str) -> ParsedData {
             }
         }
     }
-    // Catch consecutive episodes without separator: S01E01E02E03
-    // RE_EPISODE_SE only captures the first episode in this case; fill the rest.
+    // Catch consecutive episodes: S01E01E02E03
     for cap in RE_EPISODE_CONSECUTIVE.captures_iter(raw) {
         for ep_cap in RE_EP_NUM_BARE.captures_iter(&cap[1]) {
             if let Ok(n) = ep_cap[1].parse::<i32>() {
@@ -445,7 +618,7 @@ pub fn parse(raw_title: &str) -> ParsedData {
     data.episodes.sort();
     data.episodes.dedup();
 
-    // Part number (e.g. "Part 1", "Pt.2")
+    // Part number
     data.part = RE_PART.captures(raw).and_then(|c| c[1].parse().ok());
 
     // Audio, HDR, channels
@@ -453,14 +626,16 @@ pub fn parse(raw_title: &str) -> ParsedData {
     detect_hdr(raw, &mut data.hdr);
     detect_channels(raw, &mut data.channels);
 
-    // Bit depth
-    if RE_BIT_DEPTH.is_match(raw) || RE_BIT_DEPTH_HDR10.is_match(raw) {
-        data.bit_depth = Some("10bit".to_string());
-    }
+    // Bit depth (8, 10, 12)
+    data.bit_depth = detect_bit_depth(raw);
 
-    // Simple flags
+    // 3D
     data.three_d = RE_3D.is_match(raw);
-    data.complete = RE_COMPLETE.is_match(raw);
+
+    // Complete (basic + collection patterns + year range already handled above)
+    if !data.complete {
+        data.complete = RE_COMPLETE.is_match(raw) || RE_COMPLETE_COLLECTION.is_match(raw);
+    }
 
     // Volumes
     extract_numbers(&RE_VOLUME, raw, &mut data.volumes);
@@ -468,10 +643,14 @@ pub fn parse(raw_title: &str) -> ParsedData {
     data.volumes.dedup();
 
     // Edition
-    data.edition = RE_EDITION.captures(raw).map(|c| normalize_edition(&c[1]));
+    data.edition = RE_EDITION
+        .captures(raw)
+        .map(|c| normalize_edition(&c[1]));
 
-    // Region
-    data.region = RE_REGION.captures(raw).map(|c| c[1].to_string());
+    // Region (R1-R9, PAL, NTSC, SECAM)
+    data.region = RE_REGION
+        .captures(raw)
+        .map(|c| c[1].to_uppercase());
 
     // Network
     detect_network(raw, &mut data);
@@ -484,18 +663,29 @@ pub fn parse(raw_title: &str) -> ParsedData {
     }
 
     // Country
-    data.country = RE_COUNTRY.captures(raw).map(|c| c[1].to_uppercase());
+    data.country = RE_COUNTRY
+        .captures(raw)
+        .map(|c| c[1].to_uppercase());
 
-    // Extras
+    // Anime extras (NCED, NCOP, NC, OVA, ED, OP)
+    detect_anime_extras(raw, &mut data.extras);
+
+    // Standard extras
     for cap in RE_EXTRAS.captures_iter(raw) {
         push_unique(&mut data.extras, &cap[1]);
     }
 
-    // Group
+    // Group detection — try multiple patterns
     data.group = RE_GROUP_DASH
         .captures(raw)
         .map(|c| c[1].to_string())
         .filter(|g| !is_false_group(g))
+        .or_else(|| {
+            RE_GROUP_PAREN
+                .captures(raw)
+                .map(|c| c[1].to_string())
+                .filter(|g| !is_false_group(g))
+        })
         .or_else(|| {
             RE_GROUP_BRACKET
                 .captures(raw)
@@ -507,7 +697,8 @@ pub fn parse(raw_title: &str) -> ParsedData {
     data.proper = RE_PROPER.is_match(raw);
     data.repack = RE_REPACK.is_match(raw);
     data.retail = RE_RETAIL.is_match(raw);
-    data.upscaled = RE_UPSCALED.is_match(raw);
+    data.upscaled =
+        RE_UPSCALED.is_match(raw) || RE_UPSCALED_SPECIFIC.is_match(raw) || RE_UPSCALED_AI.is_match(raw);
     data.remastered = RE_REMASTERED.is_match(raw);
     data.extended = RE_EXTENDED.is_match(raw);
     data.converted = RE_CONVERTED.is_match(raw);
@@ -519,9 +710,13 @@ pub fn parse(raw_title: &str) -> ParsedData {
     data.documentary = RE_DOCUMENTARY.is_match(raw);
     data.commentary = RE_COMMENTARY.is_match(raw);
     data.adult = RE_ADULT.is_match(raw);
-    data.ppv = RE_PPV.is_match(raw);
-    data.torrent = raw.to_lowercase().contains(".torrent");
-    data.scene = RE_SCENE.is_match(raw);
+    data.ppv = RE_PPV.is_match(raw) || RE_PPV_FIGHT.is_match(raw);
+    data.scene = detect_scene(raw);
+
+    // Site (additional patterns)
+    if data.site.is_none() {
+        data.site = detect_site_extra(raw);
+    }
 
     // Trash detection
     data.trash = detect_trash(raw, &data);
@@ -530,6 +725,9 @@ pub fn parse(raw_title: &str) -> ParsedData {
     let title = extract_title(raw);
     data.normalized_title = normalize_title(&title);
     data.parsed_title = title;
+
+    // Anime detection (after group/episode_code/extras are populated)
+    data.anime = detect_anime(raw, &data);
 
     data
 }

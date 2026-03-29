@@ -326,6 +326,43 @@ async fn handle_content_service_job(
 
 // ── Monitor factory ───────────────────────────────────────────────────────────
 
+/// Queue names used by apalis-redis (must match `RedisConfig::new` calls).
+const QUEUE_NAMES: &[&str] = &["riven:index", "riven:scrape", "riven:download", "riven:content"];
+
+/// Remove stale worker registrations from Redis so the monitor can restart cleanly.
+pub async fn clear_worker_registrations(redis: &mut redis::aio::ConnectionManager) {
+    for queue in QUEUE_NAMES {
+        let workers_set = format!("{queue}:workers");
+        let members: Vec<String> = redis::cmd("ZRANGE")
+            .arg(&workers_set)
+            .arg(0i64)
+            .arg(-1i64)
+            .query_async(redis)
+            .await
+            .unwrap_or_default();
+
+        if !members.is_empty() {
+            // Remove each worker's metadata key and inflight set
+            for member in &members {
+                let meta_key = format!("core::apalis::workers:metadata::{member}");
+                let inflight_key = format!("{queue}:inflight:{member}");
+                let _: Result<(), _> = redis::pipe()
+                    .del(&meta_key)
+                    .del(&inflight_key)
+                    .query_async(redis)
+                    .await;
+            }
+            // Clear the workers sorted set itself
+            let _: Result<(), _> = redis::cmd("DEL")
+                .arg(&workers_set)
+                .query_async(redis)
+                .await;
+
+            tracing::info!(queue = queue, "cleared {} stale worker registrations", members.len());
+        }
+    }
+}
+
 pub fn start_workers(queue: Arc<JobQueue>) -> Monitor {
     Monitor::new()
         .register({

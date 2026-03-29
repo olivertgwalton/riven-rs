@@ -1,20 +1,30 @@
 services:
+  riven-frontend:
+    image: docker.io/library/riven-frontend
+    container_name: riven-frontend
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "3000:3000"
+    depends_on:
+      riven:
+        condition: service_healthy
+    volumes:
+      - riven-frontend-data:/riven/data
+
   postgres:
     image: postgres:18-alpine
-    environment:
-      POSTGRES_DB: riven
-      POSTGRES_USER: riven
-      POSTGRES_PASSWORD: riven
+    env_file: .env
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U riven"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-riven}"]
       interval: 5s
       timeout: 5s
       retries: 5
 
   redis:
-    image: redis:7-alpine
+    image: redis:8-alpine
     volumes:
       - redis_data:/data
     healthcheck:
@@ -25,6 +35,7 @@ services:
 
   jellyfin:
     image: jellyfin/jellyfin:latest
+    env_file: .env
     depends_on:
       riven:
         condition: service_healthy
@@ -33,52 +44,39 @@ services:
     volumes:
       - jellyfin_data:/config
       - jellyfin_cache:/cache
-      - /mnt/riven:/mnt/riven:rslave
-    environment:
-      TZ: Europe/London
+      - type: bind
+        source: /mnt/riven
+        target: /mnt/riven
+        read_only: true
+        bind:
+          propagation: slave
 
   riven:
     build: .
+    env_file: .env
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
     ports:
-      - "3000:3000"
-    privileged: true
-    devices:
-      - /dev/fuse:/dev/fuse
+      - "8080:8080"
     volumes:
-      - /mnt/riven:/mnt/riven:rshared
+      - type: bind
+        source: /mnt/riven
+        target: /mnt/riven
+        bind:
+          propagation: shared
       - riven_logs:/logs
+    devices:
+      - /dev/fuse
+    cap_add:
+      - SYS_ADMIN
+    security_opt:
+      - apparmor:unconfined
     healthcheck:
-      test: ["CMD-SHELL", "grep -q '/mnt/riven fuse' /proc/mounts"]
-      interval: 5s
-      timeout: 5s
-      retries: 12
-      start_period: 30s
-    environment:
-      RIVEN_SETTING__DATABASE_URL: postgresql://riven:riven@postgres/riven
-      RIVEN_SETTING__REDIS_URL: redis://redis:6379
-      RIVEN_SETTING__VFS_MOUNT_PATH: /mnt/riven
-      RIVEN_SETTING__GQL_PORT: "3000"
-      RIVEN_SETTING__LOG_LEVEL: debug
-      RIVEN_SETTING__API_KEY: 366fa5d4f45556087b8e4e529d4bbb05024589f9b3ac898ead2f90c2b7b51906
-
-      RIVEN_PLUGIN_SETTING__SEERR__APIKEY: ${SEERR_API_KEY:-}
-      RIVEN_PLUGIN_SETTING__SEERR__URL: http://seerr:5055
-      RIVEN_PLUGIN_SETTING__SEERR__FILTER: approved
-
-      RIVEN_PLUGIN_SETTING__TMDB__APIKEY: ${TMDB_API_KEY:-}
-
-      RIVEN_PLUGIN_SETTING__STREMTHRU__REALDEBRIDAPIKEY: ${REAL_DEBRID_API_KEY:-}
-
-      RIVEN_PLUGIN_SETTING__PLEX__PLEXTOKEN: ${PLEX_TOKEN:-}
-      RIVEN_PLUGIN_SETTING__PLEX__PLEXSERVERURL: ${PLEX_URL:-}
-      RIVEN_PLUGIN_SETTING__PLEX__PLEXLIBRARYPATH: /mnt/riven
-
-      RIVEN_PLUGIN_SETTING__NOTIFICATIONS__URLS: ${NOTIFICATION_URLS:-[]}
+      test: ["CMD", "true"]
+      interval: 2s
 
 volumes:
   postgres_data:
@@ -87,3 +85,4 @@ volumes:
   jellyfin_data:
   jellyfin_cache:
   riven_logs:
+  riven-frontend-data:

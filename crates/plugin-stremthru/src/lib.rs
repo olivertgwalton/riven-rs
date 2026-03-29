@@ -4,9 +4,9 @@ use std::collections::HashMap;
 
 use riven_core::events::{EventType, HookResponse, RivenEvent};
 use riven_core::plugin::{Plugin, PluginContext};
+use riven_core::register_plugin;
 use riven_core::settings::PluginSettings;
 use riven_core::types::*;
-use riven_core::register_plugin;
 
 const DEFAULT_URL: &str = "https://stremthru.13377001.xyz/";
 
@@ -62,7 +62,6 @@ impl Plugin for StremthruPlugin {
         Ok(!get_configured_stores(settings).is_empty())
     }
 
-
     fn settings_schema(&self) -> Vec<riven_core::plugin::SettingField> {
         use riven_core::plugin::SettingField;
         vec![
@@ -95,7 +94,6 @@ impl Plugin for StremthruPlugin {
                 info_hash,
                 magnet,
             } => {
-                // Mirrors riven-ts-main findValidTorrentProcessor:
                 //   hasCacheCheckHook → getCachedTorrentFiles → if not cached, skip.
                 //   If cached → getPluginDownloadResult → return files instantly.
                 let mut any_network_error = false;
@@ -230,9 +228,8 @@ impl Plugin for StremthruPlugin {
                     _ => "tvsearch",
                 };
 
-                let mut url = format!(
-                    "{base_url}v0/torznab/api?o=json&imdbid={imdb_id}&t={t}&cat={cat}"
-                );
+                let mut url =
+                    format!("{base_url}v0/torznab/api?o=json&imdbid={imdb_id}&t={t}&cat={cat}");
                 if let Some(s) = season {
                     url.push_str(&format!("&season={s}"));
                 }
@@ -247,24 +244,37 @@ impl Plugin for StremthruPlugin {
                         if status.is_success() {
                             match resp.text().await {
                                 Ok(body) => {
-                                    tracing::debug!(url, body_len = body.len(), "torznab raw response received");
+                                    tracing::debug!(
+                                        url,
+                                        body_len = body.len(),
+                                        "torznab raw response received"
+                                    );
                                     match serde_json::from_str::<StremthruTorznabResponse>(&body) {
                                         Ok(data) => {
                                             let count = data.channel.items.len();
                                             tracing::debug!(url, count, "torznab items parsed");
                                             for item in data.channel.items {
-                                                let info_hash = item.attr.iter().find(|a| a.attributes.name == "infohash").map(|a| &a.attributes.value);
-                                                if let (Some(hash), title) = (info_hash, item.title) {
+                                                let info_hash = item
+                                                    .attr
+                                                    .iter()
+                                                    .find(|a| a.attributes.name == "infohash")
+                                                    .map(|a| &a.attributes.value);
+                                                if let (Some(hash), title) = (info_hash, item.title)
+                                                {
                                                     if !hash.is_empty() && !title.is_empty() {
                                                         streams.insert(hash.to_lowercase(), title);
                                                     }
                                                 }
                                             }
                                         }
-                                        Err(e) => tracing::warn!(error = %e, body = %body, "failed to parse torznab json"),
+                                        Err(e) => {
+                                            tracing::warn!(error = %e, body = %body, "failed to parse torznab json")
+                                        }
                                     }
                                 }
-                                Err(e) => tracing::warn!(error = %e, "failed to read torznab response body"),
+                                Err(e) => {
+                                    tracing::warn!(error = %e, "failed to read torznab response body")
+                                }
                             }
                         } else {
                             tracing::warn!(status = %status, "torznab request failed");
@@ -298,7 +308,9 @@ impl Plugin for StremthruPlugin {
                 for (store, api_key) in &stores {
                     match fetch_user_info(&ctx.http_client, &base_url, store, api_key).await {
                         Ok(info) => infos.push(info),
-                        Err(e) => tracing::warn!(store, error = %e, "failed to fetch debrid user info"),
+                        Err(e) => {
+                            tracing::warn!(store, error = %e, "failed to fetch debrid user info")
+                        }
                     }
                 }
                 Ok(HookResponse::UserInfo(infos))
@@ -391,19 +403,19 @@ async fn check_cache(
     // StremThru has a hard limit of 500 hashes per request, but we use a smaller
     // chunk size to avoid 414 Request-URI Too Large errors on some servers/proxies.
     const CHUNK_SIZE: usize = 50;
-    
+
     let mut futures = Vec::new();
     for chunk in hashes.chunks(CHUNK_SIZE) {
         futures.push(check_cache_chunk(client, base_url, store, api_key, chunk));
     }
 
     let results = futures::future::join_all(futures).await;
-    
+
     let mut all_results = Vec::new();
     for res in results {
         all_results.extend(res?);
     }
-    
+
     Ok(all_results)
 }
 
@@ -416,8 +428,13 @@ async fn check_cache_chunk(
 ) -> anyhow::Result<Vec<CacheCheckResult>> {
     let hash_str = hashes.join(",");
     let url = format!("{base_url}v0/store/torz/check?hash={hash_str}");
-    tracing::debug!(store, hashes = hashes.len(), url_len = url.len(), "checking debrid cache");
-    
+    tracing::debug!(
+        store,
+        hashes = hashes.len(),
+        url_len = url.len(),
+        "checking debrid cache"
+    );
+
     let response = client
         .get(&url)
         .header("x-stremthru-store-name", store)
@@ -500,13 +517,17 @@ async fn fetch_user_info(
     let resp: StremthruResponse<StremthruUser> = client
         .get(&url)
         .header("x-stremthru-store-name", store)
-        .header("x-stremthru-store-authorization", format!("Bearer {api_key}"))
+        .header(
+            "x-stremthru-store-authorization",
+            format!("Bearer {api_key}"),
+        )
         .send()
         .await?
         .json()
         .await?;
 
-    let premium_until = fetch_premium_until(client, store, api_key).await
+    let premium_until = fetch_premium_until(client, store, api_key)
+        .await
         .inspect_err(|e| tracing::debug!(store, error = %e, "could not fetch premium_until"))
         .ok()
         .flatten();

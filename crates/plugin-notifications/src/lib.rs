@@ -139,6 +139,14 @@ fn parse_notification_url(url: &str) -> Option<NotificationService> {
             webhook_id: webhook_id.to_string(),
             webhook_token: webhook_token.to_string(),
         })
+    } else if url.starts_with("https://discord.com/api/webhooks/") {
+        // https://discord.com/api/webhooks/webhookId/webhookToken
+        let rest = url.strip_prefix("https://discord.com/api/webhooks/")?;
+        let (webhook_id, webhook_token) = rest.split_once('/')?;
+        Some(NotificationService::Discord {
+            webhook_id: webhook_id.to_string(),
+            webhook_token: webhook_token.to_string(),
+        })
     } else if url.starts_with("json://") {
         let rest = url.strip_prefix("json://")?;
         Some(NotificationService::Json {
@@ -197,7 +205,8 @@ async fn send_discord(
         .post(&url)
         .json(&body)
         .send()
-        .await?;
+        .await?
+        .error_for_status()?;
 
     Ok(())
 }
@@ -211,7 +220,8 @@ async fn send_json_webhook(
         .post(url)
         .json(payload)
         .send()
-        .await?;
+        .await?
+        .error_for_status()?;
     Ok(())
 }
 

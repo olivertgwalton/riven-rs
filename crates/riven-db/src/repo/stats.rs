@@ -1,8 +1,21 @@
 use anyhow::Result;
-use chrono::NaiveDate;
+use chrono::{DateTime, NaiveDate, Utc};
 use sqlx::PgPool;
 
 use crate::entities::*;
+
+// ── Ranking profiles ──
+
+#[derive(Debug, sqlx::FromRow, serde::Serialize, serde::Deserialize)]
+pub struct RankingProfile {
+    pub id: i32,
+    pub name: String,
+    pub settings: serde_json::Value,
+    pub is_builtin: bool,
+    pub enabled: bool,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
 
 #[derive(Debug, sqlx::FromRow)]
 pub struct MediaStats {
@@ -179,6 +192,98 @@ pub async fn set_setting(pool: &PgPool, key: &str, value: serde_json::Value) -> 
     .execute(pool)
     .await?;
     Ok(())
+}
+
+pub async fn list_ranking_profiles(pool: &PgPool) -> Result<Vec<RankingProfile>> {
+    Ok(sqlx::query_as::<_, RankingProfile>(
+        "SELECT id, name, settings, is_builtin, enabled, created_at, updated_at \
+         FROM ranking_profiles ORDER BY name",
+    )
+    .fetch_all(pool)
+    .await?)
+}
+
+/// Return only profiles whose `enabled` flag is true.
+pub async fn get_enabled_profiles(pool: &PgPool) -> Result<Vec<RankingProfile>> {
+    Ok(sqlx::query_as::<_, RankingProfile>(
+        "SELECT id, name, settings, is_builtin, enabled, created_at, updated_at \
+         FROM ranking_profiles WHERE enabled = true ORDER BY name",
+    )
+    .fetch_all(pool)
+    .await?)
+}
+
+/// Toggle `enabled` on any profile (built-in or custom) by name.
+pub async fn set_profile_enabled(pool: &PgPool, name: &str, enabled: bool) -> Result<bool> {
+    let result = sqlx::query(
+        "UPDATE ranking_profiles SET enabled = $1, updated_at = NOW() WHERE name = $2",
+    )
+    .bind(enabled)
+    .bind(name)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() > 0)
+}
+
+pub async fn upsert_ranking_profile(
+    pool: &PgPool,
+    id: Option<i32>,
+    name: &str,
+    settings: serde_json::Value,
+    enabled: bool,
+) -> Result<RankingProfile> {
+    if let Some(existing_id) = id {
+        Ok(sqlx::query_as::<_, RankingProfile>(
+            "UPDATE ranking_profiles \
+             SET name = $2, settings = $3, enabled = $4, updated_at = NOW() \
+             WHERE id = $1 AND is_builtin = false \
+             RETURNING id, name, settings, is_builtin, enabled, created_at, updated_at",
+        )
+        .bind(existing_id)
+        .bind(name)
+        .bind(&settings)
+        .bind(enabled)
+        .fetch_one(pool)
+        .await?)
+    } else {
+        Ok(sqlx::query_as::<_, RankingProfile>(
+            "INSERT INTO ranking_profiles (name, settings, enabled) \
+             VALUES ($1, $2, $3) \
+             RETURNING id, name, settings, is_builtin, enabled, created_at, updated_at",
+        )
+        .bind(name)
+        .bind(&settings)
+        .bind(enabled)
+        .fetch_one(pool)
+        .await?)
+    }
+}
+
+/// Update the `settings` JSON on a profile (built-in or custom) by name.
+/// For built-in profiles this stores user overrides that are merged on top of
+/// the Rust defaults at load time.
+pub async fn update_profile_settings(
+    pool: &PgPool,
+    name: &str,
+    settings: serde_json::Value,
+) -> Result<bool> {
+    let result = sqlx::query(
+        "UPDATE ranking_profiles SET settings = $1, updated_at = NOW() WHERE name = $2",
+    )
+    .bind(&settings)
+    .bind(name)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() > 0)
+}
+
+/// Delete a custom ranking profile. Built-in profiles cannot be deleted.
+pub async fn delete_ranking_profile(pool: &PgPool, id: i32) -> Result<bool> {
+    let result = sqlx::query("DELETE FROM ranking_profiles WHERE id = $1 AND is_builtin = false")
+        .bind(id)
+        .execute(pool)
+        .await?;
+    Ok(result.rows_affected() > 0)
 }
 
 pub async fn get_all_settings(pool: &PgPool) -> Result<serde_json::Value> {

@@ -88,9 +88,12 @@ pub fn matches_episode(
 
 /// Build the VFS path for an episode file.
 /// Appends `.ptN` before the extension when `part` is `Some`.
-pub fn episode_vfs_path(show: &str, season: i32, ep: i32, part: Option<i32>) -> String {
-    let suffix = part.map(|n| format!(".pt{n}")).unwrap_or_default();
-    format!("/shows/{show}/Season {season:02}/{show} - s{season:02}e{ep:02}{suffix}.mkv")
+/// In multi-version mode, `path_tag` (e.g. `Some("ultra_hd")`) is prepended as
+/// a top-level directory so each profile has its own directory tree.
+pub fn episode_vfs_path(show: &str, season: i32, ep: i32, part: Option<i32>, path_tag: Option<&str>) -> String {
+    let part_suffix = part.map(|n| format!(".pt{n}")).unwrap_or_default();
+    let tag_suffix = path_tag.map(|t| format!(" [{t}]")).unwrap_or_default();
+    format!("/shows/{show}/Season {season:02}/{show} - s{season:02}e{ep:02}{part_suffix}{tag_suffix}.mkv")
 }
 
 /// Choose which files to persist for an episode.

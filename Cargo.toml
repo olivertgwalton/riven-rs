@@ -27,14 +27,14 @@ members = [
 
 [workspace.dependencies]
 # Async runtime
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time", "net", "signal"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time", "net", "signal", "io-util"] }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 # HTTP client
-reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+reqwest = { version = "0.12", features = ["json", "rustls-tls", "stream"], default-features = false }
 
 # Database
 sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "postgres", "chrono", "json", "migrate"] }
@@ -81,3 +81,5 @@ parking_lot = "0.12"
 dashmap = "6"
 inventory = "0.3"
 libc = "0.2"
+bytes = "1"
+tokio-util = { version = "0.7", features = ["io"] }

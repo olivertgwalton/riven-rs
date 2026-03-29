@@ -114,6 +114,10 @@ pub struct FileSystemEntry {
     pub file_hash: Option<String>,
     pub video_file_size: Option<i64>,
     pub opensubtitles_id: Option<String>,
+    // Multi-version tracking
+    pub stream_id: Option<i64>,
+    pub resolution: Option<String>,
+    pub ranking_profile_name: Option<String>,
 }
 
 impl FileSystemEntry {

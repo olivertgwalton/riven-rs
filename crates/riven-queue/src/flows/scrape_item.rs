@@ -4,10 +4,10 @@ use riven_core::events::{HookResponse, RivenEvent};
 use riven_core::types::*;
 use riven_db::entities::MediaItem;
 use riven_db::repo;
-use riven_rank::{ParsedData, RankSettings};
+use riven_rank::{ParsedData, RankSettings, RankedTorrent};
 
 use crate::{JobQueue, ScrapeJob};
-use super::load_item_or_log;
+use super::{load_active_profiles, load_item_or_log};
 
 /// Validate that a parsed torrent is a plausible match for the given item.
 /// Returns `Some(reason)` if the torrent should be skipped, `None` if it passes.
@@ -174,7 +174,16 @@ pub async fn run(id: i64, job: &ScrapeJob, queue: &JobQueue) {
         item.title.clone()
     };
 
-    let rank_settings = load_rank_settings(&queue.db_pool).await;
+    // In multi-version mode, rank each torrent against all configured profiles
+    // and keep it if it passes at least one.  In single-version mode, fall back
+    // to the active `rank_settings` DB key (existing behaviour).
+    let version_profile_settings: Vec<(String, RankSettings)> =
+        load_active_profiles(&queue.db_pool).await;
+    let fallback_settings = if version_profile_settings.is_empty() {
+        Some(load_rank_settings(&queue.db_pool).await)
+    } else {
+        None
+    };
 
     let mut stream_count = 0;
     for (info_hash, title) in &all_streams {
@@ -185,26 +194,31 @@ pub async fn run(id: i64, job: &ScrapeJob, queue: &JobQueue) {
             continue;
         }
 
-        let (parsed_data, rank) = match riven_rank::rank_torrent(
-            title,
-            info_hash,
-            &correct_title,
-            &aliases,
-            &rank_settings,
-        ) {
-            Ok(ranked) => {
+        // Try each profile; keep the highest-ranked result.
+        let best: Option<RankedTorrent> = if let Some(ref settings) = fallback_settings {
+            riven_rank::rank_torrent(title, info_hash, &correct_title, &aliases, settings).ok()
+        } else {
+            version_profile_settings
+                .iter()
+                .filter_map(|(_, settings)| {
+                    riven_rank::rank_torrent(title, info_hash, &correct_title, &aliases, settings).ok()
+                })
+                .max_by_key(|r| r.rank)
+        };
+
+        let (parsed_data, rank) = match best {
+            Some(ranked) => {
                 let parsed_data = serde_json::to_value(&ranked.data).ok();
                 let rank = ranked.rank;
                 let bitrate = ranked.data.bitrate.as_deref().unwrap_or("unknown");
                 tracing::info!(id, info_hash, rank, bitrate, title, "stream ranked and linked");
                 (parsed_data, Some(rank))
             }
-            Err(e) => {
+            None => {
                 tracing::debug!(
                     info_hash,
                     title,
-                    error = %e,
-                    "stream rejected by ranking — not linked to item"
+                    "stream rejected by all ranking profiles — not linked to item"
                 );
                 let parsed_data = serde_json::to_value(&base_parsed).ok();
                 let _ = repo::upsert_stream(&queue.db_pool, info_hash, parsed_data, None).await;

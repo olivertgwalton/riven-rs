@@ -2,7 +2,7 @@ use anyhow::Result;
 use sqlx::PgPool;
 
 use crate::entities::*;
-use riven_rank::{RankSettings, ResolutionRanks};
+use riven_rank::ResolutionRanks;
 
 pub async fn upsert_stream(
     pool: &PgPool,
@@ -109,9 +109,9 @@ pub async fn clear_blacklisted_streams(pool: &PgPool, media_item_id: i64) -> Res
 
 async fn load_resolution_ranks(pool: &PgPool) -> ResolutionRanks {
     match super::get_setting(pool, "rank_settings").await {
-        Ok(Some(value)) => serde_json::from_value::<RankSettings>(value)
-            .ok()
-            .map(|s| s.resolution_ranks)
+        Ok(Some(value)) => value
+            .get("resolution_ranks")
+            .and_then(|v| serde_json::from_value::<ResolutionRanks>(v.clone()).ok())
             .unwrap_or_default(),
         _ => ResolutionRanks::default(),
     }
@@ -161,6 +161,41 @@ pub async fn get_media_entry_by_path(pool: &PgPool, path: &str) -> Result<Option
     )
 }
 
+/// Return the ranking profile names that already have a downloaded entry for this item.
+/// Used by the multi-version download flow to skip profiles that are already complete.
+pub async fn get_downloaded_profile_names(pool: &PgPool, media_item_id: i64) -> Result<Vec<String>> {
+    let rows: Vec<Option<String>> = sqlx::query_scalar(
+        "SELECT DISTINCT ranking_profile_name FROM filesystem_entries \
+         WHERE media_item_id = $1 AND entry_type = 'media' AND ranking_profile_name IS NOT NULL",
+    )
+    .bind(media_item_id)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.into_iter().flatten().collect())
+}
+
+/// For a Season item, return profile names that have been downloaded for at least
+/// one episode in that season. Season pack downloads store entries on episode IDs
+/// (not the season ID itself), so the regular `get_downloaded_profile_names` always
+/// returns empty for seasons.
+pub async fn get_downloaded_profile_names_for_season(
+    pool: &PgPool,
+    season_id: i64,
+) -> Result<Vec<String>> {
+    let rows: Vec<Option<String>> = sqlx::query_scalar(
+        "SELECT DISTINCT fe.ranking_profile_name \
+         FROM filesystem_entries fe \
+         INNER JOIN media_items ep ON ep.id = fe.media_item_id \
+         WHERE ep.parent_id = $1 \
+           AND fe.entry_type = 'media' \
+           AND fe.ranking_profile_name IS NOT NULL",
+    )
+    .bind(season_id)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.into_iter().flatten().collect())
+}
+
 pub async fn create_media_entry(
     pool: &PgPool,
     media_item_id: i64,
@@ -171,6 +206,9 @@ pub async fn create_media_entry(
     stream_url: Option<&str>,
     plugin: &str,
     provider: Option<&str>,
+    stream_id: Option<i64>,
+    resolution: Option<&str>,
+    ranking_profile_name: Option<&str>,
 ) -> Result<FileSystemEntry> {
     let media_metadata = parse_filename_metadata(original_filename);
 
@@ -186,7 +224,11 @@ pub async fn create_media_entry(
         let updated = sqlx::query_as::<_, FileSystemEntry>(
             "UPDATE filesystem_entries \
              SET file_size = $1, original_filename = $2, download_url = $3, stream_url = $4, \
-                 plugin = $5, provider = $6, media_metadata = $7, updated_at = NOW() \
+                 plugin = $5, provider = $6, media_metadata = $7, \
+                 stream_id = COALESCE($9, stream_id), \
+                 resolution = COALESCE($10, resolution), \
+                 ranking_profile_name = COALESCE($11, ranking_profile_name), \
+                 updated_at = NOW() \
              WHERE id = $8 \
              RETURNING *",
         )
@@ -198,6 +240,9 @@ pub async fn create_media_entry(
         .bind(provider)
         .bind(&media_metadata)
         .bind(entry.id)
+        .bind(stream_id)
+        .bind(resolution)
+        .bind(ranking_profile_name)
         .fetch_one(pool)
         .await?;
         return Ok(updated);
@@ -205,8 +250,9 @@ pub async fn create_media_entry(
 
     let entry = sqlx::query_as::<_, FileSystemEntry>(
         "INSERT INTO filesystem_entries \
-         (media_item_id, entry_type, path, file_size, original_filename, download_url, stream_url, plugin, provider, media_metadata) \
-         VALUES ($1, 'media', $2, $3, $4, $5, $6, $7, $8, $9) \
+         (media_item_id, entry_type, path, file_size, original_filename, download_url, stream_url, \
+          plugin, provider, media_metadata, stream_id, resolution, ranking_profile_name) \
+         VALUES ($1, 'media', $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) \
          RETURNING *",
     )
     .bind(media_item_id)
@@ -218,6 +264,9 @@ pub async fn create_media_entry(
     .bind(plugin)
     .bind(provider)
     .bind(&media_metadata)
+    .bind(stream_id)
+    .bind(resolution)
+    .bind(ranking_profile_name)
     .fetch_one(pool)
     .await?;
     Ok(entry)
@@ -318,6 +367,16 @@ pub async fn list_vfs_file_paths(pool: &PgPool, dir_path: &str) -> Result<Vec<St
     )
     .fetch_all(pool)
     .await?)
+}
+
+pub async fn delete_filesystem_entry(pool: &PgPool, entry_id: i64) -> Result<bool> {
+    let rows = sqlx::query_scalar::<_, i64>(
+        "WITH deleted AS (DELETE FROM filesystem_entries WHERE id = $1 AND entry_type = 'media' RETURNING id) SELECT COUNT(*) FROM deleted"
+    )
+    .bind(entry_id)
+    .fetch_one(pool)
+    .await?;
+    Ok(rows > 0)
 }
 
 pub async fn update_stream_url(pool: &PgPool, entry_id: i64, stream_url: &str) -> Result<()> {

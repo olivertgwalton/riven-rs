@@ -28,8 +28,16 @@ pub(crate) fn extract_title(raw: &str) -> String {
     // Step 5: Find the earliest "marker" position
     let mut end = cleaned.len();
 
-    // Check year
-    if let Some(m) = RE_YEAR.find(&cleaned) {
+    // Check year — skip if it's at position 0 (year is part of the title, e.g. "2019 After...")
+    for m in RE_YEAR.find_iter(&cleaned) {
+        if m.start() > 0 {
+            end = end.min(m.start());
+            break;
+        }
+    }
+
+    // Check year range
+    if let Some(m) = RE_YEAR_RANGE.find(&cleaned) {
         end = end.min(m.start());
     }
 
@@ -53,7 +61,12 @@ pub(crate) fn extract_title(raw: &str) -> String {
     }
 
     // Check season indicators
-    for re in [&*RE_SEASON_SE, &*RE_SEASON_FULL, &*RE_SEASON_RANGE] {
+    for re in [
+        &*RE_SEASON_SE,
+        &*RE_SEASON_FULL,
+        &*RE_SEASON_RANGE,
+        &*RE_SEASON_ORDINAL,
+    ] {
         if let Some(m) = re.find(&cleaned) {
             end = end.min(m.start());
         }
@@ -74,6 +87,24 @@ pub(crate) fn extract_title(raw: &str) -> String {
         end = end.min(m.start());
     }
 
+    // Check edition/flag markers — these mark the end of the title
+    for re in [
+        &*RE_EDITION,
+        &*RE_UNRATED,
+        &*RE_UNCENSORED,
+        &*RE_EXTENDED,
+        &*RE_REMASTERED,
+        &*RE_PROPER,
+        &*RE_REPACK,
+        &*RE_DUBBED,
+        &*RE_DOCUMENTARY,
+        &*RE_HARDCODED,
+    ] {
+        if let Some(m) = re.find(&cleaned) {
+            end = end.min(m.start());
+        }
+    }
+
     // Check codec markers
     for re in [
         &*RE_CODEC_AVC,
@@ -86,12 +117,24 @@ pub(crate) fn extract_title(raw: &str) -> String {
         }
     }
 
+    // Check audio markers
+    for re in [
+        &*RE_AUDIO_DTS_LOSSLESS,
+        &*RE_AUDIO_DD_PLUS,
+        &*RE_AUDIO_DD,
+        &*RE_AUDIO_AAC,
+    ] {
+        if let Some(m) = re.find(&cleaned) {
+            end = end.min(m.start());
+        }
+    }
+
     // Step 6: Extract and clean up
     let title = &cleaned[..end];
 
-    // Remove trailing dashes, parens, brackets
-    let title =
-        title.trim_end_matches(|c: char| c == '-' || c == '(' || c == '[' || c.is_whitespace());
+    // Remove trailing dashes, parens, brackets, and whitespace
+    let title = title
+        .trim_end_matches(|c: char| c == '-' || c == '(' || c == '[' || c.is_whitespace());
 
     // Collapse whitespace and trim
     title
@@ -107,9 +150,10 @@ pub(crate) fn normalize_title(title: &str) -> String {
     let lower = title.to_lowercase();
     let no_accents = remove_accents(&lower);
     let replaced = no_accents.replace('&', " and ");
-    
+
     // Remove 4-digit years (e.g. 1900-2099) to handle matching when one source excludes it
-    static RE_YEAR_STRIP: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b(19|20)\d{2}\b").unwrap());
+    static RE_YEAR_STRIP: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"\b(19|20)\d{2}\b").unwrap());
     let no_year = RE_YEAR_STRIP.replace_all(&replaced, "").to_string();
 
     no_year
@@ -125,24 +169,26 @@ pub(crate) fn normalize_title(title: &str) -> String {
 pub(crate) fn normalize_edition(edition: &str) -> String {
     let lower = edition.to_lowercase();
     const TABLE: &[(&[&str], &str)] = &[
-        (&["anniversary"],           "Anniversary Edition"),
-        (&["ultimate"],              "Ultimate Edition"),
-        (&["diamond"],               "Diamond Edition"),
-        (&["collector"],             "Collectors Edition"),
-        (&["special", "edition"],    "Special Edition"),
-        (&["director"],              "Directors Cut"),
-        (&["extended", "cut"],       "Extended Cut"),
-        (&["extended", "edition"],   "Extended Edition"),
-        (&["theatrical"],            "Theatrical"),
-        (&["uncut"],                 "Uncut"),
-        (&["imax"],                  "IMAX"),
-        (&["remaster"],              "Remastered"),
-        (&["criterion"],             "Criterion Collection"),
-        (&["final", "cut"],          "Final Cut"),
-        (&["limited"],               "Limited Edition"),
-        (&["deluxe"],                "Deluxe Edition"),
+        (&["anniversary"], "Anniversary Edition"),
+        (&["ultimate"], "Ultimate Edition"),
+        (&["diamond"], "Diamond Edition"),
+        (&["collector"], "Collectors Edition"),
+        (&["special", "edition"], "Special Edition"),
+        (&["director"], "Directors Cut"),
+        (&["extended", "cut"], "Extended Cut"),
+        (&["extended", "edition"], "Extended Edition"),
+        (&["extended"], "Extended Edition"),
+        (&["theatrical"], "Theatrical"),
+        (&["uncut"], "Uncut"),
+        (&["imax"], "IMAX"),
+        (&["remaster"], "Remastered"),
+        (&["criterion"], "Criterion Collection"),
+        (&["final", "cut"], "Final Cut"),
+        (&["limited"], "Limited Edition"),
+        (&["deluxe"], "Deluxe Edition"),
     ];
-    TABLE.iter()
+    TABLE
+        .iter()
         .find(|(keys, _)| keys.iter().all(|k| lower.contains(k)))
         .map_or_else(|| edition.to_string(), |(_, name)| name.to_string())
 }

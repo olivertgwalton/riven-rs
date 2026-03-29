@@ -105,7 +105,7 @@ impl PluginSettings {
     pub fn get(&self, key: &str) -> Option<&str> {
         self.values
             .get(&key.to_lowercase())
-            .map(|s| s.as_str())
+            .map(|s| s.trim())
             .filter(|s| !s.is_empty())
     }
 

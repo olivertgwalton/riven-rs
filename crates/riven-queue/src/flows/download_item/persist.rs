@@ -12,11 +12,20 @@ use super::helpers::{
 };
 
 /// Persist a movie download result. Returns `true` on success.
+///
+/// `stream_id` links the created entry to the source stream for version tracking.
+/// `resolution` is stored in the DB for metadata.
+/// `path_tag` is embedded in the VFS filename when `Some` (multi-version mode).
+/// `profile_name` is stored on the entry for version-profile tracking.
 pub async fn persist_movie(
     item: &MediaItem,
     dl: &DownloadResult,
     info_hash: &str,
     queue: &JobQueue,
+    stream_id: Option<i64>,
+    resolution: Option<&str>,
+    path_tag: Option<&str>,
+    profile_name: Option<&str>,
 ) -> bool {
     let id = item.id;
 
@@ -59,8 +68,10 @@ pub async fn persist_movie(
     drop(config);
 
     let ext = file.filename.rsplit('.').next().unwrap_or("mkv");
-    let vfs_name = format!("{}.{ext}", item.pretty_name());
-    let path = format!("/movies/{}/{vfs_name}", item.pretty_name());
+    let tag_suffix = path_tag.map(|t| format!(" [{t}]")).unwrap_or_default();
+    let base_name = item.pretty_name();
+    let vfs_name = format!("{base_name}{tag_suffix}.{ext}");
+    let path = format!("/movies/{base_name}/{vfs_name}");
 
     if let Err(e) = repo::create_media_entry(
         &queue.db_pool,
@@ -72,6 +83,9 @@ pub async fn persist_movie(
         file.stream_url.as_deref(),
         &dl.plugin_name,
         dl.provider.as_deref(),
+        stream_id,
+        resolution,
+        profile_name,
     )
     .await
     {
@@ -95,6 +109,10 @@ pub async fn persist_episode(
     dl: &DownloadResult,
     info_hash: &str,
     queue: &JobQueue,
+    stream_id: Option<i64>,
+    resolution: Option<&str>,
+    path_tag: Option<&str>,
+    profile_name: Option<&str>,
 ) -> bool {
     let id = item.id;
 
@@ -180,7 +198,7 @@ pub async fn persist_episode(
 
     let show_name = show.pretty_name();
     for (file, part) in select_episode_files(&matched) {
-        let path = episode_vfs_path(&show_name, season_number, episode_number, part);
+        let path = episode_vfs_path(&show_name, season_number, episode_number, part, path_tag);
         if let Err(e) = repo::create_media_entry(
             &queue.db_pool,
             id,
@@ -191,6 +209,9 @@ pub async fn persist_episode(
             file.stream_url.as_deref(),
             &dl.plugin_name,
             dl.provider.as_deref(),
+            stream_id,
+            resolution,
+            profile_name,
         )
         .await
         {
@@ -218,6 +239,9 @@ pub async fn persist_season(
     info_hash: &str,
     queue: &JobQueue,
     start_time: Instant,
+    stream_id: Option<i64>,
+    path_tag: Option<&str>,
+    profile_name: Option<&str>,
 ) -> bool {
     let id = item.id;
 
@@ -290,7 +314,7 @@ pub async fn persist_season(
         }
 
         for (file, part) in select_episode_files(&matched) {
-            let path = episode_vfs_path(&show_name, season_number, episode_number, part);
+            let path = episode_vfs_path(&show_name, season_number, episode_number, part, path_tag);
             match repo::create_media_entry(
                 &queue.db_pool,
                 ep.id,
@@ -301,6 +325,9 @@ pub async fn persist_season(
                 file.stream_url.as_deref(),
                 &dl.plugin_name,
                 dl.provider.as_deref(),
+                stream_id,
+                None,
+                profile_name,
             )
             .await
             {

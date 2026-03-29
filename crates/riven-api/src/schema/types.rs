@@ -7,6 +7,7 @@ pub struct EpisodeFull {
     #[graphql(flatten)]
     pub item: MediaItem,
     pub filesystem_entry: Option<FileSystemEntry>,
+    pub filesystem_entries: Vec<FileSystemEntry>,
 }
 
 /// Season with its episodes and their file info.
@@ -23,6 +24,7 @@ pub struct MediaItemFull {
     #[graphql(flatten)]
     pub item: MediaItem,
     pub filesystem_entry: Option<FileSystemEntry>,
+    pub filesystem_entries: Vec<FileSystemEntry>,
     pub seasons: Vec<SeasonFull>,
 }
 

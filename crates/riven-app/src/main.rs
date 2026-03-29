@@ -84,6 +84,7 @@ async fn main() -> Result<()> {
     // ── Register plugins ──
     let http_client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
+        .user_agent("Mozilla/5.0 (compatible; riven/1.0)")
         .build()?;
 
     let registry = setup::register_plugins(http_client.clone(), db_pool.clone(), redis_conn).await;
@@ -185,7 +186,9 @@ async fn main() -> Result<()> {
 
     // ── Run everything ──
     let monitor_task = tokio::spawn(async move {
+        let mut redis_conn = monitor_jq.redis.clone();
         loop {
+            riven_queue::clear_worker_registrations(&mut redis_conn).await;
             let result = tokio::spawn(riven_queue::start_workers(monitor_jq.clone()).run()).await;
             match result {
                 Ok(Ok(())) => tracing::warn!("apalis monitor exited, restarting"),
