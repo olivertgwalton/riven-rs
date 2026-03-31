@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use riven_core::events::RivenEvent;
-use riven_core::types::DownloadFile;
+use riven_core::types::{CacheCheckFile, DownloadFile, MediaItemType};
 use riven_db::entities::MediaItem;
 use riven_db::repo;
 
@@ -65,6 +65,37 @@ pub async fn load_item_or_err(
     }
 }
 
+const VALID_VIDEO_EXTENSIONS: &[&str] = &["mp4", "mkv", "avi", "mov", "wmv", "flv", "webm"];
+
+/// Returns true if the filename has a recognised video extension.
+/// Matches riven-ts VALID_FILE_EXTENSIONS list.
+pub fn is_video_file(filename: &str) -> bool {
+    let ext = filename.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+    VALID_VIDEO_EXTENSIONS.contains(&ext.as_str())
+}
+
+/// Returns true if the cached file list contains at least one file that matches
+/// the media item. Used to skip add_torrent when the torrent clearly won't
+/// satisfy the item (matches riven-ts getCachedTorrentFiles pre-validation).
+pub fn has_matching_file(files: &[CacheCheckFile], item: &MediaItem) -> bool {
+    match item.item_type {
+        MediaItemType::Movie => files.iter().any(|f| {
+            is_video_file(&f.name) && parse_file_path(&f.name).media_type() == "movie"
+        }),
+        MediaItemType::Episode => {
+            let season = item.season_number.unwrap_or(1);
+            let ep = item.episode_number.unwrap_or(1);
+            files.iter().any(|f| {
+                is_video_file(&f.name)
+                    && matches_episode(&parse_file_path(&f.name), season, ep, item.absolute_number)
+            })
+        }
+        // For seasons, any video file is sufficient; per-episode validation
+        // happens in persist_season which already accepts partial packs.
+        _ => files.iter().any(|f| is_video_file(&f.name)),
+    }
+}
+
 /// Parse a file path by merging metadata from all path segments.
 pub fn parse_file_path(path: &str) -> riven_rank::ParsedData {
     let mut merged = riven_rank::ParsedData::default();
@@ -75,15 +106,24 @@ pub fn parse_file_path(path: &str) -> riven_rank::ParsedData {
 }
 
 /// Returns true if a parsed file covers the given season/episode.
+///
+/// Handles two cases (matching riven-ts mapItemsToFiles behaviour):
+/// 1. Normal: file has season info → season must match, episode or abs must match.
+/// 2. Abs-only: file has no season info → abs number alone is sufficient.
 pub fn matches_episode(
     parsed: &riven_rank::ParsedData,
     season: i32,
     ep: i32,
     abs: Option<i32>,
 ) -> bool {
-    parsed.seasons.contains(&season)
+    let season_match = parsed.seasons.contains(&season)
         && (parsed.episodes.contains(&ep)
-            || abs.map_or(false, |a| parsed.episodes.contains(&a)))
+            || abs.map_or(false, |a| parsed.episodes.contains(&a)));
+
+    let abs_only_match = parsed.seasons.is_empty()
+        && abs.map_or(false, |a| parsed.episodes.contains(&a));
+
+    season_match || abs_only_match
 }
 
 /// Build the VFS path for an episode file.

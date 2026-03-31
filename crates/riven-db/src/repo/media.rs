@@ -24,11 +24,19 @@ async fn upsert_top_level_item(
     if let Some(existing) =
         find_existing_media_item(pool, type_val, imdb_id, tmdb_id, tvdb_id).await?
     {
-        if !existing.is_requested {
-            sqlx::query!(
-                "UPDATE media_items SET is_requested = TRUE, updated_at = NOW() WHERE id = $1",
-                existing.id
+        // Update is_requested and link to the current request when not already set.
+        let needs_update = !existing.is_requested
+            || (item_request_id.is_some() && existing.item_request_id != item_request_id);
+        if needs_update {
+            sqlx::query(
+                "UPDATE media_items \
+                 SET is_requested = TRUE, \
+                     item_request_id = COALESCE($1, item_request_id), \
+                     updated_at = NOW() \
+                 WHERE id = $2",
             )
+            .bind(item_request_id)
+            .bind(existing.id)
             .execute(pool)
             .await?;
         }

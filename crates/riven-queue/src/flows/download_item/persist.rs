@@ -7,7 +7,7 @@ use riven_db::repo;
 
 use crate::JobQueue;
 use super::helpers::{
-    episode_vfs_path, handle_bitrate_failure, load_item_or_err, matches_episode,
+    episode_vfs_path, handle_bitrate_failure, is_video_file, load_item_or_err, matches_episode,
     parse_file_path, select_episode_files,
 };
 
@@ -37,6 +37,7 @@ pub async fn persist_movie(
     let mut video_files: Vec<(&DownloadFile, riven_rank::ParsedData)> = dl
         .files
         .iter()
+        .filter(|f| is_video_file(&f.filename))
         .map(|f| (f, parse_file_path(&f.filename)))
         .filter(|(_, parsed)| parsed.media_type() == "movie")
         .collect();
@@ -166,6 +167,7 @@ pub async fn persist_episode(
     let matched: Vec<(&DownloadFile, riven_rank::ParsedData)> = dl
         .files
         .iter()
+        .filter(|f| is_video_file(&f.filename))
         .map(|f| (f, parse_file_path(&f.filename)))
         .filter(|(_, p)| matches_episode(p, season_number, episode_number, item.absolute_number))
         .collect();
@@ -291,6 +293,7 @@ pub async fn persist_season(
         let matched: Vec<(&DownloadFile, riven_rank::ParsedData)> = dl
             .files
             .iter()
+            .filter(|f| is_video_file(&f.filename))
             .map(|f| (f, parse_file_path(&f.filename)))
             .filter(|(_, p)| matches_episode(p, season_number, episode_number, ep.absolute_number))
             .collect();

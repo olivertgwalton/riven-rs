@@ -260,6 +260,52 @@ pub async fn mark_seasons_requested_and_get_episodes(
     .await?)
 }
 
+/// Clear `is_requested` on all non-completed seasons of a show that are NOT in
+/// `requested_season_numbers`, and on their child episodes. This prevents the
+/// retry scheduler from processing seasons the user did not select.
+pub async fn unmark_unrequested_seasons(
+    pool: &PgPool,
+    show_id: i64,
+    requested_season_numbers: &[i32],
+) -> Result<()> {
+    // Un-mark seasons not in the requested list (skip already-completed ones so
+    // they remain visible in the show's state computation).
+    sqlx::query(
+        "UPDATE media_items \
+         SET is_requested = false, updated_at = NOW() \
+         WHERE parent_id = $1 \
+           AND item_type = 'season' \
+           AND season_number IS NOT NULL \
+           AND NOT (season_number = ANY($2)) \
+           AND state NOT IN ('completed', 'partially_completed', 'ongoing')",
+    )
+    .bind(show_id)
+    .bind(requested_season_numbers)
+    .execute(pool)
+    .await?;
+
+    // Un-mark episodes inside those seasons too.
+    sqlx::query(
+        "UPDATE media_items \
+         SET is_requested = false, updated_at = NOW() \
+         WHERE parent_id IN ( \
+             SELECT id FROM media_items \
+             WHERE parent_id = $1 \
+               AND item_type = 'season' \
+               AND season_number IS NOT NULL \
+               AND NOT (season_number = ANY($2)) \
+               AND state NOT IN ('completed', 'partially_completed', 'ongoing') \
+         ) \
+           AND item_type = 'episode'",
+    )
+    .bind(show_id)
+    .bind(requested_season_numbers)
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
 fn apply_item_filters(
     qb: &mut sqlx::QueryBuilder<'_, sqlx::Postgres>,
     types: Option<&[MediaItemType]>,

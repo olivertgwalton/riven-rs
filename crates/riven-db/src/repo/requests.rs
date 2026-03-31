@@ -68,32 +68,42 @@ pub async fn create_item_request(
     if let Some(existing) =
         find_existing_item_request(pool, imdb_id, tmdb_id, tvdb_id).await?
     {
-        // For shows: if new seasons are specified and the existing request has a seasons list,
-        // merge them so "Request More" adds to the existing request rather than being a no-op.
+        // For shows: if new seasons are specified, update the request.
+        // - If the existing request has a seasons list, merge (Request More adds seasons).
+        // - If the existing request has seasons = NULL (whole show), replace with the
+        //   specific seasons so the indexer honours the user's selection.
         if let Some(new_seasons) = seasons {
             if !new_seasons.is_empty() {
-                if let Some(ref existing_seasons_val) = existing.seasons {
-                    let existing_vec: Vec<i32> =
-                        serde_json::from_value(existing_seasons_val.clone()).unwrap_or_default();
-                    let mut seen: std::collections::HashSet<i32> =
-                        existing_vec.iter().copied().collect();
-                    let mut merged = existing_vec;
-                    for &s in new_seasons {
-                        if seen.insert(s) {
-                            merged.push(s);
+                let updated_seasons: Vec<i32> =
+                    if let Some(ref existing_seasons_val) = existing.seasons {
+                        let existing_vec: Vec<i32> =
+                            serde_json::from_value(existing_seasons_val.clone())
+                                .unwrap_or_default();
+                        let mut seen: std::collections::HashSet<i32> =
+                            existing_vec.iter().copied().collect();
+                        let mut merged = existing_vec;
+                        for &s in new_seasons {
+                            if seen.insert(s) {
+                                merged.push(s);
+                            }
                         }
-                    }
-                    merged.sort_unstable();
-                    let merged_json = serde_json::to_value(&merged).unwrap_or_default();
-                    let updated = sqlx::query_as::<_, ItemRequest>(
-                        "UPDATE item_requests SET seasons = $1 WHERE id = $2 RETURNING *",
-                    )
-                    .bind(merged_json)
-                    .bind(existing.id)
-                    .fetch_one(pool)
-                    .await?;
-                    return Ok(updated);
-                }
+                        merged.sort_unstable();
+                        merged
+                    } else {
+                        // Existing request covered the whole show; narrow to requested seasons.
+                        let mut v = new_seasons.to_vec();
+                        v.sort_unstable();
+                        v
+                    };
+                let merged_json = serde_json::to_value(&updated_seasons).unwrap_or_default();
+                let updated = sqlx::query_as::<_, ItemRequest>(
+                    "UPDATE item_requests SET seasons = $1 WHERE id = $2 RETURNING *",
+                )
+                .bind(merged_json)
+                .bind(existing.id)
+                .fetch_one(pool)
+                .await?;
+                return Ok(updated);
             }
         }
         return Ok(existing);

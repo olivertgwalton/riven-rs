@@ -6,12 +6,12 @@ use std::time::Instant;
 
 use riven_core::events::{HookResponse, RivenEvent};
 use riven_core::types::*;
-use riven_db::entities::Stream;
+use riven_db::entities::{MediaItem, Stream};
 use riven_db::repo;
 use riven_rank::{ParsedData, RankSettings};
 
 use crate::{DownloadJob, JobQueue};
-use helpers::load_item_or_err;
+use helpers::{has_matching_file, load_item_or_err};
 use persist::{persist_episode, persist_movie, persist_season};
 use super::load_active_profiles;
 
@@ -70,17 +70,12 @@ pub async fn run(id: i64, _job: &DownloadJob, queue: &JobQueue) {
     let cache_event = RivenEvent::MediaItemDownloadCacheCheckRequested { hashes };
     let cache_results = queue.registry.dispatch(&cache_event).await;
 
-    let mut cached_info: HashMap<String, u64> = HashMap::new();
+    let mut cached_info: HashMap<String, Vec<CacheCheckFile>> = HashMap::new();
     for (_, result) in cache_results {
         if let Ok(HookResponse::CacheCheck(results)) = result {
             for r in results {
-                if matches!(
-                    r.status,
-                    riven_core::types::TorrentStatus::Cached
-                        | riven_core::types::TorrentStatus::Downloaded
-                ) {
-                    let size_sum = r.files.iter().map(|f| f.size).sum();
-                    cached_info.insert(r.hash.to_lowercase(), size_sum);
+                if matches!(r.status, TorrentStatus::Cached | TorrentStatus::Downloaded) {
+                    cached_info.insert(r.hash.to_lowercase(), r.files);
                 }
             }
         }
@@ -132,12 +127,12 @@ pub async fn run(id: i64, _job: &DownloadJob, queue: &JobQueue) {
 
 async fn run_multi_version(
     id: i64,
-    item: &riven_db::entities::MediaItem,
+    item: &MediaItem,
     queue: &JobQueue,
     start_time: Instant,
     version_profiles: &[(String, RankSettings)],
     all_streams: &[Stream],
-    cached_info: &HashMap<String, u64>,
+    cached_info: &HashMap<String, Vec<CacheCheckFile>>,
     max_size_bytes: Option<u64>,
     min_size_bytes: Option<u64>,
 ) {
@@ -155,7 +150,7 @@ async fn run_multi_version(
 
         // Pick the best cached stream for this profile from the already-fetched pool.
         let stream = match pick_best_for_profile(
-            all_streams, profile_settings, cached_info, max_size_bytes, min_size_bytes,
+            all_streams, item, profile_settings, cached_info, max_size_bytes, min_size_bytes,
         ) {
             Some(s) => s,
             None => {
@@ -217,8 +212,9 @@ async fn run_multi_version(
 /// a genuinely distinct quality tier.
 fn pick_best_for_profile<'a>(
     candidates: &'a [Stream],
+    item: &MediaItem,
     profile: &RankSettings,
-    cached_info: &HashMap<String, u64>,
+    cached_info: &HashMap<String, Vec<CacheCheckFile>>,
     max_size: Option<u64>,
     min_size: Option<u64>,
 ) -> Option<&'a Stream> {
@@ -227,12 +223,15 @@ fn pick_best_for_profile<'a>(
     let mut scored: Vec<(&Stream, i64)> = candidates
         .iter()
         .filter_map(|s| {
-            // Must be cached and within bitrate limits.
-            let size = cached_info.get(&s.info_hash.to_lowercase())?;
-            if max_size.is_some_and(|max| *size > max) {
+            let files = cached_info.get(&s.info_hash.to_lowercase())?;
+            let size: u64 = files.iter().map(|f| f.size).sum();
+            if max_size.is_some_and(|max| size > max) {
                 return None;
             }
-            if min_size.is_some_and(|min| *size < min) {
+            if min_size.is_some_and(|min| size < min) {
+                return None;
+            }
+            if !has_matching_file(files, item) {
                 return None;
             }
 
@@ -290,30 +289,31 @@ async fn fetch_done_profiles(queue: &JobQueue, id: i64, item_type: MediaItemType
 
 async fn run_single_version(
     id: i64,
-    item: &riven_db::entities::MediaItem,
+    item: &MediaItem,
     queue: &JobQueue,
     start_time: Instant,
     streams: &[Stream],
-    cached_info: &HashMap<String, u64>,
+    cached_info: &HashMap<String, Vec<CacheCheckFile>>,
     max_size_bytes: Option<u64>,
     min_size_bytes: Option<u64>,
 ) {
     let valid_streams: Vec<&Stream> = streams
         .iter()
         .filter(|s| {
-            let Some(size) = cached_info.get(&s.info_hash.to_lowercase()) else {
+            let Some(files) = cached_info.get(&s.info_hash.to_lowercase()) else {
                 return false;
             };
+            let size: u64 = files.iter().map(|f| f.size).sum();
             tracing::debug!(id, info_hash = %s.info_hash, size, "stream is cached");
-            if max_size_bytes.is_some_and(|max| *size > max) {
+            if max_size_bytes.is_some_and(|max| size > max) {
                 tracing::debug!(id, info_hash = %s.info_hash, size, "stream filtered: exceeds max bitrate");
                 return false;
             }
-            if min_size_bytes.is_some_and(|min| *size < min) {
+            if min_size_bytes.is_some_and(|min| size < min) {
                 tracing::debug!(id, info_hash = %s.info_hash, size, "stream filtered: below min bitrate");
                 return false;
             }
-            true
+            has_matching_file(files, item)
         })
         .collect();
 

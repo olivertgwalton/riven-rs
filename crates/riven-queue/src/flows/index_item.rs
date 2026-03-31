@@ -14,6 +14,18 @@ pub async fn run(id: i64, queue: &JobQueue) {
         return;
     };
 
+    // Resolve which seasons this request covers (None = whole show).
+    let requested_seasons: Option<Vec<i32>> = if let Some(req_id) = item.item_request_id {
+        repo::get_item_request_by_id(&queue.db_pool, req_id)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|req| req.seasons)
+            .and_then(|s| serde_json::from_value(s).ok())
+    } else {
+        None
+    };
+
     let event = RivenEvent::MediaItemIndexRequested {
         id: item.id,
         item_type: item.item_type,
@@ -73,16 +85,6 @@ pub async fn run(id: i64, queue: &JobQueue) {
     // For shows, create seasons and episodes then refresh state for each.
     if item.item_type == MediaItemType::Show {
         if let Some(seasons) = &merged.seasons {
-            let requested_seasons: Option<Vec<i32>> = if let Some(req_id) = item.item_request_id {
-                repo::get_item_request_by_id(&queue.db_pool, req_id)
-                    .await
-                    .ok()
-                    .flatten()
-                    .and_then(|req| req.seasons)
-                    .and_then(|s| serde_json::from_value(s).ok())
-            } else {
-                None
-            };
 
             for season_data in seasons {
                 let season_requested = if season_data.number == 0 {
@@ -96,6 +98,12 @@ pub async fn run(id: i64, queue: &JobQueue) {
                         .map(|s| s.contains(&season_data.number))
                         .unwrap_or(true)
                 };
+
+                // When specific seasons were requested, skip seasons not in the list
+                // entirely — don't create them or their episodes.
+                if requested_seasons.is_some() && !season_requested {
+                    continue;
+                }
 
                 let season = match repo::create_season(
                     &queue.db_pool,
@@ -138,6 +146,12 @@ pub async fn run(id: i64, queue: &JobQueue) {
 
                 let _ = repo::refresh_state(&queue.db_pool, &season).await;
             }
+        }
+
+        // Un-mark non-requested, non-completed seasons so the retry scheduler
+        // does not pick them up (covers both re-add and existing-show cases).
+        if let Some(ref nums) = requested_seasons {
+            let _ = repo::unmark_unrequested_seasons(&queue.db_pool, id, nums).await;
         }
 
         if let Ok(Some(show_item)) = repo::get_media_item(&queue.db_pool, id).await {
@@ -213,6 +227,13 @@ pub async fn run(id: i64, queue: &JobQueue) {
                 riven_db::repo::get_requested_seasons_for_show(&queue.db_pool, fresh_item.id).await
             {
                 for season in seasons {
+                    // When specific seasons were requested, only push scrape jobs for those —
+                    // avoid re-scraping all previously-requested seasons.
+                    if let Some(ref nums) = requested_seasons {
+                        if !season.season_number.map(|n| nums.contains(&n)).unwrap_or(false) {
+                            continue;
+                        }
+                    }
                     queue
                         .push_scrape(ScrapeJob {
                             id: season.id,

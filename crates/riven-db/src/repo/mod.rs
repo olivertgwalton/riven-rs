@@ -51,5 +51,20 @@ pub async fn delete_items_by_ids(pool: &PgPool, ids: Vec<i64>) -> Result<u64> {
     let result = sqlx::query!("DELETE FROM media_items WHERE id = ANY($1)", &ids[..])
         .execute(pool)
         .await?;
+
+    // Clean up item_requests that are no longer referenced by any media_item.
+    // Deleting a show cascades its seasons/episodes, leaving the item_request
+    // orphaned. Without this, re-requesting the same show finds the old request
+    // and merges all previously-requested seasons back in.
+    let _ = sqlx::query(
+        "DELETE FROM item_requests \
+         WHERE id NOT IN ( \
+             SELECT DISTINCT item_request_id FROM media_items \
+             WHERE item_request_id IS NOT NULL \
+         )",
+    )
+    .execute(pool)
+    .await;
+
     Ok(result.rows_affected())
 }

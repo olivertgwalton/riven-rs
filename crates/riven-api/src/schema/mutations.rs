@@ -326,13 +326,20 @@ impl MutationRoot {
                         season_numbers,
                     )
                     .await;
+
+                    // Un-mark non-requested, non-completed seasons so the retry
+                    // scheduler does not process them while the index job is pending.
+                    let _ = repo::unmark_unrequested_seasons(pool, item.id, season_numbers).await;
                 }
             }
 
-            // If the show has no imdb_id yet (e.g. created by Seerr with only tvdb_id
-            // before indexing completed), re-index so the indexer fills in imdb_id and
-            // then pushes scrape jobs with the correct ID.
-            if item.imdb_id.is_none() {
+            // Re-index when: (a) no imdb_id yet, or (b) specific seasons were requested
+            // so the indexer can create any new seasons and push scrape jobs for only
+            // the requested ones. For a whole-show re-request with imdb_id already set,
+            // skip re-indexing and go straight to scraping non-completed seasons.
+            let specific_seasons_requested =
+                seasons.as_deref().map(|s| !s.is_empty()).unwrap_or(false);
+            if item.imdb_id.is_none() || specific_seasons_requested {
                 job_queue
                     .push_index(IndexJob {
                         id: item.id,
