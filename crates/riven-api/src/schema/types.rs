@@ -1,4 +1,5 @@
 use async_graphql::SimpleObject;
+use riven_core::types::MediaItemState;
 use riven_db::entities::*;
 
 /// Episode with its primary filesystem entry (media file only).
@@ -28,6 +29,35 @@ pub struct MediaItemFull {
     pub seasons: Vec<SeasonFull>,
 }
 
+/// Lightweight episode state used for live state subscriptions.
+#[derive(SimpleObject)]
+pub struct EpisodeState {
+    pub id: i64,
+    pub episode_number: Option<i32>,
+    pub state: MediaItemState,
+}
+
+/// Lightweight season state used for live state subscriptions.
+#[derive(SimpleObject)]
+pub struct SeasonState {
+    pub id: i64,
+    pub season_number: Option<i32>,
+    pub state: MediaItemState,
+    pub is_requested: bool,
+    pub episodes: Vec<EpisodeState>,
+}
+
+/// Lightweight media state tree used for live state subscriptions.
+#[derive(SimpleObject)]
+pub struct MediaItemStateTree {
+    pub id: i64,
+    pub state: MediaItemState,
+    pub imdb_id: Option<String>,
+    pub tmdb_id: Option<String>,
+    pub tvdb_id: Option<String>,
+    pub seasons: Vec<SeasonState>,
+}
+
 #[derive(SimpleObject)]
 pub struct ItemsPage {
     pub items: Vec<MediaItem>,
@@ -41,6 +71,7 @@ pub struct ItemsPage {
 pub struct PluginInfo {
     pub name: String,
     pub version: String,
+    pub enabled: bool,
     pub valid: bool,
     /// JSON array of SettingField descriptors for rendering the settings form.
     pub schema: serde_json::Value,

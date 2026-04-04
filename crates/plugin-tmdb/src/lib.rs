@@ -4,9 +4,9 @@ use serde::Deserialize;
 
 use riven_core::events::{EventType, HookResponse, RivenEvent};
 use riven_core::plugin::{Plugin, PluginContext};
+use riven_core::register_plugin;
 use riven_core::settings::PluginSettings;
 use riven_core::types::*;
-use riven_core::register_plugin;
 
 const TMDB_BASE_URL: &str = "https://api.themoviedb.org/3/";
 
@@ -21,10 +21,6 @@ impl Plugin for TmdbPlugin {
         "tmdb"
     }
 
-    fn version(&self) -> &'static str {
-        "0.1.0"
-    }
-
     fn subscribed_events(&self) -> &[EventType] {
         &[EventType::MediaItemIndexRequested]
     }
@@ -33,12 +29,9 @@ impl Plugin for TmdbPlugin {
         Ok(settings.has("apikey"))
     }
 
-
     fn settings_schema(&self) -> Vec<riven_core::plugin::SettingField> {
         use riven_core::plugin::SettingField;
-        vec![
-            SettingField::new("apikey", "API Key", "password").required(),
-        ]
+        vec![SettingField::new("apikey", "API Key", "password").required()]
     }
 
     async fn handle_event(
@@ -46,36 +39,33 @@ impl Plugin for TmdbPlugin {
         event: &RivenEvent,
         ctx: &PluginContext,
     ) -> anyhow::Result<HookResponse> {
-        match event {
-            RivenEvent::MediaItemIndexRequested {
-                item_type,
-                imdb_id,
-                tmdb_id,
-                ..
-            } => {
-                if *item_type != MediaItemType::Movie {
-                    return Ok(HookResponse::Empty);
-                }
-
-                let api_key = ctx.require_setting("apikey")?;
-
-                let indexed = if let Some(tmdb_id) = tmdb_id {
-                    fetch_movie_by_tmdb_id(&ctx.http_client, api_key, tmdb_id).await?
-                } else if let Some(imdb_id) = imdb_id {
-                    let tmdb_id = find_tmdb_id(&ctx.http_client, api_key, imdb_id).await?;
-                    fetch_movie_by_tmdb_id(&ctx.http_client, api_key, &tmdb_id).await?
-                } else {
-                    return Ok(HookResponse::Empty);
-                };
-
-                Ok(HookResponse::Index(Box::new(indexed)))
-            }
-            _ => Ok(HookResponse::Empty),
+        let Some(request) = event.index_request() else {
+            return Ok(HookResponse::Empty);
+        };
+        if request.item_type != MediaItemType::Movie {
+            return Ok(HookResponse::Empty);
         }
+
+        let api_key = ctx.require_setting("apikey")?;
+
+        let indexed = if let Some(tmdb_id) = request.tmdb_id {
+            fetch_movie_by_tmdb_id(&ctx.http_client, api_key, tmdb_id).await?
+        } else if let Some(imdb_id) = request.imdb_id {
+            let tmdb_id = find_tmdb_id(&ctx.http_client, api_key, imdb_id).await?;
+            fetch_movie_by_tmdb_id(&ctx.http_client, api_key, &tmdb_id).await?
+        } else {
+            return Ok(HookResponse::Empty);
+        };
+
+        Ok(HookResponse::Index(Box::new(indexed)))
     }
 }
 
-async fn find_tmdb_id(client: &reqwest::Client, api_key: &str, imdb_id: &str) -> anyhow::Result<String> {
+async fn find_tmdb_id(
+    client: &reqwest::Client,
+    api_key: &str,
+    imdb_id: &str,
+) -> anyhow::Result<String> {
     let url = format!("{TMDB_BASE_URL}find/{imdb_id}?external_source=imdb_id");
     let resp: TmdbFindResponse = client
         .get(&url)
@@ -96,9 +86,8 @@ async fn fetch_movie_by_tmdb_id(
     api_key: &str,
     tmdb_id: &str,
 ) -> anyhow::Result<IndexedMediaItem> {
-    let url = format!(
-        "{TMDB_BASE_URL}movie/{tmdb_id}?append_to_response=external_ids,release_dates"
-    );
+    let url =
+        format!("{TMDB_BASE_URL}movie/{tmdb_id}?append_to_response=external_ids,release_dates");
     let movie: TmdbMovieResponse = client
         .get(&url)
         .bearer_auth(api_key)
@@ -123,10 +112,7 @@ async fn fetch_movie_by_tmdb_id(
         .as_ref()
         .map(|g| g.iter().map(|genre| genre.name.clone()).collect());
 
-    let imdb_id = movie
-        .external_ids
-        .as_ref()
-        .and_then(|e| e.imdb_id.clone());
+    let imdb_id = movie.external_ids.as_ref().and_then(|e| e.imdb_id.clone());
 
     Ok(IndexedMediaItem {
         title: Some(movie.title),

@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use redis::AsyncCommands;
 use serde::Deserialize;
 use std::collections::HashMap;
 
@@ -9,6 +10,7 @@ use riven_core::settings::PluginSettings;
 use riven_core::types::*;
 
 const DEFAULT_URL: &str = "https://stremthru.13377001.xyz/";
+const CACHE_CHECK_TTL_SECS: u64 = 60 * 60 * 24;
 
 const STORE_NAMES: &[&str] = &[
     "realdebrid",
@@ -41,10 +43,6 @@ fn get_configured_stores(settings: &PluginSettings) -> Vec<(&str, String)> {
 impl Plugin for StremthruPlugin {
     fn name(&self) -> &'static str {
         "stremthru"
-    }
-
-    fn version(&self) -> &'static str {
-        "0.1.0"
     }
 
     fn subscribed_events(&self) -> &[EventType] {
@@ -88,19 +86,92 @@ impl Plugin for StremthruPlugin {
         let base_url = ctx.settings.get_or("stremthruurl", DEFAULT_URL);
         let stores = get_configured_stores(&ctx.settings);
 
+        if let Some(request) = event.scrape_request() {
+            let Some(imdb_id) = request.imdb_id else {
+                return Ok(HookResponse::Empty);
+            };
+
+            let cat = match request.item_type {
+                MediaItemType::Movie => "2000",
+                _ => "5000",
+            };
+
+            let t = match request.item_type {
+                MediaItemType::Movie => "movie",
+                _ => "tvsearch",
+            };
+
+            let mut url =
+                format!("{base_url}v0/torznab/api?o=json&imdbid={imdb_id}&t={t}&cat={cat}");
+            if let Some(s) = request.season {
+                url.push_str(&format!("&season={s}"));
+            }
+            if let Some(e) = request.episode {
+                url.push_str(&format!("&ep={e}"));
+            }
+
+            let mut streams = HashMap::new();
+            match ctx.http_client.get(&url).send().await {
+                Ok(resp) => {
+                    let status = resp.status();
+                    if status.is_success() {
+                        match resp.text().await {
+                            Ok(body) => {
+                                tracing::debug!(
+                                    url,
+                                    body_len = body.len(),
+                                    "torznab raw response received"
+                                );
+                                match serde_json::from_str::<StremthruTorznabResponse>(&body) {
+                                    Ok(data) => {
+                                        let count = data.channel.items.len();
+                                        tracing::debug!(url, count, "torznab items parsed");
+                                        for item in data.channel.items {
+                                            let info_hash = item
+                                                .attr
+                                                .iter()
+                                                .find(|a| a.attributes.name == "infohash")
+                                                .map(|a| &a.attributes.value);
+                                            if let (Some(hash), title) = (info_hash, item.title) {
+                                                if !hash.is_empty() && !title.is_empty() {
+                                                    streams.insert(hash.to_lowercase(), title);
+                                                }
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(error = %e, body = %body, "failed to parse torznab json")
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!(error = %e, "failed to read torznab response body")
+                            }
+                        }
+                    } else {
+                        tracing::warn!(status = %status, "torznab request failed");
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "torznab scrape failed");
+                }
+            }
+            tracing::debug!(url, found = streams.len(), "scrape complete");
+
+            return Ok(HookResponse::Scrape(streams));
+        }
+
         match event {
             RivenEvent::MediaItemDownloadRequested {
                 id: _,
                 info_hash,
                 magnet,
             } => {
-                //   hasCacheCheckHook → getCachedTorrentFiles → if not cached, skip.
-                //   If cached → getPluginDownloadResult → return files instantly.
                 let mut any_network_error = false;
                 for (store, api_key) in &stores {
-                    // Step 1: Cache check — only proceed if the torrent is cached.
                     let is_cached = match check_cache(
                         &ctx.http_client,
+                        &ctx.redis,
                         &base_url,
                         store,
                         api_key,
@@ -133,7 +204,6 @@ impl Plugin for StremthruPlugin {
                         continue;
                     }
 
-                    // Step 2: Torrent is cached — add it to get download URLs instantly.
                     match add_torrent(&ctx.http_client, &base_url, store, api_key, magnet).await {
                         Ok(result) => {
                             let files = result
@@ -177,6 +247,7 @@ impl Plugin for StremthruPlugin {
                 for (store, api_key) in &stores {
                     futures.push(check_cache(
                         &ctx.http_client,
+                        &ctx.redis,
                         &base_url,
                         store,
                         api_key,
@@ -204,89 +275,6 @@ impl Plugin for StremthruPlugin {
                     })
                     .collect();
                 Ok(HookResponse::ProviderList(providers))
-            }
-
-            RivenEvent::MediaItemScrapeRequested {
-                imdb_id,
-                item_type,
-                season,
-                episode,
-                ..
-            } => {
-                let imdb_id = match imdb_id {
-                    Some(id) => id,
-                    None => return Ok(HookResponse::Empty),
-                };
-
-                let cat = match item_type {
-                    MediaItemType::Movie => "2000",
-                    _ => "5000",
-                };
-
-                let t = match item_type {
-                    MediaItemType::Movie => "movie",
-                    _ => "tvsearch",
-                };
-
-                let mut url =
-                    format!("{base_url}v0/torznab/api?o=json&imdbid={imdb_id}&t={t}&cat={cat}");
-                if let Some(s) = season {
-                    url.push_str(&format!("&season={s}"));
-                }
-                if let Some(e) = episode {
-                    url.push_str(&format!("&ep={e}"));
-                }
-
-                let mut streams = HashMap::new();
-                match ctx.http_client.get(&url).send().await {
-                    Ok(resp) => {
-                        let status = resp.status();
-                        if status.is_success() {
-                            match resp.text().await {
-                                Ok(body) => {
-                                    tracing::debug!(
-                                        url,
-                                        body_len = body.len(),
-                                        "torznab raw response received"
-                                    );
-                                    match serde_json::from_str::<StremthruTorznabResponse>(&body) {
-                                        Ok(data) => {
-                                            let count = data.channel.items.len();
-                                            tracing::debug!(url, count, "torznab items parsed");
-                                            for item in data.channel.items {
-                                                let info_hash = item
-                                                    .attr
-                                                    .iter()
-                                                    .find(|a| a.attributes.name == "infohash")
-                                                    .map(|a| &a.attributes.value);
-                                                if let (Some(hash), title) = (info_hash, item.title)
-                                                {
-                                                    if !hash.is_empty() && !title.is_empty() {
-                                                        streams.insert(hash.to_lowercase(), title);
-                                                    }
-                                                }
-                                            }
-                                        }
-                                        Err(e) => {
-                                            tracing::warn!(error = %e, body = %body, "failed to parse torznab json")
-                                        }
-                                    }
-                                }
-                                Err(e) => {
-                                    tracing::warn!(error = %e, "failed to read torznab response body")
-                                }
-                            }
-                        } else {
-                            tracing::warn!(status = %status, "torznab request failed");
-                        }
-                    }
-                    Err(e) => {
-                        tracing::warn!(error = %e, "torznab scrape failed");
-                    }
-                }
-                tracing::debug!(url, found = streams.len(), "scrape complete");
-
-                Ok(HookResponse::Scrape(streams))
             }
 
             RivenEvent::MediaItemStreamLinkRequested { magnet, .. } => {
@@ -321,8 +309,6 @@ impl Plugin for StremthruPlugin {
     }
 }
 
-// ── API calls ──
-
 async fn add_torrent(
     client: &reqwest::Client,
     base_url: &str,
@@ -343,11 +329,17 @@ async fn add_torrent(
         .await?;
 
     if !response.status().is_success() {
-        anyhow::bail!("store rejected torrent: HTTP {}", response.status());
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        anyhow::bail!("store rejected torrent: HTTP {} - {}", status, body);
     }
 
-    let resp: StremthruResponse<StremthruTorrent> = response.json().await?;
-    let data = resp.data;
+    let text = response.text().await?;
+    let resp: StremthruResponse<StremthruTorrent> = serde_json::from_str(&text)
+        .map_err(|error| anyhow::anyhow!("invalid add-torrent response: {error}; body={text}"))?;
+    let Some(data) = resp.data else {
+        anyhow::bail!("store returned no add-torrent data");
+    };
 
     if data.status != "downloaded" {
         if let Some(ref torrent_id) = data.id {
@@ -390,6 +382,7 @@ async fn remove_torrent(
 
 async fn check_cache(
     client: &reqwest::Client,
+    redis: &redis::aio::ConnectionManager,
     base_url: &str,
     store: &str,
     api_key: &str,
@@ -399,14 +392,14 @@ async fn check_cache(
         return Ok(Vec::new());
     }
 
-    // StremThru has a hard limit of 500 hashes per request.
-    // StremThru has a hard limit of 500 hashes per request, but we use a smaller
-    // chunk size to avoid 414 Request-URI Too Large errors on some servers/proxies.
+    // Chunk to avoid 414 Request-URI Too Large errors on some servers.
     const CHUNK_SIZE: usize = 50;
 
     let mut futures = Vec::new();
     for chunk in hashes.chunks(CHUNK_SIZE) {
-        futures.push(check_cache_chunk(client, base_url, store, api_key, chunk));
+        futures.push(check_cache_chunk(
+            client, redis, base_url, store, api_key, chunk,
+        ));
     }
 
     let results = futures::future::join_all(futures).await;
@@ -421,17 +414,51 @@ async fn check_cache(
 
 async fn check_cache_chunk(
     client: &reqwest::Client,
+    redis: &redis::aio::ConnectionManager,
     base_url: &str,
     store: &str,
     api_key: &str,
     hashes: &[String],
 ) -> anyhow::Result<Vec<CacheCheckResult>> {
-    let hash_str = hashes.join(",");
+    let mut normalized_hashes: Vec<String> =
+        hashes.iter().map(|hash| hash.to_lowercase()).collect();
+    normalized_hashes.sort_unstable();
+
+    let mut conn = redis.clone();
+    let mut cached_results = Vec::with_capacity(normalized_hashes.len());
+    let mut missing_hashes = Vec::new();
+
+    for hash in &normalized_hashes {
+        let cache_key = cache_check_key(store, hash);
+        let cached: Option<String> = AsyncCommands::get(&mut conn, &cache_key).await.ok();
+        match cached {
+            Some(payload) => match serde_json::from_str::<CacheCheckResult>(&payload) {
+                Ok(result) => cached_results.push(result),
+                Err(error) => {
+                    tracing::warn!(
+                        store,
+                        hash,
+                        error = %error,
+                        "invalid cached stremthru cache-check payload"
+                    );
+                    missing_hashes.push(hash.clone());
+                }
+            },
+            None => missing_hashes.push(hash.clone()),
+        }
+    }
+
+    if missing_hashes.is_empty() {
+        return Ok(cached_results);
+    }
+
+    let hash_str = missing_hashes.join(",");
     let url = format!("{base_url}v0/store/torz/check?hash={hash_str}");
     tracing::debug!(
         store,
-        hashes = hashes.len(),
+        hashes = missing_hashes.len(),
         url_len = url.len(),
+        cached = cached_results.len(),
         "checking debrid cache"
     );
 
@@ -446,7 +473,6 @@ async fn check_cache_chunk(
         .await?;
 
     if !response.status().is_success() {
-        // Fallback to reading text just in case it's a readable error
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
         anyhow::bail!("store cache check rejected: HTTP {} - {}", status, body);
@@ -461,8 +487,9 @@ async fn check_cache_chunk(
         }
     };
 
-    let results = resp
+    let fetched_results: Vec<CacheCheckResult> = resp
         .data
+        .ok_or_else(|| anyhow::anyhow!("store returned no cache-check data"))?
         .items
         .into_iter()
         .map(|item| CacheCheckResult {
@@ -481,7 +508,31 @@ async fn check_cache_chunk(
         })
         .collect();
 
-    Ok(results)
+    for result in &fetched_results {
+        match serde_json::to_string(result) {
+            Ok(payload) => {
+                let cache_key = cache_check_key(store, &result.hash.to_lowercase());
+                let _: Result<(), _> =
+                    AsyncCommands::set_ex(&mut conn, &cache_key, payload, CACHE_CHECK_TTL_SECS)
+                        .await;
+            }
+            Err(error) => {
+                tracing::warn!(
+                    store,
+                    hash = result.hash,
+                    error = %error,
+                    "failed to serialize stremthru cache-check payload"
+                );
+            }
+        }
+    }
+
+    cached_results.extend(fetched_results);
+    Ok(cached_results)
+}
+
+fn cache_check_key(store: &str, hash: &str) -> String {
+    format!("plugin:stremthru:cache-check:{store}:{hash}")
 }
 
 async fn generate_link(
@@ -504,7 +555,10 @@ async fn generate_link(
         .await?
         .json()
         .await?;
-    Ok(resp.data.link)
+    Ok(resp
+        .data
+        .ok_or_else(|| anyhow::anyhow!("store returned no link data"))?
+        .link)
 }
 
 async fn fetch_user_info(
@@ -525,6 +579,9 @@ async fn fetch_user_info(
         .await?
         .json()
         .await?;
+    let user = resp
+        .data
+        .ok_or_else(|| anyhow::anyhow!("store returned no user data"))?;
 
     let premium_until = fetch_premium_until(client, store, api_key)
         .await
@@ -534,17 +591,12 @@ async fn fetch_user_info(
 
     Ok(riven_core::types::DebridUserInfo {
         store: store.to_string(),
-        email: resp.data.email,
-        subscription_status: resp.data.subscription_status,
+        email: user.email,
+        subscription_status: user.subscription_status,
         premium_until,
     })
 }
 
-/// Fetch an expiry date (ISO 8601) from each store's native API where supported.
-///
-/// Each entry is `(url, bearer_token, json_pointer, is_unix_timestamp)`.
-/// `json_pointer` uses RFC 6901 syntax (`/field/nested`) to locate the expiry
-/// value inside the parsed response, avoiding per-store struct definitions.
 async fn fetch_premium_until(
     client: &reqwest::Client,
     store: &str,
@@ -617,8 +669,6 @@ fn parse_torrent_status(s: &str) -> TorrentStatus {
     }
 }
 
-// ── API response types ──
-
 #[derive(Deserialize)]
 struct StremthruTorznabResponse {
     channel: StremthruTorznabChannel,
@@ -651,7 +701,7 @@ struct StremthruTorznabAttrContent {
 
 #[derive(Deserialize)]
 struct StremthruResponse<T> {
-    data: T,
+    data: Option<T>,
 }
 
 #[derive(Deserialize)]

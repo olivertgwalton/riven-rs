@@ -20,7 +20,7 @@ use riven_db::repo;
 use crate::cache::RangeCache;
 use crate::chunks::FileLayout;
 use crate::detect::detect_read_type;
-use crate::fetcher::{serve_read, ReadOutcome, resolve_stream_url};
+use crate::fetcher::{resolve_stream_url, serve_read, ReadOutcome};
 use crate::path_info::{parse_path, PathType};
 use crate::prefetch::Prefetch;
 use crate::readdir::{populate_entries, DirEntry};
@@ -45,7 +45,11 @@ fn make_attr(ino: u64, kind: FileType, size: u64, mtime: SystemTime) -> FileAttr
     FileAttr {
         ino,
         size,
-        blocks: if is_dir { 0 } else { (size + BLOCK_SIZE - 1) / BLOCK_SIZE },
+        blocks: if is_dir {
+            0
+        } else {
+            (size + BLOCK_SIZE - 1) / BLOCK_SIZE
+        },
         atime: mtime,
         mtime,
         ctime: mtime,
@@ -113,7 +117,12 @@ impl RivenFs {
         debug_logging: bool,
         cache_max_size_mb: u64,
     ) -> Self {
-        let entries = if cache_max_size_mb == 0 { 256 } else { cache_max_size_mb as usize };
+        // Convert MB budget to entry count, assuming ~CHUNK_SIZE bytes per cached range.
+        let entries = if cache_max_size_mb == 0 {
+            256
+        } else {
+            ((cache_max_size_mb * 1024 * 1024) / CHUNK_SIZE) as usize
+        };
         Self {
             db_pool,
             http_client,
@@ -154,7 +163,8 @@ impl RivenFs {
             .block_on(repo::get_media_entry_by_path(&self.db_pool, path))
             .ok()
             .flatten();
-        self.entry_cache.insert(path.to_string(), (result.clone(), Instant::now()));
+        self.entry_cache
+            .insert(path.to_string(), (result.clone(), Instant::now()));
         result
     }
 
@@ -178,12 +188,35 @@ impl RivenFs {
         Some(url)
     }
 
+    fn get_stream_url_for_open(&self, path: &str, entry: &FileSystemEntry) -> Option<String> {
+        // Direct debrid URLs expire, so refresh them when playback starts.
+        if entry.download_url.is_some() {
+            if let Some(url) = resolve_stream_url(
+                entry.download_url.as_deref(),
+                &self.link_request_tx,
+                &self.db_pool,
+                entry.id,
+                &self.runtime,
+            ) {
+                self.stream_url_cache.insert(entry.id, url.clone());
+                self.entry_cache.remove(path);
+                return Some(url);
+            }
+        }
+
+        self.get_stream_url_cached(path, entry)
+    }
+
     fn resolve_path(&self, parent_ino: u64, name: &str) -> Arc<str> {
         let parent: Arc<str> = match parent_ino {
             ROOT_INO => Arc::from("/"),
             MOVIES_INO => Arc::from("/movies"),
             SHOWS_INO => Arc::from("/shows"),
-            _ => self.ino_to_path.get(&parent_ino).map(|r| Arc::clone(&r)).unwrap_or_else(|| Arc::from("/")),
+            _ => self
+                .ino_to_path
+                .get(&parent_ino)
+                .map(|r| Arc::clone(&r))
+                .unwrap_or_else(|| Arc::from("/")),
         };
         if &*parent == "/" {
             Arc::from(format!("/{name}").as_str())
@@ -194,6 +227,18 @@ impl RivenFs {
 }
 
 impl Filesystem for RivenFs {
+    fn init(
+        &mut self,
+        _req: &Request,
+        config: &mut fuser::KernelConfig,
+    ) -> Result<(), libc::c_int> {
+        // Request the maximum readahead the kernel allows. This lets the kernel
+        // pipeline read-ahead requests aggressively, reducing latency stalls
+        // between successive FUSE reads during sequential playback.
+        let _ = config.set_max_readahead(128 * 1024 * 1024);
+        Ok(())
+    }
+
     fn lookup(&mut self, _req: &Request, parent: u64, name: &OsStr, reply: ReplyEntry) {
         let name = name.to_string_lossy();
         if is_ignored_name(&name) {
@@ -215,7 +260,11 @@ impl Filesystem for RivenFs {
                 match self.get_entry_cached(&path) {
                     Some(entry) => {
                         let ino = self.get_or_create_ino(&path);
-                        reply.entry(&TTL, &file_attr(ino, entry.file_size as u64, entry_mtime(&entry)), 0);
+                        reply.entry(
+                            &TTL,
+                            &file_attr(ino, entry.file_size as u64, entry_mtime(&entry)),
+                            0,
+                        );
                     }
                     None => reply.error(libc::ENOENT),
                 }
@@ -236,7 +285,10 @@ impl Filesystem for RivenFs {
                 match parse_path(&path) {
                     PathType::MovieFile { .. } | PathType::EpisodeFile { .. } => {
                         match self.get_entry_cached(&*path) {
-                            Some(entry) => reply.attr(&TTL, &file_attr(ino, entry.file_size as u64, entry_mtime(&entry))),
+                            Some(entry) => reply.attr(
+                                &TTL,
+                                &file_attr(ino, entry.file_size as u64, entry_mtime(&entry)),
+                            ),
                             None => reply.error(libc::ENOENT),
                         }
                     }
@@ -246,10 +298,18 @@ impl Filesystem for RivenFs {
         }
     }
 
-    fn readdir(&mut self, _req: &Request, ino: u64, _fh: u64, offset: i64, mut reply: ReplyDirectory) {
-        let cached = self.readdir_cache.get(&ino).and_then(|e| {
-            (e.1.elapsed() < READDIR_CACHE_TTL).then(|| e.0.clone())
-        });
+    fn readdir(
+        &mut self,
+        _req: &Request,
+        ino: u64,
+        _fh: u64,
+        offset: i64,
+        mut reply: ReplyDirectory,
+    ) {
+        let cached = self
+            .readdir_cache
+            .get(&ino)
+            .and_then(|e| (e.1.elapsed() < READDIR_CACHE_TTL).then(|| e.0.clone()));
 
         let entries = if let Some(entries) = cached {
             entries
@@ -260,11 +320,22 @@ impl Filesystem for RivenFs {
             ];
             let ino_to_path = self.ino_to_path.get(&ino).map(|r| Arc::clone(&r));
             let mut get_ino = |path: &str| self.get_or_create_ino(path);
-            populate_entries(ino, ino_to_path.as_deref(), &self.db_pool, &self.runtime, &mut entries, &mut get_ino);
+            populate_entries(
+                ino,
+                ino_to_path.as_deref(),
+                &self.db_pool,
+                &self.runtime,
+                &mut entries,
+                &mut get_ino,
+            );
 
             let mut seen = HashSet::new();
-            let deduped: Vec<DirEntry> = entries.into_iter().filter(|(_, _, n)| seen.insert(n.clone())).collect();
-            self.readdir_cache.insert(ino, (deduped.clone(), Instant::now()));
+            let deduped: Vec<DirEntry> = entries
+                .into_iter()
+                .filter(|(_, _, n)| seen.insert(n.clone()))
+                .collect();
+            self.readdir_cache
+                .insert(ino, (deduped.clone(), Instant::now()));
             deduped
         };
 
@@ -288,22 +359,38 @@ impl Filesystem for RivenFs {
             reply.error(libc::ENOENT);
             return;
         };
-        let Some(stream_url) = self.get_stream_url_cached(&*path, &entry) else {
-            reply.error(if entry.download_url.is_some() { libc::EIO } else { libc::ENOENT });
+        let Some(stream_url) = self.get_stream_url_for_open(&*path, &entry) else {
+            reply.error(if entry.download_url.is_some() {
+                libc::EIO
+            } else {
+                libc::ENOENT
+            });
             return;
         };
 
         let fd = self.next_fd.fetch_add(1, Ordering::SeqCst);
         let file_size = entry.file_size as u64;
-        self.file_handles.insert(fd, FileHandle {
-            ino,
-            path,
-            stream_url,
-            file_size,
-            layout: FileLayout::new(file_size),
-            previous_read_pos: None,
-            prefetch: None,
-        });
+        // Start the background download task immediately at file open so the
+        // 64 MB pre-buffer fills during header scanning, eliminating the stall
+        // window between open() and the first Sequential read.
+        let prefetch = Prefetch::start(
+            self.http_client.clone(),
+            stream_url.clone(),
+            0,
+            &self.runtime,
+        );
+        self.file_handles.insert(
+            fd,
+            FileHandle {
+                ino,
+                path,
+                stream_url,
+                file_size,
+                layout: FileLayout::new(file_size),
+                previous_read_pos: None,
+                prefetch,
+            },
+        );
         reply.opened(fd, 0);
     }
 
@@ -329,22 +416,64 @@ impl Filesystem for RivenFs {
             return;
         }
         let end = (start + size as u64 - 1).min(handle.file_size - 1);
-        let read_type = detect_read_type(start, handle.previous_read_pos, handle.layout.header_end);
+        let chunks = handle.layout.request_chunks(start, end);
+        let read_type = detect_read_type(
+            handle.ino,
+            start,
+            end,
+            (end - start + 1) as usize,
+            handle.previous_read_pos,
+            &handle.layout,
+            &chunks,
+            &self.range_cache,
+        );
 
         if self.debug_logging {
-            tracing::debug!(path = %handle.path, offset = start, size, read_type = ?read_type, "read");
+            tracing::debug!(
+                path = %handle.path,
+                offset = start,
+                size,
+                read_type = ?read_type,
+                chunks = chunks.len(),
+                "read"
+            );
         }
 
         handle.previous_read_pos = Some(start);
-        let stream_url = handle.stream_url.clone();
-
-        match serve_read(read_type, handle.ino, start, end, &stream_url, &self.range_cache, &self.http_client, &self.runtime, &mut handle.prefetch, self.debug_logging) {
+        let FileHandle {
+            ino,
+            stream_url,
+            prefetch,
+            ..
+        } = &mut *handle;
+        match serve_read(
+            read_type,
+            *ino,
+            start,
+            end,
+            &chunks,
+            stream_url.as_str(),
+            &self.range_cache,
+            &self.http_client,
+            &self.runtime,
+            prefetch,
+            self.debug_logging,
+        ) {
             ReadOutcome::Data(buf) => reply.data(&buf),
             ReadOutcome::Error(code) => reply.error(code),
         }
     }
 
-    fn release(&mut self, _req: &Request, _ino: u64, fh: u64, _flags: i32, _lock_owner: Option<u64>, _flush: bool, reply: fuser::ReplyEmpty) {
+    fn release(
+        &mut self,
+        _req: &Request,
+        _ino: u64,
+        fh: u64,
+        _flags: i32,
+        _lock_owner: Option<u64>,
+        _flush: bool,
+        reply: fuser::ReplyEmpty,
+    ) {
         if self.debug_logging {
             tracing::debug!(fh, "release");
         }

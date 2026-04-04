@@ -27,8 +27,6 @@ pub async fn upsert_stream(
 }
 
 /// Record the actual file size for a stream (learned from a download attempt).
-/// This is stored globally on the stream so future scrapes of any item can
-/// pre-filter the stream before it enters the ranked candidate pool.
 pub async fn update_stream_file_size(
     pool: &PgPool,
     info_hash: &str,
@@ -77,9 +75,9 @@ fn build_stream_query(ranks: &ResolutionRanks, limit_one: bool) -> String {
                    WHEN '2160p' THEN {r2160p}
                    WHEN '1440p' THEN {r1440p}
                    WHEN '1080p' THEN {r1080p}
-                   WHEN '720p' THEN {r720p}
-                   WHEN '480p' THEN {r480p}
-                   WHEN '360p' THEN {r360p}
+                   WHEN '720p'  THEN {r720p}
+                   WHEN '480p'  THEN {r480p}
+                   WHEN '360p'  THEN {r360p}
                    WHEN 'unknown' THEN {unknown}
                    ELSE 0
                END DESC,
@@ -107,7 +105,10 @@ pub async fn clear_blacklisted_streams(pool: &PgPool, media_item_id: i64) -> Res
     Ok(())
 }
 
-async fn load_resolution_ranks(pool: &PgPool) -> ResolutionRanks {
+/// Load resolution ranks from the `rank_settings` DB key.
+/// Called once at `JobQueue` startup and on settings reload — callers pass the
+/// cached value into stream queries so each query doesn't re-hit the DB.
+pub async fn load_resolution_ranks(pool: &PgPool) -> ResolutionRanks {
     match super::get_setting(pool, "rank_settings").await {
         Ok(Some(value)) => value
             .get("resolution_ranks")
@@ -117,53 +118,66 @@ async fn load_resolution_ranks(pool: &PgPool) -> ResolutionRanks {
     }
 }
 
-pub async fn get_non_blacklisted_streams(pool: &PgPool, media_item_id: i64) -> Result<Vec<Stream>> {
-    let ranks = load_resolution_ranks(pool).await;
-    let sql = build_stream_query(&ranks, false);
-    Ok(sqlx::query_as::<_, Stream>(&sql).bind(media_item_id).fetch_all(pool).await?)
+pub async fn get_non_blacklisted_streams(
+    pool: &PgPool,
+    media_item_id: i64,
+    ranks: &ResolutionRanks,
+) -> Result<Vec<Stream>> {
+    let sql = build_stream_query(ranks, false);
+    Ok(sqlx::query_as::<_, Stream>(&sql)
+        .bind(media_item_id)
+        .fetch_all(pool)
+        .await?)
 }
 
 /// Fetch only the highest-ranked non-blacklisted stream for an item.
-pub async fn get_best_stream(pool: &PgPool, media_item_id: i64) -> Result<Option<Stream>> {
-    let ranks = load_resolution_ranks(pool).await;
-    let sql = build_stream_query(&ranks, true);
-    Ok(sqlx::query_as::<_, Stream>(&sql).bind(media_item_id).fetch_optional(pool).await?)
+pub async fn get_best_stream(
+    pool: &PgPool,
+    media_item_id: i64,
+    ranks: &ResolutionRanks,
+) -> Result<Option<Stream>> {
+    let sql = build_stream_query(ranks, true);
+    Ok(sqlx::query_as::<_, Stream>(&sql)
+        .bind(media_item_id)
+        .fetch_optional(pool)
+        .await?)
 }
 
-pub async fn get_filesystem_entries(pool: &PgPool, media_item_id: i64) -> Result<Vec<FileSystemEntry>> {
-    Ok(
-        sqlx::query_as::<_, FileSystemEntry>("SELECT * FROM filesystem_entries WHERE media_item_id = $1")
-            .bind(media_item_id)
-            .fetch_all(pool)
-            .await?,
+pub async fn get_filesystem_entries(
+    pool: &PgPool,
+    media_item_id: i64,
+) -> Result<Vec<FileSystemEntry>> {
+    Ok(sqlx::query_as::<_, FileSystemEntry>(
+        "SELECT * FROM filesystem_entries WHERE media_item_id = $1",
     )
+    .bind(media_item_id)
+    .fetch_all(pool)
+    .await?)
 }
 
 pub async fn get_media_entries(pool: &PgPool, media_item_id: i64) -> Result<Vec<FileSystemEntry>> {
-    Ok(
-        sqlx::query_as::<_, FileSystemEntry>(
-            "SELECT * FROM filesystem_entries WHERE media_item_id = $1 AND entry_type = 'media'",
-        )
-        .bind(media_item_id)
-        .fetch_all(pool)
-        .await?,
+    Ok(sqlx::query_as::<_, FileSystemEntry>(
+        "SELECT * FROM filesystem_entries WHERE media_item_id = $1 AND entry_type = 'media'",
     )
+    .bind(media_item_id)
+    .fetch_all(pool)
+    .await?)
 }
 
 pub async fn get_media_entry_by_path(pool: &PgPool, path: &str) -> Result<Option<FileSystemEntry>> {
-    Ok(
-        sqlx::query_as::<_, FileSystemEntry>(
-            "SELECT * FROM filesystem_entries WHERE path = $1 AND entry_type = 'media'",
-        )
-        .bind(path)
-        .fetch_optional(pool)
-        .await?,
+    Ok(sqlx::query_as::<_, FileSystemEntry>(
+        "SELECT * FROM filesystem_entries WHERE path = $1 AND entry_type = 'media'",
     )
+    .bind(path)
+    .fetch_optional(pool)
+    .await?)
 }
 
 /// Return the ranking profile names that already have a downloaded entry for this item.
-/// Used by the multi-version download flow to skip profiles that are already complete.
-pub async fn get_downloaded_profile_names(pool: &PgPool, media_item_id: i64) -> Result<Vec<String>> {
+pub async fn get_downloaded_profile_names(
+    pool: &PgPool,
+    media_item_id: i64,
+) -> Result<Vec<String>> {
     let rows: Vec<Option<String>> = sqlx::query_scalar(
         "SELECT DISTINCT ranking_profile_name FROM filesystem_entries \
          WHERE media_item_id = $1 AND entry_type = 'media' AND ranking_profile_name IS NOT NULL",
@@ -174,10 +188,8 @@ pub async fn get_downloaded_profile_names(pool: &PgPool, media_item_id: i64) -> 
     Ok(rows.into_iter().flatten().collect())
 }
 
-/// For a Season item, return profile names that have been downloaded for at least
-/// one episode in that season. Season pack downloads store entries on episode IDs
-/// (not the season ID itself), so the regular `get_downloaded_profile_names` always
-/// returns empty for seasons.
+/// For a Season item, return profile names that have been downloaded for at
+/// least one episode in that season.
 pub async fn get_downloaded_profile_names_for_season(
     pool: &PgPool,
     season_id: i64,
@@ -196,6 +208,11 @@ pub async fn get_downloaded_profile_names_for_season(
     Ok(rows.into_iter().flatten().collect())
 }
 
+/// Upsert a media filesystem entry, replacing the former SELECT + INSERT/UPDATE
+/// two-round-trip pattern with a single statement.
+///
+/// Requires the partial unique index `idx_fs_entries_media_path_unique` on
+/// `(media_item_id, path) WHERE entry_type = 'media'` (migration 011).
 pub async fn create_media_entry(
     pool: &PgPool,
     media_item_id: i64,
@@ -212,47 +229,24 @@ pub async fn create_media_entry(
 ) -> Result<FileSystemEntry> {
     let media_metadata = parse_filename_metadata(original_filename);
 
-    let existing = sqlx::query_as::<_, FileSystemEntry>(
-        "SELECT * FROM filesystem_entries WHERE media_item_id = $1 AND path = $2 AND entry_type = 'media'",
-    )
-    .bind(media_item_id)
-    .bind(path)
-    .fetch_optional(pool)
-    .await?;
-
-    if let Some(entry) = existing {
-        let updated = sqlx::query_as::<_, FileSystemEntry>(
-            "UPDATE filesystem_entries \
-             SET file_size = $1, original_filename = $2, download_url = $3, stream_url = $4, \
-                 plugin = $5, provider = $6, media_metadata = $7, \
-                 stream_id = COALESCE($9, stream_id), \
-                 resolution = COALESCE($10, resolution), \
-                 ranking_profile_name = COALESCE($11, ranking_profile_name), \
-                 updated_at = NOW() \
-             WHERE id = $8 \
-             RETURNING *",
-        )
-        .bind(file_size)
-        .bind(original_filename)
-        .bind(download_url)
-        .bind(stream_url)
-        .bind(plugin)
-        .bind(provider)
-        .bind(&media_metadata)
-        .bind(entry.id)
-        .bind(stream_id)
-        .bind(resolution)
-        .bind(ranking_profile_name)
-        .fetch_one(pool)
-        .await?;
-        return Ok(updated);
-    }
-
     let entry = sqlx::query_as::<_, FileSystemEntry>(
         "INSERT INTO filesystem_entries \
          (media_item_id, entry_type, path, file_size, original_filename, download_url, stream_url, \
           plugin, provider, media_metadata, stream_id, resolution, ranking_profile_name) \
          VALUES ($1, 'media', $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) \
+         ON CONFLICT (media_item_id, path) WHERE entry_type = 'media' \
+         DO UPDATE SET \
+             file_size             = EXCLUDED.file_size, \
+             original_filename     = EXCLUDED.original_filename, \
+             download_url          = EXCLUDED.download_url, \
+             stream_url            = EXCLUDED.stream_url, \
+             plugin                = EXCLUDED.plugin, \
+             provider              = EXCLUDED.provider, \
+             media_metadata        = EXCLUDED.media_metadata, \
+             stream_id             = COALESCE(EXCLUDED.stream_id, filesystem_entries.stream_id), \
+             resolution            = COALESCE(EXCLUDED.resolution, filesystem_entries.resolution), \
+             ranking_profile_name  = COALESCE(EXCLUDED.ranking_profile_name, filesystem_entries.ranking_profile_name), \
+             updated_at            = NOW() \
          RETURNING *",
     )
     .bind(media_item_id)
@@ -269,6 +263,7 @@ pub async fn create_media_entry(
     .bind(ranking_profile_name)
     .fetch_one(pool)
     .await?;
+
     Ok(entry)
 }
 
@@ -286,7 +281,11 @@ fn parse_filename_metadata(filename: &str) -> serde_json::Value {
 
     let hdr_type = parsed.hdr.first().cloned();
     let bit_depth: Option<i64> = parsed.bit_depth.as_deref().and_then(|b| {
-        b.trim_end_matches("-bit").trim_end_matches("bit").trim().parse().ok()
+        b.trim_end_matches("-bit")
+            .trim_end_matches("bit")
+            .trim()
+            .parse()
+            .ok()
     });
 
     let audio_tracks: Vec<serde_json::Value> = parsed
@@ -323,8 +322,6 @@ fn parse_filename_metadata(filename: &str) -> serde_json::Value {
 }
 
 // ── VFS directory helpers ──
-// All queries are single prefix-scans on the indexed `path` column, avoiding
-// the N+1 pattern that previously made library scans slow.
 
 async fn list_vfs_dirs_at_depth(pool: &PgPool, pattern: &str, depth: u32) -> Result<Vec<String>> {
     let sql = format!(
@@ -340,24 +337,18 @@ async fn list_vfs_dirs_at_depth(pool: &PgPool, pattern: &str, depth: u32) -> Res
     Ok(rows.into_iter().flatten().collect())
 }
 
-/// Distinct movie directory names (e.g. "The Matrix (1999) {tmdb-603}") that
-/// have at least one media file in the VFS.
 pub async fn list_vfs_movie_dirs(pool: &PgPool) -> Result<Vec<String>> {
     list_vfs_dirs_at_depth(pool, "/movies/%/%", 3).await
 }
 
-/// Distinct show directory names that have at least one episode file in the VFS.
 pub async fn list_vfs_show_dirs(pool: &PgPool) -> Result<Vec<String>> {
     list_vfs_dirs_at_depth(pool, "/shows/%/%/%", 3).await
 }
 
-/// Distinct season directory names (e.g. "Season 04") under the given show
-/// directory path (e.g. "/shows/Breaking Bad (2008) {tvdb-81189}").
 pub async fn list_vfs_season_dirs(pool: &PgPool, show_path: &str) -> Result<Vec<String>> {
     list_vfs_dirs_at_depth(pool, &format!("{show_path}/%/%"), 4).await
 }
 
-/// VFS file paths directly inside `dir_path` (one level deep only).
 pub async fn list_vfs_file_paths(pool: &PgPool, dir_path: &str) -> Result<Vec<String>> {
     let pattern = format!("{dir_path}/%");
     Ok(sqlx::query_scalar!(

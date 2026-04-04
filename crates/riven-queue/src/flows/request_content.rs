@@ -1,10 +1,9 @@
-use std::collections::HashSet;
-
 use riven_core::events::{HookResponse, RivenEvent};
-use riven_core::types::*;
+use riven_core::plugin::ContentCollection;
 use riven_db::repo;
 
-use crate::{IndexJob, JobQueue};
+use crate::orchestrator::LibraryOrchestrator;
+use crate::JobQueue;
 
 /// Run the content service request flow.
 /// Dispatches to all content service plugins, aggregates results, and persists new items.
@@ -14,10 +13,7 @@ pub async fn run(queue: &JobQueue) {
     let event = RivenEvent::ContentServiceRequested;
     let results = queue.registry.dispatch(&event).await;
 
-    let mut all_movies = Vec::new();
-    let mut all_shows = Vec::new();
-    let mut seen_movie_ids = HashSet::new();
-    let mut seen_show_ids = HashSet::new();
+    let mut content = ContentCollection::default();
     let mut any_plugin_errored = false;
 
     for (plugin_name, result) in results {
@@ -31,29 +27,33 @@ pub async fn run(queue: &JobQueue) {
                 );
 
                 for movie in response.movies {
-                    if seen_movie_ids.insert(movie.movie_key()) {
-                        all_movies.push(movie);
-                    }
+                    content.insert_movie(movie);
                 }
 
                 for show in response.shows {
-                    if seen_show_ids.insert(show.show_key()) {
-                        all_shows.push(show);
-                    }
+                    content.insert_show(show);
                 }
             }
             Ok(_) => {}
-            Err(e) => {
-                tracing::error!(plugin = plugin_name, error = %e, "content service hook failed");
+            Err(error) => {
+                tracing::error!(
+                    plugin = plugin_name,
+                    error = %error,
+                    "content service hook failed"
+                );
                 any_plugin_errored = true;
             }
         }
     }
 
+    let orchestrator = LibraryOrchestrator::new(queue);
+    let response = content.into_response();
+    let all_movies = response.movies;
+    let all_shows = response.shows;
+
     let mut new_items = 0usize;
     let mut updated_items = 0usize;
 
-    // Persist movies
     for movie in &all_movies {
         let title = movie
             .imdb_id
@@ -61,49 +61,31 @@ pub async fn run(queue: &JobQueue) {
             .or(movie.tmdb_id.as_deref())
             .unwrap_or("Unknown");
 
-        let request = match repo::create_item_request(
-            &queue.db_pool,
-            movie.imdb_id.as_deref(),
-            movie.tmdb_id.as_deref(),
-            None,
-            ItemRequestType::Movie,
-            movie.requested_by.as_deref(),
-            movie.external_request_id.as_deref(),
-            None,
-        )
-        .await
+        match orchestrator
+            .upsert_requested_movie(
+                title,
+                movie.imdb_id.as_deref(),
+                movie.tmdb_id.as_deref(),
+                movie.requested_by.as_deref(),
+                movie.external_request_id.as_deref(),
+            )
+            .await
         {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::warn!(error = %e, "failed to create item request for movie");
-                continue;
-            }
-        };
-
-        match repo::create_movie(
-            &queue.db_pool,
-            title,
-            movie.imdb_id.as_deref(),
-            movie.tmdb_id.as_deref(),
-            Some(request.id),
-        )
-        .await
-        {
-            Ok((item, was_created)) => {
-                if was_created {
-                    new_items += 1;
-                    queue.push_index(IndexJob::from_item(&item)).await;
-                } else {
-                    updated_items += 1;
+            Ok(outcome) => {
+                match outcome.action {
+                    repo::ItemRequestUpsertAction::Created => new_items += 1,
+                    repo::ItemRequestUpsertAction::Updated => updated_items += 1,
+                    repo::ItemRequestUpsertAction::Unchanged => {}
                 }
+
+                orchestrator.enqueue_after_request(&outcome, None).await;
             }
-            Err(e) => {
-                tracing::warn!(error = %e, "failed to create movie");
+            Err(error) => {
+                tracing::warn!(error = %error, "failed to upsert requested movie");
             }
         }
     }
 
-    // Persist shows
     for show in &all_shows {
         let title = show
             .imdb_id
@@ -111,77 +93,61 @@ pub async fn run(queue: &JobQueue) {
             .or(show.tvdb_id.as_deref())
             .unwrap_or("Unknown");
 
-        let request = match repo::create_item_request(
-            &queue.db_pool,
-            show.imdb_id.as_deref(),
-            None,
-            show.tvdb_id.as_deref(),
-            ItemRequestType::Show,
-            show.requested_by.as_deref(),
-            show.external_request_id.as_deref(),
-            show.requested_seasons.as_deref(),
-        )
-        .await
+        match orchestrator
+            .upsert_requested_show(
+                title,
+                show.imdb_id.as_deref(),
+                show.tvdb_id.as_deref(),
+                show.requested_by.as_deref(),
+                show.external_request_id.as_deref(),
+                show.requested_seasons.as_deref(),
+            )
+            .await
         {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::warn!(error = %e, "failed to create item request for show");
-                continue;
-            }
-        };
-
-        match repo::create_show(
-            &queue.db_pool,
-            title,
-            show.imdb_id.as_deref(),
-            show.tvdb_id.as_deref(),
-            Some(request.id),
-        )
-        .await
-        {
-            Ok((item, was_created)) => {
-                if was_created {
-                    new_items += 1;
-                    queue.push_index(IndexJob::from_item(&item)).await;
-                } else {
-                    updated_items += 1;
+            Ok(outcome) => {
+                match outcome.action {
+                    repo::ItemRequestUpsertAction::Created => new_items += 1,
+                    repo::ItemRequestUpsertAction::Updated => updated_items += 1,
+                    repo::ItemRequestUpsertAction::Unchanged => {}
                 }
+
+                orchestrator
+                    .enqueue_after_request(&outcome, show.requested_seasons.as_deref())
+                    .await;
             }
-            Err(e) => {
-                tracing::warn!(error = %e, "failed to create show");
+            Err(error) => {
+                tracing::warn!(error = %error, "failed to upsert requested show");
             }
         }
     }
 
-    // Delete items no longer present in any content service.
-    // Skip if any plugin errored — a partial response must not be treated as complete,
-    // or items from the failed plugin would be incorrectly removed from the library.
     let active_external_ids: Vec<String> = all_movies
         .iter()
-        .filter_map(|m| m.external_request_id.clone())
-        .chain(all_shows.iter().filter_map(|s| s.external_request_id.clone()))
+        .filter_map(|movie| movie.external_request_id.clone())
+        .chain(
+            all_shows
+                .iter()
+                .filter_map(|show| show.external_request_id.clone()),
+        )
         .collect();
 
     if !active_external_ids.is_empty() && !any_plugin_errored {
-        match repo::delete_items_removed_from_content_services(
-            &queue.db_pool,
-            &active_external_ids,
-        )
-        .await
+        match repo::delete_items_removed_from_content_services(&queue.db_pool, &active_external_ids)
+            .await
         {
-            Ok(n) if n > 0 => {
-                tracing::info!(count = n, "deleted items removed from content services")
+            Ok(count) if count > 0 => {
+                tracing::info!(count, "deleted items removed from content services")
             }
             Ok(_) => {}
-            Err(e) => {
-                tracing::error!(error = %e, "failed to clean up removed content service items")
+            Err(error) => {
+                tracing::error!(error = %error, "failed to clean up removed content service items")
             }
         }
     }
 
     let count = all_movies.len() + all_shows.len();
 
-    if new_items > 0 {
+    if new_items > 0 || updated_items > 0 {
         queue
             .notify(RivenEvent::ItemRequestCreateSuccess {
                 count,
@@ -191,5 +157,10 @@ pub async fn run(queue: &JobQueue) {
             .await;
     }
 
-    tracing::debug!(count, new_items, updated_items, "content service flow completed");
+    tracing::debug!(
+        count,
+        new_items,
+        updated_items,
+        "content service flow completed"
+    );
 }

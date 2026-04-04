@@ -125,19 +125,31 @@ pub async fn create_episode(
 }
 
 /// Base season query. Excludes specials (Season 0).
-async fn seasons_for_show(pool: &PgPool, show_id: i64, state_filter: &str) -> Result<Vec<MediaItem>> {
+async fn seasons_for_show(
+    pool: &PgPool,
+    show_id: i64,
+    state_filter: &str,
+) -> Result<Vec<MediaItem>> {
     let sql = format!(
         "SELECT * FROM media_items \
          WHERE parent_id = $1 AND item_type = 'season' AND is_requested = true \
            AND is_special = false AND {state_filter} \
          ORDER BY season_number ASC"
     );
-    Ok(sqlx::query_as::<_, MediaItem>(&sql).bind(show_id).fetch_all(pool).await?)
+    Ok(sqlx::query_as::<_, MediaItem>(&sql)
+        .bind(show_id)
+        .fetch_all(pool)
+        .await?)
 }
 
 /// Fetch all requested, non-completed seasons for a show.
 pub async fn get_requested_seasons_for_show(pool: &PgPool, show_id: i64) -> Result<Vec<MediaItem>> {
-    seasons_for_show(pool, show_id, "state NOT IN ('completed', 'unreleased')").await
+    seasons_for_show(
+        pool,
+        show_id,
+        "state NOT IN ('completed', 'unreleased', 'paused', 'failed')",
+    )
+    .await
 }
 
 /// Fetch requested seasons in scraped state for a show.
@@ -145,9 +157,11 @@ pub async fn get_scraped_seasons_for_show(pool: &PgPool, show_id: i64) -> Result
     seasons_for_show(pool, show_id, "state = 'scraped'").await
 }
 
-
 /// Fetch incomplete (indexed/scraped/ongoing) requested episodes for a season.
-pub async fn get_incomplete_episodes_for_season(pool: &PgPool, season_id: i64) -> Result<Vec<MediaItem>> {
+pub async fn get_incomplete_episodes_for_season(
+    pool: &PgPool,
+    season_id: i64,
+) -> Result<Vec<MediaItem>> {
     Ok(sqlx::query_as::<_, MediaItem>(
         "SELECT * FROM media_items
          WHERE parent_id = $1
@@ -348,7 +362,12 @@ pub async fn list_items_paginated(
     let offset = (page - 1) * limit;
 
     let mut qb = sqlx::QueryBuilder::<sqlx::Postgres>::new("SELECT * FROM media_items WHERE 1=1");
-    apply_item_filters(&mut qb, types.as_deref(), search.as_deref(), states.as_deref());
+    apply_item_filters(
+        &mut qb,
+        types.as_deref(),
+        search.as_deref(),
+        states.as_deref(),
+    );
 
     let order = match sort.as_deref() {
         Some("date_asc") => " ORDER BY created_at ASC NULLS LAST",
@@ -357,8 +376,10 @@ pub async fn list_items_paginated(
         _ => " ORDER BY created_at DESC NULLS LAST",
     };
     qb.push(order);
-    qb.push(" LIMIT "); qb.push_bind(limit);
-    qb.push(" OFFSET "); qb.push_bind(offset);
+    qb.push(" LIMIT ");
+    qb.push_bind(limit);
+    qb.push(" OFFSET ");
+    qb.push_bind(offset);
     Ok(qb.build_query_as::<MediaItem>().fetch_all(pool).await?)
 }
 
@@ -368,7 +389,13 @@ pub async fn count_items_filtered(
     search: Option<String>,
     states: Option<Vec<MediaItemState>>,
 ) -> Result<i64> {
-    let mut qb = sqlx::QueryBuilder::<sqlx::Postgres>::new("SELECT COUNT(*) FROM media_items WHERE 1=1");
-    apply_item_filters(&mut qb, types.as_deref(), search.as_deref(), states.as_deref());
+    let mut qb =
+        sqlx::QueryBuilder::<sqlx::Postgres>::new("SELECT COUNT(*) FROM media_items WHERE 1=1");
+    apply_item_filters(
+        &mut qb,
+        types.as_deref(),
+        search.as_deref(),
+        states.as_deref(),
+    );
     Ok(qb.build_query_scalar::<i64>().fetch_one(pool).await?)
 }

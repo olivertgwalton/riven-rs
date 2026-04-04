@@ -3,7 +3,9 @@ use std::collections::HashMap;
 
 // ── Media item types ──
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, sqlx::Type, async_graphql::Enum)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, sqlx::Type, async_graphql::Enum,
+)]
 #[sqlx(type_name = "media_item_type", rename_all = "lowercase")]
 pub enum MediaItemType {
     Movie,
@@ -12,7 +14,9 @@ pub enum MediaItemType {
     Episode,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, sqlx::Type, async_graphql::Enum)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, sqlx::Type, async_graphql::Enum,
+)]
 #[sqlx(type_name = "media_item_state", rename_all = "snake_case")]
 #[graphql(rename_items = "PascalCase")]
 pub enum MediaItemState {
@@ -26,14 +30,18 @@ pub enum MediaItemState {
     Failed,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, sqlx::Type, async_graphql::Enum)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, sqlx::Type, async_graphql::Enum,
+)]
 #[sqlx(type_name = "show_status", rename_all = "lowercase")]
 pub enum ShowStatus {
     Continuing,
     Ended,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, sqlx::Type, async_graphql::Enum)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, sqlx::Type, async_graphql::Enum,
+)]
 #[sqlx(type_name = "content_rating")]
 pub enum ContentRating {
     #[sqlx(rename = "G")]
@@ -68,28 +76,34 @@ pub enum ContentRating {
     TvMa,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, sqlx::Type, async_graphql::Enum)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, sqlx::Type, async_graphql::Enum,
+)]
 #[sqlx(type_name = "filesystem_entry_type", rename_all = "lowercase")]
 pub enum FileSystemEntryType {
     Media,
     Subtitle,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, sqlx::Type, async_graphql::Enum)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, sqlx::Type, async_graphql::Enum,
+)]
 #[sqlx(type_name = "item_request_type", rename_all = "lowercase")]
 pub enum ItemRequestType {
     Movie,
     Show,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, sqlx::Type, async_graphql::Enum)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, sqlx::Type, async_graphql::Enum,
+)]
 #[sqlx(type_name = "item_request_state", rename_all = "lowercase")]
 pub enum ItemRequestState {
-    Pending,
-    Approved,
-    Declined,
+    Requested,
     Completed,
     Failed,
+    Ongoing,
+    Unreleased,
 }
 
 // ── External IDs ──

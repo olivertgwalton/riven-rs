@@ -173,12 +173,11 @@ pub async fn get_upcoming_unreleased(pool: &PgPool, limit: i64) -> Result<Vec<Me
 }
 
 pub async fn get_setting(pool: &PgPool, key: &str) -> Result<Option<serde_json::Value>> {
-    Ok(sqlx::query_scalar!(
-        "SELECT value FROM settings WHERE key = $1",
-        key
+    Ok(
+        sqlx::query_scalar!("SELECT value FROM settings WHERE key = $1", key)
+            .fetch_optional(pool)
+            .await?,
     )
-    .fetch_optional(pool)
-    .await?)
 }
 
 pub async fn set_setting(pool: &PgPool, key: &str, value: serde_json::Value) -> Result<()> {
@@ -192,6 +191,19 @@ pub async fn set_setting(pool: &PgPool, key: &str, value: serde_json::Value) -> 
     .execute(pool)
     .await?;
     Ok(())
+}
+
+pub async fn get_plugin_enabled(pool: &PgPool, name: &str) -> Result<bool> {
+    let key = format!("plugin_enabled.{name}");
+    Ok(match get_setting(pool, &key).await? {
+        Some(serde_json::Value::Bool(enabled)) => enabled,
+        _ => true,
+    })
+}
+
+pub async fn set_plugin_enabled(pool: &PgPool, name: &str, enabled: bool) -> Result<()> {
+    let key = format!("plugin_enabled.{name}");
+    set_setting(pool, &key, serde_json::Value::Bool(enabled)).await
 }
 
 pub async fn list_ranking_profiles(pool: &PgPool) -> Result<Vec<RankingProfile>> {
@@ -215,13 +227,12 @@ pub async fn get_enabled_profiles(pool: &PgPool) -> Result<Vec<RankingProfile>> 
 
 /// Toggle `enabled` on any profile (built-in or custom) by name.
 pub async fn set_profile_enabled(pool: &PgPool, name: &str, enabled: bool) -> Result<bool> {
-    let result = sqlx::query(
-        "UPDATE ranking_profiles SET enabled = $1, updated_at = NOW() WHERE name = $2",
-    )
-    .bind(enabled)
-    .bind(name)
-    .execute(pool)
-    .await?;
+    let result =
+        sqlx::query("UPDATE ranking_profiles SET enabled = $1, updated_at = NOW() WHERE name = $2")
+            .bind(enabled)
+            .bind(name)
+            .execute(pool)
+            .await?;
     Ok(result.rows_affected() > 0)
 }
 
@@ -287,10 +298,9 @@ pub async fn delete_ranking_profile(pool: &PgPool, id: i32) -> Result<bool> {
 }
 
 pub async fn get_all_settings(pool: &PgPool) -> Result<serde_json::Value> {
-    let rows: Vec<(String, serde_json::Value)> =
-        sqlx::query_as("SELECT key, value FROM settings")
-            .fetch_all(pool)
-            .await?;
+    let rows: Vec<(String, serde_json::Value)> = sqlx::query_as("SELECT key, value FROM settings")
+        .fetch_all(pool)
+        .await?;
     Ok(serde_json::Value::Object(rows.into_iter().collect()))
 }
 

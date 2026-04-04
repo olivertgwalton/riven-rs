@@ -1,17 +1,21 @@
 /// Runtime-configurable bitrate filter for downloaded files.
-///
-/// Thresholds are computed as `runtime_seconds × bitrate_mbps × 125_000` (bytes).
-/// If a threshold is `None` or the item has no runtime, that check is skipped.
 #[derive(Clone, Default)]
 pub struct DownloaderConfig {
-    /// Minimum average bitrate for movies (Mbps). `None` = disabled.
     pub minimum_average_bitrate_movies: Option<u32>,
-    /// Minimum average bitrate for episodes (Mbps). `None` = disabled.
     pub minimum_average_bitrate_episodes: Option<u32>,
-    /// Maximum average bitrate for movies (Mbps). `None` = disabled.
     pub maximum_average_bitrate_movies: Option<u32>,
-    /// Maximum average bitrate for episodes (Mbps). `None` = disabled.
     pub maximum_average_bitrate_episodes: Option<u32>,
+}
+
+impl From<&crate::settings::RivenSettings> for DownloaderConfig {
+    fn from(s: &crate::settings::RivenSettings) -> Self {
+        Self {
+            minimum_average_bitrate_movies: s.minimum_average_bitrate_movies,
+            minimum_average_bitrate_episodes: s.minimum_average_bitrate_episodes,
+            maximum_average_bitrate_movies: s.maximum_average_bitrate_movies,
+            maximum_average_bitrate_episodes: s.maximum_average_bitrate_episodes,
+        }
+    }
 }
 
 impl DownloaderConfig {
@@ -19,7 +23,6 @@ impl DownloaderConfig {
         runtime_minutes as u64 * 60 * mbps as u64 * 125_000
     }
 
-    /// Returns `true` if the file passes both the min and max bitrate gates for movies.
     pub fn movie_passes(&self, file_size: u64, runtime_minutes: Option<i32>) -> bool {
         self.passes(
             self.minimum_average_bitrate_movies,
@@ -29,7 +32,6 @@ impl DownloaderConfig {
         )
     }
 
-    /// Returns `true` if the file passes both the min and max bitrate gates for episodes.
     pub fn episode_passes(&self, file_size: u64, runtime_minutes: Option<i32>) -> bool {
         self.passes(
             self.minimum_average_bitrate_episodes,

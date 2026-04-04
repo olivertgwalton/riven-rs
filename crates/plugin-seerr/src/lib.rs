@@ -1,12 +1,10 @@
 use async_trait::async_trait;
-use serde::Deserialize;
-use std::collections::HashSet;
-
 use riven_core::events::{EventType, HookResponse, RivenEvent};
-use riven_core::plugin::{validate_api_key, Plugin, PluginContext};
+use riven_core::plugin::{validate_api_key, ContentCollection, Plugin, PluginContext};
+use riven_core::register_plugin;
 use riven_core::settings::PluginSettings;
 use riven_core::types::*;
-use riven_core::register_plugin;
+use serde::Deserialize;
 
 const DEFAULT_URL: &str = "http://localhost:5055";
 const DEFAULT_FILTER: &str = "approved";
@@ -23,10 +21,6 @@ impl Plugin for SeerrPlugin {
         "seerr"
     }
 
-    fn version(&self) -> &'static str {
-        "0.1.0"
-    }
-
     fn subscribed_events(&self) -> &[EventType] {
         &[
             EventType::ContentServiceRequested,
@@ -38,9 +32,14 @@ impl Plugin for SeerrPlugin {
     async fn validate(&self, settings: &PluginSettings) -> anyhow::Result<bool> {
         let url = settings.get_or("url", DEFAULT_URL);
         let base_url = url.trim_end_matches('/');
-        validate_api_key(settings, "apikey", &format!("{base_url}/api/v1/auth/me"), "x-api-key").await
+        validate_api_key(
+            settings,
+            "apikey",
+            &format!("{base_url}/api/v1/auth/me"),
+            "x-api-key",
+        )
+        .await
     }
-
 
     fn settings_schema(&self) -> Vec<riven_core::plugin::SettingField> {
         use riven_core::plugin::SettingField;
@@ -66,13 +65,13 @@ impl Plugin for SeerrPlugin {
         let base_url = url.trim_end_matches('/');
 
         match event {
-            RivenEvent::ContentServiceRequested => {
-                fetch_content(ctx, api_key, base_url).await
-            }
+            RivenEvent::ContentServiceRequested => fetch_content(ctx, api_key, base_url).await,
 
-            RivenEvent::MediaItemDownloadSuccess { id, item_type, .. } => {
+            RivenEvent::MediaItemDownloadSuccess {
+                id, item_type: _, ..
+            } => {
                 // Look up the external_request_id for this item (or its parent show).
-                let request_id = get_seerr_request_id(&ctx.db_pool, *id, *item_type).await;
+                let request_id = get_seerr_request_id(&ctx.db_pool, *id).await;
                 if let Some(rid) = request_id {
                     let mark_url = format!("{base_url}/api/v1/request/{rid}/available");
                     if let Err(e) = ctx
@@ -91,7 +90,9 @@ impl Plugin for SeerrPlugin {
                 Ok(HookResponse::Empty)
             }
 
-            RivenEvent::MediaItemsDeleted { external_request_ids } => {
+            RivenEvent::MediaItemsDeleted {
+                external_request_ids,
+            } => {
                 for rid in external_request_ids {
                     let del_url = format!("{base_url}/api/v1/request/{rid}");
                     if let Err(e) = ctx
@@ -115,23 +116,14 @@ impl Plugin for SeerrPlugin {
     }
 }
 
-// ── Helpers ──
-
-/// Fetch the Seerr request ID linked to a media item.
-/// For seasons/episodes walks up to the show so we use the show's request.
-async fn get_seerr_request_id(
-    pool: &sqlx::PgPool,
-    id: i64,
-    _item_type: MediaItemType,
-) -> Option<String> {
+async fn get_seerr_request_id(pool: &sqlx::PgPool, id: i64) -> Option<String> {
     use riven_db::repo;
 
     let item = repo::get_media_item(pool, id).await.ok()??;
-
-    // For seasons/episodes, the item_request_id is on the item itself (propagated
-    // from the show at index time), so we can use it directly.
     let request_id = item.item_request_id?;
-    let request = repo::get_item_request_by_id(pool, request_id).await.ok()??;
+    let request = repo::get_item_request_by_id(pool, request_id)
+        .await
+        .ok()??;
     request.external_request_id
 }
 
@@ -142,10 +134,7 @@ async fn fetch_content(
 ) -> anyhow::Result<HookResponse> {
     let filter = ctx.settings.get_or("filter", DEFAULT_FILTER);
 
-    let mut movies = Vec::new();
-    let mut shows = Vec::new();
-    let mut seen_movies = HashSet::new();
-    let mut seen_shows = HashSet::new();
+    let mut content = ContentCollection::default();
 
     let mut skip = 0u32;
     loop {
@@ -163,31 +152,24 @@ async fn fetch_content(
             .await?;
 
         for request in &resp.results {
-            let requested_by = request
-                .requested_by
-                .as_ref()
-                .and_then(|u| u.email.clone());
+            let requested_by = request.requested_by.as_ref().and_then(|u| u.email.clone());
 
             match request.media_type.as_deref() {
                 Some("movie") => {
                     if let Some(ref media) = request.media {
                         if let Some(tmdb_id) = media.tmdb_id {
-                            let key = tmdb_id.to_string();
-                            if seen_movies.insert(key.clone()) {
-                                movies.push(ExternalIds {
-                                    tmdb_id: Some(key),
-                                    external_request_id: Some(request.id.to_string()),
-                                    requested_by: requested_by.clone(),
-                                    ..Default::default()
-                                });
-                            }
+                            content.insert_movie(ExternalIds {
+                                tmdb_id: Some(tmdb_id.to_string()),
+                                external_request_id: Some(request.id.to_string()),
+                                requested_by: requested_by.clone(),
+                                ..Default::default()
+                            });
                         }
                     }
                 }
                 Some("tv") => {
                     if let Some(ref media) = request.media {
                         if let Some(tvdb_id) = media.tvdb_id {
-                            let key = tvdb_id.to_string();
                             let seasons: Vec<i32> = request
                                 .seasons
                                 .iter()
@@ -195,19 +177,17 @@ async fn fetch_content(
                                 .filter_map(|s| s.season_number)
                                 .collect();
 
-                            if seen_shows.insert(key.clone()) {
-                                shows.push(ExternalIds {
-                                    tvdb_id: Some(key),
-                                    external_request_id: Some(request.id.to_string()),
-                                    requested_by: requested_by.clone(),
-                                    requested_seasons: if seasons.is_empty() {
-                                        None
-                                    } else {
-                                        Some(seasons)
-                                    },
-                                    ..Default::default()
-                                });
-                            }
+                            content.insert_show(ExternalIds {
+                                tvdb_id: Some(tvdb_id.to_string()),
+                                external_request_id: Some(request.id.to_string()),
+                                requested_by: requested_by.clone(),
+                                requested_seasons: if seasons.is_empty() {
+                                    None
+                                } else {
+                                    Some(seasons)
+                                },
+                                ..Default::default()
+                            });
                         }
                     }
                 }
@@ -221,13 +201,8 @@ async fn fetch_content(
         skip += PAGE_SIZE;
     }
 
-    Ok(HookResponse::ContentService(Box::new(ContentServiceResponse {
-        movies,
-        shows,
-    })))
+    Ok(content.into_hook_response())
 }
-
-// ── Seerr API types ──
 
 #[derive(Deserialize)]
 struct SeerrRequestResponse {

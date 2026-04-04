@@ -7,9 +7,8 @@ use std::time::{Duration, Instant};
 
 use riven_core::events::{EventType, HookResponse, RivenEvent};
 use riven_core::plugin::{Plugin, PluginContext};
-use riven_core::settings::PluginSettings;
-use riven_core::types::*;
 use riven_core::register_plugin;
+use riven_core::types::*;
 
 const TVDB_BASE_URL: &str = "https://api4.thetvdb.com/v4/";
 const DEFAULT_API_KEY: &str = "6be85335-5c4f-4d8d-b945-d3ed0eb8cdce";
@@ -53,24 +52,13 @@ impl Plugin for TvdbPlugin {
         "tvdb"
     }
 
-    fn version(&self) -> &'static str {
-        "0.1.0"
-    }
-
     fn subscribed_events(&self) -> &[EventType] {
         &[EventType::MediaItemIndexRequested]
     }
 
-    async fn validate(&self, _settings: &PluginSettings) -> anyhow::Result<bool> {
-        Ok(true) // Has default API key
-    }
-
-
     fn settings_schema(&self) -> Vec<riven_core::plugin::SettingField> {
         use riven_core::plugin::SettingField;
-        vec![
-            SettingField::new("apikey", "API Key", "password"),
-        ]
+        vec![SettingField::new("apikey", "API Key", "password")]
     }
 
     async fn handle_event(
@@ -78,30 +66,21 @@ impl Plugin for TvdbPlugin {
         event: &RivenEvent,
         ctx: &PluginContext,
     ) -> anyhow::Result<HookResponse> {
-        match event {
-            RivenEvent::MediaItemIndexRequested {
-                id: _,
-                item_type,
-                tvdb_id,
-                ..
-            } => {
-                if *item_type != MediaItemType::Show {
-                    return Ok(HookResponse::Empty);
-                }
-
-                let tvdb_id = match tvdb_id {
-                    Some(id) => id.clone(),
-                    None => return Ok(HookResponse::Empty),
-                };
-
-                let api_key = ctx.settings.get_or("apikey", DEFAULT_API_KEY);
-                let token = self.get_token(&ctx.http_client, &api_key).await?;
-
-                let indexed = fetch_series(&ctx.http_client, &token, &tvdb_id).await?;
-                Ok(HookResponse::Index(Box::new(indexed)))
-            }
-            _ => Ok(HookResponse::Empty),
+        let Some(request) = event.index_request() else {
+            return Ok(HookResponse::Empty);
+        };
+        if request.item_type != MediaItemType::Show {
+            return Ok(HookResponse::Empty);
         }
+        let Some(tvdb_id) = request.tvdb_id else {
+            return Ok(HookResponse::Empty);
+        };
+
+        let api_key = ctx.settings.get_or("apikey", DEFAULT_API_KEY);
+        let token = self.get_token(&ctx.http_client, &api_key).await?;
+
+        let indexed = fetch_series(&ctx.http_client, &token, tvdb_id).await?;
+        Ok(HookResponse::Index(Box::new(indexed)))
     }
 }
 
@@ -110,7 +89,6 @@ async fn fetch_series(
     token: &str,
     tvdb_id: &str,
 ) -> anyhow::Result<IndexedMediaItem> {
-    // Fetch series extended data
     let url = format!("{TVDB_BASE_URL}series/{tvdb_id}/extended?short=true&meta=translations");
     let resp: TvdbResponse<TvdbSeries> = client
         .get(&url)
@@ -121,21 +99,16 @@ async fn fetch_series(
         .await?;
     let series = resp.data;
 
-    // Fetch episodes
     let episodes = fetch_all_episodes(client, token, tvdb_id).await?;
 
-    // Transform
-    let title = extract_english_name(&series)
-        .unwrap_or_else(|| series.name.clone().unwrap_or_default());
+    let title =
+        extract_english_name(&series).unwrap_or_else(|| series.name.clone().unwrap_or_default());
 
-    let imdb_id = series
-        .remote_ids
-        .as_ref()
-        .and_then(|ids| {
-            ids.iter()
-                .find(|r| r.source_name.as_deref() == Some("IMDB"))
-                .and_then(|r| r.id.clone())
-        });
+    let imdb_id = series.remote_ids.as_ref().and_then(|ids| {
+        ids.iter()
+            .find(|r| r.source_name.as_deref() == Some("IMDB"))
+            .and_then(|r| r.id.clone())
+    });
 
     let genres = series
         .genres
@@ -152,17 +125,13 @@ async fn fetch_series(
         _ => Some(ShowStatus::Ended),
     };
 
-    let content_rating = series
-        .content_ratings
-        .as_ref()
-        .and_then(|ratings| {
-            ratings
-                .iter()
-                .find(|r| r.country.as_deref() == Some("usa"))
-                .and_then(|r| parse_content_rating(r.name.as_deref().unwrap_or("")))
-        });
+    let content_rating = series.content_ratings.as_ref().and_then(|ratings| {
+        ratings
+            .iter()
+            .find(|r| r.country.as_deref() == Some("usa"))
+            .and_then(|r| parse_content_rating(r.name.as_deref().unwrap_or("")))
+    });
 
-    // Build seasons
     let mut season_map: HashMap<i32, Vec<IndexedEpisode>> = HashMap::new();
     for ep in &episodes {
         let season_num = ep.season_number.unwrap_or(0);
@@ -239,7 +208,10 @@ async fn fetch_series(
         year,
         genres,
         country,
-        network: series.original_network.as_ref().and_then(|n| n.name.clone()),
+        network: series
+            .original_network
+            .as_ref()
+            .and_then(|n| n.name.clone()),
         content_rating,
         status,
         aliases,
@@ -258,9 +230,7 @@ async fn fetch_all_episodes(
     let mut page = 0;
 
     loop {
-        let url = format!(
-            "{TVDB_BASE_URL}series/{tvdb_id}/episodes/official/eng?page={page}"
-        );
+        let url = format!("{TVDB_BASE_URL}series/{tvdb_id}/episodes/official/eng?page={page}");
         let resp: TvdbResponse<TvdbEpisodePage> = client
             .get(&url)
             .bearer_auth(token)
@@ -305,8 +275,6 @@ fn parse_content_rating(rating: &str) -> Option<ContentRating> {
         _ => None,
     }
 }
-
-// ── TVDB API response types ──
 
 #[derive(Deserialize)]
 struct TvdbResponse<T> {
@@ -359,7 +327,6 @@ struct TvdbTranslation {
     name: String,
 }
 
-/// Generic single-`name` object used for network, genre, status, etc.
 #[derive(Deserialize)]
 struct Named {
     name: Option<String>,

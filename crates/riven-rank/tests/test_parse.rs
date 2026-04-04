@@ -30,13 +30,16 @@ fn test_resolution_2160p_explicit() {
 
 #[test]
 fn test_resolution_2160p_from_3840_width() {
-    let data = parse("[Beatrice-Raws] Evangelion 3.333 You Can (Not) Redo [BDRip 3840x1632 HEVC TrueHD]");
+    let data =
+        parse("[Beatrice-Raws] Evangelion 3.333 You Can (Not) Redo [BDRip 3840x1632 HEVC TrueHD]");
     assert_eq!(data.resolution, "2160p");
 }
 
 #[test]
 fn test_resolution_1080p_from_1920_width() {
-    let data = parse("[Erai-raws] Evangelion 3.0 You Can (Not) Redo - Movie [1920x960][Multiple Subtitle].mkv");
+    let data = parse(
+        "[Erai-raws] Evangelion 3.0 You Can (Not) Redo - Movie [1920x960][Multiple Subtitle].mkv",
+    );
     assert_eq!(data.resolution, "1080p");
 }
 
@@ -1080,13 +1083,19 @@ fn test_extras_ova() {
 #[test]
 fn test_extras_trailer() {
     let data = parse("Movie.Title.2023.Trailer.1080p");
-    assert!(data.extras.iter().any(|e| e.to_lowercase().contains("trailer")));
+    assert!(data
+        .extras
+        .iter()
+        .any(|e| e.to_lowercase().contains("trailer")));
 }
 
 #[test]
 fn test_extras_sample() {
     let data = parse("Movie.Title.2023.Sample.1080p");
-    assert!(data.extras.iter().any(|e| e.to_lowercase().contains("sample")));
+    assert!(data
+        .extras
+        .iter()
+        .any(|e| e.to_lowercase().contains("sample")));
 }
 
 // =============================================================================
@@ -1218,10 +1227,12 @@ fn test_language_dutch() {
 #[test]
 fn test_language_danish_nordic() {
     let data = parse("Movie.Title.Nordic.1080p.BluRay");
-    assert!(data.languages.contains(&"da".to_string()) ||
-            data.languages.contains(&"fi".to_string()) ||
-            data.languages.contains(&"sv".to_string()) ||
-            data.languages.contains(&"no".to_string()));
+    assert!(
+        data.languages.contains(&"da".to_string())
+            || data.languages.contains(&"fi".to_string())
+            || data.languages.contains(&"sv".to_string())
+            || data.languages.contains(&"no".to_string())
+    );
 }
 
 // =============================================================================
@@ -1400,7 +1411,8 @@ fn test_ptt_main_avengers_endgame() {
 
 #[test]
 fn test_ptt_main_beatrice_raws_evangelion() {
-    let data = parse("[Beatrice-Raws] Evangelion 3.333 You Can (Not) Redo [BDRip 3840x1632 HEVC TrueHD]");
+    let data =
+        parse("[Beatrice-Raws] Evangelion 3.333 You Can (Not) Redo [BDRip 3840x1632 HEVC TrueHD]");
     assert_eq!(data.resolution, "2160p");
     assert_eq!(data.codec, Some("hevc".into()));
     assert!(data.audio.contains(&"TrueHD".to_string()));
@@ -1518,13 +1530,16 @@ fn test_quality_ppvrip() {
 
 #[test]
 fn test_quality_bdrip_bracket() {
-    let data = parse("[UsifRenegade] Cardcaptor Sakura [BD][Remastered][1080p][HEVC_10Bit][Dual] + Movies");
+    let data = parse(
+        "[UsifRenegade] Cardcaptor Sakura [BD][Remastered][1080p][HEVC_10Bit][Dual] + Movies",
+    );
     assert_eq!(data.quality, Some("BDRip".to_string()));
 }
 
 #[test]
 fn test_quality_bdrip_bd_rm() {
-    let data = parse("[UsifRenegade] Cardcaptor Sakura - 54 [BD-RM][1080p][x265_10Bit][Dual_AAC].mkv");
+    let data =
+        parse("[UsifRenegade] Cardcaptor Sakura - 54 [BD-RM][1080p][x265_10Bit][Dual_AAC].mkv");
     assert_eq!(data.quality, Some("BDRip".to_string()));
 }
 
@@ -1688,7 +1703,8 @@ fn test_audio_dolby_digital_plus_eac3_variant() {
 
 #[test]
 fn test_audio_atmos_truehd() {
-    let data = parse("Spider-Man.No.Way.Home.2021.2160p.BluRay.REMUX.HEVC.TrueHD.7.1.Atmos-FraMeSToR");
+    let data =
+        parse("Spider-Man.No.Way.Home.2021.2160p.BluRay.REMUX.HEVC.TrueHD.7.1.Atmos-FraMeSToR");
     assert!(data.audio.contains(&"Atmos".to_string()));
     assert!(data.audio.contains(&"TrueHD".to_string()));
 }
@@ -1701,7 +1717,8 @@ fn test_audio_ddp_from_ddp() {
 
 #[test]
 fn test_audio_dts_lossless_with_title() {
-    let data = parse("The Shawshank Redemption 1994.MULTi.1080p.Blu-ray.DTS-HDMA.5.1.HEVC-DDR[EtHD]");
+    let data =
+        parse("The Shawshank Redemption 1994.MULTi.1080p.Blu-ray.DTS-HDMA.5.1.HEVC-DDR[EtHD]");
     assert!(data.audio.contains(&"DTS Lossless".to_string()));
 }
 
@@ -1738,7 +1755,9 @@ fn test_audio_dd_plus_from_ddp_number() {
 
 #[test]
 fn test_audio_dolby_digital_plus_ddp51() {
-    let data = parse("Madame Web (2024) 1080p HINDI ENGLISH 10bit AMZN WEBRip DDP5 1 x265 HEVC - PSA Shadow");
+    let data = parse(
+        "Madame Web (2024) 1080p HINDI ENGLISH 10bit AMZN WEBRip DDP5 1 x265 HEVC - PSA Shadow",
+    );
     assert!(data.audio.contains(&"Dolby Digital Plus".to_string()));
 }
 
@@ -1756,7 +1775,9 @@ fn test_hdr_basic() {
 
 #[test]
 fn test_hdr_hdr10() {
-    let data = parse("Spider-Man - Complete Movie Collection (2002-2022) 1080p.HEVC.HDR10.1920x800.x265. DTS-HD");
+    let data = parse(
+        "Spider-Man - Complete Movie Collection (2002-2022) 1080p.HEVC.HDR10.1920x800.x265. DTS-HD",
+    );
     assert!(data.hdr.contains(&"HDR".to_string()));
 }
 
@@ -1839,7 +1860,8 @@ fn test_year_2019() {
 
 #[test]
 fn test_year_2021() {
-    let data = parse("Spider-Man.No.Way.Home.2021.2160p.BluRay.REMUX.HEVC.TrueHD.7.1.Atmos-FraMeSToR");
+    let data =
+        parse("Spider-Man.No.Way.Home.2021.2160p.BluRay.REMUX.HEVC.TrueHD.7.1.Atmos-FraMeSToR");
     assert_eq!(data.year, Some(2021));
 }
 
@@ -1873,7 +1895,8 @@ fn test_title_joker() {
 
 #[test]
 fn test_title_spiderman() {
-    let data = parse("Spider-Man.No.Way.Home.2021.2160p.BluRay.REMUX.HEVC.TrueHD.7.1.Atmos-FraMeSToR");
+    let data =
+        parse("Spider-Man.No.Way.Home.2021.2160p.BluRay.REMUX.HEVC.TrueHD.7.1.Atmos-FraMeSToR");
     assert_eq!(data.parsed_title, "Spider-Man No Way Home");
 }
 
@@ -1921,7 +1944,8 @@ fn test_title_site_prefix_stripped_2() {
 
 #[test]
 fn test_title_french_connection() {
-    let data = parse("The French Connection 1971 Remastered BluRay 1080p REMUX AVC DTS-HD MA 5 1-LEGi0N");
+    let data =
+        parse("The French Connection 1971 Remastered BluRay 1080p REMUX AVC DTS-HD MA 5 1-LEGi0N");
     assert_eq!(data.parsed_title, "The French Connection");
 }
 
@@ -2105,13 +2129,15 @@ fn test_group_dash_with_extension() {
 
 #[test]
 fn test_group_framestor() {
-    let data = parse("Spider-Man.No.Way.Home.2021.2160p.BluRay.REMUX.HEVC.TrueHD.7.1.Atmos-FraMeSToR");
+    let data =
+        parse("Spider-Man.No.Way.Home.2021.2160p.BluRay.REMUX.HEVC.TrueHD.7.1.Atmos-FraMeSToR");
     assert_eq!(data.group, Some("FraMeSToR".to_string()));
 }
 
 #[test]
 fn test_group_bracket_format() {
-    let data = parse("[Beatrice-Raws] Evangelion 3.333 You Can (Not) Redo [BDRip 3840x1632 HEVC TrueHD]");
+    let data =
+        parse("[Beatrice-Raws] Evangelion 3.333 You Can (Not) Redo [BDRip 3840x1632 HEVC TrueHD]");
     assert_eq!(data.group, Some("Beatrice-Raws".to_string()));
 }
 
@@ -2245,7 +2271,8 @@ fn test_media_type_show_season_only() {
 
 #[test]
 fn test_media_type_movie_no_season() {
-    let data = parse("Spider-Man.No.Way.Home.2021.2160p.BluRay.REMUX.HEVC.TrueHD.7.1.Atmos-FraMeSToR");
+    let data =
+        parse("Spider-Man.No.Way.Home.2021.2160p.BluRay.REMUX.HEVC.TrueHD.7.1.Atmos-FraMeSToR");
     assert_eq!(data.media_type(), "movie");
 }
 
@@ -2355,7 +2382,8 @@ fn test_integration_joker_remux() {
 
 #[test]
 fn test_integration_spiderman_no_way_home() {
-    let data = parse("Spider-Man.No.Way.Home.2021.2160p.BluRay.REMUX.HEVC.TrueHD.7.1.Atmos-FraMeSToR");
+    let data =
+        parse("Spider-Man.No.Way.Home.2021.2160p.BluRay.REMUX.HEVC.TrueHD.7.1.Atmos-FraMeSToR");
     assert_eq!(data.parsed_title, "Spider-Man No Way Home");
     assert_eq!(data.year, Some(2021));
     assert_eq!(data.resolution, "2160p");
@@ -2406,7 +2434,8 @@ fn test_integration_mad_max() {
 
 #[test]
 fn test_integration_evangelion_3840() {
-    let data = parse("[Beatrice-Raws] Evangelion 3.333 You Can (Not) Redo [BDRip 3840x1632 HEVC TrueHD]");
+    let data =
+        parse("[Beatrice-Raws] Evangelion 3.333 You Can (Not) Redo [BDRip 3840x1632 HEVC TrueHD]");
     assert_eq!(data.resolution, "2160p");
     assert_eq!(data.codec, Some("hevc".to_string()));
     assert!(data.audio.contains(&"TrueHD".to_string()));
@@ -2503,7 +2532,8 @@ fn test_normalized_title_lowercase() {
 
 #[test]
 fn test_normalized_title_stripped_punctuation() {
-    let data = parse("Spider-Man.No.Way.Home.2021.2160p.BluRay.REMUX.HEVC.TrueHD.7.1.Atmos-FraMeSToR");
+    let data =
+        parse("Spider-Man.No.Way.Home.2021.2160p.BluRay.REMUX.HEVC.TrueHD.7.1.Atmos-FraMeSToR");
     assert!(data.normalized_title.contains("spider"));
     assert!(data.normalized_title.contains("home"));
 }

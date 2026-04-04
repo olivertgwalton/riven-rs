@@ -5,11 +5,12 @@ use riven_core::types::*;
 use riven_db::entities::MediaItem;
 use riven_db::repo;
 
-use crate::JobQueue;
 use super::helpers::{
     episode_vfs_path, handle_bitrate_failure, is_video_file, load_item_or_err, matches_episode,
     parse_file_path, select_episode_files,
 };
+use crate::orchestrator::LibraryOrchestrator;
+use crate::JobQueue;
 
 /// Persist a movie download result. Returns `true` on success.
 ///
@@ -30,9 +31,6 @@ pub async fn persist_movie(
     let id = item.id;
 
     tracing::debug!(id, info_hash, files = dl.files.len(), "persisting movie");
-    for f in &dl.files {
-        tracing::debug!(id, filename = %f.filename, size = f.file_size, "torrent file");
-    }
 
     let mut video_files: Vec<(&DownloadFile, riven_rank::ParsedData)> = dl
         .files
@@ -47,7 +45,11 @@ pub async fn persist_movie(
     let file = if let Some(first) = video_files.first() {
         first.0
     } else if let Some(largest) = dl.files.iter().max_by_key(|f| f.file_size) {
-        tracing::warn!(id, info_hash, "no movie file found in torrent; falling back to largest file");
+        tracing::warn!(
+            id,
+            info_hash,
+            "no movie file found in torrent; falling back to largest file"
+        );
         largest
     } else {
         tracing::warn!(id, info_hash = %info_hash, "torrent has no files — blacklisting stream");
@@ -57,7 +59,9 @@ pub async fn persist_movie(
         queue
             .notify(RivenEvent::MediaItemDownloadPartialSuccess { id })
             .await;
-        queue.fan_out_download(id).await;
+        LibraryOrchestrator::new(queue)
+            .fan_out_download_failure(id)
+            .await;
         return false;
     };
 
@@ -160,9 +164,6 @@ pub async fn persist_episode(
     let episode_number = item.episode_number.unwrap_or(1);
 
     tracing::debug!(id, info_hash, files = dl.files.len(), "persisting episode");
-    for f in &dl.files {
-        tracing::debug!(id, filename = %f.filename, size = f.file_size, "torrent file");
-    }
 
     let matched: Vec<(&DownloadFile, riven_rank::ParsedData)> = dl
         .files
@@ -184,7 +185,9 @@ pub async fn persist_episode(
         queue
             .notify(RivenEvent::MediaItemDownloadPartialSuccess { id })
             .await;
-        queue.fan_out_download(id).await;
+        LibraryOrchestrator::new(queue)
+            .fan_out_download_failure(id)
+            .await;
         return false;
     }
 
@@ -192,8 +195,15 @@ pub async fn persist_episode(
     let config = queue.downloader_config.read().await;
     if !config.episode_passes(largest.file_size, item.runtime) {
         drop(config);
-        handle_bitrate_failure(id, info_hash, largest.file_size, item.runtime, "episode", queue)
-            .await;
+        handle_bitrate_failure(
+            id,
+            info_hash,
+            largest.file_size,
+            item.runtime,
+            "episode",
+            queue,
+        )
+        .await;
         return false;
     }
     drop(config);
@@ -284,18 +294,25 @@ pub async fn persist_season(
     let season_number = item.season_number.unwrap_or(1);
     let show_name = show.pretty_name();
     let mut any_matched = false;
+    let mut completed_episode_ids: Vec<i64> = Vec::new();
+
+    // Pre-parse all video files once — reused across every episode filter below.
+    let parsed_video_files: Vec<(&DownloadFile, riven_rank::ParsedData)> = dl
+        .files
+        .iter()
+        .filter(|f| is_video_file(&f.filename))
+        .map(|f| (f, parse_file_path(&f.filename)))
+        .collect();
 
     let config = queue.downloader_config.read().await;
 
     for ep in &episodes {
         let episode_number = ep.episode_number.unwrap_or(1);
 
-        let matched: Vec<(&DownloadFile, riven_rank::ParsedData)> = dl
-            .files
+        let matched: Vec<(&DownloadFile, riven_rank::ParsedData)> = parsed_video_files
             .iter()
-            .filter(|f| is_video_file(&f.filename))
-            .map(|f| (f, parse_file_path(&f.filename)))
             .filter(|(_, p)| matches_episode(p, season_number, episode_number, ep.absolute_number))
+            .map(|(f, p)| (*f, p.clone()))
             .collect();
 
         if matched.is_empty() {
@@ -311,7 +328,8 @@ pub async fn persist_season(
             );
             if !info_hash.is_empty() {
                 let _ = repo::blacklist_stream_by_hash(&queue.db_pool, ep.id, info_hash).await;
-                let _ = repo::update_stream_file_size(&queue.db_pool, info_hash, largest.file_size).await;
+                let _ = repo::update_stream_file_size(&queue.db_pool, info_hash, largest.file_size)
+                    .await;
             }
             continue;
         }
@@ -335,9 +353,7 @@ pub async fn persist_season(
             .await
             {
                 Ok(_) => {
-                    if let Err(e) = repo::refresh_state(&queue.db_pool, ep).await {
-                        tracing::error!(error = %e, ep_id = ep.id, "failed to refresh episode state");
-                    }
+                    completed_episode_ids.push(ep.id);
                     any_matched = true;
                 }
                 Err(e) => {
@@ -360,11 +376,29 @@ pub async fn persist_season(
         queue
             .notify(RivenEvent::MediaItemDownloadPartialSuccess { id })
             .await;
-        queue.fan_out_download(id).await;
+        LibraryOrchestrator::new(queue)
+            .fan_out_download_failure(id)
+            .await;
         return false;
     }
 
-    let _ = repo::refresh_state_cascade(&queue.db_pool, item).await;
+    // Batch-set all matched episodes to Completed in one UPDATE, then refresh
+    // season and show states once each — replaces N×(SELECT+UPDATE) per episode
+    // with 1 batch UPDATE + 2 lightweight state refreshes.
+    if let Err(e) = repo::batch_set_completed(&queue.db_pool, &completed_episode_ids).await {
+        tracing::error!(error = %e, "failed to batch-set episodes completed");
+    }
+    if let Err(e) = repo::refresh_state(&queue.db_pool, item).await {
+        tracing::error!(error = %e, "failed to refresh season state after download");
+    }
+    if let Ok(Some(show_item)) = repo::get_media_item(&queue.db_pool, show_id).await {
+        if let Err(e) = repo::refresh_state(&queue.db_pool, &show_item).await {
+            tracing::error!(error = %e, "failed to refresh show state after download");
+        }
+    }
+    LibraryOrchestrator::new(queue)
+        .sync_item_request_state(item)
+        .await;
 
     let duration = start_time.elapsed();
     let display_title = format!("{} - {}", show.title, item.title);
@@ -383,6 +417,10 @@ pub async fn persist_season(
             duration_seconds: duration.as_secs_f64(),
         })
         .await;
-    tracing::info!(id, duration_secs = duration.as_secs_f64(), "season download flow completed");
+    tracing::info!(
+        id,
+        duration_secs = duration.as_secs_f64(),
+        "season download flow completed"
+    );
     true
 }

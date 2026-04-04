@@ -7,9 +7,16 @@ use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 
 pub async fn connect(database_url: &str) -> Result<PgPool> {
+    let parallelism = std::thread::available_parallelism()
+        .map(|n| n.get() as u32)
+        .unwrap_or(4);
+    // Peak demand: parallelism × 4 (parse) + parallelism × 3 (other workers) + API headroom.
+    let max_connections = (parallelism * 8).max(40);
+
     let pool = PgPoolOptions::new()
-        .max_connections(5)
-        .min_connections(1)
+        .max_connections(max_connections)
+        .min_connections(2)
+        .acquire_timeout(std::time::Duration::from_secs(10))
         .connect(database_url)
         .await?;
 

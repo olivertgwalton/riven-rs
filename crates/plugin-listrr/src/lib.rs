@@ -1,12 +1,10 @@
 use async_trait::async_trait;
-use serde::Deserialize;
-use std::collections::HashMap;
-
 use riven_core::events::{EventType, HookResponse, RivenEvent};
-use riven_core::plugin::{validate_api_key, Plugin, PluginContext};
+use riven_core::plugin::{validate_api_key, ContentCollection, Plugin, PluginContext};
+use riven_core::register_plugin;
 use riven_core::settings::PluginSettings;
 use riven_core::types::*;
-use riven_core::register_plugin;
+use serde::Deserialize;
 
 const LISTRR_BASE_URL: &str = "https://listrr.pro/api/";
 
@@ -21,18 +19,19 @@ impl Plugin for ListrrPlugin {
         "listrr"
     }
 
-    fn version(&self) -> &'static str {
-        "0.1.0"
-    }
-
     fn subscribed_events(&self) -> &[EventType] {
         &[EventType::ContentServiceRequested]
     }
 
     async fn validate(&self, settings: &PluginSettings) -> anyhow::Result<bool> {
-        validate_api_key(settings, "apikey", &format!("{LISTRR_BASE_URL}List/My/1"), "x-api-key").await
+        validate_api_key(
+            settings,
+            "apikey",
+            &format!("{LISTRR_BASE_URL}List/My/1"),
+            "x-api-key",
+        )
+        .await
     }
-
 
     fn settings_schema(&self) -> Vec<riven_core::plugin::SettingField> {
         use riven_core::plugin::SettingField;
@@ -59,8 +58,7 @@ impl Plugin for ListrrPlugin {
                 let movie_lists = ctx.settings.get_list("movielists");
                 let show_lists = ctx.settings.get_list("showlists");
 
-                let mut movies = HashMap::new();
-                let mut shows = HashMap::new();
+                let mut content = ContentCollection::default();
 
                 // Fetch movie lists
                 for list_id in &movie_lists {
@@ -69,16 +67,11 @@ impl Plugin for ListrrPlugin {
                         continue;
                     }
 
-                    let items = fetch_list_items(
-                        &ctx.http_client,
-                        api_key,
-                        "Movies",
-                        list_id,
-                    )
-                    .await?;
+                    let items =
+                        fetch_list_items(&ctx.http_client, api_key, "Movies", list_id).await?;
 
                     for item in items {
-                        movies.entry(item.movie_key()).or_insert(item);
+                        content.insert_movie(item);
                     }
                 }
 
@@ -89,23 +82,15 @@ impl Plugin for ListrrPlugin {
                         continue;
                     }
 
-                    let items = fetch_list_items(
-                        &ctx.http_client,
-                        api_key,
-                        "Shows",
-                        list_id,
-                    )
-                    .await?;
+                    let items =
+                        fetch_list_items(&ctx.http_client, api_key, "Shows", list_id).await?;
 
                     for item in items {
-                        shows.entry(item.show_key()).or_insert(item);
+                        content.insert_show(item);
                     }
                 }
 
-                Ok(HookResponse::ContentService(Box::new(ContentServiceResponse {
-                    movies: movies.into_values().collect(),
-                    shows: shows.into_values().collect(),
-                })))
+                Ok(content.into_hook_response())
             }
             _ => Ok(HookResponse::Empty),
         }
@@ -122,9 +107,8 @@ async fn fetch_list_items(
     let mut page = 1;
 
     loop {
-        let url = format!(
-            "{LISTRR_BASE_URL}List/{list_type}/{list_id}/ReleaseDate/Descending/{page}"
-        );
+        let url =
+            format!("{LISTRR_BASE_URL}List/{list_type}/{list_id}/ReleaseDate/Descending/{page}");
 
         let resp: ListrrResponse = client
             .get(&url)

@@ -4,6 +4,7 @@ use figment::{
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::str::FromStr;
 
 /// Core application settings, loaded from environment variables.
 /// Prefix: RIVEN_SETTING__
@@ -33,6 +34,10 @@ pub struct RivenSettings {
     /// Retry items that have been stuck (failed_attempts > 0) for longer than
     /// this many seconds. 0 = disabled. Default: 86400 (24 h).
     pub retry_interval_secs: u64,
+    /// Minutes to wait after a known release/air date before re-indexing.
+    pub schedule_offset_minutes: u64,
+    /// Fallback delay when an unreleased/ongoing item has no known future air date.
+    pub unknown_air_date_offset_days: u64,
 
     /// Bearer token / API key required on the GraphQL endpoint.
     /// Empty string means no authentication is enforced.
@@ -61,6 +66,8 @@ impl Default for RivenSettings {
             maximum_average_bitrate_movies: None,
             maximum_average_bitrate_episodes: None,
             retry_interval_secs: 86400,
+            schedule_offset_minutes: 30,
+            unknown_air_date_offset_days: 7,
             api_key: String::new(),
             vfs_cache_max_size_mb: 0,
         }
@@ -113,12 +120,31 @@ impl PluginSettings {
         self.get(key).unwrap_or(default).to_string()
     }
 
+    pub fn get_bool(&self, key: &str) -> bool {
+        self.get(key)
+            .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+            .unwrap_or(false)
+    }
+
+    pub fn get_parsed<T>(&self, key: &str) -> Option<T>
+    where
+        T: FromStr,
+    {
+        self.get(key).and_then(|v| v.parse().ok())
+    }
+
+    pub fn get_parsed_or<T>(&self, key: &str, default: T) -> T
+    where
+        T: FromStr,
+    {
+        self.get_parsed(key).unwrap_or(default)
+    }
+
     pub fn get_list(&self, key: &str) -> Vec<String> {
         self.get(key)
             .map(|v| {
-                serde_json::from_str::<Vec<String>>(v).unwrap_or_else(|_| {
-                    v.split(',').map(|s| s.trim().to_string()).collect()
-                })
+                serde_json::from_str::<Vec<String>>(v)
+                    .unwrap_or_else(|_| v.split(',').map(|s| s.trim().to_string()).collect())
             })
             .unwrap_or_default()
     }
@@ -129,6 +155,10 @@ impl PluginSettings {
 
     pub fn has(&self, key: &str) -> bool {
         self.get(key).is_some()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.values.is_empty()
     }
 
     /// Merge DB-stored settings (JSON object of string values) on top of env vars.

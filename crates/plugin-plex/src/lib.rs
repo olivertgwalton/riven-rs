@@ -3,8 +3,8 @@ use serde::Deserialize;
 
 use riven_core::events::{EventType, HookResponse, RivenEvent};
 use riven_core::plugin::{Plugin, PluginContext};
-use riven_core::settings::PluginSettings;
 use riven_core::register_plugin;
+use riven_core::settings::PluginSettings;
 use riven_db::repo;
 
 #[derive(Default)]
@@ -18,10 +18,6 @@ impl Plugin for PlexPlugin {
         "plex"
     }
 
-    fn version(&self) -> &'static str {
-        "0.1.0"
-    }
-
     fn subscribed_events(&self) -> &[EventType] {
         &[EventType::MediaItemDownloadSuccess]
     }
@@ -29,7 +25,6 @@ impl Plugin for PlexPlugin {
     async fn validate(&self, settings: &PluginSettings) -> anyhow::Result<bool> {
         Ok(settings.has("plextoken") && settings.has("plexserverurl"))
     }
-
 
     fn settings_schema(&self) -> Vec<riven_core::plugin::SettingField> {
         use riven_core::plugin::SettingField;
@@ -53,20 +48,16 @@ impl Plugin for PlexPlugin {
         match event {
             RivenEvent::MediaItemDownloadSuccess { id, .. } => {
                 let plex_token = ctx.require_setting("plextoken")?;
-                let plex_url = ctx.require_setting("plexserverurl")?
-                    .trim_end_matches('/');
+                let plex_url = ctx.require_setting("plexserverurl")?.trim_end_matches('/');
                 let library_path = ctx.settings.get_or("plexlibrarypath", "/mount");
 
-                // Get filesystem entries for this media item
                 let entries = repo::get_media_entries(&ctx.db_pool, *id).await?;
                 if entries.is_empty() {
                     anyhow::bail!("no filesystem entries found for media item {id}");
                 }
 
-                // Get library sections
                 let sections = get_library_sections(&ctx.http_client, plex_url, plex_token).await?;
 
-                // Refresh matching sections
                 for entry in &entries {
                     let dir_path = entry
                         .path
@@ -130,9 +121,7 @@ async fn refresh_section(
     path: &str,
 ) -> anyhow::Result<()> {
     let encoded_path = urlencoding::encode(path);
-    let url = format!(
-        "{plex_url}/library/sections/{section_key}/refresh?path={encoded_path}"
-    );
+    let url = format!("{plex_url}/library/sections/{section_key}/refresh?path={encoded_path}");
     client
         .post(&url)
         .header("x-plex-token", token)
@@ -166,15 +155,12 @@ struct PlexLocation {
     path: String,
 }
 
-// Plex plugin needs urlencoding
 mod urlencoding {
     pub fn encode(s: &str) -> String {
         let mut result = String::new();
         for c in s.chars() {
             match c {
-                'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' | '.' | '~' | '/' => {
-                    result.push(c)
-                }
+                'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' | '.' | '~' | '/' => result.push(c),
                 _ => {
                     for b in c.to_string().as_bytes() {
                         result.push_str(&format!("%{b:02X}"));

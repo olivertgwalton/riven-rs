@@ -1,3 +1,4 @@
+pub mod flow_artifacts;
 pub mod hierarchy;
 pub mod media;
 pub mod requests;
@@ -5,6 +6,7 @@ pub mod state;
 pub mod stats;
 pub mod streams;
 
+pub use flow_artifacts::*;
 pub use hierarchy::*;
 pub use media::*;
 pub use requests::*;
@@ -18,9 +20,7 @@ use sqlx::PgPool;
 // ── Bulk state mutations ──
 
 async fn bulk_update(pool: &PgPool, ids: &[i64], set_clause: &'static str) -> Result<u64> {
-    let sql = format!(
-        "UPDATE media_items SET {set_clause}, updated_at = NOW() WHERE id = ANY($1)"
-    );
+    let sql = format!("UPDATE media_items SET {set_clause}, updated_at = NOW() WHERE id = ANY($1)");
     let result = sqlx::query(&sql).bind(ids).execute(pool).await?;
     Ok(result.rows_affected())
 }

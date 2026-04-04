@@ -1,12 +1,13 @@
 use async_trait::async_trait;
 use chrono::Utc;
+use riven_db::repo;
 use serde::Serialize;
 
 use riven_core::events::{EventType, HookResponse, RivenEvent};
 use riven_core::plugin::{Plugin, PluginContext};
+use riven_core::register_plugin;
 use riven_core::settings::PluginSettings;
 use riven_core::types::*;
-use riven_core::register_plugin;
 
 #[derive(Default)]
 pub struct NotificationsPlugin;
@@ -19,10 +20,6 @@ impl Plugin for NotificationsPlugin {
         "notifications"
     }
 
-    fn version(&self) -> &'static str {
-        "0.1.0"
-    }
-
     fn subscribed_events(&self) -> &[EventType] {
         &[EventType::MediaItemDownloadSuccess]
     }
@@ -32,15 +29,14 @@ impl Plugin for NotificationsPlugin {
         Ok(!urls.is_empty())
     }
 
-
     fn settings_schema(&self) -> Vec<riven_core::plugin::SettingField> {
         use riven_core::plugin::SettingField;
-        vec![
-            SettingField::new("urls", "Webhook URLs", "textarea")
-                .required()
-                .with_placeholder("https://discord.com/api/webhooks/...")
-                .with_description("Comma-separated webhook URLs. Supports Discord and generic JSON endpoints."),
-        ]
+        vec![SettingField::new("urls", "Webhook URLs", "textarea")
+            .required()
+            .with_placeholder("https://discord.com/api/webhooks/...")
+            .with_description(
+                "Comma-separated webhook URLs. Supports Discord and generic JSON endpoints.",
+            )]
     }
 
     async fn handle_event(
@@ -50,7 +46,7 @@ impl Plugin for NotificationsPlugin {
     ) -> anyhow::Result<HookResponse> {
         match event {
             RivenEvent::MediaItemDownloadSuccess {
-                id: _,
+                id,
                 title,
                 full_title,
                 item_type,
@@ -64,7 +60,7 @@ impl Plugin for NotificationsPlugin {
             } => {
                 let urls = ctx.settings.get_list("urls");
 
-                let payload = NotificationPayload {
+                let mut payload = NotificationPayload {
                     event: "riven.media-item.download.success".to_string(),
                     title: title.clone(),
                     full_title: full_title.clone().unwrap_or_else(|| title.clone()),
@@ -79,27 +75,84 @@ impl Plugin for NotificationsPlugin {
                     timestamp: Utc::now().to_rfc3339(),
                 };
 
-                for url_str in &urls {
-                    match parse_notification_url(url_str) {
-                        Some(NotificationService::Discord { webhook_id, webhook_token }) => {
-                            if let Err(e) = send_discord(&ctx.http_client, &webhook_id, &webhook_token, &payload).await {
-                                tracing::error!(error = %e, url = url_str, "failed to send discord notification");
-                            }
-                        }
-                        Some(NotificationService::Json { url }) => {
-                            if let Err(e) = send_json_webhook(&ctx.http_client, &url, &payload).await {
-                                tracing::error!(error = %e, url = url_str, "failed to send json notification");
-                            }
-                        }
-                        None => {
-                            tracing::warn!(url = url_str, "unsupported notification URL scheme");
-                        }
-                    }
+                if !rewrite_for_request_root(ctx, *id, &mut payload).await? {
+                    return Ok(HookResponse::Empty);
                 }
+
+                dispatch_webhooks(ctx, &urls, &payload).await;
 
                 Ok(HookResponse::Empty)
             }
             _ => Ok(HookResponse::Empty),
+        }
+    }
+}
+
+async fn rewrite_for_request_root(
+    ctx: &PluginContext,
+    item_id: i64,
+    payload: &mut NotificationPayload,
+) -> anyhow::Result<bool> {
+    let Some(item) = repo::get_media_item(&ctx.db_pool, item_id).await? else {
+        return Ok(true);
+    };
+    let Some(request_id) = item.item_request_id else {
+        return Ok(true);
+    };
+    let Some(request) = repo::get_item_request_by_id(&ctx.db_pool, request_id).await? else {
+        return Ok(false);
+    };
+    if request.state != ItemRequestState::Completed {
+        return Ok(false);
+    }
+    let Some(root_item) = repo::get_request_root_item(&ctx.db_pool, request_id).await? else {
+        return Ok(false);
+    };
+    if !mark_request_notification_sent(ctx, request_id).await? {
+        return Ok(false);
+    }
+
+    payload.title = root_item.title.clone();
+    payload.full_title = root_item
+        .full_title
+        .clone()
+        .unwrap_or_else(|| root_item.title.clone());
+    payload.item_type = root_item.item_type;
+    payload.year = root_item.year;
+    payload.imdb_id = root_item.imdb_id.clone();
+    payload.tmdb_id = root_item.tmdb_id.clone();
+    payload.poster_path = root_item.poster_path.clone();
+    payload.duration_seconds = request
+        .completed_at
+        .unwrap_or_else(Utc::now)
+        .signed_duration_since(request.created_at)
+        .to_std()
+        .map(|duration| duration.as_secs_f64())
+        .unwrap_or(payload.duration_seconds);
+    Ok(true)
+}
+
+async fn dispatch_webhooks(ctx: &PluginContext, urls: &[String], payload: &NotificationPayload) {
+    for url_str in urls {
+        match parse_notification_url(url_str) {
+            Some(NotificationService::Discord {
+                webhook_id,
+                webhook_token,
+            }) => {
+                if let Err(error) =
+                    send_discord(&ctx.http_client, &webhook_id, &webhook_token, payload).await
+                {
+                    tracing::error!(error = %error, url = url_str, "failed to send discord notification");
+                }
+            }
+            Some(NotificationService::Json { url }) => {
+                if let Err(error) = send_json_webhook(&ctx.http_client, &url, payload).await {
+                    tracing::error!(error = %error, url = url_str, "failed to send json notification");
+                }
+            }
+            None => {
+                tracing::warn!(url = url_str, "unsupported notification URL scheme");
+            }
         }
     }
 }
@@ -120,6 +173,23 @@ struct NotificationPayload {
     timestamp: String,
 }
 
+async fn mark_request_notification_sent(
+    ctx: &PluginContext,
+    request_id: i64,
+) -> anyhow::Result<bool> {
+    let key = format!("riven:notifications:request-complete:{request_id}");
+    let mut conn = ctx.redis.clone();
+    let result: Option<String> = redis::cmd("SET")
+        .arg(&key)
+        .arg("1")
+        .arg("NX")
+        .arg("EX")
+        .arg(60 * 60 * 24 * 30)
+        .query_async(&mut conn)
+        .await?;
+    Ok(result.is_some())
+}
+
 enum NotificationService {
     Discord {
         webhook_id: String,
@@ -132,7 +202,6 @@ enum NotificationService {
 
 fn parse_notification_url(url: &str) -> Option<NotificationService> {
     if url.starts_with("discord://") {
-        // discord://webhookId/webhookToken
         let rest = url.strip_prefix("discord://")?;
         let (webhook_id, webhook_token) = rest.split_once('/')?;
         Some(NotificationService::Discord {
@@ -140,7 +209,6 @@ fn parse_notification_url(url: &str) -> Option<NotificationService> {
             webhook_token: webhook_token.to_string(),
         })
     } else if url.starts_with("https://discord.com/api/webhooks/") {
-        // https://discord.com/api/webhooks/webhookId/webhookToken
         let rest = url.strip_prefix("https://discord.com/api/webhooks/")?;
         let (webhook_id, webhook_token) = rest.split_once('/')?;
         Some(NotificationService::Discord {
@@ -168,9 +236,7 @@ async fn send_discord(
     webhook_token: &str,
     payload: &NotificationPayload,
 ) -> anyhow::Result<()> {
-    let url = format!(
-        "https://discord.com/api/webhooks/{webhook_id}/{webhook_token}"
-    );
+    let url = format!("https://discord.com/api/webhooks/{webhook_id}/{webhook_token}");
 
     let duration_str = format_duration(payload.duration_seconds);
 
@@ -185,7 +251,8 @@ async fn send_discord(
     }
 
     if let Some(year) = payload.year {
-        fields.push(serde_json::json!({ "name": "Year", "value": year.to_string(), "inline": true }));
+        fields
+            .push(serde_json::json!({ "name": "Year", "value": year.to_string(), "inline": true }));
     }
 
     let mut embed = serde_json::json!({
@@ -226,7 +293,7 @@ async fn send_json_webhook(
 }
 
 fn format_duration(seconds: f64) -> String {
-    let total = seconds as u64;
+    let total = seconds.round().max(0.0) as u64;
     let hours = total / 3600;
     let minutes = (total % 3600) / 60;
     let secs = total % 60;
@@ -236,6 +303,6 @@ fn format_duration(seconds: f64) -> String {
     } else if minutes > 0 {
         format!("{minutes}m {secs}s")
     } else {
-        format!("{secs}s")
+        format!("{seconds:.1}s")
     }
 }

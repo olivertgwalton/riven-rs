@@ -133,8 +133,8 @@ pub(crate) fn extract_title(raw: &str) -> String {
     let title = &cleaned[..end];
 
     // Remove trailing dashes, parens, brackets, and whitespace
-    let title = title
-        .trim_end_matches(|c: char| c == '-' || c == '(' || c == '[' || c.is_whitespace());
+    let title =
+        title.trim_end_matches(|c: char| c == '-' || c == '(' || c == '[' || c.is_whitespace());
 
     // Collapse whitespace and trim
     title

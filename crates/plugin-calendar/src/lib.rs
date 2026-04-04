@@ -5,7 +5,6 @@ use redis::AsyncCommands;
 use riven_core::events::{EventType, HookResponse, RivenEvent};
 use riven_core::plugin::{Plugin, PluginContext};
 use riven_core::register_plugin;
-use riven_core::settings::PluginSettings;
 use riven_core::types::{MediaItemState, MediaItemType};
 use riven_db::entities::MediaItem;
 use riven_db::repo;
@@ -30,19 +29,14 @@ impl Plugin for CalendarPlugin {
         "calendar"
     }
 
-    fn version(&self) -> &'static str {
-        "0.1.0"
+    fn show_in_settings(&self) -> bool {
+        false
     }
 
     fn subscribed_events(&self) -> &[EventType] {
         // Regenerate on startup and whenever item metadata is refreshed,
         // which is when air dates are first written or updated.
         &[EventType::CoreStarted, EventType::MediaItemIndexSuccess]
-    }
-
-    async fn validate(&self, _settings: &PluginSettings) -> anyhow::Result<bool> {
-        // No required settings — the calendar plugin is always active.
-        Ok(true)
     }
 
     async fn handle_event(

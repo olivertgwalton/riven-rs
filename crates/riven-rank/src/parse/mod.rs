@@ -435,9 +435,7 @@ fn detect_anime_extras(raw: &str, extras: &mut Vec<String>) {
     if RE_EXTRAS_NCOP.is_match(raw) {
         push_unique(extras, "NCOP");
     }
-    if RE_EXTRAS_NC.is_match(raw)
-        && !extras.iter().any(|e| e == "NCED" || e == "NCOP")
-    {
+    if RE_EXTRAS_NC.is_match(raw) && !extras.iter().any(|e| e == "NCED" || e == "NCOP") {
         push_unique(extras, "NC");
     }
     if RE_EXTRAS_OVA.is_match(raw) {
@@ -482,20 +480,14 @@ pub fn parse(raw_title: &str) -> ParsedData {
     let raw = &working_title;
 
     // Extension & container
-    data.extension = RE_EXTENSION
-        .captures(raw)
-        .map(|c| c[1].to_lowercase());
-    data.container = RE_CONTAINER
-        .captures(raw)
-        .map(|c| c[1].to_lowercase());
+    data.extension = RE_EXTENSION.captures(raw).map(|c| c[1].to_lowercase());
+    data.container = RE_CONTAINER.captures(raw).map(|c| c[1].to_lowercase());
     data.size = RE_SIZE.captures(raw).map(|c| c[1].to_string());
-    data.bitrate = RE_BITRATE
-        .captures(raw)
-        .map(|c| c[1].to_lowercase());
+    data.bitrate = RE_BITRATE.captures(raw).map(|c| c[1].to_lowercase());
 
     // Torrent flag
-    data.torrent = raw.to_lowercase().ends_with(".torrent")
-        || data.extension.as_deref() == Some("torrent");
+    data.torrent =
+        raw.to_lowercase().ends_with(".torrent") || data.extension.as_deref() == Some("torrent");
 
     // Date (try multiple formats)
     data.date = detect_date(raw);
@@ -643,14 +635,10 @@ pub fn parse(raw_title: &str) -> ParsedData {
     data.volumes.dedup();
 
     // Edition
-    data.edition = RE_EDITION
-        .captures(raw)
-        .map(|c| normalize_edition(&c[1]));
+    data.edition = RE_EDITION.captures(raw).map(|c| normalize_edition(&c[1]));
 
     // Region (R1-R9, PAL, NTSC, SECAM)
-    data.region = RE_REGION
-        .captures(raw)
-        .map(|c| c[1].to_uppercase());
+    data.region = RE_REGION.captures(raw).map(|c| c[1].to_uppercase());
 
     // Network
     detect_network(raw, &mut data);
@@ -663,9 +651,7 @@ pub fn parse(raw_title: &str) -> ParsedData {
     }
 
     // Country
-    data.country = RE_COUNTRY
-        .captures(raw)
-        .map(|c| c[1].to_uppercase());
+    data.country = RE_COUNTRY.captures(raw).map(|c| c[1].to_uppercase());
 
     // Anime extras (NCED, NCOP, NC, OVA, ED, OP)
     detect_anime_extras(raw, &mut data.extras);
@@ -697,8 +683,9 @@ pub fn parse(raw_title: &str) -> ParsedData {
     data.proper = RE_PROPER.is_match(raw);
     data.repack = RE_REPACK.is_match(raw);
     data.retail = RE_RETAIL.is_match(raw);
-    data.upscaled =
-        RE_UPSCALED.is_match(raw) || RE_UPSCALED_SPECIFIC.is_match(raw) || RE_UPSCALED_AI.is_match(raw);
+    data.upscaled = RE_UPSCALED.is_match(raw)
+        || RE_UPSCALED_SPECIFIC.is_match(raw)
+        || RE_UPSCALED_AI.is_match(raw);
     data.remastered = RE_REMASTERED.is_match(raw);
     data.extended = RE_EXTENDED.is_match(raw);
     data.converted = RE_CONVERTED.is_match(raw);

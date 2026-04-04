@@ -1,9 +1,8 @@
 use async_graphql::{Context, Object, Result as GqlResult, SimpleObject};
 use async_trait::async_trait;
-use riven_core::events::{EventType, HookResponse, RivenEvent};
-use riven_core::plugin::{Plugin, PluginContext, PluginRegistry};
+use riven_core::events::{HookResponse, RivenEvent};
+use riven_core::plugin::{Plugin, PluginRegistry};
 use riven_core::register_plugin;
-use riven_core::settings::PluginSettings;
 use riven_core::types::DebridUserInfo;
 use riven_db::repo;
 use std::sync::Arc;
@@ -19,24 +18,8 @@ impl Plugin for DashboardPlugin {
         "dashboard"
     }
 
-    fn version(&self) -> &'static str {
-        "0.1.0"
-    }
-
-    fn subscribed_events(&self) -> &[EventType] {
-        &[]
-    }
-
-    async fn validate(&self, _settings: &PluginSettings) -> anyhow::Result<bool> {
-        Ok(true)
-    }
-
-    async fn handle_event(
-        &self,
-        _event: &RivenEvent,
-        _ctx: &PluginContext,
-    ) -> anyhow::Result<HookResponse> {
-        Ok(HookResponse::Empty)
+    fn show_in_settings(&self) -> bool {
+        false
     }
 }
 
@@ -67,7 +50,6 @@ pub struct DashboardQuery;
 
 #[Object]
 impl DashboardQuery {
-    /// Get aggregate library statistics.
     async fn stats(&self, ctx: &Context<'_>) -> GqlResult<LibraryStats> {
         let pool = ctx.data::<sqlx::PgPool>()?;
         let s = repo::get_stats(pool).await?;
@@ -108,7 +90,9 @@ impl DashboardQuery {
     /// Get debrid account information for all configured stores.
     async fn debrid_account_info(&self, ctx: &Context<'_>) -> GqlResult<Vec<DebridUserInfo>> {
         let registry = ctx.data::<Arc<PluginRegistry>>()?;
-        let results = registry.dispatch(&RivenEvent::DebridUserInfoRequested).await;
+        let results = registry
+            .dispatch(&RivenEvent::DebridUserInfoRequested)
+            .await;
         let mut infos = Vec::new();
         for (_, result) in results {
             if let Ok(HookResponse::UserInfo(user_infos)) = result {

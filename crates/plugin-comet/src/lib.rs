@@ -21,10 +21,6 @@ impl Plugin for CometPlugin {
         "comet"
     }
 
-    fn version(&self) -> &'static str {
-        "0.1.0"
-    }
-
     fn subscribed_events(&self) -> &[EventType] {
         &[EventType::MediaItemScrapeRequested]
     }
@@ -41,13 +37,11 @@ impl Plugin for CometPlugin {
     }
 
     fn settings_schema(&self) -> Vec<SettingField> {
-        vec![
-            SettingField::new("url", "URL", "url")
-                .required()
-                .with_default(DEFAULT_URL)
-                .with_placeholder(DEFAULT_URL)
-                .with_description("Base URL of your Comet instance."),
-        ]
+        vec![SettingField::new("url", "URL", "url")
+            .required()
+            .with_default(DEFAULT_URL)
+            .with_placeholder(DEFAULT_URL)
+            .with_description("Base URL of your Comet instance.")]
     }
 
     async fn handle_event(
@@ -55,21 +49,11 @@ impl Plugin for CometPlugin {
         event: &RivenEvent,
         ctx: &PluginContext,
     ) -> anyhow::Result<HookResponse> {
-        let RivenEvent::MediaItemScrapeRequested {
-            item_type,
-            imdb_id,
-            title,
-            season,
-            episode,
-            ..
-        } = event
-        else {
+        let Some(request) = event.scrape_request() else {
             return Ok(HookResponse::Empty);
         };
-
-        let imdb_id = match imdb_id {
-            Some(id) => id,
-            None => return Ok(HookResponse::Empty),
+        let Some(imdb_id) = request.imdb_id else {
+            return Ok(HookResponse::Empty);
         };
 
         let base_url = ctx.settings.get_or("url", DEFAULT_URL);
@@ -80,40 +64,32 @@ impl Plugin for CometPlugin {
         // Shows:   /stream/series/{imdbId}.json
         // Seasons: /stream/series/{imdbId}:{season}.json
         // Episodes:/stream/series/{imdbId}:{season}:{episode}.json
-        let (scrape_type, identifier) = match item_type {
+        let (scrape_type, identifier) = match request.item_type {
             MediaItemType::Movie => ("movie", String::new()),
             MediaItemType::Show => ("series", String::new()),
-            MediaItemType::Season => {
-                let s = season.unwrap_or(1);
-                ("series", format!(":{s}"))
-            }
+            MediaItemType::Season => ("series", format!(":{}", request.season_or_1())),
             MediaItemType::Episode => {
-                let s = season.unwrap_or(1);
-                let e = episode.unwrap_or(1);
+                let s = request.season_or_1();
+                let e = request.episode_or_1();
                 ("series", format!(":{s}:{e}"))
             }
         };
 
         let url = format!("{base_url}/stream/{scrape_type}/{imdb_id}{identifier}.json");
 
-        let resp: CometResponse = match ctx
-            .http_client
-            .get(&url)
-            .send()
-            .await?
-            .json()
-            .await
-        {
+        let resp: CometResponse = match ctx.http_client.get(&url).send().await?.json().await {
             Ok(r) => r,
             Err(e) => {
-                tracing::warn!(error = %e, imdb_id, title, "comet response parse failed");
+                tracing::warn!(error = %e, imdb_id, title = request.title, "comet response parse failed");
                 return Ok(HookResponse::Scrape(HashMap::new()));
             }
         };
 
         let mut results = HashMap::new();
         for stream in resp.streams {
-            let Some(info_hash) = stream.info_hash else { continue };
+            let Some(info_hash) = stream.info_hash else {
+                continue;
+            };
 
             // Title priority:
             // 1. behaviorHints.filename (exact original filename)
@@ -138,7 +114,12 @@ impl Plugin for CometPlugin {
             }
         }
 
-        tracing::info!(count = results.len(), imdb_id, title, "comet scrape complete");
+        tracing::info!(
+            count = results.len(),
+            imdb_id,
+            title = request.title,
+            "comet scrape complete"
+        );
         Ok(HookResponse::Scrape(results))
     }
 }

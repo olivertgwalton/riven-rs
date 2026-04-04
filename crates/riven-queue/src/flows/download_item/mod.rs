@@ -10,10 +10,11 @@ use riven_db::entities::{MediaItem, Stream};
 use riven_db::repo;
 use riven_rank::{ParsedData, RankSettings};
 
+use super::load_active_profiles;
+use crate::orchestrator::LibraryOrchestrator;
 use crate::{DownloadJob, JobQueue};
 use helpers::{has_matching_file, load_item_or_err};
 use persist::{persist_episode, persist_movie, persist_season};
-use super::load_active_profiles;
 
 /// Run the download item flow.
 pub async fn run(id: i64, _job: &DownloadJob, queue: &JobQueue) {
@@ -26,8 +27,7 @@ pub async fn run(id: i64, _job: &DownloadJob, queue: &JobQueue) {
     };
 
     // Load enabled profiles (empty = single-version mode).
-    let version_profiles: Vec<(String, RankSettings)> =
-        load_active_profiles(&queue.db_pool).await;
+    let version_profiles: Vec<(String, RankSettings)> = load_active_profiles(&queue.db_pool).await;
     let multi_version = !version_profiles.is_empty();
 
     // Early bail.
@@ -44,7 +44,8 @@ pub async fn run(id: i64, _job: &DownloadJob, queue: &JobQueue) {
     }
 
     // Fetch ALL non-blacklisted streams for the batch cache-check.
-    let all_streams = match repo::get_non_blacklisted_streams(&queue.db_pool, id).await {
+    let ranks = queue.resolution_ranks.read().await.clone();
+    let all_streams = match repo::get_non_blacklisted_streams(&queue.db_pool, id, &ranks).await {
         Ok(s) => s,
         Err(e) => {
             tracing::error!(id, error = %e, "failed to fetch streams for download");
@@ -61,7 +62,9 @@ pub async fn run(id: i64, _job: &DownloadJob, queue: &JobQueue) {
                 item_type: item.item_type,
             })
             .await;
-        queue.fan_out_download(id).await;
+        LibraryOrchestrator::new(queue)
+            .fan_out_download_failure(id)
+            .await;
         return;
     }
 
@@ -82,42 +85,48 @@ pub async fn run(id: i64, _job: &DownloadJob, queue: &JobQueue) {
     }
 
     let config = queue.downloader_config.read().await;
-    let max_size_bytes: Option<u64> = match item.item_type {
-        MediaItemType::Movie => config
-            .maximum_average_bitrate_movies
-            .zip(item.runtime)
-            .map(|(mbps, rt)| riven_core::downloader::DownloaderConfig::threshold_bytes(mbps, rt)),
-        MediaItemType::Episode => config
-            .maximum_average_bitrate_episodes
-            .zip(item.runtime)
-            .map(|(mbps, rt)| riven_core::downloader::DownloaderConfig::threshold_bytes(mbps, rt)),
-        _ => None,
+    let bitrate_threshold = |movies: Option<u32>, episodes: Option<u32>| {
+        let mbps = match item.item_type {
+            MediaItemType::Movie => movies,
+            MediaItemType::Episode => episodes,
+            _ => None,
+        };
+        mbps.zip(item.runtime)
+            .map(|(m, rt)| riven_core::downloader::DownloaderConfig::threshold_bytes(m, rt))
     };
-    let min_size_bytes: Option<u64> = match item.item_type {
-        MediaItemType::Movie => config
-            .minimum_average_bitrate_movies
-            .zip(item.runtime)
-            .map(|(mbps, rt)| riven_core::downloader::DownloaderConfig::threshold_bytes(mbps, rt)),
-        MediaItemType::Episode => config
-            .minimum_average_bitrate_episodes
-            .zip(item.runtime)
-            .map(|(mbps, rt)| riven_core::downloader::DownloaderConfig::threshold_bytes(mbps, rt)),
-        _ => None,
-    };
+    let max_size_bytes = bitrate_threshold(
+        config.maximum_average_bitrate_movies,
+        config.maximum_average_bitrate_episodes,
+    );
+    let min_size_bytes = bitrate_threshold(
+        config.minimum_average_bitrate_movies,
+        config.minimum_average_bitrate_episodes,
+    );
     drop(config);
 
     if multi_version {
         run_multi_version(
-            id, &item, queue, start_time,
-            &version_profiles, &all_streams, &cached_info,
-            max_size_bytes, min_size_bytes,
+            id,
+            &item,
+            queue,
+            start_time,
+            &version_profiles,
+            &all_streams,
+            &cached_info,
+            max_size_bytes,
+            min_size_bytes,
         )
         .await;
     } else {
         run_single_version(
-            id, &item, queue, start_time,
-            &all_streams, &cached_info,
-            max_size_bytes, min_size_bytes,
+            id,
+            &item,
+            queue,
+            start_time,
+            &all_streams,
+            &cached_info,
+            max_size_bytes,
+            min_size_bytes,
         )
         .await;
     }
@@ -142,7 +151,11 @@ async fn run_multi_version(
 
     for (profile_name, profile_settings) in version_profiles {
         if downloaded_profiles.contains(profile_name) {
-            tracing::debug!(id, profile = profile_name, "profile version already present, skipping");
+            tracing::debug!(
+                id,
+                profile = profile_name,
+                "profile version already present, skipping"
+            );
             continue;
         }
 
@@ -150,17 +163,32 @@ async fn run_multi_version(
 
         // Pick the best cached stream for this profile from the already-fetched pool.
         let stream = match pick_best_for_profile(
-            all_streams, item, profile_settings, cached_info, max_size_bytes, min_size_bytes,
+            all_streams,
+            item,
+            profile_settings,
+            cached_info,
+            max_size_bytes,
+            min_size_bytes,
         ) {
             Some(s) => s,
             None => {
-                tracing::debug!(id, profile = profile_name, "no cached stream found for profile");
+                tracing::debug!(
+                    id,
+                    profile = profile_name,
+                    "no cached stream found for profile"
+                );
                 continue;
             }
         };
 
         let success = attempt_download(
-            id, item, queue, stream, path_tag, Some(profile_name.as_str()), start_time,
+            id,
+            item,
+            queue,
+            stream,
+            path_tag,
+            Some(profile_name.as_str()),
+            start_time,
         )
         .await;
 
@@ -171,19 +199,26 @@ async fn run_multi_version(
     }
 
     if !any_success {
-        queue.fan_out_download(id).await;
+        LibraryOrchestrator::new(queue)
+            .fan_out_download_failure(id)
+            .await;
         return;
     }
 
     if let Err(e) = repo::refresh_state_cascade(&queue.db_pool, item).await {
         tracing::error!(error = %e, "failed to refresh state after multi-version download");
     }
+    LibraryOrchestrator::new(queue)
+        .sync_item_request_state(item)
+        .await;
 
     // Re-queue if any profiles are still missing.
     let done = fetch_done_profiles(queue, id, item.item_type).await;
     if !version_profiles.iter().all(|(name, _)| done.contains(name)) {
         tracing::debug!(id, "some profile versions still missing — re-queuing");
-        queue.fan_out_download(id).await;
+        LibraryOrchestrator::new(queue)
+            .fan_out_download_failure(id)
+            .await;
     }
 
     let duration = start_time.elapsed();
@@ -202,7 +237,11 @@ async fn run_multi_version(
             duration_seconds: duration.as_secs_f64(),
         })
         .await;
-    tracing::debug!(id, duration_secs = duration.as_secs_f64(), "multi-version download flow completed");
+    tracing::debug!(
+        id,
+        duration_secs = duration.as_secs_f64(),
+        "multi-version download flow completed"
+    );
 }
 
 /// Select the best stream from `candidates` that is cached, passes bitrate
@@ -326,7 +365,9 @@ async fn run_single_version(
                 error: "no cached stream found within bitrate limits".into(),
             })
             .await;
-        queue.fan_out_download(id).await;
+        LibraryOrchestrator::new(queue)
+            .fan_out_download_failure(id)
+            .await;
         return;
     }
 
@@ -339,6 +380,9 @@ async fn run_single_version(
         if let Err(e) = repo::refresh_state_cascade(&queue.db_pool, item).await {
             tracing::error!(error = %e, "failed to refresh state after download");
         }
+        LibraryOrchestrator::new(queue)
+            .sync_item_request_state(item)
+            .await;
 
         let duration = start_time.elapsed();
         queue
@@ -356,11 +400,17 @@ async fn run_single_version(
                 duration_seconds: duration.as_secs_f64(),
             })
             .await;
-        tracing::debug!(id, duration_secs = duration.as_secs_f64(), "download flow completed");
+        tracing::debug!(
+            id,
+            duration_secs = duration.as_secs_f64(),
+            "download flow completed"
+        );
         return;
     }
 
-    queue.fan_out_download(id).await;
+    LibraryOrchestrator::new(queue)
+        .fan_out_download_failure(id)
+        .await;
 }
 
 // ── Shared download attempt ───────────────────────────────────────────────────
@@ -398,12 +448,20 @@ async fn attempt_download(
     for (plugin_name, result) in results {
         match result {
             Ok(HookResponse::Download(dl)) => {
-                tracing::debug!(plugin = plugin_name, files = dl.files.len(), "download responded");
+                tracing::debug!(
+                    plugin = plugin_name,
+                    files = dl.files.len(),
+                    "download responded"
+                );
                 download_result = Some(dl);
                 break;
             }
             Ok(HookResponse::DownloadStreamUnavailable) => {
-                tracing::debug!(plugin = plugin_name, info_hash, "stream unexpectedly not cached");
+                tracing::debug!(
+                    plugin = plugin_name,
+                    info_hash,
+                    "stream unexpectedly not cached"
+                );
             }
             Ok(_) => {}
             Err(e) => {
@@ -420,13 +478,43 @@ async fn attempt_download(
 
     match item.item_type {
         MediaItemType::Movie => {
-            persist_movie(item, &dl, info_hash, queue, stream_id, resolution_ref, path_tag, profile_name).await
+            persist_movie(
+                item,
+                &dl,
+                info_hash,
+                queue,
+                stream_id,
+                resolution_ref,
+                path_tag,
+                profile_name,
+            )
+            .await
         }
         MediaItemType::Episode => {
-            persist_episode(item, &dl, info_hash, queue, stream_id, resolution_ref, path_tag, profile_name).await
+            persist_episode(
+                item,
+                &dl,
+                info_hash,
+                queue,
+                stream_id,
+                resolution_ref,
+                path_tag,
+                profile_name,
+            )
+            .await
         }
         MediaItemType::Season => {
-            persist_season(item, dl, info_hash, queue, start_time, stream_id, path_tag, profile_name).await;
+            persist_season(
+                item,
+                dl,
+                info_hash,
+                queue,
+                start_time,
+                stream_id,
+                path_tag,
+                profile_name,
+            )
+            .await;
             true // persist_season handles its own state updates
         }
         _ => {

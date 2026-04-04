@@ -1,21 +1,27 @@
-use riven_core::events::{HookResponse, RivenEvent};
+use riven_core::events::{EventType, HookResponse, RivenEvent};
 use riven_core::types::*;
 use riven_db::repo;
 
-use crate::JobQueue;
-use crate::ScrapeJob;
+use crate::orchestrator::LibraryOrchestrator;
+use crate::{IndexJob, IndexPluginJob, JobQueue};
 
-use super::load_item_or_log;
+use super::{load_item_or_log, run_plugin_hook, start_plugin_flow};
 
-/// Run the index item flow.
-/// Dispatches to indexer plugins (TMDB, TVDB), merges results, and persists.
-pub async fn run(id: i64, queue: &JobQueue) {
-    let Some(item) = load_item_or_log(id, &queue.db_pool, "indexing").await else {
-        return;
-    };
+fn index_event(job: &IndexJob) -> RivenEvent {
+    RivenEvent::MediaItemIndexRequested {
+        id: job.id,
+        item_type: job.item_type,
+        imdb_id: job.imdb_id.clone(),
+        tvdb_id: job.tvdb_id.clone(),
+        tmdb_id: job.tmdb_id.clone(),
+    }
+}
 
-    // Resolve which seasons this request covers (None = whole show).
-    let requested_seasons: Option<Vec<i32>> = if let Some(req_id) = item.item_request_id {
+async fn load_requested_seasons(
+    queue: &JobQueue,
+    item: &riven_db::entities::MediaItem,
+) -> Option<Vec<i32>> {
+    if let Some(req_id) = item.item_request_id {
         repo::get_item_request_by_id(&queue.db_pool, req_id)
             .await
             .ok()
@@ -24,37 +30,90 @@ pub async fn run(id: i64, queue: &JobQueue) {
             .and_then(|s| serde_json::from_value(s).ok())
     } else {
         None
-    };
-
-    let event = RivenEvent::MediaItemIndexRequested {
-        id: item.id,
-        item_type: item.item_type,
-        imdb_id: item.imdb_id.clone(),
-        tvdb_id: item.tvdb_id.clone(),
-        tmdb_id: item.tmdb_id.clone(),
-    };
-
-    let results = queue.registry.dispatch(&event).await;
-
-    let mut merged = IndexedMediaItem::default();
-    let mut got_response = false;
-
-    for (plugin_name, result) in results {
-        match result {
-            Ok(HookResponse::Index(indexed)) => {
-                tracing::debug!(plugin = plugin_name, id, "indexer responded");
-                got_response = true;
-                merged = merged.merge(*indexed);
-            }
-            Ok(_) => {}
-            Err(e) => {
-                tracing::error!(plugin = plugin_name, id, error = %e, "indexer hook failed");
-            }
-        }
     }
+}
 
-    if !got_response {
-        tracing::warn!(id, "no indexer plugin responded — item will stay at Indexed and be retried");
+pub async fn run(job: &IndexJob, queue: &JobQueue) {
+    let Some(_item) = load_item_or_log(job.id, &queue.db_pool, "indexing").await else {
+        queue.release_dedup("index", job.id).await;
+        return;
+    };
+
+    if start_plugin_flow(
+        queue,
+        "index",
+        job.id,
+        EventType::MediaItemIndexRequested,
+        |plugin_name| async move {
+            queue
+                .push_index_plugin(IndexPluginJob {
+                    id: job.id,
+                    plugin_name,
+                    item_type: job.item_type,
+                    imdb_id: job.imdb_id.clone(),
+                    tvdb_id: job.tvdb_id.clone(),
+                    tmdb_id: job.tmdb_id.clone(),
+                })
+                .await;
+        },
+    )
+    .await
+        == 0
+    {
+        tracing::warn!(id = job.id, "no indexer subscribers found");
+        queue
+            .notify(RivenEvent::MediaItemIndexError {
+                id: job.id,
+                error: "no indexer plugin responded".into(),
+            })
+            .await;
+        queue.release_dedup("index", job.id).await;
+        return;
+    }
+}
+
+pub async fn run_plugin(job: &IndexPluginJob, queue: &JobQueue) {
+    let event = index_event(&IndexJob {
+        id: job.id,
+        item_type: job.item_type,
+        imdb_id: job.imdb_id.clone(),
+        tvdb_id: job.tvdb_id.clone(),
+        tmdb_id: job.tmdb_id.clone(),
+    });
+
+    if run_plugin_hook(
+        queue,
+        "index",
+        job.id,
+        &job.plugin_name,
+        &event,
+        "indexer",
+        |response| match response {
+            HookResponse::Index(indexed) => Some(*indexed),
+            _ => None,
+        },
+    )
+    .await
+    {
+        finalize(job.id, queue).await;
+    }
+}
+
+pub async fn finalize(id: i64, queue: &JobQueue) {
+    let Some(item) = load_item_or_log(id, &queue.db_pool, "index finalize").await else {
+        queue.clear_flow("index", id).await;
+        queue.release_dedup("index", id).await;
+        return;
+    };
+
+    let requested_seasons = load_requested_seasons(queue, &item).await;
+    let responses: Vec<IndexedMediaItem> = queue.flow_load_results("index", id).await;
+    queue.clear_flow_results("index", id).await;
+    queue.clear_flow("index", id).await;
+    queue.release_dedup("index", id).await;
+
+    if responses.is_empty() {
+        tracing::warn!(id, "no indexer plugin responded");
         queue
             .notify(RivenEvent::MediaItemIndexError {
                 id,
@@ -64,9 +123,14 @@ pub async fn run(id: i64, queue: &JobQueue) {
         return;
     }
 
-    // Persist indexed data
+    let merged = responses
+        .into_iter()
+        .fold(IndexedMediaItem::default(), |acc, indexed| {
+            acc.merge(indexed)
+        });
+
     if let Err(e) = repo::update_media_item_index(&queue.db_pool, id, &merged).await {
-        tracing::error!(id, error = %e, "failed to persist indexed data — item will stay at Indexed");
+        tracing::error!(id, error = %e, "failed to persist indexed data");
         queue
             .notify(RivenEvent::MediaItemIndexError {
                 id,
@@ -82,10 +146,8 @@ pub async fn run(id: i64, queue: &JobQueue) {
         }
     }
 
-    // For shows, create seasons and episodes then refresh state for each.
     if item.item_type == MediaItemType::Show {
         if let Some(seasons) = &merged.seasons {
-
             for season_data in seasons {
                 let season_requested = if season_data.number == 0 {
                     requested_seasons
@@ -99,8 +161,6 @@ pub async fn run(id: i64, queue: &JobQueue) {
                         .unwrap_or(true)
                 };
 
-                // When specific seasons were requested, skip seasons not in the list
-                // entirely — don't create them or their episodes.
                 if requested_seasons.is_some() && !season_requested {
                     continue;
                 }
@@ -148,16 +208,18 @@ pub async fn run(id: i64, queue: &JobQueue) {
             }
         }
 
-        // Un-mark non-requested, non-completed seasons so the retry scheduler
-        // does not pick them up (covers both re-add and existing-show cases).
-        if let Some(ref nums) = requested_seasons {
-            let _ = repo::unmark_unrequested_seasons(&queue.db_pool, id, nums).await;
-        }
-
         if let Ok(Some(show_item)) = repo::get_media_item(&queue.db_pool, id).await {
             let _ = repo::refresh_state(&queue.db_pool, &show_item).await;
         }
     }
+
+    let fresh_item = match repo::get_media_item(&queue.db_pool, id).await {
+        Ok(Some(i)) => i,
+        _ => {
+            tracing::error!(id, "could not re-fetch item after indexing");
+            return;
+        }
+    };
 
     let title = merged.title.clone().unwrap_or_else(|| item.title.clone());
     queue
@@ -169,84 +231,7 @@ pub async fn run(id: i64, queue: &JobQueue) {
         .await;
     tracing::info!(id, "index flow completed");
 
-    // Re-fetch so ScrapeJob fields reflect what the indexer persisted.
-    let fresh_item = match repo::get_media_item(&queue.db_pool, id).await {
-        Ok(Some(i)) => i,
-        _ => {
-            tracing::error!(id, "could not re-fetch item after indexing");
-            return;
-        }
-    };
-
-    // Immediately queue scraping after successful indexing
-    match fresh_item.item_type {
-        MediaItemType::Movie => {
-            queue
-                .push_scrape(ScrapeJob {
-                    id: fresh_item.id,
-                    item_type: fresh_item.item_type,
-                    imdb_id: fresh_item.imdb_id.clone(),
-                    title: fresh_item.title.clone(),
-                    season: fresh_item.season_number,
-                    episode: fresh_item.episode_number,
-                })
-                .await;
-        }
-        MediaItemType::Episode => {
-            let show_imdb_id = if let Some(parent_id) = fresh_item.parent_id {
-                if let Ok(Some(season)) = repo::get_media_item(&queue.db_pool, parent_id).await {
-                    if let Some(show_id) = season.parent_id {
-                        repo::get_media_item(&queue.db_pool, show_id)
-                            .await
-                            .ok()
-                            .flatten()
-                            .and_then(|s| s.imdb_id)
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
-            queue
-                .push_scrape(ScrapeJob {
-                    id: fresh_item.id,
-                    item_type: fresh_item.item_type,
-                    imdb_id: show_imdb_id.or(fresh_item.imdb_id.clone()),
-                    title: title.clone(),
-                    season: fresh_item.season_number,
-                    episode: fresh_item.episode_number,
-                })
-                .await;
-        }
-        MediaItemType::Show => {
-            let show_imdb_id = fresh_item.imdb_id.clone();
-            if let Ok(seasons) =
-                riven_db::repo::get_requested_seasons_for_show(&queue.db_pool, fresh_item.id).await
-            {
-                for season in seasons {
-                    // When specific seasons were requested, only push scrape jobs for those —
-                    // avoid re-scraping all previously-requested seasons.
-                    if let Some(ref nums) = requested_seasons {
-                        if !season.season_number.map(|n| nums.contains(&n)).unwrap_or(false) {
-                            continue;
-                        }
-                    }
-                    queue
-                        .push_scrape(ScrapeJob {
-                            id: season.id,
-                            item_type: season.item_type,
-                            imdb_id: show_imdb_id.clone(),
-                            title: title.clone(),
-                            season: season.season_number,
-                            episode: None,
-                        })
-                        .await;
-                }
-            }
-        }
-        _ => {}
-    }
+    LibraryOrchestrator::new(queue)
+        .enqueue_after_index(&fresh_item, requested_seasons.as_deref())
+        .await;
 }

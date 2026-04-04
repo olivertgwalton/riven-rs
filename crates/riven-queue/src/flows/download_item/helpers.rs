@@ -5,6 +5,7 @@ use riven_core::types::{CacheCheckFile, DownloadFile, MediaItemType};
 use riven_db::entities::MediaItem;
 use riven_db::repo;
 
+use crate::orchestrator::LibraryOrchestrator;
 use crate::JobQueue;
 
 /// Log a bitrate failure, blacklist the stream, and send a PartialSuccess event.
@@ -30,15 +31,13 @@ pub async fn handle_bitrate_failure(
     queue
         .notify(RivenEvent::MediaItemDownloadPartialSuccess { id })
         .await;
-    queue.fan_out_download(id).await;
+    LibraryOrchestrator::new(queue)
+        .fan_out_download_failure(id)
+        .await;
 }
 
 /// Load a media item by id, or send a `MediaItemDownloadError` event and return `None`.
-pub async fn load_item_or_err(
-    id: i64,
-    queue: &JobQueue,
-    error_msg: &str,
-) -> Option<MediaItem> {
+pub async fn load_item_or_err(id: i64, queue: &JobQueue, error_msg: &str) -> Option<MediaItem> {
     match repo::get_media_item(&queue.db_pool, id).await {
         Ok(Some(item)) => Some(item),
         Ok(None) => {
@@ -70,7 +69,11 @@ const VALID_VIDEO_EXTENSIONS: &[&str] = &["mp4", "mkv", "avi", "mov", "wmv", "fl
 /// Returns true if the filename has a recognised video extension.
 /// Matches riven-ts VALID_FILE_EXTENSIONS list.
 pub fn is_video_file(filename: &str) -> bool {
-    let ext = filename.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+    let ext = filename
+        .rsplit('.')
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
     VALID_VIDEO_EXTENSIONS.contains(&ext.as_str())
 }
 
@@ -79,9 +82,9 @@ pub fn is_video_file(filename: &str) -> bool {
 /// satisfy the item (matches riven-ts getCachedTorrentFiles pre-validation).
 pub fn has_matching_file(files: &[CacheCheckFile], item: &MediaItem) -> bool {
     match item.item_type {
-        MediaItemType::Movie => files.iter().any(|f| {
-            is_video_file(&f.name) && parse_file_path(&f.name).media_type() == "movie"
-        }),
+        MediaItemType::Movie => files
+            .iter()
+            .any(|f| is_video_file(&f.name) && parse_file_path(&f.name).media_type() == "movie"),
         MediaItemType::Episode => {
             let season = item.season_number.unwrap_or(1);
             let ep = item.episode_number.unwrap_or(1);
@@ -117,11 +120,10 @@ pub fn matches_episode(
     abs: Option<i32>,
 ) -> bool {
     let season_match = parsed.seasons.contains(&season)
-        && (parsed.episodes.contains(&ep)
-            || abs.map_or(false, |a| parsed.episodes.contains(&a)));
+        && (parsed.episodes.contains(&ep) || abs.map_or(false, |a| parsed.episodes.contains(&a)));
 
-    let abs_only_match = parsed.seasons.is_empty()
-        && abs.map_or(false, |a| parsed.episodes.contains(&a));
+    let abs_only_match =
+        parsed.seasons.is_empty() && abs.map_or(false, |a| parsed.episodes.contains(&a));
 
     season_match || abs_only_match
 }
@@ -130,10 +132,18 @@ pub fn matches_episode(
 /// Appends `.ptN` before the extension when `part` is `Some`.
 /// In multi-version mode, `path_tag` (e.g. `Some("ultra_hd")`) is prepended as
 /// a top-level directory so each profile has its own directory tree.
-pub fn episode_vfs_path(show: &str, season: i32, ep: i32, part: Option<i32>, path_tag: Option<&str>) -> String {
+pub fn episode_vfs_path(
+    show: &str,
+    season: i32,
+    ep: i32,
+    part: Option<i32>,
+    path_tag: Option<&str>,
+) -> String {
     let part_suffix = part.map(|n| format!(".pt{n}")).unwrap_or_default();
     let tag_suffix = path_tag.map(|t| format!(" [{t}]")).unwrap_or_default();
-    format!("/shows/{show}/Season {season:02}/{show} - s{season:02}e{ep:02}{part_suffix}{tag_suffix}.mkv")
+    format!(
+        "/shows/{show}/Season {season:02}/{show} - s{season:02}e{ep:02}{part_suffix}{tag_suffix}.mkv"
+    )
 }
 
 /// Choose which files to persist for an episode.

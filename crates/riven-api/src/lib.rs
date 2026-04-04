@@ -4,16 +4,25 @@ use std::convert::Infallible;
 use std::sync::Arc;
 
 use anyhow::Result;
-use async_graphql::http::GraphiQLSource;
-use futures::StreamExt;
-use async_graphql_axum::{GraphQLRequest, GraphQLResponse};
+use async_graphql::http::{
+    create_multipart_mixed_stream, is_accept_multipart_mixed, GraphiQLSource,
+};
+use async_graphql_axum::{
+    rejection::GraphQLRejection, GraphQLBatchRequest, GraphQLRequest, GraphQLResponse,
+};
 use axum::{
+    body::Body,
+    extract::FromRequest,
     extract::State,
-    http::{HeaderMap, StatusCode},
-    response::{Html, IntoResponse, Response, sse::{Event, KeepAlive, Sse}},
+    http::{HeaderMap, Request, StatusCode},
+    response::{
+        sse::{Event, KeepAlive, Sse},
+        Html, IntoResponse, Response,
+    },
     routing::{get, post},
     Router,
 };
+use futures::StreamExt;
 use tokio::sync::broadcast;
 use tower_http::cors::CorsLayer;
 use tower_http::services::{ServeDir, ServeFile};
@@ -85,13 +94,42 @@ fn check_api_key(state: &ApiState, headers: &HeaderMap) -> bool {
 async fn graphql_handler(
     State(state): State<ApiState>,
     headers: HeaderMap,
-    req: GraphQLRequest,
+    req: Request<Body>,
 ) -> Response {
     if !check_api_key(&state, &headers) {
         return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
     }
 
-    let gql_resp: GraphQLResponse = state.schema.execute(req.into_inner()).await.into();
+    let accepts_multipart = headers
+        .get("accept")
+        .and_then(|value| value.to_str().ok())
+        .map(is_accept_multipart_mixed)
+        .unwrap_or_default();
+
+    if accepts_multipart {
+        let req = match GraphQLRequest::<GraphQLRejection>::from_request(req, &()).await {
+            Ok(req) => req,
+            Err(error) => return error.into_response(),
+        };
+        let stream = state.schema.execute_stream(req.into_inner());
+        let body = Body::from_stream(
+            create_multipart_mixed_stream(stream, std::time::Duration::from_secs(30))
+                .map(Ok::<_, std::io::Error>),
+        );
+
+        return Response::builder()
+            .status(StatusCode::OK)
+            .header("content-type", "multipart/mixed; boundary=graphql")
+            .body(body)
+            .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
+    }
+
+    let req = match GraphQLBatchRequest::<GraphQLRejection>::from_request(req, &()).await {
+        Ok(req) => req,
+        Err(error) => return error.into_response(),
+    };
+
+    let gql_resp: GraphQLResponse = state.schema.execute_batch(req.into_inner()).await.into();
     gql_resp.into_response()
 }
 
@@ -127,10 +165,7 @@ fn broadcast_to_sse(
 
 // ── SSE: live logs ──
 
-async fn logs_stream_handler(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-) -> Response {
+async fn logs_stream_handler(State(state): State<ApiState>, headers: HeaderMap) -> Response {
     if !check_api_key(&state, &headers) {
         return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
     }
@@ -154,9 +189,12 @@ async fn notifications_stream_handler(
         return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
     }
 
-    Sse::new(broadcast_to_sse(state.notification_tx.subscribe(), "notification"))
-        .keep_alive(KeepAlive::default())
-        .into_response()
+    Sse::new(broadcast_to_sse(
+        state.notification_tx.subscribe(),
+        "notification",
+    ))
+    .keep_alive(KeepAlive::default())
+    .into_response()
 }
 
 // ── Server bootstrap ──
@@ -188,9 +226,10 @@ pub async fn start_server(
         .build();
     let board_ui = Router::new().fallback_service(ServeUI::new());
 
-    let static_dir = std::env::var("RIVEN_STATIC_DIR").unwrap_or_else(|_| "./frontend/dist".to_string());
-    let serve_frontend = ServeDir::new(&static_dir)
-        .fallback(ServeFile::new(format!("{static_dir}/index.html")));
+    let static_dir =
+        std::env::var("RIVEN_STATIC_DIR").unwrap_or_else(|_| "./frontend/dist".to_string());
+    let serve_frontend =
+        ServeDir::new(&static_dir).fallback(ServeFile::new(format!("{static_dir}/index.html")));
 
     let state = ApiState {
         schema,

@@ -57,8 +57,8 @@ impl QualityProfile {
     /// at their zero-value defaults; callers may overlay them as needed.
     pub fn base_settings(self) -> RankSettings {
         match self {
-            Self::UltraHd  => ultra_hd_settings(),
-            Self::Hd       => hd_settings(),
+            Self::UltraHd => ultra_hd_settings(),
+            Self::Hd => hd_settings(),
             Self::Standard => standard_settings(),
         }
     }
@@ -77,63 +77,63 @@ fn ultra_hd_settings() -> RankSettings {
         resolutions: ResolutionSettings {
             r2160p: true,
             r1080p: true,
-            r720p:  false,
-            r480p:  false,
-            r360p:  false,
+            r720p: false,
+            r480p: false,
+            r360p: false,
             unknown: false,
         },
         resolution_ranks: ResolutionRanks {
             r2160p: 100,
             r1440p: 50,
             r1080p: 10,
-            r720p:  1,
-            r480p:  0,
-            r360p:  0,
+            r720p: 1,
+            r480p: 0,
+            r360p: 0,
             unknown: 0,
         },
         custom_ranks: CustomRanksConfig {
             // Source: REMUX > BluRay > WEB-DL > WEB; ban HDTV/DVD
             quality: QualityRanks {
-                remux:  CustomRank::scored(true,  10000),
-                bluray: CustomRank::scored(true,   5000),
-                webdl:  CustomRank::scored(true,   2000),
-                web:    CustomRank::scored(true,   1000),
-                hevc:   CustomRank::scored(true,   1500),
-                av1:    CustomRank::scored(true,   1000),
-                avc:    CustomRank::scored(true,    300),
-                hdtv:   CustomRank::scored(false, -10000),
-                dvd:    CustomRank::scored(false, -10000),
+                remux: CustomRank::scored(true, 10000),
+                bluray: CustomRank::scored(true, 5000),
+                webdl: CustomRank::scored(true, 2000),
+                web: CustomRank::scored(true, 1000),
+                hevc: CustomRank::scored(true, 1500),
+                av1: CustomRank::scored(true, 1000),
+                avc: CustomRank::scored(true, 300),
+                hdtv: CustomRank::scored(false, -10000),
+                dvd: CustomRank::scored(false, -10000),
                 ..QualityRanks::default()
             },
             // HDR: Dolby Vision > HDR10+ > HDR; heavily penalise SDR
             hdr: HdrRanks {
-                dolby_vision: CustomRank::scored(true,  5000),
-                hdr10plus:    CustomRank::scored(true,  4500),
-                hdr:          CustomRank::scored(true,  3500),
-                sdr:          CustomRank::scored(true, -3000),
-                bit10:        CustomRank::scored(true,    300),
+                dolby_vision: CustomRank::scored(true, 5000),
+                hdr10plus: CustomRank::scored(true, 4500),
+                hdr: CustomRank::scored(true, 3500),
+                sdr: CustomRank::scored(true, -3000),
+                bit10: CustomRank::scored(true, 300),
             },
             // Audio: lossless first; penalise compressed/stereo/mono
             audio: AudioRanks {
-                truehd:             CustomRank::scored(true,  4000),
-                atmos:              CustomRank::scored(true,  3500),
-                dts_lossless:       CustomRank::scored(true,  3000),
-                flac:               CustomRank::scored(true,  1500),
-                dolby_digital_plus: CustomRank::scored(true,   500),
-                dts_lossy:          CustomRank::scored(true,   400),
-                dolby_digital:      CustomRank::scored(true,   200),
-                aac:                CustomRank::scored(true,   100),
-                surround:           CustomRank::scored(true,   200),
-                stereo:             CustomRank::scored(true,  -500),
-                mono:               CustomRank::scored(false, -2000),
-                mp3:                CustomRank::scored(false, -2000),
+                truehd: CustomRank::scored(true, 4000),
+                atmos: CustomRank::scored(true, 3500),
+                dts_lossless: CustomRank::scored(true, 3000),
+                flac: CustomRank::scored(true, 1500),
+                dolby_digital_plus: CustomRank::scored(true, 500),
+                dts_lossy: CustomRank::scored(true, 400),
+                dolby_digital: CustomRank::scored(true, 200),
+                aac: CustomRank::scored(true, 100),
+                surround: CustomRank::scored(true, 200),
+                stereo: CustomRank::scored(true, -500),
+                mono: CustomRank::scored(false, -2000),
+                mp3: CustomRank::scored(false, -2000),
             },
             extras: ExtrasRanks {
-                edition: CustomRank::scored(true,  300),
-                retail:  CustomRank::scored(true,  200),
-                proper:  CustomRank::scored(true,  100),
-                repack:  CustomRank::scored(true,  100),
-                dubbed:  CustomRank::scored(true, -2000),
+                edition: CustomRank::scored(true, 300),
+                retail: CustomRank::scored(true, 200),
+                proper: CustomRank::scored(true, 100),
+                repack: CustomRank::scored(true, 100),
+                dubbed: CustomRank::scored(true, -2000),
                 ..ExtrasRanks::default()
             },
             rips: RipsRanks::all_disabled(),
@@ -150,27 +150,27 @@ fn hd_settings() -> RankSettings {
         resolutions: ResolutionSettings {
             r2160p: false,
             r1080p: true,
-            r720p:  false,
-            r480p:  false,
-            r360p:  false,
+            r720p: false,
+            r480p: false,
+            r360p: false,
             unknown: false,
         },
         resolution_ranks: ResolutionRanks {
-            r2160p:  0,
-            r1440p:  0,
+            r2160p: 0,
+            r1440p: 0,
             r1080p: 100,
-            r720p:   0,
-            r480p:   0,
-            r360p:   0,
+            r720p: 0,
+            r480p: 0,
+            r360p: 0,
             unknown: 0,
         },
         custom_ranks: CustomRanksConfig {
             hdr: HdrRanks {
                 dolby_vision: CustomRank::scored(false, -10000),
-                hdr10plus:    CustomRank::scored(false, -10000),
-                hdr:          CustomRank::scored(false, -5000),
-                sdr:          CustomRank::scored(true,    100),
-                bit10:        CustomRank::scored(false,     0),
+                hdr10plus: CustomRank::scored(false, -10000),
+                hdr: CustomRank::scored(false, -5000),
+                sdr: CustomRank::scored(true, 100),
+                bit10: CustomRank::scored(false, 0),
             },
             ..CustomRanksConfig::default()
         },
@@ -185,51 +185,51 @@ fn standard_settings() -> RankSettings {
         resolutions: ResolutionSettings {
             r2160p: false,
             r1080p: false,
-            r720p:  true,
-            r480p:  true,
-            r360p:  false,
+            r720p: true,
+            r480p: true,
+            r360p: false,
             unknown: true,
         },
         resolution_ranks: ResolutionRanks {
             r2160p: 0,
             r1440p: 1,
             r1080p: 2,
-            r720p:  7,
-            r480p:  5,
-            r360p:  3,
+            r720p: 7,
+            r480p: 5,
+            r360p: 3,
             unknown: 4,
         },
         custom_ranks: CustomRanksConfig {
             // Source: more equal; HDTV/DVD enabled, REMUX disabled
             quality: QualityRanks {
-                webdl:  CustomRank::scored(true,  400),
-                bluray: CustomRank::scored(true,  350),
-                web:    CustomRank::scored(true,  300),
-                hdtv:   CustomRank::scored(true,  200),
-                dvd:    CustomRank::scored(true,  100),
-                remux:  CustomRank::scored(false, 200),
-                hevc:   CustomRank::scored(true,  200),
-                avc:    CustomRank::scored(true,  200),
+                webdl: CustomRank::scored(true, 400),
+                bluray: CustomRank::scored(true, 350),
+                web: CustomRank::scored(true, 300),
+                hdtv: CustomRank::scored(true, 200),
+                dvd: CustomRank::scored(true, 100),
+                remux: CustomRank::scored(false, 200),
+                hevc: CustomRank::scored(true, 200),
+                avc: CustomRank::scored(true, 200),
                 ..QualityRanks::default()
             },
             // HDR: SDR only; all HDR formats disabled
             hdr: HdrRanks {
                 dolby_vision: CustomRank::scored(false, -10000),
-                hdr10plus:    CustomRank::scored(false, -10000),
-                hdr:          CustomRank::scored(false, -10000),
-                sdr:          CustomRank::scored(true,    500),
-                bit10:        CustomRank::scored(false,  -5000),
+                hdr10plus: CustomRank::scored(false, -10000),
+                hdr: CustomRank::scored(false, -10000),
+                sdr: CustomRank::scored(true, 500),
+                bit10: CustomRank::scored(false, -5000),
             },
             // Audio: decent quality, less strict
             audio: AudioRanks {
-                atmos:              CustomRank::scored(true, 400),
-                truehd:             CustomRank::scored(true, 400),
-                dts_lossless:       CustomRank::scored(true, 350),
-                flac:               CustomRank::scored(true, 200),
+                atmos: CustomRank::scored(true, 400),
+                truehd: CustomRank::scored(true, 400),
+                dts_lossless: CustomRank::scored(true, 350),
+                flac: CustomRank::scored(true, 200),
                 dolby_digital_plus: CustomRank::scored(true, 150),
-                dts_lossy:          CustomRank::scored(true, 150),
-                dolby_digital:      CustomRank::scored(true, 100),
-                aac:                CustomRank::scored(true, 100),
+                dts_lossy: CustomRank::scored(true, 150),
+                dolby_digital: CustomRank::scored(true, 100),
+                aac: CustomRank::scored(true, 100),
                 ..AudioRanks::default()
             },
             extras: ExtrasRanks {
@@ -240,8 +240,8 @@ fn standard_settings() -> RankSettings {
             // Rips enabled at lower scores
             rips: RipsRanks {
                 webrip: CustomRank::scored(true, -400),
-                brrip:  CustomRank::scored(true, -500),
-                hdrip:  CustomRank::scored(true, -600),
+                brrip: CustomRank::scored(true, -500),
+                hdrip: CustomRank::scored(true, -600),
                 ..RipsRanks::default()
             },
             ..CustomRanksConfig::default()
@@ -280,7 +280,10 @@ impl CustomRank {
     }
 
     fn scored(fetch: bool, rank: i64) -> Self {
-        Self { fetch, rank: Some(rank) }
+        Self {
+            fetch,
+            rank: Some(rank),
+        }
     }
 
     /// Returns the custom rank if set, otherwise the built-in default score.

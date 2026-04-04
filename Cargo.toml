@@ -29,6 +29,9 @@ members = [
 # Async runtime
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time", "net", "signal", "io-util"] }
 
+# Data parallelism
+rayon = "1"
+
 # Serialization
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -83,3 +86,4 @@ inventory = "0.3"
 libc = "0.2"
 bytes = "1"
 tokio-util = { version = "0.7", features = ["io"] }
+ulid = "1"

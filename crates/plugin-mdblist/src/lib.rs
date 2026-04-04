@@ -1,12 +1,10 @@
 use async_trait::async_trait;
-use serde::Deserialize;
-use std::collections::HashSet;
-
 use riven_core::events::{EventType, HookResponse, RivenEvent};
-use riven_core::plugin::{Plugin, PluginContext};
+use riven_core::plugin::{ContentCollection, Plugin, PluginContext};
+use riven_core::register_plugin;
 use riven_core::settings::PluginSettings;
 use riven_core::types::*;
-use riven_core::register_plugin;
+use serde::Deserialize;
 
 const MDBLIST_BASE_URL: &str = "https://api.mdblist.com/";
 
@@ -19,10 +17,6 @@ register_plugin!(MdblistPlugin);
 impl Plugin for MdblistPlugin {
     fn name(&self) -> &'static str {
         "mdblist"
-    }
-
-    fn version(&self) -> &'static str {
-        "0.1.0"
     }
 
     fn subscribed_events(&self) -> &[EventType] {
@@ -41,7 +35,6 @@ impl Plugin for MdblistPlugin {
             .await;
         Ok(resp.is_ok())
     }
-
 
     fn settings_schema(&self) -> Vec<riven_core::plugin::SettingField> {
         use riven_core::plugin::SettingField;
@@ -64,15 +57,18 @@ impl Plugin for MdblistPlugin {
 
                 let lists = ctx.settings.get_list("lists");
 
-                let mut movies = Vec::new();
-                let mut shows = Vec::new();
-                let mut seen_movies = HashSet::new();
-                let mut seen_shows = HashSet::new();
+                let mut content = ContentCollection::default();
 
                 for list_name in &lists {
                     // Validate format: username/listname
-                    if !list_name.contains('/') || list_name.starts_with('/') || list_name.ends_with('/') {
-                        tracing::warn!(list_name, "invalid mdblist list name format (expected username/listname)");
+                    if !list_name.contains('/')
+                        || list_name.starts_with('/')
+                        || list_name.ends_with('/')
+                    {
+                        tracing::warn!(
+                            list_name,
+                            "invalid mdblist list name format (expected username/listname)"
+                        );
                         continue;
                     }
 
@@ -81,35 +77,26 @@ impl Plugin for MdblistPlugin {
                     for item in items {
                         match item.media_type.as_deref() {
                             Some("movie") => {
-                                let ids = ExternalIds {
+                                content.insert_movie(ExternalIds {
                                     imdb_id: item.imdb_id,
                                     tmdb_id: item.tmdb_id.map(|id| id.to_string()),
                                     tvdb_id: item.tvdb_id.map(|id| id.to_string()),
                                     ..Default::default()
-                                };
-                                if seen_movies.insert(ids.movie_key()) {
-                                    movies.push(ids);
-                                }
+                                });
                             }
                             Some("show") => {
-                                let ids = ExternalIds {
+                                content.insert_show(ExternalIds {
                                     imdb_id: item.imdb_id,
                                     tvdb_id: item.tvdb_id.map(|id| id.to_string()),
                                     ..Default::default()
-                                };
-                                if seen_shows.insert(ids.show_key()) {
-                                    shows.push(ids);
-                                }
+                                });
                             }
                             _ => {}
                         }
                     }
                 }
 
-                Ok(HookResponse::ContentService(Box::new(ContentServiceResponse {
-                    movies,
-                    shows,
-                })))
+                Ok(content.into_hook_response())
             }
             _ => Ok(HookResponse::Empty),
         }
@@ -125,7 +112,8 @@ async fn fetch_list_items(
     let mut offset = 0;
 
     loop {
-        let url = format!("{MDBLIST_BASE_URL}lists/{list_name}/items?apikey={api_key}&offset={offset}");
+        let url =
+            format!("{MDBLIST_BASE_URL}lists/{list_name}/items?apikey={api_key}&offset={offset}");
 
         let resp = client.get(&url).send().await?;
         let has_more = resp

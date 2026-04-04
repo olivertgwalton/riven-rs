@@ -4,132 +4,174 @@ use sqlx::PgPool;
 
 use crate::entities::*;
 
-use super::hierarchy::{list_episodes, list_seasons};
 use super::media::{get_media_item, update_media_item_state};
 
+fn determine_fixed_state(item: &MediaItem) -> Option<MediaItemState> {
+    match item.state {
+        MediaItemState::Paused | MediaItemState::Failed => Some(item.state),
+        _ => None,
+    }
+}
+
+async fn compute_leaf_state(
+    pool: &PgPool,
+    item: &MediaItem,
+    allow_media_entries: bool,
+) -> Result<MediaItemState> {
+    if let Some(aired) = item.aired_at {
+        if aired > chrono::Utc::now().date_naive() {
+            return Ok(MediaItemState::Unreleased);
+        }
+    }
+
+    if let Some(state) = determine_fixed_state(item) {
+        return Ok(state);
+    }
+
+    let has_media = if allow_media_entries {
+        sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(
+                SELECT 1 FROM filesystem_entries
+                WHERE media_item_id = $1 AND entry_type = 'media'
+            )",
+        )
+        .bind(item.id)
+        .fetch_one(pool)
+        .await
+        .unwrap_or(false)
+    } else {
+        false
+    };
+
+    if has_media {
+        return Ok(MediaItemState::Completed);
+    }
+
+    let has_streams = sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(
+            SELECT 1 FROM media_item_streams ms
+            WHERE ms.media_item_id = $1
+              AND ms.stream_id NOT IN (
+                  SELECT stream_id FROM media_item_blacklisted_streams
+                  WHERE media_item_id = $1
+              )
+        )",
+    )
+    .bind(item.id)
+    .fetch_one(pool)
+    .await
+    .unwrap_or(false);
+
+    if has_streams {
+        return Ok(MediaItemState::Scraped);
+    }
+
+    Ok(MediaItemState::Indexed)
+}
+
 /// Derive the correct state for an item from its persisted data.
+///
+/// Season and Show variants use lightweight single-column queries rather than
+/// fetching full MediaItem rows — this is the primary hot-path optimisation
+/// since compute_state is called on every scrape and download.
 pub async fn compute_state(pool: &PgPool, item: &MediaItem) -> Result<MediaItemState> {
     match item.item_type {
-        MediaItemType::Movie | MediaItemType::Episode => {
-            let row = sqlx::query!(
-                r#"SELECT
-                     EXISTS(SELECT 1 FROM filesystem_entries WHERE media_item_id = $1 AND entry_type = 'media') AS has_media,
-                     EXISTS(SELECT 1 FROM media_item_streams ms WHERE ms.media_item_id = $1 AND ms.stream_id NOT IN (SELECT stream_id FROM media_item_blacklisted_streams WHERE media_item_id = $1)) AS has_streams"#,
-                item.id
-            )
-            .fetch_one(pool)
-            .await?;
-
-            if row.has_media.unwrap_or(false) {
-                return Ok(MediaItemState::Completed);
-            }
-
-            if row.has_streams.unwrap_or(false) {
-                return Ok(MediaItemState::Scraped);
-            }
-
-            if let Some(aired) = item.aired_at {
-                if aired > chrono::Utc::now().date_naive() {
-                    return Ok(MediaItemState::Unreleased);
-                }
-            }
-
-            Ok(MediaItemState::Indexed)
-        }
+        MediaItemType::Movie | MediaItemType::Episode => compute_leaf_state(pool, item, true).await,
 
         MediaItemType::Season => {
-            let episodes = list_episodes(pool, item.id).await?;
-            let ep_state = if episodes.is_empty() {
-                MediaItemState::Indexed
-            } else {
-                aggregate_child_states(&episodes)?
-            };
+            let states: Vec<MediaItemState> = sqlx::query_scalar::<_, MediaItemState>(
+                "SELECT state FROM media_items WHERE item_type = 'episode' AND parent_id = $1",
+            )
+            .bind(item.id)
+            .fetch_all(pool)
+            .await
+            .unwrap_or_default();
 
-            // If all episodes are Indexed, check for a season-level stream pack.
-            if ep_state == MediaItemState::Indexed {
-                let has_own_streams: bool = sqlx::query_scalar::<_, bool>(
-                    "SELECT EXISTS(
-                        SELECT 1 FROM media_item_streams ms
-                        WHERE ms.media_item_id = $1
-                          AND ms.stream_id NOT IN (
-                              SELECT stream_id FROM media_item_blacklisted_streams
-                              WHERE media_item_id = $1
-                          )
-                    )",
-                )
-                .bind(item.id)
-                .fetch_one(pool)
-                .await
-                .unwrap_or(false);
-
-                if has_own_streams {
-                    return Ok(MediaItemState::Scraped);
-                }
+            if let Some(state) = aggregate_states(item, &states) {
+                return Ok(state);
             }
 
-            Ok(ep_state)
+            compute_leaf_state(pool, item, false).await
         }
 
         MediaItemType::Show => {
-            let seasons = list_seasons(pool, item.id).await?;
-            // Specials and non-requested seasons are excluded from show state.
-            let requested: Vec<_> = seasons
-                .into_iter()
-                .filter(|s| s.is_requested)
-                .collect();
-            if requested.is_empty() {
-                return Ok(MediaItemState::Indexed);
+            let states: Vec<MediaItemState> = sqlx::query_scalar::<_, MediaItemState>(
+                "SELECT state FROM media_items \
+                 WHERE item_type = 'season' AND parent_id = $1 \
+                   AND is_requested = true AND is_special = false",
+            )
+            .bind(item.id)
+            .fetch_all(pool)
+            .await
+            .unwrap_or_default();
+
+            if let Some(state) = aggregate_states(item, &states) {
+                return Ok(state);
             }
-            let state = aggregate_child_states(&requested)?;
-            if state == MediaItemState::Completed
-                && item.show_status == Some(ShowStatus::Continuing)
-            {
-                return Ok(MediaItemState::Ongoing);
-            }
-            Ok(state)
+
+            compute_leaf_state(pool, item, false).await
         }
     }
 }
 
-fn aggregate_child_states(children: &[MediaItem]) -> Result<MediaItemState> {
-    if children.is_empty() {
-        return Ok(MediaItemState::Indexed);
+/// Aggregate child states using the same precedence as the TS subscriber.
+fn aggregate_states(item: &MediaItem, states: &[MediaItemState]) -> Option<MediaItemState> {
+    if states.is_empty() {
+        return None;
     }
 
-    let (any_completed, any_unreleased, any_ongoing, any_scraped) =
-        children.iter().fold((false, false, false, false), |(ac, au, ao, asc), c| {
-            (
-                ac || matches!(
-                    c.state,
-                    MediaItemState::Completed | MediaItemState::PartiallyCompleted | MediaItemState::Ongoing
-                ),
-                au || c.state == MediaItemState::Unreleased,
-                ao || c.state == MediaItemState::Ongoing,
-                asc || c.state == MediaItemState::Scraped,
-            )
-        });
-
-    if children.iter().all(|c| c.state == MediaItemState::Completed) {
-        return Ok(MediaItemState::Completed);
-    }
-    if children.iter().all(|c| c.state == MediaItemState::Unreleased) {
-        return Ok(MediaItemState::Unreleased);
-    }
-    if any_completed && any_unreleased {
-        return Ok(MediaItemState::Ongoing);
-    }
-    if any_completed {
-        return Ok(MediaItemState::PartiallyCompleted);
-    }
-    if any_ongoing {
-        return Ok(MediaItemState::Ongoing);
-    }
-    if any_scraped {
-        return Ok(MediaItemState::Scraped);
+    if let Some(state) = determine_fixed_state(item) {
+        return Some(state);
     }
 
-    // Mixed Indexed+Unreleased stays Indexed so scraping is not skipped.
-    Ok(MediaItemState::Indexed)
+    for propagated in [
+        MediaItemState::Paused,
+        MediaItemState::Failed,
+        MediaItemState::Unreleased,
+    ] {
+        if states.iter().all(|state| *state == propagated) {
+            return Some(propagated);
+        }
+    }
+
+    if states
+        .iter()
+        .all(|state| *state == MediaItemState::Completed)
+    {
+        return Some(
+            if item.item_type == MediaItemType::Show
+                && item.show_status == Some(ShowStatus::Continuing)
+            {
+                MediaItemState::Ongoing
+            } else {
+                MediaItemState::Completed
+            },
+        );
+    }
+
+    if states
+        .iter()
+        .any(|state| matches!(state, MediaItemState::Ongoing | MediaItemState::Unreleased))
+        || (item.item_type == MediaItemType::Show
+            && item.show_status == Some(ShowStatus::Continuing))
+    {
+        return Some(MediaItemState::Ongoing);
+    }
+
+    if states.iter().any(|state| {
+        matches!(
+            state,
+            MediaItemState::Completed | MediaItemState::PartiallyCompleted
+        )
+    }) {
+        return Some(MediaItemState::PartiallyCompleted);
+    }
+
+    if states.iter().any(|state| *state == MediaItemState::Scraped) {
+        return Some(MediaItemState::Scraped);
+    }
+
+    None
 }
 
 /// Compute and persist state without cascading to parents.
@@ -166,5 +208,24 @@ pub async fn cascade_state_update(pool: &PgPool, item: &MediaItem) -> Result<()>
             }
         }
     }
+    Ok(())
+}
+
+/// Batch-set a list of items directly to `Completed` in one UPDATE.
+///
+/// Used by `persist_season` after successfully writing media entries for
+/// multiple episodes — avoids N individual `refresh_state` calls (each of
+/// which would SELECT + UPDATE) by computing state inline (we know the
+/// episodes are completed because we just created their entries).
+pub async fn batch_set_completed(pool: &PgPool, ids: &[i64]) -> Result<()> {
+    if ids.is_empty() {
+        return Ok(());
+    }
+    sqlx::query(
+        "UPDATE media_items SET state = 'completed', updated_at = NOW() WHERE id = ANY($1)",
+    )
+    .bind(ids)
+    .execute(pool)
+    .await?;
     Ok(())
 }

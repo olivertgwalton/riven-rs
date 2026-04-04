@@ -5,13 +5,26 @@ use riven_core::plugin::PluginRegistry;
 use riven_core::types::*;
 use riven_db::entities::*;
 use riven_db::repo;
-use riven_queue::{IndexJob, JobQueue, ScrapeJob};
+use riven_queue::orchestrator::LibraryOrchestrator;
+use riven_queue::JobQueue;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
 // ── Mutation root ──
 
 pub struct MutationRoot;
+
+fn coerce_json_bool(value: serde_json::Value) -> Option<bool> {
+    match value {
+        serde_json::Value::Bool(enabled) => Some(enabled),
+        serde_json::Value::String(value) => match value.as_str() {
+            "true" => Some(true),
+            "false" => Some(false),
+            _ => None,
+        },
+        _ => None,
+    }
+}
 
 #[Object]
 impl MutationRoot {
@@ -32,7 +45,9 @@ impl MutationRoot {
             .map_err(|e| Error::new(format!("failed to serialise rank settings: {e}")))?;
 
         let pool = ctx.data::<sqlx::PgPool>()?;
-        let profile = repo::upsert_ranking_profile(pool, id, &name, canonical, enabled.unwrap_or(false)).await?;
+        let profile =
+            repo::upsert_ranking_profile(pool, id, &name, canonical, enabled.unwrap_or(false))
+                .await?;
         Ok(serde_json::to_value(profile)?)
     }
 
@@ -123,14 +138,17 @@ impl MutationRoot {
         let pool = ctx.data::<sqlx::PgPool>()?;
         let job_queue = ctx.data::<Arc<JobQueue>>()?;
 
-        let external_request_ids =
-            repo::get_external_request_ids_for_items(pool, &ids).await.unwrap_or_default();
+        let external_request_ids = repo::get_external_request_ids_for_items(pool, &ids)
+            .await
+            .unwrap_or_default();
 
         let count = repo::delete_items_by_ids(pool, ids).await? as i64;
 
         if !external_request_ids.is_empty() {
             job_queue
-                .notify(RivenEvent::MediaItemsDeleted { external_request_ids })
+                .notify(RivenEvent::MediaItemsDeleted {
+                    external_request_ids,
+                })
                 .await;
         }
 
@@ -156,16 +174,64 @@ impl MutationRoot {
         &self,
         ctx: &Context<'_>,
         plugin: String,
-        settings: serde_json::Value,
+        mut settings: serde_json::Value,
     ) -> Result<serde_json::Value> {
         let pool = ctx.data::<sqlx::PgPool>()?;
         let key = format!("plugin.{plugin}");
+        let enabled = match settings
+            .as_object_mut()
+            .and_then(|obj| obj.remove("enabled"))
+            .and_then(coerce_json_bool)
+        {
+            Some(enabled) => enabled,
+            None => repo::get_plugin_enabled(pool, &plugin).await?,
+        };
+
         repo::set_setting(pool, &key, settings.clone()).await?;
+        repo::set_plugin_enabled(pool, &plugin, enabled).await?;
 
         let registry = ctx.data::<Arc<PluginRegistry>>()?;
-        let valid = registry.revalidate_plugin(&plugin, &settings).await;
+        let valid = registry
+            .revalidate_plugin(&plugin, enabled, &settings)
+            .await;
 
-        Ok(serde_json::json!({ "settings": settings, "valid": valid }))
+        let mut response_settings = settings;
+        if let Some(obj) = response_settings.as_object_mut() {
+            obj.insert("enabled".to_string(), serde_json::Value::Bool(enabled));
+        }
+
+        Ok(serde_json::json!({
+            "settings": response_settings,
+            "enabled": enabled,
+            "valid": valid
+        }))
+    }
+
+    /// Enable or disable a plugin without overwriting its saved settings.
+    async fn set_plugin_enabled(
+        &self,
+        ctx: &Context<'_>,
+        plugin: String,
+        enabled: bool,
+    ) -> Result<serde_json::Value> {
+        let pool = ctx.data::<sqlx::PgPool>()?;
+        let settings_key = format!("plugin.{plugin}");
+        let settings = match repo::get_setting(pool, &settings_key).await? {
+            Some(value @ serde_json::Value::Object(_)) => value,
+            _ => serde_json::json!({}),
+        };
+
+        repo::set_plugin_enabled(pool, &plugin, enabled).await?;
+
+        let registry = ctx.data::<Arc<PluginRegistry>>()?;
+        let valid = registry
+            .revalidate_plugin(&plugin, enabled, &settings)
+            .await;
+
+        Ok(serde_json::json!({
+            "enabled": enabled,
+            "valid": valid
+        }))
     }
 
     /// Update general (non-plugin) settings and apply them to the live runtime config.
@@ -180,10 +246,21 @@ impl MutationRoot {
         let cfg = ctx.data::<std::sync::Arc<RwLock<DownloaderConfig>>>()?;
         let mut cfg = cfg.write().await;
         let mbps = |key: &str| settings.get(key).and_then(|v| v.as_u64()).map(|v| v as u32);
-        cfg.minimum_average_bitrate_movies   = mbps("minimum_average_bitrate_movies");
+        cfg.minimum_average_bitrate_movies = mbps("minimum_average_bitrate_movies");
         cfg.minimum_average_bitrate_episodes = mbps("minimum_average_bitrate_episodes");
-        cfg.maximum_average_bitrate_movies   = mbps("maximum_average_bitrate_movies");
+        cfg.maximum_average_bitrate_movies = mbps("maximum_average_bitrate_movies");
         cfg.maximum_average_bitrate_episodes = mbps("maximum_average_bitrate_episodes");
+
+        let queue = ctx.data::<Arc<JobQueue>>()?;
+        let mut reindex_cfg = queue.reindex_config.write().await;
+        reindex_cfg.schedule_offset_minutes = settings
+            .get("schedule_offset_minutes")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(reindex_cfg.schedule_offset_minutes);
+        reindex_cfg.unknown_air_date_offset_days = settings
+            .get("unknown_air_date_offset_days")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(reindex_cfg.unknown_air_date_offset_days);
 
         Ok(settings)
     }
@@ -199,67 +276,15 @@ impl MutationRoot {
     ) -> Result<String> {
         let pool = ctx.data::<sqlx::PgPool>()?;
         let job_queue = ctx.data::<Arc<JobQueue>>()?;
+        let orchestrator = LibraryOrchestrator::new(job_queue.as_ref());
 
         let item = repo::get_media_item(pool, id)
             .await?
             .ok_or_else(|| Error::new("Item not found"))?;
 
-        match item.item_type {
-            MediaItemType::Movie | MediaItemType::Episode => {
-                job_queue
-                    .push_scrape(ScrapeJob {
-                        id: item.id,
-                        item_type: item.item_type,
-                        imdb_id: item.imdb_id.clone(),
-                        title: item.title.clone(),
-                        season: item.season_number,
-                        episode: item.episode_number,
-                    })
-                    .await;
-            }
-            MediaItemType::Season => {
-                let show_imdb_id = if let Some(parent_id) = item.parent_id {
-                    repo::get_media_item(pool, parent_id)
-                        .await
-                        .ok()
-                        .flatten()
-                        .and_then(|s| s.imdb_id)
-                } else {
-                    None
-                };
-                job_queue
-                    .push_scrape(ScrapeJob {
-                        id: item.id,
-                        item_type: item.item_type,
-                        imdb_id: show_imdb_id,
-                        title: item.title.clone(),
-                        season: item.season_number,
-                        episode: None,
-                    })
-                    .await;
-            }
-            MediaItemType::Show => {
-                let show_imdb_id = item.imdb_id.clone();
-                let seasons = repo::get_requested_seasons_for_show(pool, item.id).await?;
-                for season in seasons {
-                    if let Some(ref nums) = season_numbers {
-                        if !season.season_number.map(|n| nums.contains(&n)).unwrap_or(false) {
-                            continue;
-                        }
-                    }
-                    job_queue
-                        .push_scrape(ScrapeJob {
-                            id: season.id,
-                            item_type: season.item_type,
-                            imdb_id: show_imdb_id.clone(),
-                            title: season.title.clone(),
-                            season: season.season_number,
-                            episode: None,
-                        })
-                        .await;
-                }
-            }
-        }
+        orchestrator
+            .queue_scrape_for_item(&item, season_numbers.as_deref())
+            .await;
 
         Ok("Scrape queued".to_string())
     }
@@ -277,111 +302,36 @@ impl MutationRoot {
         tvdb_id: Option<String>,
         seasons: Option<Vec<i32>>,
     ) -> Result<MediaItem> {
-        let pool = ctx.data::<sqlx::PgPool>()?;
         let job_queue = ctx.data::<Arc<JobQueue>>()?;
+        let orchestrator = LibraryOrchestrator::new(job_queue.as_ref());
 
-        let request_type = match item_type {
-            MediaItemType::Movie => ItemRequestType::Movie,
-            MediaItemType::Show => ItemRequestType::Show,
-            _ => return Err(Error::new("Only Movie and Show types can be added directly")),
+        let outcome = match item_type {
+            MediaItemType::Movie => orchestrator
+                .upsert_requested_movie(&title, imdb_id.as_deref(), tmdb_id.as_deref(), None, None)
+                .await
+                .map_err(Error::from)?,
+            MediaItemType::Show => orchestrator
+                .upsert_requested_show(
+                    &title,
+                    imdb_id.as_deref(),
+                    tvdb_id.as_deref(),
+                    None,
+                    None,
+                    seasons.as_deref(),
+                )
+                .await
+                .map_err(Error::from)?,
+            _ => {
+                return Err(Error::new(
+                    "Only Movie and Show types can be added directly",
+                ));
+            }
         };
 
-        let existing = repo::find_existing_media_item(
-            pool,
-            item_type,
-            imdb_id.as_deref(),
-            tmdb_id.as_deref(),
-            tvdb_id.as_deref(),
-        )
-        .await?;
+        orchestrator
+            .enqueue_after_request(&outcome, seasons.as_deref())
+            .await;
 
-        let request = repo::create_item_request(
-            pool,
-            imdb_id.as_deref(),
-            tmdb_id.as_deref(),
-            tvdb_id.as_deref(),
-            request_type,
-            None,
-            None,
-            seasons.as_deref(),
-        )
-        .await?;
-
-        let (item, _) = match item_type {
-            MediaItemType::Movie => {
-                repo::create_movie(pool, &title, imdb_id.as_deref(), tmdb_id.as_deref(), Some(request.id)).await?
-            }
-            MediaItemType::Show => {
-                repo::create_show(pool, &title, imdb_id.as_deref(), tvdb_id.as_deref(), Some(request.id)).await?
-            }
-            _ => unreachable!(),
-        };
-
-        if existing.is_some() && item_type == MediaItemType::Show {
-            if let Some(season_numbers) = seasons.as_deref() {
-                if !season_numbers.is_empty() {
-                    let _ = repo::mark_seasons_requested_and_get_episodes(
-                        pool,
-                        item.id,
-                        season_numbers,
-                    )
-                    .await;
-
-                    // Un-mark non-requested, non-completed seasons so the retry
-                    // scheduler does not process them while the index job is pending.
-                    let _ = repo::unmark_unrequested_seasons(pool, item.id, season_numbers).await;
-                }
-            }
-
-            // Re-index when: (a) no imdb_id yet, or (b) specific seasons were requested
-            // so the indexer can create any new seasons and push scrape jobs for only
-            // the requested ones. For a whole-show re-request with imdb_id already set,
-            // skip re-indexing and go straight to scraping non-completed seasons.
-            let specific_seasons_requested =
-                seasons.as_deref().map(|s| !s.is_empty()).unwrap_or(false);
-            if item.imdb_id.is_none() || specific_seasons_requested {
-                job_queue
-                    .push_index(IndexJob {
-                        id: item.id,
-                        item_type,
-                        imdb_id: item.imdb_id.clone(),
-                        tmdb_id: item.tmdb_id.clone(),
-                        tvdb_id: item.tvdb_id.clone(),
-                    })
-                    .await;
-            } else {
-                let show_imdb_id = item.imdb_id.clone();
-                if let Ok(season_items) =
-                    repo::get_requested_seasons_for_show(pool, item.id).await
-                {
-                    for season in season_items {
-                        if season.state == riven_core::types::MediaItemState::Indexed {
-                            job_queue
-                                .push_scrape(ScrapeJob {
-                                    id: season.id,
-                                    item_type: season.item_type,
-                                    imdb_id: show_imdb_id.clone(),
-                                    title: season.title.clone(),
-                                    season: season.season_number,
-                                    episode: None,
-                                })
-                                .await;
-                        }
-                    }
-                }
-            }
-        } else {
-            job_queue
-                .push_index(IndexJob {
-                    id: item.id,
-                    item_type,
-                    imdb_id,
-                    tmdb_id,
-                    tvdb_id,
-                })
-                .await;
-        }
-
-        Ok(item)
+        Ok(outcome.item)
     }
 }

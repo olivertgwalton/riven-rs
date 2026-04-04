@@ -1,14 +1,16 @@
 use async_graphql::*;
+use riven_core::plugin::{PluginRegistry, SettingField};
+use riven_core::settings::RivenSettings;
 use riven_core::types::*;
 use riven_db::entities::*;
 use riven_db::repo;
+use std::collections::HashMap;
 use std::sync::Arc;
-use riven_core::plugin::{PluginRegistry, SettingField};
-use riven_core::settings::RivenSettings;
 
 use super::helpers::derive_media_metadata;
-use super::types::*;
+use super::types::MediaItemStateTree;
 use super::types::PluginInfo;
+use super::types::*;
 
 // ── Helpers ──
 
@@ -127,16 +129,38 @@ impl CoreQuery {
     }
 
     /// Get a media item with its filesystem entry and full season/episode tree (for shows).
-    async fn media_item_full(
-        &self,
-        ctx: &Context<'_>,
-        id: i64,
-    ) -> Result<Option<MediaItemFull>> {
+    async fn media_item_full(&self, ctx: &Context<'_>, id: i64) -> Result<Option<MediaItemFull>> {
         let pool = ctx.data::<sqlx::PgPool>()?;
         let Some(item) = repo::get_media_item(pool, id).await? else {
             return Ok(None);
         };
         self.media_item_full_inner(pool, item).await.map(Some)
+    }
+
+    /// Get a media item's lightweight state tree by TMDB ID.
+    async fn media_item_state_by_tmdb(
+        &self,
+        ctx: &Context<'_>,
+        tmdb_id: String,
+    ) -> Result<Option<MediaItemStateTree>> {
+        let pool = ctx.data::<sqlx::PgPool>()?;
+        let Some(item) = repo::get_media_item_by_tmdb(pool, &tmdb_id).await? else {
+            return Ok(None);
+        };
+        self.media_item_state_tree_inner(pool, item).await.map(Some)
+    }
+
+    /// Get a media item's lightweight state tree by TVDB ID.
+    async fn media_item_state_by_tvdb(
+        &self,
+        ctx: &Context<'_>,
+        tvdb_id: String,
+    ) -> Result<Option<MediaItemStateTree>> {
+        let pool = ctx.data::<sqlx::PgPool>()?;
+        let Some(item) = repo::get_media_item_by_tvdb(pool, &tvdb_id).await? else {
+            return Ok(None);
+        };
+        self.media_item_state_tree_inner(pool, item).await.map(Some)
     }
 
     /// List all movies.
@@ -255,8 +279,8 @@ impl CoreQuery {
         let profiles: serde_json::Value = riven_rank::QualityProfile::ALL
             .iter()
             .map(|&p| {
-                let mut settings = serde_json::to_value(p.base_settings())
-                    .unwrap_or(serde_json::Value::Null);
+                let mut settings =
+                    serde_json::to_value(p.base_settings()).unwrap_or(serde_json::Value::Null);
                 inject_rank_defaults(&mut settings);
                 serde_json::json!({
                     "id":          p.id(),
@@ -298,9 +322,9 @@ impl CoreQuery {
             .map(|p| PluginInfo {
                 name: p.name,
                 version: p.version,
+                enabled: p.enabled,
                 valid: p.valid,
-                schema: serde_json::to_value(p.schema)
-                    .unwrap_or(serde_json::Value::Array(vec![])),
+                schema: serde_json::to_value(p.schema).unwrap_or(serde_json::Value::Array(vec![])),
             })
             .collect())
     }
@@ -312,10 +336,22 @@ impl CoreQuery {
         plugin: String,
     ) -> Result<serde_json::Value> {
         let registry = ctx.data::<Arc<PluginRegistry>>()?;
-        Ok(registry
+        let pool = ctx.data::<sqlx::PgPool>()?;
+        let mut settings = registry
             .get_plugin_settings_json(&plugin)
             .await
-            .unwrap_or(serde_json::Value::Object(Default::default())))
+            .unwrap_or(serde_json::Value::Object(Default::default()));
+        let enabled = repo::get_plugin_enabled(pool, &plugin).await?;
+        if let Some(obj) = settings.as_object_mut() {
+            obj.insert("enabled".to_string(), serde_json::Value::Bool(enabled));
+        }
+        Ok(settings)
+    }
+
+    /// Return whether a plugin is explicitly enabled.
+    async fn plugin_enabled(&self, ctx: &Context<'_>, plugin: String) -> Result<bool> {
+        let pool = ctx.data::<sqlx::PgPool>()?;
+        Ok(repo::get_plugin_enabled(pool, &plugin).await?)
     }
 
     /// Return the SettingField schema for the general (non-plugin) settings.
@@ -326,6 +362,12 @@ impl CoreQuery {
             SettingField::new("retry_interval_secs", "Retry interval (seconds)", "number")
                 .with_default("86400")
                 .with_description("How often to retry stuck items. 0 = disabled. Default: 86400 (24 h)."),
+            SettingField::new("schedule_offset_minutes", "Re-index offset (minutes)", "number")
+                .with_default("30")
+                .with_description("How long after a known release/air date to wait before re-indexing an unreleased or ongoing item."),
+            SettingField::new("unknown_air_date_offset_days", "Fallback re-index delay (days)", "number")
+                .with_default("7")
+                .with_description("Fallback delay used when an unreleased or ongoing item has no known future air date."),
             SettingField::new("minimum_average_bitrate_movies", "Min bitrate — movies (Mbps)", "number")
                 .with_placeholder("Disabled")
                 .with_description("Reject movie streams below this average bitrate. Leave blank to disable."),
@@ -353,6 +395,8 @@ impl CoreQuery {
             "maximum_average_bitrate_movies": defaults.maximum_average_bitrate_movies,
             "maximum_average_bitrate_episodes": defaults.maximum_average_bitrate_episodes,
             "retry_interval_secs": defaults.retry_interval_secs,
+            "schedule_offset_minutes": defaults.schedule_offset_minutes,
+            "unknown_air_date_offset_days": defaults.unknown_air_date_offset_days,
         });
         if let Some(stored) = repo::get_setting(pool, "general").await? {
             if let (Some(obj), Some(stored_obj)) = (result.as_object_mut(), stored.as_object()) {
@@ -368,6 +412,68 @@ impl CoreQuery {
 // ── CoreQuery helpers (not exposed as GraphQL) ──
 
 impl CoreQuery {
+    pub(super) async fn media_item_state_tree_inner(
+        &self,
+        pool: &sqlx::PgPool,
+        item: MediaItem,
+    ) -> async_graphql::Result<MediaItemStateTree> {
+        let seasons = if item.item_type == MediaItemType::Show {
+            let seasons = repo::list_seasons(pool, item.id).await?;
+            let season_ids: Vec<i64> = seasons.iter().map(|season| season.id).collect();
+            let episodes = if season_ids.is_empty() {
+                Vec::new()
+            } else {
+                sqlx::query_as::<_, MediaItem>(
+                    "SELECT * FROM media_items \
+                     WHERE item_type = 'episode' AND parent_id = ANY($1) \
+                     ORDER BY parent_id, episode_number",
+                )
+                .bind(&season_ids)
+                .fetch_all(pool)
+                .await?
+            };
+
+            let mut episodes_by_season: HashMap<i64, Vec<MediaItem>> = HashMap::new();
+            for episode in episodes {
+                episodes_by_season
+                    .entry(episode.parent_id.unwrap_or_default())
+                    .or_default()
+                    .push(episode);
+            }
+
+            seasons
+                .into_iter()
+                .map(|season| SeasonState {
+                    id: season.id,
+                    season_number: season.season_number,
+                    state: season.state,
+                    is_requested: season.is_requested,
+                    episodes: episodes_by_season
+                        .remove(&season.id)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|episode| EpisodeState {
+                            id: episode.id,
+                            episode_number: episode.episode_number,
+                            state: episode.state,
+                        })
+                        .collect(),
+                })
+                .collect()
+        } else {
+            vec![]
+        };
+
+        Ok(MediaItemStateTree {
+            id: item.id,
+            state: item.state,
+            imdb_id: item.imdb_id,
+            tmdb_id: item.tmdb_id,
+            tvdb_id: item.tvdb_id,
+            seasons,
+        })
+    }
+
     pub(super) async fn media_item_full_inner(
         &self,
         pool: &sqlx::PgPool,
@@ -393,17 +499,53 @@ impl CoreQuery {
 
         let seasons = if item.item_type == MediaItemType::Show {
             let seasons = repo::list_seasons(pool, item.id).await?;
-            let mut season_fulls = Vec::new();
+            let season_ids: Vec<i64> = seasons.iter().map(|season| season.id).collect();
+            let episodes = if season_ids.is_empty() {
+                Vec::new()
+            } else {
+                sqlx::query_as::<_, MediaItem>(
+                    "SELECT * FROM media_items \
+                     WHERE item_type = 'episode' AND parent_id = ANY($1) \
+                     ORDER BY parent_id, episode_number",
+                )
+                .bind(&season_ids)
+                .fetch_all(pool)
+                .await?
+            };
+            let episode_ids: Vec<i64> = episodes.iter().map(|episode| episode.id).collect();
+            let episode_entries = if episode_ids.is_empty() {
+                Vec::new()
+            } else {
+                sqlx::query_as::<_, FileSystemEntry>(
+                    "SELECT * FROM filesystem_entries \
+                     WHERE entry_type = 'media' AND media_item_id = ANY($1)",
+                )
+                .bind(&episode_ids)
+                .fetch_all(pool)
+                .await?
+            };
+
+            let mut episodes_by_season: HashMap<i64, Vec<MediaItem>> = HashMap::new();
+            for episode in episodes {
+                episodes_by_season
+                    .entry(episode.parent_id.unwrap_or_default())
+                    .or_default()
+                    .push(episode);
+            }
+
+            let mut entries_by_episode: HashMap<i64, Vec<FileSystemEntry>> = HashMap::new();
+            for entry in episode_entries {
+                entries_by_episode
+                    .entry(entry.media_item_id)
+                    .or_default()
+                    .push(with_metadata(entry));
+            }
+
+            let mut season_fulls = Vec::with_capacity(seasons.len());
             for season in seasons {
-                let episodes = repo::list_episodes(pool, season.id).await?;
                 let mut episode_fulls = Vec::new();
-                for episode in episodes {
-                    let ep_all = repo::get_filesystem_entries(pool, episode.id).await?;
-                    let ep_media: Vec<_> = ep_all
-                        .into_iter()
-                        .filter(|e| e.entry_type == FileSystemEntryType::Media)
-                        .map(with_metadata)
-                        .collect();
+                for episode in episodes_by_season.remove(&season.id).unwrap_or_default() {
+                    let ep_media = entries_by_episode.remove(&episode.id).unwrap_or_default();
                     let ep_fs = ep_media.first().cloned();
                     episode_fulls.push(EpisodeFull {
                         item: episode,

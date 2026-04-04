@@ -1,9 +1,7 @@
 use async_graphql::{Context, Error, Object, Result as GqlResult, SimpleObject};
 use async_trait::async_trait;
-use riven_core::events::{EventType, HookResponse, RivenEvent};
-use riven_core::plugin::{Plugin, PluginContext};
+use riven_core::plugin::Plugin;
 use riven_core::register_plugin;
-use riven_core::settings::PluginSettings;
 
 #[derive(Default)]
 pub struct LogsPlugin;
@@ -15,29 +13,8 @@ impl Plugin for LogsPlugin {
     fn name(&self) -> &'static str {
         "logs"
     }
-
-    fn version(&self) -> &'static str {
-        "0.1.0"
-    }
-
-    fn subscribed_events(&self) -> &[EventType] {
-        &[]
-    }
-
-    async fn validate(&self, _settings: &PluginSettings) -> anyhow::Result<bool> {
-        Ok(true)
-    }
-
-    async fn handle_event(
-        &self,
-        _event: &RivenEvent,
-        _ctx: &PluginContext,
-    ) -> anyhow::Result<HookResponse> {
-        Ok(HookResponse::Empty)
-    }
 }
 
-/// Context data holding the path to the log directory.
 pub struct LogDirectory(pub String);
 
 #[derive(SimpleObject)]
@@ -53,9 +30,6 @@ pub struct LogsQuery;
 
 #[Object]
 impl LogsQuery {
-    /// Read recent log entries from the current daily log file.
-    /// Returns up to `limit` entries (default 500), most-recent-first.
-    /// Optionally filter by `level` (e.g. "INFO", "WARN", "ERROR").
     async fn logs(
         &self,
         ctx: &Context<'_>,
@@ -88,11 +62,8 @@ impl LogsQuery {
                 })
                 .collect();
 
-            // Most recent file last alphabetically; iterate newest-first.
             log_files.sort_unstable();
 
-            // Collect lines newest-first into a deque, stopping once we have
-            // enough to satisfy the limit (with headroom for level filtering).
             let headroom = limit * 4;
             let mut lines: VecDeque<String> = VecDeque::new();
 
@@ -114,7 +85,6 @@ impl LogsQuery {
                 }
             }
 
-            // Parse JSON, filter by level, take `limit` most-recent entries.
             lines
                 .iter()
                 .filter_map(|line| {

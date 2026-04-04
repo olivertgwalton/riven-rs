@@ -1,10 +1,8 @@
-use std::collections::HashMap;
-
 use async_trait::async_trait;
 use serde::Deserialize;
 
 use riven_core::events::{EventType, HookResponse, RivenEvent};
-use riven_core::plugin::{Plugin, PluginContext};
+use riven_core::plugin::{ContentCollection, Plugin, PluginContext};
 use riven_core::register_plugin;
 use riven_core::settings::PluginSettings;
 use riven_core::types::*;
@@ -23,10 +21,6 @@ impl Plugin for TraktPlugin {
         "trakt"
     }
 
-    fn version(&self) -> &'static str {
-        "0.1.0"
-    }
-
     fn subscribed_events(&self) -> &[EventType] {
         &[EventType::ContentServiceRequested]
     }
@@ -34,7 +28,6 @@ impl Plugin for TraktPlugin {
     async fn validate(&self, settings: &PluginSettings) -> anyhow::Result<bool> {
         Ok(settings.has("clientid"))
     }
-
 
     fn settings_schema(&self) -> Vec<riven_core::plugin::SettingField> {
         use riven_core::plugin::SettingField;
@@ -49,11 +42,15 @@ impl Plugin for TraktPlugin {
             SettingField::new("trendingcount", "Trending Count", "number").with_default("10"),
             SettingField::new("fetchpopular", "Fetch Popular", "boolean").with_default("false"),
             SettingField::new("popularcount", "Popular Count", "number").with_default("10"),
-            SettingField::new("fetchwatched", "Fetch Watched History", "boolean").with_default("false"),
+            SettingField::new("fetchwatched", "Fetch Watched History", "boolean")
+                .with_default("false"),
+            SettingField::new("watchedcount", "Watched Count", "number").with_default("10"),
             SettingField::new("watchedperiod", "Watched Period", "text")
                 .with_default("weekly")
                 .with_placeholder("weekly")
-                .with_description("Period for watched history (daily, weekly, monthly, yearly, all)."),
+                .with_description(
+                    "Period for watched history (daily, weekly, monthly, yearly, all).",
+                ),
         ]
     }
 
@@ -66,20 +63,24 @@ impl Plugin for TraktPlugin {
             RivenEvent::ContentServiceRequested => {
                 let client_id = ctx.require_setting("clientid")?;
                 let access_token = ctx.settings.get("accesstoken");
-
-                let mut movies: HashMap<String, ExternalIds> = HashMap::new();
-                let mut shows: HashMap<String, ExternalIds> = HashMap::new();
+                let mut content = ContentCollection::default();
+                let trending_count = ctx.settings.get_parsed_or("trendingcount", 10usize);
+                let popular_count = ctx.settings.get_parsed_or("popularcount", 10usize);
+                let watched_count = ctx.settings.get_parsed_or("watchedcount", 10usize);
+                let watched_period = ctx.settings.get_or("watchedperiod", "weekly");
 
                 // Watchlist (requires access token)
-                if ctx.settings.get_or("watchlist", "false").to_lowercase() == "true" {
+                if ctx.settings.get_bool("watchlist") {
                     if let Some(token) = access_token {
                         collect_wrapped(
                             fetch_watchlist(&ctx.http_client, client_id, token, "movies").await?,
-                            &mut movies,
+                            &mut content,
+                            true,
                         );
                         collect_wrapped(
                             fetch_watchlist(&ctx.http_client, client_id, token, "shows").await?,
-                            &mut shows,
+                            &mut content,
+                            false,
                         );
                     } else {
                         tracing::warn!("trakt watchlist enabled but accesstoken not set");
@@ -99,93 +100,88 @@ impl Plugin for TraktPlugin {
                                 "movies",
                             )
                             .await?,
-                            &mut movies,
+                            &mut content,
+                            true,
                         );
                         collect_wrapped(
-                            fetch_user_list(
-                                &ctx.http_client,
-                                client_id,
-                                token,
-                                list_slug,
-                                "shows",
-                            )
-                            .await?,
-                            &mut shows,
+                            fetch_user_list(&ctx.http_client, client_id, token, list_slug, "shows")
+                                .await?,
+                            &mut content,
+                            false,
                         );
                     }
                 }
 
                 // Trending
-                if ctx.settings.get_or("fetchtrending", "false").to_lowercase() == "true" {
-                    let count: usize = ctx
-                        .settings
-                        .get_or("trendingcount", "10")
-                        .parse()
-                        .unwrap_or(10);
+                if ctx.settings.get_bool("fetchtrending") {
                     collect_wrapped(
-                        fetch_trending(&ctx.http_client, client_id, "movies", count).await?,
-                        &mut movies,
+                        fetch_trending(&ctx.http_client, client_id, "movies", trending_count)
+                            .await?,
+                        &mut content,
+                        true,
                     );
                     collect_wrapped(
-                        fetch_trending(&ctx.http_client, client_id, "shows", count).await?,
-                        &mut shows,
+                        fetch_trending(&ctx.http_client, client_id, "shows", trending_count)
+                            .await?,
+                        &mut content,
+                        false,
                     );
                 }
 
                 // Popular
-                if ctx.settings.get_or("fetchpopular", "false").to_lowercase() == "true" {
-                    let count: usize = ctx
-                        .settings
-                        .get_or("popularcount", "10")
-                        .parse()
-                        .unwrap_or(10);
+                if ctx.settings.get_bool("fetchpopular") {
                     collect_direct(
-                        fetch_popular(&ctx.http_client, client_id, "movies", count).await?,
-                        &mut movies,
+                        fetch_popular(&ctx.http_client, client_id, "movies", popular_count).await?,
+                        &mut content,
+                        true,
                     );
                     collect_direct(
-                        fetch_popular(&ctx.http_client, client_id, "shows", count).await?,
-                        &mut shows,
+                        fetch_popular(&ctx.http_client, client_id, "shows", popular_count).await?,
+                        &mut content,
+                        false,
                     );
                 }
 
                 // Most watched
-                if ctx.settings.get_or("fetchwatched", "false").to_lowercase() == "true" {
-                    let count: usize = ctx
-                        .settings
-                        .get_or("watchedcount", "10")
-                        .parse()
-                        .unwrap_or(10);
-                    let period = ctx.settings.get_or("watchedperiod", "weekly");
+                if ctx.settings.get_bool("fetchwatched") {
                     collect_wrapped(
-                        fetch_watched(&ctx.http_client, client_id, "movies", &period, count)
-                            .await?,
-                        &mut movies,
+                        fetch_watched(
+                            &ctx.http_client,
+                            client_id,
+                            "movies",
+                            &watched_period,
+                            watched_count,
+                        )
+                        .await?,
+                        &mut content,
+                        true,
                     );
                     collect_wrapped(
-                        fetch_watched(&ctx.http_client, client_id, "shows", &period, count)
-                            .await?,
-                        &mut shows,
+                        fetch_watched(
+                            &ctx.http_client,
+                            client_id,
+                            "shows",
+                            &watched_period,
+                            watched_count,
+                        )
+                        .await?,
+                        &mut content,
+                        false,
                     );
                 }
 
                 tracing::info!(
-                    movies = movies.len(),
-                    shows = shows.len(),
+                    movies = content.movie_count(),
+                    shows = content.show_count(),
                     "trakt content service completed"
                 );
 
-                Ok(HookResponse::ContentService(Box::new(ContentServiceResponse {
-                    movies: movies.into_values().collect(),
-                    shows: shows.into_values().collect(),
-                })))
+                Ok(content.into_hook_response())
             }
             _ => Ok(HookResponse::Empty),
         }
     }
 }
-
-// ── Response types ───────────────────────────────────────────────────────────
 
 #[derive(Deserialize)]
 struct TraktIds {
@@ -194,7 +190,6 @@ struct TraktIds {
     tvdb: Option<i64>,
 }
 
-/// Wrapper shape: `{ movie: { ids: ... } }` or `{ show: { ids: ... } }`
 #[derive(Deserialize)]
 struct WrappedItem {
     movie: Option<TraktInner>,
@@ -206,13 +201,10 @@ struct TraktInner {
     ids: TraktIds,
 }
 
-/// Direct shape: `{ ids: ... }` (popular endpoint)
 #[derive(Deserialize)]
 struct DirectItem {
     ids: TraktIds,
 }
-
-// ── Helpers ──────────────────────────────────────────────────────────────────
 
 fn ids_to_external(ids: &TraktIds) -> Option<ExternalIds> {
     if ids.imdb.is_none() && ids.tmdb.is_none() && ids.tvdb.is_none() {
@@ -226,32 +218,30 @@ fn ids_to_external(ids: &TraktIds) -> Option<ExternalIds> {
     })
 }
 
-fn collect_wrapped(items: Vec<WrappedItem>, map: &mut HashMap<String, ExternalIds>) {
+fn collect_wrapped(items: Vec<WrappedItem>, content: &mut ContentCollection, is_movie: bool) {
     for item in items {
         let inner = item.movie.or(item.show);
         if let Some(inner) = inner {
             if let Some(ext) = ids_to_external(&inner.ids) {
-                let key = ext
-                    .imdb_id
-                    .clone()
-                    .or_else(|| ext.tmdb_id.clone())
-                    .unwrap_or_default();
-                map.entry(key).or_insert(ext);
+                insert_external_ids(content, ext, is_movie);
             }
         }
     }
 }
 
-fn collect_direct(items: Vec<DirectItem>, map: &mut HashMap<String, ExternalIds>) {
+fn collect_direct(items: Vec<DirectItem>, content: &mut ContentCollection, is_movie: bool) {
     for item in items {
         if let Some(ext) = ids_to_external(&item.ids) {
-            let key = ext
-                .imdb_id
-                .clone()
-                .or_else(|| ext.tmdb_id.clone())
-                .unwrap_or_default();
-            map.entry(key).or_insert(ext);
+            insert_external_ids(content, ext, is_movie);
         }
+    }
+}
+
+fn insert_external_ids(content: &mut ContentCollection, ext: ExternalIds, is_movie: bool) {
+    if is_movie {
+        content.insert_movie(ext);
+    } else {
+        content.insert_show(ext);
     }
 }
 
@@ -268,11 +258,8 @@ fn trakt_auth_get(
     client_id: &str,
     access_token: &str,
 ) -> reqwest::RequestBuilder {
-    trakt_get(client, url, client_id)
-        .header("Authorization", format!("Bearer {access_token}"))
+    trakt_get(client, url, client_id).header("Authorization", format!("Bearer {access_token}"))
 }
-
-// ── Fetch functions ───────────────────────────────────────────────────────────
 
 async fn fetch_watchlist(
     client: &reqwest::Client,
@@ -298,8 +285,7 @@ async fn fetch_user_list(
 ) -> anyhow::Result<Vec<WrappedItem>> {
     // list_slug format: "username/listname"
     let (username, listname) = list_slug.split_once('/').unwrap_or(("me", list_slug));
-    let url =
-        format!("{TRAKT_BASE_URL}/users/{username}/lists/{listname}/items/{media_type}");
+    let url = format!("{TRAKT_BASE_URL}/users/{username}/lists/{listname}/items/{media_type}");
     let items: Vec<WrappedItem> = trakt_auth_get(client, &url, client_id, access_token)
         .send()
         .await?
@@ -345,8 +331,7 @@ async fn fetch_watched(
     period: &str,
     limit: usize,
 ) -> anyhow::Result<Vec<WrappedItem>> {
-    let url =
-        format!("{TRAKT_BASE_URL}/{media_type}/watched/{period}?limit={limit}");
+    let url = format!("{TRAKT_BASE_URL}/{media_type}/watched/{period}?limit={limit}");
     let items: Vec<WrappedItem> = trakt_get(client, &url, client_id)
         .send()
         .await?

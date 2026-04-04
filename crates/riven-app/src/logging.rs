@@ -2,8 +2,8 @@ use std::fmt;
 
 use chrono::Local;
 use tokio::sync::broadcast;
-use tracing::{Event, Subscriber};
 use tracing::field::{Field, Visit};
+use tracing::{Event, Subscriber};
 use tracing_subscriber::{
     fmt::{format::Writer, FmtContext, FormatEvent, FormatFields},
     layer::SubscriberExt,
@@ -36,8 +36,8 @@ pub fn target_display(target: &str) -> String {
 fn level_colored(level: &tracing::Level, ansi: bool) -> String {
     let label = match *level {
         tracing::Level::ERROR => "error",
-        tracing::Level::WARN  => "warn",
-        tracing::Level::INFO  => "info",
+        tracing::Level::WARN => "warn",
+        tracing::Level::INFO => "info",
         tracing::Level::DEBUG => "verbose",
         tracing::Level::TRACE => "trace",
     };
@@ -47,11 +47,11 @@ fn level_colored(level: &tracing::Level, ansi: bool) -> String {
     }
 
     let color = match *level {
-        tracing::Level::ERROR => "\x1b[31m",  // red
-        tracing::Level::WARN  => "\x1b[33m",  // yellow
-        tracing::Level::INFO  => "\x1b[32m",  // green
-        tracing::Level::DEBUG => "\x1b[36m",  // cyan
-        tracing::Level::TRACE => "\x1b[2m",   // dim
+        tracing::Level::ERROR => "\x1b[31m", // red
+        tracing::Level::WARN => "\x1b[33m",  // yellow
+        tracing::Level::INFO => "\x1b[32m",  // green
+        tracing::Level::DEBUG => "\x1b[36m", // cyan
+        tracing::Level::TRACE => "\x1b[2m",  // dim
     };
     format!("{color}{label}:\x1b[0m")
 }
@@ -94,7 +94,11 @@ pub struct BroadcastLogLayer {
 }
 
 impl<S: tracing::Subscriber> Layer<S> for BroadcastLogLayer {
-    fn on_event(&self, event: &tracing::Event<'_>, _ctx: tracing_subscriber::layer::Context<'_, S>) {
+    fn on_event(
+        &self,
+        event: &tracing::Event<'_>,
+        _ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
         let meta = event.metadata();
 
         // Only broadcast INFO and above from riven/plugin crates.
@@ -158,15 +162,14 @@ pub fn init_logging(settings: &RivenSettings, log_tx: broadcast::Sender<String>)
 
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new(&settings.log_level))
-        // Apalis emits heartbeat events every second on DEBUG/TRACE; 
+        // Apalis emits heartbeat events every second on DEBUG/TRACE;
         // this suppresses that spam while keeping user levels intact.
         .add_directive("apalis_core=info".parse().unwrap());
 
     let registry = tracing_subscriber::registry().with(filter);
 
     // Console layer — custom format
-    let console_layer = tracing_subscriber::fmt::layer()
-        .event_format(RivenFormatter);
+    let console_layer = tracing_subscriber::fmt::layer().event_format(RivenFormatter);
 
     // File layer (JSON, rolling daily)
     let log_dir = &settings.log_directory;
