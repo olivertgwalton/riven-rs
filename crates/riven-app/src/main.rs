@@ -29,6 +29,37 @@ extern crate plugin_tvdb;
 
 mod setup;
 
+fn build_http_client() -> Result<reqwest::Client> {
+    Ok(reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(
+            riven_core::config::vfs::CONNECT_TIMEOUT_SECS,
+        ))
+        .timeout(Duration::from_secs(
+            riven_core::config::vfs::ACTIVITY_TIMEOUT_SECS,
+        ))
+        .user_agent("Mozilla/5.0 (compatible; riven/1.0)")
+        .connection_verbose(false)
+        .build()?)
+}
+
+fn build_streaming_http_client() -> Result<reqwest::Client> {
+    Ok(reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(
+            riven_core::config::vfs::CONNECT_TIMEOUT_SECS,
+        ))
+        .timeout(Duration::from_secs(
+            riven_core::config::vfs::ACTIVITY_TIMEOUT_SECS,
+        ))
+        .pool_idle_timeout(Duration::from_secs(90))
+        .pool_max_idle_per_host(16)
+        .tcp_keepalive(Duration::from_secs(30))
+        .tcp_nodelay(true)
+        .http1_only()
+        .user_agent("Mozilla/5.0 (compatible; riven/1.0)")
+        .connection_verbose(false)
+        .build()?)
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let mut settings = riven_core::settings::RivenSettings::load()?;
@@ -80,16 +111,8 @@ async fn main() -> Result<()> {
     let redis_conn = redis::aio::ConnectionManager::new(redis_client).await?;
     tracing::info!("redis connection established");
 
-    let http_client = reqwest::Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(
-            riven_core::config::vfs::CONNECT_TIMEOUT_SECS,
-        ))
-        .timeout(std::time::Duration::from_secs(
-            riven_core::config::vfs::ACTIVITY_TIMEOUT_SECS,
-        ))
-        .user_agent("Mozilla/5.0 (compatible; riven/1.0)")
-        .connection_verbose(false)
-        .build()?;
+    let http_client = build_http_client()?;
+    let stream_http_client = build_streaming_http_client()?;
 
     let registry = setup::register_plugins(http_client.clone(), db_pool.clone(), redis_conn).await;
     let (notification_tx, _) = broadcast::channel::<String>(512);
@@ -116,7 +139,7 @@ async fn main() -> Result<()> {
         let vfs_session = riven_vfs::mount(
             &settings.vfs_mount_path,
             db_pool.clone(),
-            http_client.clone(),
+            stream_http_client,
             link_tx,
             log_settings.vfs_debug_logging,
             settings.vfs_cache_max_size_mb,

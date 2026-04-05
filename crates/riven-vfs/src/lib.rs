@@ -1,8 +1,9 @@
 pub mod cache;
 pub mod chunks;
 pub mod detect;
-pub mod fetcher;
 pub mod filesystem;
+pub mod link;
+pub mod media_stream;
 pub mod path_info;
 pub mod prefetch;
 pub mod readdir;
@@ -36,7 +37,7 @@ impl FuseSession {
 pub fn mount(
     mount_path: &str,
     db_pool: sqlx::PgPool,
-    http_client: reqwest::Client,
+    stream_client: reqwest::Client,
     link_request_tx: mpsc::Sender<LinkRequest>,
     debug_logging: bool,
     cache_max_size_mb: u64,
@@ -82,7 +83,7 @@ pub fn mount(
 
     let fs = RivenFs::new(
         db_pool,
-        http_client,
+        stream_client,
         link_request_tx,
         debug_logging,
         cache_max_size_mb,

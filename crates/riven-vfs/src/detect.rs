@@ -24,7 +24,7 @@ pub fn detect_read_type(
     start: u64,
     end: u64,
     request_size: usize,
-    previous_position: Option<u64>,
+    previous_read_end: Option<u64>,
     layout: &FileLayout,
     chunks: &[ChunkRange],
     cache: &RangeCache,
@@ -37,17 +37,17 @@ pub fn detect_read_type(
         return ReadType::HeaderScan;
     }
 
-    if previous_position.unwrap_or(0) < start.saturating_sub(SEQUENTIAL_READ_TOLERANCE_BYTES)
+    if previous_read_end.unwrap_or(0) < start.saturating_sub(SEQUENTIAL_READ_TOLERANCE_BYTES)
         && layout.footer_start <= start
     {
         return ReadType::FooterScan;
     }
 
-    let is_general_scan = (previous_position
-        .is_some_and(|previous| previous.abs_diff(start) > SCAN_TOLERANCE_BYTES)
+    let is_general_scan = (previous_read_end
+        .is_some_and(|previous_end| previous_end.abs_diff(start) > SCAN_TOLERANCE_BYTES)
         && start != layout.header_end
-        && request_size < BLOCK_SIZE as usize)
-        || (start > layout.header_end && previous_position.is_none());
+        && request_size <= BLOCK_SIZE as usize)
+        || (start > layout.header_end && previous_read_end.is_none());
 
     if is_general_scan {
         return ReadType::GeneralScan;

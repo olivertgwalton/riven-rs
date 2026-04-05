@@ -385,12 +385,10 @@ pub async fn delete_filesystem_entry(pool: &PgPool, entry_id: i64) -> Result<boo
 }
 
 pub async fn update_stream_url(pool: &PgPool, entry_id: i64, stream_url: &str) -> Result<()> {
-    sqlx::query!(
-        "UPDATE filesystem_entries SET stream_url = $2, updated_at = NOW() WHERE id = $1",
-        entry_id,
-        stream_url
-    )
-    .execute(pool)
-    .await?;
+    sqlx::query("UPDATE filesystem_entries SET stream_url = $2 WHERE id = $1")
+        .bind(entry_id)
+        .bind(stream_url)
+        .execute(pool)
+        .await?;
     Ok(())
 }

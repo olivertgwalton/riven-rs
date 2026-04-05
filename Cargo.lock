@@ -2763,6 +2763,7 @@ dependencies = [
  "serde",
  "sqlx",
  "tokio",
+ "tokio-util",
  "tracing",
 ]
 

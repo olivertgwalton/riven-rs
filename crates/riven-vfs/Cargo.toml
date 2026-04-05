@@ -21,3 +21,4 @@ chrono = { workspace = true }
 futures = { workspace = true }
 regex = { workspace = true }
 bytes = { workspace = true }
+tokio-util = { workspace = true }

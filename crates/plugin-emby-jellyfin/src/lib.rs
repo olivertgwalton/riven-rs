@@ -69,6 +69,10 @@ fn media_server_settings_schema() -> Vec<SettingField> {
             .required()
             .with_placeholder("http://localhost:8096"),
         SettingField::new("apikey", "API Key", "password").required(),
+        SettingField::new("librarypath", "Library Path", "text")
+            .with_default("/mount")
+            .with_placeholder("/mount")
+            .with_description("Path Jellyfin/Emby uses to reference the Riven VFS mount."),
     ]
 }
 
@@ -86,14 +90,24 @@ async fn notify_media_server(
         .trim_end_matches('/')
         .to_string();
     let api_key = ctx.require_setting("apikey")?;
+    let library_path = ctx.settings.get_or("librarypath", "/mount");
     let entries = repo::get_media_entries(&ctx.db_pool, *id).await?;
     if entries.is_empty() {
         tracing::warn!(id, title, "{plugin}: no filesystem entries");
         return Ok(HookResponse::Empty);
     }
-    let paths: Vec<String> = entries.into_iter().map(|e| e.path).collect();
+    let paths: Vec<String> = entries
+        .into_iter()
+        .map(|entry| rewrite_media_path(&library_path, &entry.path))
+        .collect();
     notify_paths(&ctx.http_client, &url, api_key, &paths, plugin).await?;
     Ok(HookResponse::Empty)
+}
+
+fn rewrite_media_path(library_path: &str, media_path: &str) -> String {
+    let library_path = library_path.trim_end_matches('/');
+    let media_path = media_path.trim_start_matches('/');
+    format!("{library_path}/{media_path}")
 }
 
 macro_rules! impl_media_server_plugin {

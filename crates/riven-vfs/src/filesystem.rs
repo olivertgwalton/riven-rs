@@ -18,11 +18,9 @@ use riven_db::entities::FileSystemEntry;
 use riven_db::repo;
 
 use crate::cache::RangeCache;
-use crate::chunks::FileLayout;
-use crate::detect::detect_read_type;
-use crate::fetcher::{resolve_stream_url, serve_read, ReadOutcome};
+use crate::link::resolve_stream_url;
+use crate::media_stream::{MediaStream, ReadOutcome};
 use crate::path_info::{parse_path, PathType};
-use crate::prefetch::Prefetch;
 use crate::readdir::{populate_entries, DirEntry};
 use crate::LinkRequest;
 
@@ -37,7 +35,12 @@ const FIRST_DYNAMIC_INO: u64 = 100;
 /// Reject hidden files (`.trickplay`, `.nfo`, etc.) and known ignored names
 /// that media servers probe for but the VFS never serves.
 fn is_ignored_name(name: &str) -> bool {
-    name.starts_with('.') || name.eq_ignore_ascii_case("folder.jpg")
+    let lower = name.to_ascii_lowercase();
+    lower.starts_with('.')
+        || lower.eq("folder.jpg")
+        || lower.ends_with(".trickplay")
+        || lower.ends_with(".nfo")
+        || lower.ends_with(".bif")
 }
 
 fn make_attr(ino: u64, kind: FileType, size: u64, mtime: SystemTime) -> FileAttr {
@@ -74,23 +77,23 @@ fn file_attr(ino: u64, size: u64, mtime: SystemTime) -> FileAttr {
 }
 
 fn entry_mtime(entry: &FileSystemEntry) -> SystemTime {
-    let ts = entry.updated_at.unwrap_or(entry.created_at);
+    // VFS file mtimes must be stable across ephemeral metadata churn such as
+    // refreshed stream URLs, or media servers will treat the file as changed
+    // and re-probe/prune extracted metadata. Use the creation time as the
+    // content timestamp for the virtual file.
+    let ts = entry.created_at;
     UNIX_EPOCH + Duration::from_secs(ts.timestamp().max(0) as u64)
 }
 
 struct FileHandle {
-    ino: u64,
     path: Arc<str>,
-    stream_url: String,
-    file_size: u64,
-    layout: FileLayout,
-    previous_read_pos: Option<u64>,
-    prefetch: Option<Prefetch>,
+    stream_url: Arc<str>,
+    media_stream: MediaStream,
 }
 
 pub struct RivenFs {
     db_pool: sqlx::PgPool,
-    http_client: reqwest::Client,
+    stream_client: reqwest::Client,
     link_request_tx: mpsc::Sender<LinkRequest>,
     debug_logging: bool,
     runtime: tokio::runtime::Handle,
@@ -112,7 +115,7 @@ pub struct RivenFs {
 impl RivenFs {
     pub fn new(
         db_pool: sqlx::PgPool,
-        http_client: reqwest::Client,
+        stream_client: reqwest::Client,
         link_request_tx: mpsc::Sender<LinkRequest>,
         debug_logging: bool,
         cache_max_size_mb: u64,
@@ -125,7 +128,7 @@ impl RivenFs {
         };
         Self {
             db_pool,
-            http_client,
+            stream_client,
             link_request_tx,
             debug_logging,
             runtime: tokio::runtime::Handle::current(),
@@ -370,25 +373,12 @@ impl Filesystem for RivenFs {
 
         let fd = self.next_fd.fetch_add(1, Ordering::SeqCst);
         let file_size = entry.file_size as u64;
-        // Start the background download task immediately at file open so the
-        // 64 MB pre-buffer fills during header scanning, eliminating the stall
-        // window between open() and the first Sequential read.
-        let prefetch = Prefetch::start(
-            self.http_client.clone(),
-            stream_url.clone(),
-            0,
-            &self.runtime,
-        );
         self.file_handles.insert(
             fd,
             FileHandle {
-                ino,
                 path,
-                stream_url,
-                file_size,
-                layout: FileLayout::new(file_size),
-                previous_read_pos: None,
-                prefetch,
+                stream_url: Arc::from(stream_url),
+                media_stream: MediaStream::new(ino, file_size),
             },
         );
         reply.opened(fd, 0);
@@ -411,52 +401,24 @@ impl Filesystem for RivenFs {
         };
 
         let start = offset as u64;
-        if start >= handle.file_size {
+        if start >= handle.media_stream.file_size() {
             reply.data(&[]);
             return;
         }
-        let end = (start + size as u64 - 1).min(handle.file_size - 1);
-        let chunks = handle.layout.request_chunks(start, end);
-        let read_type = detect_read_type(
-            handle.ino,
-            start,
-            end,
-            (end - start + 1) as usize,
-            handle.previous_read_pos,
-            &handle.layout,
-            &chunks,
-            &self.range_cache,
-        );
+        let end = (start + size as u64 - 1).min(handle.media_stream.file_size() - 1);
 
         if self.debug_logging {
-            tracing::debug!(
-                path = %handle.path,
-                offset = start,
-                size,
-                read_type = ?read_type,
-                chunks = chunks.len(),
-                "read"
-            );
+            tracing::debug!(path = %handle.path, offset = start, size, "read");
         }
 
-        handle.previous_read_pos = Some(start);
-        let FileHandle {
-            ino,
-            stream_url,
-            prefetch,
-            ..
-        } = &mut *handle;
-        match serve_read(
-            read_type,
-            *ino,
+        let stream_url = Arc::clone(&handle.stream_url);
+        match handle.media_stream.read(
             start,
             end,
-            &chunks,
-            stream_url.as_str(),
+            &stream_url,
             &self.range_cache,
-            &self.http_client,
+            &self.stream_client,
             &self.runtime,
-            prefetch,
             self.debug_logging,
         ) {
             ReadOutcome::Data(buf) => reply.data(&buf),
