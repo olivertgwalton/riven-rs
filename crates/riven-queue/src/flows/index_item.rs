@@ -2,6 +2,7 @@ use riven_core::events::{EventType, HookResponse, RivenEvent};
 use riven_core::types::*;
 use riven_db::repo;
 
+use crate::indexing::apply_indexed_media_item;
 use crate::orchestrator::LibraryOrchestrator;
 use crate::{IndexJob, IndexPluginJob, JobQueue};
 
@@ -129,7 +130,9 @@ pub async fn finalize(id: i64, queue: &JobQueue) {
             acc.merge(indexed)
         });
 
-    if let Err(e) = repo::update_media_item_index(&queue.db_pool, id, &merged).await {
+    if let Err(e) =
+        apply_indexed_media_item(&queue.db_pool, &item, &merged, requested_seasons.as_deref()).await
+    {
         tracing::error!(id, error = %e, "failed to persist indexed data");
         queue
             .notify(RivenEvent::MediaItemIndexError {
@@ -138,79 +141,6 @@ pub async fn finalize(id: i64, queue: &JobQueue) {
             })
             .await;
         return;
-    }
-
-    if item.item_type == MediaItemType::Movie {
-        if let Ok(Some(fresh)) = repo::get_media_item(&queue.db_pool, id).await {
-            let _ = repo::refresh_state(&queue.db_pool, &fresh).await;
-        }
-    }
-
-    if item.item_type == MediaItemType::Show {
-        if let Some(seasons) = &merged.seasons {
-            for season_data in seasons {
-                let season_requested = if season_data.number == 0 {
-                    requested_seasons
-                        .as_ref()
-                        .map(|s| s.contains(&0))
-                        .unwrap_or(false)
-                } else {
-                    requested_seasons
-                        .as_ref()
-                        .map(|s| s.contains(&season_data.number))
-                        .unwrap_or(true)
-                };
-
-                if requested_seasons.is_some() && !season_requested {
-                    continue;
-                }
-
-                let season = match repo::create_season(
-                    &queue.db_pool,
-                    id,
-                    season_data.number,
-                    season_data.title.as_deref(),
-                    season_data.tvdb_id.as_deref(),
-                    season_data.number == 0,
-                    item.item_request_id,
-                    season_requested,
-                )
-                .await
-                {
-                    Ok(s) => s,
-                    Err(e) => {
-                        tracing::error!(error = %e, season = season_data.number, "failed to create season");
-                        continue;
-                    }
-                };
-
-                for ep_data in &season_data.episodes {
-                    if let Err(e) = repo::create_episode(
-                        &queue.db_pool,
-                        season.id,
-                        ep_data.number,
-                        ep_data.title.as_deref(),
-                        ep_data.tvdb_id.as_deref(),
-                        ep_data.aired_at,
-                        ep_data.runtime,
-                        ep_data.absolute_number,
-                        item.item_request_id,
-                        season_requested,
-                        Some(season_data.number),
-                    )
-                    .await
-                    {
-                        tracing::error!(error = %e, episode = ep_data.number, "failed to create episode");
-                    }
-                }
-
-                let _ = repo::refresh_state(&queue.db_pool, &season).await;
-            }
-        }
-
-        if let Ok(Some(show_item)) = repo::get_media_item(&queue.db_pool, id).await {
-            let _ = repo::refresh_state(&queue.db_pool, &show_item).await;
-        }
     }
 
     let fresh_item = match repo::get_media_item(&queue.db_pool, id).await {

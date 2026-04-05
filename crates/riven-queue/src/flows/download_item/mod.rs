@@ -17,7 +17,7 @@ use helpers::{has_matching_file, load_item_or_err};
 use persist::{persist_episode, persist_movie, persist_season};
 
 /// Run the download item flow.
-pub async fn run(id: i64, _job: &DownloadJob, queue: &JobQueue) {
+pub async fn run(id: i64, job: &DownloadJob, queue: &JobQueue) {
     let start_time = Instant::now();
     tracing::debug!(id, "running download flow");
 
@@ -104,7 +104,20 @@ pub async fn run(id: i64, _job: &DownloadJob, queue: &JobQueue) {
     );
     drop(config);
 
-    if multi_version {
+    if let Some(preferred_info_hash) = job.preferred_info_hash.as_ref() {
+        run_preferred_stream(
+            id,
+            &item,
+            queue,
+            start_time,
+            &all_streams,
+            preferred_info_hash,
+            &cached_info,
+            max_size_bytes,
+            min_size_bytes,
+        )
+        .await;
+    } else if multi_version {
         run_multi_version(
             id,
             &item,
@@ -130,6 +143,95 @@ pub async fn run(id: i64, _job: &DownloadJob, queue: &JobQueue) {
         )
         .await;
     }
+}
+
+async fn run_preferred_stream(
+    id: i64,
+    item: &MediaItem,
+    queue: &JobQueue,
+    start_time: Instant,
+    streams: &[Stream],
+    preferred_info_hash: &str,
+    cached_info: &HashMap<String, Vec<CacheCheckFile>>,
+    max_size_bytes: Option<u64>,
+    min_size_bytes: Option<u64>,
+) {
+    let Some(stream) = streams
+        .iter()
+        .find(|stream| stream.info_hash.eq_ignore_ascii_case(preferred_info_hash))
+    else {
+        queue
+            .notify(RivenEvent::MediaItemDownloadError {
+                id,
+                title: item.title.clone(),
+                error: "selected stream is not linked to this item".into(),
+            })
+            .await;
+        return;
+    };
+
+    let Some(files) = cached_info.get(&stream.info_hash.to_lowercase()) else {
+        queue
+            .notify(RivenEvent::MediaItemDownloadError {
+                id,
+                title: item.title.clone(),
+                error: "selected stream is not cached".into(),
+            })
+            .await;
+        return;
+    };
+
+    let size: u64 = files.iter().map(|file| file.size).sum();
+    if max_size_bytes.is_some_and(|max| size > max) || min_size_bytes.is_some_and(|min| size < min)
+    {
+        queue
+            .notify(RivenEvent::MediaItemDownloadError {
+                id,
+                title: item.title.clone(),
+                error: "selected stream failed bitrate limits".into(),
+            })
+            .await;
+        return;
+    }
+
+    if !has_matching_file(files, item) {
+        queue
+            .notify(RivenEvent::MediaItemDownloadError {
+                id,
+                title: item.title.clone(),
+                error: "selected stream does not contain a matching file".into(),
+            })
+            .await;
+        return;
+    }
+
+    if !attempt_download(id, item, queue, stream, None, None, start_time).await {
+        return;
+    }
+
+    if let Err(e) = repo::refresh_state_cascade(&queue.db_pool, item).await {
+        tracing::error!(error = %e, "failed to refresh state after preferred download");
+    }
+    LibraryOrchestrator::new(queue)
+        .sync_item_request_state(item)
+        .await;
+
+    let duration = start_time.elapsed();
+    queue
+        .notify(RivenEvent::MediaItemDownloadSuccess {
+            id,
+            title: item.title.clone(),
+            full_title: item.full_title.clone(),
+            item_type: item.item_type,
+            year: item.year,
+            imdb_id: item.imdb_id.clone(),
+            tmdb_id: item.tmdb_id.clone(),
+            poster_path: item.poster_path.clone(),
+            plugin_name: String::new(),
+            provider: None,
+            duration_seconds: duration.as_secs_f64(),
+        })
+        .await;
 }
 
 // ── Multi-version flow ────────────────────────────────────────────────────────

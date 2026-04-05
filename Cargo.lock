@@ -2005,6 +2005,7 @@ dependencies = [
  "riven-db",
  "serde_json",
  "sqlx",
+ "tokio",
  "tracing",
 ]
 
@@ -2048,11 +2049,16 @@ dependencies = [
  "anyhow",
  "async-graphql",
  "async-trait",
+ "chrono",
  "inventory",
  "riven-core",
+ "riven-db",
  "serde_json",
+ "sqlx",
  "tokio",
  "tracing",
+ "tracing-appender",
+ "tracing-subscriber",
 ]
 
 [[package]]

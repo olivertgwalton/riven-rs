@@ -3,7 +3,9 @@ use riven_core::events::{EventType, HookResponse, RivenEvent};
 use riven_core::plugin::{Plugin, PluginContext, SettingField};
 use riven_core::register_plugin;
 use riven_core::settings::PluginSettings;
+use riven_core::types::{ActivePlaybackSession, PlaybackMethod, PlaybackState};
 use riven_db::repo;
+use serde::Deserialize;
 use serde::Serialize;
 
 #[derive(Default)]
@@ -103,7 +105,10 @@ macro_rules! impl_media_server_plugin {
             }
 
             fn subscribed_events(&self) -> &[EventType] {
-                &[EventType::MediaItemDownloadSuccess]
+                &[
+                    EventType::MediaItemDownloadSuccess,
+                    EventType::ActivePlaybackSessionsRequested,
+                ]
             }
 
             async fn validate(&self, settings: &PluginSettings) -> anyhow::Result<bool> {
@@ -119,7 +124,19 @@ macro_rules! impl_media_server_plugin {
                 event: &RivenEvent,
                 ctx: &PluginContext,
             ) -> anyhow::Result<HookResponse> {
-                notify_media_server($name, event, ctx).await
+                match event {
+                    RivenEvent::ActivePlaybackSessionsRequested => {
+                        let url = ctx
+                            .require_setting("url")?
+                            .trim_end_matches('/')
+                            .to_string();
+                        let api_key = ctx.require_setting("apikey")?;
+                        let sessions =
+                            get_active_sessions(&ctx.http_client, &url, api_key, $name).await?;
+                        Ok(HookResponse::ActivePlaybackSessions(sessions))
+                    }
+                    _ => notify_media_server($name, event, ctx).await,
+                }
             }
         }
     };
@@ -127,3 +144,119 @@ macro_rules! impl_media_server_plugin {
 
 impl_media_server_plugin!(EmbyPlugin, "emby");
 impl_media_server_plugin!(JellyfinPlugin, "jellyfin");
+
+async fn get_active_sessions(
+    client: &reqwest::Client,
+    base_url: &str,
+    api_key: &str,
+    server: &'static str,
+) -> anyhow::Result<Vec<ActivePlaybackSession>> {
+    let resp: Vec<MediaServerSession> = client
+        .get(format!("{base_url}/Sessions"))
+        .query(&[("api_key", api_key)])
+        .send()
+        .await?
+        .json()
+        .await?;
+
+    Ok(resp
+        .into_iter()
+        .filter_map(|session| {
+            let item = session.now_playing_item?;
+            let item_id = item.id.clone();
+            let duration = item.run_time_ticks;
+            let position = session
+                .play_state
+                .as_ref()
+                .and_then(|state| state.position_ticks);
+            let playback_method = session
+                .play_state
+                .as_ref()
+                .map(map_media_server_playback_method)
+                .unwrap_or(PlaybackMethod::Unknown);
+
+            Some(ActivePlaybackSession {
+                server: server.to_string(),
+                user_name: session.user_name,
+                parent_title: item.series_name,
+                item_title: item.name.unwrap_or_else(|| "Unknown item".to_string()),
+                item_type: item.item_type,
+                season_number: item.parent_index_number,
+                episode_number: item.index_number,
+                playback_state: session
+                    .play_state
+                    .as_ref()
+                    .map(map_media_server_playback_state)
+                    .unwrap_or(PlaybackState::Unknown),
+                playback_method,
+                position_seconds: position.map(|value| value / 10_000_000),
+                duration_seconds: duration.map(|value| value / 10_000_000),
+                device_name: session.device_name,
+                client_name: session.client,
+                image_url: item_id
+                    .map(|id| format!("{base_url}/Items/{id}/Images/Primary?api_key={api_key}")),
+            })
+        })
+        .collect())
+}
+
+fn map_media_server_playback_state(play_state: &MediaServerPlayState) -> PlaybackState {
+    if play_state.is_paused.unwrap_or(false) {
+        PlaybackState::Paused
+    } else if play_state.is_paused.is_some() {
+        PlaybackState::Playing
+    } else {
+        PlaybackState::Unknown
+    }
+}
+
+fn map_media_server_playback_method(play_state: &MediaServerPlayState) -> PlaybackMethod {
+    match play_state.play_method.as_deref().unwrap_or_default() {
+        "DirectPlay" => PlaybackMethod::DirectPlay,
+        "DirectStream" => PlaybackMethod::DirectStream,
+        "Transcode" | "Transcoding" => PlaybackMethod::Transcode,
+        _ => PlaybackMethod::Unknown,
+    }
+}
+
+#[derive(Deserialize)]
+struct MediaServerSession {
+    #[serde(rename = "UserName")]
+    user_name: Option<String>,
+    #[serde(rename = "DeviceName")]
+    device_name: Option<String>,
+    #[serde(rename = "Client")]
+    client: Option<String>,
+    #[serde(rename = "NowPlayingItem")]
+    now_playing_item: Option<MediaServerNowPlayingItem>,
+    #[serde(rename = "PlayState")]
+    play_state: Option<MediaServerPlayState>,
+}
+
+#[derive(Deserialize)]
+struct MediaServerNowPlayingItem {
+    #[serde(rename = "Id")]
+    id: Option<String>,
+    #[serde(rename = "SeriesName")]
+    series_name: Option<String>,
+    #[serde(rename = "Name")]
+    name: Option<String>,
+    #[serde(rename = "Type")]
+    item_type: Option<String>,
+    #[serde(rename = "ParentIndexNumber")]
+    parent_index_number: Option<i32>,
+    #[serde(rename = "IndexNumber")]
+    index_number: Option<i32>,
+    #[serde(rename = "RunTimeTicks")]
+    run_time_ticks: Option<i64>,
+}
+
+#[derive(Deserialize)]
+struct MediaServerPlayState {
+    #[serde(rename = "PositionTicks")]
+    position_ticks: Option<i64>,
+    #[serde(rename = "IsPaused")]
+    is_paused: Option<bool>,
+    #[serde(rename = "PlayMethod")]
+    play_method: Option<String>,
+}

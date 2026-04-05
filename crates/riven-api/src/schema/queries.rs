@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use super::helpers::derive_media_metadata;
+use super::types::InstanceStatus;
 use super::types::MediaItemStateTree;
 use super::types::PluginInfo;
 use super::types::*;
@@ -310,6 +311,17 @@ impl CoreQuery {
     async fn all_settings(&self, ctx: &Context<'_>) -> Result<serde_json::Value> {
         let pool = ctx.data::<sqlx::PgPool>()?;
         Ok(repo::get_all_settings(pool).await?)
+    }
+
+    /// Return instance-level status flags used by frontend bootstrap flows.
+    async fn instance_status(&self, ctx: &Context<'_>) -> Result<InstanceStatus> {
+        let pool = ctx.data::<sqlx::PgPool>()?;
+        let setup_completed = match repo::get_setting(pool, "instance.setup_completed").await? {
+            Some(serde_json::Value::Bool(value)) => value,
+            _ => false,
+        };
+
+        Ok(InstanceStatus { setup_completed })
     }
 
     /// Get info about all registered plugins.

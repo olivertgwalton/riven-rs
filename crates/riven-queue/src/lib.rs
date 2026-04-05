@@ -1,4 +1,6 @@
+pub mod discovery;
 pub mod flows;
+pub mod indexing;
 pub mod orchestrator;
 pub mod worker;
 
@@ -58,6 +60,12 @@ pub struct ScrapeJob {
     pub title: String,
     pub season: Option<i32>,
     pub episode: Option<i32>,
+    #[serde(default = "default_true")]
+    pub auto_download: bool,
+}
+
+const fn default_true() -> bool {
+    true
 }
 
 impl ScrapeJob {
@@ -69,6 +77,7 @@ impl ScrapeJob {
             title: item.title.clone(),
             season: None,
             episode: None,
+            auto_download: true,
         }
     }
 
@@ -84,6 +93,7 @@ impl ScrapeJob {
             title: show_title,
             season: season.season_number,
             episode: None,
+            auto_download: true,
         }
     }
 
@@ -95,6 +105,7 @@ impl ScrapeJob {
             title: show_title,
             season: ep.season_number,
             episode: ep.episode_number,
+            auto_download: true,
         }
     }
 }
@@ -104,11 +115,15 @@ pub struct DownloadJob {
     pub id: i64,
     pub info_hash: String,
     pub magnet: String,
+    #[serde(default)]
+    pub preferred_info_hash: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ParseScrapeResultsJob {
     pub id: i64,
+    #[serde(default = "default_true")]
+    pub auto_download: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -130,6 +145,8 @@ pub struct ScrapePluginJob {
     pub title: String,
     pub season: Option<i32>,
     pub episode: Option<i32>,
+    #[serde(default = "default_true")]
+    pub auto_download: bool,
 }
 
 // ── JobQueue ─────────────────────────────────────────────────────────────────
@@ -376,6 +393,7 @@ impl JobQueue {
                 id,
                 magnet: format!("magnet:?xt=urn:btih:{}", stream.info_hash),
                 info_hash: stream.info_hash,
+                preferred_info_hash: None,
             })
             .await;
             true

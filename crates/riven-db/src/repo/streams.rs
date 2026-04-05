@@ -62,6 +62,20 @@ pub async fn get_streams_for_item(pool: &PgPool, media_item_id: i64) -> Result<V
     .await?)
 }
 
+pub async fn get_stream_for_item(
+    pool: &PgPool,
+    media_item_id: i64,
+    stream_id: i64,
+) -> Result<Option<Stream>> {
+    Ok(sqlx::query_as::<_, Stream>(
+        "SELECT s.* FROM streams s JOIN media_item_streams ms ON s.id = ms.stream_id WHERE ms.media_item_id = $1 AND s.id = $2 LIMIT 1",
+    )
+    .bind(media_item_id)
+    .bind(stream_id)
+    .fetch_optional(pool)
+    .await?)
+}
+
 fn build_stream_query(ranks: &ResolutionRanks, limit_one: bool) -> String {
     format!(
         r#"SELECT s.* FROM streams s

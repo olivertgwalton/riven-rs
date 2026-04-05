@@ -1,195 +1,17 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use futures::stream::{self, StreamExt};
-use rayon::prelude::*;
 
 use riven_core::events::RivenEvent;
 use riven_core::types::*;
 use riven_db::repo;
-use riven_rank::RankSettings;
 
-use super::{load_active_profiles, load_item_or_log};
+use super::load_item_or_log;
+use crate::discovery::{
+    load_active_profiles, load_dubbed_anime_only, load_fallback_rank_settings, rank_streams,
+    ParseContext,
+};
 use crate::{JobQueue, ParseScrapeResultsJob};
-
-/// All data needed for the CPU-bound parse + validate + rank loop.
-/// Must be Send + 'static so it can cross the spawn_blocking boundary.
-struct ParseContext {
-    item_type: MediaItemType,
-    season_number: Option<i32>,
-    episode_number: Option<i32>,
-    absolute_number: Option<i32>,
-    item_year: Option<i32>,
-    /// Year of the top-level show (for seasons/episodes).
-    parent_year: Option<i32>,
-    item_country: Option<String>,
-    /// (episode_number, absolute_number) for every episode in the season.
-    season_episodes: Vec<(i32, Option<i32>)>,
-    /// Season numbers that belong to the show (for Show-level scrapes).
-    show_season_numbers: Vec<i32>,
-    show_status: Option<ShowStatus>,
-    /// Show title used for title-similarity ranking.
-    correct_title: String,
-    aliases: HashMap<String, Vec<String>>,
-    profiles: Vec<(String, RankSettings)>,
-    fallback_settings: Option<RankSettings>,
-    /// Mirror of riven-ts `settings.dubbedAnimeOnly`.
-    dubbed_anime_only: bool,
-}
-
-fn year_candidates(year: i32) -> [i32; 3] {
-    [year - 1, year, year + 1]
-}
-
-/// Returns `Some(reason)` to skip the torrent, `None` to keep it.
-fn validate(ctx: &ParseContext, parsed: &riven_rank::ParsedData) -> Option<String> {
-    let has_episodes = !parsed.episodes.is_empty();
-    let has_seasons = !parsed.seasons.is_empty();
-
-    // `parsed.anime` is proxy for `item.isAnime` — dubbed-anime only mode skips non-dubbed anime
-    if ctx.dubbed_anime_only && parsed.anime && !parsed.dubbed {
-        return Some("non-dubbed anime torrent (dubbed_anime_only=true)".into());
-    }
-
-    if !parsed.anime {
-        if let (Some(pc), Some(ic)) = (parsed.country.as_deref(), ctx.item_country.as_deref()) {
-            if !pc.eq_ignore_ascii_case(ic) {
-                return Some(format!("incorrect country: {pc} vs {ic}"));
-            }
-        }
-    }
-
-    if let Some(py) = parsed.year {
-        let mut candidates: HashSet<i32> = HashSet::new();
-        if let Some(y) = ctx.item_year {
-            candidates.extend(year_candidates(y));
-        }
-        if let Some(y) = ctx.parent_year {
-            candidates.extend(year_candidates(y));
-        }
-        if !candidates.is_empty() && !candidates.contains(&py) {
-            return Some(format!("incorrect year: {py}"));
-        }
-    }
-
-    match ctx.item_type {
-        MediaItemType::Movie => {
-            if has_seasons || has_episodes {
-                return Some("show torrent for movie".into());
-            }
-        }
-        MediaItemType::Episode => {
-            if !has_episodes && !has_seasons {
-                return Some("no seasons or episodes for episode item".into());
-            }
-            if has_episodes {
-                let ep_num = ctx.episode_number.unwrap_or(0);
-                let matches_relative = parsed.episodes.contains(&ep_num);
-                let matches_absolute = ctx
-                    .absolute_number
-                    .map(|a| parsed.episodes.contains(&a))
-                    .unwrap_or(false);
-                if !matches_relative && !matches_absolute {
-                    return Some(format!(
-                        "incorrect episode number for episode item: {:?} does not include ep {} (abs {:?})",
-                        parsed.episodes, ep_num, ctx.absolute_number
-                    ));
-                }
-            }
-            if has_seasons {
-                let season_num = ctx.season_number.unwrap_or(0);
-                if !parsed.seasons.contains(&season_num) {
-                    return Some(format!(
-                        "incorrect season number for episode item: {:?} does not include season {}",
-                        parsed.seasons, season_num
-                    ));
-                }
-            }
-        }
-        MediaItemType::Season => {
-            if !has_episodes && !has_seasons {
-                return Some("no seasons or episodes for season item".into());
-            }
-            if !has_seasons {
-                if has_episodes {
-                    // No season info in torrent — check absolute episode range.
-                    // e.g. "One Piece 0001-1000" has no S## tag, only episode numbers.
-                    let abs_eps: HashSet<i32> = ctx
-                        .season_episodes
-                        .iter()
-                        .filter_map(|(_, abs)| *abs)
-                        .collect();
-                    if !abs_eps.is_empty() {
-                        let torrent_eps: HashSet<i32> = parsed.episodes.iter().copied().collect();
-                        let intersection = abs_eps.intersection(&torrent_eps).count();
-                        if intersection != abs_eps.len() {
-                            return Some("incorrect absolute episode range for season item".into());
-                        }
-                    }
-                }
-            } else {
-                let season_num = ctx.season_number.unwrap_or(1);
-                if !parsed.seasons.contains(&season_num) {
-                    return Some(format!(
-                        "incorrect season number for season item: {:?} does not include season {}",
-                        parsed.seasons, season_num
-                    ));
-                }
-                if has_episodes {
-                    // Torrent has both season and episode numbers — check relative coverage.
-                    let rel_eps: HashSet<i32> =
-                        ctx.season_episodes.iter().map(|(ep, _)| *ep).collect();
-                    if !rel_eps.is_empty() {
-                        let torrent_eps: HashSet<i32> = parsed.episodes.iter().copied().collect();
-                        let intersection = rel_eps.intersection(&torrent_eps).count();
-                        if intersection != rel_eps.len() {
-                            return Some("incorrect episodes for season item".into());
-                        }
-                    }
-                }
-            }
-        }
-        MediaItemType::Show => {
-            if !has_episodes && !has_seasons {
-                return Some("no seasons or episodes for show item".into());
-            }
-            if has_seasons && !ctx.show_season_numbers.is_empty() {
-                let show_seasons: HashSet<i32> = ctx.show_season_numbers.iter().copied().collect();
-                let torrent_seasons: HashSet<i32> = parsed.seasons.iter().copied().collect();
-                let intersection = show_seasons.intersection(&torrent_seasons).count();
-                let expected = if ctx.show_status == Some(ShowStatus::Continuing) {
-                    show_seasons.len().saturating_sub(1)
-                } else {
-                    show_seasons.len()
-                };
-                if intersection < expected {
-                    return Some(format!(
-                        "incorrect number of seasons for show: {intersection} < {expected}"
-                    ));
-                }
-            }
-        }
-    }
-
-    None
-}
-
-async fn load_rank_settings(db_pool: &sqlx::PgPool) -> RankSettings {
-    match repo::get_setting(db_pool, "rank_settings").await {
-        Ok(Some(value)) => serde_json::from_value(value).unwrap_or_default(),
-        _ => RankSettings::default(),
-    }
-}
-
-/// Load the `dubbed_anime_only` flag from the `general` settings key.
-async fn load_dubbed_anime_only(db_pool: &sqlx::PgPool) -> bool {
-    match repo::get_setting(db_pool, "general").await {
-        Ok(Some(v)) => v
-            .get("dubbed_anime_only")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false),
-        _ => false,
-    }
-}
 
 /// Resolve the show title, year, and aliases for Season/Episode items by
 /// walking up the parent chain. Returns (correct_title, parent_year, aliases,
@@ -277,7 +99,7 @@ async fn load_episode_or_season_data(
     }
 }
 
-pub async fn run(id: i64, _job: &ParseScrapeResultsJob, queue: &JobQueue) {
+pub async fn run(id: i64, job: &ParseScrapeResultsJob, queue: &JobQueue) {
     tracing::debug!(id, "running parse-scrape-results flow");
 
     let Some(item) = load_item_or_log(id, &queue.db_pool, "parse-scrape-results").await else {
@@ -310,7 +132,7 @@ pub async fn run(id: i64, _job: &ParseScrapeResultsJob, queue: &JobQueue) {
     );
 
     let fallback_settings = if profiles.is_empty() {
-        Some(load_rank_settings(&queue.db_pool).await)
+        Some(load_fallback_rank_settings(&queue.db_pool).await)
     } else {
         None
     };
@@ -351,81 +173,26 @@ pub async fn run(id: i64, _job: &ParseScrapeResultsJob, queue: &JobQueue) {
 
     // CPU-bound: parse + validate + rank — offloaded to the blocking thread pool.
     // Rayon parallelises across all CPU cores within a single job.
-    let ranked: Vec<(String, Option<serde_json::Value>, Option<i64>)> =
-        tokio::task::spawn_blocking(move || {
-            streams
-                .par_iter()
-                .filter_map(|(info_hash, title)| {
-                    let parsed = riven_rank::parse(title);
-
-                    if let Some(reason) = validate(&ctx, &parsed) {
-                        tracing::debug!(info_hash, title, reason, "torrent skipped");
-                        return None;
-                    }
-
-                    let best = if let Some(ref settings) = ctx.fallback_settings {
-                        riven_rank::rank_torrent(
-                            title,
-                            info_hash,
-                            &ctx.correct_title,
-                            &ctx.aliases,
-                            settings,
-                        )
-                        .ok()
-                    } else {
-                        ctx.profiles
-                            .iter()
-                            .filter_map(|(_, settings)| {
-                                riven_rank::rank_torrent(
-                                    title,
-                                    info_hash,
-                                    &ctx.correct_title,
-                                    &ctx.aliases,
-                                    settings,
-                                )
-                                .ok()
-                            })
-                            .max_by_key(|r| r.rank)
-                    };
-
-                    let (parsed_value, rank) = match best {
-                        Some(ranked) => {
-                            let bitrate = ranked.data.bitrate.as_deref().unwrap_or("unknown");
-                            tracing::info!(
-                                info_hash,
-                                rank = ranked.rank,
-                                bitrate,
-                                title,
-                                "stream ranked"
-                            );
-                            (serde_json::to_value(&ranked.data).ok(), Some(ranked.rank))
-                        }
-                        None => {
-                            tracing::debug!(
-                                info_hash,
-                                title,
-                                "stream rejected by all ranking profiles"
-                            );
-                            (serde_json::to_value(&parsed).ok(), None)
-                        }
-                    };
-
-                    Some((info_hash.clone(), parsed_value, rank))
-                })
-                .collect()
-        })
+    let ranked = tokio::task::spawn_blocking(move || rank_streams(ctx, streams))
         .await
         .unwrap_or_default();
 
     // Async: persist stream entities in parallel, then link to this item.
     let stream_count = stream::iter(ranked)
-        .map(|(info_hash, parsed_data, rank)| {
+        .map(|candidate| {
             let pool = queue.db_pool.clone();
             async move {
-                let stream = match repo::upsert_stream(&pool, &info_hash, parsed_data, rank).await {
+                let stream = match repo::upsert_stream(
+                    &pool,
+                    &candidate.info_hash,
+                    candidate.parsed_data,
+                    candidate.rank,
+                )
+                .await
+                {
                     Ok(s) => s,
                     Err(e) => {
-                        tracing::error!(error = %e, info_hash, "failed to upsert stream");
+                        tracing::error!(error = %e, info_hash = %candidate.info_hash, title = %candidate.title, "failed to upsert stream");
                         return false;
                     }
                 };
@@ -473,6 +240,8 @@ pub async fn run(id: i64, _job: &ParseScrapeResultsJob, queue: &JobQueue) {
                 stream_count,
             })
             .await;
-        queue.push_download_from_best_stream(id).await;
+        if job.auto_download {
+            queue.push_download_from_best_stream(id).await;
+        }
     }
 }

@@ -1,8 +1,9 @@
 use serde::{Deserialize, Serialize};
 
 use crate::types::{
-    CacheCheckResult, ContentServiceResponse, DebridUserInfo, DownloadResult, IndexedMediaItem,
-    MediaItemType, ProviderInfo, ScrapeResponse, StreamLinkResponse,
+    ActivePlaybackSession, CacheCheckResult, ContentServiceResponse, DebridUserInfo,
+    DownloadResult, IndexedMediaItem, MediaItemType, ProviderInfo, ScrapeResponse,
+    StreamLinkResponse,
 };
 
 pub struct ScrapeRequest<'a> {
@@ -104,6 +105,10 @@ pub enum EventType {
     // Debrid account info
     #[serde(rename = "riven.debrid.user-info.requested")]
     DebridUserInfoRequested,
+
+    // Media server active sessions
+    #[serde(rename = "riven.media-server.active-sessions.requested")]
+    ActivePlaybackSessionsRequested,
 }
 
 impl EventType {
@@ -263,6 +268,10 @@ pub enum RivenEvent {
     // Debrid account info
     #[serde(rename = "riven.debrid.user-info.requested")]
     DebridUserInfoRequested,
+
+    // Media server active sessions
+    #[serde(rename = "riven.media-server.active-sessions.requested")]
+    ActivePlaybackSessionsRequested,
 }
 
 impl RivenEvent {
@@ -355,6 +364,7 @@ impl RivenEvent {
             Self::MediaItemStreamLinkRequested { .. } => EventType::MediaItemStreamLinkRequested,
             Self::MediaItemsDeleted { .. } => EventType::MediaItemsDeleted,
             Self::DebridUserInfoRequested => EventType::DebridUserInfoRequested,
+            Self::ActivePlaybackSessionsRequested => EventType::ActivePlaybackSessionsRequested,
         }
     }
 }
@@ -374,5 +384,6 @@ pub enum HookResponse {
     ProviderList(Vec<ProviderInfo>),
     StreamLink(StreamLinkResponse),
     UserInfo(Vec<DebridUserInfo>),
+    ActivePlaybackSessions(Vec<ActivePlaybackSession>),
     Empty,
 }

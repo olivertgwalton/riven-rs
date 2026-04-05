@@ -27,6 +27,8 @@ pub struct SettingField {
     pub placeholder: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub options: Option<Vec<&'static str>>,
 }
 
 impl SettingField {
@@ -39,6 +41,7 @@ impl SettingField {
             default_value: None,
             placeholder: None,
             description: None,
+            options: None,
         }
     }
     pub const fn required(mut self) -> Self {
@@ -55,6 +58,10 @@ impl SettingField {
     }
     pub const fn with_description(mut self, v: &'static str) -> Self {
         self.description = Some(v);
+        self
+    }
+    pub fn with_options(mut self, values: &[&'static str]) -> Self {
+        self.options = Some(values.to_vec());
         self
     }
 }

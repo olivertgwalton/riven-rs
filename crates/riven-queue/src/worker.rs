@@ -79,7 +79,7 @@ impl Scheduler {
                         self.job_queue.push_index(IndexJob::from_item(&item)).await;
                     }
                     MediaItemState::Indexed | MediaItemState::PartiallyCompleted => {
-                        orchestrator.queue_scrape_for_item(&item, None).await;
+                        orchestrator.queue_scrape_for_item(&item, None, true).await;
                     }
                     MediaItemState::Scraped => {
                         orchestrator.queue_download_for_item(&item).await;

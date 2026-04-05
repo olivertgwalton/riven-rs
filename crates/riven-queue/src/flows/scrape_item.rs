@@ -31,6 +31,7 @@ pub async fn run(id: i64, job: &ScrapeJob, queue: &JobQueue) {
             | MediaItemState::Ongoing
             | MediaItemState::Scraped
             | MediaItemState::PartiallyCompleted
+            | MediaItemState::Completed
     ) {
         tracing::debug!(id, state = ?item.state, "skipping scrape");
         queue.release_dedup("scrape", id).await;
@@ -54,6 +55,7 @@ pub async fn run(id: i64, job: &ScrapeJob, queue: &JobQueue) {
                     title: job.title.clone(),
                     season: job.season,
                     episode: job.episode,
+                    auto_download: job.auto_download,
                 })
                 .await;
         },
@@ -61,7 +63,7 @@ pub async fn run(id: i64, job: &ScrapeJob, queue: &JobQueue) {
     .await
         == 0
     {
-        finalize(id, &job.title, queue).await;
+        finalize(id, &job.title, job.auto_download, queue).await;
         return;
     }
 }
@@ -74,6 +76,7 @@ pub async fn run_plugin(job: &ScrapePluginJob, queue: &JobQueue) {
         title: job.title.clone(),
         season: job.season,
         episode: job.episode,
+        auto_download: job.auto_download,
     });
 
     if run_plugin_hook(
@@ -90,11 +93,11 @@ pub async fn run_plugin(job: &ScrapePluginJob, queue: &JobQueue) {
     )
     .await
     {
-        finalize(job.id, &job.title, queue).await;
+        finalize(job.id, &job.title, job.auto_download, queue).await;
     }
 }
 
-pub async fn finalize(id: i64, requested_title: &str, queue: &JobQueue) {
+pub async fn finalize(id: i64, requested_title: &str, auto_download: bool, queue: &JobQueue) {
     let Some(item) = load_item_or_log(id, &queue.db_pool, "scrape finalize").await else {
         queue.clear_flow_results("scrape", id).await;
         queue.clear_flow("scrape", id).await;
@@ -129,6 +132,6 @@ pub async fn finalize(id: i64, requested_title: &str, queue: &JobQueue) {
     let result_count = queue.flow_result_count("scrape", id).await;
     tracing::debug!(id, count = result_count, "pushing parse-scrape-results job");
     queue
-        .push_parse_scrape_results(ParseScrapeResultsJob { id })
+        .push_parse_scrape_results(ParseScrapeResultsJob { id, auto_download })
         .await;
 }

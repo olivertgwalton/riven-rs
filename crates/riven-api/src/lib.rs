@@ -58,6 +58,7 @@ async fn board_assets_middleware(
     }
     next.run(req).await
 }
+use plugin_logs::LogControl;
 use riven_core::plugin::PluginRegistry;
 use riven_queue::JobQueue;
 
@@ -209,6 +210,7 @@ pub async fn start_server(
     log_tx: broadcast::Sender<String>,
     notification_tx: broadcast::Sender<String>,
     downloader_config: Arc<tokio::sync::RwLock<riven_core::downloader::DownloaderConfig>>,
+    log_control: Arc<LogControl>,
 ) -> Result<()> {
     let schema = build_schema(
         db_pool,
@@ -216,6 +218,7 @@ pub async fn start_server(
         job_queue.clone(),
         log_directory,
         downloader_config,
+        log_control,
     );
 
     let board_api = ApiBuilder::new(Router::new())

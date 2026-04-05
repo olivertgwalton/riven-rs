@@ -121,7 +121,7 @@ impl<'a> LibraryOrchestrator<'a> {
                             .push_index(IndexJob::from_item(&outcome.item))
                             .await;
                     } else {
-                        self.queue_scrape_for_item(&outcome.item, requested_seasons)
+                        self.queue_scrape_for_item(&outcome.item, requested_seasons, true)
                             .await;
                     }
                 }
@@ -211,6 +211,7 @@ impl<'a> LibraryOrchestrator<'a> {
 
     pub async fn enqueue_after_index(&self, item: &MediaItem, requested_seasons: Option<&[i32]>) {
         self.sync_item_request_state(item).await;
+        let auto_download = item.is_requested;
 
         match item.state {
             MediaItemState::Unreleased => {
@@ -221,10 +222,11 @@ impl<'a> LibraryOrchestrator<'a> {
 
                 match item.item_type {
                     MediaItemType::Movie | MediaItemType::Episode => {
-                        self.queue_scrape_for_item(item, None).await;
+                        self.queue_scrape_for_item(item, None, auto_download).await;
                     }
                     MediaItemType::Show => {
-                        self.queue_scrape_for_item(item, requested_seasons).await;
+                        self.queue_scrape_for_item(item, requested_seasons, auto_download)
+                            .await;
                     }
                     _ => {}
                 }
@@ -234,10 +236,11 @@ impl<'a> LibraryOrchestrator<'a> {
 
                 match item.item_type {
                     MediaItemType::Movie | MediaItemType::Episode => {
-                        self.queue_scrape_for_item(item, None).await;
+                        self.queue_scrape_for_item(item, None, auto_download).await;
                     }
                     MediaItemType::Show => {
-                        self.queue_scrape_for_item(item, requested_seasons).await;
+                        self.queue_scrape_for_item(item, requested_seasons, auto_download)
+                            .await;
                     }
                     _ => {}
                 }
@@ -245,10 +248,17 @@ impl<'a> LibraryOrchestrator<'a> {
         }
     }
 
-    pub async fn queue_scrape_for_item(&self, item: &MediaItem, season_numbers: Option<&[i32]>) {
+    pub async fn queue_scrape_for_item(
+        &self,
+        item: &MediaItem,
+        season_numbers: Option<&[i32]>,
+        auto_download: bool,
+    ) {
         match item.item_type {
             MediaItemType::Movie => {
-                self.queue.push_scrape(ScrapeJob::for_movie(item)).await;
+                let mut job = ScrapeJob::for_movie(item);
+                job.auto_download = auto_download;
+                self.queue.push_scrape(job).await;
             }
             MediaItemType::Show => {
                 if let Some(seasons) = season_numbers {
@@ -272,13 +282,13 @@ impl<'a> LibraryOrchestrator<'a> {
                                 })
                                 .unwrap_or(true)
                         }) {
-                            self.queue
-                                .push_scrape(ScrapeJob::for_season(
-                                    &season,
-                                    item.title.clone(),
-                                    item.imdb_id.clone(),
-                                ))
-                                .await;
+                            let mut job = ScrapeJob::for_season(
+                                &season,
+                                item.title.clone(),
+                                item.imdb_id.clone(),
+                            );
+                            job.auto_download = auto_download;
+                            self.queue.push_scrape(job).await;
                         }
                     }
                     Err(error) => {
@@ -292,15 +302,15 @@ impl<'a> LibraryOrchestrator<'a> {
             }
             MediaItemType::Season => {
                 let (show_title, show_imdb_id) = self.show_context(item).await;
-                self.queue
-                    .push_scrape(ScrapeJob::for_season(item, show_title, show_imdb_id))
-                    .await;
+                let mut job = ScrapeJob::for_season(item, show_title, show_imdb_id);
+                job.auto_download = auto_download;
+                self.queue.push_scrape(job).await;
             }
             MediaItemType::Episode => {
                 let (show_title, show_imdb_id) = self.show_context(item).await;
-                self.queue
-                    .push_scrape(ScrapeJob::for_episode(item, show_title, show_imdb_id))
-                    .await;
+                let mut job = ScrapeJob::for_episode(item, show_title, show_imdb_id);
+                job.auto_download = auto_download;
+                self.queue.push_scrape(job).await;
             }
         }
     }
@@ -343,7 +353,7 @@ impl<'a> LibraryOrchestrator<'a> {
 
         match item.item_type {
             MediaItemType::Show => {
-                self.queue_scrape_for_item(&item, None).await;
+                self.queue_scrape_for_item(&item, None, true).await;
             }
             MediaItemType::Season => {
                 let (show_title, show_imdb_id) = self.show_context(&item).await;

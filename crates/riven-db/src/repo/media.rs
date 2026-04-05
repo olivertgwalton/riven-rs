@@ -16,6 +16,7 @@ async fn upsert_top_level_item(
     second_id_val: Option<&str>,
     item_type: &'static str,
     item_request_id: Option<i64>,
+    is_requested: bool,
 ) -> Result<(MediaItem, bool)> {
     let (type_val, tmdb_id, tvdb_id) = match item_type {
         "movie" => (MediaItemType::Movie, second_id_val, None),
@@ -25,8 +26,9 @@ async fn upsert_top_level_item(
         find_existing_media_item(pool, type_val, imdb_id, tmdb_id, tvdb_id).await?
     {
         // Update is_requested and link to the current request when not already set.
-        let needs_update = !existing.is_requested
-            || (item_request_id.is_some() && existing.item_request_id != item_request_id);
+        let needs_update = is_requested
+            && (!existing.is_requested
+                || (item_request_id.is_some() && existing.item_request_id != item_request_id));
         if needs_update {
             sqlx::query(
                 "UPDATE media_items \
@@ -44,13 +46,14 @@ async fn upsert_top_level_item(
     }
     let sql = format!(
         "INSERT INTO media_items (title, imdb_id, {second_id_col}, item_type, state, is_requested, created_at, item_request_id) \
-         VALUES ($1, $2, $3, '{item_type}', 'indexed', TRUE, $4, $5) \
+         VALUES ($1, $2, $3, '{item_type}', 'indexed', $4, $5, $6) \
          RETURNING *"
     );
     let item = sqlx::query_as::<_, MediaItem>(&sql)
         .bind(title)
         .bind(imdb_id)
         .bind(second_id_val)
+        .bind(is_requested)
         .bind(Utc::now())
         .bind(item_request_id)
         .fetch_one(pool)
@@ -255,6 +258,7 @@ pub async fn create_movie(
         tmdb_id,
         "movie",
         item_request_id,
+        true,
     )
     .await
 }
@@ -275,6 +279,31 @@ pub async fn create_show(
         tvdb_id,
         "show",
         item_request_id,
+        true,
+    )
+    .await
+}
+
+pub async fn create_movie_unrequested(
+    pool: &PgPool,
+    title: &str,
+    imdb_id: Option<&str>,
+    tmdb_id: Option<&str>,
+) -> Result<(MediaItem, bool)> {
+    upsert_top_level_item(
+        pool, title, imdb_id, "tmdb_id", tmdb_id, "movie", None, false,
+    )
+    .await
+}
+
+pub async fn create_show_unrequested(
+    pool: &PgPool,
+    title: &str,
+    imdb_id: Option<&str>,
+    tvdb_id: Option<&str>,
+) -> Result<(MediaItem, bool)> {
+    upsert_top_level_item(
+        pool, title, imdb_id, "tvdb_id", tvdb_id, "show", None, false,
     )
     .await
 }
@@ -467,6 +496,31 @@ pub async fn add_media_item(
         }
         MediaItemType::Show => {
             create_show(pool, &title, imdb_id.as_deref(), tvdb_id.as_deref(), None)
+                .await
+                .map(|(item, _)| item)
+        }
+        _ => Err(anyhow::anyhow!(
+            "Only Movie and Show types can be added directly"
+        )),
+    }
+}
+
+pub async fn add_media_item_unrequested(
+    pool: &PgPool,
+    item_type: MediaItemType,
+    title: String,
+    imdb_id: Option<String>,
+    tmdb_id: Option<String>,
+    tvdb_id: Option<String>,
+) -> Result<MediaItem> {
+    match item_type {
+        MediaItemType::Movie => {
+            create_movie_unrequested(pool, &title, imdb_id.as_deref(), tmdb_id.as_deref())
+                .await
+                .map(|(item, _)| item)
+        }
+        MediaItemType::Show => {
+            create_show_unrequested(pool, &title, imdb_id.as_deref(), tvdb_id.as_deref())
                 .await
                 .map(|(item, _)| item)
         }

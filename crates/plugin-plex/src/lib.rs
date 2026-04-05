@@ -5,6 +5,7 @@ use riven_core::events::{EventType, HookResponse, RivenEvent};
 use riven_core::plugin::{Plugin, PluginContext};
 use riven_core::register_plugin;
 use riven_core::settings::PluginSettings;
+use riven_core::types::{ActivePlaybackSession, PlaybackMethod, PlaybackState};
 use riven_db::repo;
 
 #[derive(Default)]
@@ -19,7 +20,10 @@ impl Plugin for PlexPlugin {
     }
 
     fn subscribed_events(&self) -> &[EventType] {
-        &[EventType::MediaItemDownloadSuccess]
+        &[
+            EventType::MediaItemDownloadSuccess,
+            EventType::ActivePlaybackSessionsRequested,
+        ]
     }
 
     async fn validate(&self, settings: &PluginSettings) -> anyhow::Result<bool> {
@@ -90,6 +94,12 @@ impl Plugin for PlexPlugin {
 
                 Ok(HookResponse::Empty)
             }
+            RivenEvent::ActivePlaybackSessionsRequested => {
+                let plex_token = ctx.require_setting("plextoken")?;
+                let plex_url = ctx.require_setting("plexserverurl")?.trim_end_matches('/');
+                let sessions = get_active_sessions(&ctx.http_client, plex_url, plex_token).await?;
+                Ok(HookResponse::ActivePlaybackSessions(sessions))
+            }
             _ => Ok(HookResponse::Empty),
         }
     }
@@ -131,6 +141,91 @@ async fn refresh_section(
     Ok(())
 }
 
+async fn get_active_sessions(
+    client: &reqwest::Client,
+    plex_url: &str,
+    token: &str,
+) -> anyhow::Result<Vec<ActivePlaybackSession>> {
+    let url = format!("{plex_url}/status/sessions");
+    let resp: PlexSessionsResponse = client
+        .get(&url)
+        .header("x-plex-token", token)
+        .header("accept", "application/json")
+        .send()
+        .await?
+        .json()
+        .await?;
+
+    Ok(resp
+        .media_container
+        .metadata
+        .into_iter()
+        .map(|item| {
+            let PlexSessionMetadata {
+                item_type,
+                title,
+                grandparent_title,
+                duration,
+                parent_index,
+                index,
+                thumb,
+                view_offset,
+                transcode_session,
+                player,
+                user,
+            } = item;
+            let (device_name, client_name, playback_state) = match player {
+                Some(player) => (
+                    player.title,
+                    player.product,
+                    map_playback_state(player.state.as_deref()),
+                ),
+                None => (None, None, PlaybackState::Unknown),
+            };
+            let playback_method = map_playback_method(transcode_session.is_some());
+
+            ActivePlaybackSession {
+                server: "plex".to_string(),
+                user_name: user.and_then(|user| user.title),
+                parent_title: grandparent_title.clone(),
+                item_title: title
+                    .or(grandparent_title)
+                    .unwrap_or_else(|| "Unknown item".to_string()),
+                item_type,
+                season_number: parent_index,
+                episode_number: index,
+                playback_state,
+                playback_method,
+                position_seconds: view_offset.map(|value| value / 1000),
+                duration_seconds: duration.map(|value| value / 1000),
+                device_name,
+                client_name,
+                image_url: thumb
+                    .as_ref()
+                    .map(|thumb| format!("{plex_url}{thumb}?X-Plex-Token={token}")),
+            }
+        })
+        .collect())
+}
+
+fn map_playback_state(state: Option<&str>) -> PlaybackState {
+    match state.unwrap_or_default().to_ascii_lowercase().as_str() {
+        "playing" => PlaybackState::Playing,
+        "paused" => PlaybackState::Paused,
+        "buffering" => PlaybackState::Buffering,
+        "stopped" => PlaybackState::Idle,
+        _ => PlaybackState::Unknown,
+    }
+}
+
+fn map_playback_method(is_transcoding: bool) -> PlaybackMethod {
+    if is_transcoding {
+        PlaybackMethod::Transcode
+    } else {
+        PlaybackMethod::DirectPlay
+    }
+}
+
 #[derive(Deserialize)]
 struct PlexSectionsResponse {
     #[serde(rename = "MediaContainer")]
@@ -153,6 +248,60 @@ struct PlexSection {
 #[derive(Deserialize)]
 struct PlexLocation {
     path: String,
+}
+
+#[derive(Deserialize)]
+struct PlexSessionsResponse {
+    #[serde(rename = "MediaContainer")]
+    media_container: PlexSessionsContainer,
+}
+
+#[derive(Deserialize)]
+struct PlexSessionsContainer {
+    #[serde(rename = "Metadata", default)]
+    metadata: Vec<PlexSessionMetadata>,
+}
+
+#[derive(Deserialize)]
+struct PlexSessionMetadata {
+    #[serde(rename = "type")]
+    item_type: Option<String>,
+    #[serde(rename = "title")]
+    title: Option<String>,
+    #[serde(rename = "grandparentTitle")]
+    grandparent_title: Option<String>,
+    #[serde(rename = "duration")]
+    duration: Option<i64>,
+    #[serde(rename = "parentIndex")]
+    parent_index: Option<i32>,
+    #[serde(rename = "index")]
+    index: Option<i32>,
+    #[serde(rename = "thumb")]
+    thumb: Option<String>,
+    #[serde(rename = "ViewOffset")]
+    view_offset: Option<i64>,
+    #[serde(rename = "TranscodeSession")]
+    transcode_session: Option<serde_json::Value>,
+    #[serde(rename = "Player")]
+    player: Option<PlexPlayer>,
+    #[serde(rename = "User")]
+    user: Option<PlexUser>,
+}
+
+#[derive(Deserialize)]
+struct PlexPlayer {
+    #[serde(rename = "title")]
+    title: Option<String>,
+    #[serde(rename = "product")]
+    product: Option<String>,
+    #[serde(rename = "state")]
+    state: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct PlexUser {
+    #[serde(rename = "title")]
+    title: Option<String>,
 }
 
 mod urlencoding {

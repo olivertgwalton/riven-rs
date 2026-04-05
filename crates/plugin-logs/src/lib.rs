@@ -1,7 +1,11 @@
+mod runtime;
+
 use async_graphql::{Context, Error, Object, Result as GqlResult, SimpleObject};
 use async_trait::async_trait;
-use riven_core::plugin::Plugin;
+use riven_core::plugin::{Plugin, SettingField};
 use riven_core::register_plugin;
+
+pub use runtime::{init_logging, load_log_settings, LogControl, LogSettings};
 
 #[derive(Default)]
 pub struct LogsPlugin;
@@ -12,6 +16,26 @@ register_plugin!(LogsPlugin);
 impl Plugin for LogsPlugin {
     fn name(&self) -> &'static str {
         "logs"
+    }
+
+    fn settings_schema(&self) -> Vec<SettingField> {
+        vec![
+            SettingField::new("logging_enabled", "Application logging", "boolean")
+                .with_description("Enable or disable runtime logging output."),
+            SettingField::new("log_level", "Logging verbosity", "select")
+                .with_default("info")
+                .with_options(&["error", "warn", "info", "debug", "trace"])
+                .with_description("Choose how verbose the application logs should be."),
+            SettingField::new("log_rotation", "Log rotation", "select")
+                .with_default("hourly")
+                .with_options(&["hourly", "daily"])
+                .with_description("Rotate log files on this schedule. Takes effect after restart."),
+            SettingField::new("log_max_files", "Retained log files", "number")
+                .with_default("72")
+                .with_description("Maximum number of rotated log files to keep on disk. Takes effect after restart."),
+            SettingField::new("vfs_debug_logging", "VFS debug logging", "boolean")
+                .with_description("Emit verbose virtual filesystem operation logs."),
+        ]
     }
 }
 
@@ -46,8 +70,8 @@ impl LogsQuery {
         let entries = task::spawn_blocking(move || -> Vec<LogEntry> {
             use std::collections::VecDeque;
 
-            // tracing-appender rolling::daily writes files named
-            // "{prefix}.{YYYY-MM-DD}", so we glob for the most recent.
+            // The rolling file appender writes files named with the "riven.log"
+            // prefix followed by the rotation timestamp.
             let dir = std::path::Path::new(&log_dir);
             let mut log_files: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
                 .into_iter()

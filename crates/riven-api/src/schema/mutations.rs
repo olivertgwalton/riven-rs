@@ -1,4 +1,6 @@
+use super::discovery::{discover_streams, ensure_download_target};
 use async_graphql::*;
+use plugin_logs::{LogControl, LogSettings};
 use riven_core::downloader::DownloaderConfig;
 use riven_core::events::RivenEvent;
 use riven_core::plugin::PluginRegistry;
@@ -6,7 +8,7 @@ use riven_core::types::*;
 use riven_db::entities::*;
 use riven_db::repo;
 use riven_queue::orchestrator::LibraryOrchestrator;
-use riven_queue::JobQueue;
+use riven_queue::{DownloadJob, IndexJob, JobQueue};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -14,9 +16,9 @@ use tokio::sync::RwLock;
 
 pub struct MutationRoot;
 
-fn coerce_json_bool(value: serde_json::Value) -> Option<bool> {
+fn coerce_json_bool(value: &serde_json::Value) -> Option<bool> {
     match value {
-        serde_json::Value::Bool(enabled) => Some(enabled),
+        serde_json::Value::Bool(enabled) => Some(*enabled),
         serde_json::Value::String(value) => match value.as_str() {
             "true" => Some(true),
             "false" => Some(false),
@@ -114,6 +116,18 @@ impl MutationRoot {
         Ok(repo::set_all_settings(pool, settings).await?)
     }
 
+    /// Mark the instance-wide first-run setup flow as completed.
+    async fn complete_initial_setup(&self, ctx: &Context<'_>) -> Result<bool> {
+        let pool = ctx.data::<sqlx::PgPool>()?;
+        repo::set_setting(
+            pool,
+            "instance.setup_completed",
+            serde_json::Value::Bool(true),
+        )
+        .await?;
+        Ok(true)
+    }
+
     /// Delete a specific filesystem entry (a single downloaded version) by its ID.
     /// Returns true if the entry was found and deleted.
     async fn delete_filesystem_entry(&self, ctx: &Context<'_>, id: i64) -> Result<bool> {
@@ -181,6 +195,7 @@ impl MutationRoot {
         let enabled = match settings
             .as_object_mut()
             .and_then(|obj| obj.remove("enabled"))
+            .as_ref()
             .and_then(coerce_json_bool)
         {
             Some(enabled) => enabled,
@@ -194,6 +209,40 @@ impl MutationRoot {
         let valid = registry
             .revalidate_plugin(&plugin, enabled, &settings)
             .await;
+
+        if plugin == "logs" {
+            let log_control = ctx.data::<Arc<LogControl>>()?;
+            let log_settings = LogSettings {
+                enabled: settings
+                    .get("logging_enabled")
+                    .and_then(coerce_json_bool)
+                    .unwrap_or(true),
+                level: settings
+                    .get("log_level")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("info")
+                    .to_string(),
+                rotation: settings
+                    .get("log_rotation")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("hourly")
+                    .to_string(),
+                max_files: settings
+                    .get("log_max_files")
+                    .and_then(|value| value.as_u64())
+                    .map(|value| value as usize)
+                    .filter(|value| *value > 0)
+                    .unwrap_or(72),
+                vfs_debug_logging: settings
+                    .get("vfs_debug_logging")
+                    .and_then(coerce_json_bool)
+                    .unwrap_or(false),
+            };
+
+            log_control
+                .apply(&log_settings)
+                .map_err(|error| Error::new(error.to_string()))?;
+        }
 
         let mut response_settings = settings;
         if let Some(obj) = response_settings.as_object_mut() {
@@ -227,6 +276,37 @@ impl MutationRoot {
         let valid = registry
             .revalidate_plugin(&plugin, enabled, &settings)
             .await;
+
+        if plugin == "logs" {
+            let log_control = ctx.data::<Arc<LogControl>>()?;
+            let log_settings = LogSettings {
+                enabled,
+                level: settings
+                    .get("log_level")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("info")
+                    .to_string(),
+                rotation: settings
+                    .get("log_rotation")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("hourly")
+                    .to_string(),
+                max_files: settings
+                    .get("log_max_files")
+                    .and_then(|value| value.as_u64())
+                    .map(|value| value as usize)
+                    .filter(|value| *value > 0)
+                    .unwrap_or(72),
+                vfs_debug_logging: settings
+                    .get("vfs_debug_logging")
+                    .and_then(coerce_json_bool)
+                    .unwrap_or(false),
+            };
+
+            log_control
+                .apply(&log_settings)
+                .map_err(|error| Error::new(error.to_string()))?;
+        }
 
         Ok(serde_json::json!({
             "enabled": enabled,
@@ -283,10 +363,166 @@ impl MutationRoot {
             .ok_or_else(|| Error::new("Item not found"))?;
 
         orchestrator
-            .queue_scrape_for_item(&item, season_numbers.as_deref())
+            .queue_scrape_for_item(&item, season_numbers.as_deref(), true)
             .await;
 
         Ok("Scrape queued".to_string())
+    }
+
+    /// Discover stream candidates without creating or mutating media items.
+    async fn discover_streams(
+        &self,
+        ctx: &Context<'_>,
+        item_type: MediaItemType,
+        title: String,
+        imdb_id: Option<String>,
+        tmdb_id: Option<String>,
+        tvdb_id: Option<String>,
+        seasons: Option<Vec<i32>>,
+        cached_only: Option<bool>,
+    ) -> Result<Vec<super::types::DiscoveredStream>> {
+        let pool = ctx.data::<sqlx::PgPool>()?;
+        let registry = ctx.data::<Arc<PluginRegistry>>()?;
+
+        discover_streams(
+            pool,
+            registry.as_ref(),
+            item_type,
+            &title,
+            imdb_id.as_deref(),
+            tmdb_id.as_deref(),
+            tvdb_id.as_deref(),
+            seasons.as_deref(),
+            cached_only.unwrap_or(false),
+        )
+        .await
+    }
+
+    /// Create or update the real item only after the user picks a specific discovered stream.
+    async fn download_discovered_stream(
+        &self,
+        ctx: &Context<'_>,
+        item_type: MediaItemType,
+        title: String,
+        imdb_id: Option<String>,
+        tmdb_id: Option<String>,
+        tvdb_id: Option<String>,
+        season_number: Option<i32>,
+        info_hash: String,
+        parsed_data: Option<serde_json::Value>,
+        rank: Option<i64>,
+    ) -> Result<String> {
+        let pool = ctx.data::<sqlx::PgPool>()?;
+        let registry = ctx.data::<Arc<PluginRegistry>>()?;
+        let job_queue = ctx.data::<Arc<JobQueue>>()?;
+
+        let target = ensure_download_target(
+            pool,
+            registry.as_ref(),
+            job_queue,
+            item_type,
+            &title,
+            imdb_id.as_deref(),
+            tmdb_id.as_deref(),
+            tvdb_id.as_deref(),
+            season_number,
+        )
+        .await?;
+
+        let stream = repo::upsert_stream(pool, &info_hash, parsed_data, rank).await?;
+        repo::link_stream_to_item(pool, target.id, stream.id).await?;
+
+        job_queue
+            .push_download(DownloadJob {
+                id: target.id,
+                info_hash: info_hash.clone(),
+                magnet: format!("magnet:?xt=urn:btih:{info_hash}"),
+                preferred_info_hash: Some(info_hash),
+            })
+            .await;
+
+        Ok("Download queued".to_string())
+    }
+
+    /// Create or reuse a non-requested media item, then index/scrape it so streams can be inspected.
+    async fn discover_item(
+        &self,
+        ctx: &Context<'_>,
+        item_type: MediaItemType,
+        title: String,
+        imdb_id: Option<String>,
+        tmdb_id: Option<String>,
+        tvdb_id: Option<String>,
+        seasons: Option<Vec<i32>>,
+    ) -> Result<MediaItem> {
+        if !matches!(item_type, MediaItemType::Movie | MediaItemType::Show) {
+            return Err(Error::new(
+                "Only Movie and Show types can be discovered directly",
+            ));
+        }
+
+        let pool = ctx.data::<sqlx::PgPool>()?;
+        let job_queue = ctx.data::<Arc<JobQueue>>()?;
+        let orchestrator = LibraryOrchestrator::new(job_queue.as_ref());
+
+        let item = if let Some(existing) = repo::find_existing_media_item(
+            pool,
+            item_type,
+            imdb_id.as_deref(),
+            tmdb_id.as_deref(),
+            tvdb_id.as_deref(),
+        )
+        .await?
+        {
+            existing
+        } else {
+            repo::add_media_item_unrequested(
+                pool,
+                item_type,
+                title,
+                imdb_id.clone(),
+                tmdb_id,
+                tvdb_id,
+            )
+            .await?
+        };
+
+        if item.imdb_id.is_some() {
+            orchestrator
+                .queue_scrape_for_item(&item, seasons.as_deref(), false)
+                .await;
+        } else {
+            job_queue.push_index(IndexJob::from_item(&item)).await;
+        }
+
+        Ok(item)
+    }
+
+    /// Download a specific stream already linked to a media item.
+    async fn download_selected_stream(
+        &self,
+        ctx: &Context<'_>,
+        item_id: i64,
+        stream_id: i64,
+    ) -> Result<String> {
+        let pool = ctx.data::<sqlx::PgPool>()?;
+        let job_queue = ctx.data::<Arc<JobQueue>>()?;
+
+        let stream = repo::get_stream_for_item(pool, item_id, stream_id)
+            .await?
+            .ok_or_else(|| Error::new("Stream not found for item"))?;
+
+        let info_hash = stream.info_hash.clone();
+        job_queue
+            .push_download(DownloadJob {
+                id: item_id,
+                info_hash: info_hash.clone(),
+                magnet: format!("magnet:?xt=urn:btih:{info_hash}"),
+                preferred_info_hash: Some(info_hash),
+            })
+            .await;
+
+        Ok("Download queued".to_string())
     }
 
     /// Add a new media item to track and immediately queue it for indexing.

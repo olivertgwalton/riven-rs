@@ -1,5 +1,5 @@
 use async_graphql::SimpleObject;
-use riven_core::types::MediaItemState;
+use riven_core::types::{MediaItemState, MediaItemType};
 use riven_db::entities::*;
 
 /// Episode with its primary filesystem entry (media file only).
@@ -75,4 +75,22 @@ pub struct PluginInfo {
     pub valid: bool,
     /// JSON array of SettingField descriptors for rendering the settings form.
     pub schema: serde_json::Value,
+}
+
+#[derive(SimpleObject)]
+pub struct InstanceStatus {
+    pub setup_completed: bool,
+}
+
+#[derive(SimpleObject)]
+pub struct DiscoveredStream {
+    pub key: String,
+    pub title: String,
+    pub info_hash: String,
+    pub parsed_data: Option<serde_json::Value>,
+    pub rank: Option<i64>,
+    pub file_size_bytes: Option<i64>,
+    pub is_cached: bool,
+    pub item_type: MediaItemType,
+    pub season_number: Option<i32>,
 }

@@ -27,17 +27,17 @@ extern crate plugin_torrentio;
 extern crate plugin_trakt;
 extern crate plugin_tvdb;
 
-mod logging;
 mod setup;
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let mut settings = riven_core::settings::RivenSettings::load()?;
-    let (log_tx, _) = broadcast::channel::<String>(1024);
-    logging::init_logging(&settings, log_tx.clone());
-    tracing::info!("riven starting up");
-
     let db_pool = riven_db::connect(&settings.database_url).await?;
+    let log_settings = plugin_logs::load_log_settings(&db_pool).await?;
+    let (log_tx, _) = broadcast::channel::<String>(1024);
+    let log_control =
+        plugin_logs::init_logging(&log_settings, &settings.log_directory, log_tx.clone())?;
+    tracing::info!("riven starting up");
 
     if settings.unsafe_refresh_database_on_startup {
         tracing::warn!("unsafe_refresh_database_on_startup is enabled — wiping database");
@@ -118,7 +118,7 @@ async fn main() -> Result<()> {
             db_pool.clone(),
             http_client.clone(),
             link_tx,
-            settings.vfs_debug_logging,
+            log_settings.vfs_debug_logging,
             settings.vfs_cache_max_size_mb,
         )?;
         Some(vfs_session)
@@ -156,6 +156,7 @@ async fn main() -> Result<()> {
         let log_dir = settings.log_directory.clone();
         let log_tx = log_tx.clone();
         let notif_tx = notification_tx.clone();
+        let log_control = log_control.clone();
         async move {
             if let Err(e) = riven_api::start_server(
                 gql_port,
@@ -167,6 +168,7 @@ async fn main() -> Result<()> {
                 log_tx,
                 notif_tx,
                 jq.downloader_config.clone(),
+                log_control,
             )
             .await
             {

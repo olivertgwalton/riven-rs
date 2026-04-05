@@ -3,9 +3,11 @@ use async_trait::async_trait;
 use riven_core::events::{HookResponse, RivenEvent};
 use riven_core::plugin::{Plugin, PluginRegistry};
 use riven_core::register_plugin;
-use riven_core::types::DebridUserInfo;
+use riven_core::types::{ActivePlaybackSession, DebridUserInfo};
 use riven_db::repo;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
+use tokio::sync::Mutex;
 
 #[derive(Default)]
 pub struct DashboardPlugin;
@@ -47,6 +49,51 @@ pub struct YearRelease {
 
 #[derive(Default)]
 pub struct DashboardQuery;
+
+const ACTIVE_PLAYBACK_CACHE_TTL: Duration = Duration::from_secs(10);
+
+#[derive(Default)]
+pub struct PlaybackSessionsCache {
+    state: Mutex<PlaybackSessionsCacheState>,
+}
+
+#[derive(Default)]
+struct PlaybackSessionsCacheState {
+    fetched_at: Option<Instant>,
+    sessions: Vec<ActivePlaybackSession>,
+}
+
+impl PlaybackSessionsCache {
+    pub async fn get_or_refresh(&self, registry: &PluginRegistry) -> Vec<ActivePlaybackSession> {
+        let mut state = self.state.lock().await;
+        if state
+            .fetched_at
+            .is_some_and(|fetched_at| fetched_at.elapsed() < ACTIVE_PLAYBACK_CACHE_TTL)
+        {
+            return state.sessions.clone();
+        }
+
+        let results = registry
+            .dispatch(&RivenEvent::ActivePlaybackSessionsRequested)
+            .await;
+        let mut sessions = Vec::new();
+        for (_, result) in results {
+            if let Ok(HookResponse::ActivePlaybackSessions(items)) = result {
+                sessions.extend(items);
+            }
+        }
+        sessions.sort_by(|a, b| {
+            a.server
+                .cmp(&b.server)
+                .then_with(|| a.user_name.cmp(&b.user_name))
+                .then_with(|| a.item_title.cmp(&b.item_title))
+        });
+
+        state.fetched_at = Some(Instant::now());
+        state.sessions = sessions.clone();
+        sessions
+    }
+}
 
 #[Object]
 impl DashboardQuery {
@@ -100,5 +147,15 @@ impl DashboardQuery {
             }
         }
         Ok(infos)
+    }
+
+    /// Get active playback sessions from configured media-server plugins.
+    async fn active_playback_sessions(
+        &self,
+        ctx: &Context<'_>,
+    ) -> GqlResult<Vec<ActivePlaybackSession>> {
+        let registry = ctx.data::<Arc<PluginRegistry>>()?;
+        let cache = ctx.data::<Arc<PlaybackSessionsCache>>()?;
+        Ok(cache.get_or_refresh(registry).await)
     }
 }
