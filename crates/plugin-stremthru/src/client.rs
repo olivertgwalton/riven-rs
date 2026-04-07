@@ -270,7 +270,7 @@ pub async fn generate_link(
     magnet: &str,
 ) -> anyhow::Result<String> {
     let url = format!("{base_url}v0/store/torz/link/generate");
-    let resp: StremthruResponse<StremthruLink> = client
+    let response = client
         .post(&url)
         .header("x-stremthru-store-name", store)
         .header(
@@ -279,13 +279,45 @@ pub async fn generate_link(
         )
         .json(&serde_json::json!({ "link": magnet }))
         .send()
-        .await?
-        .json()
         .await?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        anyhow::bail!("store rejected link generation: HTTP {} - {}", status, body);
+    }
+
+    let text = response.text().await?;
+    let resp: StremthruResponse<StremthruLink> = serde_json::from_str(&text)
+        .map_err(|error| anyhow::anyhow!("invalid generate-link response: {error}; body={text}"))?;
+
     Ok(resp
         .data
-        .ok_or_else(|| anyhow::anyhow!("store returned no link data"))?
+        .ok_or_else(|| anyhow::anyhow!("{}", describe_empty_link_response(&text)))?
         .link)
+}
+
+fn describe_empty_link_response(body: &str) -> String {
+    match serde_json::from_str::<serde_json::Value>(body) {
+        Ok(value) => {
+            let code = value
+                .pointer("/error/code")
+                .and_then(serde_json::Value::as_str);
+            let message = value
+                .pointer("/error/message")
+                .and_then(serde_json::Value::as_str);
+
+            match (code, message) {
+                (Some(code), Some(message)) => {
+                    format!("store returned no link data: {code} - {message}")
+                }
+                (Some(code), None) => format!("store returned no link data: {code}; body={body}"),
+                (None, Some(message)) => format!("store returned no link data: {message}"),
+                (None, None) => format!("store returned no link data; body={body}"),
+            }
+        }
+        Err(_) => format!("store returned no link data; body={body}"),
+    }
 }
 
 pub async fn fetch_user_info(
