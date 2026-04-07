@@ -9,6 +9,7 @@ pub mod worker;
 use std::collections::HashSet;
 use std::future::Future;
 use std::sync::Arc;
+use std::sync::atomic::AtomicU64;
 
 use anyhow::Result;
 use apalis::layers::WorkerBuilderExt;
@@ -26,6 +27,7 @@ use riven_core::plugin::PluginRegistry;
 use riven_core::reindex::ReindexConfig;
 use riven_core::settings::FilesystemSettings;
 use riven_core::types::MediaItemType;
+use riven_core::vfs_layout::VfsLibraryLayout;
 use riven_db::entities::MediaItem;
 use riven_rank::ResolutionRanks;
 
@@ -169,6 +171,8 @@ pub struct JobQueue {
     pub downloader_config: Arc<RwLock<DownloaderConfig>>,
     pub reindex_config: Arc<RwLock<ReindexConfig>>,
     pub filesystem_settings: Arc<RwLock<FilesystemSettings>>,
+    pub vfs_layout: Arc<RwLock<VfsLibraryLayout>>,
+    pub filesystem_settings_revision: Arc<AtomicU64>,
     /// Cached resolution ranks — loaded once at startup and reloaded on
     /// settings save. Avoids a DB round-trip on every stream fetch.
     pub resolution_ranks: Arc<RwLock<ResolutionRanks>>,
@@ -226,7 +230,11 @@ impl JobQueue {
             db_pool,
             downloader_config: Arc::new(RwLock::new(downloader_config)),
             reindex_config: Arc::new(RwLock::new(reindex_config)),
+            vfs_layout: Arc::new(RwLock::new(VfsLibraryLayout::new(
+                filesystem_settings.clone(),
+            ))),
             filesystem_settings: Arc::new(RwLock::new(filesystem_settings)),
+            filesystem_settings_revision: Arc::new(AtomicU64::new(0)),
             resolution_ranks: Arc::new(RwLock::new(resolution_ranks)),
         })
     }

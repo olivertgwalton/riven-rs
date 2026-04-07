@@ -11,10 +11,12 @@ use fuser::{
 };
 use lru::LruCache;
 use parking_lot::Mutex;
+use tokio::sync::RwLock;
 use tokio::sync::mpsc;
 
 use riven_core::config::vfs::*;
-use riven_core::settings::{FilesystemSettings, LibraryProfileMembership};
+use riven_core::settings::LibraryProfileMembership;
+use riven_core::vfs_layout::VfsLibraryLayout;
 use riven_db::entities::FileSystemEntry;
 use riven_db::repo;
 
@@ -22,7 +24,7 @@ use crate::LinkRequest;
 use crate::cache::RangeCache;
 use crate::link::resolve_stream_url;
 use crate::media_stream::{MediaStream, ReadOutcome};
-use crate::path_info::{CanonicalPath, PathTarget, VfsLibraryLayout};
+use crate::path_info::{CanonicalPath, PathTarget, parse_path};
 use crate::readdir::{DirEntry, populate_entries};
 
 const TTL: Duration = Duration::from_secs(300);
@@ -89,7 +91,9 @@ struct FileHandle {
 }
 
 pub struct RivenFs {
-    layout: VfsLibraryLayout,
+    vfs_layout: Arc<RwLock<VfsLibraryLayout>>,
+    filesystem_settings_revision: Arc<AtomicU64>,
+    cache_revision: AtomicU64,
     db_pool: sqlx::PgPool,
     stream_client: reqwest::Client,
     link_request_tx: mpsc::Sender<LinkRequest>,
@@ -112,7 +116,8 @@ pub struct RivenFs {
 
 impl RivenFs {
     pub fn new(
-        filesystem_settings: FilesystemSettings,
+        vfs_layout: Arc<RwLock<VfsLibraryLayout>>,
+        filesystem_settings_revision: Arc<AtomicU64>,
         db_pool: sqlx::PgPool,
         stream_client: reqwest::Client,
         link_request_tx: mpsc::Sender<LinkRequest>,
@@ -135,7 +140,9 @@ impl RivenFs {
         ino_to_path.insert(SHOWS_INO, shows_path);
 
         Self {
-            layout: VfsLibraryLayout::new(filesystem_settings),
+            vfs_layout,
+            filesystem_settings_revision,
+            cache_revision: AtomicU64::new(0),
             db_pool,
             stream_client,
             link_request_tx,
@@ -153,6 +160,22 @@ impl RivenFs {
         }
     }
 
+    fn current_layout(&self) -> VfsLibraryLayout {
+        self.vfs_layout.blocking_read().clone()
+    }
+
+    fn refresh_caches_if_needed(&self) {
+        let revision = self.filesystem_settings_revision.load(Ordering::SeqCst);
+        let cached = self.cache_revision.load(Ordering::SeqCst);
+        if revision == cached {
+            return;
+        }
+
+        self.readdir_cache.clear();
+        self.entry_cache.clear();
+        self.cache_revision.store(revision, Ordering::SeqCst);
+    }
+
     fn get_or_create_ino(&self, path: &str) -> u64 {
         if let Some(ino) = self.path_to_ino.get(path) {
             return *ino;
@@ -165,12 +188,14 @@ impl RivenFs {
     }
 
     fn get_entry_cached(&self, path: &str) -> Option<FileSystemEntry> {
+        self.refresh_caches_if_needed();
         if let Some(cached) = self.entry_cache.get(path)
             && cached.1.elapsed() < TTL
         {
             return cached.0.clone();
         }
-        let result = match self.layout.parse(path) {
+        let layout = self.current_layout();
+        let result = match parse_path(&layout, path) {
             PathTarget::Canonical {
                 profile_key,
                 path: canonical,
@@ -278,7 +303,9 @@ impl Filesystem for RivenFs {
         if self.debug_logging {
             tracing::debug!(path = %path, "lookup");
         }
-        match self.layout.parse(&path) {
+        self.refresh_caches_if_needed();
+        let layout = self.current_layout();
+        match parse_path(&layout, &path) {
             PathTarget::Root => reply.entry(&TTL, &dir_attr(ROOT_INO), 0),
             PathTarget::ProfilePrefixDir => {
                 reply.entry(&TTL, &dir_attr(self.get_or_create_ino(&path)), 0)
@@ -323,7 +350,9 @@ impl Filesystem for RivenFs {
                     reply.error(libc::ENOENT);
                     return;
                 };
-                match self.layout.parse(&path) {
+                self.refresh_caches_if_needed();
+                let layout = self.current_layout();
+                match parse_path(&layout, &path) {
                     PathTarget::Canonical {
                         path: CanonicalPath::MovieFile { .. } | CanonicalPath::EpisodeFile { .. },
                         ..
@@ -348,6 +377,7 @@ impl Filesystem for RivenFs {
         offset: i64,
         mut reply: ReplyDirectory,
     ) {
+        self.refresh_caches_if_needed();
         let cached = self
             .readdir_cache
             .get(&ino)
@@ -362,12 +392,13 @@ impl Filesystem for RivenFs {
             ];
             let ino_to_path = self.ino_to_path.get(&ino).map(|r| Arc::clone(&r));
             let mut get_ino = |path: &str| self.get_or_create_ino(path);
+            let layout = self.current_layout();
             populate_entries(
                 ino,
                 ino_to_path.as_deref(),
                 &self.db_pool,
                 &self.runtime,
-                &self.layout,
+                &layout,
                 &mut entries,
                 &mut get_ino,
             );

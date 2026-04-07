@@ -103,7 +103,8 @@ async fn main() -> Result<()> {
     let vfs_handle = if !vfs_mount_path.is_empty() {
         let vfs_session = riven_vfs::mount(
             &vfs_mount_path,
-            settings.filesystem.clone(),
+            job_queue.vfs_layout.clone(),
+            job_queue.filesystem_settings_revision.clone(),
             db_pool.clone(),
             stream_http_client,
             link_tx,

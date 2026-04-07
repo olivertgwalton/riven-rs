@@ -6,11 +6,13 @@ use riven_core::events::RivenEvent;
 use riven_core::plugin::PluginRegistry;
 use riven_core::settings::FilesystemSettings;
 use riven_core::types::*;
+use riven_core::vfs_layout::VfsLibraryLayout;
 use riven_db::entities::*;
 use riven_db::repo;
 use riven_queue::orchestrator::LibraryOrchestrator;
 use riven_queue::{DownloadJob, IndexJob, JobQueue};
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use tokio::sync::RwLock;
 
 // ── Mutation root ──
@@ -352,7 +354,11 @@ impl MutationRoot {
             .get("filesystem")
             .and_then(|v| serde_json::from_value::<FilesystemSettings>(v.clone()).ok())
             .unwrap_or_default();
-        *queue.filesystem_settings.write().await = filesystem;
+        *queue.filesystem_settings.write().await = filesystem.clone();
+        *queue.vfs_layout.write().await = VfsLibraryLayout::new(filesystem);
+        queue
+            .filesystem_settings_revision
+            .fetch_add(1, Ordering::SeqCst);
 
         Ok(settings)
     }

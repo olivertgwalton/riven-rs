@@ -5,3 +5,4 @@ pub mod plugin;
 pub mod reindex;
 pub mod settings;
 pub mod types;
+pub mod vfs_layout;

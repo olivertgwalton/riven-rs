@@ -2,9 +2,10 @@ use std::collections::HashSet;
 
 use fuser::FileType;
 use riven_core::settings::LibraryProfileMembership;
+use riven_core::vfs_layout::VfsLibraryLayout;
 use riven_db::repo::{self, VfsEntryPath};
 
-use crate::path_info::{CanonicalPath, PathTarget, VfsLibraryLayout};
+use crate::path_info::{CanonicalPath, PathTarget, parse_path};
 
 /// A directory entry ready to hand back to FUSE.
 pub type DirEntry = (u64, FileType, String);
@@ -27,7 +28,7 @@ pub fn populate_entries(
         ino_to_path.unwrap_or("/")
     };
 
-    match layout.parse(path) {
+    match parse_path(layout, path) {
         PathTarget::Root => {
             for name in layout.root_entries() {
                 push_dir_entry(entries, get_ino, path, &name);
