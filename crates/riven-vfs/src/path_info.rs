@@ -1,101 +1,223 @@
-use regex::Regex;
-use std::sync::LazyLock;
+use riven_core::settings::FilesystemSettings;
 
 #[derive(Debug, Clone)]
-pub enum PathType {
-    Root,
-    AllMovies,
-    MovieDir {
-        pretty_name: String,
-        tmdb_id: Option<String>,
-    },
-    MovieFile {
-        pretty_name: String,
-        tmdb_id: Option<String>,
-        filename: String,
-    },
-    AllShows,
-    ShowDir {
-        pretty_name: String,
-        tvdb_id: Option<String>,
-    },
-    SeasonDir {
-        show_pretty_name: String,
-        tvdb_id: Option<String>,
-        season_number: i32,
-    },
-    EpisodeFile {
-        show_pretty_name: String,
-        tvdb_id: Option<String>,
-        season_number: i32,
-        filename: String,
-    },
+pub struct ActiveLibraryProfile {
+    pub key: String,
+    pub library_path: String,
+    pub segments: Vec<String>,
 }
 
-static RE_TMDB: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\{tmdb-(\d+)\}").unwrap());
-static RE_TVDB: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\{tvdb-(\d+)\}").unwrap());
-static RE_SEASON: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^Season (\d{2})$").unwrap());
+#[derive(Debug, Clone)]
+pub struct VfsLibraryLayout {
+    profiles: Vec<ActiveLibraryProfile>,
+}
 
-pub fn parse_path(path: &str) -> PathType {
-    let parts: Vec<&str> = path
-        .trim_start_matches('/')
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CanonicalPath {
+    Root,
+    AllMovies,
+    MovieDir { actual_dir: String },
+    MovieFile { actual_path: String },
+    AllShows,
+    ShowDir { actual_dir: String },
+    SeasonDir { actual_dir: String },
+    EpisodeFile { actual_path: String },
+    Invalid,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PathTarget {
+    Root,
+    ProfilePrefixDir,
+    Canonical {
+        profile_key: Option<String>,
+        path: CanonicalPath,
+    },
+    Invalid,
+}
+
+impl VfsLibraryLayout {
+    pub fn new(settings: FilesystemSettings) -> Self {
+        let mut profiles: Vec<_> = settings
+            .library_profiles
+            .into_iter()
+            .filter_map(|(key, profile)| {
+                if !profile.enabled {
+                    return None;
+                }
+                let normalized = normalize_library_path(&profile.library_path)?;
+                Some(ActiveLibraryProfile {
+                    key,
+                    segments: normalized
+                        .trim_start_matches('/')
+                        .split('/')
+                        .map(ToString::to_string)
+                        .collect(),
+                    library_path: normalized,
+                })
+            })
+            .collect();
+        profiles.sort_by(|a, b| a.library_path.cmp(&b.library_path));
+        Self { profiles }
+    }
+
+    pub fn profiles(&self) -> &[ActiveLibraryProfile] {
+        &self.profiles
+    }
+
+    pub fn parse(&self, path: &str) -> PathTarget {
+        let segments = split_path(path);
+        if segments.is_empty() {
+            return PathTarget::Root;
+        }
+
+        if let Some(profile) = self
+            .profiles
+            .iter()
+            .filter(|profile| is_prefix(&profile.segments, &segments))
+            .max_by_key(|profile| profile.segments.len())
+        {
+            if segments.len() <= profile.segments.len() {
+                return PathTarget::ProfilePrefixDir;
+            }
+
+            let remainder = &segments[profile.segments.len()..];
+            return PathTarget::Canonical {
+                profile_key: Some(profile.key.clone()),
+                path: parse_canonical_segments(remainder),
+            };
+        }
+
+        if self
+            .profiles
+            .iter()
+            .any(|profile| is_prefix(&segments, &profile.segments))
+        {
+            return PathTarget::ProfilePrefixDir;
+        }
+
+        PathTarget::Canonical {
+            profile_key: None,
+            path: parse_canonical_segments(&segments),
+        }
+    }
+
+    pub fn root_entries(&self) -> Vec<String> {
+        let mut entries = vec!["movies".to_string(), "shows".to_string()];
+        for profile in &self.profiles {
+            if let Some(first) = profile.segments.first() {
+                if !entries.contains(first) {
+                    entries.push(first.clone());
+                }
+            }
+        }
+        entries.sort();
+        entries.dedup();
+        entries
+    }
+
+    pub fn profile_prefix_children(&self, path: &str) -> Vec<String> {
+        let current = split_path(path);
+        let mut children = Vec::new();
+
+        for profile in &self.profiles {
+            if !is_prefix(&current, &profile.segments) {
+                continue;
+            }
+            if let Some(next) = profile.segments.get(current.len()) {
+                children.push(next.clone());
+            } else {
+                children.push("movies".to_string());
+                children.push("shows".to_string());
+            }
+        }
+
+        children.sort();
+        children.dedup();
+        children
+    }
+}
+
+fn parse_canonical_segments(segments: &[String]) -> CanonicalPath {
+    match segments {
+        [] => CanonicalPath::Root,
+        [first] if first == "movies" => CanonicalPath::AllMovies,
+        [first, dir] if first == "movies" => CanonicalPath::MovieDir {
+            actual_dir: format!("/movies/{dir}"),
+        },
+        [first, dir, file] if first == "movies" => CanonicalPath::MovieFile {
+            actual_path: format!("/movies/{dir}/{file}"),
+        },
+        [first] if first == "shows" => CanonicalPath::AllShows,
+        [first, dir] if first == "shows" => CanonicalPath::ShowDir {
+            actual_dir: format!("/shows/{dir}"),
+        },
+        [first, dir, season] if first == "shows" => CanonicalPath::SeasonDir {
+            actual_dir: format!("/shows/{dir}/{season}"),
+        },
+        [first, dir, season, file] if first == "shows" => CanonicalPath::EpisodeFile {
+            actual_path: format!("/shows/{dir}/{season}/{file}"),
+        },
+        _ => CanonicalPath::Invalid,
+    }
+}
+
+fn normalize_library_path(path: &str) -> Option<String> {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let normalized = format!("/{}", trimmed.trim_matches('/'));
+    if normalized == "/" || normalized == "/movies" || normalized == "/shows" {
+        return None;
+    }
+    Some(normalized)
+}
+
+fn split_path(path: &str) -> Vec<String> {
+    path.trim_matches('/')
         .split('/')
-        .filter(|s| !s.is_empty())
-        .collect();
+        .filter(|segment| !segment.is_empty())
+        .map(ToString::to_string)
+        .collect()
+}
 
-    let path_type = match parts.as_slice() {
-        [] => PathType::Root,
-        ["movies"] => PathType::AllMovies,
-        ["movies", dir] => {
-            let tmdb_id = RE_TMDB.captures(dir).map(|c| c[1].to_string());
-            PathType::MovieDir {
-                pretty_name: dir.to_string(),
-                tmdb_id,
-            }
-        }
-        ["movies", dir, file] => {
-            let tmdb_id = RE_TMDB.captures(dir).map(|c| c[1].to_string());
-            PathType::MovieFile {
-                pretty_name: dir.to_string(),
-                tmdb_id,
-                filename: file.to_string(),
-            }
-        }
-        ["shows"] => PathType::AllShows,
-        ["shows", dir] => {
-            let tvdb_id = RE_TVDB.captures(dir).map(|c| c[1].to_string());
-            PathType::ShowDir {
-                pretty_name: dir.to_string(),
-                tvdb_id,
-            }
-        }
-        ["shows", dir, season_str] => {
-            let tvdb_id = RE_TVDB.captures(dir).map(|c| c[1].to_string());
-            let season_number = RE_SEASON
-                .captures(season_str)
-                .and_then(|c| c[1].parse().ok())
-                .unwrap_or(0);
-            PathType::SeasonDir {
-                show_pretty_name: dir.to_string(),
-                tvdb_id,
-                season_number,
-            }
-        }
-        ["shows", dir, season_str, file] => {
-            let tvdb_id = RE_TVDB.captures(dir).map(|c| c[1].to_string());
-            let season_number = RE_SEASON
-                .captures(season_str)
-                .and_then(|c| c[1].parse().ok())
-                .unwrap_or(0);
-            PathType::EpisodeFile {
-                show_pretty_name: dir.to_string(),
-                tvdb_id,
-                season_number,
-                filename: file.to_string(),
-            }
-        }
-        _ => PathType::Root,
-    };
+fn is_prefix(prefix: &[String], full: &[String]) -> bool {
+    prefix.len() <= full.len() && prefix.iter().zip(full).all(|(a, b)| a == b)
+}
 
-    path_type
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use riven_core::settings::{FilesystemLibraryProfile, FilesystemSettings};
+    use std::collections::HashMap;
+
+    #[test]
+    fn parses_profile_prefixed_canonical_paths() {
+        let mut profiles = HashMap::new();
+        profiles.insert(
+            "kids".to_string(),
+            FilesystemLibraryProfile {
+                name: "Kids".to_string(),
+                library_path: "/kids".to_string(),
+                enabled: true,
+                filter_rules: Default::default(),
+            },
+        );
+        let layout = VfsLibraryLayout::new(FilesystemSettings {
+            mount_path: "/mount".to_string(),
+            library_profiles: profiles,
+        });
+
+        assert_eq!(layout.parse("/kids"), PathTarget::ProfilePrefixDir);
+        assert_eq!(
+            layout.parse("/kids/movies/Film/Film.mkv"),
+            PathTarget::Canonical {
+                profile_key: Some("kids".to_string()),
+                path: CanonicalPath::MovieFile {
+                    actual_path: "/movies/Film/Film.mkv".to_string(),
+                },
+            }
+        );
+    }
 }

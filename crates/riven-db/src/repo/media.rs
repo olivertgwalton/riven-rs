@@ -318,6 +318,7 @@ pub async fn update_media_item_index(
     indexed: &riven_core::types::IndexedMediaItem,
 ) -> Result<()> {
     let now = Utc::now();
+    let is_anime = indexed.inferred_is_anime();
     sqlx::query!(
         r#"UPDATE media_items SET
             title          = COALESCE($2,  title),
@@ -332,11 +333,12 @@ pub async fn update_media_item_index(
             language       = COALESCE($11, language),
             network        = COALESCE($12, network),
             content_rating = COALESCE($13, content_rating),
-            runtime        = COALESCE($14, runtime),
-            aliases        = COALESCE($15, aliases),
-            aired_at       = COALESCE($16, aired_at),
-            show_status    = COALESCE($18, show_status),
-            indexed_at = $17, updated_at = $17
+            is_anime       = $14,
+            runtime        = COALESCE($15, runtime),
+            aliases        = COALESCE($16, aliases),
+            aired_at       = COALESCE($17, aired_at),
+            show_status    = COALESCE($19, show_status),
+            indexed_at = $18, updated_at = $18
            WHERE id = $1"#,
         id,
         indexed.title.as_deref(),
@@ -351,6 +353,7 @@ pub async fn update_media_item_index(
         indexed.language.as_deref(),
         indexed.network.as_deref(),
         indexed.content_rating as Option<ContentRating>,
+        is_anime,
         indexed.runtime,
         indexed.aliases.as_ref().map(to_json),
         indexed.aired_at,

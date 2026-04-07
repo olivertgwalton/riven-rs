@@ -29,6 +29,14 @@ pub struct SettingField {
     pub description: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub options: Option<Vec<&'static str>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fields: Option<Vec<SettingField>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub item_fields: Option<Vec<SettingField>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub key_placeholder: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub add_label: Option<&'static str>,
 }
 
 impl SettingField {
@@ -42,6 +50,10 @@ impl SettingField {
             placeholder: None,
             description: None,
             options: None,
+            fields: None,
+            item_fields: None,
+            key_placeholder: None,
+            add_label: None,
         }
     }
     pub const fn required(mut self) -> Self {
@@ -62,6 +74,22 @@ impl SettingField {
     }
     pub fn with_options(mut self, values: &[&'static str]) -> Self {
         self.options = Some(values.to_vec());
+        self
+    }
+    pub fn with_fields(mut self, fields: Vec<SettingField>) -> Self {
+        self.fields = Some(fields);
+        self
+    }
+    pub fn with_item_fields(mut self, fields: Vec<SettingField>) -> Self {
+        self.item_fields = Some(fields);
+        self
+    }
+    pub const fn with_key_placeholder(mut self, v: &'static str) -> Self {
+        self.key_placeholder = Some(v);
+        self
+    }
+    pub const fn with_add_label(mut self, v: &'static str) -> Self {
+        self.add_label = Some(v);
         self
     }
 }

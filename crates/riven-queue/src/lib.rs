@@ -22,6 +22,7 @@ pub use riven_core::downloader::DownloaderConfig;
 use riven_core::events::RivenEvent;
 use riven_core::plugin::PluginRegistry;
 use riven_core::reindex::ReindexConfig;
+use riven_core::settings::FilesystemSettings;
 use riven_core::types::MediaItemType;
 use riven_db::entities::MediaItem;
 use riven_rank::ResolutionRanks;
@@ -165,6 +166,7 @@ pub struct JobQueue {
     pub db_pool: sqlx::PgPool,
     pub downloader_config: Arc<RwLock<DownloaderConfig>>,
     pub reindex_config: Arc<RwLock<ReindexConfig>>,
+    pub filesystem_settings: Arc<RwLock<FilesystemSettings>>,
     /// Cached resolution ranks — loaded once at startup and reloaded on
     /// settings save. Avoids a DB round-trip on every stream fetch.
     pub resolution_ranks: Arc<RwLock<ResolutionRanks>>,
@@ -178,6 +180,7 @@ impl JobQueue {
         db_pool: sqlx::PgPool,
         downloader_config: DownloaderConfig,
         reindex_config: ReindexConfig,
+        filesystem_settings: FilesystemSettings,
     ) -> Result<Self> {
         // apalis-redis uses its own ConnectionManager for storages
         let apalis_conn = apalis_redis::connect(redis_url).await?;
@@ -221,6 +224,7 @@ impl JobQueue {
             db_pool,
             downloader_config: Arc::new(RwLock::new(downloader_config)),
             reindex_config: Arc::new(RwLock::new(reindex_config)),
+            filesystem_settings: Arc::new(RwLock::new(filesystem_settings)),
             resolution_ranks: Arc::new(RwLock::new(resolution_ranks)),
         })
     }

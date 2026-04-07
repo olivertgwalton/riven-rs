@@ -392,6 +392,41 @@ impl CoreQuery {
             SettingField::new("maximum_average_bitrate_episodes", "Max bitrate — episodes (Mbps)", "number")
                 .with_placeholder("Disabled")
                 .with_description("Reject episode streams above this average bitrate. Leave blank to disable."),
+            SettingField::new("filesystem", "Filesystem", "object")
+                .with_description("Virtual filesystem mount settings and filtered library profile aliases.")
+                .with_fields(vec![
+                    SettingField::new("mount_path", "Mount path", "string")
+                        .with_placeholder("/mount")
+                        .with_description("Where the virtual filesystem should be mounted."),
+                    SettingField::new("library_profiles", "Library profiles", "dictionary")
+                        .with_description("Named filtered views that expose matching items under additional virtual paths.")
+                        .with_key_placeholder("profile_key")
+                        .with_add_label("Add profile")
+                        .with_item_fields(vec![
+                            SettingField::new("name", "Name", "string")
+                                .required()
+                                .with_description("Display name for this profile."),
+                            SettingField::new("library_path", "Library path", "string")
+                                .required()
+                                .with_placeholder("/anime")
+                                .with_description("Virtual path prefix to expose for this profile."),
+                            SettingField::new("enabled", "Enabled", "boolean")
+                                .with_description("Disable a profile without deleting its rules."),
+                            SettingField::new("filter_rules", "Filter rules", "object")
+                                .with_description("Only items matching all configured rules will appear in this profile.")
+                                .with_fields(vec![
+                                    SettingField::new("content_types", "Content types", "string_array")
+                                        .with_options(&["movie", "show"])
+                                        .with_description("Restrict the profile to movies, shows, or both."),
+                                    SettingField::new("genres", "Genres", "string_array")
+                                        .with_description("Genre filters. Prefix a value with ! to exclude it."),
+                                    SettingField::new("content_ratings", "Content ratings", "string_array")
+                                        .with_description("Content rating filters. Prefix a value with ! to exclude it."),
+                                    SettingField::new("is_anime", "Anime filter", "nullable_boolean")
+                                        .with_description("Only anime, only non-anime, or leave unset for any item."),
+                                ]),
+                        ]),
+                ]),
         ];
         Ok(serde_json::to_value(schema).unwrap_or(serde_json::Value::Array(vec![])))
     }
@@ -409,6 +444,7 @@ impl CoreQuery {
             "retry_interval_secs": defaults.retry_interval_secs,
             "schedule_offset_minutes": defaults.schedule_offset_minutes,
             "unknown_air_date_offset_days": defaults.unknown_air_date_offset_days,
+            "filesystem": defaults.filesystem,
         });
         if let Some(stored) = repo::get_setting(pool, "general").await? {
             if let (Some(obj), Some(stored_obj)) = (result.as_object_mut(), stored.as_object()) {

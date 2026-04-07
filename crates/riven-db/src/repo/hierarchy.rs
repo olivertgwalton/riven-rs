@@ -185,7 +185,7 @@ pub async fn get_episodes_ready_for_scraping(pool: &PgPool, limit: i64) -> Resul
                COALESCE(e.imdb_id, show_item.imdb_id) AS imdb_id,
                e.tvdb_id, e.tmdb_id, e.poster_path,
                e.created_at, e.updated_at, e.indexed_at, e.scraped_at, e.scraped_times,
-               e.aliases, e.network, e.country, e.language, e.aired_at, e.year, e.genres,
+               e.aliases, e.network, e.country, e.language, e.is_anime, e.aired_at, e.year, e.genres,
                e.rating, e.content_rating AS "content_rating: _", e.state AS "state: _",
                e.failed_attempts, e.item_type AS "item_type: _",
                e.is_requested, e.show_status AS "show_status: _", e.season_number, e.is_special, e.parent_id,

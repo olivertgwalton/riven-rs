@@ -279,6 +279,7 @@ pub struct IndexedMediaItem {
     pub language: Option<String>,
     pub network: Option<String>,
     pub content_rating: Option<ContentRating>,
+    pub is_anime: Option<bool>,
     pub runtime: Option<i32>,
     pub aliases: Option<HashMap<String, Vec<String>>>,
     pub aired_at: Option<chrono::NaiveDate>,
@@ -303,12 +304,50 @@ impl IndexedMediaItem {
             language: other.language.or(self.language),
             network: other.network.or(self.network),
             content_rating: other.content_rating.or(self.content_rating),
+            is_anime: match (self.is_anime, other.is_anime) {
+                (Some(a), Some(b)) => Some(a || b),
+                (Some(a), None) => Some(a),
+                (None, Some(b)) => Some(b),
+                (None, None) => None,
+            },
             runtime: other.runtime.or(self.runtime),
             aliases: other.aliases.or(self.aliases),
             aired_at: other.aired_at.or(self.aired_at),
             status: other.status.or(self.status),
             seasons: other.seasons.or(self.seasons),
         }
+    }
+}
+
+impl IndexedMediaItem {
+    pub fn inferred_is_anime(&self) -> bool {
+        if let Some(is_anime) = self.is_anime {
+            return is_anime;
+        }
+
+        let genres = self
+            .genres
+            .as_ref()
+            .map(|genres| {
+                genres
+                    .iter()
+                    .map(|genre| genre.to_ascii_lowercase())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
+        if genres.iter().any(|genre| genre == "anime") {
+            return true;
+        }
+
+        let language = self
+            .language
+            .as_deref()
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        genres.iter().any(|genre| genre == "anime")
+            || (genres.iter().any(|genre| genre == "animation")
+                && !matches!(language.as_str(), "en" | "eng"))
     }
 }
 

@@ -4,6 +4,7 @@ use plugin_logs::{LogControl, LogSettings};
 use riven_core::downloader::DownloaderConfig;
 use riven_core::events::RivenEvent;
 use riven_core::plugin::PluginRegistry;
+use riven_core::settings::FilesystemSettings;
 use riven_core::types::*;
 use riven_db::entities::*;
 use riven_db::repo;
@@ -341,6 +342,12 @@ impl MutationRoot {
             .get("unknown_air_date_offset_days")
             .and_then(|v| v.as_u64())
             .unwrap_or(reindex_cfg.unknown_air_date_offset_days);
+
+        let filesystem = settings
+            .get("filesystem")
+            .and_then(|v| serde_json::from_value::<FilesystemSettings>(v.clone()).ok())
+            .unwrap_or_default();
+        *queue.filesystem_settings.write().await = filesystem;
 
         Ok(settings)
     }

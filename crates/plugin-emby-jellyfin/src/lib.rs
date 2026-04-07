@@ -63,6 +63,26 @@ pub(crate) async fn notify_paths(
     Ok(())
 }
 
+async fn refresh_library(
+    client: &reqwest::Client,
+    base_url: &str,
+    api_key: &str,
+    plugin: &'static str,
+) -> anyhow::Result<()> {
+    let resp = client
+        .post(format!("{base_url}/Library/Refresh"))
+        .query(&[("api_key", api_key)])
+        .send()
+        .await?;
+
+    if !resp.status().is_success() {
+        anyhow::bail!("{plugin} refresh failed: {}", resp.status());
+    }
+
+    tracing::info!(plugin, "library refresh requested");
+    Ok(())
+}
+
 fn media_server_settings_schema() -> Vec<SettingField> {
     vec![
         SettingField::new("url", "Server URL", "url")
@@ -100,7 +120,11 @@ async fn notify_media_server(
         .into_iter()
         .map(|entry| rewrite_media_path(&library_path, &entry.path))
         .collect();
-    notify_paths(&ctx.http_client, &url, api_key, &paths, plugin).await?;
+    if plugin == "jellyfin" {
+        refresh_library(&ctx.http_client, &url, api_key, plugin).await?;
+    } else {
+        notify_paths(&ctx.http_client, &url, api_key, &paths, plugin).await?;
+    }
     Ok(HookResponse::Empty)
 }
 

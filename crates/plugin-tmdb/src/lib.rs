@@ -111,6 +111,15 @@ async fn fetch_movie_by_tmdb_id(
         .genres
         .as_ref()
         .map(|g| g.iter().map(|genre| genre.name.clone()).collect());
+    let is_anime = genres.as_ref().is_some_and(|genres: &Vec<String>| {
+        genres.iter().any(|genre| {
+            let genre = genre.to_ascii_lowercase();
+            genre == "animation" || genre == "anime"
+        })
+    }) && movie
+        .original_language
+        .as_deref()
+        .is_some_and(|language| !language.eq_ignore_ascii_case("en"));
 
     let imdb_id = movie.external_ids.as_ref().and_then(|e| e.imdb_id.clone());
 
@@ -129,6 +138,7 @@ async fn fetch_movie_by_tmdb_id(
             .and_then(|c| c.first())
             .map(|c| c.iso_3166_1.clone()),
         language: movie.original_language,
+        is_anime: Some(is_anime),
         runtime: movie.runtime,
         aired_at,
         ..Default::default()

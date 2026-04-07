@@ -4,6 +4,12 @@ use sqlx::PgPool;
 use crate::entities::*;
 use riven_rank::ResolutionRanks;
 
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct VfsEntryPath {
+    pub path: String,
+    pub library_profiles: Option<serde_json::Value>,
+}
+
 pub async fn upsert_stream(
     pool: &PgPool,
     info_hash: &str,
@@ -240,14 +246,15 @@ pub async fn create_media_entry(
     stream_id: Option<i64>,
     resolution: Option<&str>,
     ranking_profile_name: Option<&str>,
+    library_profiles: Option<&serde_json::Value>,
 ) -> Result<FileSystemEntry> {
     let media_metadata = parse_filename_metadata(original_filename);
 
     let entry = sqlx::query_as::<_, FileSystemEntry>(
         "INSERT INTO filesystem_entries \
          (media_item_id, entry_type, path, file_size, original_filename, download_url, stream_url, \
-          plugin, provider, media_metadata, stream_id, resolution, ranking_profile_name) \
-         VALUES ($1, 'media', $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) \
+          plugin, provider, media_metadata, stream_id, resolution, ranking_profile_name, library_profiles) \
+         VALUES ($1, 'media', $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) \
          ON CONFLICT (media_item_id, path) WHERE entry_type = 'media' \
          DO UPDATE SET \
              file_size             = EXCLUDED.file_size, \
@@ -260,6 +267,7 @@ pub async fn create_media_entry(
              stream_id             = COALESCE(EXCLUDED.stream_id, filesystem_entries.stream_id), \
              resolution            = COALESCE(EXCLUDED.resolution, filesystem_entries.resolution), \
              ranking_profile_name  = COALESCE(EXCLUDED.ranking_profile_name, filesystem_entries.ranking_profile_name), \
+             library_profiles      = EXCLUDED.library_profiles, \
              updated_at            = NOW() \
          RETURNING *",
     )
@@ -275,6 +283,7 @@ pub async fn create_media_entry(
     .bind(stream_id)
     .bind(resolution)
     .bind(ranking_profile_name)
+    .bind(library_profiles)
     .fetch_one(pool)
     .await?;
 
@@ -349,6 +358,17 @@ async fn list_vfs_dirs_at_depth(pool: &PgPool, pattern: &str, depth: u32) -> Res
         .fetch_all(pool)
         .await?;
     Ok(rows.into_iter().flatten().collect())
+}
+
+pub async fn list_vfs_entry_paths(pool: &PgPool, pattern: &str) -> Result<Vec<VfsEntryPath>> {
+    Ok(sqlx::query_as::<_, VfsEntryPath>(
+        "SELECT path, library_profiles FROM filesystem_entries \
+         WHERE path LIKE $1 AND entry_type = 'media' \
+         ORDER BY path",
+    )
+    .bind(pattern)
+    .fetch_all(pool)
+    .await?)
 }
 
 pub async fn list_vfs_movie_dirs(pool: &PgPool) -> Result<Vec<String>> {

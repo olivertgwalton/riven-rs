@@ -82,6 +82,16 @@ async fn main() -> Result<()> {
     // Apply DB-stored overrides on top of env-var settings.
     if let Ok(Some(g)) = riven_db::repo::get_setting(&db_pool, "general").await {
         let opt_u32 = |k| g.get(k).and_then(|v| v.as_u64()).map(|v| v as u32);
+        if let Some(v) = g.get("filesystem") {
+            if let Ok(fs) =
+                serde_json::from_value::<riven_core::settings::FilesystemSettings>(v.clone())
+            {
+                settings.filesystem = fs;
+                if settings.filesystem.mount_path.is_empty() {
+                    settings.filesystem.mount_path = settings.vfs_mount_path.clone();
+                }
+            }
+        }
         if let Some(v) = g.get("dubbed_anime_only").and_then(|v| v.as_bool()) {
             settings.dubbed_anime_only = v;
         }
@@ -125,6 +135,7 @@ async fn main() -> Result<()> {
             db_pool.clone(),
             DownloaderConfig::from(&settings),
             ReindexConfig::from(&settings),
+            settings.filesystem.clone(),
         )
         .await?,
     );
@@ -135,9 +146,11 @@ async fn main() -> Result<()> {
 
     let (link_tx, mut link_rx) = tokio::sync::mpsc::channel(64);
 
-    let vfs_handle = if !settings.vfs_mount_path.is_empty() {
+    let vfs_mount_path = settings.effective_vfs_mount_path().to_string();
+    let vfs_handle = if !vfs_mount_path.is_empty() {
         let vfs_session = riven_vfs::mount(
-            &settings.vfs_mount_path,
+            &vfs_mount_path,
+            settings.filesystem.clone(),
             db_pool.clone(),
             stream_http_client,
             link_tx,
@@ -246,7 +259,7 @@ async fn main() -> Result<()> {
         }
     });
 
-    tracing::info!(gql_port, vfs = settings.vfs_mount_path, "riven is running");
+    tracing::info!(gql_port, vfs = vfs_mount_path, "riven is running");
 
     // Handle SIGINT and SIGTERM so the FUSE mount is properly unmounted on shutdown.
     #[cfg(unix)]

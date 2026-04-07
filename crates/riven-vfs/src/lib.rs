@@ -12,6 +12,7 @@ pub mod stream;
 use std::path::Path;
 
 use anyhow::Result;
+use riven_core::settings::FilesystemSettings;
 use tokio::sync::mpsc;
 
 use crate::filesystem::RivenFs;
@@ -36,6 +37,7 @@ impl FuseSession {
 /// Start the FUSE virtual filesystem.
 pub fn mount(
     mount_path: &str,
+    filesystem_settings: FilesystemSettings,
     db_pool: sqlx::PgPool,
     stream_client: reqwest::Client,
     link_request_tx: mpsc::Sender<LinkRequest>,
@@ -82,6 +84,7 @@ pub fn mount(
     }
 
     let fs = RivenFs::new(
+        filesystem_settings,
         db_pool,
         stream_client,
         link_request_tx,

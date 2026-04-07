@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT\n               e.id, e.title, e.full_title,\n               COALESCE(e.imdb_id, show_item.imdb_id) AS imdb_id,\n               e.tvdb_id, e.tmdb_id, e.poster_path,\n               e.created_at, e.updated_at, e.indexed_at, e.scraped_at, e.scraped_times,\n               e.aliases, e.network, e.country, e.language, e.aired_at, e.year, e.genres,\n               e.rating, e.content_rating AS \"content_rating: _\", e.state AS \"state: _\",\n               e.failed_attempts, e.item_type AS \"item_type: _\",\n               e.is_requested, e.show_status AS \"show_status: _\", e.season_number, e.is_special, e.parent_id,\n               e.episode_number, e.absolute_number, e.runtime, e.item_request_id, e.active_stream_id\n           FROM media_items e\n           LEFT JOIN media_items season_item ON e.parent_id = season_item.id AND season_item.item_type = 'season'\n           LEFT JOIN media_items show_item ON season_item.parent_id = show_item.id AND show_item.item_type = 'show'\n           WHERE e.state = 'indexed'\n             AND e.item_type = 'episode'\n             AND e.is_requested = true\n             AND (e.failed_attempts = 0 OR e.updated_at IS NULL OR e.updated_at < NOW() - INTERVAL '1 hour')\n           ORDER BY e.failed_attempts ASC, e.created_at ASC\n           LIMIT $1",
+  "query": "SELECT\n               e.id, e.title, e.full_title,\n               COALESCE(e.imdb_id, show_item.imdb_id) AS imdb_id,\n               e.tvdb_id, e.tmdb_id, e.poster_path,\n               e.created_at, e.updated_at, e.indexed_at, e.scraped_at, e.scraped_times,\n               e.aliases, e.network, e.country, e.language, e.is_anime, e.aired_at, e.year, e.genres,\n               e.rating, e.content_rating AS \"content_rating: _\", e.state AS \"state: _\",\n               e.failed_attempts, e.item_type AS \"item_type: _\",\n               e.is_requested, e.show_status AS \"show_status: _\", e.season_number, e.is_special, e.parent_id,\n               e.episode_number, e.absolute_number, e.runtime, e.item_request_id, e.active_stream_id\n           FROM media_items e\n           LEFT JOIN media_items season_item ON e.parent_id = season_item.id AND season_item.item_type = 'season'\n           LEFT JOIN media_items show_item ON season_item.parent_id = show_item.id AND show_item.item_type = 'show'\n           WHERE e.state = 'indexed'\n             AND e.item_type = 'episode'\n             AND e.is_requested = true\n             AND (e.failed_attempts = 0 OR e.updated_at IS NULL OR e.updated_at < NOW() - INTERVAL '1 hour')\n           ORDER BY e.failed_attempts ASC, e.created_at ASC\n           LIMIT $1",
   "describe": {
     "columns": [
       {
@@ -85,26 +85,31 @@
       },
       {
         "ordinal": 16,
+        "name": "is_anime",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 17,
         "name": "aired_at",
         "type_info": "Date"
       },
       {
-        "ordinal": 17,
+        "ordinal": 18,
         "name": "year",
         "type_info": "Int4"
       },
       {
-        "ordinal": 18,
+        "ordinal": 19,
         "name": "genres",
         "type_info": "Jsonb"
       },
       {
-        "ordinal": 19,
+        "ordinal": 20,
         "name": "rating",
         "type_info": "Float8"
       },
       {
-        "ordinal": 20,
+        "ordinal": 21,
         "name": "content_rating: _",
         "type_info": {
           "Custom": {
@@ -128,7 +133,7 @@
         }
       },
       {
-        "ordinal": 21,
+        "ordinal": 22,
         "name": "state: _",
         "type_info": {
           "Custom": {
@@ -149,12 +154,12 @@
         }
       },
       {
-        "ordinal": 22,
+        "ordinal": 23,
         "name": "failed_attempts",
         "type_info": "Int4"
       },
       {
-        "ordinal": 23,
+        "ordinal": 24,
         "name": "item_type: _",
         "type_info": {
           "Custom": {
@@ -171,12 +176,12 @@
         }
       },
       {
-        "ordinal": 24,
+        "ordinal": 25,
         "name": "is_requested",
         "type_info": "Bool"
       },
       {
-        "ordinal": 25,
+        "ordinal": 26,
         "name": "show_status: _",
         "type_info": {
           "Custom": {
@@ -191,42 +196,42 @@
         }
       },
       {
-        "ordinal": 26,
+        "ordinal": 27,
         "name": "season_number",
         "type_info": "Int4"
       },
       {
-        "ordinal": 27,
+        "ordinal": 28,
         "name": "is_special",
         "type_info": "Bool"
       },
       {
-        "ordinal": 28,
+        "ordinal": 29,
         "name": "parent_id",
         "type_info": "Int8"
       },
       {
-        "ordinal": 29,
+        "ordinal": 30,
         "name": "episode_number",
         "type_info": "Int4"
       },
       {
-        "ordinal": 30,
+        "ordinal": 31,
         "name": "absolute_number",
         "type_info": "Int4"
       },
       {
-        "ordinal": 31,
+        "ordinal": 32,
         "name": "runtime",
         "type_info": "Int4"
       },
       {
-        "ordinal": 32,
+        "ordinal": 33,
         "name": "item_request_id",
         "type_info": "Int8"
       },
       {
-        "ordinal": 33,
+        "ordinal": 34,
         "name": "active_stream_id",
         "type_info": "Int8"
       }
@@ -253,6 +258,7 @@
       true,
       true,
       true,
+      false,
       true,
       true,
       true,
@@ -273,5 +279,5 @@
       true
     ]
   },
-  "hash": "23ac59e4f906d35c3f4a47b2ebff07679105751d113da2612bb1a558be589403"
+  "hash": "fc60326b30df9b64890743a650c360e8fd28627bc282eeea9c897cd4d600e924"
 }

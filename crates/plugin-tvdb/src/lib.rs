@@ -114,6 +114,21 @@ async fn fetch_series(
         .genres
         .as_ref()
         .map(|g| g.iter().filter_map(|n| n.name.clone()).collect());
+    let genres_lower = genres
+        .as_ref()
+        .map(|genres: &Vec<String>| {
+            genres
+                .iter()
+                .map(|genre| genre.to_ascii_lowercase())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let is_anime = genres_lower.iter().any(|genre| genre == "anime")
+        || (genres_lower.iter().any(|genre| genre == "animation")
+            && series
+                .original_language
+                .as_deref()
+                .is_some_and(|language| !language.eq_ignore_ascii_case("eng")));
 
     let country = series
         .original_country
@@ -208,11 +223,13 @@ async fn fetch_series(
         year,
         genres,
         country,
+        language: series.original_language.clone(),
         network: series
             .original_network
             .as_ref()
             .and_then(|n| n.name.clone()),
         content_rating,
+        is_anime: Some(is_anime),
         status,
         aliases,
         aired_at,
@@ -300,6 +317,8 @@ struct TvdbSeries {
     year: Option<String>,
     #[serde(rename = "firstAired")]
     first_aired: Option<String>,
+    #[serde(rename = "originalLanguage")]
+    original_language: Option<String>,
     #[serde(rename = "originalCountry")]
     original_country: Option<String>,
     country: Option<String>,

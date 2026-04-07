@@ -1,6 +1,7 @@
 use std::time::Instant;
 
 use riven_core::events::RivenEvent;
+use riven_core::settings::{FilesystemContentType, FilesystemItemMetadata};
 use riven_core::types::*;
 use riven_db::entities::MediaItem;
 use riven_db::repo;
@@ -11,6 +12,29 @@ use super::helpers::{
 };
 use crate::orchestrator::LibraryOrchestrator;
 use crate::JobQueue;
+
+fn metadata_from_item(item: &MediaItem) -> FilesystemItemMetadata {
+    let genres = item
+        .genres
+        .as_ref()
+        .and_then(|value| value.as_array())
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(|value| value.as_str())
+                .map(|value| value.to_ascii_lowercase())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    FilesystemItemMetadata {
+        genres,
+        content_rating: item.content_rating,
+        language: item.language.clone(),
+        country: item.country.clone(),
+        is_anime: item.is_anime,
+    }
+}
 
 /// Persist a movie download result. Returns `true` on success.
 ///
@@ -77,6 +101,12 @@ pub async fn persist_movie(
     let base_name = item.pretty_name();
     let vfs_name = format!("{base_name}{tag_suffix}.{ext}");
     let path = format!("/movies/{base_name}/{vfs_name}");
+    let metadata = metadata_from_item(item);
+    let filesystem_settings = queue.filesystem_settings.read().await;
+    let library_profiles =
+        filesystem_settings.matching_profile_keys(&metadata, FilesystemContentType::Movie);
+    let library_profiles_json = library_profiles.into_json();
+    drop(filesystem_settings);
 
     if let Err(e) = repo::create_media_entry(
         &queue.db_pool,
@@ -91,6 +121,7 @@ pub async fn persist_movie(
         stream_id,
         resolution,
         profile_name,
+        Some(&library_profiles_json),
     )
     .await
     {
@@ -162,6 +193,12 @@ pub async fn persist_episode(
 
     let season_number = season.season_number.unwrap_or(1);
     let episode_number = item.episode_number.unwrap_or(1);
+    let metadata = metadata_from_item(&show);
+    let filesystem_settings = queue.filesystem_settings.read().await;
+    let library_profiles =
+        filesystem_settings.matching_profile_keys(&metadata, FilesystemContentType::Show);
+    let library_profiles_json = library_profiles.into_json();
+    drop(filesystem_settings);
 
     tracing::debug!(id, info_hash, files = dl.files.len(), "persisting episode");
 
@@ -224,6 +261,7 @@ pub async fn persist_episode(
             stream_id,
             resolution,
             profile_name,
+            Some(&library_profiles_json),
         )
         .await
         {
@@ -293,6 +331,12 @@ pub async fn persist_season(
 
     let season_number = item.season_number.unwrap_or(1);
     let show_name = show.pretty_name();
+    let metadata = metadata_from_item(&show);
+    let filesystem_settings = queue.filesystem_settings.read().await;
+    let library_profiles =
+        filesystem_settings.matching_profile_keys(&metadata, FilesystemContentType::Show);
+    let library_profiles_json = library_profiles.into_json();
+    drop(filesystem_settings);
     let mut any_matched = false;
     let mut completed_episode_ids: Vec<i64> = Vec::new();
 
@@ -349,6 +393,7 @@ pub async fn persist_season(
                 stream_id,
                 None,
                 profile_name,
+                Some(&library_profiles_json),
             )
             .await
             {

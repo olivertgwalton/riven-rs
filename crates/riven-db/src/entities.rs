@@ -23,6 +23,7 @@ pub struct MediaItem {
     pub network: Option<String>,
     pub country: Option<String>,
     pub language: Option<String>,
+    pub is_anime: bool,
     pub aired_at: Option<NaiveDate>,
     pub year: Option<i32>,
     pub genres: Option<serde_json::Value>,

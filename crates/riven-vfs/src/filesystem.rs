@@ -14,13 +14,14 @@ use parking_lot::Mutex;
 use tokio::sync::mpsc;
 
 use riven_core::config::vfs::*;
+use riven_core::settings::{FilesystemSettings, LibraryProfileMembership};
 use riven_db::entities::FileSystemEntry;
 use riven_db::repo;
 
 use crate::cache::RangeCache;
 use crate::link::resolve_stream_url;
 use crate::media_stream::{MediaStream, ReadOutcome};
-use crate::path_info::{parse_path, PathType};
+use crate::path_info::{CanonicalPath, PathTarget, VfsLibraryLayout};
 use crate::readdir::{populate_entries, DirEntry};
 use crate::LinkRequest;
 
@@ -92,6 +93,7 @@ struct FileHandle {
 }
 
 pub struct RivenFs {
+    layout: VfsLibraryLayout,
     db_pool: sqlx::PgPool,
     stream_client: reqwest::Client,
     link_request_tx: mpsc::Sender<LinkRequest>,
@@ -114,6 +116,7 @@ pub struct RivenFs {
 
 impl RivenFs {
     pub fn new(
+        filesystem_settings: FilesystemSettings,
         db_pool: sqlx::PgPool,
         stream_client: reqwest::Client,
         link_request_tx: mpsc::Sender<LinkRequest>,
@@ -126,7 +129,17 @@ impl RivenFs {
         } else {
             ((cache_max_size_mb * 1024 * 1024) / CHUNK_SIZE) as usize
         };
+        let path_to_ino = DashMap::new();
+        let ino_to_path = DashMap::new();
+        let movies_path: Arc<str> = Arc::from("/movies");
+        let shows_path: Arc<str> = Arc::from("/shows");
+        path_to_ino.insert(Arc::clone(&movies_path), MOVIES_INO);
+        path_to_ino.insert(Arc::clone(&shows_path), SHOWS_INO);
+        ino_to_path.insert(MOVIES_INO, movies_path);
+        ino_to_path.insert(SHOWS_INO, shows_path);
+
         Self {
+            layout: VfsLibraryLayout::new(filesystem_settings),
             db_pool,
             stream_client,
             link_request_tx,
@@ -134,8 +147,8 @@ impl RivenFs {
             runtime: tokio::runtime::Handle::current(),
             next_fd: AtomicU64::new(1),
             file_handles: DashMap::new(),
-            path_to_ino: DashMap::new(),
-            ino_to_path: DashMap::new(),
+            path_to_ino,
+            ino_to_path,
             next_ino: AtomicU64::new(FIRST_DYNAMIC_INO),
             range_cache: Mutex::new(LruCache::new(std::num::NonZeroUsize::new(entries).unwrap())),
             readdir_cache: DashMap::new(),
@@ -161,11 +174,28 @@ impl RivenFs {
                 return cached.0.clone();
             }
         }
-        let result = self
-            .runtime
-            .block_on(repo::get_media_entry_by_path(&self.db_pool, path))
-            .ok()
-            .flatten();
+        let result = match self.layout.parse(path) {
+            PathTarget::Canonical {
+                profile_key,
+                path: canonical,
+            } => {
+                let actual_path = match canonical {
+                    CanonicalPath::MovieFile { actual_path }
+                    | CanonicalPath::EpisodeFile { actual_path } => actual_path,
+                    _ => String::new(),
+                };
+                if actual_path.is_empty() {
+                    None
+                } else {
+                    self.runtime
+                        .block_on(repo::get_media_entry_by_path(&self.db_pool, &actual_path))
+                        .ok()
+                        .flatten()
+                        .filter(|entry| matches_profile(entry, profile_key.as_deref()))
+                }
+            }
+            _ => None,
+        };
         self.entry_cache
             .insert(path.to_string(), (result.clone(), Instant::now()));
         result
@@ -252,26 +282,38 @@ impl Filesystem for RivenFs {
         if self.debug_logging {
             tracing::debug!(path = %path, "lookup");
         }
-        match parse_path(&path) {
-            PathType::Root => reply.entry(&TTL, &dir_attr(ROOT_INO), 0),
-            PathType::AllMovies => reply.entry(&TTL, &dir_attr(MOVIES_INO), 0),
-            PathType::AllShows => reply.entry(&TTL, &dir_attr(SHOWS_INO), 0),
-            PathType::MovieDir { .. } | PathType::ShowDir { .. } | PathType::SeasonDir { .. } => {
-                reply.entry(&TTL, &dir_attr(self.get_or_create_ino(&path)), 0);
+        match self.layout.parse(&path) {
+            PathTarget::Root => reply.entry(&TTL, &dir_attr(ROOT_INO), 0),
+            PathTarget::ProfilePrefixDir => {
+                reply.entry(&TTL, &dir_attr(self.get_or_create_ino(&path)), 0)
             }
-            PathType::MovieFile { .. } | PathType::EpisodeFile { .. } => {
-                match self.get_entry_cached(&path) {
-                    Some(entry) => {
-                        let ino = self.get_or_create_ino(&path);
-                        reply.entry(
-                            &TTL,
-                            &file_attr(ino, entry.file_size as u64, entry_mtime(&entry)),
-                            0,
-                        );
-                    }
-                    None => reply.error(libc::ENOENT),
+            PathTarget::Canonical {
+                path: canonical, ..
+            } => match canonical {
+                CanonicalPath::Root => reply.entry(&TTL, &dir_attr(ROOT_INO), 0),
+                CanonicalPath::AllMovies => reply.entry(&TTL, &dir_attr(MOVIES_INO), 0),
+                CanonicalPath::AllShows => reply.entry(&TTL, &dir_attr(SHOWS_INO), 0),
+                CanonicalPath::MovieDir { .. }
+                | CanonicalPath::ShowDir { .. }
+                | CanonicalPath::SeasonDir { .. } => {
+                    reply.entry(&TTL, &dir_attr(self.get_or_create_ino(&path)), 0);
                 }
-            }
+                CanonicalPath::MovieFile { .. } | CanonicalPath::EpisodeFile { .. } => {
+                    match self.get_entry_cached(&path) {
+                        Some(entry) => {
+                            let ino = self.get_or_create_ino(&path);
+                            reply.entry(
+                                &TTL,
+                                &file_attr(ino, entry.file_size as u64, entry_mtime(&entry)),
+                                0,
+                            );
+                        }
+                        None => reply.error(libc::ENOENT),
+                    }
+                }
+                CanonicalPath::Invalid => reply.error(libc::ENOENT),
+            },
+            PathTarget::Invalid => reply.error(libc::ENOENT),
         }
     }
 
@@ -285,16 +327,17 @@ impl Filesystem for RivenFs {
                     reply.error(libc::ENOENT);
                     return;
                 };
-                match parse_path(&path) {
-                    PathType::MovieFile { .. } | PathType::EpisodeFile { .. } => {
-                        match self.get_entry_cached(&*path) {
-                            Some(entry) => reply.attr(
-                                &TTL,
-                                &file_attr(ino, entry.file_size as u64, entry_mtime(&entry)),
-                            ),
-                            None => reply.error(libc::ENOENT),
-                        }
-                    }
+                match self.layout.parse(&path) {
+                    PathTarget::Canonical {
+                        path: CanonicalPath::MovieFile { .. } | CanonicalPath::EpisodeFile { .. },
+                        ..
+                    } => match self.get_entry_cached(&*path) {
+                        Some(entry) => reply.attr(
+                            &TTL,
+                            &file_attr(ino, entry.file_size as u64, entry_mtime(&entry)),
+                        ),
+                        None => reply.error(libc::ENOENT),
+                    },
                     _ => reply.attr(&TTL, &dir_attr(ino)),
                 }
             }
@@ -328,6 +371,7 @@ impl Filesystem for RivenFs {
                 ino_to_path.as_deref(),
                 &self.db_pool,
                 &self.runtime,
+                &self.layout,
                 &mut entries,
                 &mut get_ino,
             );
@@ -442,4 +486,11 @@ impl Filesystem for RivenFs {
         self.file_handles.remove(&fh);
         reply.ok();
     }
+}
+
+fn matches_profile(entry: &FileSystemEntry, profile_key: Option<&str>) -> bool {
+    let Some(profile_key) = profile_key else {
+        return true;
+    };
+    LibraryProfileMembership::from_json(entry.library_profiles.as_ref()).contains(profile_key)
 }
