@@ -1,3 +1,5 @@
+pub mod application;
+pub mod context;
 pub mod discovery;
 pub mod flows;
 pub mod indexing;
@@ -15,7 +17,7 @@ use apalis_redis::{RedisConfig, RedisStorage};
 use chrono::{DateTime, Utc};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use tokio::sync::{broadcast, RwLock};
+use tokio::sync::{RwLock, broadcast};
 use ulid::Ulid;
 
 pub use riven_core::downloader::DownloaderConfig;
@@ -369,10 +371,10 @@ impl JobQueue {
                 tracing::error!(plugin = plugin_name, error = %e, "plugin hook failed");
             }
         }
-        if event.event_type().is_ui_streamed() {
-            if let Ok(json) = serde_json::to_string(&event) {
-                let _ = self.notification_tx.send(json);
-            }
+        if event.event_type().is_ui_streamed()
+            && let Ok(json) = serde_json::to_string(&event)
+        {
+            let _ = self.notification_tx.send(json);
         }
     }
 
@@ -526,10 +528,9 @@ impl JobQueue {
         if self
             .set_nx(&format!("riven:dedup:{prefix}:{id}"), 300)
             .await
+            && let Err(e) = push().await
         {
-            if let Err(e) = push().await {
-                tracing::error!(error = %e, label, "failed to push job");
-            }
+            tracing::error!(error = %e, label, "failed to push job");
         }
     }
 }

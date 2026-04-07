@@ -84,10 +84,11 @@ async fn scrape_streams(
                             .iter()
                             .find(|attr| attr.attributes.name == "infohash")
                             .map(|attr| attr.attributes.value.as_str());
-                        if let (Some(hash), title) = (info_hash, item.title) {
-                            if !hash.is_empty() && !title.is_empty() {
-                                streams.insert(hash.to_lowercase(), title);
-                            }
+                        if let (Some(hash), title) = (info_hash, item.title)
+                            && !hash.is_empty()
+                            && !title.is_empty()
+                        {
+                            streams.insert(hash.to_lowercase(), title);
                         }
                     }
                 }

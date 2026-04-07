@@ -1,5 +1,5 @@
 use bytes::Bytes;
-use futures::{stream::BoxStream, StreamExt, TryStreamExt};
+use futures::{StreamExt, TryStreamExt, stream::BoxStream};
 use std::io;
 use tokio::io::{AsyncReadExt, BufReader};
 use tokio_util::io::StreamReader;

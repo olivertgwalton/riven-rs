@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use serde::Deserialize;
+use std::collections::HashSet;
 
 use riven_core::events::{EventType, HookResponse, RivenEvent};
 use riven_core::plugin::{Plugin, PluginContext};
@@ -22,6 +23,7 @@ impl Plugin for PlexPlugin {
     fn subscribed_events(&self) -> &[EventType] {
         &[
             EventType::MediaItemDownloadSuccess,
+            EventType::MediaItemsDeleted,
             EventType::ActivePlaybackSessionsRequested,
         ]
     }
@@ -86,6 +88,51 @@ impl Plugin for PlexPlugin {
                                     section = section.key,
                                     path = full_path,
                                     "plex library section refreshed"
+                                );
+                            }
+                        }
+                    }
+                }
+
+                Ok(HookResponse::Empty)
+            }
+            RivenEvent::MediaItemsDeleted { deleted_paths, .. } => {
+                if deleted_paths.is_empty() {
+                    return Ok(HookResponse::Empty);
+                }
+
+                let plex_token = ctx.require_setting("plextoken")?;
+                let plex_url = ctx.require_setting("plexserverurl")?.trim_end_matches('/');
+                let library_path = ctx.settings.get_or("plexlibrarypath", "/mount");
+                let sections = get_library_sections(&ctx.http_client, plex_url, plex_token).await?;
+
+                let dirs: HashSet<String> = deleted_paths
+                    .iter()
+                    .map(|path| {
+                        path.rsplit_once('/')
+                            .map(|(dir, _)| dir)
+                            .unwrap_or(path.as_str())
+                            .to_string()
+                    })
+                    .collect();
+
+                for dir_path in dirs {
+                    let full_path = format!("{library_path}{dir_path}");
+                    for section in &sections {
+                        for location in &section.locations {
+                            if full_path.starts_with(&location.path) {
+                                refresh_section(
+                                    &ctx.http_client,
+                                    plex_url,
+                                    plex_token,
+                                    &section.key,
+                                    &full_path,
+                                )
+                                .await?;
+                                tracing::info!(
+                                    section = section.key,
+                                    path = full_path,
+                                    "plex library section refreshed after delete"
                                 );
                             }
                         }

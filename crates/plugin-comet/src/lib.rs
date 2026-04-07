@@ -37,11 +37,13 @@ impl Plugin for CometPlugin {
     }
 
     fn settings_schema(&self) -> Vec<SettingField> {
-        vec![SettingField::new("url", "URL", "url")
-            .required()
-            .with_default(DEFAULT_URL)
-            .with_placeholder(DEFAULT_URL)
-            .with_description("Base URL of your Comet instance.")]
+        vec![
+            SettingField::new("url", "URL", "url")
+                .required()
+                .with_default(DEFAULT_URL)
+                .with_placeholder(DEFAULT_URL)
+                .with_description("Base URL of your Comet instance."),
+        ]
     }
 
     async fn handle_event(

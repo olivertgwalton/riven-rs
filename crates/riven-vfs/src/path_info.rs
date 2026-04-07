@@ -105,10 +105,10 @@ impl VfsLibraryLayout {
     pub fn root_entries(&self) -> Vec<String> {
         let mut entries = vec!["movies".to_string(), "shows".to_string()];
         for profile in &self.profiles {
-            if let Some(first) = profile.segments.first() {
-                if !entries.contains(first) {
-                    entries.push(first.clone());
-                }
+            if let Some(first) = profile.segments.first()
+                && !entries.contains(first)
+            {
+                entries.push(first.clone());
             }
         }
         entries.sort();
@@ -218,6 +218,75 @@ mod tests {
                     actual_path: "/movies/Film/Film.mkv".to_string(),
                 },
             }
+        );
+    }
+
+    #[test]
+    fn root_entries_include_profile_prefixes_once() {
+        let mut profiles = HashMap::new();
+        profiles.insert(
+            "kids".to_string(),
+            FilesystemLibraryProfile {
+                name: "Kids".to_string(),
+                library_path: "/library/kids".to_string(),
+                enabled: true,
+                filter_rules: Default::default(),
+            },
+        );
+        profiles.insert(
+            "anime".to_string(),
+            FilesystemLibraryProfile {
+                name: "Anime".to_string(),
+                library_path: "/library/anime".to_string(),
+                enabled: true,
+                filter_rules: Default::default(),
+            },
+        );
+
+        let layout = VfsLibraryLayout::new(FilesystemSettings {
+            mount_path: "/mount".to_string(),
+            library_profiles: profiles,
+        });
+
+        assert_eq!(
+            layout.root_entries(),
+            vec![
+                "library".to_string(),
+                "movies".to_string(),
+                "shows".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn profile_prefix_children_expand_nested_profiles() {
+        let mut profiles = HashMap::new();
+        profiles.insert(
+            "kids".to_string(),
+            FilesystemLibraryProfile {
+                name: "Kids".to_string(),
+                library_path: "/library/kids".to_string(),
+                enabled: true,
+                filter_rules: Default::default(),
+            },
+        );
+
+        let layout = VfsLibraryLayout::new(FilesystemSettings {
+            mount_path: "/mount".to_string(),
+            library_profiles: profiles,
+        });
+
+        assert_eq!(
+            layout.profile_prefix_children("/"),
+            vec!["library".to_string()]
+        );
+        assert_eq!(
+            layout.profile_prefix_children("/library"),
+            vec!["kids".to_string()]
+        );
+        assert_eq!(
+            layout.profile_prefix_children("/library/kids"),
+            vec!["movies".to_string(), "shows".to_string()]
         );
     }
 }

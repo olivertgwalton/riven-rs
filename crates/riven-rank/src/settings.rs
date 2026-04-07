@@ -44,8 +44,12 @@ impl QualityProfile {
 
     pub fn description(self) -> &'static str {
         match self {
-            Self::UltraHd => "Prioritises 2160p REMUX, Dolby Vision, and lossless audio. Disables rips and low-quality sources.",
-            Self::Hd => "Balanced defaults for FHD content. Priorities compatibility and availability.",
+            Self::UltraHd => {
+                "Prioritises 2160p REMUX, Dolby Vision, and lossless audio. Disables rips and low-quality sources."
+            }
+            Self::Hd => {
+                "Balanced defaults for FHD content. Priorities compatibility and availability."
+            }
             Self::Standard => "Lower quality defaults. Relaxed thresholds for easier streaming.",
         }
     }
@@ -520,7 +524,7 @@ impl Default for TrashRanks {
 }
 
 /// All custom rank categories
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CustomRanksConfig {
     pub quality: QualityRanks,
@@ -529,19 +533,6 @@ pub struct CustomRanksConfig {
     pub audio: AudioRanks,
     pub extras: ExtrasRanks,
     pub trash: TrashRanks,
-}
-
-impl Default for CustomRanksConfig {
-    fn default() -> Self {
-        Self {
-            quality: QualityRanks::default(),
-            rips: RipsRanks::default(),
-            hdr: HdrRanks::default(),
-            audio: AudioRanks::default(),
-            extras: ExtrasRanks::default(),
-            trash: TrashRanks::default(),
-        }
-    }
 }
 
 impl CustomRanksConfig {

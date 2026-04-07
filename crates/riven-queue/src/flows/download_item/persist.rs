@@ -10,8 +10,14 @@ use super::helpers::{
     episode_vfs_path, handle_bitrate_failure, is_video_file, load_item_or_err, matches_episode,
     parse_file_path, select_episode_files,
 };
-use crate::orchestrator::LibraryOrchestrator;
 use crate::JobQueue;
+use crate::orchestrator::LibraryOrchestrator;
+
+pub enum SeasonPersistOutcome {
+    Failed,
+    Partial,
+    Complete,
+}
 
 fn metadata_from_item(item: &MediaItem) -> FilesystemItemMetadata {
     let genres = item
@@ -34,6 +40,45 @@ fn metadata_from_item(item: &MediaItem) -> FilesystemItemMetadata {
         country: item.country.clone(),
         is_anime: item.is_anime,
     }
+}
+
+fn metadata_from_show_context(
+    ctx: &crate::context::DownloadHierarchyContext,
+) -> FilesystemItemMetadata {
+    let genres = ctx
+        .show_genres
+        .as_ref()
+        .and_then(|value| value.as_array())
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(|value| value.as_str())
+                .map(|value| value.to_ascii_lowercase())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    FilesystemItemMetadata {
+        genres,
+        content_rating: ctx.show_content_rating,
+        language: ctx.show_language.clone(),
+        country: ctx.show_country.clone(),
+        is_anime: ctx.show_is_anime,
+    }
+}
+
+fn pretty_show_name(
+    ctx: &crate::context::DownloadHierarchyContext,
+    fallback_title: &str,
+) -> String {
+    let title = ctx.show_title.as_deref().unwrap_or(fallback_title);
+    let year_str = ctx.show_year.map(|y| format!(" ({y})")).unwrap_or_default();
+    let id_str = ctx
+        .show_tvdb_id
+        .as_ref()
+        .map(|id| format!(" {{tvdb-{id}}}"))
+        .unwrap_or_default();
+    format!("{title}{year_str}{id_str}")
 }
 
 /// Persist a movie download result. Returns `true` on success.
@@ -145,6 +190,7 @@ pub async fn persist_episode(
     dl: &DownloadResult,
     info_hash: &str,
     queue: &JobQueue,
+    hierarchy: &crate::context::DownloadHierarchyContext,
     stream_id: Option<i64>,
     resolution: Option<&str>,
     path_tag: Option<&str>,
@@ -152,8 +198,8 @@ pub async fn persist_episode(
 ) -> bool {
     let id = item.id;
 
-    let season_id = match item.parent_id {
-        Some(sid) => sid,
+    match hierarchy.season_id {
+        Some(_) => {}
         None => {
             tracing::error!(id, "episode has no parent_id");
             queue
@@ -165,35 +211,11 @@ pub async fn persist_episode(
                 .await;
             return false;
         }
-    };
+    }
 
-    let season = match load_item_or_err(season_id, queue, "could not load parent season").await {
-        Some(s) => s,
-        None => return false,
-    };
-
-    let show_id = match season.parent_id {
-        Some(sid) => sid,
-        None => {
-            queue
-                .notify(RivenEvent::MediaItemDownloadError {
-                    id,
-                    title: item.title.clone(),
-                    error: "season has no parent show".into(),
-                })
-                .await;
-            return false;
-        }
-    };
-
-    let show = match load_item_or_err(show_id, queue, "could not load parent show").await {
-        Some(s) => s,
-        None => return false,
-    };
-
-    let season_number = season.season_number.unwrap_or(1);
+    let season_number = hierarchy.season_number.unwrap_or(1);
     let episode_number = item.episode_number.unwrap_or(1);
-    let metadata = metadata_from_item(&show);
+    let metadata = metadata_from_show_context(hierarchy);
     let filesystem_settings = queue.filesystem_settings.read().await;
     let library_profiles =
         filesystem_settings.matching_profile_keys(&metadata, FilesystemContentType::Show);
@@ -245,7 +267,7 @@ pub async fn persist_episode(
     }
     drop(config);
 
-    let show_name = show.pretty_name();
+    let show_name = pretty_show_name(hierarchy, &item.title);
     for (file, part) in select_episode_files(&matched) {
         let path = episode_vfs_path(&show_name, season_number, episode_number, part, path_tag);
         if let Err(e) = repo::create_media_entry(
@@ -288,14 +310,15 @@ pub async fn persist_season(
     dl: DownloadResult,
     info_hash: &str,
     queue: &JobQueue,
+    hierarchy: &crate::context::DownloadHierarchyContext,
     start_time: Instant,
     stream_id: Option<i64>,
     path_tag: Option<&str>,
     profile_name: Option<&str>,
-) -> bool {
+) -> SeasonPersistOutcome {
     let id = item.id;
 
-    let show_id = match item.parent_id {
+    let show_id = match hierarchy.show_id {
         Some(sid) => sid,
         None => {
             tracing::error!(id, "season has no parent show");
@@ -306,13 +329,13 @@ pub async fn persist_season(
                     error: "season has no parent show".into(),
                 })
                 .await;
-            return false;
+            return SeasonPersistOutcome::Failed;
         }
     };
 
     let show = match load_item_or_err(show_id, queue, "could not load parent show").await {
         Some(s) => s,
-        None => return false,
+        None => return SeasonPersistOutcome::Failed,
     };
 
     let episodes = match repo::list_episodes(&queue.db_pool, id).await {
@@ -325,13 +348,15 @@ pub async fn persist_season(
                     error: e.to_string(),
                 })
                 .await;
-            return false;
+            return SeasonPersistOutcome::Failed;
         }
     };
 
-    let season_number = item.season_number.unwrap_or(1);
+    let season_number = hierarchy
+        .season_number
+        .unwrap_or_else(|| item.season_number.unwrap_or(1));
     let show_name = show.pretty_name();
-    let metadata = metadata_from_item(&show);
+    let metadata = metadata_from_show_context(hierarchy);
     let filesystem_settings = queue.filesystem_settings.read().await;
     let library_profiles =
         filesystem_settings.matching_profile_keys(&metadata, FilesystemContentType::Show);
@@ -424,7 +449,7 @@ pub async fn persist_season(
         LibraryOrchestrator::new(queue)
             .fan_out_download_failure(id)
             .await;
-        return false;
+        return SeasonPersistOutcome::Failed;
     }
 
     // Batch-set all matched episodes to Completed in one UPDATE, then refresh
@@ -436,14 +461,27 @@ pub async fn persist_season(
     if let Err(e) = repo::refresh_state(&queue.db_pool, item).await {
         tracing::error!(error = %e, "failed to refresh season state after download");
     }
-    if let Ok(Some(show_item)) = repo::get_media_item(&queue.db_pool, show_id).await {
-        if let Err(e) = repo::refresh_state(&queue.db_pool, &show_item).await {
-            tracing::error!(error = %e, "failed to refresh show state after download");
-        }
+    if let Err(e) = repo::refresh_state(&queue.db_pool, &show).await {
+        tracing::error!(error = %e, "failed to refresh show state after download");
     }
     LibraryOrchestrator::new(queue)
         .sync_item_request_state(item)
         .await;
+
+    let season_complete = matches!(
+        repo::compute_state(&queue.db_pool, item).await,
+        Ok(MediaItemState::Completed)
+    );
+
+    if !season_complete {
+        queue
+            .notify(RivenEvent::MediaItemDownloadPartialSuccess { id })
+            .await;
+        LibraryOrchestrator::new(queue)
+            .fan_out_download_failure(id)
+            .await;
+        return SeasonPersistOutcome::Partial;
+    }
 
     let duration = start_time.elapsed();
     let display_title = format!("{} - {}", show.title, item.title);
@@ -467,5 +505,5 @@ pub async fn persist_season(
         duration_secs = duration.as_secs_f64(),
         "season download flow completed"
     );
-    true
+    SeasonPersistOutcome::Complete
 }

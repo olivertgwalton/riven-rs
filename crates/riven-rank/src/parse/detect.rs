@@ -1,8 +1,8 @@
 use regex::Regex;
 use std::sync::LazyLock;
 
-use super::patterns::*;
 use super::ParsedData;
+use super::patterns::*;
 
 // =============================================================================
 // Network detection
@@ -136,7 +136,7 @@ const TRASH_EXTRAS: &[&str] = &["sample", "trailer", "deleted scene"];
 pub(crate) fn detect_trash(raw: &str, data: &ParsedData) -> bool {
     data.quality
         .as_deref()
-        .map_or(false, |q| TRASH_QUALITIES.contains(&q))
+        .is_some_and(|q| TRASH_QUALITIES.contains(&q))
         || RE_SPRINT.is_match(raw)
         || RE_Q_PRE_DVD.is_match(raw)
         || RE_DVB.is_match(raw)

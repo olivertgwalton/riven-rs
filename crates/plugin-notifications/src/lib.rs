@@ -31,12 +31,14 @@ impl Plugin for NotificationsPlugin {
 
     fn settings_schema(&self) -> Vec<riven_core::plugin::SettingField> {
         use riven_core::plugin::SettingField;
-        vec![SettingField::new("urls", "Webhook URLs", "textarea")
-            .required()
-            .with_placeholder("https://discord.com/api/webhooks/...")
-            .with_description(
-                "Comma-separated webhook URLs. Supports Discord and generic JSON endpoints.",
-            )]
+        vec![
+            SettingField::new("urls", "Webhook URLs", "textarea")
+                .required()
+                .with_placeholder("https://discord.com/api/webhooks/...")
+                .with_description(
+                    "Comma-separated webhook URLs. Supports Discord and generic JSON endpoints.",
+                ),
+        ]
     }
 
     async fn handle_event(

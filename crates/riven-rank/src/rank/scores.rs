@@ -122,11 +122,7 @@ fn calculate_preferred(data: &ParsedData, settings: &RankSettings) -> i64 {
             .filter_map(|p| regex::Regex::new(p).ok())
             .any(|re| re.is_match(&data.raw_title))
     };
-    if matches {
-        10000
-    } else {
-        0
-    }
+    if matches { 10000 } else { 0 }
 }
 
 fn calculate_preferred_langs(data: &ParsedData, settings: &RankSettings) -> i64 {

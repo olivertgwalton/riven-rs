@@ -9,12 +9,12 @@ use tracing::{Event, Subscriber};
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_appender::rolling::{RollingFileAppender, Rotation};
 use tracing_subscriber::{
-    fmt::{format::Writer, FmtContext, FormatEvent, FormatFields},
+    EnvFilter, Layer, Registry,
+    fmt::{FmtContext, FormatEvent, FormatFields, format::Writer},
     layer::SubscriberExt,
     registry::LookupSpan,
     reload,
     util::SubscriberInitExt,
-    EnvFilter, Layer, Registry,
 };
 
 #[derive(Debug, Clone)]

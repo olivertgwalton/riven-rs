@@ -9,9 +9,11 @@ fn trash_handler(data: &ParsedData, settings: &RankSettings, failed: &mut Vec<St
     if !settings.options.remove_all_trash {
         return true;
     }
-    if data.quality.as_ref().map_or(false, |q| {
-        TRASH_QUALITIES.iter().any(|tq| q.eq_ignore_ascii_case(tq))
-    }) {
+    if data
+        .quality
+        .as_ref()
+        .is_some_and(|q| TRASH_QUALITIES.iter().any(|tq| q.eq_ignore_ascii_case(tq)))
+    {
         failed.push("trash_quality".into());
         return false;
     }
@@ -170,22 +172,22 @@ fn fetch_quality(data: &ParsedData, settings: &RankSettings, failed: &mut Vec<St
         Some(q) => q,
         None => return true,
     };
-    if let Some(cr) = settings.custom_ranks.quality_rank(q) {
-        if !cr.fetch {
-            failed.push("quality".into());
-            return false;
-        }
+    if let Some(cr) = settings.custom_ranks.quality_rank(q)
+        && !cr.fetch
+    {
+        failed.push("quality".into());
+        return false;
     }
     true
 }
 
 fn fetch_audio(data: &ParsedData, settings: &RankSettings, failed: &mut Vec<String>) -> bool {
     for a in &data.audio {
-        if let Some(cr) = settings.custom_ranks.audio_rank(a) {
-            if !cr.fetch {
-                failed.push(format!("audio_{a}"));
-                return false;
-            }
+        if let Some(cr) = settings.custom_ranks.audio_rank(a)
+            && !cr.fetch
+        {
+            failed.push(format!("audio_{a}"));
+            return false;
         }
     }
     true
@@ -194,11 +196,11 @@ fn fetch_audio(data: &ParsedData, settings: &RankSettings, failed: &mut Vec<Stri
 fn fetch_hdr(data: &ParsedData, settings: &RankSettings, failed: &mut Vec<String>) -> bool {
     let cr = &settings.custom_ranks;
     for h in &data.hdr {
-        if let Some(rank) = cr.hdr_rank(h) {
-            if !rank.fetch {
-                failed.push(format!("hdr_{h}"));
-                return false;
-            }
+        if let Some(rank) = cr.hdr_rank(h)
+            && !rank.fetch
+        {
+            failed.push(format!("hdr_{h}"));
+            return false;
         }
     }
     if data.bit_depth.is_some() && !cr.hdr.bit10.fetch {
@@ -213,11 +215,11 @@ fn fetch_codec(data: &ParsedData, settings: &RankSettings, failed: &mut Vec<Stri
         Some(c) => c,
         None => return true,
     };
-    if let Some(cr) = settings.custom_ranks.codec_rank(codec) {
-        if !cr.fetch {
-            failed.push(format!("codec_{codec}"));
-            return false;
-        }
+    if let Some(cr) = settings.custom_ranks.codec_rank(codec)
+        && !cr.fetch
+    {
+        failed.push(format!("codec_{codec}"));
+        return false;
     }
     true
 }

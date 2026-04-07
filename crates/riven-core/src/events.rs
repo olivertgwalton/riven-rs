@@ -263,7 +263,11 @@ pub enum RivenEvent {
     // Deletion — carries the external content-service request IDs so plugins
     // (e.g. Seerr) can cancel/delete the corresponding requests.
     #[serde(rename = "riven.media-item.deleted")]
-    MediaItemsDeleted { external_request_ids: Vec<String> },
+    MediaItemsDeleted {
+        item_ids: Vec<i64>,
+        external_request_ids: Vec<String>,
+        deleted_paths: Vec<String>,
+    },
 
     // Debrid account info
     #[serde(rename = "riven.debrid.user-info.requested")]

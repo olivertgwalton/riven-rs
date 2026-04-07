@@ -153,16 +153,21 @@ impl MutationRoot {
         let pool = ctx.data::<sqlx::PgPool>()?;
         let job_queue = ctx.data::<Arc<JobQueue>>()?;
 
+        let deleted_paths = repo::get_media_entry_paths_for_items(pool, &ids)
+            .await
+            .unwrap_or_default();
         let external_request_ids = repo::get_external_request_ids_for_items(pool, &ids)
             .await
             .unwrap_or_default();
 
-        let count = repo::delete_items_by_ids(pool, ids).await? as i64;
+        let count = repo::delete_items_by_ids(pool, ids.clone()).await? as i64;
 
-        if !external_request_ids.is_empty() {
+        if !ids.is_empty() {
             job_queue
                 .notify(RivenEvent::MediaItemsDeleted {
+                    item_ids: ids,
                     external_request_ids,
+                    deleted_paths,
                 })
                 .await;
         }

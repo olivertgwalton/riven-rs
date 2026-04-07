@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use riven_core::events::{EventType, HookResponse, RivenEvent};
-use riven_core::plugin::{validate_api_key, ContentCollection, Plugin, PluginContext};
+use riven_core::plugin::{ContentCollection, Plugin, PluginContext, validate_api_key};
 use riven_core::register_plugin;
 use riven_core::settings::PluginSettings;
 use riven_core::types::*;

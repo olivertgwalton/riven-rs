@@ -2,8 +2,8 @@ use riven_core::events::{HookResponse, RivenEvent};
 use riven_core::plugin::ContentCollection;
 use riven_db::repo;
 
-use crate::orchestrator::LibraryOrchestrator;
 use crate::JobQueue;
+use crate::orchestrator::LibraryOrchestrator;
 
 /// Run the content service request flow.
 /// Dispatches to all content service plugins, aggregates results, and persists new items.

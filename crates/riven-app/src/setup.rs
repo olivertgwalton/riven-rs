@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use riven_core::plugin::{collect_plugins, PluginRegistry};
+use riven_core::plugin::{PluginRegistry, collect_plugins};
 use riven_core::settings::PluginSettings;
 
 pub async fn register_plugins(

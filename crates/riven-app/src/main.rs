@@ -11,21 +11,7 @@ use riven_queue::worker::Scheduler;
 use riven_queue::{DownloaderConfig, JobQueue};
 
 // Force plugin crate linking so inventory collects registrations.
-extern crate plugin_calendar;
-extern crate plugin_comet;
-extern crate plugin_dashboard;
-extern crate plugin_emby_jellyfin;
-extern crate plugin_listrr;
-extern crate plugin_logs;
-extern crate plugin_mdblist;
-extern crate plugin_notifications;
-extern crate plugin_plex;
-extern crate plugin_seerr;
-extern crate plugin_stremthru;
-extern crate plugin_tmdb;
-extern crate plugin_torrentio;
-extern crate plugin_trakt;
-extern crate plugin_tvdb;
+include!(concat!(env!("OUT_DIR"), "/plugin_crates.rs"));
 
 mod setup;
 
@@ -64,6 +50,8 @@ fn build_streaming_http_client() -> Result<reqwest::Client> {
 async fn main() -> Result<()> {
     let mut settings = riven_core::settings::RivenSettings::load()?;
     let db_pool = riven_db::connect(&settings.database_url).await?;
+    riven_db::run_migrations(&db_pool).await?;
+
     let log_settings = plugin_logs::load_log_settings(&db_pool).await?;
     let (log_tx, _) = broadcast::channel::<String>(1024);
     let log_control =
@@ -75,46 +63,11 @@ async fn main() -> Result<()> {
         sqlx::query("DROP SCHEMA public CASCADE; CREATE SCHEMA public;")
             .execute(&db_pool)
             .await?;
+        riven_db::run_migrations(&db_pool).await?;
     }
 
-    riven_db::run_migrations(&db_pool).await?;
-
-    // Apply DB-stored overrides on top of env-var settings.
-    if let Ok(Some(g)) = riven_db::repo::get_setting(&db_pool, "general").await {
-        let opt_u32 = |k| g.get(k).and_then(|v| v.as_u64()).map(|v| v as u32);
-        if let Some(v) = g.get("filesystem") {
-            if let Ok(fs) =
-                serde_json::from_value::<riven_core::settings::FilesystemSettings>(v.clone())
-            {
-                settings.filesystem = fs;
-                if settings.filesystem.mount_path.is_empty() {
-                    settings.filesystem.mount_path = settings.vfs_mount_path.clone();
-                }
-            }
-        }
-        if let Some(v) = g.get("dubbed_anime_only").and_then(|v| v.as_bool()) {
-            settings.dubbed_anime_only = v;
-        }
-        if let Some(v) = g.get("retry_interval_secs").and_then(|v| v.as_u64()) {
-            settings.retry_interval_secs = v;
-        }
-        if let Some(v) = g.get("schedule_offset_minutes").and_then(|v| v.as_u64()) {
-            settings.schedule_offset_minutes = v;
-        }
-        if let Some(v) = g
-            .get("unknown_air_date_offset_days")
-            .and_then(|v| v.as_u64())
-        {
-            settings.unknown_air_date_offset_days = v;
-        }
-        settings.minimum_average_bitrate_movies =
-            opt_u32("minimum_average_bitrate_movies").or(settings.minimum_average_bitrate_movies);
-        settings.minimum_average_bitrate_episodes = opt_u32("minimum_average_bitrate_episodes")
-            .or(settings.minimum_average_bitrate_episodes);
-        settings.maximum_average_bitrate_movies =
-            opt_u32("maximum_average_bitrate_movies").or(settings.maximum_average_bitrate_movies);
-        settings.maximum_average_bitrate_episodes = opt_u32("maximum_average_bitrate_episodes")
-            .or(settings.maximum_average_bitrate_episodes);
+    if let Ok(Some(general_settings)) = riven_db::repo::get_setting(&db_pool, "general").await {
+        settings.apply_general_db_override(&general_settings);
     }
 
     let redis_client = redis::Client::open(settings.redis_url.as_str())?;
@@ -264,7 +217,7 @@ async fn main() -> Result<()> {
     // Handle SIGINT and SIGTERM so the FUSE mount is properly unmounted on shutdown.
     #[cfg(unix)]
     {
-        use signal::unix::{signal as unix_signal, SignalKind};
+        use signal::unix::{SignalKind, signal as unix_signal};
         let mut sigterm = unix_signal(SignalKind::terminate())?;
         tokio::select! {
             _ = signal::ctrl_c() => {},

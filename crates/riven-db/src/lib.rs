@@ -3,8 +3,8 @@ pub mod migrations;
 pub mod repo;
 
 use anyhow::Result;
-use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
+use sqlx::postgres::PgPoolOptions;
 
 pub async fn connect(database_url: &str) -> Result<PgPool> {
     let parallelism = std::thread::available_parallelism()

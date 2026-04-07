@@ -28,10 +28,10 @@ fn strip_zero_ranks(json: &mut serde_json::Value) {
     for cat in custom_ranks.values_mut() {
         if let Some(fields) = cat.as_object_mut() {
             for entry in fields.values_mut() {
-                if let Some(obj) = entry.as_object_mut() {
-                    if obj.get("rank").and_then(|v| v.as_i64()) == Some(0) {
-                        obj.remove("rank");
-                    }
+                if let Some(obj) = entry.as_object_mut()
+                    && obj.get("rank").and_then(|v| v.as_i64()) == Some(0)
+                {
+                    obj.remove("rank");
                 }
             }
         }
@@ -446,11 +446,11 @@ impl CoreQuery {
             "unknown_air_date_offset_days": defaults.unknown_air_date_offset_days,
             "filesystem": defaults.filesystem,
         });
-        if let Some(stored) = repo::get_setting(pool, "general").await? {
-            if let (Some(obj), Some(stored_obj)) = (result.as_object_mut(), stored.as_object()) {
-                for (k, v) in stored_obj {
-                    obj.insert(k.clone(), v.clone());
-                }
+        if let Some(stored) = repo::get_setting(pool, "general").await?
+            && let (Some(obj), Some(stored_obj)) = (result.as_object_mut(), stored.as_object())
+        {
+            for (k, v) in stored_obj {
+                obj.insert(k.clone(), v.clone());
             }
         }
         Ok(result)
@@ -528,10 +528,10 @@ impl CoreQuery {
         item: MediaItem,
     ) -> async_graphql::Result<MediaItemFull> {
         let with_metadata = |mut e: FileSystemEntry| {
-            if e.media_metadata.is_none() {
-                if let Some(ref filename) = e.original_filename {
-                    e.media_metadata = Some(derive_media_metadata(filename));
-                }
+            if e.media_metadata.is_none()
+                && let Some(ref filename) = e.original_filename
+            {
+                e.media_metadata = Some(derive_media_metadata(filename));
             }
             e
         };

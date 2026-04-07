@@ -6,7 +6,7 @@ use super::patterns::*;
 /// Extract the human-readable title from a raw torrent name.
 pub(crate) fn extract_title(raw: &str) -> String {
     // Step 1: Clean the raw title - replace dots/underscores with spaces
-    let cleaned = raw.replace('_', " ").replace('.', " ");
+    let cleaned = raw.replace(['_', '.'], " ");
 
     // Step 2: Remove non-English character blocks from the beginning
     let cleaned = RE_NON_ENGLISH_PREFIX.replace(&cleaned, "").to_string();

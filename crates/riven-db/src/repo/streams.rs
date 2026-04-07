@@ -184,6 +184,35 @@ pub async fn get_media_entries(pool: &PgPool, media_item_id: i64) -> Result<Vec<
     .await?)
 }
 
+pub async fn get_media_entry_paths_for_items(
+    pool: &PgPool,
+    root_ids: &[i64],
+) -> Result<Vec<String>> {
+    if root_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let rows: Vec<String> = sqlx::query_scalar(
+        "WITH RECURSIVE media_tree AS (
+             SELECT id FROM media_items WHERE id = ANY($1)
+             UNION
+             SELECT child.id
+             FROM media_items child
+             INNER JOIN media_tree parent ON child.parent_id = parent.id
+         )
+         SELECT fe.path
+         FROM filesystem_entries fe
+         INNER JOIN media_tree mt ON fe.media_item_id = mt.id
+         WHERE fe.entry_type = 'media'
+         ORDER BY fe.path",
+    )
+    .bind(root_ids)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows)
+}
+
 pub async fn get_media_entry_by_path(pool: &PgPool, path: &str) -> Result<Option<FileSystemEntry>> {
     Ok(sqlx::query_as::<_, FileSystemEntry>(
         "SELECT * FROM filesystem_entries WHERE path = $1 AND entry_type = 'media'",

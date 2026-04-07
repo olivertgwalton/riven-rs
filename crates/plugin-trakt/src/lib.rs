@@ -221,10 +221,10 @@ fn ids_to_external(ids: &TraktIds) -> Option<ExternalIds> {
 fn collect_wrapped(items: Vec<WrappedItem>, content: &mut ContentCollection, is_movie: bool) {
     for item in items {
         let inner = item.movie.or(item.show);
-        if let Some(inner) = inner {
-            if let Some(ext) = ids_to_external(&inner.ids) {
-                insert_external_ids(content, ext, is_movie);
-            }
+        if let Some(inner) = inner
+            && let Some(ext) = ids_to_external(&inner.ids)
+        {
+            insert_external_ids(content, ext, is_movie);
         }
     }
 }

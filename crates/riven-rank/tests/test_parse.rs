@@ -1083,19 +1083,21 @@ fn test_extras_ova() {
 #[test]
 fn test_extras_trailer() {
     let data = parse("Movie.Title.2023.Trailer.1080p");
-    assert!(data
-        .extras
-        .iter()
-        .any(|e| e.to_lowercase().contains("trailer")));
+    assert!(
+        data.extras
+            .iter()
+            .any(|e| e.to_lowercase().contains("trailer"))
+    );
 }
 
 #[test]
 fn test_extras_sample() {
     let data = parse("Movie.Title.2023.Sample.1080p");
-    assert!(data
-        .extras
-        .iter()
-        .any(|e| e.to_lowercase().contains("sample")));
+    assert!(
+        data.extras
+            .iter()
+            .any(|e| e.to_lowercase().contains("sample"))
+    );
 }
 
 // =============================================================================
@@ -1587,7 +1589,9 @@ fn test_quality_bluray_remux_bdremux() {
 
 #[test]
 fn test_quality_bluray_remux_uhdremux() {
-    let data = parse("Peter Rabbit 2 [4K UHDremux][2160p][HDR10][DTS-HD 5.1 Castellano-TrueHD 7.1-Ingles+Subs][ES-EN]");
+    let data = parse(
+        "Peter Rabbit 2 [4K UHDremux][2160p][HDR10][DTS-HD 5.1 Castellano-TrueHD 7.1-Ingles+Subs][ES-EN]",
+    );
     assert_eq!(data.quality, Some("BluRay REMUX".to_string()));
 }
 
@@ -1808,7 +1812,9 @@ fn test_hdr_empty_when_absent() {
 
 #[test]
 fn test_hdr_dv_from_dolby_vision_text() {
-    let data = parse("Андор / Andor [01x01-03 из 12] (2022) WEB-DL-HEVC 2160p | 4K | Dolby Vision TV | NewComers, HDRezka Studio");
+    let data = parse(
+        "Андор / Andor [01x01-03 из 12] (2022) WEB-DL-HEVC 2160p | 4K | Dolby Vision TV | NewComers, HDRezka Studio",
+    );
     assert!(data.hdr.contains(&"DV".to_string()));
 }
 
@@ -1920,7 +1926,9 @@ fn test_title_batman_returns() {
 
 #[test]
 fn test_title_game_of_thrones() {
-    let data = parse("Game of Thrones - S02E07 - A Man Without Honor [2160p] [HDR] [5.1, 7.1, 5.1] [ger, eng, eng] [Vio].mkv");
+    let data = parse(
+        "Game of Thrones - S02E07 - A Man Without Honor [2160p] [HDR] [5.1, 7.1, 5.1] [ger, eng, eng] [Vio].mkv",
+    );
     assert_eq!(data.parsed_title, "Game of Thrones");
 }
 
@@ -1932,7 +1940,9 @@ fn test_title_pawn_stars() {
 
 #[test]
 fn test_title_site_prefix_stripped() {
-    let data = parse("www.1TamilMV.world - Ayalaan (2024) Tamil PreDVD - 1080p - x264 - HQ Clean Aud - 2.5GB.mkv");
+    let data = parse(
+        "www.1TamilMV.world - Ayalaan (2024) Tamil PreDVD - 1080p - x264 - HQ Clean Aud - 2.5GB.mkv",
+    );
     assert_eq!(data.parsed_title, "Ayalaan");
 }
 
@@ -2086,7 +2096,9 @@ fn test_crossref_1x08() {
 
 #[test]
 fn test_season_s02e07() {
-    let data = parse("Game of Thrones - S02E07 - A Man Without Honor [2160p] [HDR] [5.1, 7.1, 5.1] [ger, eng, eng] [Vio].mkv");
+    let data = parse(
+        "Game of Thrones - S02E07 - A Man Without Honor [2160p] [HDR] [5.1, 7.1, 5.1] [ger, eng, eng] [Vio].mkv",
+    );
     assert_eq!(data.seasons, vec![2]);
     assert_eq!(data.episodes, vec![7]);
 }
@@ -2322,7 +2334,9 @@ fn test_bit_depth_none() {
 
 #[test]
 fn test_site_detected() {
-    let data = parse("www.1TamilMV.world - Ayalaan (2024) Tamil PreDVD - 1080p - x264 - HQ Clean Aud - 2.5GB.mkv");
+    let data = parse(
+        "www.1TamilMV.world - Ayalaan (2024) Tamil PreDVD - 1080p - x264 - HQ Clean Aud - 2.5GB.mkv",
+    );
     assert_eq!(data.site, Some("1TamilMV.world".to_string()));
 }
 

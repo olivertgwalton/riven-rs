@@ -1,6 +1,6 @@
 use figment::{
-    providers::{Env, Serialized},
     Figment,
+    providers::{Env, Serialized},
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -15,24 +15,13 @@ pub enum FilesystemContentType {
     Show,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct FilesystemFilterRules {
     pub content_types: Vec<FilesystemContentType>,
     pub genres: Vec<String>,
     pub content_ratings: Vec<String>,
     pub is_anime: Option<bool>,
-}
-
-impl Default for FilesystemFilterRules {
-    fn default() -> Self {
-        Self {
-            content_types: Vec::new(),
-            genres: Vec::new(),
-            content_ratings: Vec::new(),
-            is_anime: None,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -55,20 +44,11 @@ impl Default for FilesystemLibraryProfile {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct FilesystemSettings {
     pub mount_path: String,
     pub library_profiles: HashMap<String, FilesystemLibraryProfile>,
-}
-
-impl Default for FilesystemSettings {
-    fn default() -> Self {
-        Self {
-            mount_path: String::new(),
-            library_profiles: HashMap::new(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -151,10 +131,10 @@ impl FilesystemFilterRules {
             return false;
         }
 
-        if let Some(required) = self.is_anime {
-            if metadata.is_anime != required {
-                return false;
-            }
+        if let Some(required) = self.is_anime
+            && metadata.is_anime != required
+        {
+            return false;
         }
 
         true
@@ -239,6 +219,20 @@ pub struct RivenSettings {
     pub vfs_cache_max_size_mb: u64,
 }
 
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+struct GeneralSettingsOverride {
+    filesystem: Option<FilesystemSettings>,
+    dubbed_anime_only: Option<bool>,
+    minimum_average_bitrate_movies: Option<u32>,
+    minimum_average_bitrate_episodes: Option<u32>,
+    maximum_average_bitrate_movies: Option<u32>,
+    maximum_average_bitrate_episodes: Option<u32>,
+    retry_interval_secs: Option<u64>,
+    schedule_offset_minutes: Option<u64>,
+    unknown_air_date_offset_days: Option<u64>,
+}
+
 impl Default for RivenSettings {
     fn default() -> Self {
         Self {
@@ -283,11 +277,61 @@ impl RivenSettings {
             &self.filesystem.mount_path
         }
     }
+
+    pub fn apply_general_db_override(&mut self, value: &serde_json::Value) {
+        let Ok(override_settings) =
+            serde_json::from_value::<GeneralSettingsOverride>(value.clone())
+        else {
+            return;
+        };
+
+        if let Some(mut filesystem) = override_settings.filesystem {
+            if filesystem.mount_path.is_empty() {
+                filesystem.mount_path = self.vfs_mount_path.clone();
+            }
+            self.filesystem = filesystem;
+        }
+
+        if let Some(value) = override_settings.dubbed_anime_only {
+            self.dubbed_anime_only = value;
+        }
+        if let Some(value) = override_settings.minimum_average_bitrate_movies {
+            self.minimum_average_bitrate_movies = Some(value);
+        }
+        if let Some(value) = override_settings.minimum_average_bitrate_episodes {
+            self.minimum_average_bitrate_episodes = Some(value);
+        }
+        if let Some(value) = override_settings.maximum_average_bitrate_movies {
+            self.maximum_average_bitrate_movies = Some(value);
+        }
+        if let Some(value) = override_settings.maximum_average_bitrate_episodes {
+            self.maximum_average_bitrate_episodes = Some(value);
+        }
+        if let Some(value) = override_settings.retry_interval_secs {
+            self.retry_interval_secs = value;
+        }
+        if let Some(value) = override_settings.schedule_offset_minutes {
+            self.schedule_offset_minutes = value;
+        }
+        if let Some(value) = override_settings.unknown_air_date_offset_days {
+            self.unknown_air_date_offset_days = value;
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn plugin_settings(values: &[(&str, &str)]) -> PluginSettings {
+        PluginSettings {
+            prefix: "TEST".to_string(),
+            values: values
+                .iter()
+                .map(|(key, value)| (key.to_string(), value.to_string()))
+                .collect(),
+        }
+    }
 
     #[test]
     fn matching_profiles_support_inclusion_and_exclusion_rules() {
@@ -322,6 +366,136 @@ mod tests {
             settings.matching_profile_keys(&metadata, FilesystemContentType::Movie),
             LibraryProfileMembership(vec!["kids".to_string()])
         );
+    }
+
+    #[test]
+    fn apply_general_db_override_updates_supported_fields() {
+        let mut settings = RivenSettings {
+            vfs_mount_path: "/vfs".to_string(),
+            minimum_average_bitrate_movies: Some(10),
+            retry_interval_secs: 60,
+            ..RivenSettings::default()
+        };
+
+        settings.apply_general_db_override(&serde_json::json!({
+            "filesystem": {
+                "mount_path": "",
+                "library_profiles": {
+                    "kids": {
+                        "name": "Kids",
+                        "library_path": "/kids",
+                        "enabled": true,
+                        "filter_rules": {}
+                    }
+                }
+            },
+            "dubbed_anime_only": true,
+            "minimum_average_bitrate_movies": 15,
+            "maximum_average_bitrate_episodes": 20,
+            "retry_interval_secs": 3600,
+            "schedule_offset_minutes": 45,
+            "unknown_air_date_offset_days": 3
+        }));
+
+        assert_eq!(settings.filesystem.mount_path, "/vfs");
+        assert!(settings.filesystem.library_profiles.contains_key("kids"));
+        assert!(settings.dubbed_anime_only);
+        assert_eq!(settings.minimum_average_bitrate_movies, Some(15));
+        assert_eq!(settings.maximum_average_bitrate_episodes, Some(20));
+        assert_eq!(settings.retry_interval_secs, 3600);
+        assert_eq!(settings.schedule_offset_minutes, 45);
+        assert_eq!(settings.unknown_air_date_offset_days, 3);
+    }
+
+    #[test]
+    fn apply_general_db_override_ignores_invalid_payloads() {
+        let original = RivenSettings::default();
+        let mut settings = original.clone();
+
+        settings.apply_general_db_override(&serde_json::json!("invalid"));
+
+        assert_eq!(settings.database_url, original.database_url);
+        assert_eq!(settings.filesystem, original.filesystem);
+        assert_eq!(settings.retry_interval_secs, original.retry_interval_secs);
+    }
+
+    #[test]
+    fn plugin_settings_getters_normalize_keys_and_trim_values() {
+        let settings = plugin_settings(&[
+            ("api_key", "  secret-token  "),
+            ("empty_value", "   "),
+            ("feature_enabled", "YeS"),
+            ("timeout_secs", "45"),
+        ]);
+
+        assert_eq!(settings.get("API_KEY"), Some("secret-token"));
+        assert_eq!(settings.get("empty_value"), None);
+        assert!(settings.get_bool("feature_enabled"));
+        assert_eq!(settings.get_parsed::<u32>("timeout_secs"), Some(45));
+        assert_eq!(settings.get_or("missing", "fallback"), "fallback");
+        assert_eq!(settings.get_parsed_or("missing", 12_u32), 12);
+        assert_eq!(settings.prefix(), "TEST");
+        assert!(settings.has("api_key"));
+    }
+
+    #[test]
+    fn plugin_settings_get_list_supports_json_and_csv() {
+        let settings = plugin_settings(&[
+            ("json_values", r#"["one","two"]"#),
+            ("csv_values", "alpha, beta ,gamma"),
+        ]);
+
+        assert_eq!(
+            settings.get_list("json_values"),
+            vec!["one".to_string(), "two".to_string()]
+        );
+        assert_eq!(
+            settings.get_list("csv_values"),
+            vec!["alpha".to_string(), "beta".to_string(), "gamma".to_string()]
+        );
+    }
+
+    #[test]
+    fn plugin_settings_merge_db_override_overrides_and_serializes_supported_values() {
+        let mut settings = plugin_settings(&[("api_key", "env-value"), ("keep", "original")]);
+
+        settings.merge_db_override(&serde_json::json!({
+            "api_key": "db-value",
+            "enabled": true,
+            "retries": 3,
+            "providers": ["a", "b"],
+            "ignored_empty": "",
+            "ignored_null": null
+        }));
+
+        assert_eq!(settings.get("api_key"), Some("db-value"));
+        assert!(settings.get_bool("enabled"));
+        assert_eq!(settings.get_parsed::<u32>("retries"), Some(3));
+        assert_eq!(
+            settings.get_list("providers"),
+            vec!["a".to_string(), "b".to_string()]
+        );
+        assert_eq!(settings.get("keep"), Some("original"));
+        assert_eq!(
+            settings.to_json(),
+            serde_json::json!({
+                "api_key": "db-value",
+                "enabled": "true",
+                "keep": "original",
+                "providers": "[\"a\",\"b\"]",
+                "retries": "3"
+            })
+        );
+    }
+
+    #[test]
+    fn plugin_settings_reports_empty_only_when_no_values_exist() {
+        let empty = plugin_settings(&[]);
+        let whitespace_only = plugin_settings(&[("blank", "   ")]);
+
+        assert!(empty.is_empty());
+        assert!(!whitespace_only.has("blank"));
+        assert!(!whitespace_only.is_empty());
     }
 }
 

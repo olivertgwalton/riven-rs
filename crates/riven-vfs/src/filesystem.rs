@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::ffi::OsStr;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use dashmap::DashMap;
@@ -18,12 +18,12 @@ use riven_core::settings::{FilesystemSettings, LibraryProfileMembership};
 use riven_db::entities::FileSystemEntry;
 use riven_db::repo;
 
+use crate::LinkRequest;
 use crate::cache::RangeCache;
 use crate::link::resolve_stream_url;
 use crate::media_stream::{MediaStream, ReadOutcome};
 use crate::path_info::{CanonicalPath, PathTarget, VfsLibraryLayout};
-use crate::readdir::{populate_entries, DirEntry};
-use crate::LinkRequest;
+use crate::readdir::{DirEntry, populate_entries};
 
 const TTL: Duration = Duration::from_secs(300);
 const READDIR_CACHE_TTL: Duration = Duration::from_secs(30);
@@ -49,11 +49,7 @@ fn make_attr(ino: u64, kind: FileType, size: u64, mtime: SystemTime) -> FileAttr
     FileAttr {
         ino,
         size,
-        blocks: if is_dir {
-            0
-        } else {
-            (size + BLOCK_SIZE - 1) / BLOCK_SIZE
-        },
+        blocks: if is_dir { 0 } else { size.div_ceil(BLOCK_SIZE) },
         atime: mtime,
         mtime,
         ctime: mtime,
@@ -169,10 +165,10 @@ impl RivenFs {
     }
 
     fn get_entry_cached(&self, path: &str) -> Option<FileSystemEntry> {
-        if let Some(cached) = self.entry_cache.get(path) {
-            if cached.1.elapsed() < TTL {
-                return cached.0.clone();
-            }
+        if let Some(cached) = self.entry_cache.get(path)
+            && cached.1.elapsed() < TTL
+        {
+            return cached.0.clone();
         }
         let result = match self.layout.parse(path) {
             PathTarget::Canonical {
@@ -223,18 +219,18 @@ impl RivenFs {
 
     fn get_stream_url_for_open(&self, path: &str, entry: &FileSystemEntry) -> Option<String> {
         // Direct debrid URLs expire, so refresh them when playback starts.
-        if entry.download_url.is_some() {
-            if let Some(url) = resolve_stream_url(
+        if entry.download_url.is_some()
+            && let Some(url) = resolve_stream_url(
                 entry.download_url.as_deref(),
                 &self.link_request_tx,
                 &self.db_pool,
                 entry.id,
                 &self.runtime,
-            ) {
-                self.stream_url_cache.insert(entry.id, url.clone());
-                self.entry_cache.remove(path);
-                return Some(url);
-            }
+            )
+        {
+            self.stream_url_cache.insert(entry.id, url.clone());
+            self.entry_cache.remove(path);
+            return Some(url);
         }
 
         self.get_stream_url_cached(path, entry)
@@ -331,7 +327,7 @@ impl Filesystem for RivenFs {
                     PathTarget::Canonical {
                         path: CanonicalPath::MovieFile { .. } | CanonicalPath::EpisodeFile { .. },
                         ..
-                    } => match self.get_entry_cached(&*path) {
+                    } => match self.get_entry_cached(&path) {
                         Some(entry) => reply.attr(
                             &TTL,
                             &file_attr(ino, entry.file_size as u64, entry_mtime(&entry)),
@@ -402,11 +398,11 @@ impl Filesystem for RivenFs {
         if self.debug_logging {
             tracing::debug!(path = %path, "open");
         }
-        let Some(entry) = self.get_entry_cached(&*path) else {
+        let Some(entry) = self.get_entry_cached(&path) else {
             reply.error(libc::ENOENT);
             return;
         };
-        let Some(stream_url) = self.get_stream_url_for_open(&*path, &entry) else {
+        let Some(stream_url) = self.get_stream_url_for_open(&path, &entry) else {
             reply.error(if entry.download_url.is_some() {
                 libc::EIO
             } else {

@@ -10,6 +10,10 @@ impl ChunkRange {
     pub const fn len(self) -> usize {
         (self.end - self.start + 1) as usize
     }
+
+    pub const fn is_empty(self) -> bool {
+        self.end < self.start
+    }
 }
 
 /// Pre-calculated file layout — only header and footer boundaries.
@@ -86,5 +90,50 @@ impl FileLayout {
         }
 
         chunks
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ChunkRange, FileLayout};
+    use riven_core::config::vfs::HEADER_SIZE;
+
+    #[test]
+    fn chunk_range_reports_length_and_empty_state() {
+        let range = ChunkRange { start: 10, end: 19 };
+
+        assert_eq!(range.len(), 10);
+        assert!(!range.is_empty());
+        assert!(ChunkRange { start: 5, end: 4 }.is_empty());
+    }
+
+    #[test]
+    fn file_layout_calculates_header_and_footer_chunks() {
+        let file_size = 10_000_000;
+        let layout = FileLayout::new(file_size);
+
+        assert_eq!(layout.header_chunk().start, 0);
+        assert_eq!(layout.header_chunk().end, HEADER_SIZE - 1);
+        assert_eq!(layout.footer_chunk().end, layout.file_size - 1);
+        assert_eq!(layout.footer_chunk().start, layout.footer_start);
+    }
+
+    #[test]
+    fn request_chunks_includes_header_body_and_footer_without_duplicates() {
+        let file_size = 10_000_000;
+        let layout = FileLayout::new(file_size);
+
+        let chunks = layout.request_chunks(0, file_size - 1);
+
+        assert_eq!(chunks.first().copied(), Some(layout.header_chunk()));
+        assert_eq!(chunks.last().copied(), Some(layout.footer_chunk()));
+        assert!(chunks.len() >= 3);
+    }
+
+    #[test]
+    fn request_chunks_returns_empty_for_empty_files() {
+        let layout = FileLayout::new(0);
+
+        assert!(layout.request_chunks(0, 0).is_empty());
     }
 }

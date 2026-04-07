@@ -5,7 +5,7 @@ use std::collections::HashMap;
 
 use thiserror::Error;
 
-use crate::parse::{parse, ParsedData};
+use crate::parse::{ParsedData, parse};
 use crate::settings::RankSettings;
 
 pub use fetch::check_fetch;

@@ -18,10 +18,10 @@ async fn compute_leaf_state(
     item: &MediaItem,
     allow_media_entries: bool,
 ) -> Result<MediaItemState> {
-    if let Some(aired) = item.aired_at {
-        if aired > chrono::Utc::now().date_naive() {
-            return Ok(MediaItemState::Unreleased);
-        }
+    if let Some(aired) = item.aired_at
+        && aired > chrono::Utc::now().date_naive()
+    {
+        return Ok(MediaItemState::Unreleased);
     }
 
     if let Some(state) = determine_fixed_state(item) {
@@ -167,7 +167,7 @@ fn aggregate_states(item: &MediaItem, states: &[MediaItemState]) -> Option<Media
         return Some(MediaItemState::PartiallyCompleted);
     }
 
-    if states.iter().any(|state| *state == MediaItemState::Scraped) {
+    if states.contains(&MediaItemState::Scraped) {
         return Some(MediaItemState::Scraped);
     }
 
@@ -191,22 +191,21 @@ pub async fn refresh_state_cascade(pool: &PgPool, item: &MediaItem) -> Result<()
 /// Cascade state updates from an item up through its parents.
 pub async fn cascade_state_update(pool: &PgPool, item: &MediaItem) -> Result<()> {
     if item.item_type == MediaItemType::Episode {
-        if let Some(season_id) = item.parent_id {
-            if let Some(season) = get_media_item(pool, season_id).await? {
-                refresh_state(pool, &season).await?;
-                if let Some(show_id) = season.parent_id {
-                    if let Some(show) = get_media_item(pool, show_id).await? {
-                        refresh_state(pool, &show).await?;
-                    }
-                }
-            }
-        }
-    } else if item.item_type == MediaItemType::Season {
-        if let Some(show_id) = item.parent_id {
-            if let Some(show) = get_media_item(pool, show_id).await? {
+        if let Some(season_id) = item.parent_id
+            && let Some(season) = get_media_item(pool, season_id).await?
+        {
+            refresh_state(pool, &season).await?;
+            if let Some(show_id) = season.parent_id
+                && let Some(show) = get_media_item(pool, show_id).await?
+            {
                 refresh_state(pool, &show).await?;
             }
         }
+    } else if item.item_type == MediaItemType::Season
+        && let Some(show_id) = item.parent_id
+        && let Some(show) = get_media_item(pool, show_id).await?
+    {
+        refresh_state(pool, &show).await?;
     }
     Ok(())
 }

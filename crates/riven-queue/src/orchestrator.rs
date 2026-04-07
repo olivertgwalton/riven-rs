@@ -5,6 +5,7 @@ use riven_core::types::*;
 use riven_db::entities::{ItemRequest, MediaItem};
 use riven_db::repo::{self, ItemRequestUpsertAction};
 
+use crate::context::{load_media_item_or_log, load_show_context};
 use crate::{IndexJob, JobQueue, ScrapeJob};
 
 pub struct RequestedItemOutcome {
@@ -346,9 +347,10 @@ impl<'a> LibraryOrchestrator<'a> {
     }
 
     pub async fn fan_out_download_failure(&self, id: i64) {
-        let item = match repo::get_media_item(&self.queue.db_pool, id).await {
-            Ok(Some(item)) => item,
-            _ => return,
+        let Some(item) =
+            load_media_item_or_log(&self.queue.db_pool, id, "fan out download failure").await
+        else {
+            return;
         };
 
         match item.item_type {
@@ -383,35 +385,8 @@ impl<'a> LibraryOrchestrator<'a> {
     }
 
     async fn show_context(&self, item: &MediaItem) -> (String, Option<String>) {
-        match item.item_type {
-            MediaItemType::Show => (item.title.clone(), item.imdb_id.clone()),
-            MediaItemType::Season => {
-                if let Some(show_id) = item.parent_id {
-                    if let Ok(Some(show)) = repo::get_media_item(&self.queue.db_pool, show_id).await
-                    {
-                        return (show.title, show.imdb_id);
-                    }
-                }
-                (item.title.clone(), item.imdb_id.clone())
-            }
-            MediaItemType::Episode => {
-                if let Some(season_id) = item.parent_id {
-                    if let Ok(Some(season)) =
-                        repo::get_media_item(&self.queue.db_pool, season_id).await
-                    {
-                        if let Some(show_id) = season.parent_id {
-                            if let Ok(Some(show)) =
-                                repo::get_media_item(&self.queue.db_pool, show_id).await
-                            {
-                                return (show.title, show.imdb_id);
-                            }
-                        }
-                    }
-                }
-                (item.title.clone(), item.imdb_id.clone())
-            }
-            MediaItemType::Movie => (item.title.clone(), item.imdb_id.clone()),
-        }
+        let ctx = load_show_context(&self.queue.db_pool, item).await;
+        (ctx.title, ctx.imdb_id)
     }
 
     async fn schedule_reindex(&self, item: &MediaItem) {

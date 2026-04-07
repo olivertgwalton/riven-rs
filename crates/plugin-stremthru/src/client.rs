@@ -5,8 +5,8 @@ use riven_core::types::{
 };
 
 use crate::models::{
-    parse_torrent_status, StremthruCacheCheck, StremthruLink, StremthruResponse, StremthruTorrent,
-    StremthruUser,
+    StremthruCacheCheck, StremthruLink, StremthruResponse, StremthruTorrent, StremthruUser,
+    parse_torrent_status,
 };
 
 pub const CACHE_CHECK_TTL_SECS: u64 = 60 * 60 * 24;
@@ -40,7 +40,7 @@ pub async fn add_torrent(
     let resp: StremthruResponse<StremthruTorrent> = serde_json::from_str(&text)
         .map_err(|error| anyhow::anyhow!("invalid add-torrent response: {error}; body={text}"))?;
     let Some(data) = resp.data else {
-        anyhow::bail!("store returned no add-torrent data");
+        anyhow::bail!("{}", describe_empty_add_torrent_response(&text));
     };
 
     if data.status != "downloaded" {
@@ -55,6 +55,33 @@ pub async fn add_torrent(
     }
 
     Ok(data)
+}
+
+fn describe_empty_add_torrent_response(body: &str) -> String {
+    match serde_json::from_str::<serde_json::Value>(body) {
+        Ok(value) => {
+            let code = value
+                .pointer("/error/code")
+                .and_then(serde_json::Value::as_str);
+            let message = value
+                .pointer("/error/message")
+                .and_then(serde_json::Value::as_str);
+
+            match (code, message) {
+                (Some(code), Some(message)) => {
+                    format!("store returned no add-torrent data: {code} - {message}")
+                }
+                (Some(code), None) => {
+                    format!("store returned no add-torrent data: {code}; body={body}")
+                }
+                (None, Some(message)) => {
+                    format!("store returned no add-torrent data: {message}")
+                }
+                (None, None) => format!("store returned no add-torrent data; body={body}"),
+            }
+        }
+        Err(_) => format!("store returned no add-torrent data; body={body}"),
+    }
 }
 
 pub async fn remove_torrent(

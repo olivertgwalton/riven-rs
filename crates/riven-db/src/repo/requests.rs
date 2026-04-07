@@ -262,10 +262,7 @@ pub async fn derive_item_request_state_for_request(
                     return Ok(ItemRequestState::Unreleased);
                 }
 
-                if season_states
-                    .iter()
-                    .any(|state| *state == MediaItemState::Failed)
-                {
+                if season_states.contains(&MediaItemState::Failed) {
                     return Ok(ItemRequestState::Failed);
                 }
 

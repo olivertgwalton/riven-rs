@@ -27,10 +27,12 @@ impl Plugin for TorrentioPlugin {
 
     fn settings_schema(&self) -> Vec<riven_core::plugin::SettingField> {
         use riven_core::plugin::SettingField;
-        vec![SettingField::new("filter", "Filter", "text")
-            .with_default("sort=qualitysize|qualityfilter=threed,480p,scr,cam")
-            .with_placeholder("sort=qualitysize|qualityfilter=...")
-            .with_description("Torrentio filter/sort query string.")]
+        vec![
+            SettingField::new("filter", "Filter", "text")
+                .with_default("sort=qualitysize|qualityfilter=threed,480p,scr,cam")
+                .with_placeholder("sort=qualitysize|qualityfilter=...")
+                .with_description("Torrentio filter/sort query string."),
+        ]
     }
 
     async fn handle_event(

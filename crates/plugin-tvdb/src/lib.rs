@@ -23,10 +23,10 @@ impl TvdbPlugin {
     async fn get_token(&self, client: &reqwest::Client, api_key: &str) -> anyhow::Result<String> {
         {
             let guard = self.token.lock();
-            if let Some((ref token, ref created)) = *guard {
-                if created.elapsed() < TOKEN_EXPIRY {
-                    return Ok(token.clone());
-                }
+            if let Some((ref token, ref created)) = *guard
+                && created.elapsed() < TOKEN_EXPIRY
+            {
+                return Ok(token.clone());
             }
         }
 
@@ -191,7 +191,7 @@ async fn fetch_series(
     let aliases = series.aliases.as_ref().map(|aliases| {
         let mut map: HashMap<String, Vec<String>> = HashMap::new();
         for alias in aliases {
-            if let (Some(ref lang), Some(ref name)) = (&alias.language, &alias.name) {
+            if let (Some(lang), Some(name)) = (&alias.language, &alias.name) {
                 map.entry(lang.clone()).or_default().push(name.clone());
             }
         }

@@ -57,7 +57,7 @@ async fn load_item_state_by_tmdb(
         return Ok(None);
     };
 
-    CoreQuery::default()
+    CoreQuery
         .media_item_state_tree_inner(pool, item)
         .await
         .map(Some)
@@ -71,7 +71,7 @@ async fn load_item_state_by_tvdb(
         return Ok(None);
     };
 
-    CoreQuery::default()
+    CoreQuery
         .media_item_state_tree_inner(pool, item)
         .await
         .map(Some)
@@ -158,12 +158,7 @@ impl SubscriptionRoot {
                         continue;
                     };
 
-                    if wait_for_relevant_event(&mut rx, &pool, item)
-                        .await
-                        .is_none()
-                    {
-                        return None;
-                    }
+                    wait_for_relevant_event(&mut rx, &pool, item).await?;
 
                     let next = match load_item_state_by_tmdb(&pool, &tmdb_id).await {
                         Ok(value) => value,
@@ -204,12 +199,7 @@ impl SubscriptionRoot {
                         continue;
                     };
 
-                    if wait_for_relevant_event(&mut rx, &pool, item)
-                        .await
-                        .is_none()
-                    {
-                        return None;
-                    }
+                    wait_for_relevant_event(&mut rx, &pool, item).await?;
 
                     let next = match load_item_state_by_tvdb(&pool, &tvdb_id).await {
                         Ok(value) => value,

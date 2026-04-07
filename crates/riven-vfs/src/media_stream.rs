@@ -1,8 +1,8 @@
 use bytes::{Bytes, BytesMut};
 
-use crate::cache::{cache_get, cache_put, RangeCache};
+use crate::cache::{RangeCache, cache_get, cache_put};
 use crate::chunks::{ChunkRange, FileLayout};
-use crate::detect::{detect_read_type, ReadType};
+use crate::detect::{ReadType, detect_read_type};
 use crate::prefetch::Prefetch;
 use crate::stream::fetch_range;
 

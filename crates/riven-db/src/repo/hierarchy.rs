@@ -27,6 +27,45 @@ pub async fn list_episodes(pool: &PgPool, season_id: i64) -> Result<Vec<MediaIte
     )
 }
 
+pub async fn get_media_item_hierarchy(
+    pool: &PgPool,
+    id: i64,
+) -> Result<Option<MediaItemHierarchy>> {
+    Ok(sqlx::query_as::<_, MediaItemHierarchy>(
+        r#"SELECT
+               item.*,
+               season.id AS resolved_season_id,
+               season.season_number AS resolved_season_number,
+               show_item.id AS resolved_show_id,
+               show_item.title AS resolved_show_title,
+               show_item.imdb_id AS resolved_show_imdb_id,
+               show_item.tvdb_id AS resolved_show_tvdb_id,
+               show_item.year AS resolved_show_year,
+               show_item.aliases AS resolved_show_aliases,
+               show_item.genres AS resolved_show_genres,
+               show_item.content_rating AS resolved_show_content_rating,
+               show_item.language AS resolved_show_language,
+               show_item.country AS resolved_show_country,
+               show_item.is_anime AS resolved_show_is_anime
+           FROM media_items item
+           LEFT JOIN media_items season
+             ON (
+                    (item.item_type = 'episode' AND item.parent_id = season.id AND season.item_type = 'season')
+                 OR (item.item_type = 'season' AND item.id = season.id)
+                )
+           LEFT JOIN media_items show_item
+             ON (
+                    (item.item_type = 'show' AND item.id = show_item.id)
+                 OR (item.item_type = 'season' AND item.parent_id = show_item.id AND show_item.item_type = 'show')
+                 OR (item.item_type = 'episode' AND season.parent_id = show_item.id AND show_item.item_type = 'show')
+                )
+           WHERE item.id = $1"#,
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await?)
+}
+
 pub async fn create_season(
     pool: &PgPool,
     show_id: i64,
@@ -326,25 +365,25 @@ fn apply_item_filters(
     search: Option<&str>,
     states: Option<&[MediaItemState]>,
 ) {
-    if let Some(t) = types {
-        if !t.is_empty() {
-            qb.push(" AND item_type = ANY(");
-            qb.push_bind(t.to_vec());
-            qb.push(")");
-        }
+    if let Some(t) = types
+        && !t.is_empty()
+    {
+        qb.push(" AND item_type = ANY(");
+        qb.push_bind(t.to_vec());
+        qb.push(")");
     }
-    if let Some(s) = states {
-        if !s.is_empty() {
-            qb.push(" AND state = ANY(");
-            qb.push_bind(s.to_vec());
-            qb.push(")");
-        }
+    if let Some(s) = states
+        && !s.is_empty()
+    {
+        qb.push(" AND state = ANY(");
+        qb.push_bind(s.to_vec());
+        qb.push(")");
     }
-    if let Some(q) = search {
-        if !q.is_empty() {
-            qb.push(" AND LOWER(title) LIKE ");
-            qb.push_bind(format!("%{}%", q.to_lowercase()));
-        }
+    if let Some(q) = search
+        && !q.is_empty()
+    {
+        qb.push(" AND LOWER(title) LIKE ");
+        qb.push_bind(format!("%{}%", q.to_lowercase()));
     }
 }
 

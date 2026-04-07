@@ -7,13 +7,13 @@ use riven_core::plugin::PluginRegistry;
 use riven_core::types::*;
 use riven_db::entities::MediaItem;
 use riven_db::repo;
+use riven_queue::JobQueue;
 use riven_queue::discovery::{
-    load_active_profiles, load_dubbed_anime_only, load_fallback_rank_settings, rank_streams,
-    ParseContext,
+    ParseContext, load_active_profiles, load_dubbed_anime_only, load_fallback_rank_settings,
+    rank_streams,
 };
 use riven_queue::indexing::apply_indexed_media_item;
 use riven_queue::orchestrator::LibraryOrchestrator;
-use riven_queue::JobQueue;
 
 use super::types::DiscoveredStream;
 

@@ -45,12 +45,11 @@ fn validate(ctx: &ParseContext, parsed: &riven_rank::ParsedData) -> Option<Strin
         return Some("non-dubbed anime torrent (dubbed_anime_only=true)".into());
     }
 
-    if !parsed.anime {
-        if let (Some(pc), Some(ic)) = (parsed.country.as_deref(), ctx.item_country.as_deref()) {
-            if !pc.eq_ignore_ascii_case(ic) {
-                return Some(format!("incorrect country: {pc} vs {ic}"));
-            }
-        }
+    if !parsed.anime
+        && let (Some(pc), Some(ic)) = (parsed.country.as_deref(), ctx.item_country.as_deref())
+        && !pc.eq_ignore_ascii_case(ic)
+    {
+        return Some(format!("incorrect country: {pc} vs {ic}"));
     }
 
     if let Some(py) = parsed.year {
@@ -206,14 +205,17 @@ pub fn rank_streams(
 
             let (parsed_value, rank) = match best {
                 Some(ranked) => {
-                    let bitrate = ranked.data.bitrate.as_deref().unwrap_or("unknown");
-                    tracing::info!(
-                        info_hash,
-                        rank = ranked.rank,
-                        bitrate,
-                        title,
-                        "stream ranked"
-                    );
+                    if let Some(bitrate) = ranked.data.bitrate.as_deref() {
+                        tracing::info!(
+                            info_hash,
+                            rank = ranked.rank,
+                            bitrate,
+                            title,
+                            "stream ranked"
+                        );
+                    } else {
+                        tracing::info!(info_hash, rank = ranked.rank, title, "stream ranked");
+                    }
                     (serde_json::to_value(&ranked.data).ok(), Some(ranked.rank))
                 }
                 None => {

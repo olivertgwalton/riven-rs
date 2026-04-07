@@ -5,22 +5,22 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use async_graphql::http::{
-    create_multipart_mixed_stream, is_accept_multipart_mixed, GraphiQLSource,
+    GraphiQLSource, create_multipart_mixed_stream, is_accept_multipart_mixed,
 };
 use async_graphql_axum::{
-    rejection::GraphQLRejection, GraphQLBatchRequest, GraphQLRequest, GraphQLResponse,
+    GraphQLBatchRequest, GraphQLRequest, GraphQLResponse, rejection::GraphQLRejection,
 };
 use axum::{
+    Router,
     body::Body,
     extract::FromRequest,
     extract::State,
     http::{HeaderMap, Request, StatusCode},
     response::{
-        sse::{Event, KeepAlive, Sse},
         Html, IntoResponse, Response,
+        sse::{Event, KeepAlive, Sse},
     },
     routing::{get, post},
-    Router,
 };
 use futures::StreamExt;
 use tokio::sync::broadcast;
@@ -41,20 +41,20 @@ async fn board_assets_middleware(
     next: axum::middleware::Next,
 ) -> Response {
     let path = uri.path();
-    if path.contains('.') {
-        if let Some(file) = ServeUI::get_file(path) {
-            let bytes = file.contents().to_vec();
-            let content_type = ServeUI::content_type(path);
-            let mut builder = axum::http::Response::builder()
-                .status(200)
-                .header("content-type", content_type);
-            if let Some(cc) = ServeUI::cache_control(path) {
-                builder = builder.header("cache-control", cc);
-            }
-            return builder
-                .body(axum::body::Body::from(bytes))
-                .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
+    if path.contains('.')
+        && let Some(file) = ServeUI::get_file(path)
+    {
+        let bytes = file.contents().to_vec();
+        let content_type = ServeUI::content_type(path);
+        let mut builder = axum::http::Response::builder()
+            .status(200)
+            .header("content-type", content_type);
+        if let Some(cc) = ServeUI::cache_control(path) {
+            builder = builder.header("cache-control", cc);
         }
+        return builder
+            .body(axum::body::Body::from(bytes))
+            .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
     }
     next.run(req).await
 }
@@ -62,7 +62,7 @@ use plugin_logs::LogControl;
 use riven_core::plugin::PluginRegistry;
 use riven_queue::JobQueue;
 
-use crate::schema::{build_schema, AppSchema};
+use crate::schema::{AppSchema, build_schema};
 
 #[derive(Clone)]
 pub struct ApiState {

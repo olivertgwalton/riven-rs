@@ -5,8 +5,9 @@ use riven_core::types::{CacheCheckFile, DownloadFile, MediaItemType};
 use riven_db::entities::MediaItem;
 use riven_db::repo;
 
-use crate::orchestrator::LibraryOrchestrator;
 use crate::JobQueue;
+use crate::context::load_media_item_or_download_error;
+use crate::orchestrator::LibraryOrchestrator;
 
 /// Log a bitrate failure, blacklist the stream, and send a PartialSuccess event.
 pub async fn handle_bitrate_failure(
@@ -38,30 +39,7 @@ pub async fn handle_bitrate_failure(
 
 /// Load a media item by id, or send a `MediaItemDownloadError` event and return `None`.
 pub async fn load_item_or_err(id: i64, queue: &JobQueue, error_msg: &str) -> Option<MediaItem> {
-    match repo::get_media_item(&queue.db_pool, id).await {
-        Ok(Some(item)) => Some(item),
-        Ok(None) => {
-            tracing::error!(id, "{error_msg}");
-            queue
-                .notify(RivenEvent::MediaItemDownloadError {
-                    id,
-                    title: String::new(),
-                    error: error_msg.into(),
-                })
-                .await;
-            None
-        }
-        Err(e) => {
-            queue
-                .notify(RivenEvent::MediaItemDownloadError {
-                    id,
-                    title: String::new(),
-                    error: e.to_string(),
-                })
-                .await;
-            None
-        }
-    }
+    load_media_item_or_download_error(queue, id, error_msg).await
 }
 
 const VALID_VIDEO_EXTENSIONS: &[&str] = &["mp4", "mkv", "avi", "mov", "wmv", "flv", "webm"];
@@ -120,10 +98,10 @@ pub fn matches_episode(
     abs: Option<i32>,
 ) -> bool {
     let season_match = parsed.seasons.contains(&season)
-        && (parsed.episodes.contains(&ep) || abs.map_or(false, |a| parsed.episodes.contains(&a)));
+        && (parsed.episodes.contains(&ep) || abs.is_some_and(|a| parsed.episodes.contains(&a)));
 
     let abs_only_match =
-        parsed.seasons.is_empty() && abs.map_or(false, |a| parsed.episodes.contains(&a));
+        parsed.seasons.is_empty() && abs.is_some_and(|a| parsed.episodes.contains(&a));
 
     season_match || abs_only_match
 }
@@ -163,7 +141,7 @@ pub fn select_episode_files<'a>(
             if file.file_size > entry.file_size {
                 *entry = file;
             }
-        } else if largest.map_or(true, |f| file.file_size > f.file_size) {
+        } else if largest.is_none_or(|f| file.file_size > f.file_size) {
             largest = Some(file);
         }
     }

@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use riven_core::events::{EventType, HookResponse, RivenEvent};
-use riven_core::plugin::{validate_api_key, ContentCollection, Plugin, PluginContext};
+use riven_core::plugin::{ContentCollection, Plugin, PluginContext, validate_api_key};
 use riven_core::register_plugin;
 use riven_core::settings::PluginSettings;
 use riven_core::types::*;
@@ -92,6 +92,7 @@ impl Plugin for SeerrPlugin {
 
             RivenEvent::MediaItemsDeleted {
                 external_request_ids,
+                ..
             } => {
                 for rid in external_request_ids {
                     let del_url = format!("{base_url}/api/v1/request/{rid}");
@@ -156,39 +157,39 @@ async fn fetch_content(
 
             match request.media_type.as_deref() {
                 Some("movie") => {
-                    if let Some(ref media) = request.media {
-                        if let Some(tmdb_id) = media.tmdb_id {
-                            content.insert_movie(ExternalIds {
-                                tmdb_id: Some(tmdb_id.to_string()),
-                                external_request_id: Some(request.id.to_string()),
-                                requested_by: requested_by.clone(),
-                                ..Default::default()
-                            });
-                        }
+                    if let Some(ref media) = request.media
+                        && let Some(tmdb_id) = media.tmdb_id
+                    {
+                        content.insert_movie(ExternalIds {
+                            tmdb_id: Some(tmdb_id.to_string()),
+                            external_request_id: Some(request.id.to_string()),
+                            requested_by: requested_by.clone(),
+                            ..Default::default()
+                        });
                     }
                 }
                 Some("tv") => {
-                    if let Some(ref media) = request.media {
-                        if let Some(tvdb_id) = media.tvdb_id {
-                            let seasons: Vec<i32> = request
-                                .seasons
-                                .iter()
-                                .flatten()
-                                .filter_map(|s| s.season_number)
-                                .collect();
+                    if let Some(ref media) = request.media
+                        && let Some(tvdb_id) = media.tvdb_id
+                    {
+                        let seasons: Vec<i32> = request
+                            .seasons
+                            .iter()
+                            .flatten()
+                            .filter_map(|s| s.season_number)
+                            .collect();
 
-                            content.insert_show(ExternalIds {
-                                tvdb_id: Some(tvdb_id.to_string()),
-                                external_request_id: Some(request.id.to_string()),
-                                requested_by: requested_by.clone(),
-                                requested_seasons: if seasons.is_empty() {
-                                    None
-                                } else {
-                                    Some(seasons)
-                                },
-                                ..Default::default()
-                            });
-                        }
+                        content.insert_show(ExternalIds {
+                            tvdb_id: Some(tvdb_id.to_string()),
+                            external_request_id: Some(request.id.to_string()),
+                            requested_by: requested_by.clone(),
+                            requested_seasons: if seasons.is_empty() {
+                                None
+                            } else {
+                                Some(seasons)
+                            },
+                            ..Default::default()
+                        });
                     }
                 }
                 _ => {}

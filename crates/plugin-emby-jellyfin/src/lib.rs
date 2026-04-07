@@ -28,7 +28,7 @@ struct PathUpdate<'a> {
     #[serde(rename = "Path")]
     path: &'a str,
     #[serde(rename = "UpdateType")]
-    update_type: &'static str,
+    update_type: &'a str,
 }
 
 /// Notify a Jellyfin/Emby server that the given VFS paths were created.
@@ -38,13 +38,14 @@ pub(crate) async fn notify_paths(
     base_url: &str,
     api_key: &str,
     paths: &[String],
+    update_type: &str,
     plugin: &'static str,
 ) -> anyhow::Result<()> {
     let updates = paths
         .iter()
         .map(|p| PathUpdate {
             path: p,
-            update_type: "Created",
+            update_type,
         })
         .collect();
 
@@ -101,30 +102,47 @@ async fn notify_media_server(
     event: &RivenEvent,
     ctx: &PluginContext,
 ) -> anyhow::Result<HookResponse> {
-    let RivenEvent::MediaItemDownloadSuccess { id, title, .. } = event else {
-        return Ok(HookResponse::Empty);
-    };
-
     let url = ctx
         .require_setting("url")?
         .trim_end_matches('/')
         .to_string();
     let api_key = ctx.require_setting("apikey")?;
     let library_path = ctx.settings.get_or("librarypath", "/mount");
-    let entries = repo::get_media_entries(&ctx.db_pool, *id).await?;
-    if entries.is_empty() {
-        tracing::warn!(id, title, "{plugin}: no filesystem entries");
-        return Ok(HookResponse::Empty);
+
+    match event {
+        RivenEvent::MediaItemDownloadSuccess { id, title, .. } => {
+            let entries = repo::get_media_entries(&ctx.db_pool, *id).await?;
+            if entries.is_empty() {
+                tracing::warn!(id, title, "{plugin}: no filesystem entries");
+                return Ok(HookResponse::Empty);
+            }
+            let paths: Vec<String> = entries
+                .into_iter()
+                .map(|entry| rewrite_media_path(&library_path, &entry.path))
+                .collect();
+            if plugin == "jellyfin" {
+                refresh_library(&ctx.http_client, &url, api_key, plugin).await?;
+            } else {
+                notify_paths(&ctx.http_client, &url, api_key, &paths, "Created", plugin).await?;
+            }
+        }
+        RivenEvent::MediaItemsDeleted { deleted_paths, .. } => {
+            if deleted_paths.is_empty() {
+                return Ok(HookResponse::Empty);
+            }
+            if plugin == "jellyfin" {
+                refresh_library(&ctx.http_client, &url, api_key, plugin).await?;
+            } else {
+                let paths: Vec<String> = deleted_paths
+                    .iter()
+                    .map(|path| rewrite_media_path(&library_path, path))
+                    .collect();
+                notify_paths(&ctx.http_client, &url, api_key, &paths, "Deleted", plugin).await?;
+            }
+        }
+        _ => {}
     }
-    let paths: Vec<String> = entries
-        .into_iter()
-        .map(|entry| rewrite_media_path(&library_path, &entry.path))
-        .collect();
-    if plugin == "jellyfin" {
-        refresh_library(&ctx.http_client, &url, api_key, plugin).await?;
-    } else {
-        notify_paths(&ctx.http_client, &url, api_key, &paths, plugin).await?;
-    }
+
     Ok(HookResponse::Empty)
 }
 
@@ -145,6 +163,7 @@ macro_rules! impl_media_server_plugin {
             fn subscribed_events(&self) -> &[EventType] {
                 &[
                     EventType::MediaItemDownloadSuccess,
+                    EventType::MediaItemsDeleted,
                     EventType::ActivePlaybackSessionsRequested,
                 ]
             }

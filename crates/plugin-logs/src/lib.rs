@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use riven_core::plugin::{Plugin, SettingField};
 use riven_core::register_plugin;
 
-pub use runtime::{init_logging, load_log_settings, LogControl, LogSettings};
+pub use runtime::{LogControl, LogSettings, init_logging, load_log_settings};
 
 #[derive(Default)]
 pub struct LogsPlugin;
@@ -64,7 +64,7 @@ impl LogsQuery {
         use tokio::task;
 
         let log_dir = ctx.data::<LogDirectory>()?.0.clone();
-        let limit = limit.unwrap_or(500).max(1).min(5000) as usize;
+        let limit = limit.unwrap_or(500).clamp(1, 5000) as usize;
         let level_filter = level.map(|l| l.to_uppercase());
 
         let entries = task::spawn_blocking(move || -> Vec<LogEntry> {
@@ -97,7 +97,7 @@ impl LogsQuery {
                     // so that within each file lines stay in chronological order.
                     let file_lines: Vec<String> = BufReader::new(file)
                         .lines()
-                        .flatten()
+                        .map_while(Result::ok)
                         .filter(|l| !l.trim().is_empty())
                         .collect();
                     for line in file_lines.into_iter().rev() {
@@ -114,10 +114,10 @@ impl LogsQuery {
                 .filter_map(|line| {
                     let v: serde_json::Value = serde_json::from_str(line).ok()?;
                     let entry_level = v["level"].as_str().map(|s| s.to_uppercase());
-                    if let Some(ref filter) = level_filter {
-                        if entry_level.as_deref() != Some(filter.as_str()) {
-                            return None;
-                        }
+                    if let Some(ref filter) = level_filter
+                        && entry_level.as_deref() != Some(filter.as_str())
+                    {
+                        return None;
                     }
                     // tracing-subscriber JSON format:
                     // { "timestamp": "...", "level": "INFO", "fields": { "message": "..." }, "target": "..." }

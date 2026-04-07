@@ -151,12 +151,12 @@ fn extract_numbers(re: &Regex, raw: &str, target: &mut Vec<i32>) {
             if !target.contains(&n1) {
                 target.push(n1);
             }
-            if let Some(m2) = cap.get(2) {
-                if let Ok(n2) = m2.as_str().parse::<i32>() {
-                    for n in n1..=n2 {
-                        if !target.contains(&n) {
-                            target.push(n);
-                        }
+            if let Some(m2) = cap.get(2)
+                && let Ok(n2) = m2.as_str().parse::<i32>()
+            {
+                for n in n1..=n2 {
+                    if !target.contains(&n) {
+                        target.push(n);
                     }
                 }
             }
@@ -498,11 +498,11 @@ pub fn parse(raw_title: &str) -> ParsedData {
             data.year = Some(y);
             data.complete = true;
         }
-    } else if let Some(cap) = RE_YEAR_RANGE_SHORT.captures(raw) {
-        if let Ok(y) = cap[1].parse::<i32>() {
-            data.year = Some(y);
-            data.complete = true;
-        }
+    } else if let Some(cap) = RE_YEAR_RANGE_SHORT.captures(raw)
+        && let Ok(y) = cap[1].parse::<i32>()
+    {
+        data.year = Some(y);
+        data.complete = true;
     }
     if data.year.is_none() {
         // Skip a year at the very start of the string — it's part of the title (e.g. "2019 After...")
@@ -547,10 +547,10 @@ pub fn parse(raw_title: &str) -> ParsedData {
     extract_numbers(&RE_SEASON_TV, raw, &mut data.seasons);
     // Cross-reference format: group 1 = season
     for cap in RE_EPISODE_CROSSREF.captures_iter(raw) {
-        if let Ok(s) = cap[1].parse::<i32>() {
-            if !data.seasons.contains(&s) {
-                data.seasons.push(s);
-            }
+        if let Ok(s) = cap[1].parse::<i32>()
+            && !data.seasons.contains(&s)
+        {
+            data.seasons.push(s);
         }
     }
     data.seasons.sort();
@@ -569,18 +569,18 @@ pub fn parse(raw_title: &str) -> ParsedData {
     }
     if data.episodes.is_empty() {
         // "X of Y" pattern
-        if let Some(cap) = RE_EPISODE_OF.captures(raw) {
-            if let Ok(n) = cap[1].parse::<i32>() {
-                data.episodes.push(n);
-            }
+        if let Some(cap) = RE_EPISODE_OF.captures(raw)
+            && let Ok(n) = cap[1].parse::<i32>()
+        {
+            data.episodes.push(n);
         }
     }
     if data.episodes.is_empty() {
         // Russian "Серии: N of M"
-        if let Some(cap) = RE_EPISODE_RUSSIAN_OF.captures(raw) {
-            if let Ok(n) = cap[1].parse::<i32>() {
-                data.episodes.push(n);
-            }
+        if let Some(cap) = RE_EPISODE_RUSSIAN_OF.captures(raw)
+            && let Ok(n) = cap[1].parse::<i32>()
+        {
+            data.episodes.push(n);
         }
     }
     if data.episodes.is_empty() {
@@ -590,20 +590,20 @@ pub fn parse(raw_title: &str) -> ParsedData {
     if data.episodes.is_empty() {
         // Cross-reference: episode is in group 2
         for cap in RE_EPISODE_CROSSREF.captures_iter(raw) {
-            if let Ok(e) = cap[2].parse::<i32>() {
-                if !data.episodes.contains(&e) {
-                    data.episodes.push(e);
-                }
+            if let Ok(e) = cap[2].parse::<i32>()
+                && !data.episodes.contains(&e)
+            {
+                data.episodes.push(e);
             }
         }
     }
     // Catch consecutive episodes: S01E01E02E03
     for cap in RE_EPISODE_CONSECUTIVE.captures_iter(raw) {
         for ep_cap in RE_EP_NUM_BARE.captures_iter(&cap[1]) {
-            if let Ok(n) = ep_cap[1].parse::<i32>() {
-                if !data.episodes.contains(&n) {
-                    data.episodes.push(n);
-                }
+            if let Ok(n) = ep_cap[1].parse::<i32>()
+                && !data.episodes.contains(&n)
+            {
+                data.episodes.push(n);
             }
         }
     }
