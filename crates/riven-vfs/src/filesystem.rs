@@ -311,11 +311,26 @@ impl Filesystem for RivenFs {
                 reply.entry(&TTL, &dir_attr(self.get_or_create_ino(&path)), 0)
             }
             PathTarget::Canonical {
-                path: canonical, ..
+                profile_key,
+                path: canonical,
             } => match canonical {
                 CanonicalPath::Root => reply.entry(&TTL, &dir_attr(ROOT_INO), 0),
-                CanonicalPath::AllMovies => reply.entry(&TTL, &dir_attr(MOVIES_INO), 0),
-                CanonicalPath::AllShows => reply.entry(&TTL, &dir_attr(SHOWS_INO), 0),
+                CanonicalPath::AllMovies => {
+                    let ino = if profile_key.is_some() {
+                        self.get_or_create_ino(&path)
+                    } else {
+                        MOVIES_INO
+                    };
+                    reply.entry(&TTL, &dir_attr(ino), 0);
+                }
+                CanonicalPath::AllShows => {
+                    let ino = if profile_key.is_some() {
+                        self.get_or_create_ino(&path)
+                    } else {
+                        SHOWS_INO
+                    };
+                    reply.entry(&TTL, &dir_attr(ino), 0);
+                }
                 CanonicalPath::MovieDir { .. }
                 | CanonicalPath::ShowDir { .. }
                 | CanonicalPath::SeasonDir { .. } => {

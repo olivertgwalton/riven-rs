@@ -157,10 +157,9 @@ fn matches_token_filter(values: &[String], filters: &[String]) -> bool {
         }
     }
 
-    inclusions.is_empty()
-        || inclusions
-            .iter()
-            .any(|filter| values.iter().any(|value| value == filter))
+    inclusions
+        .iter()
+        .all(|filter| values.iter().any(|value| value == filter))
 }
 
 fn content_rating_key(rating: ContentRating) -> String {
@@ -334,7 +333,7 @@ mod tests {
     }
 
     #[test]
-    fn matching_profiles_support_inclusion_and_exclusion_rules() {
+    fn matching_profiles_require_all_positive_tokens_and_respect_exclusions() {
         let mut library_profiles = HashMap::new();
         library_profiles.insert(
             "kids".to_string(),
@@ -365,6 +364,43 @@ mod tests {
         assert_eq!(
             settings.matching_profile_keys(&metadata, FilesystemContentType::Movie),
             LibraryProfileMembership(vec!["kids".to_string()])
+        );
+    }
+
+    #[test]
+    fn matching_profiles_reject_missing_positive_tokens() {
+        let settings = FilesystemSettings {
+            mount_path: "/mount".to_string(),
+            library_profiles: HashMap::from([(
+                "nonkids".to_string(),
+                FilesystemLibraryProfile {
+                    name: "Non-kids".to_string(),
+                    library_path: "/nonkids".to_string(),
+                    enabled: true,
+                    filter_rules: FilesystemFilterRules {
+                        content_types: vec![
+                            FilesystemContentType::Movie,
+                            FilesystemContentType::Show,
+                        ],
+                        genres: vec!["family".to_string(), "children".to_string()],
+                        content_ratings: vec!["tv-14".to_string(), "r".to_string()],
+                        is_anime: Some(false),
+                    },
+                },
+            )]),
+        };
+
+        let metadata = FilesystemItemMetadata {
+            genres: vec!["family".to_string()],
+            content_rating: Some(ContentRating::R),
+            language: None,
+            country: None,
+            is_anime: false,
+        };
+
+        assert_eq!(
+            settings.matching_profile_keys(&metadata, FilesystemContentType::Movie),
+            LibraryProfileMembership::default()
         );
     }
 

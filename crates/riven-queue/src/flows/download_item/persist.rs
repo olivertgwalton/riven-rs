@@ -19,29 +19,6 @@ pub enum SeasonPersistOutcome {
     Complete,
 }
 
-fn metadata_from_item(item: &MediaItem) -> FilesystemItemMetadata {
-    let genres = item
-        .genres
-        .as_ref()
-        .and_then(|value| value.as_array())
-        .map(|values| {
-            values
-                .iter()
-                .filter_map(|value| value.as_str())
-                .map(|value| value.to_ascii_lowercase())
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-
-    FilesystemItemMetadata {
-        genres,
-        content_rating: item.content_rating,
-        language: item.language.clone(),
-        country: item.country.clone(),
-        is_anime: item.is_anime,
-    }
-}
-
 fn metadata_from_show_context(
     ctx: &crate::context::DownloadHierarchyContext,
 ) -> FilesystemItemMetadata {
@@ -146,7 +123,7 @@ pub async fn persist_movie(
     let base_name = item.pretty_name();
     let vfs_name = format!("{base_name}{tag_suffix}.{ext}");
     let path = format!("/movies/{base_name}/{vfs_name}");
-    let metadata = metadata_from_item(item);
+    let metadata = item.filesystem_metadata();
     let filesystem_settings = queue.filesystem_settings.read().await;
     let library_profiles =
         filesystem_settings.matching_profile_keys(&metadata, FilesystemContentType::Movie);

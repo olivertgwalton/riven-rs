@@ -122,6 +122,10 @@ async fn fetch_movie_by_tmdb_id(
         .is_some_and(|language| !language.eq_ignore_ascii_case("en"));
 
     let imdb_id = movie.external_ids.as_ref().and_then(|e| e.imdb_id.clone());
+    let content_rating = movie
+        .release_dates
+        .as_ref()
+        .and_then(parse_content_rating_from_release_dates);
 
     Ok(IndexedMediaItem {
         title: Some(movie.title),
@@ -138,11 +142,52 @@ async fn fetch_movie_by_tmdb_id(
             .and_then(|c| c.first())
             .map(|c| c.iso_3166_1.clone()),
         language: movie.original_language,
+        content_rating,
         is_anime: Some(is_anime),
         runtime: movie.runtime,
         aired_at,
         ..Default::default()
     })
+}
+
+fn parse_content_rating_from_release_dates(
+    release_dates: &TmdbReleaseDates,
+) -> Option<ContentRating> {
+    let parse_result = |result: &TmdbReleaseDateResult| {
+        let certification = result.certification.trim();
+        (!certification.is_empty())
+            .then_some(certification)
+            .and_then(parse_content_rating)
+    };
+
+    release_dates
+        .results
+        .iter()
+        .find(|entry| entry.iso_3166_1.eq_ignore_ascii_case("US"))
+        .and_then(|entry| entry.release_dates.iter().find_map(parse_result))
+        .or_else(|| {
+            release_dates
+                .results
+                .iter()
+                .find_map(|entry| entry.release_dates.iter().find_map(parse_result))
+        })
+}
+
+fn parse_content_rating(rating: &str) -> Option<ContentRating> {
+    match rating.trim().to_ascii_uppercase().as_str() {
+        "G" => Some(ContentRating::G),
+        "PG" => Some(ContentRating::Pg),
+        "PG-13" => Some(ContentRating::Pg13),
+        "R" => Some(ContentRating::R),
+        "NC-17" => Some(ContentRating::Nc17),
+        "TV-Y" => Some(ContentRating::TvY),
+        "TV-Y7" => Some(ContentRating::TvY7),
+        "TV-G" => Some(ContentRating::TvG),
+        "TV-PG" => Some(ContentRating::TvPg),
+        "TV-14" => Some(ContentRating::Tv14),
+        "TV-MA" => Some(ContentRating::TvMa),
+        _ => None,
+    }
 }
 
 // ── TMDB API response types ──
@@ -167,6 +212,7 @@ struct TmdbMovieResponse {
     genres: Option<Vec<TmdbGenre>>,
     production_countries: Option<Vec<TmdbCountry>>,
     external_ids: Option<TmdbExternalIds>,
+    release_dates: Option<TmdbReleaseDates>,
 }
 
 #[derive(Deserialize)]
@@ -182,4 +228,20 @@ struct TmdbCountry {
 #[derive(Deserialize)]
 struct TmdbExternalIds {
     imdb_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct TmdbReleaseDates {
+    results: Vec<TmdbReleaseDateCountry>,
+}
+
+#[derive(Deserialize)]
+struct TmdbReleaseDateCountry {
+    iso_3166_1: String,
+    release_dates: Vec<TmdbReleaseDateResult>,
+}
+
+#[derive(Deserialize)]
+struct TmdbReleaseDateResult {
+    certification: String,
 }

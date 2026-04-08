@@ -1,5 +1,5 @@
 use anyhow::Result;
-use sqlx::PgPool;
+use sqlx::{PgPool, Postgres, QueryBuilder};
 
 use crate::entities::*;
 use riven_rank::ResolutionRanks;
@@ -222,6 +222,59 @@ pub async fn get_media_entry_by_path(pool: &PgPool, path: &str) -> Result<Option
     .await?)
 }
 
+pub async fn list_filesystem_profile_entry_candidates(
+    pool: &PgPool,
+) -> Result<Vec<FilesystemProfileEntryCandidate>> {
+    Ok(sqlx::query_as::<_, FilesystemProfileEntryCandidate>(
+        r#"SELECT
+               fe.id,
+               fe.library_profiles,
+               CASE
+                   WHEN item.item_type = 'movie' THEN 'movie'
+                   ELSE 'show'
+               END AS content_type,
+               CASE
+                   WHEN item.item_type = 'movie' THEN item.genres
+                   ELSE show_item.genres
+               END AS genres,
+               CASE
+                   WHEN item.item_type = 'movie' THEN item.content_rating
+                   ELSE show_item.content_rating
+               END AS content_rating,
+               CASE
+                   WHEN item.item_type = 'movie' THEN item.language
+                   ELSE show_item.language
+               END AS language,
+               CASE
+                   WHEN item.item_type = 'movie' THEN item.country
+                   ELSE show_item.country
+               END AS country,
+               CASE
+                   WHEN item.item_type = 'movie' THEN item.is_anime
+                   ELSE COALESCE(show_item.is_anime, false)
+               END AS is_anime
+           FROM filesystem_entries fe
+           INNER JOIN media_items item ON item.id = fe.media_item_id
+           LEFT JOIN media_items season_item
+               ON item.parent_id = season_item.id
+              AND season_item.item_type = 'season'
+           LEFT JOIN media_items show_item
+               ON (
+                   (item.item_type = 'show' AND item.id = show_item.id)
+                   OR (item.item_type = 'season'
+                       AND item.parent_id = show_item.id
+                       AND show_item.item_type = 'show')
+                   OR (item.item_type = 'episode'
+                       AND season_item.parent_id = show_item.id
+                       AND show_item.item_type = 'show')
+               )
+           WHERE fe.entry_type = 'media'
+           ORDER BY fe.id"#,
+    )
+    .fetch_all(pool)
+    .await?)
+}
+
 /// Return the ranking profile names that already have a downloaded entry for this item.
 pub async fn get_downloaded_profile_names(
     pool: &PgPool,
@@ -440,4 +493,54 @@ pub async fn update_stream_url(pool: &PgPool, entry_id: i64, stream_url: &str) -
         .execute(pool)
         .await?;
     Ok(())
+}
+
+pub async fn update_library_profiles(
+    pool: &PgPool,
+    entry_id: i64,
+    library_profiles: &serde_json::Value,
+) -> Result<()> {
+    sqlx::query(
+        "UPDATE filesystem_entries SET library_profiles = $2, updated_at = NOW() WHERE id = $1",
+    )
+    .bind(entry_id)
+    .bind(library_profiles)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn update_library_profiles_batch(
+    pool: &PgPool,
+    updates: &[(i64, serde_json::Value)],
+) -> Result<u64> {
+    if updates.is_empty() {
+        return Ok(0);
+    }
+
+    let mut total = 0_u64;
+
+    for chunk in updates.chunks(500) {
+        let mut query_builder: QueryBuilder<Postgres> = QueryBuilder::new(
+            "UPDATE filesystem_entries AS fe \
+             SET library_profiles = data.library_profiles, updated_at = NOW() \
+             FROM (",
+        );
+
+        query_builder.push_values(chunk, |mut builder, (entry_id, library_profiles)| {
+            builder
+                .push_bind(*entry_id)
+                .push(", ")
+                .push_bind(library_profiles);
+        });
+
+        query_builder.push(
+            ") AS data(id, library_profiles) \
+             WHERE fe.id = data.id",
+        );
+
+        total += query_builder.build().execute(pool).await?.rows_affected();
+    }
+
+    Ok(total)
 }

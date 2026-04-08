@@ -4,7 +4,7 @@ use plugin_logs::{LogControl, LogSettings};
 use riven_core::downloader::DownloaderConfig;
 use riven_core::events::RivenEvent;
 use riven_core::plugin::PluginRegistry;
-use riven_core::settings::FilesystemSettings;
+use riven_core::settings::{FilesystemSettings, LibraryProfileMembership};
 use riven_core::types::*;
 use riven_core::vfs_layout::VfsLibraryLayout;
 use riven_db::entities::*;
@@ -29,6 +29,26 @@ fn coerce_json_bool(value: &serde_json::Value) -> Option<bool> {
         },
         _ => None,
     }
+}
+
+async fn rematch_filesystem_library_profiles_inner(
+    pool: &sqlx::PgPool,
+    filesystem_settings: &FilesystemSettings,
+) -> Result<i64> {
+    let candidates = repo::list_filesystem_profile_entry_candidates(pool).await?;
+    let updates = candidates
+        .into_iter()
+        .filter_map(|candidate| {
+            let next = filesystem_settings.matching_profile_keys(
+                &candidate.filesystem_metadata(),
+                candidate.filesystem_content_type(),
+            );
+            let current = LibraryProfileMembership::from_json(candidate.library_profiles.as_ref());
+            (next != current).then(|| (candidate.id, next.into_json()))
+        })
+        .collect::<Vec<_>>();
+
+    Ok(repo::update_library_profiles_batch(pool, &updates).await? as i64)
 }
 
 #[Object]
@@ -350,17 +370,43 @@ impl MutationRoot {
             .and_then(|v| v.as_u64())
             .unwrap_or(reindex_cfg.unknown_air_date_offset_days);
 
+        let previous_filesystem = queue.filesystem_settings.read().await.clone();
         let filesystem = settings
             .get("filesystem")
             .and_then(|v| serde_json::from_value::<FilesystemSettings>(v.clone()).ok())
             .unwrap_or_default();
         *queue.filesystem_settings.write().await = filesystem.clone();
-        *queue.vfs_layout.write().await = VfsLibraryLayout::new(filesystem);
+        *queue.vfs_layout.write().await = VfsLibraryLayout::new(filesystem.clone());
+        let mut rematch_count = 0_i64;
+        if previous_filesystem != filesystem {
+            rematch_count = rematch_filesystem_library_profiles_inner(pool, &filesystem).await?;
+            queue
+                .filesystem_settings_revision
+                .fetch_add(1, Ordering::SeqCst);
+            tracing::info!(
+                rematch_count,
+                "updated filesystem settings and rematched library profiles"
+            );
+        }
+
+        Ok(serde_json::json!({
+            "settings": settings,
+            "filesystem_profile_rematch_count": rematch_count
+        }))
+    }
+
+    /// Recompute stored library-profile matches for every existing media entry.
+    async fn rematch_filesystem_library_profiles(&self, ctx: &Context<'_>) -> Result<i64> {
+        let pool = ctx.data::<sqlx::PgPool>()?;
+        let queue = ctx.data::<Arc<JobQueue>>()?;
+        let filesystem_settings = queue.filesystem_settings.read().await.clone();
+        let updated = rematch_filesystem_library_profiles_inner(pool, &filesystem_settings).await?;
+
         queue
             .filesystem_settings_revision
             .fetch_add(1, Ordering::SeqCst);
 
-        Ok(settings)
+        Ok(updated)
     }
 
     /// Trigger a scrape for an existing item.

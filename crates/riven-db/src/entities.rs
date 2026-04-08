@@ -1,4 +1,5 @@
 use chrono::{DateTime, NaiveDate, Utc};
+use riven_core::settings::{FilesystemContentType, FilesystemItemMetadata};
 use riven_core::types::*;
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
@@ -69,6 +70,29 @@ pub struct MediaItemHierarchy {
 }
 
 impl MediaItem {
+    pub fn filesystem_metadata(&self) -> FilesystemItemMetadata {
+        let genres = self
+            .genres
+            .as_ref()
+            .and_then(|value| value.as_array())
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(|value| value.as_str())
+                    .map(|value| value.to_ascii_lowercase())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
+        FilesystemItemMetadata {
+            genres,
+            content_rating: self.content_rating,
+            language: self.language.clone(),
+            country: self.country.clone(),
+            is_anime: self.is_anime,
+        }
+    }
+
     pub fn pretty_name(&self) -> String {
         let year_str = self.year.map(|y| format!(" ({y})")).unwrap_or_default();
         let id_str = match self.item_type {
@@ -138,6 +162,50 @@ pub struct FileSystemEntry {
     pub stream_id: Option<i64>,
     pub resolution: Option<String>,
     pub ranking_profile_name: Option<String>,
+}
+
+#[derive(Debug, Clone, FromRow)]
+pub struct FilesystemProfileEntryCandidate {
+    pub id: i64,
+    pub library_profiles: Option<serde_json::Value>,
+    pub content_type: String,
+    pub genres: Option<serde_json::Value>,
+    pub content_rating: Option<ContentRating>,
+    pub language: Option<String>,
+    pub country: Option<String>,
+    pub is_anime: bool,
+}
+
+impl FilesystemProfileEntryCandidate {
+    pub fn filesystem_content_type(&self) -> FilesystemContentType {
+        match self.content_type.as_str() {
+            "movie" => FilesystemContentType::Movie,
+            _ => FilesystemContentType::Show,
+        }
+    }
+
+    pub fn filesystem_metadata(&self) -> FilesystemItemMetadata {
+        let genres = self
+            .genres
+            .as_ref()
+            .and_then(|value| value.as_array())
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(|value| value.as_str())
+                    .map(|value| value.to_ascii_lowercase())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
+        FilesystemItemMetadata {
+            genres,
+            content_rating: self.content_rating,
+            language: self.language.clone(),
+            country: self.country.clone(),
+            is_anime: self.is_anime,
+        }
+    }
 }
 
 impl FileSystemEntry {

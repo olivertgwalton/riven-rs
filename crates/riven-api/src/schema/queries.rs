@@ -413,15 +413,15 @@ impl CoreQuery {
                             SettingField::new("enabled", "Enabled", "boolean")
                                 .with_description("Disable a profile without deleting its rules."),
                             SettingField::new("filter_rules", "Filter rules", "object")
-                                .with_description("Only items matching all configured rules will appear in this profile.")
+                                .with_description("Only items matching all configured rules will appear in this profile. Positive values inside genres and content ratings are all required; prefix a value with ! to exclude it.")
                                 .with_fields(vec![
                                     SettingField::new("content_types", "Content types", "string_array")
                                         .with_options(&["movie", "show"])
                                         .with_description("Restrict the profile to movies, shows, or both."),
                                     SettingField::new("genres", "Genres", "string_array")
-                                        .with_description("Genre filters. Prefix a value with ! to exclude it."),
+                                        .with_description("Genre filters. Every positive value must match. Prefix a value with ! to exclude it."),
                                     SettingField::new("content_ratings", "Content ratings", "string_array")
-                                        .with_description("Content rating filters. Prefix a value with ! to exclude it."),
+                                        .with_description("Content rating filters. Every positive value must match. Prefix a value with ! to exclude it."),
                                     SettingField::new("is_anime", "Anime filter", "nullable_boolean")
                                         .with_description("Only anime, only non-anime, or leave unset for any item."),
                                 ]),
