@@ -408,7 +408,7 @@ impl JobQueue {
         {
             self.push_download(DownloadJob {
                 id,
-                magnet: format!("magnet:?xt=urn:btih:{}", stream.info_hash),
+                magnet: stream.magnet,
                 info_hash: stream.info_hash,
                 preferred_info_hash: None,
             })

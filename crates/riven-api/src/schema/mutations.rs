@@ -480,6 +480,7 @@ impl MutationRoot {
         tvdb_id: Option<String>,
         season_number: Option<i32>,
         info_hash: String,
+        magnet: String,
         parsed_data: Option<serde_json::Value>,
         rank: Option<i64>,
     ) -> Result<String> {
@@ -500,14 +501,14 @@ impl MutationRoot {
         )
         .await?;
 
-        let stream = repo::upsert_stream(pool, &info_hash, parsed_data, rank).await?;
+        let stream = repo::upsert_stream(pool, &info_hash, &magnet, parsed_data, rank).await?;
         repo::link_stream_to_item(pool, target.id, stream.id).await?;
 
         job_queue
             .push_download(DownloadJob {
                 id: target.id,
                 info_hash: info_hash.clone(),
-                magnet: format!("magnet:?xt=urn:btih:{info_hash}"),
+                magnet,
                 preferred_info_hash: Some(info_hash),
             })
             .await;
@@ -588,7 +589,7 @@ impl MutationRoot {
             .push_download(DownloadJob {
                 id: item_id,
                 info_hash: info_hash.clone(),
-                magnet: format!("magnet:?xt=urn:btih:{info_hash}"),
+                magnet: stream.magnet,
                 preferred_info_hash: Some(info_hash),
             })
             .await;

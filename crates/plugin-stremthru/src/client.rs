@@ -1,7 +1,8 @@
 use redis::AsyncCommands;
 
 use riven_core::types::{
-    CacheCheckFile, CacheCheckResult, DownloadFile, DownloadResult, TorrentStatus,
+    CacheCheckFile, CacheCheckQuery, CacheCheckResult, DownloadFile, DownloadResult,
+    TorrentStatus,
 };
 
 use crate::models::{
@@ -10,6 +11,41 @@ use crate::models::{
 };
 
 pub const CACHE_CHECK_TTL_SECS: u64 = 60 * 60 * 24;
+const DEFAULT_RETRY_AFTER_SECS: u64 = 5;
+
+#[derive(Debug)]
+pub enum AddTorrentError {
+    RateLimited { retry_after_secs: u64 },
+    Other(anyhow::Error),
+}
+
+impl std::fmt::Display for AddTorrentError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::RateLimited { retry_after_secs } => {
+                write!(f, "rate limited; retry after {retry_after_secs}s")
+            }
+            Self::Other(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl std::error::Error for AddTorrentError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Other(e) => Some(e.as_ref()),
+            _ => None,
+        }
+    }
+}
+
+fn parse_retry_after(headers: &reqwest::header::HeaderMap) -> Option<u64> {
+    let value = headers
+        .get(reqwest::header::RETRY_AFTER)?
+        .to_str()
+        .ok()?;
+    value.trim().parse::<u64>().ok()
+}
 
 pub async fn add_torrent(
     client: &reqwest::Client,
@@ -17,8 +53,8 @@ pub async fn add_torrent(
     store: &str,
     api_key: &str,
     magnet: &str,
-) -> anyhow::Result<StremthruTorrent> {
-    let url = format!("{base_url}v0/store/torz");
+) -> Result<StremthruTorrent, AddTorrentError> {
+    let url = format!("{base_url}v0/store/magnets");
     let response = client
         .post(&url)
         .header("x-stremthru-store-name", store)
@@ -26,32 +62,52 @@ pub async fn add_torrent(
             "x-stremthru-store-authorization",
             format!("Bearer {api_key}"),
         )
-        .json(&serde_json::json!({ "link": magnet.to_lowercase() }))
+        .json(&serde_json::json!({ "magnet": magnet.to_lowercase() }))
         .send()
-        .await?;
+        .await
+        .map_err(|e| AddTorrentError::Other(e.into()))?;
+
+    if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+        let retry_after_secs =
+            parse_retry_after(response.headers()).unwrap_or(DEFAULT_RETRY_AFTER_SECS);
+        return Err(AddTorrentError::RateLimited { retry_after_secs });
+    }
 
     if !response.status().is_success() {
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
-        anyhow::bail!("store rejected torrent: HTTP {} - {}", status, body);
+        return Err(AddTorrentError::Other(anyhow::anyhow!(
+            "store rejected torrent: HTTP {} - {}",
+            status,
+            body
+        )));
     }
 
-    let text = response.text().await?;
-    let resp: StremthruResponse<StremthruTorrent> = serde_json::from_str(&text)
-        .map_err(|error| anyhow::anyhow!("invalid add-torrent response: {error}; body={text}"))?;
+    let text = response
+        .text()
+        .await
+        .map_err(|e| AddTorrentError::Other(e.into()))?;
+    let resp: StremthruResponse<StremthruTorrent> = serde_json::from_str(&text).map_err(|e| {
+        AddTorrentError::Other(anyhow::anyhow!(
+            "invalid add-torrent response: {e}; body={text}"
+        ))
+    })?;
     let Some(data) = resp.data else {
-        anyhow::bail!("{}", describe_empty_add_torrent_response(&text));
+        return Err(AddTorrentError::Other(anyhow::anyhow!(
+            "{}",
+            describe_empty_add_torrent_response(&text)
+        )));
     };
 
     if data.status != "downloaded" {
         if let Some(ref torrent_id) = data.id {
             let _ = remove_torrent(client, base_url, store, api_key, torrent_id).await;
         }
-        anyhow::bail!(
+        return Err(AddTorrentError::Other(anyhow::anyhow!(
             "torrent was in {} state on {}; skipping to avoid empty file list",
             data.status,
             store
-        );
+        )));
     }
 
     Ok(data)
@@ -91,7 +147,7 @@ pub async fn remove_torrent(
     api_key: &str,
     id: &str,
 ) -> anyhow::Result<()> {
-    let url = format!("{base_url}v0/store/torz/{id}");
+    let url = format!("{base_url}v0/store/magnets/{id}");
     let response = client
         .delete(&url)
         .header("x-stremthru-store-name", store)
@@ -115,48 +171,27 @@ pub async fn check_cache(
     base_url: &str,
     store: &str,
     api_key: &str,
-    hashes: &[String],
+    queries: &[CacheCheckQuery],
 ) -> anyhow::Result<Vec<CacheCheckResult>> {
-    if hashes.is_empty() {
+    if queries.is_empty() {
         return Ok(Vec::new());
     }
 
-    const CHUNK_SIZE: usize = 50;
-
-    let mut futures = Vec::new();
-    for chunk in hashes.chunks(CHUNK_SIZE) {
-        futures.push(check_cache_chunk(
-            client, redis, base_url, store, api_key, chunk,
-        ));
-    }
-
-    let results = futures::future::join_all(futures).await;
-    let mut all_results = Vec::new();
-    for res in results {
-        all_results.extend(res?);
-    }
-
-    Ok(all_results)
-}
-
-async fn check_cache_chunk(
-    client: &reqwest::Client,
-    redis: &redis::aio::ConnectionManager,
-    base_url: &str,
-    store: &str,
-    api_key: &str,
-    hashes: &[String],
-) -> anyhow::Result<Vec<CacheCheckResult>> {
-    let mut normalized_hashes: Vec<String> =
-        hashes.iter().map(|hash| hash.to_lowercase()).collect();
-    normalized_hashes.sort_unstable();
+    let mut normalized_queries: Vec<CacheCheckQuery> = queries
+        .iter()
+        .map(|query| CacheCheckQuery {
+            hash: query.hash.to_lowercase(),
+            magnet: query.magnet.clone(),
+        })
+        .collect();
+    normalized_queries.sort_unstable_by(|a, b| a.hash.cmp(&b.hash));
 
     let mut conn = redis.clone();
-    let mut cached_results = Vec::with_capacity(normalized_hashes.len());
-    let mut missing_hashes = Vec::new();
+    let mut cached_results = Vec::with_capacity(normalized_queries.len());
+    let mut missing_queries = Vec::new();
 
-    for hash in &normalized_hashes {
-        let cache_key = cache_check_key(store, hash);
+    for query in &normalized_queries {
+        let cache_key = cache_check_key(store, &query.hash);
         let cached: Option<String> = AsyncCommands::get(&mut conn, &cache_key).await.ok();
         match cached {
             Some(payload) => match serde_json::from_str::<CacheCheckResult>(&payload) {
@@ -164,38 +199,41 @@ async fn check_cache_chunk(
                 Err(error) => {
                     tracing::warn!(
                         store,
-                        hash,
+                        hash = query.hash,
                         error = %error,
                         "invalid cached stremthru cache-check payload"
                     );
-                    missing_hashes.push(hash.clone());
+                    missing_queries.push(query.clone());
                 }
             },
-            None => missing_hashes.push(hash.clone()),
+            None => missing_queries.push(query.clone()),
         }
     }
 
-    if missing_hashes.is_empty() {
+    if missing_queries.is_empty() {
         return Ok(cached_results);
     }
 
-    let hash_str = missing_hashes.join(",");
-    let url = format!("{base_url}v0/store/torz/check?hash={hash_str}");
+    let magnet_str = missing_queries
+        .iter()
+        .map(|query| query.hash.as_str())
+        .collect::<Vec<_>>()
+        .join(",");
     tracing::debug!(
         store,
-        hashes = missing_hashes.len(),
-        url_len = url.len(),
+        hashes = missing_queries.len(),
         cached = cached_results.len(),
         "checking debrid cache"
     );
 
     let response = client
-        .get(&url)
+        .get(format!("{base_url}v0/store/magnets/check"))
         .header("x-stremthru-store-name", store)
         .header(
             "x-stremthru-store-authorization",
             format!("Bearer {api_key}"),
         )
+        .query(&[("magnet", magnet_str)])
         .send()
         .await?;
 
@@ -206,18 +244,14 @@ async fn check_cache_chunk(
     }
 
     let text = response.text().await?;
-    let resp: StremthruResponse<StremthruCacheCheck> = match serde_json::from_str(&text) {
-        Ok(v) => v,
-        Err(e) => {
-            tracing::warn!(store, text = %text, error = %e, "stremthru cache check JSON parse error");
-            return Err(e.into());
-        }
-    };
-
-    let fetched_results: Vec<CacheCheckResult> = resp
+    let resp = serde_json::from_str::<StremthruResponse<StremthruCacheCheck>>(&text)
+        .map_err(|e| anyhow::anyhow!("store returned invalid cache-check data: {e}; body={text}"))?;
+    let cache_items = resp
         .data
-        .ok_or_else(|| anyhow::anyhow!("store returned no cache-check data"))?
-        .items
+        .ok_or_else(|| anyhow::anyhow!("store returned no cache-check data; body={text}"))?
+        .items;
+
+    let fetched_results: Vec<CacheCheckResult> = cache_items
         .into_iter()
         .map(|item| CacheCheckResult {
             hash: item.hash,
@@ -225,9 +259,8 @@ async fn check_cache_chunk(
             files: item
                 .files
                 .into_iter()
-                .enumerate()
-                .map(|(i, f)| CacheCheckFile {
-                    index: i as u32,
+                .map(|f| CacheCheckFile {
+                    index: f.index.max(0) as u32,
                     name: f.name,
                     size: f.size,
                 })
@@ -269,7 +302,7 @@ pub async fn generate_link(
     api_key: &str,
     magnet: &str,
 ) -> anyhow::Result<String> {
-    let url = format!("{base_url}v0/store/torz/link/generate");
+    let url = format!("{base_url}v0/store/link/generate");
     let response = client
         .post(&url)
         .header("x-stremthru-store-name", store)

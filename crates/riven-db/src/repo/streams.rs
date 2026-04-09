@@ -13,18 +13,21 @@ pub struct VfsEntryPath {
 pub async fn upsert_stream(
     pool: &PgPool,
     info_hash: &str,
+    magnet: &str,
     parsed_data: Option<serde_json::Value>,
     rank: Option<i64>,
 ) -> Result<Stream> {
     let stream = sqlx::query_as::<_, Stream>(
-        "INSERT INTO streams (info_hash, parsed_data, rank) \
-         VALUES ($1, $2, $3) \
+        "INSERT INTO streams (info_hash, magnet, parsed_data, rank) \
+         VALUES ($1, $2, $3, $4) \
          ON CONFLICT (info_hash) DO UPDATE SET \
-             parsed_data = COALESCE($2, streams.parsed_data), \
-             rank = COALESCE($3, streams.rank) \
+             magnet = CASE WHEN $2 <> '' THEN $2 ELSE streams.magnet END, \
+             parsed_data = COALESCE($3, streams.parsed_data), \
+             rank = COALESCE($4, streams.rank) \
          RETURNING *",
     )
     .bind(info_hash)
+    .bind(magnet)
     .bind(parsed_data)
     .bind(rank)
     .fetch_one(pool)

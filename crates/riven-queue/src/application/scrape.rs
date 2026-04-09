@@ -172,7 +172,7 @@ pub async fn parse_results(id: i64, job: &ParseScrapeResultsJob, queue: &JobQueu
     let item_title = parse_context.item_title;
     let item_type = parse_context.item_type;
 
-    let responses: Vec<HashMap<String, String>> = queue.flow_load_results("scrape", id).await;
+    let responses: Vec<ScrapeResponse> = queue.flow_load_results("scrape", id).await;
     queue.clear_flow_results("scrape", id).await;
 
     let streams = responses
@@ -193,6 +193,7 @@ pub async fn parse_results(id: i64, job: &ParseScrapeResultsJob, queue: &JobQueu
                 let stream = match repo::upsert_stream(
                     &pool,
                     &candidate.info_hash,
+                    &candidate.magnet,
                     candidate.parsed_data,
                     candidate.rank,
                 )

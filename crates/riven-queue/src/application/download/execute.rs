@@ -31,11 +31,10 @@ pub async fn attempt_download(
     let resolution = stream_resolution(stream).to_owned();
     let resolution_ref: Option<&str> = Some(resolution.as_str());
 
-    let magnet = format!("magnet:?xt=urn:btih:{info_hash}");
     let event = RivenEvent::MediaItemDownloadRequested {
         id,
         info_hash: info_hash.clone(),
-        magnet,
+        magnet: stream.magnet.clone(),
     };
 
     let results = queue.registry.dispatch(&event).await;

@@ -92,7 +92,14 @@ impl Plugin for TorrentioPlugin {
                     .to_string();
 
                 if !title.is_empty() {
-                    results.insert(info_hash.to_lowercase(), title);
+                    let info_hash = info_hash.to_lowercase();
+                    results.insert(
+                        info_hash.clone(),
+                        ScrapeStream {
+                            title,
+                            magnet: build_magnet_uri(&info_hash),
+                        },
+                    );
                 }
             }
         }

@@ -148,8 +148,18 @@ pub struct ContentServiceResponse {
 
 // ── Scrape response ──
 
-/// Maps info_hash -> torrent title
-pub type ScrapeResponse = HashMap<String, String>;
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScrapeStream {
+    pub title: String,
+    pub magnet: String,
+}
+
+/// Maps info_hash -> discovered stream metadata
+pub type ScrapeResponse = HashMap<String, ScrapeStream>;
+
+pub fn build_magnet_uri(info_hash: &str) -> String {
+    format!("magnet:?xt=urn:btih:{}", info_hash.to_lowercase())
+}
 
 // ── Download types ──
 
@@ -177,6 +187,12 @@ pub struct StreamLinkResponse {
 }
 
 // ── Cache check ──
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CacheCheckQuery {
+    pub hash: String,
+    pub magnet: String,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]

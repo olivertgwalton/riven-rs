@@ -87,6 +87,7 @@ pub struct DiscoveredStream {
     pub key: String,
     pub title: String,
     pub info_hash: String,
+    pub magnet: String,
     pub parsed_data: Option<serde_json::Value>,
     pub rank: Option<i64>,
     pub file_size_bytes: Option<i64>,

@@ -81,6 +81,7 @@ pub struct StremthruCacheItem {
 
 #[derive(Deserialize)]
 pub struct StremthruCacheFile {
+    pub index: i32,
     pub name: String,
     pub size: u64,
 }

@@ -125,11 +125,15 @@ async fn collect_cached_info(
     queue: &JobQueue,
     streams: &[Stream],
 ) -> HashMap<String, Vec<CacheCheckFile>> {
-    let hashes: Vec<String> = streams
+    let query_map: HashMap<String, String> = streams
         .iter()
-        .map(|stream| stream.info_hash.clone())
+        .map(|stream| (stream.info_hash.clone(), stream.magnet.clone()))
         .collect();
-    let cache_event = RivenEvent::MediaItemDownloadCacheCheckRequested { hashes };
+    let queries = query_map
+        .into_iter()
+        .map(|(hash, magnet)| CacheCheckQuery { hash, magnet })
+        .collect();
+    let cache_event = RivenEvent::MediaItemDownloadCacheCheckRequested { queries };
     let cache_results = queue.registry.dispatch(&cache_event).await;
 
     let mut cached_info: HashMap<String, Vec<CacheCheckFile>> = HashMap::new();

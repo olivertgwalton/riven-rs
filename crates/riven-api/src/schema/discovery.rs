@@ -69,7 +69,7 @@ pub async fn run_scrape_discovery(
     title: &str,
     season: Option<i32>,
     episode: Option<i32>,
-) -> HashMap<String, String> {
+) -> ScrapeResponse {
     let event = RivenEvent::MediaItemScrapeRequested {
         id: 0,
         item_type,
@@ -245,6 +245,7 @@ pub async fn discover_streams(
             ),
             title: candidate.title,
             info_hash: candidate.info_hash,
+            magnet: candidate.magnet,
             parsed_data: candidate.parsed_data,
             rank: candidate.rank,
             file_size_bytes: None,
@@ -275,15 +276,17 @@ async fn apply_cache_status(registry: &PluginRegistry, streams: &mut [Discovered
         return;
     }
 
-    let hashes: Vec<String> = streams
+    let query_map: HashMap<String, String> = streams
         .iter()
-        .map(|stream| stream.info_hash.to_lowercase())
-        .collect::<HashSet<_>>()
+        .map(|stream| (stream.info_hash.to_lowercase(), stream.magnet.clone()))
+        .collect();
+    let queries: Vec<CacheCheckQuery> = query_map
         .into_iter()
+        .map(|(hash, magnet)| CacheCheckQuery { hash, magnet })
         .collect();
 
     let results = registry
-        .dispatch(&RivenEvent::MediaItemDownloadCacheCheckRequested { hashes })
+        .dispatch(&RivenEvent::MediaItemDownloadCacheCheckRequested { queries })
         .await;
 
     let mut cached_hashes = HashSet::new();
