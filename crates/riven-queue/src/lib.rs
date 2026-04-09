@@ -173,6 +173,7 @@ pub struct JobQueue {
     pub filesystem_settings: Arc<RwLock<FilesystemSettings>>,
     pub vfs_layout: Arc<RwLock<VfsLibraryLayout>>,
     pub filesystem_settings_revision: Arc<AtomicU64>,
+    pub retry_interval_secs: Arc<AtomicU64>,
     /// Cached resolution ranks — loaded once at startup and reloaded on
     /// settings save. Avoids a DB round-trip on every stream fetch.
     pub resolution_ranks: Arc<RwLock<ResolutionRanks>>,
@@ -187,6 +188,7 @@ impl JobQueue {
         downloader_config: DownloaderConfig,
         reindex_config: ReindexConfig,
         filesystem_settings: FilesystemSettings,
+        retry_interval_secs: u64,
     ) -> Result<Self> {
         // apalis-redis uses its own ConnectionManager for storages
         let apalis_conn = apalis_redis::connect(redis_url).await?;
@@ -235,6 +237,7 @@ impl JobQueue {
             ))),
             filesystem_settings: Arc::new(RwLock::new(filesystem_settings)),
             filesystem_settings_revision: Arc::new(AtomicU64::new(0)),
+            retry_interval_secs: Arc::new(AtomicU64::new(retry_interval_secs)),
             resolution_ranks: Arc::new(RwLock::new(resolution_ranks)),
         })
     }

@@ -14,3 +14,4 @@ async-graphql = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 inventory = { workspace = true }
+url = "2"

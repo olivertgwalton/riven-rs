@@ -89,6 +89,7 @@ async fn main() -> Result<()> {
             DownloaderConfig::from(&settings),
             ReindexConfig::from(&settings),
             settings.filesystem.clone(),
+            settings.retry_interval_secs,
         )
         .await?,
     );

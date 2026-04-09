@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use riven_core::types::*;
@@ -50,21 +51,34 @@ impl Scheduler {
     /// Retry pending top-level items.
     async fn retry_library(&self) {
         let orchestrator = LibraryOrchestrator::new(&self.job_queue);
+        let retry_interval_secs = self.job_queue.retry_interval_secs.load(Ordering::SeqCst);
 
-        let requests = match repo::get_retryable_item_requests(&self.db_pool, 50).await {
-            Ok(requests) => requests,
-            Err(error) => {
-                tracing::error!(%error, "failed to fetch retryable item requests");
-                vec![]
-            }
-        };
+        if retry_interval_secs == 0 {
+            self.retry_ongoing().await;
+            return;
+        }
+
+        let requests =
+            match repo::get_retryable_item_requests(&self.db_pool, retry_interval_secs, 50).await {
+                Ok(requests) => requests,
+                Err(error) => {
+                    tracing::error!(%error, "failed to fetch retryable item requests");
+                    vec![]
+                }
+            };
 
         for request in requests {
             orchestrator.retry_item_request(&request).await;
         }
 
         for item_type in [MediaItemType::Movie, MediaItemType::Show] {
-            let items = match repo::get_pending_items_for_retry(&self.db_pool, item_type, 50).await
+            let items = match repo::get_pending_items_for_retry(
+                &self.db_pool,
+                item_type,
+                retry_interval_secs,
+                50,
+            )
+            .await
             {
                 Ok(items) => items,
                 Err(e) => {

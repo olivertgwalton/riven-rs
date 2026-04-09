@@ -369,6 +369,13 @@ impl MutationRoot {
             .get("unknown_air_date_offset_days")
             .and_then(|v| v.as_u64())
             .unwrap_or(reindex_cfg.unknown_air_date_offset_days);
+        queue.retry_interval_secs.store(
+            settings
+                .get("retry_interval_secs")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(queue.retry_interval_secs.load(Ordering::SeqCst)),
+            Ordering::SeqCst,
+        );
 
         let previous_filesystem = queue.filesystem_settings.read().await.clone();
         let filesystem = settings
