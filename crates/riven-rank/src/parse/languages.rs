@@ -27,6 +27,10 @@ pub(crate) static LANG_PATTERNS: LazyLock<Vec<LangPattern>> = LazyLock::new(|| {
         ("en", r"(?i)\beng?\b"),
         ("en", r"(?i)\benglish?\b"),
         // --- Japanese ---
+        (
+            "ja",
+            r"(?i)(?:^|[\[\]._ /\-])(?:JP|JAP|JPN)(?:$|[\[\]._ /\-])",
+        ),
         ("ja", r"(?i)\b(?:JP|JAP|JPN)\b"),
         ("ja", r"(?i)\b(?:japanese|japon[eê]s)\b"),
         // --- Korean ---
@@ -38,6 +42,7 @@ pub(crate) static LANG_PATTERNS: LazyLock<Vec<LangPattern>> = LazyLock::new(|| {
             r"(?i)\b(?:traditional\W*chinese|chinese\W*traditional)(?:\Wchi)?\b",
         ),
         ("zh", r"(?i)\bzh-hant\b"),
+        ("zh", r"(?i)(?:^|[\W_])chi(?:$|[\W_])"),
         ("zh", r"(?i)\b(?:mand[ae]rin|ch[sn])\b"),
         ("zh", r"(?i)\bCH[IT]\b"),
         ("zh", r"(?i)\b(?:chinese|chin[eê]s)\b"),
@@ -106,7 +111,7 @@ pub(crate) static LANG_PATTERNS: LazyLock<Vec<LangPattern>> = LazyLock::new(|| {
         // --- Punjabi ---
         ("pa", r"(?i)\b(?:PUN(?:jabi)?|punjabi)\b"),
         // --- Bengali ---
-        ("bn", r"(?i)\b(?:BEN(?:gali)?|bengali|bangla)\b"),
+        ("bn", r"(?i)\b(?:bengali|bangla)\b"),
         // --- Urdu ---
         ("ur", r"(?i)\b(?:URD|urdu)\b"),
         // --- Lithuanian ---
@@ -132,12 +137,15 @@ pub(crate) static LANG_PATTERNS: LazyLock<Vec<LangPattern>> = LazyLock::new(|| {
         ("hu", r"(?i)\bHU\b"),
         ("hu", r"(?i)\bHUN(?:garian)?\b"),
         // --- Romanian ---
+        ("ro", r"(?i)(?:^|[\W_])rosub(?:$|[\W_])"),
+        ("ro", r"(?i)(?:^|[\W_])RO(?:$|[\W_])"),
         ("ro", r"(?i)\bROM(?:anian)?\b"),
         // --- Bulgarian ---
         ("bg", r"(?i)\bbul(?:garian)?\b"),
         // --- Serbian ---
         ("sr", r"(?i)\b(?:srp|serbian)\b"),
         // --- Croatian ---
+        ("hr", r"(?i)\bHR\b"),
         ("hr", r"(?i)\b(?:HRV|croatian)\b"),
         // --- Slovenian ---
         ("sl", r"(?i)\bslovenian\b"),
@@ -155,6 +163,7 @@ pub(crate) static LANG_PATTERNS: LazyLock<Vec<LangPattern>> = LazyLock::new(|| {
         ("sv", r"(?i)\b(?:SE|swe|swesubs?|sv(?:ensk)?|nordic)\b"),
         ("sv", r"(?i)\b(?:swedish|sueco)\b"),
         // --- Norwegian ---
+        ("no", r"(?i)\bNO\b"),
         ("no", r"(?i)\b(?:NOR|norsk|norsub|nordic)\b"),
         ("no", r"(?i)\b(?:norwegian|noruegu[eê]s|bokm[aå]l|nob)\b"),
         // --- Norwegian Bokmål ---
@@ -162,18 +171,22 @@ pub(crate) static LANG_PATTERNS: LazyLock<Vec<LangPattern>> = LazyLock::new(|| {
         // --- Nynorsk ---
         ("nn", r"(?i)\b(?:nynorsk|NNO|NN)\b"),
         // --- Arabic ---
+        ("ar", r"(?i)\barab(?:ic)?(?:\W+subtitle)?\b"),
         ("ar", r"(?i)\b(?:arabic|[aá]rabe|ara)\b"),
         // --- Turkish ---
         ("tr", r"(?i)\b(?:turkish|tur(?:co)?|t[uü]rk)\b"),
         ("tr", r"(?i)\b(?:TİVİBU|tivibu|bitturk)\b"),
         // --- Vietnamese ---
+        ("vi", r"(?i)(?:^|[\W_])vie(?:$|[\W_])"),
         ("vi", r"(?i)\bvietnamese\b"),
         // --- Indonesian ---
+        ("id", r"(?i)(?:^|[\W_])ind(?:$|[\W_])"),
         ("id", r"(?i)\bind(?:onesian)?\b"),
         // --- Thai ---
         ("th", r"(?i)\b(?:thai|tailand[eê]s)\b"),
         ("th", r"(?i)\bTHA\b"),
         // --- Malay ---
+        ("ms", r"(?i)(?:^|[\W_])may(?:$|[\W_])"),
         ("ms", r"(?i)\bmalay(?:sian)?\b"),
         // --- Hebrew ---
         ("he", r"(?i)\bheb(?:rew|raico)?\b"),

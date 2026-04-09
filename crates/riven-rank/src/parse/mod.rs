@@ -5,6 +5,7 @@ mod title;
 
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use std::sync::LazyLock;
 
 use detect::{detect_anime, detect_network, detect_scene, detect_trash, is_false_group};
 use languages::LANG_PATTERNS;
@@ -144,24 +145,48 @@ fn extend_sorted<T: Ord>(dst: &mut Vec<T>, src: Vec<T>) {
 }
 
 /// Extract numbers from a regex with capture groups 1 (required) and 2 (optional range end).
-/// Pushes unique values into the target vec.
+/// Callers sort and dedup once after all extraction passes.
 fn extract_numbers(re: &Regex, raw: &str, target: &mut Vec<i32>) {
     for cap in re.captures_iter(raw) {
         if let Ok(n1) = cap[1].parse::<i32>() {
-            if !target.contains(&n1) {
-                target.push(n1);
-            }
+            target.push(n1);
             if let Some(m2) = cap.get(2)
                 && let Ok(n2) = m2.as_str().parse::<i32>()
             {
                 for n in n1..=n2 {
-                    if !target.contains(&n) {
-                        target.push(n);
-                    }
+                    target.push(n);
                 }
             }
         }
     }
+}
+
+fn maybe_has_season_markers(raw: &str) -> bool {
+    raw.contains(['S', 's', 'X', 'x'])
+        || raw.contains("Season")
+        || raw.contains("season")
+        || raw.contains("temporada")
+        || raw.contains("Temporada")
+        || raw.contains("Sezon")
+        || raw.contains("sezon")
+        || raw.contains("Сезон")
+        || raw.contains("сезон")
+        || raw.contains("TV-")
+}
+
+fn maybe_has_episode_markers(raw: &str) -> bool {
+    raw.contains(['E', 'e', 'X', 'x', '~'])
+        || raw.contains("Episode")
+        || raw.contains("episode")
+        || raw.contains("Episodes")
+        || raw.contains("episodes")
+        || raw.contains("Cap")
+        || raw.contains("cap")
+        || raw.contains("Böl")
+        || raw.contains("böl")
+        || raw.contains("Ser")
+        || raw.contains("ser")
+        || raw.contains(" of ")
 }
 
 /// Detect resolution from raw title string.
@@ -202,15 +227,18 @@ fn detect_resolution(raw: &str) -> String {
 
     // Digit-based (e.g., "1080i")
     if let Some(cap) = RE_RES_DIGITS.captures(raw) {
+        let scan = cap[2].to_lowercase();
         return match &cap[1] {
             "3840" | "2160" => "2160p",
+            "1080" if scan == "i" => "1080i",
             "1080" => "1080p",
+            "720" if scan == "i" => "720i",
             "720" => "720p",
             "576" => "576p",
             "480" => "480p",
             "360" => "360p",
             "240" => "240p",
-            num => return format!("{num}p"),
+            num => return format!("{num}{scan}"),
         }
         .to_string();
     }
@@ -455,12 +483,53 @@ fn detect_site_extra(raw: &str) -> Option<String> {
         return Some(m.as_str().to_lowercase());
     }
     if let Some(cap) = RE_SITE_BRACKET.captures(raw) {
-        return Some(cap[1].to_string());
+        return Some(cap[1].trim().to_string());
     }
     if let Some(m) = RE_SITE_DOMAIN.find(raw) {
         return Some(m.as_str().to_string());
     }
     None
+}
+
+fn bracket_group_is_site(raw: &str, candidate: &str) -> bool {
+    if RE_SITE_DOMAIN.is_match(candidate) || RE_SITE_BRACKET.is_match(&format!("[{candidate}]")) {
+        return true;
+    }
+
+    if let Some(caps) = RE_GROUP_BRACKET.captures(raw)
+        && caps.get(1).is_some_and(|m| m.as_str() == candidate)
+    {
+        let rest = &raw[caps.get(0).unwrap().end()..];
+        if rest.trim_start().starts_with('-') && candidate.contains('.') {
+            return true;
+        }
+    }
+
+    false
+}
+
+fn detect_bitrate(raw: &str) -> Option<String> {
+    let caps = RE_BITRATE.captures(raw)?;
+    let m = caps.get(1)?;
+    let mut bitrate = m.as_str().to_lowercase();
+
+    if bitrate.contains('.')
+        && m.start() >= 2
+        && raw.as_bytes()[m.start() - 1] == b'.'
+        && raw.as_bytes()[m.start() - 2].is_ascii_digit()
+    {
+        let number_end = bitrate
+            .find(|c: char| !c.is_ascii_digit() && c != '.')
+            .unwrap_or(bitrate.len());
+        let (number, unit) = bitrate.split_at(number_end);
+        if let Some((_, frac)) = number.split_once('.')
+            && !frac.is_empty()
+        {
+            bitrate = format!("{frac}{unit}");
+        }
+    }
+
+    Some(bitrate)
 }
 
 pub fn parse(raw_title: &str) -> ParsedData {
@@ -472,10 +541,17 @@ pub fn parse(raw_title: &str) -> ParsedData {
 
     // Site detection (must be first - strip from working title)
     let working_title = if let Some(cap) = RE_SITE.captures(raw_title) {
-        data.site = Some(cap[1].to_string());
+        data.site = Some(cap[1].trim().to_string());
         raw_title[cap.get(0).unwrap().end()..].to_string()
     } else {
-        raw_title.to_string()
+        static RE_SITE_BRACKET_PREFIX: LazyLock<Regex> =
+            LazyLock::new(|| Regex::new(r"^\[([^\]]+\.[^\]]+)\][\s._-]*").unwrap());
+        if let Some(cap) = RE_SITE_BRACKET_PREFIX.captures(raw_title) {
+            data.site = Some(cap[1].trim().to_string());
+            raw_title[cap.get(0).unwrap().end()..].to_string()
+        } else {
+            raw_title.to_string()
+        }
     };
     let raw = &working_title;
 
@@ -483,7 +559,7 @@ pub fn parse(raw_title: &str) -> ParsedData {
     data.extension = RE_EXTENSION.captures(raw).map(|c| c[1].to_lowercase());
     data.container = RE_CONTAINER.captures(raw).map(|c| c[1].to_lowercase());
     data.size = RE_SIZE.captures(raw).map(|c| c[1].to_string());
-    data.bitrate = RE_BITRATE.captures(raw).map(|c| c[1].to_lowercase());
+    data.bitrate = detect_bitrate(raw);
 
     // Torrent flag
     data.torrent =
@@ -530,80 +606,109 @@ pub fn parse(raw_title: &str) -> ParsedData {
     data.codec = detect_codec(raw);
 
     // Seasons (try each pattern in priority order)
-    extract_numbers(&RE_SEASON_RANGE, raw, &mut data.seasons);
-    if data.seasons.is_empty() {
-        extract_numbers(&RE_SEASON_SE, raw, &mut data.seasons);
-    }
-    extract_numbers(&RE_SEASON_MULTI, raw, &mut data.seasons);
-    extract_numbers(&RE_SEASON_FULL, raw, &mut data.seasons);
-    // Ordinal: "1st season", "2nd season"
-    extract_numbers(&RE_SEASON_ORDINAL, raw, &mut data.seasons);
-    // Russian formats
-    extract_numbers(&RE_SEASON_RUSSIAN, raw, &mut data.seasons);
-    extract_numbers(&RE_SEASON_RUSSIAN2, raw, &mut data.seasons);
-    // Portuguese
-    extract_numbers(&RE_SEASON_PT, raw, &mut data.seasons);
-    // ТВ-N
-    extract_numbers(&RE_SEASON_TV, raw, &mut data.seasons);
-    // Cross-reference format: group 1 = season
-    for cap in RE_EPISODE_CROSSREF.captures_iter(raw) {
-        if let Ok(s) = cap[1].parse::<i32>()
-            && !data.seasons.contains(&s)
-        {
-            data.seasons.push(s);
+    if maybe_has_season_markers(raw) {
+        for cap in RE_SEASON_EP_COMPACT.captures_iter(raw) {
+            if let Ok(s) = cap[1].parse::<i32>() {
+                data.seasons.push(s);
+            }
+        }
+        extract_numbers(&RE_SEASON_RANGE, raw, &mut data.seasons);
+        if data.seasons.is_empty() {
+            extract_numbers(&RE_SEASON_SE, raw, &mut data.seasons);
+        }
+        extract_numbers(&RE_SEASON_MULTI, raw, &mut data.seasons);
+        extract_numbers(&RE_SEASON_FULL, raw, &mut data.seasons);
+        // Ordinal: "1st season", "2nd season"
+        extract_numbers(&RE_SEASON_ORDINAL, raw, &mut data.seasons);
+        // Russian formats
+        extract_numbers(&RE_SEASON_RUSSIAN, raw, &mut data.seasons);
+        extract_numbers(&RE_SEASON_RUSSIAN2, raw, &mut data.seasons);
+        // Portuguese
+        extract_numbers(&RE_SEASON_PT, raw, &mut data.seasons);
+        // Turkish
+        extract_numbers(&RE_SEASON_TR, raw, &mut data.seasons);
+        // ТВ-N
+        extract_numbers(&RE_SEASON_TV, raw, &mut data.seasons);
+        // Cross-reference format: group 1 = season
+        for cap in RE_EPISODE_CROSSREF.captures_iter(raw) {
+            if let Ok(s) = cap[1].parse::<i32>() {
+                data.seasons.push(s);
+            }
         }
     }
     data.seasons.sort();
     data.seasons.dedup();
 
     // Episodes (try each pattern in priority order)
-    extract_numbers(&RE_EPISODE_RANGE, raw, &mut data.episodes);
-    if data.episodes.is_empty() {
-        extract_numbers(&RE_EPISODE_SE, raw, &mut data.episodes);
-    }
-    if data.episodes.is_empty() {
-        extract_numbers(&RE_EPISODE_STANDALONE, raw, &mut data.episodes);
-    }
-    if data.episodes.is_empty() {
-        extract_numbers(&RE_EPISODE_FULL, raw, &mut data.episodes);
-    }
-    if data.episodes.is_empty() {
-        // "X of Y" pattern
-        if let Some(cap) = RE_EPISODE_OF.captures(raw)
-            && let Ok(n) = cap[1].parse::<i32>()
-        {
-            data.episodes.push(n);
-        }
-    }
-    if data.episodes.is_empty() {
-        // Russian "Серии: N of M"
-        if let Some(cap) = RE_EPISODE_RUSSIAN_OF.captures(raw)
-            && let Ok(n) = cap[1].parse::<i32>()
-        {
-            data.episodes.push(n);
-        }
-    }
-    if data.episodes.is_empty() {
-        // Russian episodes
-        extract_numbers(&RE_EPISODE_RUSSIAN, raw, &mut data.episodes);
-    }
-    if data.episodes.is_empty() {
-        // Cross-reference: episode is in group 2
-        for cap in RE_EPISODE_CROSSREF.captures_iter(raw) {
-            if let Ok(e) = cap[2].parse::<i32>()
-                && !data.episodes.contains(&e)
-            {
+    if maybe_has_episode_markers(raw) {
+        for cap in RE_SEASON_EP_COMPACT.captures_iter(raw) {
+            if let Ok(e) = cap[2].parse::<i32>() {
                 data.episodes.push(e);
             }
         }
-    }
-    // Catch consecutive episodes: S01E01E02E03
-    for cap in RE_EPISODE_CONSECUTIVE.captures_iter(raw) {
-        for ep_cap in RE_EP_NUM_BARE.captures_iter(&cap[1]) {
-            if let Ok(n) = ep_cap[1].parse::<i32>()
-                && !data.episodes.contains(&n)
+        extract_numbers(&RE_EPISODE_RANGE, raw, &mut data.episodes);
+        if data.episodes.is_empty() {
+            extract_numbers(&RE_EPISODE_RANGE_BARE, raw, &mut data.episodes);
+        }
+        if data.episodes.is_empty() {
+            extract_numbers(&RE_EPISODE_RANGE_PAREN, raw, &mut data.episodes);
+        }
+        if data.episodes.is_empty() {
+            extract_numbers(&RE_EPISODE_SE, raw, &mut data.episodes);
+        }
+        if data.episodes.is_empty() {
+            extract_numbers(&RE_EPISODE_STANDALONE, raw, &mut data.episodes);
+        }
+        if data.episodes.is_empty() {
+            extract_numbers(&RE_EPISODE_FULL, raw, &mut data.episodes);
+        }
+        if data.episodes.is_empty() {
+            // "X of Y" pattern
+            if let Some(cap) = RE_EPISODE_OF.captures(raw)
+                && let Ok(n) = cap[1].parse::<i32>()
             {
                 data.episodes.push(n);
+            }
+        }
+        if data.episodes.is_empty() {
+            // Russian "Серии: N of M"
+            if let Some(cap) = RE_EPISODE_RUSSIAN_OF.captures(raw)
+                && let Ok(n) = cap[1].parse::<i32>()
+            {
+                data.episodes.push(n);
+            }
+        }
+        if data.episodes.is_empty() {
+            // Russian episodes
+            extract_numbers(&RE_EPISODE_RUSSIAN, raw, &mut data.episodes);
+        }
+        if data.episodes.is_empty() {
+            // Turkish episodes
+            extract_numbers(&RE_EPISODE_TR, raw, &mut data.episodes);
+        }
+        if data.episodes.is_empty() {
+            for cap in RE_EPISODE_CROSSREF_RANGE.captures_iter(raw) {
+                if let (Ok(start), Ok(end)) = (cap[2].parse::<i32>(), cap[3].parse::<i32>()) {
+                    for ep in start..=end {
+                        data.episodes.push(ep);
+                    }
+                }
+            }
+        }
+        if data.episodes.is_empty() {
+            // Cross-reference: episode is in group 2
+            for cap in RE_EPISODE_CROSSREF.captures_iter(raw) {
+                if let Ok(e) = cap[2].parse::<i32>() {
+                    data.episodes.push(e);
+                }
+            }
+        }
+        // Catch consecutive episodes: S01E01E02E03
+        for cap in RE_EPISODE_CONSECUTIVE.captures_iter(raw) {
+            for ep_cap in RE_EP_NUM_BARE.captures_iter(&cap[1]) {
+                if let Ok(n) = ep_cap[1].parse::<i32>() {
+                    data.episodes.push(n);
+                }
             }
         }
     }
@@ -638,7 +743,10 @@ pub fn parse(raw_title: &str) -> ParsedData {
     data.edition = RE_EDITION.captures(raw).map(|c| normalize_edition(&c[1]));
 
     // Region (R1-R9, PAL, NTSC, SECAM)
-    data.region = RE_REGION.captures(raw).map(|c| c[1].to_uppercase());
+    data.region = RE_REGION_DISC
+        .captures(raw)
+        .or_else(|| RE_REGION.captures(raw))
+        .map(|c| c[1].to_uppercase());
 
     // Network
     detect_network(raw, &mut data);
@@ -676,7 +784,7 @@ pub fn parse(raw_title: &str) -> ParsedData {
             RE_GROUP_BRACKET
                 .captures(raw)
                 .map(|c| c[1].to_string())
-                .filter(|g| !is_false_group(g))
+                .filter(|g| !is_false_group(g) && !bracket_group_is_site(raw, g))
         });
 
     // Boolean flags
@@ -712,6 +820,16 @@ pub fn parse(raw_title: &str) -> ParsedData {
     let title = extract_title(raw);
     data.normalized_title = normalize_title(&title);
     data.parsed_title = title;
+
+    // Movie titles such as "Kill Bill: Vol. 1" should keep "Vol" in the title
+    // without being treated as comic/manga volume metadata.
+    if data.year.is_some()
+        && data.seasons.is_empty()
+        && data.episodes.is_empty()
+        && data.parsed_title.to_lowercase().contains("vol")
+    {
+        data.volumes.clear();
+    }
 
     // Anime detection (after group/episode_code/extras are populated)
     data.anime = detect_anime(raw, &data);

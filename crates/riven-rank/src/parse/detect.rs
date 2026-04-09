@@ -72,6 +72,8 @@ pub(crate) fn detect_network(raw: &str, data: &mut ParsedData) {
 /// Check if a detected group name is actually a false positive (codec, format, etc.).
 pub(crate) fn is_false_group(group: &str) -> bool {
     let lower = group.to_lowercase();
+    static RE_FALSE_GROUP_EP: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"(?i)^s\d{1,4}e\d{1,4}$").unwrap());
     matches!(
         lower.as_str(),
         "mkv"
@@ -115,6 +117,12 @@ pub(crate) fn is_false_group(group: &str) -> bool {
             | "dovi"
             | "eng"
             | "english"
+            | "dl"
+            | "rip"
+            | "web"
+            | "bluray"
+            | "bdrip"
+            | "brrip"
             | "proper"
             | "repack"
             | "retail"
@@ -122,6 +130,7 @@ pub(crate) fn is_false_group(group: &str) -> bool {
             | "remastered"
     ) || group == "-"
         || group.is_empty()
+        || RE_FALSE_GROUP_EP.is_match(group)
 }
 
 // =============================================================================
@@ -137,6 +146,7 @@ pub(crate) fn detect_trash(raw: &str, data: &ParsedData) -> bool {
     data.quality
         .as_deref()
         .is_some_and(|q| TRASH_QUALITIES.contains(&q))
+        || RE_Q_R5.is_match(raw)
         || RE_SPRINT.is_match(raw)
         || RE_Q_PRE_DVD.is_match(raw)
         || RE_DVB.is_match(raw)
@@ -169,7 +179,9 @@ static ANIME_GROUPS: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
     vec![
         "HorribleSubs",
         "SubsPlease",
+        "SobsPlease",
         "Erai-raws",
+        "HorribleRips",
         "EMBER",
         "ASW",
         "Judas",
@@ -218,6 +230,129 @@ static ANIME_GROUPS: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
         "Tenrai-Sensei",
         "Ember",
         "ADN",
+        "Legion",
+        "Spark",
+        "BlueLobster",
+        "Aergia",
+        "Arg0",
+        "LYS1TH3A",
+        "OZR",
+        "SCY",
+        "smol",
+        "Vanilla",
+        "Vodes",
+        "ZeroBuild",
+        "0x539",
+        "Alt",
+        "ARC",
+        "Baws",
+        "BKC",
+        "Crow",
+        "CUNNY",
+        "CsS",
+        "D-Z0N3",
+        "Dae",
+        "Datte13",
+        "FLFL",
+        "iKaos",
+        "JySzE",
+        "Lulu",
+        "Matsya",
+        "Metal",
+        "Noyr",
+        "Okay-Subs",
+        "pyroneko",
+        "RAI",
+        "Shimatta",
+        "Smoke",
+        "Spirale",
+        "Thighs",
+        "UDF",
+        "Yuki",
+        "Golumpa",
+        "KamiFS",
+        "AssMix",
+        "Ayashii",
+        "CyC",
+        "Dekinai",
+        "EXP",
+        "Galator",
+        "Holomux",
+        "AnimeKaizoku",
+        "Kametsu",
+        "LazyRemux",
+        "Mysteria",
+        "Netaro",
+        "Pookie",
+        "Quetzal",
+        "Rasetsu",
+        "Senjou",
+        "ShowY",
+        "WBDP",
+        "Yoghurt",
+        "YURI",
+        "ZOIO",
+        "ANThELIa",
+        "BluDragon",
+        "Dragon-Releases",
+        "KAWAiREMUX",
+        "MKVULTRA",
+        "Raizel",
+        "REVO",
+        "TTGA",
+        "Afro",
+        "Akai",
+        "Almighty",
+        "Asenshi",
+        "BlurayDesuYo",
+        "Bunny-Apocalypse",
+        "Exiled-Destiny",
+        "Harunatsu",
+        "Impatience",
+        "Inka-Subs",
+        "Judgment",
+        "Kantai",
+        "Licca",
+        "Nii-sama",
+        "niizk",
+        "Nishi-Taku",
+        "OnDeed",
+        "peachflavored",
+        "Saizen",
+        "SmugCat",
+        "Sushi",
+        "Watashi",
+        "Yabai",
+        "ANiHLS",
+        "DHD",
+        "HAiKU",
+        "RedBlade",
+        "STRiFE",
+        "TENEIGHTY",
+        "AkihitoSubs",
+        "Arukoru",
+        "naiyas",
+        "NanDesuKa",
+        "URANIME",
+        "VARYG",
+        "ZigZag",
+        "9volt",
+        "Chihiro",
+        "Doki",
+        "Daddy-Raws",
+        "Iriza-Raws",
+        "Kawaiika-Raws",
+        "Koi-Raws",
+        "Lilith-Raws",
+        "LowPower-Raws",
+        "Nanako-Raws",
+        "Ohys-Raws",
+        "PandoraTV-Raws",
+        "Raws-Maji",
+        "ReinForce",
+        "Scryous-Raws",
+        "Seicher-Raws",
+        "Shiniori-Raws",
     ]
 });
 

@@ -1,0 +1,7 @@
+mode,parser,n,total_s,throughput,p50_ms,p95_ms
+upstream,PTT.parse_title,1000,0.795419,1257.2,0.592,1.660
+rust,riven-rank.parse,1000,0.075320,13276.8,0.020,0.028
+upstream,PTT.parse_title,10000,3.873474,2581.7,0.380,0.463
+rust,riven-rank.parse,10000,0.266764,37486.4,0.020,0.026
+upstream,PTT.parse_title,30000,11.644060,2576.4,0.382,0.457
+rust,riven-rank.parse,30000,0.802696,37374.1,0.021,0.041

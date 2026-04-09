@@ -39,9 +39,9 @@ pub(crate) static RE_RES_PREFIXED_720: LazyLock<Regex> =
 pub(crate) static RE_RES_PREFIXED_480: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)\b(?:BD|HD|M)\s*480p?\b").unwrap());
 pub(crate) static RE_RES_GENERIC: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)\b(?:4k|2160p|1080p|720p|480p)\b").unwrap());
+    LazyLock::new(|| Regex::new(r"(?i)\b(?:4k|2160p|1080[pi]|720p|480p)\b").unwrap());
 pub(crate) static RE_RES_DIGITS: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)\b(240|360|480|576|720|1080|2160|3840)[pi]\b").unwrap());
+    LazyLock::new(|| Regex::new(r"(?i)\b(240|360|480|576|720|1080|2160|3840)([pi])\b").unwrap());
 /// Typo correction: "4800p" → 480p, "10800p" → 1080p, "21600p" → 2160p
 pub(crate) static RE_RES_TYPO: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)(480|720|1080|2160)0[pi]").unwrap());
@@ -50,13 +50,14 @@ pub(crate) static RE_RES_TYPO: LazyLock<Regex> =
 // Season
 // =============================================================================
 
-pub(crate) static RE_SEASON_SE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)\bS(\d{1,4})(?:\s*[&+\-]\s*S?(\d{1,4}))*").unwrap());
+pub(crate) static RE_SEASON_SE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)(?:^|[.\s\[(])S(\d{1,4})(?:(?:\s*[&+]\s*S?|\s*-\s*S)(\d{1,4}))*").unwrap()
+});
 pub(crate) static RE_SEASON_FULL: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)\b(?:season|saison|temporada|сезон|staffel|seizoen|series|temp)[\s._]*(\d{1,3})\b(?:[\s._]*[-&+][\s._]*(?:season|saison|temporada|сезон|staffel|seizoen|series|temp)?[\s._]*(\d{1,3})\b)*").unwrap()
+    Regex::new(r"(?i)\b(?:season|saison|temporada|сезон|staffel|seizoen|series|temp|sezon)[\s._]*(\d{1,3})\b(?:[\s._]*[-&+][\s._]*(?:season|saison|temporada|сезон|staffel|seizoen|series|temp|sezon)?[\s._]*(\d{1,3})\b)*").unwrap()
 });
 pub(crate) static RE_SEASON_RANGE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)\bS(\d{1,3})\s*-\s*S(\d{1,3})\b").unwrap());
+    LazyLock::new(|| Regex::new(r"(?i)(?:^|[.\s\[(])S(\d{1,3})\s*[-–—]+\s*S(\d{1,3})\b").unwrap());
 pub(crate) static RE_SEASON_MULTI: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)\b(?:season|saison|temporada|сезон|staffel|seizoen)s?[\s._]*(\d{1,3})\b[\s._]*(?:[,&+][\s._]*(\d{1,3})\b)+")
         .unwrap()
@@ -73,6 +74,12 @@ pub(crate) static RE_SEASON_RUSSIAN2: LazyLock<Regex> =
 /// Portuguese season: "1ª temporada"
 pub(crate) static RE_SEASON_PT: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)(\d{1,2})[°ºªa]?\s*temporada").unwrap());
+/// Turkish season: "2.Sezon", "2 Sezon"
+pub(crate) static RE_SEASON_TR: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)\b(\d{1,2})[.\s]*sezon\b").unwrap());
+/// Compact season/episode pair: "(S4-24)"
+pub(crate) static RE_SEASON_EP_COMPACT: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)\bS(\d{1,3})-(\d{1,4})\b").unwrap());
 /// ТВ-N format
 pub(crate) static RE_SEASON_TV: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)\bТВ-(\d{1,2})\b").unwrap());
@@ -89,14 +96,27 @@ pub(crate) static RE_EPISODE_STANDALONE: LazyLock<Regex> = LazyLock::new(|| {
 });
 pub(crate) static RE_EPISODE_FULL: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-        r"(?i)\b(?:episode|ep|episodio|épisode|folge|Эпизод|Серия|сер\.?|cap(?:itulo)?|epis[oó]dio)[\s._]*[-:#№]?[\s._]*(\d{1,4})(?:[\s._]*[-+&][\s._]*(?:episode|ep|episodio|épisode|folge)?[\s._]*(\d{1,4}))*",
+        r"(?i)\b(?:episodes?|eps?|episodio|episodios|épisode|folge|Эпизод|Серия|сер\.?|cap(?:itulo)?|epis[oó]dio)[\s._]*[-:#№]?[\s._]*(\d{1,4})(?:[\s._]*[-+&][\s._]*(?:episodes?|eps?|episodio|episodios|épisode|folge)?[\s._]*(\d{1,4}))*",
     )
     .unwrap()
 });
+/// Turkish episode: "7.Bölüm", "7 Bölum"
+pub(crate) static RE_EPISODE_TR: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)\b(\d{1,4})[.\s]*b[oö]l(?:u|ü)m\b").unwrap());
+/// Crossref range: "06x01-08"
+pub(crate) static RE_EPISODE_CROSSREF_RANGE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)\b(\d{1,2})[xх](\d{2,3})\s*-\s*(\d{2,3})\b").unwrap());
 pub(crate) static RE_EPISODE_CROSSREF: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)\b(\d{1,2})[xх](\d{2,3})\b").unwrap());
 pub(crate) static RE_EPISODE_RANGE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)\bE(\d{1,4})\s*-\s*E(\d{1,4})\b").unwrap());
+/// Anime-style bare range: "01 ~ 12", "00~25"
+pub(crate) static RE_EPISODE_RANGE_BARE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)(?:^|[\s\[(\-])(\d{1,3})\s*~\s*(\d{1,3})(?:$|[\s\])])").unwrap()
+});
+/// Parenthesized bare range: "(01 - 12)"
+pub(crate) static RE_EPISODE_RANGE_PAREN: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)\((\d{1,3})\s*-\s*(\d{1,3})\)").unwrap());
 
 /// Consecutive multi-episode without separator: S01E01E02E03
 pub(crate) static RE_EPISODE_CONSECUTIVE: LazyLock<Regex> =
@@ -184,11 +204,11 @@ pub(crate) static RE_Q_R5: LazyLock<Regex> =
 pub(crate) static RE_Q_WEBMUX: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)\b(?:DL|WEB|BD|BR)MUX\b").unwrap());
 pub(crate) static RE_Q_WEBRIP: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)\bWEB[ .\-]*Rip\b").unwrap());
+    LazyLock::new(|| Regex::new(r"(?i)\bWEB[ ._\-]*Rip\b").unwrap());
 pub(crate) static RE_Q_WEBDLRIP: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)\bWEB[ .\-]?DL[ .\-]?Rip\b").unwrap());
+    LazyLock::new(|| Regex::new(r"(?i)\bWEB[ ._\-]?DL[ ._\-]?Rip\b").unwrap());
 pub(crate) static RE_Q_WEBDL: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)\bWEB[ .\-]*(?:DL|\.BDrip|\.DLRIP)\b").unwrap());
+    LazyLock::new(|| Regex::new(r"(?i)\bWEB[ ._\-]*(?:DL|\.BDrip|\.DLRIP)\b").unwrap());
 pub(crate) static RE_Q_WEB: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)(?:^|[\s.\-\[(])WEB(?:[\s.\-\])]|$)").unwrap());
 pub(crate) static RE_Q_CAM: LazyLock<Regex> = LazyLock::new(|| {
@@ -199,22 +219,23 @@ pub(crate) static RE_Q_CAM_FALSE: LazyLock<Regex> =
 pub(crate) static RE_Q_PDTV: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)\bPDTV\b").unwrap());
 pub(crate) static RE_Q_HDTV: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)\bHD(?:.?TV)?\b").unwrap());
+    LazyLock::new(|| Regex::new(r"(?i)(?:^|[\W_])HD(?:.?TV)?(?:$|[\W_])").unwrap());
 
 // =============================================================================
 // Codec
 // =============================================================================
 
 pub(crate) static RE_CODEC_AVC: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)\b(?:x\.?264|h\.?264|AVC)\b").unwrap());
-pub(crate) static RE_CODEC_HEVC: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)\b(?:x\.?265|h\.?265|HEVC(?:10)?)\b").unwrap());
+    LazyLock::new(|| Regex::new(r"(?i)(?:^|[\W_])(?:x\.?264|h\.?264|AVC)(?:$|[\W_])").unwrap());
+pub(crate) static RE_CODEC_HEVC: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)(?:^|[\W_])(?:x\.?265|h\.?265|HEVC(?:10)?)(?:$|[\W_])").unwrap()
+});
 pub(crate) static RE_CODEC_XVID: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)\b(?:xvid|divx)\b").unwrap());
+    LazyLock::new(|| Regex::new(r"(?i)(?:^|[\W_])(?:xvid|divx)(?:$|[\W_])").unwrap());
 pub(crate) static RE_CODEC_AV1: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)\bAV1\b").unwrap());
+    LazyLock::new(|| Regex::new(r"(?i)(?:^|[\W_])AV1(?:$|[\W_])").unwrap());
 pub(crate) static RE_CODEC_MPEG: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)\bmpe?g\d*\b").unwrap());
+    LazyLock::new(|| Regex::new(r"(?i)(?:^|[\W_])mpe?g\d*(?:$|[\W_])").unwrap());
 /// Bare 264/265 not preceded by x or h
 pub(crate) static RE_CODEC_264_BARE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)\W264\W").unwrap());
@@ -242,10 +263,14 @@ pub(crate) static RE_AUDIO_TRUEHD_BARE: LazyLock<Regex> =
 pub(crate) static RE_AUDIO_FLAC: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)\bFLAC(?:\d\.\d)?(?:x\d+)?\b").unwrap());
 pub(crate) static RE_AUDIO_DD_PLUS: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)(?:DD2?[P+]|DDP?\d|Dolby\s*Digital\s*Plus|DD\s*Plus|\bE[ .\-]?AC[ .\-]?3\b|\bEAC3\b)(?:-S\d+)?").unwrap()
+    Regex::new(
+        r"(?i)(?:\b(?:DD2?P(?:\d(?:\.\d)?)?|DDP(?:\d(?:\.\d)?)?|Dolby\s*Digital\s*Plus|DD\s*Plus|E[ .\-]?AC[ .\-]?3|EAC3)\b|\bDD\+(?:\d(?:\.\d)?)?(?:$|[\s)\].,_-]))(?:-S\d+)?",
+    )
+    .unwrap()
 });
 pub(crate) static RE_AUDIO_DD: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)\b(?:DD|Dolby\s*Digital|DolbyD|AC[ .\-]?3(?:x2)?(?:-S\d+)?)\b").unwrap()
+    Regex::new(r"(?i)\b(?:DD(?:\d(?:\.\d)?)?|Dolby\s*Digital|DolbyD|AC[ .\-]?3(?:x2)?(?:-S\d+)?)\b")
+        .unwrap()
 });
 pub(crate) static RE_AUDIO_AAC: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)\bQ?Q?AAC(?:x?\d+\.?\d*)?").unwrap());
@@ -292,7 +317,7 @@ pub(crate) static RE_HDR_SDR: LazyLock<Regex> =
 
 /// 10-bit detection
 pub(crate) static RE_BIT_DEPTH_10: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)(?:\b10[- ]?bit\b|\bHi10[Pp]?\b|\bHEVC\s*10\b|\bHDR10\b)").unwrap()
+    Regex::new(r"(?i)(?:\b10[- ]?bit\b|\bHi10[Pp]?\b|\bHEVC\s*10\b|\bHDR10\b|\b(?:HEVC|[XH]\.?265)10(?:[- ]?bit)?\b)").unwrap()
 });
 /// 8-bit detection
 pub(crate) static RE_BIT_DEPTH_8: LazyLock<Regex> =
@@ -360,10 +385,18 @@ pub(crate) static RE_DATE_COMPACT: LazyLock<Regex> = LazyLock::new(|| {
 
 pub(crate) static RE_BITRATE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)\b(\d+(?:\.\d+)?\s*(?:[KkMm]bps|[KkMm]b/s))\b").unwrap());
-pub(crate) static RE_REGION: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)\b(R[0-9]J?|Region\s*[0-9]|PAL|NTSC|SECAM)\b").unwrap());
-pub(crate) static RE_SITE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^(?:www?\.)?([\w-]+\.[\w-]+(?:\.[\w-]+)?)\s+-\s*").unwrap());
+pub(crate) static RE_REGION: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)(?:^|[\W_])(R[0-9]J?|Region\s*[0-9]|PAL|NTSC|SECAM)(?:$|[\W_])").unwrap()
+});
+pub(crate) static RE_REGION_DISC: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)(?:^|[\W_])(?:DVD)?(R[0-9]J?|Region\s*[0-9])(?:$|[\W_])").unwrap()
+});
+pub(crate) static RE_SITE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+            r"^((?:(?:www?[.,]?\s*[\w-]+(?:[ .][\w-]+)+)|(?:(?:www?[.,])?[\w-]+\.[\w-]+(?:\.[\w-]+)?)))\s+-\s*",
+        )
+        .unwrap()
+});
 /// Additional site patterns
 pub(crate) static RE_SITE_DOMAIN: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)\bwww?.?(?:\w+-)*\w+[.\s](?:com|org|net|ms|tv|mx|co|party|vip|nu|pics)\b")
@@ -386,7 +419,7 @@ pub(crate) static RE_COUNTRY: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"\b(US|UK|AU|NZ|CA|IE|FR|DE|ES|IT|NL|BE|AT|CH|SE|NO|DK|FI|JP|KR|CN|TW|HK|IN|BR|MX|AR|CL|CO|RU|PL|CZ|HU|RO|BG|HR|RS|SK|SI|UA|GR|TR|TH|PH|MY|SG|ID|VN)\b").unwrap()
 });
 pub(crate) static RE_NON_ENGLISH_PREFIX: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"^[\p{Han}\p{Katakana}\p{Hiragana}\p{Cyrillic}\p{Arabic}\p{Thai}\p{Hangul}\p{Devanagari}\p{Bengali}\p{Tamil}\p{Telugu}\p{Malayalam}\p{Kannada}\p{Gujarati}()\[\]\s.。，、·]+").unwrap()
+    Regex::new(r"^[\p{Han}\p{Katakana}\p{Hiragana}\p{Cyrillic}\p{Arabic}\p{Thai}\p{Hangul}\p{Devanagari}\p{Bengali}\p{Tamil}\p{Telugu}\p{Malayalam}\p{Kannada}\p{Gujarati}()\s.。，、·【】★「」『』]+").unwrap()
 });
 pub(crate) static RE_EXTRAS: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)\b(trailer|sample|featurettes?|behind\s*the\s*scenes|deleted\s*scenes?|bonus|extras?|interview|commentary|making\s*of|bloopers?|gag\s*reel)\b").unwrap()
@@ -405,7 +438,7 @@ pub(crate) static RE_EXTRAS_OP: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\bOPv?\d*\b").unwrap());
 
 pub(crate) static RE_TITLE_QUALITY: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)(?:\b(?:HD[ .\-]*)?T(?:ELE)?S(?:YNC)?(?:Rip)?|\b(?:HD[ .\-]*)?T(?:ELE)?C(?:INE)?(?:Rip)?|\bBlu[ .\-]*Ray|\bremux|\bWEB[ .\-]*(?:DL|Rip)|\bWEB\b|\bHDTV|\bDVD(?:Rip)?|\bBDRip|\bBRRip|\bHDRip|\bCAM|\bPDTV|\bSAT[ .\-]*Rip|\bPPV|\bVHS)\b").unwrap()
+    Regex::new(r"(?i)(?:\b(?:HD[ .\-]*)?T(?:ELE)?S(?:YNC)?(?:Rip)?|\b(?:HD[ .\-]*)?T(?:ELE)?C(?:INE)?(?:Rip)?|\bBlu[ .\-]*Ray|\bremux|\bWEB[ .\-]*(?:DL|Rip)|\bWEB\b|\bHDTV|\bDVD(?:Rip)?|\bBDRip|\bBRRip|\bHDRip|\bCAM|\bPDTV|\bSAT[ .\-]*Rip|\bVHS)\b").unwrap()
 });
 
 // =============================================================================
@@ -467,7 +500,7 @@ pub(crate) static RE_ADULT: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\b(?:XXX|xxx|Xxx)\b").unwrap());
 pub(crate) static RE_PPV: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\bPPV\b").unwrap());
 pub(crate) static RE_PPV_FIGHT: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)\bFight\s*Nights?\b").unwrap());
+    LazyLock::new(|| Regex::new(r"(?i)\bFight[.\s_-]*Nights?\b").unwrap());
 pub(crate) static RE_SCENE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)(?:-CAKES|-GGEZ|-GGWP|-GLHF|-GOSSIP|-NAISU|-KOGI|-PECULATE|-SLOT|-EDITH|-ETHEL|-ELEANOR|-B2B|-SPAMnEGGS|-FTP|-DiRT|-SYNCOPY|-BAE|-SuccessfulCrab|-NHTFS|-SURCODE|-B0MBARDIERS)\b").unwrap()
 });
