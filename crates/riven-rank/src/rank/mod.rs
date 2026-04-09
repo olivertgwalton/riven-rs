@@ -2,6 +2,7 @@ mod fetch;
 pub mod scores;
 
 use std::collections::HashMap;
+use std::sync::LazyLock;
 
 use thiserror::Error;
 
@@ -10,6 +11,9 @@ use crate::settings::RankSettings;
 
 pub use fetch::check_fetch;
 pub use scores::get_rank;
+
+static DEFAULT_MODEL: LazyLock<crate::defaults::RankingModel> =
+    LazyLock::new(crate::defaults::RankingModel::default);
 
 #[derive(Debug, Error)]
 pub enum RankError {
@@ -73,35 +77,40 @@ pub fn rank_torrent(
     }
 
     // 4. Check title similarity
-    let normalized_query = crate::parse::normalize_title(correct_title);
-    let mut best_ratio = lev_ratio(&data.normalized_title, &normalized_query);
-    for alias_list in aliases.values() {
-        for alias in alias_list {
-            let normalized_alias = crate::parse::normalize_title(alias);
-            let r = lev_ratio(&data.normalized_title, &normalized_alias);
-            if r > best_ratio {
-                best_ratio = r;
+    let best_ratio = if correct_title.is_empty() {
+        0.0
+    } else {
+        let normalized_query = crate::parse::normalize_title(correct_title);
+        let mut best_ratio = lev_ratio(&data.normalized_title, &normalized_query);
+        for alias_list in aliases.values() {
+            for alias in alias_list {
+                let normalized_alias = crate::parse::normalize_title(alias);
+                let r = lev_ratio(&data.normalized_title, &normalized_alias);
+                if r > best_ratio {
+                    best_ratio = r;
+                }
             }
         }
-    }
 
-    if best_ratio < settings.options.title_similarity {
-        tracing::info!(
-            parsed = %data.normalized_title,
-            query = %normalized_query,
-            ratio = best_ratio,
-            threshold = settings.options.title_similarity,
-            "stream rejected: similarity too low"
-        );
-        return Err(RankError::TitleSimilarity {
-            ratio: best_ratio,
-            threshold: settings.options.title_similarity,
-        });
-    }
+        if best_ratio < settings.options.title_similarity {
+            tracing::info!(
+                parsed = %data.normalized_title,
+                query = %normalized_query,
+                ratio = best_ratio,
+                threshold = settings.options.title_similarity,
+                "stream rejected: similarity too low"
+            );
+            return Err(RankError::TitleSimilarity {
+                ratio: best_ratio,
+                threshold: settings.options.title_similarity,
+            });
+        }
+
+        best_ratio
+    };
 
     // 5. Compute score
-    let model = crate::defaults::RankingModel::default();
-    let (total_score, score_parts) = get_rank(&data, settings, &model);
+    let (total_score, score_parts) = get_rank(&data, settings, &DEFAULT_MODEL);
 
     // 6. Check fetch
     let (fetch, failed_checks) = check_fetch(&data, settings);

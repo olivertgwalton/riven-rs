@@ -224,3 +224,60 @@ pub(crate) static LANG_PATTERNS: LazyLock<Vec<LangPattern>> = LazyLock::new(|| {
         })
         .collect()
 });
+
+pub(crate) fn translate_langs(langs: &[String]) -> Vec<String> {
+    langs
+        .iter()
+        .filter_map(|lang| match lang.as_str() {
+            "en" => Some("English"),
+            "ja" => Some("Japanese"),
+            "zh" => Some("Chinese"),
+            "ru" => Some("Russian"),
+            "ar" => Some("Arabic"),
+            "pt" => Some("Portuguese"),
+            "es" => Some("Spanish"),
+            "fr" => Some("French"),
+            "de" => Some("German"),
+            "it" => Some("Italian"),
+            "ko" => Some("Korean"),
+            "hi" => Some("Hindi"),
+            "bn" => Some("Bengali"),
+            "pa" => Some("Punjabi"),
+            "mr" => Some("Marathi"),
+            "gu" => Some("Gujarati"),
+            "ta" => Some("Tamil"),
+            "te" => Some("Telugu"),
+            "kn" => Some("Kannada"),
+            "ml" => Some("Malayalam"),
+            "th" => Some("Thai"),
+            "vi" => Some("Vietnamese"),
+            "id" => Some("Indonesian"),
+            "tr" => Some("Turkish"),
+            "he" => Some("Hebrew"),
+            "fa" => Some("Persian"),
+            "uk" => Some("Ukrainian"),
+            "el" => Some("Greek"),
+            "lt" => Some("Lithuanian"),
+            "lv" => Some("Latvian"),
+            "et" => Some("Estonian"),
+            "pl" => Some("Polish"),
+            "cs" => Some("Czech"),
+            "sk" => Some("Slovak"),
+            "hu" => Some("Hungarian"),
+            "ro" => Some("Romanian"),
+            "bg" => Some("Bulgarian"),
+            "sr" => Some("Serbian"),
+            "hr" => Some("Croatian"),
+            "sl" => Some("Slovenian"),
+            "nl" => Some("Dutch"),
+            "da" => Some("Danish"),
+            "fi" => Some("Finnish"),
+            "sv" => Some("Swedish"),
+            "no" => Some("Norwegian"),
+            "ms" => Some("Malay"),
+            "la" => Some("Latino"),
+            _ => None,
+        })
+        .map(str::to_string)
+        .collect()
+}

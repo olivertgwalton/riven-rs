@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::LazyLock;
 
 use detect::{detect_anime, detect_network, detect_scene, detect_trash, is_false_group};
-use languages::LANG_PATTERNS;
+use languages::{LANG_PATTERNS, translate_langs};
 use patterns::*;
 pub(crate) use title::normalize_title;
 use title::{extract_title, normalize_edition};
@@ -66,6 +66,11 @@ pub struct ParsedData {
     pub extras: Vec<String>,
     pub torrent: bool,
     pub scene: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ParseOptions {
+    pub translate_languages: bool,
 }
 
 impl ParsedData {
@@ -533,6 +538,10 @@ fn detect_bitrate(raw: &str) -> Option<String> {
 }
 
 pub fn parse(raw_title: &str) -> ParsedData {
+    parse_with_options(raw_title, ParseOptions::default())
+}
+
+pub fn parse_with_options(raw_title: &str, options: ParseOptions) -> ParsedData {
     let mut data = ParsedData {
         raw_title: raw_title.to_string(),
         resolution: "unknown".to_string(),
@@ -833,6 +842,10 @@ pub fn parse(raw_title: &str) -> ParsedData {
 
     // Anime detection (after group/episode_code/extras are populated)
     data.anime = detect_anime(raw, &data);
+
+    if options.translate_languages {
+        data.languages = translate_langs(&data.languages);
+    }
 
     data
 }

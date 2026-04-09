@@ -1,4 +1,4 @@
-use riven_rank::parse;
+use riven_rank::{ParseOptions, parse, parse_with_options};
 
 #[test]
 fn test_language_french_vostfr() {
@@ -99,6 +99,17 @@ fn test_language_danish_nordic() {
 fn test_language_multi() {
     let data = parse("Nocturnal Animals 2016 VFF 1080p BluRay DTS HEVC-HD2");
     assert!(data.languages.contains(&"fr".to_string()));
+}
+
+#[test]
+fn test_language_translation_option_matches_ptt_behavior() {
+    let data = parse_with_options(
+        "Movie.Title.English.JPN.1080p.BluRay.MULTI",
+        ParseOptions {
+            translate_languages: true,
+        },
+    );
+    assert_eq!(data.languages, vec!["English", "Japanese"]);
 }
 
 #[test]

@@ -275,6 +275,18 @@ pub fn check_fetch(data: &ParsedData, settings: &RankSettings) -> (bool, Vec<Str
     let mut failed = Vec::new();
     let speed = settings.options.enable_fetch_speed_mode;
 
+    if speed {
+        if !trash_handler(data, settings, &mut failed) {
+            return (false, failed);
+        }
+        if !adult_handler(data, settings, &mut failed) {
+            return (false, failed);
+        }
+        if required_matches(data, settings) {
+            return (true, failed);
+        }
+    }
+
     macro_rules! run {
         ($fn:expr) => {{
             let ok = $fn(data, settings, &mut failed);
