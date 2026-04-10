@@ -1,8 +1,7 @@
 use redis::AsyncCommands;
 
 use riven_core::types::{
-    CacheCheckFile, CacheCheckQuery, CacheCheckResult, DownloadFile, DownloadResult,
-    TorrentStatus,
+    CacheCheckFile, CacheCheckQuery, CacheCheckResult, DownloadFile, DownloadResult, TorrentStatus,
 };
 
 use crate::models::{
@@ -40,10 +39,7 @@ impl std::error::Error for AddTorrentError {
 }
 
 fn parse_retry_after(headers: &reqwest::header::HeaderMap) -> Option<u64> {
-    let value = headers
-        .get(reqwest::header::RETRY_AFTER)?
-        .to_str()
-        .ok()?;
+    let value = headers.get(reqwest::header::RETRY_AFTER)?.to_str().ok()?;
     value.trim().parse::<u64>().ok()
 }
 
@@ -244,8 +240,10 @@ pub async fn check_cache(
     }
 
     let text = response.text().await?;
-    let resp = serde_json::from_str::<StremthruResponse<StremthruCacheCheck>>(&text)
-        .map_err(|e| anyhow::anyhow!("store returned invalid cache-check data: {e}; body={text}"))?;
+    let resp =
+        serde_json::from_str::<StremthruResponse<StremthruCacheCheck>>(&text).map_err(|e| {
+            anyhow::anyhow!("store returned invalid cache-check data: {e}; body={text}")
+        })?;
     let cache_items = resp
         .data
         .ok_or_else(|| anyhow::anyhow!("store returned no cache-check data; body={text}"))?

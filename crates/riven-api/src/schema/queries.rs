@@ -413,15 +413,29 @@ impl CoreQuery {
                             SettingField::new("enabled", "Enabled", "boolean")
                                 .with_description("Disable a profile without deleting its rules."),
                             SettingField::new("filter_rules", "Filter rules", "object")
-                                .with_description("Only items matching all configured rules will appear in this profile. Positive values inside genres and content ratings are all required; prefix a value with ! to exclude it.")
+                                .with_description("Only items matching all configured rules will appear in this profile. Positive values inside token lists use OR matching; prefix a value with ! to exclude it.")
                                 .with_fields(vec![
                                     SettingField::new("content_types", "Content types", "string_array")
                                         .with_options(&["movie", "show"])
                                         .with_description("Restrict the profile to movies, shows, or both."),
                                     SettingField::new("genres", "Genres", "string_array")
-                                        .with_description("Genre filters. Every positive value must match. Prefix a value with ! to exclude it."),
+                                        .with_description("Genre filters. Any positive value may match. Prefix a value with ! to exclude it."),
+                                    SettingField::new("networks", "Networks", "string_array")
+                                        .with_description("Network filters. Any positive value may match. Prefix a value with ! to exclude it."),
+                                    SettingField::new("languages", "Languages", "string_array")
+                                        .with_description("Language filters. Any positive value may match. Prefix a value with ! to exclude it."),
+                                    SettingField::new("countries", "Countries", "string_array")
+                                        .with_description("Country filters. Any positive value may match. Prefix a value with ! to exclude it."),
                                     SettingField::new("content_ratings", "Content ratings", "string_array")
-                                        .with_description("Content rating filters. Every positive value must match. Prefix a value with ! to exclude it."),
+                                        .with_description("Content rating filters. Any positive value may match. Prefix a value with ! to exclude it."),
+                                    SettingField::new("min_year", "Min year", "number")
+                                        .with_description("Minimum release year for matching items."),
+                                    SettingField::new("max_year", "Max year", "number")
+                                        .with_description("Maximum release year for matching items."),
+                                    SettingField::new("min_rating", "Min rating", "number")
+                                        .with_description("Minimum numeric rating for matching items."),
+                                    SettingField::new("max_rating", "Max rating", "number")
+                                        .with_description("Maximum numeric rating for matching items."),
                                     SettingField::new("is_anime", "Anime filter", "nullable_boolean")
                                         .with_description("Only anime, only non-anime, or leave unset for any item."),
                                 ]),

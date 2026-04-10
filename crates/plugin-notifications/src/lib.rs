@@ -103,8 +103,7 @@ impl Plugin for NotificationsPlugin {
                             fetch_tmdb_overview(&ctx.http_client, api_key, &payload).await;
                     }
                     if let Some(ref tvdb_id) = payload.tvdb_id.clone() {
-                        payload.tvdb_slug =
-                            fetch_tvdb_slug(&ctx.http_client, tvdb_id).await;
+                        payload.tvdb_slug = fetch_tvdb_slug(&ctx.http_client, tvdb_id).await;
                     }
                 }
 
@@ -181,12 +180,7 @@ async fn fetch_tmdb_overview(
         "tv"
     };
     let url = format!("{TMDB_BASE_URL}/{media_type}/{tmdb_id}");
-    let resp = client
-        .get(&url)
-        .bearer_auth(api_key)
-        .send()
-        .await
-        .ok()?;
+    let resp = client.get(&url).bearer_auth(api_key).send().await.ok()?;
     if !resp.status().is_success() {
         return None;
     }
@@ -206,9 +200,14 @@ async fn dispatch_webhooks(
                 webhook_id,
                 webhook_token,
             }) => {
-                if let Err(error) =
-                    send_discord(&ctx.http_client, &webhook_id, &webhook_token, payload, detailed)
-                        .await
+                if let Err(error) = send_discord(
+                    &ctx.http_client,
+                    &webhook_id,
+                    &webhook_token,
+                    payload,
+                    detailed,
+                )
+                .await
                 {
                     tracing::error!(error = %error, url = url_str, "failed to send discord notification");
                 }
@@ -340,7 +339,8 @@ fn build_simple_embed(payload: &NotificationPayload) -> serde_json::Value {
     }
 
     if let Some(year) = payload.year {
-        fields.push(serde_json::json!({ "name": "Year", "value": year.to_string(), "inline": true }));
+        fields
+            .push(serde_json::json!({ "name": "Year", "value": year.to_string(), "inline": true }));
     }
 
     let mut embed = serde_json::json!({

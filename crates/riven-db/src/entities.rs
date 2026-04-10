@@ -1,4 +1,4 @@
-use chrono::{DateTime, NaiveDate, Utc};
+use chrono::{DateTime, Datelike, NaiveDate, Utc};
 use riven_core::settings::{FilesystemContentType, FilesystemItemMetadata};
 use riven_core::types::*;
 use serde::{Deserialize, Serialize};
@@ -63,6 +63,8 @@ pub struct MediaItemHierarchy {
     pub resolved_show_year: Option<i32>,
     pub resolved_show_aliases: Option<serde_json::Value>,
     pub resolved_show_genres: Option<serde_json::Value>,
+    pub resolved_show_network: Option<String>,
+    pub resolved_show_rating: Option<f64>,
     pub resolved_show_content_rating: Option<ContentRating>,
     pub resolved_show_language: Option<String>,
     pub resolved_show_country: Option<String>,
@@ -86,9 +88,12 @@ impl MediaItem {
 
         FilesystemItemMetadata {
             genres,
+            network: self.network.clone(),
             content_rating: self.content_rating,
             language: self.language.clone(),
             country: self.country.clone(),
+            year: self.aired_at.map(|date| date.year()).or(self.year),
+            rating: self.rating,
             is_anime: self.is_anime,
         }
     }
@@ -170,9 +175,12 @@ pub struct FilesystemProfileEntryCandidate {
     pub library_profiles: Option<serde_json::Value>,
     pub content_type: String,
     pub genres: Option<serde_json::Value>,
+    pub network: Option<String>,
     pub content_rating: Option<ContentRating>,
     pub language: Option<String>,
     pub country: Option<String>,
+    pub year: Option<i32>,
+    pub rating: Option<f64>,
     pub is_anime: bool,
 }
 
@@ -200,9 +208,12 @@ impl FilesystemProfileEntryCandidate {
 
         FilesystemItemMetadata {
             genres,
+            network: self.network.clone(),
             content_rating: self.content_rating,
             language: self.language.clone(),
             country: self.country.clone(),
+            year: self.year,
+            rating: self.rating,
             is_anime: self.is_anime,
         }
     }

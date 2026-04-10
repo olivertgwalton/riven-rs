@@ -94,6 +94,7 @@ fn build_stream_query(ranks: &ResolutionRanks, limit_one: bool) -> String {
                  SELECT stream_id FROM media_item_blacklisted_streams WHERE media_item_id = $1
              )
            ORDER BY
+               s.rank DESC NULLS LAST,
                CASE COALESCE(s.parsed_data->>'resolution', 'unknown')
                    WHEN '2160p' THEN {r2160p}
                    WHEN '1440p' THEN {r1440p}
@@ -104,7 +105,6 @@ fn build_stream_query(ranks: &ResolutionRanks, limit_one: bool) -> String {
                    WHEN 'unknown' THEN {unknown}
                    ELSE 0
                END DESC,
-               s.rank DESC NULLS LAST,
                s.id ASC
            LIMIT {limit}"#,
         r2160p = ranks.r2160p,
@@ -241,6 +241,10 @@ pub async fn list_filesystem_profile_entry_candidates(
                    ELSE show_item.genres
                END AS genres,
                CASE
+                   WHEN item.item_type = 'movie' THEN item.network
+                   ELSE show_item.network
+               END AS network,
+               CASE
                    WHEN item.item_type = 'movie' THEN item.content_rating
                    ELSE show_item.content_rating
                END AS content_rating,
@@ -252,6 +256,14 @@ pub async fn list_filesystem_profile_entry_candidates(
                    WHEN item.item_type = 'movie' THEN item.country
                    ELSE show_item.country
                END AS country,
+               CASE
+                   WHEN item.item_type = 'movie' THEN COALESCE(item.year, EXTRACT(YEAR FROM item.aired_at)::integer)
+                   ELSE COALESCE(show_item.year, EXTRACT(YEAR FROM show_item.aired_at)::integer)
+               END AS year,
+               CASE
+                   WHEN item.item_type = 'movie' THEN item.rating
+                   ELSE show_item.rating
+               END AS rating,
                CASE
                    WHEN item.item_type = 'movie' THEN item.is_anime
                    ELSE COALESCE(show_item.is_anime, false)

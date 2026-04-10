@@ -7,8 +7,8 @@ use riven_db::entities::MediaItem;
 use riven_db::repo;
 
 use super::helpers::{
-    episode_vfs_path, handle_bitrate_failure, is_video_file, load_item_or_err, matches_episode,
-    parse_file_path, select_episode_files,
+    build_episode_lookup_set, episode_lookup_keys, episode_vfs_path, handle_bitrate_failure,
+    is_video_file, load_item_or_err, matches_episode_lookup, parse_file_path, select_episode_files,
 };
 use crate::JobQueue;
 use crate::orchestrator::LibraryOrchestrator;
@@ -37,9 +37,12 @@ fn metadata_from_show_context(
 
     FilesystemItemMetadata {
         genres,
+        network: ctx.show_network.clone(),
         content_rating: ctx.show_content_rating,
         language: ctx.show_language.clone(),
         country: ctx.show_country.clone(),
+        year: ctx.show_year,
+        rating: ctx.show_rating,
         is_anime: ctx.show_is_anime,
     }
 }
@@ -206,7 +209,9 @@ pub async fn persist_episode(
         .iter()
         .filter(|f| is_video_file(&f.filename))
         .map(|f| (f, parse_file_path(&f.filename)))
-        .filter(|(_, p)| matches_episode(p, season_number, episode_number, item.absolute_number))
+        .filter(|(_, p)| {
+            matches_episode_lookup(p, season_number, episode_number, item.absolute_number)
+        })
         .collect();
 
     if matched.is_empty() {
@@ -350,33 +355,42 @@ pub async fn persist_season(
         .map(|f| (f, parse_file_path(&f.filename)))
         .collect();
 
-    let config = queue.downloader_config.read().await;
+    let available_episode_keys =
+        build_episode_lookup_set(parsed_video_files.iter().map(|(_, parsed)| parsed.clone()));
+
+    let covers_full_season =
+        hierarchy
+            .season_episodes
+            .iter()
+            .all(|(episode_number, absolute_number)| {
+                episode_lookup_keys(season_number, *episode_number, *absolute_number)
+                    .iter()
+                    .any(|key| available_episode_keys.contains(key))
+            });
+
+    if !covers_full_season || available_episode_keys.len() < hierarchy.season_episodes.len() {
+        tracing::info!(
+            id, season = season_number, info_hash = %info_hash,
+            "season torrent does not cover all requested episodes — blacklisting stream"
+        );
+        if !info_hash.is_empty() {
+            let _ = repo::blacklist_stream_by_hash(&queue.db_pool, id, info_hash).await;
+        }
+        return SeasonPersistOutcome::Failed;
+    }
 
     for ep in &episodes {
         let episode_number = ep.episode_number.unwrap_or(1);
 
         let matched: Vec<(&DownloadFile, riven_rank::ParsedData)> = parsed_video_files
             .iter()
-            .filter(|(_, p)| matches_episode(p, season_number, episode_number, ep.absolute_number))
+            .filter(|(_, p)| {
+                matches_episode_lookup(p, season_number, episode_number, ep.absolute_number)
+            })
             .map(|(f, p)| (*f, p.clone()))
             .collect();
 
         if matched.is_empty() {
-            continue;
-        }
-
-        let largest = matched.iter().max_by_key(|(f, _)| f.file_size).unwrap().0;
-        if !config.episode_passes(largest.file_size, ep.runtime) {
-            tracing::info!(
-                id = ep.id, file_size = largest.file_size, runtime = ?ep.runtime,
-                info_hash = %info_hash,
-                "episode failed bitrate check in season download — blacklisting stream for episode"
-            );
-            if !info_hash.is_empty() {
-                let _ = repo::blacklist_stream_by_hash(&queue.db_pool, ep.id, info_hash).await;
-                let _ = repo::update_stream_file_size(&queue.db_pool, info_hash, largest.file_size)
-                    .await;
-            }
             continue;
         }
 
@@ -410,8 +424,6 @@ pub async fn persist_season(
         }
     }
 
-    drop(config);
-
     if !any_matched {
         tracing::info!(
             id, season = season_number, info_hash = %info_hash,
@@ -420,12 +432,6 @@ pub async fn persist_season(
         if !info_hash.is_empty() {
             let _ = repo::blacklist_stream_by_hash(&queue.db_pool, id, info_hash).await;
         }
-        queue
-            .notify(RivenEvent::MediaItemDownloadPartialSuccess { id })
-            .await;
-        LibraryOrchestrator::new(queue)
-            .fan_out_download_failure(id)
-            .await;
         return SeasonPersistOutcome::Failed;
     }
 

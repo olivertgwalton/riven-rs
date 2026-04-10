@@ -1,7 +1,5 @@
 use std::collections::{HashMap, HashSet};
 
-use rayon::prelude::*;
-
 use riven_core::types::*;
 use riven_db::repo;
 use riven_rank::{QualityProfile, RankSettings};
@@ -169,8 +167,11 @@ pub fn rank_streams(
     ctx: ParseContext,
     streams: HashMap<String, ScrapeStream>,
 ) -> Vec<RankedStreamCandidate> {
-    streams
-        .par_iter()
+    let mut ordered_streams: Vec<(&String, &ScrapeStream)> = streams.iter().collect();
+    ordered_streams.sort_by(|(info_hash_a, _), (info_hash_b, _)| info_hash_a.cmp(info_hash_b));
+
+    ordered_streams
+        .into_iter()
         .filter_map(|(info_hash, stream)| {
             let title = &stream.title;
             let parsed = riven_rank::parse(title);

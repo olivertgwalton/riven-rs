@@ -15,16 +15,23 @@ pub enum FilesystemContentType {
     Show,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct FilesystemFilterRules {
     pub content_types: Vec<FilesystemContentType>,
     pub genres: Vec<String>,
+    pub networks: Vec<String>,
+    pub languages: Vec<String>,
+    pub countries: Vec<String>,
     pub content_ratings: Vec<String>,
+    pub min_year: Option<i32>,
+    pub max_year: Option<i32>,
+    pub min_rating: Option<f64>,
+    pub max_rating: Option<f64>,
     pub is_anime: Option<bool>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct FilesystemLibraryProfile {
     pub name: String,
@@ -44,7 +51,7 @@ impl Default for FilesystemLibraryProfile {
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct FilesystemSettings {
     pub mount_path: String,
@@ -82,12 +89,15 @@ impl LibraryProfileMembership {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct FilesystemItemMetadata {
     pub genres: Vec<String>,
+    pub network: Option<String>,
     pub content_rating: Option<ContentRating>,
     pub language: Option<String>,
     pub country: Option<String>,
+    pub year: Option<i32>,
+    pub rating: Option<f64>,
     pub is_anime: bool,
 }
 
@@ -122,12 +132,69 @@ impl FilesystemFilterRules {
             return false;
         }
 
+        let network = metadata
+            .network
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| vec![value.to_ascii_lowercase()])
+            .unwrap_or_default();
+        if !matches_token_filter(&network, &self.networks) {
+            return false;
+        }
+
+        let language = metadata
+            .language
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| vec![value.to_ascii_lowercase()])
+            .unwrap_or_default();
+        if !matches_token_filter(&language, &self.languages) {
+            return false;
+        }
+
+        let country = metadata
+            .country
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| vec![value.to_ascii_lowercase()])
+            .unwrap_or_default();
+        if !matches_token_filter(&country, &self.countries) {
+            return false;
+        }
+
         let content_rating = metadata
             .content_rating
             .map(content_rating_key)
             .map(|value| vec![value])
             .unwrap_or_default();
         if !matches_token_filter(&content_rating, &self.content_ratings) {
+            return false;
+        }
+
+        if let Some(min_year) = self.min_year
+            && metadata.year.is_none_or(|year| year < min_year)
+        {
+            return false;
+        }
+
+        if let Some(max_year) = self.max_year
+            && metadata.year.is_none_or(|year| year > max_year)
+        {
+            return false;
+        }
+
+        if let Some(min_rating) = self.min_rating
+            && metadata.rating.is_none_or(|rating| rating < min_rating)
+        {
+            return false;
+        }
+
+        if let Some(max_rating) = self.max_rating
+            && metadata.rating.is_none_or(|rating| rating > max_rating)
+        {
             return false;
         }
 
@@ -157,9 +224,10 @@ fn matches_token_filter(values: &[String], filters: &[String]) -> bool {
         }
     }
 
-    inclusions
-        .iter()
-        .all(|filter| values.iter().any(|value| value == filter))
+    inclusions.is_empty()
+        || inclusions
+            .iter()
+            .any(|filter| values.iter().any(|value| value == filter))
 }
 
 fn content_rating_key(rating: ContentRating) -> String {
@@ -333,7 +401,7 @@ mod tests {
     }
 
     #[test]
-    fn matching_profiles_require_all_positive_tokens_and_respect_exclusions() {
+    fn matching_profiles_allow_any_positive_token_and_respect_exclusions() {
         let mut library_profiles = HashMap::new();
         library_profiles.insert(
             "kids".to_string(),
@@ -343,8 +411,19 @@ mod tests {
                 enabled: true,
                 filter_rules: FilesystemFilterRules {
                     content_types: vec![FilesystemContentType::Movie],
-                    genres: vec!["animation".to_string(), "!horror".to_string()],
-                    content_ratings: vec!["pg".to_string(), "!r".to_string()],
+                    genres: vec![
+                        "animation".to_string(),
+                        "family".to_string(),
+                        "!horror".to_string(),
+                    ],
+                    networks: vec![],
+                    content_ratings: vec!["pg".to_string(), "tv-pg".to_string(), "!r".to_string()],
+                    languages: vec![],
+                    countries: vec![],
+                    min_year: None,
+                    max_year: None,
+                    min_rating: None,
+                    max_rating: None,
                     is_anime: None,
                 },
             },
@@ -355,9 +434,12 @@ mod tests {
         };
         let metadata = FilesystemItemMetadata {
             genres: vec!["animation".to_string(), "family".to_string()],
+            network: None,
             content_rating: Some(ContentRating::Pg),
             language: None,
             country: None,
+            year: None,
+            rating: None,
             is_anime: false,
         };
 
@@ -368,7 +450,7 @@ mod tests {
     }
 
     #[test]
-    fn matching_profiles_reject_missing_positive_tokens() {
+    fn matching_profiles_reject_when_no_positive_token_matches() {
         let settings = FilesystemSettings {
             mount_path: "/mount".to_string(),
             library_profiles: HashMap::from([(
@@ -383,7 +465,14 @@ mod tests {
                             FilesystemContentType::Show,
                         ],
                         genres: vec!["family".to_string(), "children".to_string()],
+                        networks: vec![],
                         content_ratings: vec!["tv-14".to_string(), "r".to_string()],
+                        languages: vec![],
+                        countries: vec![],
+                        min_year: None,
+                        max_year: None,
+                        min_rating: None,
+                        max_rating: None,
                         is_anime: Some(false),
                     },
                 },
@@ -392,15 +481,62 @@ mod tests {
 
         let metadata = FilesystemItemMetadata {
             genres: vec!["family".to_string()],
+            network: None,
             content_rating: Some(ContentRating::R),
             language: None,
             country: None,
+            year: None,
+            rating: None,
             is_anime: false,
         };
 
         assert_eq!(
             settings.matching_profile_keys(&metadata, FilesystemContentType::Movie),
             LibraryProfileMembership::default()
+        );
+    }
+
+    #[test]
+    fn matching_profiles_support_language_country_year_and_rating_filters() {
+        let settings = FilesystemSettings {
+            mount_path: "/mount".to_string(),
+            library_profiles: HashMap::from([(
+                "curated".to_string(),
+                FilesystemLibraryProfile {
+                    name: "Curated".to_string(),
+                    library_path: "/curated".to_string(),
+                    enabled: true,
+                    filter_rules: FilesystemFilterRules {
+                        content_types: vec![FilesystemContentType::Movie],
+                        genres: vec![],
+                        networks: vec!["netflix".to_string(), "!fox".to_string()],
+                        languages: vec!["en".to_string(), "!jp".to_string()],
+                        countries: vec!["us".to_string()],
+                        content_ratings: vec![],
+                        min_year: Some(2000),
+                        max_year: Some(2020),
+                        min_rating: Some(7.0),
+                        max_rating: Some(8.5),
+                        is_anime: Some(false),
+                    },
+                },
+            )]),
+        };
+
+        let metadata = FilesystemItemMetadata {
+            genres: vec!["thriller".to_string()],
+            network: Some("Netflix".to_string()),
+            content_rating: None,
+            language: Some("EN".to_string()),
+            country: Some("us".to_string()),
+            year: Some(2010),
+            rating: Some(7.8),
+            is_anime: false,
+        };
+
+        assert_eq!(
+            settings.matching_profile_keys(&metadata, FilesystemContentType::Movie),
+            LibraryProfileMembership(vec!["curated".to_string()])
         );
     }
 

@@ -60,10 +60,7 @@ fn add_torrent_inflight_key(store: &str, info_hash: &str) -> String {
     )
 }
 
-async fn store_add_torrent_cooled_down(
-    redis: &redis::aio::ConnectionManager,
-    store: &str,
-) -> bool {
+async fn store_add_torrent_cooled_down(redis: &redis::aio::ConnectionManager, store: &str) -> bool {
     let mut conn = redis.clone();
     AsyncCommands::exists(&mut conn, add_torrent_cooldown_key(store))
         .await
@@ -76,13 +73,8 @@ async fn set_store_add_torrent_cooldown(
     ttl_secs: u64,
 ) {
     let mut conn = redis.clone();
-    let _: Result<(), _> = AsyncCommands::set_ex(
-        &mut conn,
-        add_torrent_cooldown_key(store),
-        "1",
-        ttl_secs,
-    )
-    .await;
+    let _: Result<(), _> =
+        AsyncCommands::set_ex(&mut conn, add_torrent_cooldown_key(store), "1", ttl_secs).await;
 }
 
 async fn try_acquire_add_torrent_inflight(
@@ -113,7 +105,6 @@ async fn release_add_torrent_inflight(
     let _: Result<(), _> =
         AsyncCommands::del(&mut conn, add_torrent_inflight_key(store, info_hash)).await;
 }
-
 
 async fn scrape_streams(
     client: &reqwest::Client,
@@ -249,19 +240,20 @@ impl Plugin for StremthruPlugin {
                     hash: info_hash.clone(),
                     magnet: magnet.clone(),
                 };
-                let cache_checks = futures::future::join_all(stores.iter().map(|(store, api_key)| async {
-                    let result = check_cache(
-                        &ctx.http_client,
-                        &ctx.redis,
-                        &base_url,
-                        store,
-                        api_key,
-                        std::slice::from_ref(&query),
-                    )
+                let cache_checks =
+                    futures::future::join_all(stores.iter().map(|(store, api_key)| async {
+                        let result = check_cache(
+                            &ctx.http_client,
+                            &ctx.redis,
+                            &base_url,
+                            store,
+                            api_key,
+                            std::slice::from_ref(&query),
+                        )
+                        .await;
+                        (*store, api_key.as_str(), result)
+                    }))
                     .await;
-                    (*store, api_key.as_str(), result)
-                }))
-                .await;
 
                 let mut any_network_error = false;
                 let mut cached_stores = Vec::new();
@@ -271,7 +263,11 @@ impl Plugin for StremthruPlugin {
                             cached_stores.push((store, api_key));
                         }
                         Ok(_) => {
-                            tracing::debug!(store, info_hash, "torrent not cached in store; skipping");
+                            tracing::debug!(
+                                store,
+                                info_hash,
+                                "torrent not cached in store; skipping"
+                            );
                         }
                         Err(error) => {
                             let is_network = error
@@ -292,7 +288,11 @@ impl Plugin for StremthruPlugin {
 
                 for (store, api_key) in cached_stores {
                     if store_add_torrent_cooled_down(&ctx.redis, store).await {
-                        tracing::debug!(store, info_hash, "store add_torrent cooling down after rate limit");
+                        tracing::debug!(
+                            store,
+                            info_hash,
+                            "store add_torrent cooling down after rate limit"
+                        );
                         continue;
                     }
                     if !try_acquire_add_torrent_inflight(
@@ -303,7 +303,11 @@ impl Plugin for StremthruPlugin {
                     )
                     .await
                     {
-                        tracing::debug!(store, info_hash, "duplicate add_torrent attempt suppressed");
+                        tracing::debug!(
+                            store,
+                            info_hash,
+                            "duplicate add_torrent attempt suppressed"
+                        );
                         continue;
                     }
 
@@ -380,14 +384,17 @@ impl Plugin for StremthruPlugin {
                 let results =
                     futures::future::join_all(stores.iter().map(|(store, api_key)| async {
                         let result =
-                            generate_link(&ctx.http_client, &base_url, store, api_key, magnet).await;
+                            generate_link(&ctx.http_client, &base_url, store, api_key, magnet)
+                                .await;
                         (*store, result)
                     }))
                     .await;
 
                 for (store, result) in results {
                     match result {
-                        Ok(link) => return Ok(HookResponse::StreamLink(StreamLinkResponse { link })),
+                        Ok(link) => {
+                            return Ok(HookResponse::StreamLink(StreamLinkResponse { link }));
+                        }
                         Err(error) => {
                             tracing::warn!(store, error = %error, "generate link failed");
                         }

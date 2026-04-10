@@ -80,6 +80,7 @@ pub async fn run(id: i64, job: &DownloadJob, queue: &JobQueue) {
     let candidates = build_cached_candidates(
         id,
         &item,
+        hierarchy.as_ref(),
         &all_streams,
         &cached_info,
         max_size_bytes,
@@ -269,6 +270,7 @@ async fn run_multi_version(
     }
 
     if !any_success {
+        notify_no_valid_torrent(id, item, queue).await;
         LibraryOrchestrator::new(queue)
             .fan_out_download_failure(id)
             .await;
@@ -332,10 +334,21 @@ async fn run_single_version(
         }
     }
 
+    notify_no_valid_torrent(id, item, queue).await;
     LibraryOrchestrator::new(queue)
         .fan_out_download_failure(id)
         .await;
     false
+}
+
+async fn notify_no_valid_torrent(id: i64, item: &MediaItem, queue: &JobQueue) {
+    queue
+        .notify(RivenEvent::MediaItemDownloadError {
+            id,
+            title: item.title.clone(),
+            error: "no valid torrent found after trying cached candidates".into(),
+        })
+        .await;
 }
 
 async fn finalize_download_success(

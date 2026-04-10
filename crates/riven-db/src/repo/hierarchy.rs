@@ -43,6 +43,8 @@ pub async fn get_media_item_hierarchy(
                show_item.year AS resolved_show_year,
                show_item.aliases AS resolved_show_aliases,
                show_item.genres AS resolved_show_genres,
+               show_item.network AS resolved_show_network,
+               show_item.rating AS resolved_show_rating,
                show_item.content_rating AS resolved_show_content_rating,
                show_item.language AS resolved_show_language,
                show_item.country AS resolved_show_country,

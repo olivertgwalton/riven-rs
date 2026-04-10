@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 use riven_core::events::RivenEvent;
 use riven_core::types::{CacheCheckFile, DownloadFile, MediaItemType};
@@ -6,6 +6,7 @@ use riven_db::entities::MediaItem;
 use riven_db::repo;
 
 use crate::JobQueue;
+use crate::context::DownloadHierarchyContext;
 use crate::context::load_media_item_or_download_error;
 use crate::orchestrator::LibraryOrchestrator;
 
@@ -58,7 +59,11 @@ pub fn is_video_file(filename: &str) -> bool {
 /// Returns true if the cached file list contains at least one file that matches
 /// the media item. Used to skip add_torrent when the torrent clearly won't
 /// satisfy the item (matches riven-ts getCachedTorrentFiles pre-validation).
-pub fn has_matching_file(files: &[CacheCheckFile], item: &MediaItem) -> bool {
+pub fn has_matching_file(
+    files: &[CacheCheckFile],
+    item: &MediaItem,
+    hierarchy: Option<&DownloadHierarchyContext>,
+) -> bool {
     match item.item_type {
         MediaItemType::Movie => files
             .iter()
@@ -66,15 +71,94 @@ pub fn has_matching_file(files: &[CacheCheckFile], item: &MediaItem) -> bool {
         MediaItemType::Episode => {
             let season = item.season_number.unwrap_or(1);
             let ep = item.episode_number.unwrap_or(1);
+            let lookup_keys = episode_lookup_keys(season, ep, item.absolute_number);
             files.iter().any(|f| {
                 is_video_file(&f.name)
-                    && matches_episode(&parse_file_path(&f.name), season, ep, item.absolute_number)
+                    && file_lookup_key(&parse_file_path(&f.name))
+                        .is_some_and(|key| lookup_keys.iter().any(|lookup| lookup == &key))
             })
         }
-        // For seasons, any video file is sufficient; per-episode validation
-        // happens in persist_season which already accepts partial packs.
+        MediaItemType::Season => hierarchy
+            .and_then(|ctx| ctx.season_number.map(|season_number| (ctx, season_number)))
+            .map(|(ctx, season_number)| season_has_matching_files(files, season_number, ctx))
+            .unwrap_or_else(|| files.iter().any(|f| is_video_file(&f.name))),
         _ => files.iter().any(|f| is_video_file(&f.name)),
     }
+}
+
+fn season_has_matching_files(
+    files: &[CacheCheckFile],
+    season_number: i32,
+    hierarchy: &DownloadHierarchyContext,
+) -> bool {
+    if hierarchy.season_episodes.is_empty() {
+        return files.iter().any(|f| is_video_file(&f.name));
+    }
+
+    let file_keys = build_episode_lookup_set(
+        files
+            .iter()
+            .filter(|f| is_video_file(&f.name))
+            .map(|f| parse_file_path(&f.name)),
+    );
+
+    if file_keys.len() < hierarchy.season_episodes.len() {
+        return false;
+    }
+
+    hierarchy
+        .season_episodes
+        .iter()
+        .all(|(episode_number, absolute_number)| {
+            episode_lookup_keys(season_number, *episode_number, *absolute_number)
+                .iter()
+                .any(|lookup| file_keys.contains(lookup))
+        })
+}
+
+pub fn episode_lookup_keys(season: i32, ep: i32, abs: Option<i32>) -> Vec<String> {
+    let mut keys = Vec::with_capacity(2);
+    if let Some(abs) = abs {
+        keys.push(format!("abs:{abs}"));
+    }
+    keys.push(format!("{season}:{ep}"));
+    keys
+}
+
+pub fn file_lookup_key(parsed: &riven_rank::ParsedData) -> Option<String> {
+    let episode = *parsed.episodes.first()?;
+
+    if let Some(season) = parsed.seasons.first() {
+        Some(format!("{season}:{episode}"))
+    } else {
+        Some(format!("abs:{episode}"))
+    }
+}
+
+pub fn build_episode_lookup_set<I>(parsed_files: I) -> HashSet<String>
+where
+    I: IntoIterator<Item = riven_rank::ParsedData>,
+{
+    let mut keys = HashSet::new();
+    for parsed in parsed_files {
+        if let Some(key) = file_lookup_key(&parsed) {
+            keys.insert(key);
+        }
+    }
+    keys
+}
+
+pub fn matches_episode_lookup(
+    parsed: &riven_rank::ParsedData,
+    season: i32,
+    ep: i32,
+    abs: Option<i32>,
+) -> bool {
+    file_lookup_key(parsed).is_some_and(|key| {
+        episode_lookup_keys(season, ep, abs)
+            .iter()
+            .any(|lookup| lookup == &key)
+    })
 }
 
 /// Parse a file path by merging metadata from all path segments.
@@ -84,26 +168,6 @@ pub fn parse_file_path(path: &str) -> riven_rank::ParsedData {
         merged.merge(riven_rank::parse(segment));
     }
     merged
-}
-
-/// Returns true if a parsed file covers the given season/episode.
-///
-/// Handles two cases (matching riven-ts mapItemsToFiles behaviour):
-/// 1. Normal: file has season info → season must match, episode or abs must match.
-/// 2. Abs-only: file has no season info → abs number alone is sufficient.
-pub fn matches_episode(
-    parsed: &riven_rank::ParsedData,
-    season: i32,
-    ep: i32,
-    abs: Option<i32>,
-) -> bool {
-    let season_match = parsed.seasons.contains(&season)
-        && (parsed.episodes.contains(&ep) || abs.is_some_and(|a| parsed.episodes.contains(&a)));
-
-    let abs_only_match =
-        parsed.seasons.is_empty() && abs.is_some_and(|a| parsed.episodes.contains(&a));
-
-    season_match || abs_only_match
 }
 
 /// Build the VFS path for an episode file.

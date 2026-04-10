@@ -42,7 +42,7 @@ pub async fn load_flow_artifacts(
         "SELECT payload
          FROM flow_artifacts
          WHERE flow_name = $1 AND item_id = $2
-         ORDER BY plugin_name",
+         ORDER BY created_at ASC, plugin_name ASC",
     )
     .bind(flow_name)
     .bind(item_id)

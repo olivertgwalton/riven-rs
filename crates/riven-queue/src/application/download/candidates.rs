@@ -4,6 +4,7 @@ use riven_core::types::CacheCheckFile;
 use riven_db::entities::{MediaItem, Stream};
 use riven_rank::{ParsedData, RankSettings};
 
+use crate::context::DownloadHierarchyContext;
 use crate::flows::download_item::helpers::has_matching_file;
 
 pub struct CachedCandidate<'a> {
@@ -13,6 +14,7 @@ pub struct CachedCandidate<'a> {
 pub fn build_cached_candidates<'a>(
     id: i64,
     item: &MediaItem,
+    hierarchy: Option<&DownloadHierarchyContext>,
     streams: &'a [Stream],
     cached_info: &HashMap<String, Vec<CacheCheckFile>>,
     max_size_bytes: Option<u64>,
@@ -43,7 +45,7 @@ pub fn build_cached_candidates<'a>(
                 );
                 return None;
             }
-            if !has_matching_file(files, item) {
+            if !has_matching_file(files, item, hierarchy) {
                 return None;
             }
 

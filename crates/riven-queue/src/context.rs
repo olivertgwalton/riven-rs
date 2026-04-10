@@ -26,12 +26,15 @@ pub struct DownloadHierarchyContext {
     pub item: MediaItem,
     pub season_id: Option<i64>,
     pub season_number: Option<i32>,
+    pub season_episodes: Vec<(i32, Option<i32>)>,
     pub show_id: Option<i64>,
     pub show_title: Option<String>,
     pub show_imdb_id: Option<String>,
     pub show_tvdb_id: Option<String>,
     pub show_year: Option<i32>,
     pub show_genres: Option<serde_json::Value>,
+    pub show_network: Option<String>,
+    pub show_rating: Option<f64>,
     pub show_content_rating: Option<riven_core::types::ContentRating>,
     pub show_language: Option<String>,
     pub show_country: Option<String>,
@@ -193,8 +196,10 @@ pub async fn load_download_hierarchy_context(
     db_pool: &sqlx::PgPool,
     item: &MediaItem,
 ) -> DownloadHierarchyContext {
-    let hierarchy =
-        load_media_item_hierarchy_or_log(db_pool, item.id, "load download hierarchy context").await;
+    let (hierarchy, (season_episodes, _, _)) = tokio::join!(
+        load_media_item_hierarchy_or_log(db_pool, item.id, "load download hierarchy context"),
+        load_episode_or_season_data(db_pool, item),
+    );
 
     let default_show_id = match item.item_type {
         MediaItemType::Show => Some(item.id),
@@ -231,6 +236,7 @@ pub async fn load_download_hierarchy_context(
             .as_ref()
             .and_then(|h| h.resolved_season_number)
             .or(default_season_number),
+        season_episodes,
         show_id: hierarchy
             .as_ref()
             .and_then(|h| h.resolved_show_id)
@@ -255,6 +261,14 @@ pub async fn load_download_hierarchy_context(
             .as_ref()
             .and_then(|h| h.resolved_show_genres.clone())
             .or_else(|| item.genres.clone()),
+        show_network: hierarchy
+            .as_ref()
+            .and_then(|h| h.resolved_show_network.clone())
+            .or_else(|| item.network.clone()),
+        show_rating: hierarchy
+            .as_ref()
+            .and_then(|h| h.resolved_show_rating)
+            .or(item.rating),
         show_content_rating: hierarchy
             .as_ref()
             .and_then(|h| h.resolved_show_content_rating)

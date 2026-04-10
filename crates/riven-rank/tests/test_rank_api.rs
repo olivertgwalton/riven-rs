@@ -48,8 +48,14 @@ fn test_ultra_hd_profile_prefers_premium_4k_disc_release() {
     let (premium_rank, _) = get_rank(&premium, &settings, &model);
     let (fallback_rank, _) = get_rank(&fallback, &settings, &model);
 
-    assert!(premium_fetch, "premium release rejected: {premium_failed:?}");
-    assert!(fallback_fetch, "fallback release rejected: {fallback_failed:?}");
+    assert!(
+        premium_fetch,
+        "premium release rejected: {premium_failed:?}"
+    );
+    assert!(
+        fallback_fetch,
+        "fallback release rejected: {fallback_failed:?}"
+    );
     assert!(premium_rank > fallback_rank);
 }
 
@@ -84,7 +90,13 @@ fn test_standard_profile_prefers_good_720p_source_over_480p_rip() {
     let (preferred_rank, _) = get_rank(&preferred, &settings, &model);
     let (fallback_rank, _) = get_rank(&fallback, &settings, &model);
 
-    assert!(preferred_fetch, "preferred standard release rejected: {preferred_failed:?}");
-    assert!(fallback_fetch, "standard fallback rejected: {fallback_failed:?}");
+    assert!(
+        preferred_fetch,
+        "preferred standard release rejected: {preferred_failed:?}"
+    );
+    assert!(
+        fallback_fetch,
+        "standard fallback rejected: {fallback_failed:?}"
+    );
     assert!(preferred_rank > fallback_rank);
 }
