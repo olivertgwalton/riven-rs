@@ -318,7 +318,7 @@ impl<'a> LibraryOrchestrator<'a> {
 
     pub async fn queue_download_for_item(&self, item: &MediaItem) {
         match item.item_type {
-            MediaItemType::Movie | MediaItemType::Season => {
+            MediaItemType::Movie | MediaItemType::Season | MediaItemType::Episode => {
                 if !self.queue.push_download_from_best_stream(item.id).await {
                     let _ = repo::refresh_state_cascade(&self.queue.db_pool, item).await;
                 }
@@ -342,7 +342,6 @@ impl<'a> LibraryOrchestrator<'a> {
                     }
                 }
             }
-            _ => {}
         }
     }
 
@@ -355,20 +354,51 @@ impl<'a> LibraryOrchestrator<'a> {
 
         match item.item_type {
             MediaItemType::Show => {
-                self.queue_scrape_for_item(&item, None, true).await;
+                match repo::get_requested_seasons_for_show(&self.queue.db_pool, item.id).await {
+                    Ok(seasons) => {
+                        for season in seasons {
+                            match season.state {
+                                MediaItemState::Scraped => {
+                                    self.queue_download_for_item(&season).await;
+                                }
+                                MediaItemState::Indexed
+                                | MediaItemState::Ongoing
+                                | MediaItemState::PartiallyCompleted => {
+                                    self.queue_scrape_for_item(&season, None, true).await;
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        tracing::error!(
+                            show_id = item.id,
+                            error = %error,
+                            "failed to fetch requested seasons for fan-out"
+                        );
+                    }
+                }
             }
             MediaItemType::Season => {
                 let (show_title, show_imdb_id) = self.show_context(&item).await;
                 match repo::get_incomplete_episodes_for_season(&self.queue.db_pool, item.id).await {
                     Ok(episodes) => {
                         for episode in episodes {
-                            self.queue
-                                .push_scrape(ScrapeJob::for_episode(
-                                    &episode,
-                                    show_title.clone(),
-                                    show_imdb_id.clone(),
-                                ))
-                                .await;
+                            match episode.state {
+                                MediaItemState::Scraped => {
+                                    self.queue_download_for_item(&episode).await;
+                                }
+                                MediaItemState::Indexed | MediaItemState::Ongoing => {
+                                    self.queue
+                                        .push_scrape(ScrapeJob::for_episode(
+                                            &episode,
+                                            show_title.clone(),
+                                            show_imdb_id.clone(),
+                                        ))
+                                        .await;
+                                }
+                                _ => {}
+                            }
                         }
                     }
                     Err(error) => {

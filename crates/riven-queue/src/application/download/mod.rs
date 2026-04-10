@@ -270,7 +270,7 @@ async fn run_multi_version(
     }
 
     if !any_success {
-        notify_no_valid_torrent(id, item, queue).await;
+        tracing::debug!(id, title = %item.title, "no valid torrent found after trying cached candidates");
         LibraryOrchestrator::new(queue)
             .fan_out_download_failure(id)
             .await;
@@ -299,13 +299,6 @@ async fn run_single_version(
 ) -> bool {
     if candidates.is_empty() {
         tracing::debug!(id, "no cached+valid streams found in this pass");
-        queue
-            .notify(RivenEvent::MediaItemDownloadError {
-                id,
-                title: item.title.clone(),
-                error: "no cached stream found within bitrate limits".into(),
-            })
-            .await;
         LibraryOrchestrator::new(queue)
             .fan_out_download_failure(id)
             .await;
@@ -334,21 +327,11 @@ async fn run_single_version(
         }
     }
 
-    notify_no_valid_torrent(id, item, queue).await;
+    tracing::debug!(id, title = %item.title, "no valid torrent found after trying cached candidates");
     LibraryOrchestrator::new(queue)
         .fan_out_download_failure(id)
         .await;
     false
-}
-
-async fn notify_no_valid_torrent(id: i64, item: &MediaItem, queue: &JobQueue) {
-    queue
-        .notify(RivenEvent::MediaItemDownloadError {
-            id,
-            title: item.title.clone(),
-            error: "no valid torrent found after trying cached candidates".into(),
-        })
-        .await;
 }
 
 async fn finalize_download_success(

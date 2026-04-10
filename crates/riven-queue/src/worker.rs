@@ -21,15 +21,34 @@ impl Scheduler {
 
     pub async fn run(self) {
         let mut content_tick = tokio::time::interval(Duration::from_secs(120));
-        let mut retry_tick = tokio::time::interval(Duration::from_secs(60));
         let mut cleanup_tick = tokio::time::interval(Duration::from_secs(60 * 60));
+        let retry_wait =
+            Self::retry_wait_duration(self.job_queue.retry_interval_secs.load(Ordering::SeqCst));
+        let mut retry_sleep = std::pin::pin!(tokio::time::sleep(retry_wait));
+
+        self.retry_library().await;
 
         loop {
             tokio::select! {
                 _ = content_tick.tick()    => self.job_queue.push_content_service().await,
-                _ = retry_tick.tick()      => self.retry_library().await,
+                _ = &mut retry_sleep       => {
+                    self.retry_library().await;
+                    let next_wait = Self::retry_wait_duration(
+                        self.job_queue.retry_interval_secs.load(Ordering::SeqCst),
+                    );
+                    retry_sleep
+                        .as_mut()
+                        .reset(tokio::time::Instant::now() + next_wait);
+                }
                 _ = cleanup_tick.tick()    => self.cleanup_runtime_state().await,
             }
+        }
+    }
+
+    fn retry_wait_duration(retry_interval_secs: u64) -> Duration {
+        match retry_interval_secs {
+            0 => Duration::from_secs(60 * 60),
+            secs => Duration::from_secs(secs),
         }
     }
 
