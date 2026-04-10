@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 
 use riven_core::events::RivenEvent;
 use riven_core::types::{CacheCheckFile, DownloadFile, MediaItemType};
@@ -78,41 +78,44 @@ pub fn has_matching_file(
                         .is_some_and(|key| lookup_keys.iter().any(|lookup| lookup == &key))
             })
         }
-        MediaItemType::Season => hierarchy
-            .and_then(|ctx| ctx.season_number.map(|season_number| (ctx, season_number)))
-            .map(|(ctx, season_number)| season_has_matching_files(files, season_number, ctx))
-            .unwrap_or_else(|| files.iter().any(|f| is_video_file(&f.name))),
+        MediaItemType::Season => {
+            let Some((ctx, season_number)) = hierarchy
+                .and_then(|ctx| ctx.season_number.map(|season_number| (ctx, season_number)))
+            else {
+                return files.iter().any(|f| is_video_file(&f.name));
+            };
+
+            files.iter().any(|f| {
+                is_video_file(&f.name)
+                    && season_file_matches(&parse_file_path(&f.name), season_number, ctx)
+            })
+        }
         _ => files.iter().any(|f| is_video_file(&f.name)),
     }
 }
 
-fn season_has_matching_files(
-    files: &[CacheCheckFile],
+fn season_file_matches(
+    parsed: &riven_rank::ParsedData,
     season_number: i32,
     hierarchy: &DownloadHierarchyContext,
 ) -> bool {
     if hierarchy.season_episodes.is_empty() {
-        return files.iter().any(|f| is_video_file(&f.name));
+        return true;
     }
 
-    let file_keys = build_episode_lookup_set(
-        files
-            .iter()
-            .filter(|f| is_video_file(&f.name))
-            .map(|f| parse_file_path(&f.name)),
-    );
+    if parsed.complete && parsed.seasons.contains(&season_number) {
+        return true;
+    }
 
-    if file_keys.len() < hierarchy.season_episodes.len() {
+    if !parsed.seasons.is_empty() && !parsed.seasons.contains(&season_number) {
         return false;
     }
 
     hierarchy
         .season_episodes
         .iter()
-        .all(|(episode_number, absolute_number)| {
-            episode_lookup_keys(season_number, *episode_number, *absolute_number)
-                .iter()
-                .any(|lookup| file_keys.contains(lookup))
+        .any(|(episode_number, absolute_number)| {
+            matches_episode_lookup(parsed, season_number, *episode_number, *absolute_number)
         })
 }
 
@@ -133,19 +136,6 @@ pub fn file_lookup_key(parsed: &riven_rank::ParsedData) -> Option<String> {
     } else {
         Some(format!("abs:{episode}"))
     }
-}
-
-pub fn build_episode_lookup_set<I>(parsed_files: I) -> HashSet<String>
-where
-    I: IntoIterator<Item = riven_rank::ParsedData>,
-{
-    let mut keys = HashSet::new();
-    for parsed in parsed_files {
-        if let Some(key) = file_lookup_key(&parsed) {
-            keys.insert(key);
-        }
-    }
-    keys
 }
 
 pub fn matches_episode_lookup(

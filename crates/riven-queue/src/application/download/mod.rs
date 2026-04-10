@@ -239,7 +239,7 @@ async fn run_multi_version(
             continue;
         }
 
-        let Some(stream) = pick_best_for_profile(candidates, profile_settings) else {
+        let Some(stream) = pick_best_for_profile(candidates, item, profile_settings) else {
             tracing::debug!(
                 id,
                 profile = profile_name,

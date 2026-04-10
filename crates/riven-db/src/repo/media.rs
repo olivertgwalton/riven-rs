@@ -160,9 +160,8 @@ pub async fn get_pending_items_for_retry(
          WHERE state = ANY(ARRAY['indexed'::media_item_state, 'scraped'::media_item_state, 'partially_completed'::media_item_state])
            AND item_type = $1
            AND is_requested = true
-           AND failed_attempts > 0
            AND (updated_at IS NULL OR updated_at < NOW() - ($2 * INTERVAL '1 second'))
-         ORDER BY updated_at ASC NULLS FIRST, failed_attempts DESC, created_at ASC
+         ORDER BY updated_at ASC NULLS FIRST, created_at ASC
          LIMIT $3",
     )
     .bind(item_type)
