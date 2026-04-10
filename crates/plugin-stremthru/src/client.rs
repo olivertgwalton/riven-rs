@@ -204,8 +204,8 @@ pub async fn generate_link(
     api_key: &str,
     magnet: &str,
 ) -> anyhow::Result<String> {
-    let url = format!("{base_url}v0/store/torz/link/generate");
-    tracing::debug!(store, url = %url, "generating stremthru torz link");
+    let url = format!("{base_url}v0/store/link/generate");
+    tracing::debug!(store, url = %url, "generating stremthru link");
     let response = riven_core::http::send(|| {
         client
             .post(&url)
