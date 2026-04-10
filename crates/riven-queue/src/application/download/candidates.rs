@@ -71,6 +71,7 @@ pub fn pick_best_for_profile<'a>(
     item: &MediaItem,
     profile: &RankSettings,
 ) -> Option<&'a Stream> {
+    let download_profile = build_download_candidate_profile(profile);
     let model = riven_rank::RankingModel::default();
 
     let mut scored: Vec<(&Stream, i64, i64)> = candidates
@@ -96,7 +97,7 @@ pub fn pick_best_for_profile<'a>(
                 return None;
             };
 
-            let (fetch, failed_checks) = riven_rank::rank::check_fetch(&parsed, profile);
+            let (fetch, failed_checks) = riven_rank::rank::check_fetch(&parsed, &download_profile);
             if !fetch {
                 tracing::debug!(
                     item_id = item.id,
@@ -109,25 +110,78 @@ pub fn pick_best_for_profile<'a>(
                     audio = ?parsed.audio,
                     hdr = ?parsed.hdr,
                     checks = ?failed_checks,
-                    "cached stream rejected by active profile fetch checks"
+                    "cached stream does not match download preference checks; keeping for fallback scoring"
                 );
-                return None;
             }
 
-            let (score, _) = riven_rank::rank::scores::get_rank(&parsed, profile, &model);
+            let (score, _) = riven_rank::rank::scores::get_rank(&parsed, &download_profile, &model);
             Some((candidate.stream, score, pack_preference(item, &parsed)))
         })
         .collect();
 
     scored.sort_by(|(a, sa, pa), (b, sb, pb)| {
         sb.cmp(sa).then_with(|| pb.cmp(pa)).then_with(|| {
-            let ra = profile.resolution_ranks.rank_for(stream_resolution(a));
-            let rb = profile.resolution_ranks.rank_for(stream_resolution(b));
+            let ra = download_profile.resolution_ranks.rank_for(stream_resolution(a));
+            let rb = download_profile.resolution_ranks.rank_for(stream_resolution(b));
             rb.cmp(&ra)
         })
     });
 
     scored.into_iter().next().map(|(stream, _, _)| stream)
+}
+
+fn build_download_candidate_profile(profile: &RankSettings) -> RankSettings {
+    let mut download_profile = profile.clone();
+
+    // Match riven-ts download selection more closely: use active profiles to
+    // prefer better candidates, but don't hard-reject normal TV/web releases
+    // just because their cached metadata is sparse.
+    download_profile.resolutions.r2160p = true;
+    download_profile.resolutions.r1080p = true;
+    download_profile.resolutions.r720p = true;
+    download_profile.resolutions.r480p = true;
+    download_profile.resolutions.unknown = true;
+
+    download_profile.custom_ranks.quality.av1.fetch = true;
+    download_profile.custom_ranks.quality.remux.fetch = true;
+    download_profile.custom_ranks.rips.bdrip.fetch = true;
+    download_profile.custom_ranks.rips.dvdrip.fetch = true;
+    download_profile.custom_ranks.rips.tvrip.fetch = true;
+    download_profile.custom_ranks.rips.uhdrip.fetch = true;
+    download_profile.custom_ranks.rips.webdlrip.fetch = true;
+    download_profile.custom_ranks.hdr.dolby_vision.fetch = true;
+    download_profile.custom_ranks.extras.documentary.fetch = true;
+    download_profile.custom_ranks.extras.site.fetch = true;
+
+    // Avoid hard-failing sparse TV releases that only parse weakly.
+    download_profile.custom_ranks.quality.hdtv.fetch = true;
+    download_profile.custom_ranks.quality.dvd.fetch = true;
+    download_profile.custom_ranks.audio.mono.fetch = true;
+    download_profile.custom_ranks.audio.mp3.fetch = true;
+    download_profile.custom_ranks.audio.stereo.fetch = true;
+    download_profile.custom_ranks.hdr.sdr.fetch = true;
+    download_profile.custom_ranks.hdr.bit10.fetch = true;
+
+    if download_profile.custom_ranks.audio.stereo.rank.is_none() {
+        download_profile.custom_ranks.audio.stereo.rank = Some(0);
+    }
+    if download_profile.custom_ranks.audio.mono.rank.is_none() {
+        download_profile.custom_ranks.audio.mono.rank = Some(-250);
+    }
+    if download_profile.custom_ranks.audio.mp3.rank.is_none() {
+        download_profile.custom_ranks.audio.mp3.rank = Some(-250);
+    }
+    if download_profile.custom_ranks.hdr.sdr.rank.is_none() {
+        download_profile.custom_ranks.hdr.sdr.rank = Some(0);
+    }
+    if download_profile.custom_ranks.quality.hdtv.rank.is_none() {
+        download_profile.custom_ranks.quality.hdtv.rank = Some(-5000);
+    }
+    if download_profile.custom_ranks.quality.dvd.rank.is_none() {
+        download_profile.custom_ranks.quality.dvd.rank = Some(-10000);
+    }
+
+    download_profile
 }
 
 fn pack_preference(item: &MediaItem, parsed: &ParsedData) -> i64 {
