@@ -240,6 +240,9 @@ pub async fn parse_results(id: i64, job: &ParseScrapeResultsJob, queue: &JobQueu
             })
             .await;
         retry_existing_download_if_scraped(&item, job.auto_download, queue).await;
+        LibraryOrchestrator::new(queue)
+            .fan_out_download_failure(id)
+            .await;
     } else {
         let _ = repo::reset_failed_attempts(&queue.db_pool, id).await;
         queue

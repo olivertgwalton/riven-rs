@@ -318,18 +318,29 @@ impl<'a> LibraryOrchestrator<'a> {
 
     pub async fn queue_download_for_item(&self, item: &MediaItem) {
         match item.item_type {
-            MediaItemType::Movie | MediaItemType::Season | MediaItemType::Episode => {
+            MediaItemType::Movie | MediaItemType::Episode => {
                 if !self.queue.push_download_from_best_stream(item.id).await {
                     let _ = repo::refresh_state_cascade(&self.queue.db_pool, item).await;
                 }
             }
+            // For a season with no direct streams (episode-based shows like anime),
+            // fan out to re-scrape its incomplete episodes — mirrors riven-ts behaviour
+            // where a failed season download triggers fanOutDownload → re-scrape episodes.
+            MediaItemType::Season => {
+                if !self.queue.push_download_from_best_stream(item.id).await {
+                    self.fan_out_download_failure_for_item(item).await;
+                }
+            }
+            // For a show, attempt to download each scraped season.  If a season has no
+            // direct streams (episode-based), fan out to its episodes — mirrors the
+            // riven-ts cascade: show download fail → fanOut seasons → season scrape fail
+            // → fanOut episodes → episode scrape → download.
             MediaItemType::Show => {
                 match repo::get_scraped_seasons_for_show(&self.queue.db_pool, item.id).await {
                     Ok(seasons) => {
                         for season in &seasons {
                             if !self.queue.push_download_from_best_stream(season.id).await {
-                                let _ =
-                                    repo::refresh_state_cascade(&self.queue.db_pool, season).await;
+                                self.fan_out_download_failure_for_item(season).await;
                             }
                         }
                     }
@@ -351,13 +362,16 @@ impl<'a> LibraryOrchestrator<'a> {
         else {
             return;
         };
+        self.fan_out_download_failure_for_item(&item).await;
+    }
 
+    async fn fan_out_download_failure_for_item(&self, item: &MediaItem) {
         match item.item_type {
             MediaItemType::Show => {
-                self.queue_scrape_for_item(&item, None, true).await;
+                self.queue_scrape_for_item(item, None, true).await;
             }
             MediaItemType::Season => {
-                let (show_title, show_imdb_id) = self.show_context(&item).await;
+                let (show_title, show_imdb_id) = self.show_context(item).await;
                 match repo::get_incomplete_episodes_for_season(&self.queue.db_pool, item.id).await {
                     Ok(episodes) => {
                         for episode in episodes {

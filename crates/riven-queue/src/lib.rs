@@ -625,6 +625,9 @@ fn scheduled_index_task_id(id: i64) -> Ulid {
 
 // ── Monitor factory ───────────────────────────────────────────────────────────
 
+/// The key prefix apalis-redis uses for per-worker metadata hashes.
+const APALIS_WORKERS_METADATA_PREFIX: &str = "core::apalis::workers:metadata::";
+
 /// Queue names used by apalis-redis (must match `RedisConfig::new` calls).
 const QUEUE_NAMES: &[&str] = &[
     "riven:index",
@@ -636,14 +639,18 @@ const QUEUE_NAMES: &[&str] = &[
     "riven:content",
 ];
 
-/// Remove stale worker registrations and dedup keys from Redis so the monitor
-/// can restart cleanly. Clearing dedup keys ensures the scheduler can
-/// immediately re-queue any jobs that were inflight when the monitor exited.
+/// Re-enqueue inflight jobs from dead workers and clean up their registrations.
+///
+/// apalis-redis stores the full inflight-set key (e.g. `riven:index:inflight:riven-index`)
+/// as the member of `{queue}:workers`.  Each member IS the inflight set key — jobs still
+/// held by a dead worker live there and must be pushed back to `{queue}:active` before
+/// the registration is deleted, otherwise they are permanently lost.
 pub async fn clear_worker_registrations(redis: &mut redis::aio::ConnectionManager) {
-    for queue in QUEUE_NAMES {
-        let workers_set = format!("{queue}:workers");
+    for &queue_name in QUEUE_NAMES {
+        let config = RedisConfig::new(queue_name);
+        // Each member is the full inflight-set key, e.g. "riven:index:inflight:riven-index"
         let members: Vec<String> = redis::cmd("ZRANGE")
-            .arg(&workers_set)
+            .arg(config.workers_set())
             .arg(0i64)
             .arg(-1i64)
             .query_async(redis)
@@ -651,22 +658,44 @@ pub async fn clear_worker_registrations(redis: &mut redis::aio::ConnectionManage
             .unwrap_or_default();
 
         if !members.is_empty() {
-            for member in &members {
-                let meta_key = format!("core::apalis::workers:metadata::{member}");
-                let inflight_key = format!("{queue}:inflight:{member}");
+            // Collect all inflight jobs across all dead workers, then signal once.
+            let mut rescued_jobs: Vec<String> = Vec::new();
+            for inflight_key in &members {
+                let meta_key = format!("{APALIS_WORKERS_METADATA_PREFIX}{inflight_key}");
+
+                let jobs: Vec<String> = redis::cmd("SMEMBERS")
+                    .arg(inflight_key)
+                    .query_async(redis)
+                    .await
+                    .unwrap_or_default();
+                rescued_jobs.extend(jobs);
+
                 let _: Result<(), _> = redis::pipe()
                     .del(&meta_key)
-                    .del(&inflight_key)
+                    .del(inflight_key)
                     .query_async(redis)
                     .await;
             }
-            let _: Result<(), _> = redis::cmd("DEL").arg(&workers_set).query_async(redis).await;
 
-            tracing::info!(
-                queue = queue,
-                "cleared {} stale worker registrations",
-                members.len()
-            );
+            if !rescued_jobs.is_empty() {
+                let _: Result<(), _> = redis::pipe()
+                    .rpush(config.active_jobs_list(), &rescued_jobs)
+                    .del(config.signal_list())
+                    .lpush(config.signal_list(), 1u8)
+                    .query_async(redis)
+                    .await;
+                tracing::info!(
+                    queue = queue_name,
+                    count = rescued_jobs.len(),
+                    "re-enqueued inflight jobs from dead workers"
+                );
+            }
+
+            let _: Result<(), _> = redis::cmd("DEL")
+                .arg(config.workers_set())
+                .query_async(redis)
+                .await;
+            tracing::info!(queue = queue_name, count = members.len(), "cleared stale worker registrations");
         }
     }
 

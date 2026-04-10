@@ -70,7 +70,6 @@ impl Scheduler {
     /// Retry pending top-level items.
     async fn retry_library(&self) {
         let orchestrator = LibraryOrchestrator::new(&self.job_queue);
-        let retry_interval_secs = self.job_queue.retry_interval_secs.load(Ordering::SeqCst);
 
         let requests = match repo::get_retryable_item_requests(&self.db_pool, 50).await {
             Ok(requests) => requests,
@@ -110,27 +109,5 @@ impl Scheduler {
             }
         }
 
-        if retry_interval_secs != 0 {
-            self.retry_ongoing().await;
-        }
-    }
-
-    /// Retry items stuck in Ongoing (partially completed with some unreleased episodes).
-    async fn retry_ongoing(&self) {
-        let orchestrator = LibraryOrchestrator::new(&self.job_queue);
-
-        for item_type in [MediaItemType::Movie, MediaItemType::Season] {
-            let items = match repo::get_stuck_ongoing_items(&self.db_pool, item_type, 10, 20).await
-            {
-                Ok(items) => items,
-                Err(e) => {
-                    tracing::error!(error = %e, "failed to fetch stuck ongoing items");
-                    vec![]
-                }
-            };
-            for item in &items {
-                orchestrator.queue_download_for_item(item).await;
-            }
-        }
     }
 }
