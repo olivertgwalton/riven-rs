@@ -16,35 +16,6 @@ pub fn parse_torrent_status(status: &str) -> TorrentStatus {
     }
 }
 
-#[derive(Deserialize)]
-pub struct StremthruTorznabResponse {
-    pub channel: StremthruTorznabChannel,
-}
-
-#[derive(Deserialize)]
-pub struct StremthruTorznabChannel {
-    #[serde(default)]
-    pub items: Vec<StremthruTorznabItem>,
-}
-
-#[derive(Deserialize)]
-pub struct StremthruTorznabItem {
-    pub title: String,
-    #[serde(default)]
-    pub attr: Vec<StremthruTorznabAttr>,
-}
-
-#[derive(Deserialize)]
-pub struct StremthruTorznabAttr {
-    #[serde(rename = "@attributes")]
-    pub attributes: StremthruTorznabAttrContent,
-}
-
-#[derive(Deserialize)]
-pub struct StremthruTorznabAttrContent {
-    pub name: String,
-    pub value: String,
-}
 
 #[derive(Deserialize)]
 pub struct StremthruResponse<T> {

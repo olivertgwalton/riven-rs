@@ -2,8 +2,6 @@ mod client;
 mod models;
 
 use async_trait::async_trait;
-use std::collections::HashMap;
-
 use riven_core::events::{EventType, HookResponse, RivenEvent};
 use riven_core::plugin::{Plugin, PluginContext};
 use riven_core::register_plugin;
@@ -14,8 +12,6 @@ use crate::client::{
     check_cache, check_cache_live, download_result_from_cache_check, fetch_user_info,
     generate_link,
 };
-use crate::models::StremthruTorznabResponse;
-
 const DEFAULT_URL: &str = "https://stremthru.13377001.xyz/";
 
 const STORE_NAMES: &[&str] = &[
@@ -47,77 +43,6 @@ fn get_configured_stores(settings: &PluginSettings) -> Vec<(&str, String)> {
         .collect()
 }
 
-async fn scrape_streams(
-    client: &reqwest::Client,
-    base_url: &str,
-    request: &riven_core::events::ScrapeRequest<'_>,
-) -> ScrapeResponse {
-    let Some(imdb_id) = request.imdb_id else {
-        return HashMap::new();
-    };
-
-    let cat = match request.item_type {
-        MediaItemType::Movie => "2000",
-        _ => "5000",
-    };
-    let kind = match request.item_type {
-        MediaItemType::Movie => "movie",
-        _ => "tvsearch",
-    };
-
-    let mut url = format!("{base_url}v0/torznab/api?o=json&imdbid={imdb_id}&t={kind}&cat={cat}");
-    if let Some(season) = request.season {
-        url.push_str(&format!("&season={season}"));
-    }
-    if let Some(episode) = request.episode {
-        url.push_str(&format!("&ep={episode}"));
-    }
-
-    let mut streams = HashMap::new();
-    match riven_core::http::send(|| client.get(&url)).await {
-        Ok(response) if response.status().is_success() => match response.text().await {
-            Ok(body) => match serde_json::from_str::<StremthruTorznabResponse>(&body) {
-                Ok(data) => {
-                    for item in data.channel.items {
-                        let info_hash = item
-                            .attr
-                            .iter()
-                            .find(|attr| attr.attributes.name == "infohash")
-                            .map(|attr| attr.attributes.value.as_str());
-                        if let (Some(hash), title) = (info_hash, item.title)
-                            && !hash.is_empty()
-                            && !title.is_empty()
-                        {
-                            let hash = hash.to_lowercase();
-                            streams.insert(
-                                hash.clone(),
-                                ScrapeStream {
-                                    title,
-                                    magnet: build_magnet_uri(&hash),
-                                },
-                            );
-                        }
-                    }
-                }
-                Err(error) => {
-                    tracing::warn!(error = %error, body = %body, "failed to parse torznab json");
-                }
-            },
-            Err(error) => {
-                tracing::warn!(error = %error, "failed to read torznab response body");
-            }
-        },
-        Ok(response) => {
-            tracing::warn!(status = %response.status(), "torznab request failed");
-        }
-        Err(error) => {
-            tracing::warn!(error = %error, "torznab scrape failed");
-        }
-    }
-
-    tracing::debug!(url, found = streams.len(), "scrape complete");
-    streams
-}
 
 #[async_trait]
 impl Plugin for StremthruPlugin {
@@ -130,7 +55,6 @@ impl Plugin for StremthruPlugin {
             EventType::MediaItemDownloadRequested,
             EventType::MediaItemDownloadCacheCheckRequested,
             EventType::MediaItemDownloadProviderListRequested,
-            EventType::MediaItemScrapeRequested,
             EventType::MediaItemStreamLinkRequested,
             EventType::DebridUserInfoRequested,
         ]
@@ -165,11 +89,6 @@ impl Plugin for StremthruPlugin {
     ) -> anyhow::Result<HookResponse> {
         let base_url = ctx.settings.get_or("stremthruurl", DEFAULT_URL);
         let stores = get_configured_stores(&ctx.settings);
-
-        if let Some(request) = event.scrape_request() {
-            let streams = scrape_streams(&ctx.http_client, &base_url, &request).await;
-            return Ok(HookResponse::Scrape(streams));
-        }
 
         match event {
             RivenEvent::MediaItemDownloadRequested { info_hash, .. } => {
