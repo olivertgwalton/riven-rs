@@ -376,17 +376,21 @@ impl JobQueue {
 
     /// Dispatch a notification event to plugins and (if notable) to the UI broadcast channel.
     pub async fn notify(&self, event: RivenEvent) {
-        let results = self.registry.dispatch(&event).await;
-        for (plugin_name, result) in results {
-            if let Err(e) = result {
-                tracing::error!(plugin = plugin_name, error = %e, "plugin hook failed");
-            }
-        }
         if event.event_type().is_ui_streamed()
             && let Ok(json) = serde_json::to_string(&event)
         {
             let _ = self.notification_tx.send(json);
         }
+
+        let registry = Arc::clone(&self.registry);
+        tokio::spawn(async move {
+            let results = registry.dispatch(&event).await;
+            for (plugin_name, result) in results {
+                if let Err(error) = result {
+                    tracing::error!(plugin = plugin_name, error = %error, "plugin hook failed");
+                }
+            }
+        });
     }
 
     // ── Private helpers ──────────────────────────────────────────────────────

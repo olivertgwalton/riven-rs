@@ -190,12 +190,14 @@ async fn notifications_stream_handler(
         return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
     }
 
-    Sse::new(broadcast_to_sse(
-        state.notification_tx.subscribe(),
-        "notification",
-    ))
-    .keep_alive(KeepAlive::default())
-    .into_response()
+    let ping = futures::stream::once(async {
+        Ok::<Event, Infallible>(Event::default().event("connected").data("ok"))
+    });
+    let rest = broadcast_to_sse(state.notification_tx.subscribe(), "notification");
+
+    Sse::new(ping.chain(rest))
+        .keep_alive(KeepAlive::new().interval(std::time::Duration::from_secs(3)))
+        .into_response()
 }
 
 // ── Server bootstrap ──

@@ -41,6 +41,7 @@ pub(crate) async fn notify_paths(
     update_type: &str,
     plugin: &'static str,
 ) -> anyhow::Result<()> {
+    let url = format!("{base_url}/Library/Media/Updated");
     let updates = paths
         .iter()
         .map(|p| PathUpdate {
@@ -49,8 +50,9 @@ pub(crate) async fn notify_paths(
         })
         .collect();
 
+    tracing::debug!(plugin, target_url = %url, path_count = paths.len(), update_type, "notifying media server about updated library paths");
     let resp = client
-        .post(format!("{base_url}/Library/Media/Updated"))
+        .post(&url)
         .query(&[("api_key", api_key)])
         .json(&LibraryUpdate { updates })
         .send()
@@ -70,8 +72,10 @@ async fn refresh_library(
     api_key: &str,
     plugin: &'static str,
 ) -> anyhow::Result<()> {
+    let url = format!("{base_url}/Library/Refresh");
+    tracing::debug!(plugin, target_url = %url, "requesting media server library refresh");
     let resp = client
-        .post(format!("{base_url}/Library/Refresh"))
+        .post(&url)
         .query(&[("api_key", api_key)])
         .send()
         .await?;
@@ -208,8 +212,10 @@ async fn get_active_sessions(
     api_key: &str,
     server: &'static str,
 ) -> anyhow::Result<Vec<ActivePlaybackSession>> {
+    let url = format!("{base_url}/Sessions");
+    tracing::debug!(server, target_url = %url, "fetching active playback sessions from media server");
     let resp: Vec<MediaServerSession> = client
-        .get(format!("{base_url}/Sessions"))
+        .get(&url)
         .query(&[("api_key", api_key)])
         .send()
         .await?

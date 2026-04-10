@@ -74,6 +74,7 @@ impl Plugin for SeerrPlugin {
                 let request_id = get_seerr_request_id(&ctx.db_pool, *id).await;
                 if let Some(rid) = request_id {
                     let mark_url = format!("{base_url}/api/v1/request/{rid}/available");
+                    tracing::debug!(request_id = rid, target_url = %mark_url, "marking seerr request as available");
                     if let Err(e) = ctx
                         .http_client
                         .post(&mark_url)
@@ -96,6 +97,7 @@ impl Plugin for SeerrPlugin {
             } => {
                 for rid in external_request_ids {
                     let del_url = format!("{base_url}/api/v1/request/{rid}");
+                    tracing::debug!(request_id = rid, target_url = %del_url, "deleting seerr request");
                     if let Err(e) = ctx
                         .http_client
                         .delete(&del_url)
@@ -142,6 +144,7 @@ async fn fetch_content(
         let req_url = format!(
             "{base_url}/api/v1/request?take={PAGE_SIZE}&skip={skip}&filter={filter}&sort=added"
         );
+        tracing::debug!(target_url = %req_url, skip, filter, "fetching seerr requests");
         let resp: SeerrRequestResponse = ctx
             .http_client
             .get(&req_url)

@@ -158,6 +158,7 @@ async fn get_library_sections(
     token: &str,
 ) -> anyhow::Result<Vec<PlexSection>> {
     let url = format!("{plex_url}/library/sections");
+    tracing::debug!(target_url = %url, "fetching plex library sections");
     let resp: PlexSectionsResponse = client
         .get(&url)
         .header("x-plex-token", token)
@@ -179,6 +180,7 @@ async fn refresh_section(
 ) -> anyhow::Result<()> {
     let encoded_path = urlencoding::encode(path);
     let url = format!("{plex_url}/library/sections/{section_key}/refresh?path={encoded_path}");
+    tracing::debug!(target_url = %url, section_key, path, "refreshing plex library section");
     client
         .post(&url)
         .header("x-plex-token", token)
@@ -194,6 +196,7 @@ async fn get_active_sessions(
     token: &str,
 ) -> anyhow::Result<Vec<ActivePlaybackSession>> {
     let url = format!("{plex_url}/status/sessions");
+    tracing::debug!(target_url = %url, "fetching plex active sessions");
     let resp: PlexSessionsResponse = client
         .get(&url)
         .header("x-plex-token", token)
