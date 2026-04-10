@@ -30,6 +30,21 @@ pub async fn attempt_download(
     let stream_id = Some(stream.id);
     let resolution = stream_resolution(stream).to_owned();
     let resolution_ref: Option<&str> = Some(resolution.as_str());
+    let raw_title = stream
+        .parsed_data
+        .as_ref()
+        .and_then(|parsed| parsed.get("raw_title"))
+        .and_then(|value| value.as_str())
+        .unwrap_or("");
+
+    tracing::debug!(
+        id,
+        info_hash,
+        resolution,
+        profile = profile_name,
+        raw_title,
+        "attempting cached stream download"
+    );
 
     let event = RivenEvent::MediaItemDownloadRequested {
         id,
@@ -45,6 +60,7 @@ pub async fn attempt_download(
             Ok(HookResponse::Download(download)) => {
                 tracing::debug!(
                     plugin = plugin_name,
+                    info_hash,
                     files = download.files.len(),
                     "download responded"
                 );
@@ -62,6 +78,7 @@ pub async fn attempt_download(
             Err(error) => {
                 tracing::error!(
                     plugin = plugin_name,
+                    info_hash,
                     error = %error,
                     "download hook failed (transient)"
                 );
@@ -71,6 +88,7 @@ pub async fn attempt_download(
     }
 
     let Some(download) = download_result else {
+        tracing::debug!(id, info_hash, "no download provider accepted cached stream");
         return DownloadAttemptOutcome::Failed;
     };
     let download = *download;
@@ -89,8 +107,10 @@ pub async fn attempt_download(
             )
             .await
             {
+                tracing::debug!(id, info_hash, "movie download persisted");
                 DownloadAttemptOutcome::Succeeded
             } else {
+                tracing::debug!(id, info_hash, "movie download rejected during persist");
                 DownloadAttemptOutcome::Failed
             }
         }
@@ -108,8 +128,10 @@ pub async fn attempt_download(
             )
             .await
             {
+                tracing::debug!(id, info_hash, "episode download persisted");
                 DownloadAttemptOutcome::Succeeded
             } else {
+                tracing::debug!(id, info_hash, "episode download rejected during persist");
                 DownloadAttemptOutcome::Failed
             }
         }
@@ -128,9 +150,13 @@ pub async fn attempt_download(
             .await
             {
                 SeasonPersistOutcome::Complete | SeasonPersistOutcome::Partial => {
+                    tracing::debug!(id, info_hash, "season download handled during persist");
                     DownloadAttemptOutcome::TerminalHandled
                 }
-                SeasonPersistOutcome::Failed => DownloadAttemptOutcome::Failed,
+                SeasonPersistOutcome::Failed => {
+                    tracing::debug!(id, info_hash, "season download rejected during persist");
+                    DownloadAttemptOutcome::Failed
+                }
             }
         }
         _ => DownloadAttemptOutcome::Failed,
