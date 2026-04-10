@@ -354,51 +354,20 @@ impl<'a> LibraryOrchestrator<'a> {
 
         match item.item_type {
             MediaItemType::Show => {
-                match repo::get_requested_seasons_for_show(&self.queue.db_pool, item.id).await {
-                    Ok(seasons) => {
-                        for season in seasons {
-                            match season.state {
-                                MediaItemState::Scraped => {
-                                    self.queue_download_for_item(&season).await;
-                                }
-                                MediaItemState::Indexed
-                                | MediaItemState::Ongoing
-                                | MediaItemState::PartiallyCompleted => {
-                                    self.queue_scrape_for_item(&season, None, true).await;
-                                }
-                                _ => {}
-                            }
-                        }
-                    }
-                    Err(error) => {
-                        tracing::error!(
-                            show_id = item.id,
-                            error = %error,
-                            "failed to fetch requested seasons for fan-out"
-                        );
-                    }
-                }
+                self.queue_scrape_for_item(&item, None, true).await;
             }
             MediaItemType::Season => {
                 let (show_title, show_imdb_id) = self.show_context(&item).await;
                 match repo::get_incomplete_episodes_for_season(&self.queue.db_pool, item.id).await {
                     Ok(episodes) => {
                         for episode in episodes {
-                            match episode.state {
-                                MediaItemState::Scraped => {
-                                    self.queue_download_for_item(&episode).await;
-                                }
-                                MediaItemState::Indexed | MediaItemState::Ongoing => {
-                                    self.queue
-                                        .push_scrape(ScrapeJob::for_episode(
-                                            &episode,
-                                            show_title.clone(),
-                                            show_imdb_id.clone(),
-                                        ))
-                                        .await;
-                                }
-                                _ => {}
-                            }
+                            self.queue
+                                .push_scrape(ScrapeJob::for_episode(
+                                    &episode,
+                                    show_title.clone(),
+                                    show_imdb_id.clone(),
+                                ))
+                                .await;
                         }
                     }
                     Err(error) => {
