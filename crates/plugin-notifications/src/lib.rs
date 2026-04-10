@@ -1,13 +1,17 @@
 use async_trait::async_trait;
 use chrono::Utc;
 use riven_db::repo;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use riven_core::events::{EventType, HookResponse, RivenEvent};
 use riven_core::plugin::{Plugin, PluginContext};
 use riven_core::register_plugin;
 use riven_core::settings::PluginSettings;
 use riven_core::types::*;
+
+const TMDB_BASE_URL: &str = "https://api.themoviedb.org/3";
+const TVDB_BASE_URL: &str = "https://api4.thetvdb.com/v4";
+const TVDB_DEFAULT_API_KEY: &str = "6be85335-5c4f-4d8d-b945-d3ed0eb8cdce";
 
 #[derive(Default)]
 pub struct NotificationsPlugin;
@@ -38,6 +42,12 @@ impl Plugin for NotificationsPlugin {
                 .with_description(
                     "Comma-separated webhook URLs. Supports Discord and generic JSON endpoints.",
                 ),
+            SettingField::new("detailed", "Detailed Embeds", "boolean").with_description(
+                "Show rich Discord embeds with overview, rating, and external links.",
+            ),
+            SettingField::new("tmdb_api_key", "TMDB API Key", "password").with_description(
+                "Optional. Required for overview text in detailed Discord embeds.",
+            ),
         ]
     }
 
@@ -61,6 +71,7 @@ impl Plugin for NotificationsPlugin {
                 duration_seconds,
             } => {
                 let urls = ctx.settings.get_list("urls");
+                let detailed = ctx.settings.get_bool("detailed");
 
                 let mut payload = NotificationPayload {
                     event: "riven.media-item.download.success".to_string(),
@@ -70,18 +81,34 @@ impl Plugin for NotificationsPlugin {
                     year: *year,
                     imdb_id: imdb_id.clone(),
                     tmdb_id: tmdb_id.clone(),
+                    tvdb_id: None,
                     poster_path: poster_path.clone(),
                     downloader: plugin_name.clone(),
                     provider: provider.clone(),
                     duration_seconds: *duration_seconds,
                     timestamp: Utc::now().to_rfc3339(),
+                    is_anime: false,
+                    rating: None,
+                    overview: None,
+                    tvdb_slug: None,
                 };
 
                 if !rewrite_for_request_root(ctx, *id, &mut payload).await? {
                     return Ok(HookResponse::Empty);
                 }
 
-                dispatch_webhooks(ctx, &urls, &payload).await;
+                if detailed {
+                    if let Some(api_key) = ctx.settings.get("tmdb_api_key") {
+                        payload.overview =
+                            fetch_tmdb_overview(&ctx.http_client, api_key, &payload).await;
+                    }
+                    if let Some(ref tvdb_id) = payload.tvdb_id.clone() {
+                        payload.tvdb_slug =
+                            fetch_tvdb_slug(&ctx.http_client, tvdb_id).await;
+                    }
+                }
+
+                dispatch_webhooks(ctx, &urls, &payload, detailed).await;
 
                 Ok(HookResponse::Empty)
             }
@@ -98,6 +125,11 @@ async fn rewrite_for_request_root(
     let Some(item) = repo::get_media_item(&ctx.db_pool, item_id).await? else {
         return Ok(true);
     };
+
+    payload.is_anime = item.is_anime;
+    payload.rating = item.rating;
+    payload.tvdb_id = item.tvdb_id.clone();
+
     let Some(request_id) = item.item_request_id else {
         return Ok(true);
     };
@@ -123,7 +155,10 @@ async fn rewrite_for_request_root(
     payload.year = root_item.year;
     payload.imdb_id = root_item.imdb_id.clone();
     payload.tmdb_id = root_item.tmdb_id.clone();
+    payload.tvdb_id = root_item.tvdb_id.clone();
     payload.poster_path = root_item.poster_path.clone();
+    payload.is_anime = root_item.is_anime;
+    payload.rating = root_item.rating;
     payload.duration_seconds = request
         .completed_at
         .unwrap_or_else(Utc::now)
@@ -134,7 +169,37 @@ async fn rewrite_for_request_root(
     Ok(true)
 }
 
-async fn dispatch_webhooks(ctx: &PluginContext, urls: &[String], payload: &NotificationPayload) {
+async fn fetch_tmdb_overview(
+    client: &reqwest::Client,
+    api_key: &str,
+    payload: &NotificationPayload,
+) -> Option<String> {
+    let tmdb_id = payload.tmdb_id.as_deref()?;
+    let media_type = if payload.item_type == MediaItemType::Movie {
+        "movie"
+    } else {
+        "tv"
+    };
+    let url = format!("{TMDB_BASE_URL}/{media_type}/{tmdb_id}");
+    let resp = client
+        .get(&url)
+        .bearer_auth(api_key)
+        .send()
+        .await
+        .ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let json: TmdbOverviewResponse = resp.json().await.ok()?;
+    json.overview.filter(|s| !s.is_empty())
+}
+
+async fn dispatch_webhooks(
+    ctx: &PluginContext,
+    urls: &[String],
+    payload: &NotificationPayload,
+    detailed: bool,
+) {
     for url_str in urls {
         match parse_notification_url(url_str) {
             Some(NotificationService::Discord {
@@ -142,7 +207,8 @@ async fn dispatch_webhooks(ctx: &PluginContext, urls: &[String], payload: &Notif
                 webhook_token,
             }) => {
                 if let Err(error) =
-                    send_discord(&ctx.http_client, &webhook_id, &webhook_token, payload).await
+                    send_discord(&ctx.http_client, &webhook_id, &webhook_token, payload, detailed)
+                        .await
                 {
                     tracing::error!(error = %error, url = url_str, "failed to send discord notification");
                 }
@@ -168,11 +234,17 @@ struct NotificationPayload {
     year: Option<i32>,
     imdb_id: Option<String>,
     tmdb_id: Option<String>,
+    tvdb_id: Option<String>,
     poster_path: Option<String>,
     downloader: String,
     provider: Option<String>,
     duration_seconds: f64,
     timestamp: String,
+    is_anime: bool,
+    rating: Option<f64>,
+    overview: Option<String>,
+    #[serde(skip)]
+    tvdb_slug: Option<String>,
 }
 
 async fn mark_request_notification_sent(
@@ -237,9 +309,24 @@ async fn send_discord(
     webhook_id: &str,
     webhook_token: &str,
     payload: &NotificationPayload,
+    detailed: bool,
 ) -> anyhow::Result<()> {
     let url = format!("https://discord.com/api/webhooks/{webhook_id}/{webhook_token}");
+    let body = if detailed {
+        build_detailed_embed(payload)
+    } else {
+        build_simple_embed(payload)
+    };
+    client
+        .post(&url)
+        .json(&body)
+        .send()
+        .await?
+        .error_for_status()?;
+    Ok(())
+}
 
+fn build_simple_embed(payload: &NotificationPayload) -> serde_json::Value {
     let duration_str = format_duration(payload.duration_seconds);
 
     let mut fields = vec![
@@ -253,8 +340,7 @@ async fn send_discord(
     }
 
     if let Some(year) = payload.year {
-        fields
-            .push(serde_json::json!({ "name": "Year", "value": year.to_string(), "inline": true }));
+        fields.push(serde_json::json!({ "name": "Year", "value": year.to_string(), "inline": true }));
     }
 
     let mut embed = serde_json::json!({
@@ -268,16 +354,116 @@ async fn send_discord(
         embed["thumbnail"] = serde_json::json!({ "url": poster });
     }
 
-    let body = serde_json::json!({ "embeds": [embed] });
+    serde_json::json!({ "embeds": [embed] })
+}
 
-    client
-        .post(&url)
-        .json(&body)
-        .send()
-        .await?
-        .error_for_status()?;
+fn build_detailed_embed(payload: &NotificationPayload) -> serde_json::Value {
+    let media_label = if payload.is_anime {
+        "Anime"
+    } else {
+        match payload.item_type {
+            MediaItemType::Movie => "Movie",
+            MediaItemType::Show => "Show",
+            MediaItemType::Season => "Season",
+            MediaItemType::Episode => "Episode",
+        }
+    };
 
-    Ok(())
+    let color: u32 = if payload.is_anime {
+        0x9B59B6
+    } else {
+        match payload.item_type {
+            MediaItemType::Movie => 0xE67E22,
+            MediaItemType::Show | MediaItemType::Season | MediaItemType::Episode => 0x3498DB,
+        }
+    };
+
+    let title = match payload.year {
+        Some(year) => format!("{} ({})", payload.full_title, year),
+        None => payload.full_title.clone(),
+    };
+
+    let description = match &payload.overview {
+        Some(overview) => {
+            let truncated = if overview.len() > 500 {
+                &overview[..500]
+            } else {
+                overview.as_str()
+            };
+            format!("**✅ {media_label} Completed Successfully**\n\n{truncated}")
+        }
+        None => format!("**✅ {media_label} Completed Successfully**"),
+    };
+
+    let mut fields = vec![];
+
+    if let Some(rating) = payload.rating {
+        fields.push(serde_json::json!({
+            "name": "⭐ Rating",
+            "value": format!("{:.2} / 10", rating),
+            "inline": false,
+        }));
+    }
+
+    fields.push(serde_json::json!({
+        "name": "⏱ Completion Time",
+        "value": format_duration(payload.duration_seconds),
+        "inline": false,
+    }));
+
+    fields.push(serde_json::json!({
+        "name": "Downloader",
+        "value": &payload.downloader,
+        "inline": true,
+    }));
+
+    if let Some(ref provider) = payload.provider {
+        fields.push(serde_json::json!({
+            "name": "Provider",
+            "value": provider,
+            "inline": true,
+        }));
+    }
+
+    let mut links = vec![];
+    if let Some(ref tmdb_id) = payload.tmdb_id {
+        let path = if payload.item_type == MediaItemType::Movie {
+            "movie"
+        } else {
+            "tv"
+        };
+        links.push(format!(
+            "[TMDB](https://www.themoviedb.org/{path}/{tmdb_id})"
+        ));
+    }
+    if let Some(ref imdb_id) = payload.imdb_id {
+        links.push(format!("[IMDB](https://www.imdb.com/title/{imdb_id})"));
+    }
+    if let Some(ref tvdb_slug) = payload.tvdb_slug {
+        links.push(format!("[TVDB](https://thetvdb.com/series/{tvdb_slug})"));
+    }
+    if !links.is_empty() {
+        fields.push(serde_json::json!({
+            "name": "Links",
+            "value": links.join(" • "),
+            "inline": false,
+        }));
+    }
+
+    let mut embed = serde_json::json!({
+        "title": title,
+        "description": description,
+        "color": color,
+        "fields": fields,
+        "timestamp": &payload.timestamp,
+        "footer": { "text": "Riven" },
+    });
+
+    if let Some(ref poster) = payload.poster_path {
+        embed["image"] = serde_json::json!({ "url": poster });
+    }
+
+    serde_json::json!({ "embeds": [embed] })
 }
 
 async fn send_json_webhook(
@@ -307,4 +493,50 @@ fn format_duration(seconds: f64) -> String {
     } else {
         format!("{seconds:.1}s")
     }
+}
+
+async fn fetch_tvdb_slug(client: &reqwest::Client, tvdb_id: &str) -> Option<String> {
+    let login: TvdbResponse<TvdbLoginData> = client
+        .post(format!("{TVDB_BASE_URL}/login"))
+        .json(&serde_json::json!({ "apikey": TVDB_DEFAULT_API_KEY }))
+        .send()
+        .await
+        .ok()?
+        .json()
+        .await
+        .ok()?;
+
+    let token = login.data.token;
+
+    let resp: TvdbResponse<TvdbSeriesSlug> = client
+        .get(format!("{TVDB_BASE_URL}/series/{tvdb_id}"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .ok()?
+        .json()
+        .await
+        .ok()?;
+
+    resp.data.slug
+}
+
+#[derive(Deserialize)]
+struct TvdbResponse<T> {
+    data: T,
+}
+
+#[derive(Deserialize)]
+struct TvdbLoginData {
+    token: String,
+}
+
+#[derive(Deserialize)]
+struct TvdbSeriesSlug {
+    slug: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct TmdbOverviewResponse {
+    overview: Option<String>,
 }
