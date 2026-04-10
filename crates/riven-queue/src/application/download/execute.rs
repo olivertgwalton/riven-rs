@@ -1,5 +1,6 @@
 use std::time::Instant;
 
+use anyhow::Result;
 use riven_core::events::{HookResponse, RivenEvent};
 use riven_core::types::{DownloadResult, MediaItemType};
 use riven_db::{entities::{MediaItem, Stream}, repo};
@@ -101,6 +102,14 @@ pub async fn attempt_download(
             } else {
                 tracing::debug!(id, info_hash, "blacklisted stale cached stream after provider rejection");
             }
+            if let Err(error) = clear_stremthru_cache_check_keys(queue, info_hash).await {
+                tracing::error!(
+                    id,
+                    info_hash,
+                    error = %error,
+                    "failed to clear stale stremthru cache-check keys"
+                );
+            }
         }
         tracing::debug!(id, info_hash, "no download provider accepted cached stream");
         return DownloadAttemptOutcome::Failed;
@@ -184,4 +193,34 @@ fn stream_resolution(stream: &Stream) -> &str {
         .and_then(|parsed| parsed.get("resolution"))
         .and_then(|value| value.as_str())
         .unwrap_or("unknown")
+}
+
+async fn clear_stremthru_cache_check_keys(queue: &JobQueue, info_hash: &str) -> Result<()> {
+    let mut conn = queue.redis.clone();
+    let pattern = format!("plugin:stremthru:cache-check:*:{}", info_hash.to_lowercase());
+    let mut cursor = 0u64;
+    let mut keys = Vec::new();
+
+    loop {
+        let (next, batch): (u64, Vec<String>) = redis::cmd("SCAN")
+            .arg(cursor)
+            .arg("MATCH")
+            .arg(&pattern)
+            .arg("COUNT")
+            .arg(100u32)
+            .query_async(&mut conn)
+            .await?;
+        keys.extend(batch);
+        cursor = next;
+        if cursor == 0 {
+            break;
+        }
+    }
+
+    if !keys.is_empty() {
+        let _: () = redis::cmd("DEL").arg(&keys).query_async(&mut conn).await?;
+        tracing::debug!(info_hash, cleared = keys.len(), "cleared stale stremthru cache-check keys");
+    }
+
+    Ok(())
 }
