@@ -197,15 +197,10 @@ pub async fn update_item_request_state(
     .await?)
 }
 
-pub async fn get_retryable_item_requests(
-    pool: &PgPool,
-    retry_interval_secs: u64,
-    limit: i64,
-) -> Result<Vec<ItemRequest>> {
+pub async fn get_retryable_item_requests(pool: &PgPool, limit: i64) -> Result<Vec<ItemRequest>> {
     Ok(sqlx::query_as::<_, ItemRequest>(
         "SELECT * FROM item_requests
          WHERE state = ANY(ARRAY['requested'::item_request_state, 'failed'::item_request_state])
-           AND (created_at IS NULL OR created_at < NOW() - ($1 * INTERVAL '1 second'))
            AND (
              state = 'failed'
              OR NOT EXISTS (
@@ -216,9 +211,8 @@ pub async fn get_retryable_item_requests(
              )
            )
          ORDER BY created_at ASC
-         LIMIT $2",
+         LIMIT $1",
     )
-    .bind(retry_interval_secs as f64)
     .bind(limit)
     .fetch_all(pool)
     .await?)
