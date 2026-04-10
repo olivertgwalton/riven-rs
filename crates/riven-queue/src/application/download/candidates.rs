@@ -102,6 +102,7 @@ pub fn pick_best_for_profile<'a>(
                     item_id = item.id,
                     title = %item.title,
                     info_hash = %candidate.stream.info_hash,
+                    raw_title = %parsed.raw_title,
                     resolution = parsed.resolution,
                     quality = ?parsed.quality,
                     codec = ?parsed.codec,
