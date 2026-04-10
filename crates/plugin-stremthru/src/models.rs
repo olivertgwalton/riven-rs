@@ -51,20 +51,6 @@ pub struct StremthruResponse<T> {
     pub data: Option<T>,
 }
 
-#[derive(Deserialize)]
-pub struct StremthruTorrent {
-    pub id: Option<String>,
-    pub status: String,
-    pub files: Vec<StremthruFile>,
-}
-
-#[derive(Deserialize)]
-pub struct StremthruFile {
-    pub name: String,
-    pub size: u64,
-    #[serde(default)]
-    pub link: String,
-}
 
 #[derive(Deserialize)]
 pub struct StremthruCacheCheck {
@@ -84,6 +70,8 @@ pub struct StremthruCacheFile {
     pub index: i32,
     pub name: String,
     pub size: u64,
+    #[serde(default)]
+    pub link: String,
 }
 
 #[derive(Deserialize)]

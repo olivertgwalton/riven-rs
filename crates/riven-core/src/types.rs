@@ -220,6 +220,11 @@ pub struct CacheCheckFile {
     pub index: u32,
     pub name: String,
     pub size: u64,
+    /// Direct download link for this file, populated from a live cache-check
+    /// response when `status == Cached`.  Intentionally not serialized so that
+    /// expiring links are never written into the Redis 24-hour cache.
+    #[serde(skip_serializing, default)]
+    pub link: Option<String>,
 }
 
 // ── Provider list ──

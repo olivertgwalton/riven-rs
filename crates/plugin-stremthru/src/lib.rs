@@ -2,7 +2,6 @@ mod client;
 mod models;
 
 use async_trait::async_trait;
-use redis::AsyncCommands;
 use std::collections::HashMap;
 
 use riven_core::events::{EventType, HookResponse, RivenEvent};
@@ -12,13 +11,12 @@ use riven_core::settings::PluginSettings;
 use riven_core::types::*;
 
 use crate::client::{
-    AddTorrentError, add_torrent, check_cache, download_result_from_torrent, fetch_user_info,
-    generate_link, has_cached_hash,
+    check_cache, check_cache_live, download_result_from_cache_check, fetch_user_info,
+    generate_link,
 };
 use crate::models::StremthruTorznabResponse;
 
 const DEFAULT_URL: &str = "https://stremthru.13377001.xyz/";
-const ADD_TORRENT_INFLIGHT_TTL_SECS: u64 = 20;
 
 const STORE_NAMES: &[&str] = &[
     "realdebrid",
@@ -47,63 +45,6 @@ fn get_configured_stores(settings: &PluginSettings) -> Vec<(&str, String)> {
                 .map(|api_key| (*name, api_key.to_string()))
         })
         .collect()
-}
-
-fn add_torrent_cooldown_key(store: &str) -> String {
-    format!("plugin:stremthru:add-torrent:cooldown:{store}")
-}
-
-fn add_torrent_inflight_key(store: &str, info_hash: &str) -> String {
-    format!(
-        "plugin:stremthru:add-torrent:inflight:{store}:{}",
-        info_hash.to_lowercase()
-    )
-}
-
-async fn store_add_torrent_cooled_down(redis: &redis::aio::ConnectionManager, store: &str) -> bool {
-    let mut conn = redis.clone();
-    AsyncCommands::exists(&mut conn, add_torrent_cooldown_key(store))
-        .await
-        .unwrap_or(false)
-}
-
-async fn set_store_add_torrent_cooldown(
-    redis: &redis::aio::ConnectionManager,
-    store: &str,
-    ttl_secs: u64,
-) {
-    let mut conn = redis.clone();
-    let _: Result<(), _> =
-        AsyncCommands::set_ex(&mut conn, add_torrent_cooldown_key(store), "1", ttl_secs).await;
-}
-
-async fn try_acquire_add_torrent_inflight(
-    redis: &redis::aio::ConnectionManager,
-    store: &str,
-    info_hash: &str,
-    ttl_secs: u64,
-) -> bool {
-    let key = add_torrent_inflight_key(store, info_hash);
-    let mut conn = redis.clone();
-    let acquired: Result<Option<String>, _> = redis::cmd("SET")
-        .arg(&key)
-        .arg("1")
-        .arg("EX")
-        .arg(ttl_secs)
-        .arg("NX")
-        .query_async(&mut conn)
-        .await;
-    acquired.ok().flatten().is_some()
-}
-
-async fn release_add_torrent_inflight(
-    redis: &redis::aio::ConnectionManager,
-    store: &str,
-    info_hash: &str,
-) {
-    let mut conn = redis.clone();
-    let _: Result<(), _> =
-        AsyncCommands::del(&mut conn, add_torrent_inflight_key(store, info_hash)).await;
 }
 
 async fn scrape_streams(
@@ -231,38 +172,31 @@ impl Plugin for StremthruPlugin {
         }
 
         match event {
-            RivenEvent::MediaItemDownloadRequested {
-                id: _,
-                info_hash,
-                magnet,
-            } => {
-                let query = CacheCheckQuery {
-                    hash: info_hash.clone(),
-                    magnet: magnet.clone(),
-                };
-                let cache_checks =
-                    futures::future::join_all(stores.iter().map(|(store, api_key)| async {
-                        let result = check_cache(
-                            &ctx.http_client,
-                            &ctx.redis,
-                            &base_url,
-                            store,
-                            api_key,
-                            std::slice::from_ref(&query),
-                        )
-                        .await;
-                        (*store, api_key.as_str(), result)
-                    }))
-                    .await;
-
+            RivenEvent::MediaItemDownloadRequested { info_hash, .. } => {
                 let mut any_network_error = false;
-                let mut cached_stores = Vec::new();
-                for (store, api_key, result) in cache_checks {
-                    match result {
-                        Ok(results) if has_cached_hash(&results, info_hash) => {
-                            cached_stores.push((store, api_key));
+
+                for (store, api_key) in &stores {
+                    match check_cache_live(
+                        &ctx.http_client,
+                        &base_url,
+                        store,
+                        api_key,
+                        info_hash,
+                    )
+                    .await
+                    {
+                        Ok(Some(result)) => {
+                            tracing::debug!(
+                                store,
+                                info_hash,
+                                files = result.files.len(),
+                                "torrent cached; building download result from check"
+                            );
+                            let download =
+                                download_result_from_cache_check(store, info_hash, result);
+                            return Ok(HookResponse::Download(Box::new(download)));
                         }
-                        Ok(_) => {
+                        Ok(None) => {
                             tracing::debug!(
                                 store,
                                 info_hash,
@@ -272,11 +206,7 @@ impl Plugin for StremthruPlugin {
                         Err(error) => {
                             let is_network = error
                                 .downcast_ref::<reqwest::Error>()
-                                .map(|reqwest_error| {
-                                    reqwest_error.is_connect()
-                                        || reqwest_error.is_timeout()
-                                        || reqwest_error.is_request()
-                                })
+                                .map(|e| e.is_connect() || e.is_timeout() || e.is_request())
                                 .unwrap_or(false);
                             if is_network {
                                 any_network_error = true;
@@ -286,60 +216,6 @@ impl Plugin for StremthruPlugin {
                     }
                 }
 
-                for (store, api_key) in cached_stores {
-                    if store_add_torrent_cooled_down(&ctx.redis, store).await {
-                        tracing::debug!(
-                            store,
-                            info_hash,
-                            "store add_torrent cooling down after rate limit"
-                        );
-                        continue;
-                    }
-                    if !try_acquire_add_torrent_inflight(
-                        &ctx.redis,
-                        store,
-                        info_hash,
-                        ADD_TORRENT_INFLIGHT_TTL_SECS,
-                    )
-                    .await
-                    {
-                        tracing::debug!(
-                            store,
-                            info_hash,
-                            "duplicate add_torrent attempt suppressed"
-                        );
-                        continue;
-                    }
-
-                    match add_torrent(&ctx.http_client, &base_url, store, api_key, magnet).await {
-                        Ok(torrent) => {
-                            release_add_torrent_inflight(&ctx.redis, store, info_hash).await;
-                            let result = download_result_from_torrent(store, info_hash, torrent);
-                            return Ok(HookResponse::Download(Box::new(result)));
-                        }
-                        Err(AddTorrentError::RateLimited { retry_after_secs }) => {
-                            release_add_torrent_inflight(&ctx.redis, store, info_hash).await;
-                            set_store_add_torrent_cooldown(&ctx.redis, store, retry_after_secs)
-                                .await;
-                            tracing::warn!(
-                                store,
-                                retry_after_secs,
-                                "stremthru add_torrent rate limited"
-                            );
-                        }
-                        Err(AddTorrentError::Other(error)) => {
-                            release_add_torrent_inflight(&ctx.redis, store, info_hash).await;
-                            let is_network = error
-                                .downcast_ref::<reqwest::Error>()
-                                .map(|e| e.is_connect() || e.is_timeout() || e.is_request())
-                                .unwrap_or(false);
-                            if is_network {
-                                any_network_error = true;
-                            }
-                            tracing::warn!(store, error = %error, "stremthru add torrent failed");
-                        }
-                    }
-                }
                 if any_network_error {
                     anyhow::bail!("network error contacting store");
                 }
