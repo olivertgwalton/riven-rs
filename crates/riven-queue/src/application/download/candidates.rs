@@ -76,14 +76,40 @@ pub fn pick_best_for_profile<'a>(
     let mut scored: Vec<(&Stream, i64, i64)> = candidates
         .iter()
         .filter_map(|candidate| {
-            let parsed: ParsedData = candidate
-                .stream
-                .parsed_data
-                .as_ref()
-                .and_then(|value| serde_json::from_value(value.clone()).ok())?;
+            let Some(parsed_data) = candidate.stream.parsed_data.as_ref() else {
+                tracing::debug!(
+                    item_id = item.id,
+                    title = %item.title,
+                    info_hash = %candidate.stream.info_hash,
+                    "cached stream rejected: missing parsed_data"
+                );
+                return None;
+            };
 
-            let (fetch, _) = riven_rank::rank::check_fetch(&parsed, profile);
+            let Ok(parsed) = serde_json::from_value::<ParsedData>(parsed_data.clone()) else {
+                tracing::debug!(
+                    item_id = item.id,
+                    title = %item.title,
+                    info_hash = %candidate.stream.info_hash,
+                    "cached stream rejected: invalid parsed_data"
+                );
+                return None;
+            };
+
+            let (fetch, failed_checks) = riven_rank::rank::check_fetch(&parsed, profile);
             if !fetch {
+                tracing::debug!(
+                    item_id = item.id,
+                    title = %item.title,
+                    info_hash = %candidate.stream.info_hash,
+                    resolution = parsed.resolution,
+                    quality = ?parsed.quality,
+                    codec = ?parsed.codec,
+                    audio = ?parsed.audio,
+                    hdr = ?parsed.hdr,
+                    checks = ?failed_checks,
+                    "cached stream rejected by active profile fetch checks"
+                );
                 return None;
             }
 
