@@ -23,7 +23,7 @@ fn build_http_client() -> Result<reqwest::Client> {
         .timeout(Duration::from_secs(
             riven_core::config::vfs::ACTIVITY_TIMEOUT_SECS,
         ))
-        .pool_idle_timeout(Duration::from_secs(90))
+        .pool_idle_timeout(Duration::from_secs(25))
         .pool_max_idle_per_host(16)
         .tcp_keepalive(Duration::from_secs(30))
         .tcp_nodelay(true)
@@ -41,7 +41,7 @@ fn build_streaming_http_client() -> Result<reqwest::Client> {
         .timeout(Duration::from_secs(
             riven_core::config::vfs::ACTIVITY_TIMEOUT_SECS,
         ))
-        .pool_idle_timeout(Duration::from_secs(90))
+        .pool_idle_timeout(Duration::from_secs(25))
         .pool_max_idle_per_host(16)
         .tcp_keepalive(Duration::from_secs(30))
         .tcp_nodelay(true)

@@ -1,7 +1,7 @@
 mod candidates;
 mod execute;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
 use riven_core::events::{HookResponse, RivenEvent};
@@ -225,6 +225,10 @@ async fn run_multi_version(
 ) -> bool {
     let downloaded_profiles = fetch_done_profiles(queue, id, item.item_type).await;
     let mut any_success = false;
+    // Track hashes already attempted in this run so we don't retry the same
+    // stream for a second profile after it failed for the first — mirrors the
+    // riven-ts `failedInfoHashes` per-job exclusion set.
+    let mut attempted_hashes: HashSet<String> = HashSet::new();
 
     for (profile_name, profile_settings) in active_profiles {
         if downloaded_profiles.contains(profile_name) {
@@ -245,6 +249,16 @@ async fn run_multi_version(
             continue;
         };
 
+        if attempted_hashes.contains(&stream.info_hash) {
+            tracing::debug!(
+                id,
+                profile = profile_name,
+                info_hash = %stream.info_hash,
+                "skipping already-attempted stream for this profile"
+            );
+            continue;
+        }
+
         match attempt_download(
             id,
             item,
@@ -257,7 +271,9 @@ async fn run_multi_version(
         )
         .await
         {
-            DownloadAttemptOutcome::Failed => {}
+            DownloadAttemptOutcome::Failed => {
+                attempted_hashes.insert(stream.info_hash.clone());
+            }
             DownloadAttemptOutcome::TerminalHandled => return true,
             DownloadAttemptOutcome::Succeeded => {
                 any_success = true;

@@ -226,15 +226,16 @@ pub async fn check_cache(
 
     let url = format!("{base_url}v0/store/torz/check?hash={hash_str}");
     tracing::debug!(store, url = %url, "requesting stremthru torz cache check");
-    let response = client
-        .get(&url)
-        .header("x-stremthru-store-name", store)
-        .header(
-            "x-stremthru-store-authorization",
-            format!("Bearer {api_key}"),
-        )
-        .send()
-        .await?;
+    let response = riven_core::http::send(|| {
+        client
+            .get(&url)
+            .header("x-stremthru-store-name", store)
+            .header(
+                "x-stremthru-store-authorization",
+                format!("Bearer {api_key}"),
+            )
+    })
+    .await?;
 
     if !response.status().is_success() {
         let status = response.status();
@@ -305,16 +306,17 @@ pub async fn generate_link(
 ) -> anyhow::Result<String> {
     let url = format!("{base_url}v0/store/torz/link/generate");
     tracing::debug!(store, url = %url, "generating stremthru torz link");
-    let response = client
-        .post(&url)
-        .header("x-stremthru-store-name", store)
-        .header(
-            "x-stremthru-store-authorization",
-            format!("Bearer {api_key}"),
-        )
-        .json(&serde_json::json!({ "link": magnet }))
-        .send()
-        .await?;
+    let response = riven_core::http::send(|| {
+        client
+            .post(&url)
+            .header("x-stremthru-store-name", store)
+            .header(
+                "x-stremthru-store-authorization",
+                format!("Bearer {api_key}"),
+            )
+            .json(&serde_json::json!({ "link": magnet }))
+    })
+    .await?;
 
     if !response.status().is_success() {
         let status = response.status();

@@ -69,7 +69,7 @@ impl Plugin for TorrentioPlugin {
             episode = request.episode,
             "requesting torrentio streams"
         );
-        let http_resp = ctx.http_client.get(&url).send().await?;
+        let http_resp = riven_core::http::send(|| ctx.http_client.get(&url)).await?;
         let status = http_resp.status();
         if !status.is_success() {
             let body = http_resp.text().await.unwrap_or_default();

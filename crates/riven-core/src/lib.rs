@@ -1,6 +1,7 @@
 pub mod config;
 pub mod downloader;
 pub mod events;
+pub mod http;
 pub mod plugin;
 pub mod reindex;
 pub mod settings;

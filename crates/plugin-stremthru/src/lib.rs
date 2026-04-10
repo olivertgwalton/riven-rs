@@ -133,7 +133,7 @@ async fn scrape_streams(
     }
 
     let mut streams = HashMap::new();
-    match client.get(&url).send().await {
+    match riven_core::http::send(|| client.get(&url)).await {
         Ok(response) if response.status().is_success() => match response.text().await {
             Ok(body) => match serde_json::from_str::<StremthruTorznabResponse>(&body) {
                 Ok(data) => {

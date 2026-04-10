@@ -13,6 +13,13 @@ pub struct RequestedItemOutcome {
     pub action: ItemRequestUpsertAction,
 }
 
+/// Maximum number of episode jobs pushed per fan-out call.
+///
+/// Prevents enqueuing thousands of scrape/download jobs at once for long-running
+/// shows (e.g. One Piece). Remaining episodes are picked up on the next
+/// scheduler retry pass. Mirrors the riven-ts TODO for pagination.
+const EPISODE_FAN_OUT_BATCH: usize = 50;
+
 pub struct LibraryOrchestrator<'a> {
     queue: &'a JobQueue,
 }
@@ -374,7 +381,16 @@ impl<'a> LibraryOrchestrator<'a> {
                 let (show_title, show_imdb_id) = self.show_context(item).await;
                 match repo::get_incomplete_episodes_for_season(&self.queue.db_pool, item.id).await {
                     Ok(episodes) => {
-                        for episode in episodes {
+                        let total = episodes.len();
+                        if total > EPISODE_FAN_OUT_BATCH {
+                            tracing::debug!(
+                                season_id = item.id,
+                                total,
+                                batch = EPISODE_FAN_OUT_BATCH,
+                                "fan-out capped; remaining episodes will be retried by scheduler"
+                            );
+                        }
+                        for episode in episodes.iter().take(EPISODE_FAN_OUT_BATCH) {
                             match episode.state {
                                 MediaItemState::Scraped
                                 | MediaItemState::Ongoing

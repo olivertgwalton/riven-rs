@@ -3,7 +3,7 @@ use std::time::Instant;
 use anyhow::Result;
 use riven_core::events::{HookResponse, RivenEvent};
 use riven_core::types::{DownloadResult, MediaItemType};
-use riven_db::{entities::{MediaItem, Stream}, repo};
+use riven_db::entities::{MediaItem, Stream};
 
 use crate::JobQueue;
 use crate::context::DownloadHierarchyContext;
@@ -92,16 +92,11 @@ pub async fn attempt_download(
 
     let Some(download) = download_result else {
         if saw_unavailable {
-            if let Err(error) = repo::blacklist_stream_by_hash(&queue.db_pool, id, info_hash).await {
-                tracing::error!(
-                    id,
-                    info_hash,
-                    error = %error,
-                    "failed to blacklist stale cached stream"
-                );
-            } else {
-                tracing::debug!(id, info_hash, "blacklisted stale cached stream after provider rejection");
-            }
+            // Clear stale cache-check keys so the next download attempt does a fresh
+            // API check rather than relying on a potentially outdated Redis entry.
+            // We intentionally do NOT blacklist here: the stream may become available
+            // again (transient debrid error), and a fresh cache check will correctly
+            // filter it out if it really isn't cached.
             if let Err(error) = clear_stremthru_cache_check_keys(queue, info_hash).await {
                 tracing::error!(
                     id,
