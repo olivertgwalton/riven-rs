@@ -61,19 +61,19 @@ pub async fn check_cache(
         return Ok(cached_results);
     }
 
-    let hash_str = missing_queries
+    let magnet_str = missing_queries
         .iter()
-        .map(|query| query.hash.as_str())
+        .map(|query| query.magnet.as_str())
         .collect::<Vec<_>>()
         .join(",");
     tracing::debug!(
         store,
         hashes = missing_queries.len(),
         cached = cached_results.len(),
-        "checking debrid cache via stremthru torz endpoint"
+        "checking debrid cache via stremthru magnets endpoint"
     );
 
-    let fetched_results = fetch_cache_check(client, base_url, store, api_key, &hash_str).await?;
+    let fetched_results = fetch_cache_check(client, base_url, store, api_key, &magnet_str).await?;
 
     for result in &fetched_results {
         match serde_json::to_string(result) {
@@ -167,10 +167,10 @@ async fn fetch_cache_check(
     base_url: &str,
     store: &str,
     api_key: &str,
-    hash_str: &str,
+    magnet_str: &str,
 ) -> anyhow::Result<Vec<CacheCheckResult>> {
-    let url = format!("{base_url}v0/store/torz/check?hash={hash_str}");
-    tracing::debug!(store, url = %url, "requesting stremthru torz cache check");
+    let url = format!("{base_url}v0/store/magnets/check?magnet={magnet_str}");
+    tracing::debug!(store, url = %url, "requesting stremthru magnets cache check");
     let response = riven_core::http::send(|| {
         client
             .get(&url)
