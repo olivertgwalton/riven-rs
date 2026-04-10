@@ -375,13 +375,29 @@ impl<'a> LibraryOrchestrator<'a> {
                 match repo::get_incomplete_episodes_for_season(&self.queue.db_pool, item.id).await {
                     Ok(episodes) => {
                         for episode in episodes {
-                            self.queue
-                                .push_scrape(ScrapeJob::for_episode(
-                                    &episode,
-                                    show_title.clone(),
-                                    show_imdb_id.clone(),
-                                ))
-                                .await;
+                            match episode.state {
+                                MediaItemState::Scraped
+                                | MediaItemState::Ongoing
+                                | MediaItemState::PartiallyCompleted => {
+                                    if !self.queue.push_download_from_best_stream(episode.id).await {
+                                        let _ = repo::refresh_state_cascade(
+                                            &self.queue.db_pool,
+                                            &episode,
+                                        )
+                                        .await;
+                                    }
+                                }
+                                MediaItemState::Indexed => {
+                                    self.queue
+                                        .push_scrape(ScrapeJob::for_episode(
+                                            &episode,
+                                            show_title.clone(),
+                                            show_imdb_id.clone(),
+                                        ))
+                                        .await;
+                                }
+                                _ => {}
+                            }
                         }
                     }
                     Err(error) => {

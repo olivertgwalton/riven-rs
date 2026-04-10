@@ -67,6 +67,7 @@ async fn find_tmdb_id(
     imdb_id: &str,
 ) -> anyhow::Result<String> {
     let url = format!("{TMDB_BASE_URL}find/{imdb_id}?external_source=imdb_id");
+    tracing::debug!(url = %url, imdb_id, "requesting tmdb id lookup");
     let resp: TmdbFindResponse = client
         .get(&url)
         .bearer_auth(api_key)
@@ -88,6 +89,7 @@ async fn fetch_movie_by_tmdb_id(
 ) -> anyhow::Result<IndexedMediaItem> {
     let url =
         format!("{TMDB_BASE_URL}movie/{tmdb_id}?append_to_response=external_ids,release_dates");
+    tracing::debug!(url = %url, tmdb_id, "requesting tmdb movie details");
     let movie: TmdbMovieResponse = client
         .get(&url)
         .bearer_auth(api_key)

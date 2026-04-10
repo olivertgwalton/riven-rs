@@ -268,6 +268,7 @@ async fn fetch_watchlist(
     media_type: &str,
 ) -> anyhow::Result<Vec<WrappedItem>> {
     let url = format!("{TRAKT_BASE_URL}/sync/watchlist/{media_type}");
+    tracing::debug!(url = %url, media_type, "requesting trakt watchlist");
     let items: Vec<WrappedItem> = trakt_auth_get(client, &url, client_id, access_token)
         .send()
         .await?
@@ -286,6 +287,13 @@ async fn fetch_user_list(
     // list_slug format: "username/listname"
     let (username, listname) = list_slug.split_once('/').unwrap_or(("me", list_slug));
     let url = format!("{TRAKT_BASE_URL}/users/{username}/lists/{listname}/items/{media_type}");
+    tracing::debug!(
+        url = %url,
+        media_type,
+        username,
+        list = listname,
+        "requesting trakt user list"
+    );
     let items: Vec<WrappedItem> = trakt_auth_get(client, &url, client_id, access_token)
         .send()
         .await?
@@ -301,6 +309,7 @@ async fn fetch_trending(
     limit: usize,
 ) -> anyhow::Result<Vec<WrappedItem>> {
     let url = format!("{TRAKT_BASE_URL}/{media_type}/trending?limit={limit}");
+    tracing::debug!(url = %url, media_type, limit, "requesting trakt trending");
     let items: Vec<WrappedItem> = trakt_get(client, &url, client_id)
         .send()
         .await?
@@ -316,6 +325,7 @@ async fn fetch_popular(
     limit: usize,
 ) -> anyhow::Result<Vec<DirectItem>> {
     let url = format!("{TRAKT_BASE_URL}/{media_type}/popular?limit={limit}");
+    tracing::debug!(url = %url, media_type, limit, "requesting trakt popular");
     let items: Vec<DirectItem> = trakt_get(client, &url, client_id)
         .send()
         .await?
@@ -332,6 +342,7 @@ async fn fetch_watched(
     limit: usize,
 ) -> anyhow::Result<Vec<WrappedItem>> {
     let url = format!("{TRAKT_BASE_URL}/{media_type}/watched/{period}?limit={limit}");
+    tracing::debug!(url = %url, media_type, period, limit, "requesting trakt watched");
     let items: Vec<WrappedItem> = trakt_get(client, &url, client_id)
         .send()
         .await?

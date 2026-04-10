@@ -30,6 +30,7 @@ impl TvdbPlugin {
             }
         }
 
+        tracing::debug!(url = %format!("{TVDB_BASE_URL}login"), "requesting tvdb token");
         let resp: TvdbResponse<TvdbLoginData> = client
             .post(format!("{TVDB_BASE_URL}login"))
             .json(&serde_json::json!({ "apikey": api_key }))
@@ -90,6 +91,7 @@ async fn fetch_series(
     tvdb_id: &str,
 ) -> anyhow::Result<IndexedMediaItem> {
     let url = format!("{TVDB_BASE_URL}series/{tvdb_id}/extended?short=true&meta=translations");
+    tracing::debug!(url = %url, tvdb_id, "requesting tvdb series details");
     let resp: TvdbResponse<TvdbSeries> = client
         .get(&url)
         .bearer_auth(token)

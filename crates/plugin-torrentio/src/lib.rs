@@ -61,6 +61,14 @@ impl Plugin for TorrentioPlugin {
         let url =
             format!("{TORRENTIO_BASE_URL}{filter}/stream/{scrape_type}/{imdb_id}{identifier}.json");
 
+        tracing::debug!(
+            url = %url,
+            imdb_id,
+            scrape_type,
+            season = request.season,
+            episode = request.episode,
+            "requesting torrentio streams"
+        );
         let http_resp = ctx.http_client.get(&url).send().await?;
         let status = http_resp.status();
         if !status.is_success() {
