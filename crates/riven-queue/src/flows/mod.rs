@@ -117,9 +117,9 @@ pub(crate) async fn load_active_profiles(db_pool: &sqlx::PgPool) -> Vec<(String,
                             Ok(s) => {
                                 tracing::debug!(
                                     profile = q.id(),
-                                    r2160p = s.resolutions.r2160p,
-                                    r1080p = s.resolutions.r1080p,
-                                    r720p = s.resolutions.r720p,
+                                    r2160p = s.resolutions.high_definition.r2160p,
+                                    r1080p = s.resolutions.high_definition.r1080p,
+                                    r720p = s.resolutions.high_definition.r720p,
                                     unknown = s.resolutions.unknown,
                                     "loaded profile resolutions from DB"
                                 );
@@ -134,7 +134,7 @@ pub(crate) async fn load_active_profiles(db_pool: &sqlx::PgPool) -> Vec<(String,
             } else {
                 serde_json::from_value::<RankSettings>(p.settings)
                     .ok()
-                    .map(|s| s.prepare())
+                    .map(RankSettings::prepare)
             };
             settings.map(|s| (p.name, s))
         })
@@ -186,9 +186,9 @@ mod tests {
         )
         .expect("settings should parse");
 
-        assert!(settings.resolutions.r2160p);
-        assert!(settings.resolutions.r1080p);
-        assert!(!settings.resolutions.r720p);
+        assert!(settings.resolutions.high_definition.r2160p);
+        assert!(settings.resolutions.high_definition.r1080p);
+        assert!(!settings.resolutions.high_definition.r720p);
         assert!(!settings.custom_ranks.quality.hdtv.fetch);
         assert!(!settings.custom_ranks.rips.webrip.fetch);
         assert!(!settings.custom_ranks.audio.mono.fetch);

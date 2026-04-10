@@ -1,3 +1,9 @@
+#![allow(
+    clippy::missing_panics_doc,
+    clippy::struct_excessive_bools,
+    clippy::too_many_lines
+)]
+
 mod detect;
 mod languages;
 pub(crate) mod patterns;
@@ -9,11 +15,39 @@ use std::sync::LazyLock;
 
 use detect::{detect_anime, detect_network, detect_scene, detect_trash, is_false_group};
 use languages::{LANG_PATTERNS, translate_langs};
-use patterns::*;
+use patterns::{
+    RE_3D, RE_ADULT, RE_AUDIO_AAC, RE_AUDIO_ATMOS, RE_AUDIO_DD, RE_AUDIO_DD_PLUS,
+    RE_AUDIO_DTS_LOSSLESS, RE_AUDIO_DTS_LOSSY, RE_AUDIO_FLAC, RE_AUDIO_HQ_CLEAN, RE_AUDIO_MP3,
+    RE_AUDIO_OPUS, RE_AUDIO_PCM, RE_AUDIO_TRUEHD, RE_AUDIO_TRUEHD_BARE, RE_BIT_DEPTH_8,
+    RE_BIT_DEPTH_10, RE_BIT_DEPTH_12, RE_BITRATE, RE_CHAN_20, RE_CHAN_51, RE_CHAN_71, RE_CHAN_MONO,
+    RE_CHAN_STEREO, RE_CODEC_264_BARE, RE_CODEC_265_BARE, RE_CODEC_AV1, RE_CODEC_AVC,
+    RE_CODEC_HEVC, RE_CODEC_MPEG, RE_CODEC_XVID, RE_COMMENTARY, RE_COMPLETE,
+    RE_COMPLETE_COLLECTION, RE_CONTAINER, RE_CONVERTED, RE_COUNTRY, RE_DATE_COMPACT, RE_DATE_DMY,
+    RE_DATE_YMD, RE_DOCUMENTARY, RE_DUBBED, RE_DVB, RE_EDITION, RE_EP_NUM_BARE,
+    RE_EPISODE_CODE_HEX, RE_EPISODE_CODE_NUM, RE_EPISODE_CONSECUTIVE, RE_EPISODE_CROSSREF,
+    RE_EPISODE_CROSSREF_RANGE, RE_EPISODE_FULL, RE_EPISODE_OF, RE_EPISODE_RANGE,
+    RE_EPISODE_RANGE_BARE, RE_EPISODE_RANGE_PAREN, RE_EPISODE_RUSSIAN, RE_EPISODE_RUSSIAN_OF,
+    RE_EPISODE_SE, RE_EPISODE_STANDALONE, RE_EPISODE_TR, RE_EXTENDED, RE_EXTENSION, RE_EXTRAS,
+    RE_EXTRAS_ED, RE_EXTRAS_NC, RE_EXTRAS_NCED, RE_EXTRAS_NCOP, RE_EXTRAS_OP, RE_EXTRAS_OVA,
+    RE_GROUP_BRACKET, RE_GROUP_DASH, RE_GROUP_PAREN, RE_HARDCODED, RE_HDR_DV, RE_HDR_HDR,
+    RE_HDR_HDR10PLUS, RE_HDR_SDR, RE_PART, RE_PPV, RE_PPV_FIGHT, RE_PROPER, RE_Q_BDRIP,
+    RE_Q_BLURAY, RE_Q_BLURAY_REMUX1, RE_Q_BLURAY_REMUX2, RE_Q_BLURAY_REMUX3, RE_Q_BRRIP, RE_Q_CAM,
+    RE_Q_CAM_FALSE, RE_Q_DVD, RE_Q_DVDRIP, RE_Q_HDRIP, RE_Q_HDTV, RE_Q_HDTVRIP, RE_Q_PDTV,
+    RE_Q_PPVRIP, RE_Q_PRE_DVD, RE_Q_R5, RE_Q_REMUX, RE_Q_SATRIP, RE_Q_SCR, RE_Q_TELECINE,
+    RE_Q_TELESYNC, RE_Q_TVRIP, RE_Q_UHDRIP, RE_Q_VHS, RE_Q_VHSRIP, RE_Q_WEB, RE_Q_WEBDL,
+    RE_Q_WEBDLRIP, RE_Q_WEBMUX, RE_Q_WEBRIP, RE_REGION, RE_REGION_DISC, RE_REMASTERED, RE_REPACK,
+    RE_RES_1280, RE_RES_1920, RE_RES_3840, RE_RES_DIGITS, RE_RES_FHD, RE_RES_GENERIC,
+    RE_RES_PREFIXED_480, RE_RES_PREFIXED_720, RE_RES_PREFIXED_1080, RE_RES_PREFIXED_2160,
+    RE_RES_QHD, RE_RES_TYPO, RE_RETAIL, RE_SEASON_EP_COMPACT, RE_SEASON_FULL, RE_SEASON_MULTI,
+    RE_SEASON_ORDINAL, RE_SEASON_PT, RE_SEASON_RANGE, RE_SEASON_RUSSIAN, RE_SEASON_RUSSIAN2,
+    RE_SEASON_SE, RE_SEASON_TR, RE_SEASON_TV, RE_SITE, RE_SITE_BRACKET, RE_SITE_DOMAIN,
+    RE_SITE_KNOWN, RE_SIZE, RE_SPRINT, RE_SUBBED, RE_UNCENSORED, RE_UNRATED, RE_UPSCALED,
+    RE_UPSCALED_AI, RE_UPSCALED_SPECIFIC, RE_VOLUME, RE_YEAR, RE_YEAR_RANGE, RE_YEAR_RANGE_SHORT,
+};
 pub(crate) use title::normalize_title;
 use title::{extract_title, normalize_edition};
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ParsedData {
     pub raw_title: String,
     pub parsed_title: String,
@@ -74,7 +108,8 @@ pub struct ParseOptions {
 }
 
 impl ParsedData {
-    pub fn media_type(&self) -> &str {
+    #[must_use]
+    pub const fn media_type(&self) -> &str {
         if !self.seasons.is_empty() || !self.episodes.is_empty() {
             "show"
         } else {
@@ -82,8 +117,8 @@ impl ParsedData {
         }
     }
 
-    /// Merge another ParsedData into this one, preferring non-empty/Some values from self.
-    pub fn merge(&mut self, other: ParsedData) {
+    /// Merge another `ParsedData` into this one, preferring non-empty/Some values from self.
+    pub fn merge(&mut self, other: Self) {
         if self.parsed_title.is_empty() {
             self.parsed_title = other.parsed_title;
             self.normalized_title = other.normalized_title;
@@ -537,6 +572,7 @@ fn detect_bitrate(raw: &str) -> Option<String> {
     Some(bitrate)
 }
 
+#[must_use]
 pub fn parse(raw_title: &str) -> ParsedData {
     parse_with_options(raw_title, ParseOptions::default())
 }
@@ -645,7 +681,7 @@ pub fn parse_with_options(raw_title: &str, options: ParseOptions) -> ParsedData 
             }
         }
     }
-    data.seasons.sort();
+    data.seasons.sort_unstable();
     data.seasons.dedup();
 
     // Episodes (try each pattern in priority order)
@@ -721,7 +757,7 @@ pub fn parse_with_options(raw_title: &str, options: ParseOptions) -> ParsedData 
             }
         }
     }
-    data.episodes.sort();
+    data.episodes.sort_unstable();
     data.episodes.dedup();
 
     // Part number
@@ -745,7 +781,7 @@ pub fn parse_with_options(raw_title: &str, options: ParseOptions) -> ParsedData 
 
     // Volumes
     extract_numbers(&RE_VOLUME, raw, &mut data.volumes);
-    data.volumes.sort();
+    data.volumes.sort_unstable();
     data.volumes.dedup();
 
     // Edition

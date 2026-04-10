@@ -151,7 +151,11 @@ pub async fn check_cache_live(
             index: f.index.max(0) as u32,
             name: f.name,
             size: f.size,
-            link: if f.link.is_empty() { None } else { Some(f.link) },
+            link: if f.link.is_empty() {
+                None
+            } else {
+                Some(f.link)
+            },
         })
         .collect();
 
@@ -209,7 +213,11 @@ async fn fetch_cache_check(
                     index: f.index.max(0) as u32,
                     name: f.name,
                     size: f.size,
-                    link: if f.link.is_empty() { None } else { Some(f.link) },
+                    link: if f.link.is_empty() {
+                        None
+                    } else {
+                        Some(f.link)
+                    },
                 })
                 .collect();
             CacheCheckResult {
@@ -401,4 +409,3 @@ async fn fetch_premium_until(
 
     Ok(expiry)
 }
-

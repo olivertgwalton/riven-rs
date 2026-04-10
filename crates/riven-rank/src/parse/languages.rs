@@ -1,14 +1,14 @@
 use regex::Regex;
 use std::sync::LazyLock;
 
-pub(crate) struct LangPattern {
+pub struct LangPattern {
     pub code: &'static str,
     pub re: Regex,
 }
 
 /// Language detection patterns ordered to match PTT handler priority.
 /// More specific patterns come first to avoid false positives.
-pub(crate) static LANG_PATTERNS: LazyLock<Vec<LangPattern>> = LazyLock::new(|| {
+pub static LANG_PATTERNS: LazyLock<Vec<LangPattern>> = LazyLock::new(|| {
     let defs: &[(&str, &str)] = &[
         // --- Pre-language contextual hints ---
         ("es", r"(?i)\b(?:temporadas?|completa)\b"),
@@ -225,7 +225,7 @@ pub(crate) static LANG_PATTERNS: LazyLock<Vec<LangPattern>> = LazyLock::new(|| {
         .collect()
 });
 
-pub(crate) fn translate_langs(langs: &[String]) -> Vec<String> {
+pub fn translate_langs(langs: &[String]) -> Vec<String> {
     langs
         .iter()
         .filter_map(|lang| match lang.as_str() {

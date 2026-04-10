@@ -23,15 +23,11 @@ pub async fn apply_indexed_media_item(
         if let Some(seasons) = &indexed.seasons {
             for season_data in seasons {
                 let season_requested = if season_data.number == 0 {
-                    requested_seasons
-                        .as_ref()
-                        .map(|s| s.contains(&0))
-                        .unwrap_or(false)
+                    requested_seasons.as_ref().is_some_and(|s| s.contains(&0))
                 } else {
                     requested_seasons
                         .as_ref()
-                        .map(|s| s.contains(&season_data.number))
-                        .unwrap_or(true)
+                        .is_none_or(|s| s.contains(&season_data.number))
                 };
 
                 if requested_seasons.is_some() && !season_requested {

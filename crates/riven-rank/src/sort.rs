@@ -17,13 +17,13 @@ fn bucket(res: &str) -> usize {
 
 /// Whether a resolution bucket is enabled in settings.
 #[inline]
-fn bucket_enabled(idx: usize, settings: &RankSettings) -> bool {
+const fn bucket_enabled(idx: usize, settings: &RankSettings) -> bool {
     match idx {
-        0 => settings.resolutions.r2160p,
-        1 => settings.resolutions.r1080p,
-        2 => settings.resolutions.r720p,
-        3 => settings.resolutions.r480p,
-        4 => settings.resolutions.r360p,
+        0 => settings.resolutions.high_definition.r2160p,
+        1 => settings.resolutions.high_definition.r1080p,
+        2 => settings.resolutions.high_definition.r720p,
+        3 => settings.resolutions.standard_definition.r480p,
+        4 => settings.resolutions.standard_definition.r360p,
         _ => settings.resolutions.unknown,
     }
 }
@@ -37,6 +37,7 @@ fn bucket_enabled(idx: usize, settings: &RankSettings) -> bool {
 ///    bucket until that bucket reaches `bucket_limit`.
 ///
 /// A `bucket_limit` of `usize::MAX` disables the limit.
+#[must_use]
 pub fn sort_torrents(
     mut torrents: Vec<RankedTorrent>,
     settings: &RankSettings,

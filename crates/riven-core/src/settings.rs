@@ -709,8 +709,7 @@ impl PluginSettings {
 
     pub fn get_bool(&self, key: &str) -> bool {
         self.get(key)
-            .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
-            .unwrap_or(false)
+            .is_some_and(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
     }
 
     pub fn get_parsed<T>(&self, key: &str) -> Option<T>

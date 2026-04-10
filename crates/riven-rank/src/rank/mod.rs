@@ -2,6 +2,7 @@ mod fetch;
 pub mod scores;
 
 use std::collections::HashMap;
+use std::hash::BuildHasher;
 use std::sync::LazyLock;
 
 use thiserror::Error;
@@ -51,15 +52,23 @@ fn lev_ratio(a: &str, b: &str) -> f64 {
     if total_len == 0 {
         return 1.0;
     }
-    (total_len as f64 - distance as f64) / total_len as f64
+    let total_len = f64::from(u32::try_from(total_len).unwrap_or(u32::MAX));
+    let distance = f64::from(u32::try_from(distance).unwrap_or(u32::MAX));
+    (total_len - distance) / total_len
 }
 
 /// Full ranking pipeline for a single torrent.
-pub fn rank_torrent(
+///
+/// # Errors
+///
+/// Returns [`RankError`] when the torrent hash is invalid, the parsed content
+/// is filtered, title similarity falls below the configured threshold, fetch
+/// checks fail, or the final rank is below the configured minimum.
+pub fn rank_torrent<S: BuildHasher>(
     raw_title: &str,
     hash: &str,
     correct_title: &str,
-    aliases: &HashMap<String, Vec<String>>,
+    aliases: &HashMap<String, Vec<String>, S>,
     settings: &RankSettings,
 ) -> Result<RankedTorrent, RankError> {
     // 1. Validate hash (32 or 40 hex chars)
@@ -72,7 +81,7 @@ pub fn rank_torrent(
     let data = parse(raw_title);
 
     // 3. Check adult content
-    if settings.options.remove_adult_content && data.adult {
+    if settings.options.content.remove_adult_content && data.adult {
         return Err(RankError::AdultContent);
     }
 

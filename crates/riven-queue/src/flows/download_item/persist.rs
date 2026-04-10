@@ -29,7 +29,7 @@ fn metadata_from_show_context(
             values
                 .iter()
                 .filter_map(|value| value.as_str())
-                .map(|value| value.to_ascii_lowercase())
+                .map(str::to_ascii_lowercase)
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();

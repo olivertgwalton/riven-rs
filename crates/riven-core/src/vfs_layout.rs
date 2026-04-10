@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use crate::settings::FilesystemSettings;
 
 #[derive(Debug, Clone)]
@@ -42,38 +44,28 @@ impl VfsLibraryLayout {
     }
 
     pub fn root_entries(&self) -> Vec<String> {
-        let mut entries = vec!["movies".to_string(), "shows".to_string()];
-        for profile in &self.profiles {
-            if let Some(first) = profile.segments.first()
-                && !entries.contains(first)
-            {
-                entries.push(first.clone());
-            }
-        }
-        entries.sort();
-        entries.dedup();
-        entries
+        self.profiles
+            .iter()
+            .filter_map(|profile| profile.segments.first().cloned())
+            .chain(["movies".to_string(), "shows".to_string()])
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect()
     }
 
     pub fn profile_prefix_children(&self, path: &str) -> Vec<String> {
         let current = split_path(path);
-        let mut children = Vec::new();
 
-        for profile in &self.profiles {
-            if !is_prefix(&current, &profile.segments) {
-                continue;
-            }
-            if let Some(next) = profile.segments.get(current.len()) {
-                children.push(next.clone());
-            } else {
-                children.push("movies".to_string());
-                children.push("shows".to_string());
-            }
-        }
-
-        children.sort();
-        children.dedup();
-        children
+        self.profiles
+            .iter()
+            .filter(|profile| is_prefix(&current, &profile.segments))
+            .flat_map(|profile| match profile.segments.get(current.len()) {
+                Some(next) => vec![next.clone()],
+                None => vec!["movies".to_string(), "shows".to_string()],
+            })
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect()
     }
 
     pub fn match_profile<'a>(&'a self, path: &str) -> Option<&'a ActiveLibraryProfile> {

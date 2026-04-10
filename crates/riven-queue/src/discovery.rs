@@ -2,8 +2,8 @@ use std::collections::{HashMap, HashSet};
 
 use riven_core::types::*;
 use riven_db::repo;
-use riven_rank::{QualityProfile, RankSettings};
 use riven_rank::rank::RankError;
+use riven_rank::{QualityProfile, RankSettings};
 
 use crate::flows::merge_builtin_profile_settings;
 
@@ -35,12 +35,7 @@ pub struct RankedStreamCandidate {
     pub rank: Option<i64>,
 }
 
-fn log_rank_rejection(
-    info_hash: &str,
-    title: &str,
-    profile_name: Option<&str>,
-    error: &RankError,
-) {
+fn log_rank_rejection(info_hash: &str, title: &str, profile_name: Option<&str>, error: &RankError) {
     match error {
         RankError::FetchChecksFailed { checks } => {
             tracing::debug!(
@@ -130,8 +125,7 @@ fn validate(ctx: &ParseContext, parsed: &riven_rank::ParsedData) -> Option<Strin
                 let matches_relative = parsed.episodes.contains(&ep_num);
                 let matches_absolute = ctx
                     .absolute_number
-                    .map(|a| parsed.episodes.contains(&a))
-                    .unwrap_or(false);
+                    .is_some_and(|a| parsed.episodes.contains(&a));
                 if !matches_relative && !matches_absolute {
                     return Some(format!(
                         "incorrect episode number for episode item: {:?} does not include ep {} (abs {:?})",
@@ -239,8 +233,7 @@ pub fn rank_streams(
                     &ctx.correct_title,
                     &ctx.aliases,
                     settings,
-                )
-                {
+                ) {
                     Ok(ranked) => Some(ranked),
                     Err(error) => {
                         log_rank_rejection(info_hash, title, None, &error);
@@ -257,8 +250,7 @@ pub fn rank_streams(
                             &ctx.correct_title,
                             &ctx.aliases,
                             settings,
-                        )
-                        {
+                        ) {
                             Ok(ranked) => Some(ranked),
                             Err(error) => {
                                 log_rank_rejection(
@@ -339,7 +331,7 @@ pub async fn load_active_profiles(db_pool: &sqlx::PgPool) -> Vec<(String, RankSe
             } else {
                 serde_json::from_value::<RankSettings>(p.settings)
                     .ok()
-                    .map(|s| s.prepare())
+                    .map(RankSettings::prepare)
             };
             settings.map(|s| (p.name, s))
         })
@@ -357,7 +349,7 @@ pub async fn load_dubbed_anime_only(db_pool: &sqlx::PgPool) -> bool {
     match repo::get_setting(db_pool, "general").await {
         Ok(Some(v)) => v
             .get("dubbed_anime_only")
-            .and_then(|v| v.as_bool())
+            .and_then(serde_json::Value::as_bool)
             .unwrap_or(false),
         _ => false,
     }

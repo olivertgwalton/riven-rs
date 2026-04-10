@@ -192,7 +192,10 @@ fn stream_resolution(stream: &Stream) -> &str {
 
 async fn clear_stremthru_cache_check_keys(queue: &JobQueue, info_hash: &str) -> Result<()> {
     let mut conn = queue.redis.clone();
-    let pattern = format!("plugin:stremthru:cache-check:*:{}", info_hash.to_lowercase());
+    let pattern = format!(
+        "plugin:stremthru:cache-check:*:{}",
+        info_hash.to_lowercase()
+    );
     let mut cursor = 0u64;
     let mut keys = Vec::new();
 
@@ -214,7 +217,11 @@ async fn clear_stremthru_cache_check_keys(queue: &JobQueue, info_hash: &str) -> 
 
     if !keys.is_empty() {
         let _: () = redis::cmd("DEL").arg(&keys).query_async(&mut conn).await?;
-        tracing::debug!(info_hash, cleared = keys.len(), "cleared stale stremthru cache-check keys");
+        tracing::debug!(
+            info_hash,
+            cleared = keys.len(),
+            "cleared stale stremthru cache-check keys"
+        );
     }
 
     Ok(())

@@ -1,3 +1,9 @@
+#![allow(
+    clippy::items_after_statements,
+    clippy::redundant_pub_crate,
+    clippy::wildcard_imports
+)]
+
 use regex::Regex;
 use std::sync::LazyLock;
 

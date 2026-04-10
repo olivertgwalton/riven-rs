@@ -16,12 +16,10 @@ pub fn parse_torrent_status(status: &str) -> TorrentStatus {
     }
 }
 
-
 #[derive(Deserialize)]
 pub struct StremthruResponse<T> {
     pub data: Option<T>,
 }
-
 
 #[derive(Deserialize)]
 pub struct StremthruCacheCheck {

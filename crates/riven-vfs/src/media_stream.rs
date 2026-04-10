@@ -19,6 +19,14 @@ pub struct MediaStream {
     prefetch: Option<Prefetch>,
 }
 
+struct ReadContext<'a> {
+    stream_url: &'a str,
+    cache: &'a RangeCache,
+    client: &'a reqwest::Client,
+    runtime: &'a tokio::runtime::Handle,
+    debug_logging: bool,
+}
+
 impl MediaStream {
     pub fn new(ino: u64, file_size: u64) -> Self {
         Self {
@@ -41,6 +49,13 @@ impl MediaStream {
         debug_logging: bool,
     ) -> ReadOutcome {
         let chunks = self.layout.request_chunks(start, end);
+        let ctx = ReadContext {
+            stream_url,
+            cache,
+            client,
+            runtime,
+            debug_logging,
+        };
         let read_type = detect_read_type(
             self.ino,
             start,
@@ -49,10 +64,10 @@ impl MediaStream {
             self.last_read_end,
             &self.layout,
             &chunks,
-            cache,
+            ctx.cache,
         );
 
-        if debug_logging {
+        if ctx.debug_logging {
             tracing::debug!(
                 ino = self.ino,
                 offset = start,
@@ -64,34 +79,16 @@ impl MediaStream {
         }
 
         let outcome = match read_type {
-            ReadType::HeaderScan => self.read_scan_range(
-                start, end, chunks[0], true, stream_url, cache, client, runtime,
-            ),
+            ReadType::HeaderScan => self.read_scan_range(start, end, chunks[0], true, &ctx),
             ReadType::FooterScan | ReadType::FooterRead => {
                 let chunk = *chunks.last().unwrap_or(&chunks[0]);
-                self.read_scan_range(start, end, chunk, true, stream_url, cache, client, runtime)
+                self.read_scan_range(start, end, chunk, true, &ctx)
             }
-            ReadType::GeneralScan => self.read_scan_range(
-                start,
-                end,
-                ChunkRange { start, end },
-                false,
-                stream_url,
-                cache,
-                client,
-                runtime,
-            ),
-            ReadType::BodyRead => self.read_body(
-                &chunks,
-                start,
-                end,
-                stream_url,
-                cache,
-                client,
-                runtime,
-                debug_logging,
-            ),
-            ReadType::CacheHit => self.read_cached_chunks(start, end, &chunks, cache),
+            ReadType::GeneralScan => {
+                self.read_scan_range(start, end, ChunkRange { start, end }, false, &ctx)
+            }
+            ReadType::BodyRead => self.read_body(&chunks, start, end, &ctx),
+            ReadType::CacheHit => self.read_cached_chunks(start, end, &chunks, ctx.cache),
         };
 
         if matches!(outcome, ReadOutcome::Data(_)) {
@@ -164,27 +161,32 @@ impl MediaStream {
         ReadOutcome::Data(full.slice(offset..offset + slice_len))
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn read_scan_range(
         &mut self,
         start: u64,
         end: u64,
         chunk: ChunkRange,
         should_cache: bool,
-        stream_url: &str,
-        cache: &RangeCache,
-        client: &reqwest::Client,
-        runtime: &tokio::runtime::Handle,
+        ctx: &ReadContext<'_>,
     ) -> ReadOutcome {
         self.prefetch = None;
 
         let full = if should_cache {
-            match self.fetch_and_cache_range(chunk, stream_url, cache, client, runtime) {
+            match self.fetch_and_cache_range(
+                chunk,
+                ctx.stream_url,
+                ctx.cache,
+                ctx.client,
+                ctx.runtime,
+            ) {
                 Ok(data) => data,
                 Err(()) => return ReadOutcome::Error(libc::EIO),
             }
         } else {
-            match runtime.block_on(fetch_range(client, stream_url, start, end)) {
+            match ctx
+                .runtime
+                .block_on(fetch_range(ctx.client, ctx.stream_url, start, end))
+            {
                 Ok(data) => data,
                 Err(e) => {
                     tracing::error!(ino = self.ino, error = %e, "range fetch failed");
@@ -215,58 +217,44 @@ impl MediaStream {
         ReadOutcome::Data(full.slice(slice_start..slice_end))
     }
 
-    fn ensure_prefetch(
-        &mut self,
-        start: u64,
-        client: &reqwest::Client,
-        stream_url: &str,
-        runtime: &tokio::runtime::Handle,
-        debug_logging: bool,
-    ) -> bool {
+    fn ensure_prefetch(&mut self, start: u64, ctx: &ReadContext<'_>) -> bool {
         let need_restart = self
             .prefetch
             .as_ref()
-            .map(|prefetch| !prefetch.is_valid_for(start))
-            .unwrap_or(true);
+            .is_none_or(|prefetch| !prefetch.is_valid_for(start));
 
         if need_restart {
-            if debug_logging {
+            if ctx.debug_logging {
                 tracing::debug!(ino = self.ino, position = start, "starting stream reader");
             }
-            self.prefetch = Prefetch::start(client.clone(), stream_url.to_string(), start, runtime);
+            self.prefetch = Prefetch::start(
+                ctx.client.clone(),
+                ctx.stream_url.to_string(),
+                start,
+                ctx.runtime,
+            );
         }
 
         self.prefetch.is_some()
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn read_body(
         &mut self,
         chunks: &[ChunkRange],
         start: u64,
         end: u64,
-        stream_url: &str,
-        cache: &RangeCache,
-        client: &reqwest::Client,
-        runtime: &tokio::runtime::Handle,
-        debug_logging: bool,
+        ctx: &ReadContext<'_>,
     ) -> ReadOutcome {
         let Some(first_missing) = chunks
             .iter()
-            .find(|chunk| cache_get(cache, (self.ino, chunk.start, chunk.end)).is_none())
+            .find(|chunk| cache_get(ctx.cache, (self.ino, chunk.start, chunk.end)).is_none())
             .copied()
         else {
-            return self.read_cached_chunks(start, end, chunks, cache);
+            return self.read_cached_chunks(start, end, chunks, ctx.cache);
         };
 
         for attempt in 0..2 {
-            if !self.ensure_prefetch(
-                first_missing.start,
-                client,
-                stream_url,
-                runtime,
-                debug_logging,
-            ) {
+            if !self.ensure_prefetch(first_missing.start, ctx) {
                 tracing::error!(ino = self.ino, "failed to start stream reader");
                 return ReadOutcome::Error(libc::EIO);
             }
@@ -276,17 +264,17 @@ impl MediaStream {
 
             for chunk in chunks {
                 let key = (self.ino, chunk.start, chunk.end);
-                let data = if let Some(cached) = cache_get(cache, key) {
+                let data = if let Some(cached) = cache_get(ctx.cache, key) {
                     cached
                 } else {
                     match self
                         .prefetch
                         .as_mut()
                         .expect("prefetch must exist after ensure_prefetch")
-                        .read(chunk.start, chunk.len(), runtime)
+                        .read(chunk.start, chunk.len(), ctx.runtime)
                     {
                         Ok(data) => {
-                            cache_put(cache, key, data.clone());
+                            cache_put(ctx.cache, key, data.clone());
                             data
                         }
                         Err(e) => {

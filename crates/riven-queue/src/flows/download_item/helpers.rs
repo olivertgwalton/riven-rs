@@ -66,11 +66,14 @@ pub fn has_matching_file(
         MediaItemType::Episode => {
             let season = item.season_number.unwrap_or(1);
             let ep = item.episode_number.unwrap_or(1);
-            let lookup_keys = episode_lookup_keys(season, ep, item.absolute_number);
             files.iter().any(|f| {
                 is_video_file(&f.name)
-                    && file_lookup_key(&parse_file_path(&f.name))
-                        .is_some_and(|key| lookup_keys.iter().any(|lookup| lookup == &key))
+                    && matches_episode_lookup(
+                        &parse_file_path(&f.name),
+                        season,
+                        ep,
+                        item.absolute_number,
+                    )
             })
         }
         MediaItemType::Season => {
@@ -123,14 +126,29 @@ pub fn episode_lookup_keys(season: i32, ep: i32, abs: Option<i32>) -> Vec<String
     keys
 }
 
-pub fn file_lookup_key(parsed: &riven_rank::ParsedData) -> Option<String> {
-    let episode = *parsed.episodes.first()?;
-
-    if let Some(season) = parsed.seasons.first() {
-        Some(format!("{season}:{episode}"))
-    } else {
-        Some(format!("abs:{episode}"))
+pub fn file_lookup_keys(parsed: &riven_rank::ParsedData) -> Vec<String> {
+    if parsed.episodes.is_empty() {
+        return Vec::new();
     }
+
+    if parsed.seasons.is_empty() {
+        return parsed
+            .episodes
+            .iter()
+            .map(|episode| format!("abs:{episode}"))
+            .collect();
+    }
+
+    parsed
+        .seasons
+        .iter()
+        .flat_map(|season| {
+            parsed
+                .episodes
+                .iter()
+                .map(move |episode| format!("{season}:{episode}"))
+        })
+        .collect()
 }
 
 pub fn matches_episode_lookup(
@@ -139,11 +157,10 @@ pub fn matches_episode_lookup(
     ep: i32,
     abs: Option<i32>,
 ) -> bool {
-    file_lookup_key(parsed).is_some_and(|key| {
-        episode_lookup_keys(season, ep, abs)
-            .iter()
-            .any(|lookup| lookup == &key)
-    })
+    let lookups = episode_lookup_keys(season, ep, abs);
+    file_lookup_keys(parsed)
+        .iter()
+        .any(|key| lookups.iter().any(|lookup| lookup == key))
 }
 
 /// Parse a file path by merging metadata from all path segments.

@@ -138,10 +138,7 @@ async fn collect_cached_info(
     for (_, result) in cache_results {
         if let Ok(HookResponse::CacheCheck(results)) = result {
             for result in results {
-                if matches!(
-                    result.status,
-                    TorrentStatus::Cached
-                ) {
+                if matches!(result.status, TorrentStatus::Cached) {
                     cached_info.insert(result.hash.to_lowercase(), result.files);
                 }
             }
@@ -277,7 +274,11 @@ async fn run_multi_version(
             DownloadAttemptOutcome::TerminalHandled => return true,
             DownloadAttemptOutcome::Succeeded => {
                 any_success = true;
-                tracing::debug!(id, profile = profile_name, "downloaded stream for active profile");
+                tracing::debug!(
+                    id,
+                    profile = profile_name,
+                    "downloaded stream for active profile"
+                );
             }
         }
     }
@@ -305,7 +306,10 @@ async fn run_multi_version(
 
     let done = fetch_done_profiles(queue, id, item.item_type).await;
     if !active_profiles.iter().all(|(name, _)| done.contains(name)) {
-        tracing::debug!(id, "downloads for some active profiles are still missing; re-queuing");
+        tracing::debug!(
+            id,
+            "downloads for some active profiles are still missing; re-queuing"
+        );
         queue
             .notify(RivenEvent::MediaItemDownloadPartialSuccess { id })
             .await;

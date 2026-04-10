@@ -5,27 +5,23 @@ use crate::parse::ParsedData;
 use crate::settings::RankSettings;
 
 fn calculate_quality_rank(data: &ParsedData, settings: &RankSettings, model: &RankingModel) -> i64 {
-    let q = match data.quality.as_deref() {
-        Some(q) => q,
-        None => return 0,
+    let Some(q) = data.quality.as_deref() else {
+        return 0;
     };
     settings
         .custom_ranks
         .quality_rank(q)
-        .map(|cr| cr.resolve(model.quality_score(q)))
-        .unwrap_or(0)
+        .map_or(0, |cr| cr.resolve(model.quality_score(q)))
 }
 
 fn calculate_codec_rank(data: &ParsedData, settings: &RankSettings, model: &RankingModel) -> i64 {
-    let codec = match data.codec.as_deref() {
-        Some(c) => c,
-        None => return 0,
+    let Some(codec) = data.codec.as_deref() else {
+        return 0;
     };
     settings
         .custom_ranks
         .codec_rank(codec)
-        .map(|cr| cr.resolve(model.codec_score(codec)))
-        .unwrap_or(0)
+        .map_or(0, |cr| cr.resolve(model.codec_score(codec)))
 }
 
 fn calculate_hdr_rank(data: &ParsedData, settings: &RankSettings, model: &RankingModel) -> i64 {
@@ -35,8 +31,7 @@ fn calculate_hdr_rank(data: &ParsedData, settings: &RankSettings, model: &Rankin
         .iter()
         .map(|h| {
             cr.hdr_rank(h)
-                .map(|cr| cr.resolve(model.hdr_score(h)))
-                .unwrap_or(0)
+                .map_or(0, |cr| cr.resolve(model.hdr_score(h)))
         })
         .sum();
     if data.bit_depth.is_some() {
@@ -51,8 +46,7 @@ fn calculate_audio_rank(data: &ParsedData, settings: &RankSettings, model: &Rank
         .iter()
         .map(|a| {
             cr.audio_rank(a)
-                .map(|cr| cr.resolve(model.audio_score(a)))
-                .unwrap_or(0)
+                .map_or(0, |cr| cr.resolve(model.audio_score(a)))
         })
         .sum()
 }
@@ -106,12 +100,7 @@ fn calculate_preferred(data: &ParsedData, settings: &RankSettings) -> i64 {
     if settings.preferred.is_empty() {
         return 0;
     }
-    let matches = if !settings.preferred_compiled.is_empty() {
-        settings
-            .preferred_compiled
-            .iter()
-            .any(|re| re.is_match(&data.raw_title))
-    } else {
+    let matches = if settings.preferred_compiled.is_empty() {
         debug_assert!(
             false,
             "RankSettings::prepare() was not called — preferred regex compiled per-torrent"
@@ -120,6 +109,11 @@ fn calculate_preferred(data: &ParsedData, settings: &RankSettings) -> i64 {
             .preferred
             .iter()
             .filter_map(|p| regex::Regex::new(p).ok())
+            .any(|re| re.is_match(&data.raw_title))
+    } else {
+        settings
+            .preferred_compiled
+            .iter()
             .any(|re| re.is_match(&data.raw_title))
     };
     if matches { 10000 } else { 0 }
@@ -140,6 +134,7 @@ fn calculate_preferred_langs(data: &ParsedData, settings: &RankSettings) -> i64 
     }
 }
 
+#[must_use]
 pub fn get_rank(
     data: &ParsedData,
     settings: &RankSettings,

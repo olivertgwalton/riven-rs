@@ -15,11 +15,6 @@ pub struct RequestedItemOutcome {
 
 /// Maximum number of episode jobs pushed per fan-out call.
 ///
-/// Prevents enqueuing thousands of scrape/download jobs at once for long-running
-/// shows (e.g. One Piece). Remaining episodes are picked up on the next
-/// scheduler retry pass. Mirrors the riven-ts TODO for pagination.
-const EPISODE_FAN_OUT_BATCH: usize = 50;
-
 pub struct LibraryOrchestrator<'a> {
     queue: &'a JobQueue,
 }
@@ -120,9 +115,8 @@ impl<'a> LibraryOrchestrator<'a> {
                         .await;
                 }
                 ItemRequestUpsertAction::Updated => {
-                    let requested_specific_seasons = requested_seasons
-                        .map(|seasons| !seasons.is_empty())
-                        .unwrap_or(false);
+                    let requested_specific_seasons =
+                        requested_seasons.is_some_and(|seasons| !seasons.is_empty());
 
                     if outcome.item.imdb_id.is_none() || requested_specific_seasons {
                         self.queue
@@ -281,14 +275,11 @@ impl<'a> LibraryOrchestrator<'a> {
                 match repo::get_requested_seasons_for_show(&self.queue.db_pool, item.id).await {
                     Ok(seasons) => {
                         for season in seasons.into_iter().filter(|season| {
-                            season_numbers
-                                .map(|numbers| {
-                                    season
-                                        .season_number
-                                        .map(|number| numbers.contains(&number))
-                                        .unwrap_or(false)
-                                })
-                                .unwrap_or(true)
+                            season_numbers.is_none_or(|numbers| {
+                                season
+                                    .season_number
+                                    .is_some_and(|number| numbers.contains(&number))
+                            })
                         }) {
                             let mut job = ScrapeJob::for_season(
                                 &season,
@@ -381,24 +372,16 @@ impl<'a> LibraryOrchestrator<'a> {
                 let (show_title, show_imdb_id) = self.show_context(item).await;
                 match repo::get_incomplete_episodes_for_season(&self.queue.db_pool, item.id).await {
                     Ok(episodes) => {
-                        let total = episodes.len();
-                        if total > EPISODE_FAN_OUT_BATCH {
-                            tracing::debug!(
-                                season_id = item.id,
-                                total,
-                                batch = EPISODE_FAN_OUT_BATCH,
-                                "fan-out capped; remaining episodes will be retried by scheduler"
-                            );
-                        }
-                        for episode in episodes.iter().take(EPISODE_FAN_OUT_BATCH) {
+                        for episode in &episodes {
                             match episode.state {
                                 MediaItemState::Scraped
                                 | MediaItemState::Ongoing
                                 | MediaItemState::PartiallyCompleted => {
-                                    if !self.queue.push_download_from_best_stream(episode.id).await {
+                                    if !self.queue.push_download_from_best_stream(episode.id).await
+                                    {
                                         let _ = repo::refresh_state_cascade(
                                             &self.queue.db_pool,
-                                            &episode,
+                                            episode,
                                         )
                                         .await;
                                     }
@@ -406,7 +389,7 @@ impl<'a> LibraryOrchestrator<'a> {
                                 MediaItemState::Indexed => {
                                     self.queue
                                         .push_scrape(ScrapeJob::for_episode(
-                                            &episode,
+                                            episode,
                                             show_title.clone(),
                                             show_imdb_id.clone(),
                                         ))

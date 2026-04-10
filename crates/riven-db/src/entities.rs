@@ -73,29 +73,16 @@ pub struct MediaItemHierarchy {
 
 impl MediaItem {
     pub fn filesystem_metadata(&self) -> FilesystemItemMetadata {
-        let genres = self
-            .genres
-            .as_ref()
-            .and_then(|value| value.as_array())
-            .map(|values| {
-                values
-                    .iter()
-                    .filter_map(|value| value.as_str())
-                    .map(|value| value.to_ascii_lowercase())
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-
-        FilesystemItemMetadata {
-            genres,
-            network: self.network.clone(),
-            content_rating: self.content_rating,
-            language: self.language.clone(),
-            country: self.country.clone(),
-            year: self.aired_at.map(|date| date.year()).or(self.year),
-            rating: self.rating,
-            is_anime: self.is_anime,
-        }
+        build_filesystem_metadata(
+            self.genres.as_ref(),
+            self.network.clone(),
+            self.content_rating,
+            self.language.clone(),
+            self.country.clone(),
+            self.aired_at.map(|date| date.year()).or(self.year),
+            self.rating,
+            self.is_anime,
+        )
     }
 
     pub fn pretty_name(&self) -> String {
@@ -193,30 +180,49 @@ impl FilesystemProfileEntryCandidate {
     }
 
     pub fn filesystem_metadata(&self) -> FilesystemItemMetadata {
-        let genres = self
-            .genres
-            .as_ref()
-            .and_then(|value| value.as_array())
-            .map(|values| {
-                values
-                    .iter()
-                    .filter_map(|value| value.as_str())
-                    .map(|value| value.to_ascii_lowercase())
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-
-        FilesystemItemMetadata {
-            genres,
-            network: self.network.clone(),
-            content_rating: self.content_rating,
-            language: self.language.clone(),
-            country: self.country.clone(),
-            year: self.year,
-            rating: self.rating,
-            is_anime: self.is_anime,
-        }
+        build_filesystem_metadata(
+            self.genres.as_ref(),
+            self.network.clone(),
+            self.content_rating,
+            self.language.clone(),
+            self.country.clone(),
+            self.year,
+            self.rating,
+            self.is_anime,
+        )
     }
+}
+
+fn build_filesystem_metadata(
+    genres: Option<&serde_json::Value>,
+    network: Option<String>,
+    content_rating: Option<ContentRating>,
+    language: Option<String>,
+    country: Option<String>,
+    year: Option<i32>,
+    rating: Option<f64>,
+    is_anime: bool,
+) -> FilesystemItemMetadata {
+    FilesystemItemMetadata {
+        genres: lowercase_json_strings(genres),
+        network,
+        content_rating,
+        language,
+        country,
+        year,
+        rating,
+        is_anime,
+    }
+}
+
+fn lowercase_json_strings(value: Option<&serde_json::Value>) -> Vec<String> {
+    value
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .map(str::to_ascii_lowercase)
+        .collect()
 }
 
 impl FileSystemEntry {

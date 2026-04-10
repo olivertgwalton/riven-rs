@@ -1,3 +1,11 @@
+#![allow(
+    clippy::items_after_statements,
+    clippy::match_same_arms,
+    clippy::redundant_pub_crate,
+    clippy::too_many_lines,
+    clippy::wildcard_imports
+)]
+
 use regex::Regex;
 use std::sync::LazyLock;
 
@@ -184,11 +192,7 @@ pub(crate) fn extract_title(raw: &str) -> String {
             rest = rest[full.end()..].to_string();
         }
 
-        if let Some(title) = bracket_title {
-            format!("{title} {rest}")
-        } else {
-            cleaned
-        }
+        bracket_title.map_or(cleaned, |title| format!("{title} {rest}"))
     };
     let cleaned = {
         static RE_BRACKET_START: LazyLock<Regex> =
@@ -259,11 +263,7 @@ pub(crate) fn extract_title(raw: &str) -> String {
             rest = rest[full.end()..].to_string();
         }
 
-        if let Some(title) = bracket_title {
-            format!("{title} {rest}")
-        } else {
-            cleaned
-        }
+        bracket_title.map_or(cleaned, |title| format!("{title} {rest}"))
     };
     let cleaned = {
         static RE_BROKEN_GROUP_PREFIX: LazyLock<Regex> =
@@ -462,10 +462,10 @@ pub(crate) fn extract_title(raw: &str) -> String {
             )
             .unwrap()
         });
-        if let Some(m) = RE_TITLE_NETWORK.find(&cleaned) {
-            if m.start() > 0 {
-                end = end.min(m.start());
-            }
+        if let Some(m) = RE_TITLE_NETWORK.find(&cleaned)
+            && m.start() > 0
+        {
+            end = end.min(m.start());
         }
     }
 
@@ -556,8 +556,7 @@ pub(crate) fn extract_title(raw: &str) -> String {
         .collect::<Vec<_>>()
         .join(" ")
         .trim()
-        .replace('§', ".")
-        .to_string();
+        .replace('§', ".");
 
     {
         static RE_LEADING_NUMERIC_SPACE: LazyLock<Regex> =
@@ -577,10 +576,8 @@ pub(crate) fn extract_title(raw: &str) -> String {
                     .is_some_and(char::is_whitespace)
         });
 
-        if has_leading_numbered_dot {
-            if let Some(caps) = RE_LEADING_NUMERIC_SPACE.captures(&title) {
-                return format!("{}. {}", &caps[1], &caps[2]);
-            }
+        if has_leading_numbered_dot && let Some(caps) = RE_LEADING_NUMERIC_SPACE.captures(&title) {
+            return format!("{}. {}", &caps[1], &caps[2]);
         }
 
         if let Some(caps) = RE_TITLE_WEB_YEAR.captures(trimmed_original) {

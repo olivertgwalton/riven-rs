@@ -121,8 +121,12 @@ pub fn pick_best_for_profile<'a>(
 
     scored.sort_by(|(a, sa, pa), (b, sb, pb)| {
         sb.cmp(sa).then_with(|| pb.cmp(pa)).then_with(|| {
-            let ra = download_profile.resolution_ranks.rank_for(stream_resolution(a));
-            let rb = download_profile.resolution_ranks.rank_for(stream_resolution(b));
+            let ra = download_profile
+                .resolution_ranks
+                .rank_for(stream_resolution(a));
+            let rb = download_profile
+                .resolution_ranks
+                .rank_for(stream_resolution(b));
             rb.cmp(&ra)
         })
     });
@@ -136,10 +140,10 @@ fn build_download_candidate_profile(profile: &RankSettings) -> RankSettings {
     // Match riven-ts download selection more closely: use active profiles to
     // prefer better candidates, but don't hard-reject normal TV/web releases
     // just because their cached metadata is sparse.
-    download_profile.resolutions.r2160p = true;
-    download_profile.resolutions.r1080p = true;
-    download_profile.resolutions.r720p = true;
-    download_profile.resolutions.r480p = true;
+    download_profile.resolutions.high_definition.r2160p = true;
+    download_profile.resolutions.high_definition.r1080p = true;
+    download_profile.resolutions.high_definition.r720p = true;
+    download_profile.resolutions.standard_definition.r480p = true;
     download_profile.resolutions.unknown = true;
 
     download_profile.custom_ranks.quality.av1.fetch = true;

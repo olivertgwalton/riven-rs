@@ -34,7 +34,7 @@ use riven_rank::ResolutionRanks;
 // ── Job types ────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct ContentServiceJob {}
+pub struct ContentServiceJob;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IndexJob {
@@ -338,12 +338,7 @@ impl JobQueue {
     }
 
     pub async fn push_content_service(&self) {
-        if let Err(e) = self
-            .content_storage
-            .clone()
-            .push(ContentServiceJob::default())
-            .await
-        {
+        if let Err(e) = self.content_storage.clone().push(ContentServiceJob).await {
             tracing::error!(error = %e, "failed to push ContentServiceJob");
         }
     }
@@ -413,7 +408,8 @@ impl JobQueue {
                 else {
                     return;
                 };
-                let requested_seasons = crate::context::load_requested_seasons(&self.db_pool, &item).await;
+                let requested_seasons =
+                    crate::context::load_requested_seasons(&self.db_pool, &item).await;
                 crate::orchestrator::LibraryOrchestrator::new(self)
                     .enqueue_after_index(&item, requested_seasons.as_deref())
                     .await;
@@ -741,7 +737,11 @@ pub async fn clear_worker_registrations(redis: &mut redis::aio::ConnectionManage
                 .arg(config.workers_set())
                 .query_async(redis)
                 .await;
-            tracing::info!(queue = queue_name, count = members.len(), "cleared stale worker registrations");
+            tracing::info!(
+                queue = queue_name,
+                count = members.len(),
+                "cleared stale worker registrations"
+            );
         }
     }
 
@@ -878,13 +878,11 @@ pub fn start_workers(queue: Arc<JobQueue>) -> Monitor {
     // Mirror riven-ts: scale worker concurrency to the number of logical CPUs,
     // matching `os.availableParallelism()` used in createFlowWorker /
     // createSandboxedWorker. Content is a singleton scheduler job so stays at 1.
-    let parallelism = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(4);
+    let parallelism = std::thread::available_parallelism().map_or(4, std::num::NonZeroUsize::get);
 
     Monitor::new()
         .register({
-            let q = queue.clone();
+            let q = Arc::clone(&queue);
             move |_| {
                 WorkerBuilder::new("riven-index")
                     .backend(q.index_storage.clone())
@@ -894,7 +892,7 @@ pub fn start_workers(queue: Arc<JobQueue>) -> Monitor {
             }
         })
         .register({
-            let q = queue.clone();
+            let q = Arc::clone(&queue);
             move |_| {
                 WorkerBuilder::new("riven-index-plugin")
                     .backend(q.index_plugin_storage.clone())
@@ -904,7 +902,7 @@ pub fn start_workers(queue: Arc<JobQueue>) -> Monitor {
             }
         })
         .register({
-            let q = queue.clone();
+            let q = Arc::clone(&queue);
             move |_| {
                 WorkerBuilder::new("riven-scrape")
                     .backend(q.scrape_storage.clone())
@@ -914,7 +912,7 @@ pub fn start_workers(queue: Arc<JobQueue>) -> Monitor {
             }
         })
         .register({
-            let q = queue.clone();
+            let q = Arc::clone(&queue);
             move |_| {
                 WorkerBuilder::new("riven-scrape-plugin")
                     .backend(q.scrape_plugin_storage.clone())
@@ -924,7 +922,7 @@ pub fn start_workers(queue: Arc<JobQueue>) -> Monitor {
             }
         })
         .register({
-            let q = queue.clone();
+            let q = Arc::clone(&queue);
             move |_| {
                 WorkerBuilder::new("riven-parse")
                     .backend(q.parse_storage.clone())
@@ -934,7 +932,7 @@ pub fn start_workers(queue: Arc<JobQueue>) -> Monitor {
             }
         })
         .register({
-            let q = queue.clone();
+            let q = Arc::clone(&queue);
             move |_| {
                 WorkerBuilder::new("riven-download")
                     .backend(q.download_storage.clone())
@@ -944,7 +942,7 @@ pub fn start_workers(queue: Arc<JobQueue>) -> Monitor {
             }
         })
         .register({
-            let q = queue.clone();
+            let q = Arc::clone(&queue);
             move |_| {
                 WorkerBuilder::new("riven-content")
                     .backend(q.content_storage.clone())

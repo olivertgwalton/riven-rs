@@ -262,21 +262,21 @@ impl RivenFs {
     }
 
     fn resolve_path(&self, parent_ino: u64, name: &str) -> Arc<str> {
-        let parent: Arc<str> = match parent_ino {
-            ROOT_INO => Arc::from("/"),
-            MOVIES_INO => Arc::from("/movies"),
-            SHOWS_INO => Arc::from("/shows"),
+        let parent = match parent_ino {
+            ROOT_INO => Arc::<str>::from("/"),
+            MOVIES_INO => Arc::<str>::from("/movies"),
+            SHOWS_INO => Arc::<str>::from("/shows"),
             _ => self
                 .ino_to_path
                 .get(&parent_ino)
-                .map(|r| Arc::clone(&r))
-                .unwrap_or_else(|| Arc::from("/")),
+                .map_or_else(|| Arc::<str>::from("/"), |path| Arc::clone(&path)),
         };
-        if &*parent == "/" {
-            Arc::from(format!("/{name}").as_str())
+
+        Arc::from(if parent.as_ref() == "/" {
+            format!("/{name}")
         } else {
-            Arc::from(format!("{parent}/{name}").as_str())
-        }
+            format!("{parent}/{name}")
+        })
     }
 }
 

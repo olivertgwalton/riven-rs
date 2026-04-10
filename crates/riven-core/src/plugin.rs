@@ -164,6 +164,20 @@ pub struct PluginContext {
 }
 
 impl PluginContext {
+    pub fn new(
+        settings: PluginSettings,
+        http_client: reqwest::Client,
+        db_pool: sqlx::PgPool,
+        redis: redis::aio::ConnectionManager,
+    ) -> Self {
+        Self {
+            settings,
+            http_client,
+            db_pool,
+            redis,
+        }
+    }
+
     pub fn require_setting(&self, key: &str) -> anyhow::Result<&str> {
         self.settings
             .get(key)
@@ -255,12 +269,7 @@ impl PluginRegistry {
             tracing::info!(plugin = plugin.name(), "plugin registered successfully");
         }
 
-        let context = Arc::new(PluginContext {
-            settings,
-            http_client,
-            db_pool,
-            redis,
-        });
+        let context = Arc::new(PluginContext::new(settings, http_client, db_pool, redis));
 
         self.plugins.write().await.push(ActivePlugin {
             plugin,
@@ -281,12 +290,12 @@ impl PluginRegistry {
             let mut new_settings = active.context.settings.clone();
             new_settings.merge_db_override(db_override);
             let valid = enabled && active.plugin.validate(&new_settings).await.unwrap_or(false);
-            active.context = Arc::new(PluginContext {
-                settings: new_settings,
-                http_client: active.context.http_client.clone(),
-                db_pool: active.context.db_pool.clone(),
-                redis: active.context.redis.clone(),
-            });
+            active.context = Arc::new(PluginContext::new(
+                new_settings,
+                active.context.http_client.clone(),
+                active.context.db_pool.clone(),
+                active.context.redis.clone(),
+            ));
             active.enabled = enabled;
             active.valid = valid;
             if !enabled {

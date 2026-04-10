@@ -99,9 +99,9 @@ mod tests {
             library_profiles: profiles,
         });
 
-        assert_eq!(layout.parse("/kids"), PathTarget::ProfilePrefixDir);
+        assert_eq!(parse_path(&layout, "/kids"), PathTarget::ProfilePrefixDir);
         assert_eq!(
-            layout.parse("/kids/movies/Film/Film.mkv"),
+            parse_path(&layout, "/kids/movies/Film/Film.mkv"),
             PathTarget::Canonical {
                 profile_key: Some("kids".to_string()),
                 path: CanonicalPath::MovieFile {

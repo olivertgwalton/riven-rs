@@ -264,6 +264,46 @@ pub async fn derive_item_request_state_for_request(
                     return Ok(ItemRequestState::Completed);
                 }
 
+                let remaining_requested_episodes = sqlx::query_scalar::<_, i64>(
+                    "SELECT COUNT(*)
+                     FROM media_items episode
+                     JOIN media_items season ON episode.parent_id = season.id
+                     WHERE season.parent_id = $1
+                       AND season.item_type = 'season'
+                       AND season.is_special = false
+                       AND season.season_number = ANY($2)
+                       AND episode.item_type = 'episode'
+                       AND episode.is_requested = true
+                       AND episode.state <> 'completed'
+                       AND episode.state <> 'unreleased'",
+                )
+                .bind(show.id)
+                .bind(&season_numbers)
+                .fetch_one(pool)
+                .await?;
+
+                if remaining_requested_episodes == 0 {
+                    let requested_episode_count = sqlx::query_scalar::<_, i64>(
+                        "SELECT COUNT(*)
+                         FROM media_items episode
+                         JOIN media_items season ON episode.parent_id = season.id
+                         WHERE season.parent_id = $1
+                           AND season.item_type = 'season'
+                           AND season.is_special = false
+                           AND season.season_number = ANY($2)
+                           AND episode.item_type = 'episode'
+                           AND episode.is_requested = true",
+                    )
+                    .bind(show.id)
+                    .bind(&season_numbers)
+                    .fetch_one(pool)
+                    .await?;
+
+                    if requested_episode_count > 0 {
+                        return Ok(ItemRequestState::Completed);
+                    }
+                }
+
                 if season_states
                     .iter()
                     .all(|state| *state == MediaItemState::Unreleased)

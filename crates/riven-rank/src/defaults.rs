@@ -159,6 +159,7 @@ impl Default for RankingModel {
 impl RankingModel {
     /// Default score for a quality/rip/trash quality string.
     #[inline]
+    #[must_use]
     pub fn quality_score(&self, q: &str) -> i64 {
         match q {
             "WEB" => self.web,
@@ -192,6 +193,7 @@ impl RankingModel {
 
     /// Default score for a codec string.
     #[inline]
+    #[must_use]
     pub fn codec_score(&self, codec: &str) -> i64 {
         match codec {
             "avc" => self.avc,
@@ -205,6 +207,7 @@ impl RankingModel {
 
     /// Default score for an audio string.
     #[inline]
+    #[must_use]
     pub fn audio_score(&self, audio: &str) -> i64 {
         match audio {
             "AAC" => self.aac,
@@ -223,6 +226,7 @@ impl RankingModel {
 
     /// Default score for an HDR string.
     #[inline]
+    #[must_use]
     pub fn hdr_score(&self, hdr: &str) -> i64 {
         match hdr {
             "DV" => self.dolby_vision,
@@ -234,7 +238,8 @@ impl RankingModel {
     }
 
     /// Nested JSON matching `custom_ranks` structure, used to inject `"default": N`
-    /// into each CustomRank entry in the GraphQL `rankSettings` response.
+    /// into each `CustomRank` entry in the GraphQL `rankSettings` response.
+    #[must_use]
     pub fn to_category_map(&self) -> serde_json::Value {
         serde_json::json!({
             "quality": {

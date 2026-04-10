@@ -79,7 +79,11 @@ impl Plugin for CometPlugin {
 
         let url = format!("{base_url}/stream/{scrape_type}/{imdb_id}{identifier}.json");
 
-        let resp: CometResponse = match riven_core::http::send(|| ctx.http_client.get(&url)).await?.json().await {
+        let resp: CometResponse = match riven_core::http::send(|| ctx.http_client.get(&url))
+            .await?
+            .json()
+            .await
+        {
             Ok(r) => r,
             Err(e) => {
                 tracing::warn!(error = %e, imdb_id, title = request.title, "comet response parse failed");

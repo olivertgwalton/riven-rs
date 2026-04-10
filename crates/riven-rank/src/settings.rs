@@ -1,11 +1,11 @@
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
-fn default_true() -> bool {
+const fn default_true() -> bool {
     true
 }
 
-fn default_hd_profile() -> QualityProfile {
+const fn default_hd_profile() -> QualityProfile {
     QualityProfile::Hd
 }
 
@@ -26,7 +26,8 @@ pub enum QualityProfile {
 }
 
 impl QualityProfile {
-    pub fn id(self) -> &'static str {
+    #[must_use]
+    pub const fn id(self) -> &'static str {
         match self {
             Self::UltraHd => "ultra_hd",
             Self::Hd => "hd",
@@ -34,7 +35,8 @@ impl QualityProfile {
         }
     }
 
-    pub fn label(self) -> &'static str {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
         match self {
             Self::UltraHd => "4K / Ultra HD",
             Self::Hd => "Full HD",
@@ -42,7 +44,8 @@ impl QualityProfile {
         }
     }
 
-    pub fn description(self) -> &'static str {
+    #[must_use]
+    pub const fn description(self) -> &'static str {
         match self {
             Self::UltraHd => {
                 "Prioritises 2160p REMUX, Dolby Vision, and lossless audio. Disables rips and low-quality sources."
@@ -54,11 +57,12 @@ impl QualityProfile {
         }
     }
 
-    pub const ALL: [QualityProfile; 3] = [Self::UltraHd, Self::Hd, Self::Standard];
+    pub const ALL: [Self; 3] = [Self::UltraHd, Self::Hd, Self::Standard];
 
     /// Return a [`RankSettings`] pre-configured for this profile.
     /// Lists (`require`, `exclude`, `preferred`) and `languages` are left
     /// at their zero-value defaults; callers may overlay them as needed.
+    #[must_use]
     pub fn base_settings(self) -> RankSettings {
         match self {
             Self::UltraHd => ultra_hd_settings(),
@@ -79,11 +83,15 @@ fn ultra_hd_settings() -> RankSettings {
     RankSettings {
         profile: QualityProfile::UltraHd,
         resolutions: ResolutionSettings {
-            r2160p: true,
-            r1080p: true,
-            r720p: false,
-            r480p: false,
-            r360p: false,
+            high_definition: HighDefinitionResolutions {
+                r2160p: true,
+                r1080p: true,
+                r720p: false,
+            },
+            standard_definition: StandardDefinitionResolutions {
+                r480p: false,
+                r360p: false,
+            },
             unknown: false,
         },
         resolution_ranks: ResolutionRanks {
@@ -152,11 +160,15 @@ fn hd_settings() -> RankSettings {
     RankSettings {
         profile: QualityProfile::Hd,
         resolutions: ResolutionSettings {
-            r2160p: false,
-            r1080p: true,
-            r720p: false,
-            r480p: false,
-            r360p: false,
+            high_definition: HighDefinitionResolutions {
+                r2160p: false,
+                r1080p: true,
+                r720p: false,
+            },
+            standard_definition: StandardDefinitionResolutions {
+                r480p: false,
+                r360p: false,
+            },
             unknown: false,
         },
         resolution_ranks: ResolutionRanks {
@@ -227,11 +239,15 @@ fn standard_settings() -> RankSettings {
     RankSettings {
         profile: QualityProfile::Standard,
         resolutions: ResolutionSettings {
-            r2160p: false,
-            r1080p: false,
-            r720p: true,
-            r480p: true,
-            r360p: false,
+            high_definition: HighDefinitionResolutions {
+                r2160p: false,
+                r1080p: false,
+                r720p: true,
+            },
+            standard_definition: StandardDefinitionResolutions {
+                r480p: true,
+                r360p: false,
+            },
             unknown: true,
         },
         resolution_ranks: ResolutionRanks {
@@ -279,7 +295,6 @@ fn standard_settings() -> RankSettings {
                 stereo: CustomRank::scored(true, 25),
                 mono: CustomRank::scored(true, -150),
                 mp3: CustomRank::scored(true, -250),
-                ..AudioRanks::default()
             },
             extras: ExtrasRanks {
                 edition: CustomRank::scored(true, 25),
@@ -309,11 +324,11 @@ fn standard_settings() -> RankSettings {
     }
 }
 
-fn default_title_similarity() -> f64 {
+const fn default_title_similarity() -> f64 {
     0.85
 }
 
-fn default_remove_ranks_under() -> i64 {
+const fn default_remove_ranks_under() -> i64 {
     -10000
 }
 
@@ -330,11 +345,11 @@ pub struct CustomRank {
 }
 
 impl CustomRank {
-    fn new(fetch: bool) -> Self {
+    const fn new(fetch: bool) -> Self {
         Self { fetch, rank: None }
     }
 
-    fn scored(fetch: bool, rank: i64) -> Self {
+    const fn scored(fetch: bool, rank: i64) -> Self {
         Self {
             fetch,
             rank: Some(rank),
@@ -343,6 +358,7 @@ impl CustomRank {
 
     /// Returns the custom rank if set, otherwise the built-in default score.
     #[inline]
+    #[must_use]
     pub fn resolve(&self, default: i64) -> i64 {
         self.rank.unwrap_or(default)
     }
@@ -423,7 +439,8 @@ impl Default for RipsRanks {
 }
 
 impl RipsRanks {
-    pub fn all_disabled() -> Self {
+    #[must_use]
+    pub const fn all_disabled() -> Self {
         Self {
             bdrip: CustomRank::new(false),
             brrip: CustomRank::new(false),
@@ -587,8 +604,9 @@ pub struct CustomRanksConfig {
 }
 
 impl CustomRanksConfig {
-    /// Look up the CustomRank for a quality/rip/trash string.
-    /// Returns None for unknown quality strings.
+    /// Look up the `CustomRank` for a quality/rip/trash string.
+    /// Returns `None` for unknown quality strings.
+    #[must_use]
     pub fn quality_rank(&self, quality: &str) -> Option<&CustomRank> {
         match quality {
             "WEB" => Some(&self.quality.web),
@@ -620,7 +638,8 @@ impl CustomRanksConfig {
         }
     }
 
-    /// Look up the CustomRank for a codec string.
+    /// Look up the `CustomRank` for a codec string.
+    #[must_use]
     pub fn codec_rank(&self, codec: &str) -> Option<&CustomRank> {
         match codec {
             "avc" => Some(&self.quality.avc),
@@ -632,7 +651,8 @@ impl CustomRanksConfig {
         }
     }
 
-    /// Look up the CustomRank for an audio string.
+    /// Look up the `CustomRank` for an audio string.
+    #[must_use]
     pub fn audio_rank(&self, audio: &str) -> Option<&CustomRank> {
         match audio {
             "AAC" => Some(&self.audio.aac),
@@ -649,7 +669,8 @@ impl CustomRanksConfig {
         }
     }
 
-    /// Look up the CustomRank for an HDR string.
+    /// Look up the `CustomRank` for an HDR string.
+    #[must_use]
     pub fn hdr_rank(&self, hdr: &str) -> Option<&CustomRank> {
         match hdr {
             "DV" => Some(&self.hdr.dolby_vision),
@@ -664,23 +685,58 @@ impl CustomRanksConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ResolutionSettings {
-    pub r2160p: bool,
-    pub r1080p: bool,
-    pub r720p: bool,
-    pub r480p: bool,
-    pub r360p: bool,
+    #[serde(flatten)]
+    pub high_definition: HighDefinitionResolutions,
+    #[serde(flatten)]
+    pub standard_definition: StandardDefinitionResolutions,
     pub unknown: bool,
 }
 
 impl Default for ResolutionSettings {
     fn default() -> Self {
         Self {
+            high_definition: HighDefinitionResolutions::default(),
+            standard_definition: StandardDefinitionResolutions::default(),
+            unknown: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HighDefinitionResolutions {
+    pub r2160p: bool,
+    pub r1080p: bool,
+    pub r720p: bool,
+}
+
+impl Default for HighDefinitionResolutions {
+    fn default() -> Self {
+        Self {
             r2160p: false,
             r1080p: true,
             r720p: true,
-            r480p: false,
-            r360p: false,
-            unknown: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StandardDefinitionResolutions {
+    pub r480p: bool,
+    pub r360p: bool,
+}
+
+impl ResolutionSettings {
+    #[must_use]
+    pub fn allows(&self, resolution: &str) -> bool {
+        match resolution {
+            "2160p" => self.high_definition.r2160p,
+            "1080p" | "1440p" => self.high_definition.r1080p,
+            "720p" => self.high_definition.r720p,
+            "480p" | "576p" => self.standard_definition.r480p,
+            "360p" | "240p" => self.standard_definition.r360p,
+            _ => self.unknown,
         }
     }
 }
@@ -714,6 +770,7 @@ impl Default for ResolutionRanks {
 }
 
 impl ResolutionRanks {
+    #[must_use]
     pub fn rank_for(&self, resolution: &str) -> i32 {
         match resolution {
             "2160p" => self.r2160p,
@@ -732,32 +789,92 @@ impl ResolutionRanks {
 pub struct RankOptions {
     #[serde(default = "default_title_similarity")]
     pub title_similarity: f64,
-    #[serde(default = "default_true")]
-    pub remove_all_trash: bool,
     #[serde(default = "default_remove_ranks_under")]
     pub remove_ranks_under: i64,
-    #[serde(default)]
-    pub remove_unknown_languages: bool,
-    #[serde(default = "default_true")]
-    pub allow_english_in_languages: bool,
-    #[serde(default = "default_true")]
-    pub remove_adult_content: bool,
+    #[serde(flatten)]
+    pub trash: TrashOptions,
+    #[serde(flatten)]
+    pub language: LanguageRankOptions,
+    #[serde(flatten)]
+    pub content: ContentRankOptions,
     /// When `true` (default), fetch checks fail as soon as one check fails.
     /// When `false`, all checks run and every failure is collected — useful for
     /// diagnostics or building a full list of reasons a torrent was rejected.
-    #[serde(default = "default_true")]
-    pub enable_fetch_speed_mode: bool,
+    #[serde(flatten)]
+    pub fetch: FetchRankOptions,
 }
 
 impl Default for RankOptions {
     fn default() -> Self {
         Self {
             title_similarity: default_title_similarity(),
-            remove_all_trash: true,
             remove_ranks_under: -10000,
+            trash: TrashOptions::default(),
+            language: LanguageRankOptions::default(),
+            content: ContentRankOptions::default(),
+            fetch: FetchRankOptions::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TrashOptions {
+    #[serde(default = "default_true")]
+    pub remove_all_trash: bool,
+}
+
+impl Default for TrashOptions {
+    fn default() -> Self {
+        Self {
+            remove_all_trash: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LanguageRankOptions {
+    #[serde(default)]
+    pub remove_unknown_languages: bool,
+    #[serde(default = "default_true")]
+    pub allow_english_in_languages: bool,
+}
+
+impl Default for LanguageRankOptions {
+    fn default() -> Self {
+        Self {
             remove_unknown_languages: false,
             allow_english_in_languages: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ContentRankOptions {
+    #[serde(default = "default_true")]
+    pub remove_adult_content: bool,
+}
+
+impl Default for ContentRankOptions {
+    fn default() -> Self {
+        Self {
             remove_adult_content: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FetchRankOptions {
+    #[serde(default = "default_true")]
+    pub enable_fetch_speed_mode: bool,
+}
+
+impl Default for FetchRankOptions {
+    fn default() -> Self {
+        Self {
             enable_fetch_speed_mode: true,
         }
     }
@@ -828,6 +945,7 @@ impl RankSettings {
     /// Call this once after deserialising settings and before passing them to
     /// the ranking pipeline. The compiled fields are skipped by serde, so they
     /// must be rebuilt on every load.
+    #[must_use]
     pub fn prepare(mut self) -> Self {
         self.require_compiled = compile_patterns(&self.require);
         self.exclude_compiled = compile_patterns(&self.exclude);

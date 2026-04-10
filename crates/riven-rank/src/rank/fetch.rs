@@ -6,7 +6,7 @@ use crate::settings::RankSettings;
 const TRASH_QUALITIES: &[&str] = &["CAM", "PDTV", "R5", "SCR", "TeleCine", "TeleSync"];
 
 fn trash_handler(data: &ParsedData, settings: &RankSettings, failed: &mut Vec<String>) -> bool {
-    if !settings.options.remove_all_trash {
+    if !settings.options.trash.remove_all_trash {
         return true;
     }
     if data
@@ -29,7 +29,7 @@ fn trash_handler(data: &ParsedData, settings: &RankSettings, failed: &mut Vec<St
 }
 
 fn adult_handler(data: &ParsedData, settings: &RankSettings, failed: &mut Vec<String>) -> bool {
-    if data.adult && settings.options.remove_adult_content {
+    if data.adult && settings.options.content.remove_adult_content {
         failed.push("trash_adult".into());
         return false;
     }
@@ -42,12 +42,7 @@ fn required_matches(data: &ParsedData, settings: &RankSettings) -> bool {
     if settings.require.is_empty() {
         return false;
     }
-    if !settings.require_compiled.is_empty() {
-        settings
-            .require_compiled
-            .iter()
-            .any(|re| re.is_match(&data.raw_title))
-    } else {
+    if settings.require_compiled.is_empty() {
         debug_assert!(
             false,
             "RankSettings::prepare() was not called — regex compiled per-torrent"
@@ -57,20 +52,25 @@ fn required_matches(data: &ParsedData, settings: &RankSettings) -> bool {
             .iter()
             .filter_map(|p| regex::Regex::new(p).ok())
             .any(|re| re.is_match(&data.raw_title))
+    } else {
+        settings
+            .require_compiled
+            .iter()
+            .any(|re| re.is_match(&data.raw_title))
     }
 }
 
 fn check_exclude(data: &ParsedData, settings: &RankSettings, failed: &mut Vec<String>) -> bool {
-    let excluded = if !settings.exclude_compiled.is_empty() {
-        settings
-            .exclude_compiled
-            .iter()
-            .any(|re| re.is_match(&data.raw_title))
-    } else {
+    let excluded = if settings.exclude_compiled.is_empty() {
         settings
             .exclude
             .iter()
             .filter_map(|p| regex::Regex::new(p).ok())
+            .any(|re| re.is_match(&data.raw_title))
+    } else {
+        settings
+            .exclude_compiled
+            .iter()
             .any(|re| re.is_match(&data.raw_title))
     };
     if excluded {
@@ -125,7 +125,7 @@ fn language_handler(data: &ParsedData, settings: &RankSettings, failed: &mut Vec
     let excluded = populate_langs(&settings.languages.exclude);
     let torrent_langs: HashSet<String> = data.languages.iter().cloned().collect();
 
-    if torrent_langs.is_empty() && settings.options.remove_unknown_languages {
+    if torrent_langs.is_empty() && settings.options.language.remove_unknown_languages {
         failed.push("unknown_language".into());
         return false;
     }
@@ -137,7 +137,7 @@ fn language_handler(data: &ParsedData, settings: &RankSettings, failed: &mut Vec
         failed.push("missing_required_language".into());
         return false;
     }
-    if torrent_langs.contains("en") && settings.options.allow_english_in_languages {
+    if torrent_langs.contains("en") && settings.options.language.allow_english_in_languages {
         return true;
     }
     if !allowed.is_empty() && torrent_langs.iter().any(|l| allowed.contains(l)) {
@@ -152,14 +152,7 @@ fn language_handler(data: &ParsedData, settings: &RankSettings, failed: &mut Vec
 
 fn fetch_resolution(data: &ParsedData, settings: &RankSettings, failed: &mut Vec<String>) -> bool {
     // Aliases mirror RTN's res_map: 1440p→1080p bucket, 576p→480p, 240p→360p.
-    let enabled = match data.resolution.as_str() {
-        "2160p" => settings.resolutions.r2160p,
-        "1080p" | "1440p" => settings.resolutions.r1080p,
-        "720p" => settings.resolutions.r720p,
-        "480p" | "576p" => settings.resolutions.r480p,
-        "360p" | "240p" => settings.resolutions.r360p,
-        _ => settings.resolutions.unknown,
-    };
+    let enabled = settings.resolutions.allows(&data.resolution);
     if !enabled {
         failed.push("resolution".into());
         return false;
@@ -168,9 +161,8 @@ fn fetch_resolution(data: &ParsedData, settings: &RankSettings, failed: &mut Vec
 }
 
 fn fetch_quality(data: &ParsedData, settings: &RankSettings, failed: &mut Vec<String>) -> bool {
-    let q = match data.quality.as_deref() {
-        Some(q) => q,
-        None => return true,
+    let Some(q) = data.quality.as_deref() else {
+        return true;
     };
     if let Some(cr) = settings.custom_ranks.quality_rank(q)
         && !cr.fetch
@@ -211,9 +203,8 @@ fn fetch_hdr(data: &ParsedData, settings: &RankSettings, failed: &mut Vec<String
 }
 
 fn fetch_codec(data: &ParsedData, settings: &RankSettings, failed: &mut Vec<String>) -> bool {
-    let codec = match data.codec.as_deref() {
-        Some(c) => c,
-        None => return true,
+    let Some(codec) = data.codec.as_deref() else {
+        return true;
     };
     if let Some(cr) = settings.custom_ranks.codec_rank(codec)
         && !cr.fetch
@@ -226,7 +217,7 @@ fn fetch_codec(data: &ParsedData, settings: &RankSettings, failed: &mut Vec<Stri
 
 fn fetch_other(data: &ParsedData, settings: &RankSettings, failed: &mut Vec<String>) -> bool {
     let cr = &settings.custom_ranks;
-    let speed = settings.options.enable_fetch_speed_mode;
+    let speed = settings.options.fetch.enable_fetch_speed_mode;
 
     let checks: &[(bool, &crate::settings::CustomRank, &str)] = &[
         (data.three_d, &cr.extras.three_d, "three_d"),
@@ -267,13 +258,14 @@ fn fetch_other(data: &ParsedData, settings: &RankSettings, failed: &mut Vec<Stri
 /// Required patterns are checked **last** as an unconditional override — a
 /// matching `require` pattern accepts the torrent even if other checks failed.
 ///
-/// When `options.enable_fetch_speed_mode` is `true` (default) the pipeline
+/// When `options.fetch.enable_fetch_speed_mode` is `true` (default) the pipeline
 /// short-circuits on the first failure, but still applies the required-pattern
 /// override before returning. When `false`, all checks run and every failure
 /// reason is collected — useful for diagnostics.
+#[must_use]
 pub fn check_fetch(data: &ParsedData, settings: &RankSettings) -> (bool, Vec<String>) {
     let mut failed = Vec::new();
-    let speed = settings.options.enable_fetch_speed_mode;
+    let speed = settings.options.fetch.enable_fetch_speed_mode;
 
     if speed {
         if !trash_handler(data, settings, &mut failed) {

@@ -9,8 +9,7 @@ use riven_core::settings::PluginSettings;
 use riven_core::types::*;
 
 use crate::client::{
-    check_cache, check_cache_live, download_result_from_cache_check, fetch_user_info,
-    generate_link,
+    check_cache, check_cache_live, download_result_from_cache_check, fetch_user_info, generate_link,
 };
 const DEFAULT_URL: &str = "https://stremthru.13377001.xyz/";
 
@@ -42,7 +41,6 @@ fn get_configured_stores(settings: &PluginSettings) -> Vec<(&str, String)> {
         })
         .collect()
 }
-
 
 #[async_trait]
 impl Plugin for StremthruPlugin {
@@ -95,14 +93,8 @@ impl Plugin for StremthruPlugin {
                 let mut any_network_error = false;
 
                 for (store, api_key) in &stores {
-                    match check_cache_live(
-                        &ctx.http_client,
-                        &base_url,
-                        store,
-                        api_key,
-                        info_hash,
-                    )
-                    .await
+                    match check_cache_live(&ctx.http_client, &base_url, store, api_key, info_hash)
+                        .await
                     {
                         Ok(Some(result)) => {
                             tracing::debug!(
