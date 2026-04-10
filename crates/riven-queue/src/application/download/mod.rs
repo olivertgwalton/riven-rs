@@ -267,47 +267,6 @@ async fn run_multi_version(
     }
 
     if !any_success {
-        if downloaded_profiles.is_empty() && item.item_type == MediaItemType::Episode {
-            let profile_names = active_profiles
-                .iter()
-                .map(|(name, _)| name.as_str())
-                .collect::<Vec<_>>()
-                .join(", ");
-            for candidate in candidates {
-                if let Err(error) = repo::blacklist_stream_by_hash(
-                    &queue.db_pool,
-                    id,
-                    &candidate.stream.info_hash,
-                )
-                .await
-                {
-                    tracing::error!(
-                        id,
-                        info_hash = %candidate.stream.info_hash,
-                        error = %error,
-                        "failed to blacklist profile-rejected cached candidate"
-                    );
-                }
-            }
-            tracing::debug!(
-                id,
-                title = %item.title,
-                profiles = %profile_names,
-                rejected_candidates = candidates.len(),
-                "all cached candidates rejected by ranking profile; skipping episode candidates"
-            );
-            queue
-                .notify(RivenEvent::MediaItemDownloadError {
-                    id,
-                    title: item.title.clone(),
-                    error: format!(
-                        "all cached candidates were rejected by ranking profile(s): {profile_names}"
-                    ),
-                })
-                .await;
-            return false;
-        }
-
         if downloaded_profiles.is_empty() {
             tracing::debug!(
                 id,
