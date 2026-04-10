@@ -157,7 +157,7 @@ pub fn parse_file_path(path: &str) -> riven_rank::ParsedData {
 
 /// Build the VFS path for an episode file.
 /// Appends `.ptN` before the extension when `part` is `Some`.
-/// In multi-version mode, `path_tag` (e.g. `Some("ultra_hd")`) is prepended as
+/// When active ranking profiles are enabled, `path_tag` (e.g. `Some("ultra_hd")`) is prepended as
 /// a top-level directory so each profile has its own directory tree.
 pub fn episode_vfs_path(
     show: &str,

@@ -64,7 +64,7 @@ fn pretty_show_name(
 ///
 /// `stream_id` links the created entry to the source stream for version tracking.
 /// `resolution` is stored in the DB for metadata.
-/// `path_tag` is embedded in the VFS filename when `Some` (multi-version mode).
+/// `path_tag` is embedded in the VFS filename when `Some` (active profile mode).
 /// `profile_name` is stored on the entry for version-profile tracking.
 pub async fn persist_movie(
     item: &MediaItem,

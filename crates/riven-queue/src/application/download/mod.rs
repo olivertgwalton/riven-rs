@@ -48,8 +48,8 @@ pub async fn run(id: i64, job: &DownloadJob, queue: &JobQueue) {
         _ => None,
     };
 
-    let version_profiles: Vec<(String, RankSettings)> = load_active_profiles(&queue.db_pool).await;
-    let multi_version = !version_profiles.is_empty();
+    let active_profiles: Vec<(String, RankSettings)> = load_active_profiles(&queue.db_pool).await;
+    let profile_mode = !active_profiles.is_empty();
 
     let ranks = queue.resolution_ranks.read().await.clone();
     let all_streams = match repo::get_non_blacklisted_streams(&queue.db_pool, id, &ranks).await {
@@ -95,13 +95,13 @@ pub async fn run(id: i64, job: &DownloadJob, queue: &JobQueue) {
             hierarchy.as_ref(),
         )
         .await;
-    } else if multi_version {
+    } else if profile_mode {
         let _ = run_multi_version(
             id,
             &item,
             queue,
             start_time,
-            &version_profiles,
+            &active_profiles,
             &candidates,
             hierarchy.as_ref(),
         )
@@ -219,19 +219,19 @@ async fn run_multi_version(
     item: &MediaItem,
     queue: &JobQueue,
     start_time: Instant,
-    version_profiles: &[(String, RankSettings)],
+    active_profiles: &[(String, RankSettings)],
     candidates: &[CachedCandidate<'_>],
     hierarchy: Option<&DownloadHierarchyContext>,
 ) -> bool {
     let downloaded_profiles = fetch_done_profiles(queue, id, item.item_type).await;
     let mut any_success = false;
 
-    for (profile_name, profile_settings) in version_profiles {
+    for (profile_name, profile_settings) in active_profiles {
         if downloaded_profiles.contains(profile_name) {
             tracing::debug!(
                 id,
                 profile = profile_name,
-                "profile version already present, skipping"
+                "download already exists for active profile, skipping"
             );
             continue;
         }
@@ -261,33 +261,41 @@ async fn run_multi_version(
             DownloadAttemptOutcome::TerminalHandled => return true,
             DownloadAttemptOutcome::Succeeded => {
                 any_success = true;
-                tracing::debug!(id, profile = profile_name, "profile version downloaded");
+                tracing::debug!(id, profile = profile_name, "downloaded stream for active profile");
             }
         }
     }
 
     if !any_success {
         if downloaded_profiles.is_empty() && item.item_type == MediaItemType::Episode {
-            let profile_names = version_profiles
+            let profile_names = active_profiles
                 .iter()
                 .map(|(name, _)| name.as_str())
                 .collect::<Vec<_>>()
                 .join(", ");
+            for candidate in candidates {
+                if let Err(error) = repo::blacklist_stream_by_hash(
+                    &queue.db_pool,
+                    id,
+                    &candidate.stream.info_hash,
+                )
+                .await
+                {
+                    tracing::error!(
+                        id,
+                        info_hash = %candidate.stream.info_hash,
+                        error = %error,
+                        "failed to blacklist profile-rejected cached candidate"
+                    );
+                }
+            }
             tracing::debug!(
                 id,
                 title = %item.title,
                 profiles = %profile_names,
-                "all cached candidates rejected by ranking profile; marking episode failed"
+                rejected_candidates = candidates.len(),
+                "all cached candidates rejected by ranking profile; skipping episode candidates"
             );
-            if let Err(error) =
-                repo::update_media_item_state(&queue.db_pool, id, MediaItemState::Failed).await
-            {
-                tracing::error!(id, error = %error, "failed to mark episode failed after profile rejection");
-            } else {
-                LibraryOrchestrator::new(queue)
-                    .sync_item_request_state(item)
-                    .await;
-            }
             queue
                 .notify(RivenEvent::MediaItemDownloadError {
                     id,
@@ -304,7 +312,7 @@ async fn run_multi_version(
             tracing::debug!(
                 id,
                 title = %item.title,
-                "no profile-qualified cached stream found; falling back to single-version selection"
+                "no cached stream matched the active profile settings; falling back to general selection"
             );
             return run_single_version(id, item, queue, start_time, candidates, hierarchy).await;
         }
@@ -321,8 +329,8 @@ async fn run_multi_version(
     }
 
     let done = fetch_done_profiles(queue, id, item.item_type).await;
-    if !version_profiles.iter().all(|(name, _)| done.contains(name)) {
-        tracing::debug!(id, "some profile versions still missing — re-queuing");
+    if !active_profiles.iter().all(|(name, _)| done.contains(name)) {
+        tracing::debug!(id, "downloads for some active profiles are still missing; re-queuing");
         queue
             .notify(RivenEvent::MediaItemDownloadPartialSuccess { id })
             .await;

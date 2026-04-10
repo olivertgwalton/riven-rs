@@ -10,6 +10,7 @@ use riven_core::events::{EventType, HookResponse, RivenEvent};
 use riven_db::repo;
 use riven_rank::{QualityProfile, RankSettings};
 use serde::Serialize;
+use serde_json::Value;
 
 use crate::JobQueue;
 
@@ -111,19 +112,18 @@ pub(crate) async fn load_active_profiles(db_pool: &sqlx::PgPool) -> Vec<(String,
                             tracing::debug!(profile = p.name, "built-in profile: using Rust defaults (no DB overrides)");
                             return q.base_settings().prepare();
                         }
-                        // DB has a full settings object — use it directly (the frontend
-                        // round-trips through RankSettings so it's always complete).
-                        tracing::debug!(profile = p.name, "built-in profile: using DB settings override");
-                        match serde_json::from_value::<RankSettings>(p.settings.clone()) {
+                        tracing::debug!(profile = p.name, "built-in profile: merging DB settings override with Rust defaults");
+                        match merge_builtin_profile_settings(*q, &p.settings) {
                             Ok(s) => {
                                 tracing::debug!(
                                     profile = q.id(),
                                     r2160p = s.resolutions.r2160p,
                                     r1080p = s.resolutions.r1080p,
                                     r720p = s.resolutions.r720p,
+                                    unknown = s.resolutions.unknown,
                                     "loaded profile resolutions from DB"
                                 );
-                                s.prepare()
+                                s
                             }
                             Err(e) => {
                                 tracing::warn!(profile = p.name, error = %e, "failed to parse DB settings, falling back to Rust defaults");
@@ -139,4 +139,58 @@ pub(crate) async fn load_active_profiles(db_pool: &sqlx::PgPool) -> Vec<(String,
             settings.map(|s| (p.name, s))
         })
         .collect()
+}
+
+pub(crate) fn merge_builtin_profile_settings(
+    profile: QualityProfile,
+    override_settings: &Value,
+) -> serde_json::Result<RankSettings> {
+    let mut merged = serde_json::to_value(profile.base_settings())?;
+    merge_json_value(&mut merged, override_settings);
+    serde_json::from_value::<RankSettings>(merged).map(RankSettings::prepare)
+}
+
+fn merge_json_value(base: &mut Value, override_value: &Value) {
+    match (base, override_value) {
+        (Value::Object(base_obj), Value::Object(override_obj)) => {
+            for (key, value) in override_obj {
+                match base_obj.get_mut(key) {
+                    Some(existing) => merge_json_value(existing, value),
+                    None => {
+                        base_obj.insert(key.clone(), value.clone());
+                    }
+                }
+            }
+        }
+        (base_slot, replacement) => {
+            *base_slot = replacement.clone();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::merge_builtin_profile_settings;
+    use riven_rank::QualityProfile;
+    use serde_json::json;
+
+    #[test]
+    fn built_in_profile_overrides_are_merged_on_top_of_preset() {
+        let settings = merge_builtin_profile_settings(
+            QualityProfile::UltraHd,
+            &json!({
+                "resolutions": {
+                    "r1080p": true
+                }
+            }),
+        )
+        .expect("settings should parse");
+
+        assert!(settings.resolutions.r2160p);
+        assert!(settings.resolutions.r1080p);
+        assert!(!settings.resolutions.r720p);
+        assert!(!settings.custom_ranks.quality.hdtv.fetch);
+        assert!(!settings.custom_ranks.rips.webrip.fetch);
+        assert!(!settings.custom_ranks.audio.mono.fetch);
+    }
 }

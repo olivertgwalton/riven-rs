@@ -3,6 +3,9 @@ use std::collections::{HashMap, HashSet};
 use riven_core::types::*;
 use riven_db::repo;
 use riven_rank::{QualityProfile, RankSettings};
+use riven_rank::rank::RankError;
+
+use crate::flows::merge_builtin_profile_settings;
 
 #[derive(Clone)]
 pub struct ParseContext {
@@ -30,6 +33,54 @@ pub struct RankedStreamCandidate {
     pub title: String,
     pub parsed_data: Option<serde_json::Value>,
     pub rank: Option<i64>,
+}
+
+fn log_rank_rejection(
+    info_hash: &str,
+    title: &str,
+    profile_name: Option<&str>,
+    error: &RankError,
+) {
+    match error {
+        RankError::FetchChecksFailed { checks } => {
+            tracing::debug!(
+                info_hash,
+                title,
+                profile = profile_name,
+                checks = ?checks,
+                "stream rejected by ranking fetch checks"
+            );
+        }
+        RankError::TitleSimilarity { ratio, threshold } => {
+            tracing::debug!(
+                info_hash,
+                title,
+                profile = profile_name,
+                ratio,
+                threshold,
+                "stream rejected by title similarity"
+            );
+        }
+        RankError::RankUnderThreshold { rank, threshold } => {
+            tracing::debug!(
+                info_hash,
+                title,
+                profile = profile_name,
+                rank,
+                threshold,
+                "stream rejected by rank threshold"
+            );
+        }
+        _ => {
+            tracing::debug!(
+                info_hash,
+                title,
+                profile = profile_name,
+                error = %error,
+                "stream rejected by ranking"
+            );
+        }
+    }
 }
 
 fn year_candidates(year: i32) -> [i32; 3] {
@@ -182,26 +233,43 @@ pub fn rank_streams(
             }
 
             let best = if let Some(ref settings) = ctx.fallback_settings {
-                riven_rank::rank_torrent(
+                match riven_rank::rank_torrent(
                     title,
                     info_hash,
                     &ctx.correct_title,
                     &ctx.aliases,
                     settings,
                 )
-                .ok()
+                {
+                    Ok(ranked) => Some(ranked),
+                    Err(error) => {
+                        log_rank_rejection(info_hash, title, None, &error);
+                        None
+                    }
+                }
             } else {
                 ctx.profiles
                     .iter()
-                    .filter_map(|(_, settings)| {
-                        riven_rank::rank_torrent(
+                    .filter_map(|(profile_name, settings)| {
+                        match riven_rank::rank_torrent(
                             title,
                             info_hash,
                             &ctx.correct_title,
                             &ctx.aliases,
                             settings,
                         )
-                        .ok()
+                        {
+                            Ok(ranked) => Some(ranked),
+                            Err(error) => {
+                                log_rank_rejection(
+                                    info_hash,
+                                    title,
+                                    Some(profile_name.as_str()),
+                                    &error,
+                                );
+                                None
+                            }
+                        }
                     })
                     .max_by_key(|r| r.rank)
             };
@@ -260,8 +328,8 @@ pub async fn load_active_profiles(db_pool: &sqlx::PgPool) -> Vec<(String, RankSe
                         if db_empty {
                             return q.base_settings().prepare();
                         }
-                        match serde_json::from_value::<RankSettings>(p.settings.clone()) {
-                            Ok(s) => s.prepare(),
+                        match merge_builtin_profile_settings(*q, &p.settings) {
+                            Ok(s) => s,
                             Err(e) => {
                                 tracing::warn!(profile = p.name, error = %e, "failed to parse DB settings, falling back to Rust defaults");
                                 q.base_settings().prepare()
