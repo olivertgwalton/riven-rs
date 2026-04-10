@@ -382,6 +382,8 @@ impl JobQueue {
             let _ = self.notification_tx.send(json);
         }
 
+        self.react_to_event(&event).await;
+
         let registry = Arc::clone(&self.registry);
         tokio::spawn(async move {
             let results = registry.dispatch(&event).await;
@@ -399,6 +401,46 @@ impl JobQueue {
     pub async fn reload_resolution_ranks(&self) {
         let ranks = riven_db::repo::load_resolution_ranks(&self.db_pool).await;
         *self.resolution_ranks.write().await = ranks;
+    }
+
+    async fn react_to_event(&self, event: &RivenEvent) {
+        match event {
+            RivenEvent::MediaItemIndexSuccess { id, .. } => {
+                let Some(item) = riven_db::repo::get_media_item(&self.db_pool, *id)
+                    .await
+                    .ok()
+                    .flatten()
+                else {
+                    return;
+                };
+                let requested_seasons = crate::context::load_requested_seasons(&self.db_pool, &item).await;
+                crate::orchestrator::LibraryOrchestrator::new(self)
+                    .enqueue_after_index(&item, requested_seasons.as_deref())
+                    .await;
+            }
+            RivenEvent::MediaItemScrapeSuccess { id, .. } => {
+                let Some(item) = riven_db::repo::get_media_item(&self.db_pool, *id)
+                    .await
+                    .ok()
+                    .flatten()
+                else {
+                    return;
+                };
+                if item.is_requested {
+                    crate::orchestrator::LibraryOrchestrator::new(self)
+                        .queue_download_for_item(&item)
+                        .await;
+                }
+            }
+            RivenEvent::MediaItemScrapeErrorNoNewStreams { id, .. }
+            | RivenEvent::MediaItemDownloadPartialSuccess { id }
+            | RivenEvent::MediaItemDownloadError { id, .. } => {
+                crate::orchestrator::LibraryOrchestrator::new(self)
+                    .fan_out_download_failure(*id)
+                    .await;
+            }
+            _ => {}
+        }
     }
 
     /// Fetch the best non-blacklisted stream for `id` and push a DownloadJob.

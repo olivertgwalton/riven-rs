@@ -6,7 +6,6 @@ use riven_db::repo;
 use crate::context::{load_media_item_or_log, load_requested_seasons};
 use crate::flows::{run_plugin_hook, start_plugin_flow};
 use crate::indexing::apply_indexed_media_item;
-use crate::orchestrator::LibraryOrchestrator;
 use crate::{IndexJob, IndexPluginJob, JobQueue};
 
 fn index_event(job: &IndexJob) -> RivenEvent {
@@ -130,12 +129,6 @@ pub async fn finalize(id: i64, queue: &JobQueue) {
         return;
     }
 
-    let Some(fresh_item) =
-        load_media_item_or_log(&queue.db_pool, id, "re-fetch item after indexing").await
-    else {
-        return;
-    };
-
     let title = merged.title.clone().unwrap_or_else(|| item.title.clone());
     queue
         .notify(RivenEvent::MediaItemIndexSuccess {
@@ -145,8 +138,4 @@ pub async fn finalize(id: i64, queue: &JobQueue) {
         })
         .await;
     tracing::info!(id, "index flow completed");
-
-    LibraryOrchestrator::new(queue)
-        .enqueue_after_index(&fresh_item, requested_seasons.as_deref())
-        .await;
 }

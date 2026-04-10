@@ -8,8 +8,6 @@ use riven_db::repo;
 use crate::JobQueue;
 use crate::context::DownloadHierarchyContext;
 use crate::context::load_media_item_or_download_error;
-use crate::orchestrator::LibraryOrchestrator;
-
 /// Log a bitrate failure, blacklist the stream, and send a PartialSuccess event.
 pub async fn handle_bitrate_failure(
     id: i64,
@@ -32,9 +30,6 @@ pub async fn handle_bitrate_failure(
     }
     queue
         .notify(RivenEvent::MediaItemDownloadPartialSuccess { id })
-        .await;
-    LibraryOrchestrator::new(queue)
-        .fan_out_download_failure(id)
         .await;
 }
 

@@ -12,7 +12,6 @@ use super::helpers::{
 };
 use crate::JobQueue;
 use crate::orchestrator::LibraryOrchestrator;
-
 pub enum SeasonPersistOutcome {
     Failed,
     Partial,
@@ -107,9 +106,6 @@ pub async fn persist_movie(
         }
         queue
             .notify(RivenEvent::MediaItemDownloadPartialSuccess { id })
-            .await;
-        LibraryOrchestrator::new(queue)
-            .fan_out_download_failure(id)
             .await;
         return false;
     };
@@ -225,9 +221,6 @@ pub async fn persist_episode(
         }
         queue
             .notify(RivenEvent::MediaItemDownloadPartialSuccess { id })
-            .await;
-        LibraryOrchestrator::new(queue)
-            .fan_out_download_failure(id)
             .await;
         return false;
     }
@@ -435,9 +428,6 @@ pub async fn persist_season(
     if !season_complete {
         queue
             .notify(RivenEvent::MediaItemDownloadPartialSuccess { id })
-            .await;
-        LibraryOrchestrator::new(queue)
-            .fan_out_download_failure(id)
             .await;
         return SeasonPersistOutcome::Partial;
     }

@@ -12,7 +12,6 @@ use crate::context::{
 };
 use crate::discovery::rank_streams;
 use crate::flows::{run_plugin_hook, start_plugin_flow};
-use crate::orchestrator::LibraryOrchestrator;
 use crate::{JobQueue, ParseScrapeResultsJob, ScrapeJob, ScrapePluginJob};
 
 fn scrape_event(job: &ScrapeJob) -> RivenEvent {
@@ -131,9 +130,6 @@ pub async fn finalize(id: i64, requested_title: &str, auto_download: bool, queue
             })
             .await;
         retry_existing_download_if_scraped(&item, auto_download, queue).await;
-        LibraryOrchestrator::new(queue)
-            .fan_out_download_failure(id)
-            .await;
         return;
     }
 
@@ -240,9 +236,6 @@ pub async fn parse_results(id: i64, job: &ParseScrapeResultsJob, queue: &JobQueu
             })
             .await;
         retry_existing_download_if_scraped(&item, job.auto_download, queue).await;
-        LibraryOrchestrator::new(queue)
-            .fan_out_download_failure(id)
-            .await;
     } else {
         let _ = repo::reset_failed_attempts(&queue.db_pool, id).await;
         queue
@@ -253,9 +246,6 @@ pub async fn parse_results(id: i64, job: &ParseScrapeResultsJob, queue: &JobQueu
                 stream_count,
             })
             .await;
-        if job.auto_download {
-            queue.push_download_from_best_stream(id).await;
-        }
     }
 }
 

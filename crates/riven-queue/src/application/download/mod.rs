@@ -69,9 +69,6 @@ pub async fn run(id: i64, job: &DownloadJob, queue: &JobQueue) {
                 error: "no streams available for download".into(),
             })
             .await;
-        LibraryOrchestrator::new(queue)
-            .fan_out_download_failure(id)
-            .await;
         return;
     }
 
@@ -271,8 +268,12 @@ async fn run_multi_version(
 
     if !any_success {
         tracing::debug!(id, title = %item.title, "no valid torrent found after trying cached candidates");
-        LibraryOrchestrator::new(queue)
-            .fan_out_download_failure(id)
+        queue
+            .notify(RivenEvent::MediaItemDownloadError {
+                id,
+                title: item.title.clone(),
+                error: "no valid torrent found after trying cached candidates".into(),
+            })
             .await;
         return false;
     }
@@ -280,8 +281,8 @@ async fn run_multi_version(
     let done = fetch_done_profiles(queue, id, item.item_type).await;
     if !version_profiles.iter().all(|(name, _)| done.contains(name)) {
         tracing::debug!(id, "some profile versions still missing — re-queuing");
-        LibraryOrchestrator::new(queue)
-            .fan_out_download_failure(id)
+        queue
+            .notify(RivenEvent::MediaItemDownloadPartialSuccess { id })
             .await;
     }
 
@@ -299,8 +300,12 @@ async fn run_single_version(
 ) -> bool {
     if candidates.is_empty() {
         tracing::debug!(id, "no cached+valid streams found in this pass");
-        LibraryOrchestrator::new(queue)
-            .fan_out_download_failure(id)
+        queue
+            .notify(RivenEvent::MediaItemDownloadError {
+                id,
+                title: item.title.clone(),
+                error: "no cached and valid streams found in this pass".into(),
+            })
             .await;
         return false;
     }
@@ -328,8 +333,12 @@ async fn run_single_version(
     }
 
     tracing::debug!(id, title = %item.title, "no valid torrent found after trying cached candidates");
-    LibraryOrchestrator::new(queue)
-        .fan_out_download_failure(id)
+    queue
+        .notify(RivenEvent::MediaItemDownloadError {
+            id,
+            title: item.title.clone(),
+            error: "no valid torrent found after trying cached candidates".into(),
+        })
         .await;
     false
 }
