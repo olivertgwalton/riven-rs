@@ -267,6 +267,48 @@ async fn run_multi_version(
     }
 
     if !any_success {
+        if downloaded_profiles.is_empty() && item.item_type == MediaItemType::Episode {
+            let profile_names = version_profiles
+                .iter()
+                .map(|(name, _)| name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            tracing::debug!(
+                id,
+                title = %item.title,
+                profiles = %profile_names,
+                "all cached candidates rejected by ranking profile; marking episode failed"
+            );
+            if let Err(error) =
+                repo::update_media_item_state(&queue.db_pool, id, MediaItemState::Failed).await
+            {
+                tracing::error!(id, error = %error, "failed to mark episode failed after profile rejection");
+            } else {
+                LibraryOrchestrator::new(queue)
+                    .sync_item_request_state(item)
+                    .await;
+            }
+            queue
+                .notify(RivenEvent::MediaItemDownloadError {
+                    id,
+                    title: item.title.clone(),
+                    error: format!(
+                        "all cached candidates were rejected by ranking profile(s): {profile_names}"
+                    ),
+                })
+                .await;
+            return false;
+        }
+
+        if downloaded_profiles.is_empty() {
+            tracing::debug!(
+                id,
+                title = %item.title,
+                "no profile-qualified cached stream found; falling back to single-version selection"
+            );
+            return run_single_version(id, item, queue, start_time, candidates, hierarchy).await;
+        }
+
         tracing::debug!(id, title = %item.title, "no valid torrent found after trying cached candidates");
         queue
             .notify(RivenEvent::MediaItemDownloadError {
