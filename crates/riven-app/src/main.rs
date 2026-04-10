@@ -23,6 +23,11 @@ fn build_http_client() -> Result<reqwest::Client> {
         .timeout(Duration::from_secs(
             riven_core::config::vfs::ACTIVITY_TIMEOUT_SECS,
         ))
+        .pool_idle_timeout(Duration::from_secs(90))
+        .pool_max_idle_per_host(16)
+        .tcp_keepalive(Duration::from_secs(30))
+        .tcp_nodelay(true)
+        .http1_only()
         .user_agent("Mozilla/5.0 (compatible; riven/1.0)")
         .connection_verbose(false)
         .build()?)
