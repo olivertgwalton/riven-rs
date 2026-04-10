@@ -50,7 +50,8 @@ pub async fn add_torrent(
     api_key: &str,
     magnet: &str,
 ) -> Result<StremthruTorrent, AddTorrentError> {
-    let url = format!("{base_url}v0/store/magnets");
+    let url = format!("{base_url}v0/store/torz");
+    tracing::debug!(store, url = %url, "adding torrent via stremthru torz endpoint");
     let response = client
         .post(&url)
         .header("x-stremthru-store-name", store)
@@ -58,7 +59,7 @@ pub async fn add_torrent(
             "x-stremthru-store-authorization",
             format!("Bearer {api_key}"),
         )
-        .json(&serde_json::json!({ "magnet": magnet.to_lowercase() }))
+        .json(&serde_json::json!({ "link": magnet.to_lowercase() }))
         .send()
         .await
         .map_err(|e| AddTorrentError::Other(e.into()))?;
@@ -143,7 +144,8 @@ pub async fn remove_torrent(
     api_key: &str,
     id: &str,
 ) -> anyhow::Result<()> {
-    let url = format!("{base_url}v0/store/magnets/{id}");
+    let url = format!("{base_url}v0/store/torz/{id}");
+    tracing::debug!(store, url = %url, torrent_id = id, "removing torrent via stremthru torz endpoint");
     let response = client
         .delete(&url)
         .header("x-stremthru-store-name", store)
@@ -210,7 +212,7 @@ pub async fn check_cache(
         return Ok(cached_results);
     }
 
-    let magnet_str = missing_queries
+    let hash_str = missing_queries
         .iter()
         .map(|query| query.hash.as_str())
         .collect::<Vec<_>>()
@@ -219,17 +221,18 @@ pub async fn check_cache(
         store,
         hashes = missing_queries.len(),
         cached = cached_results.len(),
-        "checking debrid cache"
+        "checking debrid cache via stremthru torz endpoint"
     );
 
+    let url = format!("{base_url}v0/store/torz/check?hash={hash_str}");
+    tracing::debug!(store, url = %url, "requesting stremthru torz cache check");
     let response = client
-        .get(format!("{base_url}v0/store/magnets/check"))
+        .get(&url)
         .header("x-stremthru-store-name", store)
         .header(
             "x-stremthru-store-authorization",
             format!("Bearer {api_key}"),
         )
-        .query(&[("magnet", magnet_str)])
         .send()
         .await?;
 
@@ -300,7 +303,8 @@ pub async fn generate_link(
     api_key: &str,
     magnet: &str,
 ) -> anyhow::Result<String> {
-    let url = format!("{base_url}v0/store/link/generate");
+    let url = format!("{base_url}v0/store/torz/link/generate");
+    tracing::debug!(store, url = %url, "generating stremthru torz link");
     let response = client
         .post(&url)
         .header("x-stremthru-store-name", store)
