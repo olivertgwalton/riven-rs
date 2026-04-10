@@ -140,7 +140,7 @@ async fn collect_cached_info(
             for result in results {
                 if matches!(
                     result.status,
-                    TorrentStatus::Cached | TorrentStatus::Downloaded
+                    TorrentStatus::Cached
                 ) {
                     cached_info.insert(result.hash.to_lowercase(), result.files);
                 }

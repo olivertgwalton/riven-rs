@@ -2,7 +2,7 @@ use std::time::Instant;
 
 use riven_core::events::{HookResponse, RivenEvent};
 use riven_core::types::{DownloadResult, MediaItemType};
-use riven_db::entities::{MediaItem, Stream};
+use riven_db::{entities::{MediaItem, Stream}, repo};
 
 use crate::JobQueue;
 use crate::context::DownloadHierarchyContext;
@@ -54,6 +54,7 @@ pub async fn attempt_download(
 
     let results = queue.registry.dispatch(&event).await;
     let mut download_result: Option<Box<DownloadResult>> = None;
+    let mut saw_unavailable = false;
 
     for (plugin_name, result) in results {
         match result {
@@ -68,6 +69,7 @@ pub async fn attempt_download(
                 break;
             }
             Ok(HookResponse::DownloadStreamUnavailable) => {
+                saw_unavailable = true;
                 tracing::debug!(
                     plugin = plugin_name,
                     info_hash,
@@ -88,6 +90,18 @@ pub async fn attempt_download(
     }
 
     let Some(download) = download_result else {
+        if saw_unavailable {
+            if let Err(error) = repo::blacklist_stream_by_hash(&queue.db_pool, id, info_hash).await {
+                tracing::error!(
+                    id,
+                    info_hash,
+                    error = %error,
+                    "failed to blacklist stale cached stream"
+                );
+            } else {
+                tracing::debug!(id, info_hash, "blacklisted stale cached stream after provider rejection");
+            }
+        }
         tracing::debug!(id, info_hash, "no download provider accepted cached stream");
         return DownloadAttemptOutcome::Failed;
     };

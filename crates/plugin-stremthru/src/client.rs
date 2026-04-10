@@ -476,9 +476,6 @@ pub fn download_result_from_torrent(
 pub fn has_cached_hash(results: &[CacheCheckResult], info_hash: &str) -> bool {
     results.iter().any(|result| {
         result.hash.eq_ignore_ascii_case(info_hash)
-            && matches!(
-                result.status,
-                TorrentStatus::Cached | TorrentStatus::Downloaded
-            )
+            && matches!(result.status, TorrentStatus::Cached)
     })
 }
