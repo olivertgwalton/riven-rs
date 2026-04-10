@@ -75,6 +75,23 @@ pub struct StremthruCacheFile {
 }
 
 #[derive(Deserialize)]
+pub struct StremthruMagnet {
+    pub status: String,
+    #[serde(default)]
+    pub files: Vec<StremthruMagnetFile>,
+}
+
+#[derive(Deserialize)]
+pub struct StremthruMagnetFile {
+    #[serde(default)]
+    pub index: i32,
+    pub name: String,
+    pub size: u64,
+    #[serde(default)]
+    pub link: String,
+}
+
+#[derive(Deserialize)]
 pub struct StremthruLink {
     pub link: String,
 }

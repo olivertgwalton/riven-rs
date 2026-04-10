@@ -2,10 +2,12 @@ use redis::AsyncCommands;
 
 use riven_core::types::{
     CacheCheckFile, CacheCheckQuery, CacheCheckResult, DownloadFile, DownloadResult, TorrentStatus,
+    build_magnet_uri,
 };
 
 use crate::models::{
-    StremthruCacheCheck, StremthruLink, StremthruResponse, StremthruUser, parse_torrent_status,
+    StremthruCacheCheck, StremthruLink, StremthruMagnet, StremthruResponse, StremthruUser,
+    parse_torrent_status,
 };
 
 pub const CACHE_CHECK_TTL_SECS: u64 = 60 * 60 * 24;
@@ -96,9 +98,9 @@ pub async fn check_cache(
     Ok(cached_results)
 }
 
-/// Performs a live cache check for a single hash, bypassing Redis.
-/// Returns the cached result with file links populated when the torrent is cached.
-/// Links are intentionally not persisted to Redis as they expire quickly.
+/// Adds a magnet to the store and returns the cached result with file links.
+/// Unlike the cache-check endpoint, the magnets endpoint returns per-file download
+/// links for cached torrents. Returns `None` if the torrent is not in a ready state.
 pub async fn check_cache_live(
     client: &reqwest::Client,
     base_url: &str,
@@ -107,8 +109,57 @@ pub async fn check_cache_live(
     hash: &str,
 ) -> anyhow::Result<Option<CacheCheckResult>> {
     let hash = hash.to_lowercase();
-    let results = fetch_cache_check(client, base_url, store, api_key, &hash).await?;
-    Ok(results.into_iter().find(|r| r.status == TorrentStatus::Cached))
+    let magnet = build_magnet_uri(&hash);
+    let url = format!("{base_url}v0/store/magnets");
+    tracing::debug!(store, url = %url, "adding magnet via stremthru magnets endpoint");
+
+    let response = riven_core::http::send(|| {
+        client
+            .post(&url)
+            .header("x-stremthru-store-name", store)
+            .header(
+                "x-stremthru-store-authorization",
+                format!("Bearer {api_key}"),
+            )
+            .json(&serde_json::json!({ "magnet": magnet }))
+    })
+    .await?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        anyhow::bail!("store magnets request rejected: HTTP {} - {}", status, body);
+    }
+
+    let text = response.text().await?;
+    let resp: StremthruResponse<StremthruMagnet> = serde_json::from_str(&text)
+        .map_err(|e| anyhow::anyhow!("invalid magnets response: {e}; body={text}"))?;
+
+    let Some(data) = resp.data else {
+        return Ok(None);
+    };
+
+    if !matches!(data.status.as_str(), "cached" | "downloaded") {
+        tracing::debug!(store, hash, status = %data.status, "magnet not in ready state; skipping");
+        return Ok(None);
+    }
+
+    let files = data
+        .files
+        .into_iter()
+        .map(|f| CacheCheckFile {
+            index: f.index.max(0) as u32,
+            name: f.name,
+            size: f.size,
+            link: if f.link.is_empty() { None } else { Some(f.link) },
+        })
+        .collect();
+
+    Ok(Some(CacheCheckResult {
+        hash,
+        status: TorrentStatus::Cached,
+        files,
+    }))
 }
 
 async fn fetch_cache_check(

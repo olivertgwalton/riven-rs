@@ -356,8 +356,8 @@ pub async fn create_media_entry(
          DO UPDATE SET \
              file_size             = EXCLUDED.file_size, \
              original_filename     = EXCLUDED.original_filename, \
-             download_url          = EXCLUDED.download_url, \
-             stream_url            = EXCLUDED.stream_url, \
+             download_url          = COALESCE(EXCLUDED.download_url, filesystem_entries.download_url), \
+             stream_url            = COALESCE(EXCLUDED.stream_url, filesystem_entries.stream_url), \
              plugin                = EXCLUDED.plugin, \
              provider              = EXCLUDED.provider, \
              media_metadata        = EXCLUDED.media_metadata, \
