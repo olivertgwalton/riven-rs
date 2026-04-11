@@ -1,5 +1,5 @@
 use redis::AsyncCommands;
-use reqwest::{RequestBuilder, Version, header};
+use reqwest::{RequestBuilder, header};
 
 use riven_core::types::{
     CacheCheckFile, CacheCheckResult, DownloadFile, DownloadResult, build_magnet_uri,
@@ -18,7 +18,6 @@ fn file_name_or_path(name: String, path: String) -> String {
 
 fn stremthru_request(builder: RequestBuilder, store: &str, api_key: &str) -> RequestBuilder {
     builder
-        .version(Version::HTTP_2)
         .header(header::ACCEPT, "application/json")
         .header("x-stremthru-store-name", store)
         .header(
