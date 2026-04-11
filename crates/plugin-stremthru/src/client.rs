@@ -78,8 +78,13 @@ pub async fn check_cache(
         "checking debrid cache via stremthru torz endpoint"
     );
 
-    let fetched_results =
-        fetch_cache_check(client, base_url, store, api_key, &missing_hashes).await?;
+    let mut fetched_results = Vec::new();
+    for hash in &missing_hashes {
+        tracing::debug!(store, hash, "requesting stremthru cache-check");
+        fetched_results.extend(
+            fetch_cache_check(client, base_url, store, api_key, std::slice::from_ref(hash)).await?,
+        );
+    }
 
     for result in &fetched_results {
         match serde_json::to_string(result) {
