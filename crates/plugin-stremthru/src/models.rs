@@ -36,8 +36,9 @@ pub struct StremthruCacheItem {
 
 #[derive(Deserialize)]
 pub struct StremthruCacheFile {
-    pub index: i32,
     pub name: String,
+    #[serde(default)]
+    pub path: String,
     pub size: u64,
     #[serde(default)]
     pub link: String,
@@ -53,9 +54,9 @@ pub struct StremthruTorz {
 
 #[derive(Deserialize)]
 pub struct StremthruTorzFile {
-    #[serde(default)]
-    pub index: i32,
     pub name: String,
+    #[serde(default)]
+    pub path: String,
     pub size: u64,
     #[serde(default)]
     pub link: String,

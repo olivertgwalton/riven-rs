@@ -1,8 +1,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::types::{
-    ActivePlaybackSession, CacheCheckQuery, CacheCheckResult, ContentServiceResponse,
-    DebridUserInfo, DownloadResult, IndexedMediaItem, MediaItemType, ProviderInfo, ScrapeResponse,
+    ActivePlaybackSession, CacheCheckResult, ContentServiceResponse, DebridUserInfo,
+    DownloadResult, IndexedMediaItem, MediaItemType, ProviderInfo, ScrapeResponse,
     StreamLinkResponse,
 };
 
@@ -228,7 +228,7 @@ pub enum RivenEvent {
         magnet: String,
     },
     #[serde(rename = "riven.media-item.download.cache-check-requested")]
-    MediaItemDownloadCacheCheckRequested { queries: Vec<CacheCheckQuery> },
+    MediaItemDownloadCacheCheckRequested { hashes: Vec<String> },
     #[serde(rename = "riven.media-item.download.error")]
     MediaItemDownloadError {
         id: i64,

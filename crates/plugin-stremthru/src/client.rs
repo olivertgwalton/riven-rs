@@ -1,8 +1,7 @@
 use redis::AsyncCommands;
 
 use riven_core::types::{
-    CacheCheckFile, CacheCheckQuery, CacheCheckResult, DownloadFile, DownloadResult, TorrentStatus,
-    build_magnet_uri,
+    CacheCheckFile, CacheCheckResult, DownloadFile, DownloadResult, build_magnet_uri,
 };
 
 use crate::models::{
@@ -12,33 +11,32 @@ use crate::models::{
 
 pub const CACHE_CHECK_TTL_SECS: u64 = 60 * 60 * 24;
 
+fn file_name_or_path(name: String, path: String) -> String {
+    if path.is_empty() { name } else { path }
+}
+
 pub async fn check_cache(
     client: &reqwest::Client,
     redis: &redis::aio::ConnectionManager,
     base_url: &str,
     store: &str,
     api_key: &str,
-    queries: &[CacheCheckQuery],
+    hashes: &[String],
 ) -> anyhow::Result<Vec<CacheCheckResult>> {
-    if queries.is_empty() {
+    if hashes.is_empty() {
         return Ok(Vec::new());
     }
 
-    let mut normalized_queries: Vec<CacheCheckQuery> = queries
-        .iter()
-        .map(|query| CacheCheckQuery {
-            hash: query.hash.to_lowercase(),
-            magnet: query.magnet.clone(),
-        })
-        .collect();
-    normalized_queries.sort_unstable_by(|a, b| a.hash.cmp(&b.hash));
+    let mut normalized_hashes: Vec<String> =
+        hashes.iter().map(|hash| hash.to_lowercase()).collect();
+    normalized_hashes.sort_unstable();
 
     let mut conn = redis.clone();
-    let mut cached_results = Vec::with_capacity(normalized_queries.len());
-    let mut missing_queries = Vec::new();
+    let mut cached_results = Vec::with_capacity(normalized_hashes.len());
+    let mut missing_hashes = Vec::new();
 
-    for query in &normalized_queries {
-        let cache_key = cache_check_key(store, &query.hash);
+    for hash in &normalized_hashes {
+        let cache_key = cache_check_key(store, hash);
         let cached: Option<String> = AsyncCommands::get(&mut conn, &cache_key).await.ok();
         match cached {
             Some(payload) => match serde_json::from_str::<CacheCheckResult>(&payload) {
@@ -46,29 +44,29 @@ pub async fn check_cache(
                 Err(error) => {
                     tracing::warn!(
                         store,
-                        hash = query.hash,
+                        hash,
                         error = %error,
                         "invalid cached stremthru cache-check payload"
                     );
-                    missing_queries.push(query.clone());
+                    missing_hashes.push(hash.clone());
                 }
             },
-            None => missing_queries.push(query.clone()),
+            None => missing_hashes.push(hash.clone()),
         }
     }
 
-    if missing_queries.is_empty() {
+    if missing_hashes.is_empty() {
         return Ok(cached_results);
     }
 
-    let hash_str = missing_queries
+    let hash_str = missing_hashes
         .iter()
-        .map(|query| query.hash.as_str())
+        .map(String::as_str)
         .collect::<Vec<_>>()
         .join(",");
     tracing::debug!(
         store,
-        hashes = missing_queries.len(),
+        hashes = missing_hashes.len(),
         cached = cached_results.len(),
         "checking debrid cache via stremthru torz endpoint"
     );
@@ -98,16 +96,16 @@ pub async fn check_cache(
     Ok(cached_results)
 }
 
-/// Adds a torrent to the store and returns the downloaded result with file links.
-/// Mirrors the TypeScript plugin's torz flow: a newly-added torrent must report
-/// `downloaded` immediately or it is removed and treated as unavailable.
-pub async fn check_cache_live(
+/// Adds a torrent to the store and returns the downloaded torz payload with file links.
+/// The torrent must report `downloaded` immediately or it is removed and treated as
+/// unavailable for this attempt.
+pub async fn add_torrent(
     client: &reqwest::Client,
     base_url: &str,
     store: &str,
     api_key: &str,
     hash: &str,
-) -> anyhow::Result<Option<CacheCheckResult>> {
+) -> anyhow::Result<Option<StremthruTorz>> {
     let hash = hash.to_lowercase();
     let magnet = build_magnet_uri(&hash);
     let url = format!("{base_url}v0/store/torz");
@@ -154,26 +152,7 @@ pub async fn check_cache_live(
         return Ok(None);
     }
 
-    let files = data
-        .files
-        .into_iter()
-        .map(|f| CacheCheckFile {
-            index: f.index.max(0) as u32,
-            name: f.name,
-            size: f.size,
-            link: if f.link.is_empty() {
-                None
-            } else {
-                Some(f.link)
-            },
-        })
-        .collect();
-
-    Ok(Some(CacheCheckResult {
-        hash,
-        status: TorrentStatus::Cached,
-        files,
-    }))
+    Ok(Some(data))
 }
 
 async fn fetch_cache_check(
@@ -220,8 +199,8 @@ async fn fetch_cache_check(
                 .files
                 .into_iter()
                 .map(|f| CacheCheckFile {
-                    index: f.index.max(0) as u32,
-                    name: f.name,
+                    index: 0,
+                    name: file_name_or_path(f.name, f.path),
                     size: f.size,
                     link: if f.link.is_empty() {
                         None
@@ -271,21 +250,26 @@ fn cache_check_key(store: &str, hash: &str) -> String {
     format!("plugin:stremthru:cache-check:{store}:{hash}")
 }
 
-pub fn download_result_from_cache_check(
+pub fn download_result_from_torz(
     store: &str,
     info_hash: &str,
-    result: CacheCheckResult,
+    torz: StremthruTorz,
 ) -> DownloadResult {
-    let files = result
+    let files = torz
         .files
         .into_iter()
         .map(|f| DownloadFile {
-            filename: f.name,
+            filename: file_name_or_path(f.name, f.path),
             file_size: f.size,
-            download_url: f.link,
+            download_url: if f.link.is_empty() {
+                None
+            } else {
+                Some(f.link)
+            },
             stream_url: None,
         })
         .collect();
+
     DownloadResult {
         info_hash: info_hash.to_string(),
         files,

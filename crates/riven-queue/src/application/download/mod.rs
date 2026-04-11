@@ -123,22 +123,23 @@ async fn collect_cached_info(
     queue: &JobQueue,
     streams: &[Stream],
 ) -> HashMap<String, Vec<CacheCheckFile>> {
-    let query_map: HashMap<String, String> = streams
+    let hashes: Vec<String> = streams
         .iter()
-        .map(|stream| (stream.info_hash.clone(), stream.magnet.clone()))
-        .collect();
-    let queries = query_map
+        .map(|stream| stream.info_hash.clone())
+        .collect::<HashSet<_>>()
         .into_iter()
-        .map(|(hash, magnet)| CacheCheckQuery { hash, magnet })
         .collect();
-    let cache_event = RivenEvent::MediaItemDownloadCacheCheckRequested { queries };
+    let cache_event = RivenEvent::MediaItemDownloadCacheCheckRequested { hashes };
     let cache_results = queue.registry.dispatch(&cache_event).await;
 
     let mut cached_info: HashMap<String, Vec<CacheCheckFile>> = HashMap::new();
     for (_, result) in cache_results {
         if let Ok(HookResponse::CacheCheck(results)) = result {
             for result in results {
-                if matches!(result.status, TorrentStatus::Cached) {
+                if matches!(
+                    result.status,
+                    TorrentStatus::Cached | TorrentStatus::Downloaded
+                ) {
                     cached_info.insert(result.hash.to_lowercase(), result.files);
                 }
             }

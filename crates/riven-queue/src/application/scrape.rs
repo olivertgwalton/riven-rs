@@ -190,7 +190,7 @@ pub async fn parse_results(id: i64, job: &ParseScrapeResultsJob, queue: &JobQueu
                 let stream = match repo::upsert_stream(
                     &pool,
                     &candidate.info_hash,
-                    &candidate.magnet,
+                    &build_magnet_uri(&candidate.info_hash),
                     candidate.parsed_data,
                     candidate.rank,
                 )

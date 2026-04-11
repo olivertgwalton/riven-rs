@@ -244,8 +244,8 @@ pub async fn discover_streams(
                 candidate.info_hash.to_lowercase()
             ),
             title: candidate.title,
+            magnet: build_magnet_uri(&candidate.info_hash),
             info_hash: candidate.info_hash,
-            magnet: candidate.magnet,
             parsed_data: candidate.parsed_data,
             rank: candidate.rank,
             file_size_bytes: None,
@@ -276,17 +276,15 @@ async fn apply_cache_status(registry: &PluginRegistry, streams: &mut [Discovered
         return;
     }
 
-    let query_map: HashMap<String, String> = streams
+    let hashes: Vec<String> = streams
         .iter()
-        .map(|stream| (stream.info_hash.to_lowercase(), stream.magnet.clone()))
-        .collect();
-    let queries: Vec<CacheCheckQuery> = query_map
+        .map(|stream| stream.info_hash.to_lowercase())
+        .collect::<HashSet<_>>()
         .into_iter()
-        .map(|(hash, magnet)| CacheCheckQuery { hash, magnet })
         .collect();
 
     let results = registry
-        .dispatch(&RivenEvent::MediaItemDownloadCacheCheckRequested { queries })
+        .dispatch(&RivenEvent::MediaItemDownloadCacheCheckRequested { hashes })
         .await;
 
     let mut cached_hashes = HashSet::new();

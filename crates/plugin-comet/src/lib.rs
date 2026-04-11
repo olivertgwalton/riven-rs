@@ -117,13 +117,7 @@ impl Plugin for CometPlugin {
 
             if !title.is_empty() {
                 let info_hash = info_hash.to_lowercase();
-                results.insert(
-                    info_hash.clone(),
-                    ScrapeStream {
-                        title,
-                        magnet: build_magnet_uri(&info_hash),
-                    },
-                );
+                results.insert(info_hash, title);
             }
         }
 

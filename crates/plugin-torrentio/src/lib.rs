@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use riven_core::events::{EventType, HookResponse, RivenEvent};
 use riven_core::plugin::{Plugin, PluginContext};
 use riven_core::register_plugin;
-use riven_core::types::*;
+use riven_core::types::MediaItemType;
 
 const TORRENTIO_BASE_URL: &str = "http://torrentio.strem.fun/";
 const DEFAULT_FILTER: &str = "sort=qualitysize%7Cqualityfilter=threed,480p,scr,cam";
@@ -101,13 +101,7 @@ impl Plugin for TorrentioPlugin {
 
                 if !title.is_empty() {
                     let info_hash = info_hash.to_lowercase();
-                    results.insert(
-                        info_hash.clone(),
-                        ScrapeStream {
-                            title,
-                            magnet: build_magnet_uri(&info_hash),
-                        },
-                    );
+                    results.insert(info_hash, title);
                 }
             }
         }

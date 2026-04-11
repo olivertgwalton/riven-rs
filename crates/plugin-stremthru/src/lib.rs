@@ -2,16 +2,19 @@ mod client;
 mod models;
 
 use async_trait::async_trait;
+use redis::AsyncCommands;
 use riven_core::events::{EventType, HookResponse, RivenEvent};
 use riven_core::plugin::{Plugin, PluginContext};
 use riven_core::register_plugin;
 use riven_core::settings::PluginSettings;
 use riven_core::types::*;
+use std::collections::HashMap;
 
 use crate::client::{
-    check_cache, check_cache_live, download_result_from_cache_check, fetch_user_info, generate_link,
+    add_torrent, check_cache, download_result_from_torz, fetch_user_info, generate_link,
 };
 const DEFAULT_URL: &str = "https://stremthru.13377001.xyz/";
+const STORE_SCORE_TTL_SECS: u64 = 60 * 60 * 24 * 7;
 
 const STORE_NAMES: &[&str] = &[
     "realdebrid",
@@ -40,6 +43,43 @@ fn get_configured_stores(settings: &PluginSettings) -> Vec<(&str, String)> {
                 .map(|api_key| (*name, api_key.to_string()))
         })
         .collect()
+}
+
+fn store_score_key(store: &str) -> String {
+    format!("plugin:stremthru:store-score:{store}")
+}
+
+async fn get_store_scores(
+    redis: &redis::aio::ConnectionManager,
+    stores: &[(&str, String)],
+) -> HashMap<String, i64> {
+    let mut conn = redis.clone();
+    let mut scores = HashMap::with_capacity(stores.len());
+
+    for (store, _) in stores {
+        let score = AsyncCommands::get::<_, Option<i64>>(&mut conn, store_score_key(store))
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        scores.insert((*store).to_string(), score);
+    }
+
+    scores
+}
+
+async fn adjust_store_score(redis: &redis::aio::ConnectionManager, store: &str, delta: i64) {
+    let key = store_score_key(store);
+    let mut conn = redis.clone();
+    let next = redis::cmd("INCRBY")
+        .arg(&key)
+        .arg(delta)
+        .query_async::<i64>(&mut conn)
+        .await;
+    if next.is_ok() {
+        let _: Result<(), _> =
+            AsyncCommands::expire(&mut conn, key, STORE_SCORE_TTL_SECS as i64).await;
+    }
 }
 
 #[async_trait]
@@ -91,28 +131,42 @@ impl Plugin for StremthruPlugin {
         match event {
             RivenEvent::MediaItemDownloadRequested { info_hash, .. } => {
                 let mut any_network_error = false;
+                let hashes = vec![info_hash.to_lowercase()];
+                let score_map = get_store_scores(&ctx.redis, &stores).await;
+                let cache_checks =
+                    futures::future::join_all(stores.iter().map(|(store, api_key)| async {
+                        let result = check_cache(
+                            &ctx.http_client,
+                            &ctx.redis,
+                            &base_url,
+                            store,
+                            api_key,
+                            &hashes,
+                        )
+                        .await;
+                        (*store, api_key.as_str(), result)
+                    }))
+                    .await;
 
-                for (store, api_key) in &stores {
-                    match check_cache_live(&ctx.http_client, &base_url, store, api_key, info_hash)
-                        .await
-                    {
-                        Ok(Some(result)) => {
-                            tracing::debug!(
-                                store,
-                                info_hash,
-                                files = result.files.len(),
-                                "torrent cached; building download result from check"
-                            );
-                            let download =
-                                download_result_from_cache_check(store, info_hash, result);
-                            return Ok(HookResponse::Download(Box::new(download)));
-                        }
-                        Ok(None) => {
-                            tracing::debug!(
-                                store,
-                                info_hash,
-                                "torrent not cached in store; skipping"
-                            );
+                let mut cached_stores = Vec::new();
+                for (store, api_key, result) in cache_checks {
+                    match result {
+                        Ok(results) => {
+                            if let Some(cache_result) = results.into_iter().find(|result| {
+                                result.hash.eq_ignore_ascii_case(info_hash)
+                                    && matches!(
+                                        result.status,
+                                        TorrentStatus::Cached | TorrentStatus::Downloaded
+                                    )
+                            }) {
+                                cached_stores.push((store, api_key, cache_result));
+                            } else {
+                                tracing::debug!(
+                                    store,
+                                    info_hash,
+                                    "torrent not cached in store; skipping"
+                                );
+                            }
                         }
                         Err(error) => {
                             let is_network = error
@@ -127,12 +181,58 @@ impl Plugin for StremthruPlugin {
                     }
                 }
 
+                cached_stores.sort_by(|(store_a, _, result_a), (store_b, _, result_b)| {
+                    let score_a = score_map.get(*store_a).copied().unwrap_or_default();
+                    let score_b = score_map.get(*store_b).copied().unwrap_or_default();
+                    score_b
+                        .cmp(&score_a)
+                        .then_with(|| result_b.files.len().cmp(&result_a.files.len()))
+                        .then_with(|| store_a.cmp(store_b))
+                });
+
+                for (store, api_key, cache_result) in cached_stores {
+                    match add_torrent(&ctx.http_client, &base_url, store, api_key, info_hash).await
+                    {
+                        Ok(Some(torz)) => {
+                            adjust_store_score(&ctx.redis, store, 5).await;
+                            tracing::debug!(
+                                store,
+                                info_hash,
+                                files = torz.files.len(),
+                                "torrent cached; building download result from torz add"
+                            );
+                            let download = download_result_from_torz(store, info_hash, torz);
+                            return Ok(HookResponse::Download(Box::new(download)));
+                        }
+                        Ok(None) => {
+                            adjust_store_score(&ctx.redis, store, -2).await;
+                            tracing::debug!(
+                                store,
+                                info_hash,
+                                files = cache_result.files.len(),
+                                "store passed cache check but torz add returned unavailable"
+                            );
+                        }
+                        Err(error) => {
+                            adjust_store_score(&ctx.redis, store, -1).await;
+                            let is_network = error
+                                .downcast_ref::<reqwest::Error>()
+                                .map(|e| e.is_connect() || e.is_timeout() || e.is_request())
+                                .unwrap_or(false);
+                            if is_network {
+                                any_network_error = true;
+                            }
+                            tracing::warn!(store, error = %error, "stremthru add torrent failed");
+                        }
+                    }
+                }
+
                 if any_network_error {
                     anyhow::bail!("network error contacting store");
                 }
                 Ok(HookResponse::DownloadStreamUnavailable)
             }
-            RivenEvent::MediaItemDownloadCacheCheckRequested { queries } => {
+            RivenEvent::MediaItemDownloadCacheCheckRequested { hashes } => {
                 let mut futures = Vec::new();
                 for (store, api_key) in &stores {
                     futures.push(check_cache(
@@ -141,7 +241,7 @@ impl Plugin for StremthruPlugin {
                         &base_url,
                         store,
                         api_key,
-                        queries,
+                        hashes,
                     ));
                 }
 
@@ -168,21 +268,27 @@ impl Plugin for StremthruPlugin {
                 Ok(HookResponse::ProviderList(providers))
             }
             RivenEvent::MediaItemStreamLinkRequested { magnet, .. } => {
-                let results =
-                    futures::future::join_all(stores.iter().map(|(store, api_key)| async {
-                        let result =
-                            generate_link(&ctx.http_client, &base_url, store, api_key, magnet)
-                                .await;
-                        (*store, result)
-                    }))
-                    .await;
+                let score_map = get_store_scores(&ctx.redis, &stores).await;
+                let mut ordered_stores: Vec<(&str, &str)> = stores
+                    .iter()
+                    .map(|(store, api_key)| (*store, api_key.as_str()))
+                    .collect();
+                ordered_stores.sort_by(|(store_a, _), (store_b, _)| {
+                    let score_a = score_map.get(*store_a).copied().unwrap_or_default();
+                    let score_b = score_map.get(*store_b).copied().unwrap_or_default();
+                    score_b.cmp(&score_a).then_with(|| store_a.cmp(store_b))
+                });
 
-                for (store, result) in results {
+                for (store, api_key) in ordered_stores {
+                    let result =
+                        generate_link(&ctx.http_client, &base_url, store, api_key, magnet).await;
                     match result {
                         Ok(link) => {
+                            adjust_store_score(&ctx.redis, store, 1).await;
                             return Ok(HookResponse::StreamLink(StreamLinkResponse { link }));
                         }
                         Err(error) => {
+                            adjust_store_score(&ctx.redis, store, -1).await;
                             tracing::warn!(store, error = %error, "generate link failed");
                         }
                     }
