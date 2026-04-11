@@ -207,6 +207,8 @@ pub struct CacheCheckResult {
 pub struct CacheCheckFile {
     pub index: u32,
     pub name: String,
+    #[serde(default)]
+    pub path: String,
     pub size: u64,
     /// Direct download link for this file, populated from a live cache-check
     /// response when `status == Cached`.  Intentionally not serialized so that

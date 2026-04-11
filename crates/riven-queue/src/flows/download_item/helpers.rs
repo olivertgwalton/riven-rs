@@ -60,16 +60,17 @@ pub fn has_matching_file(
     hierarchy: Option<&DownloadHierarchyContext>,
 ) -> bool {
     match item.item_type {
-        MediaItemType::Movie => files
-            .iter()
-            .any(|f| is_video_file(&f.name) && parse_file_path(&f.name).media_type() == "movie"),
+        MediaItemType::Movie => files.iter().any(|f| {
+            is_video_file(&f.name)
+                && parse_file_path(preferred_file_path(f)).media_type() == "movie"
+        }),
         MediaItemType::Episode => {
             let season = item.season_number.unwrap_or(1);
             let ep = item.episode_number.unwrap_or(1);
             files.iter().any(|f| {
                 is_video_file(&f.name)
                     && matches_episode_lookup(
-                        &parse_file_path(&f.name),
+                        &parse_file_path(preferred_file_path(f)),
                         season,
                         ep,
                         item.absolute_number,
@@ -85,10 +86,22 @@ pub fn has_matching_file(
 
             files.iter().any(|f| {
                 is_video_file(&f.name)
-                    && season_file_matches(&parse_file_path(&f.name), season_number, ctx)
+                    && season_file_matches(
+                        &parse_file_path(preferred_file_path(f)),
+                        season_number,
+                        ctx,
+                    )
             })
         }
         _ => files.iter().any(|f| is_video_file(&f.name)),
+    }
+}
+
+fn preferred_file_path(file: &CacheCheckFile) -> &str {
+    if file.path.is_empty() {
+        &file.name
+    } else {
+        &file.path
     }
 }
 

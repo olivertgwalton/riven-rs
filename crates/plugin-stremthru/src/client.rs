@@ -200,7 +200,12 @@ async fn fetch_cache_check(
                 .into_iter()
                 .map(|f| CacheCheckFile {
                     index: 0,
-                    name: file_name_or_path(f.name, f.path),
+                    path: if f.path.is_empty() {
+                        f.name.clone()
+                    } else {
+                        f.path.clone()
+                    },
+                    name: f.name,
                     size: f.size,
                     link: if f.link.is_empty() {
                         None
