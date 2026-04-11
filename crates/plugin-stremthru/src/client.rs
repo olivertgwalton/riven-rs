@@ -1,5 +1,4 @@
 use redis::AsyncCommands;
-use reqwest::{RequestBuilder, header};
 
 use riven_core::types::{
     CacheCheckFile, CacheCheckResult, DownloadFile, DownloadResult, build_magnet_uri,
@@ -11,19 +10,10 @@ use crate::models::{
 };
 
 pub const CACHE_CHECK_TTL_SECS: u64 = 60 * 60 * 24;
+const CACHE_CHECK_BATCH_SIZE: usize = 500;
 
 fn file_name_or_path(name: String, path: String) -> String {
     if path.is_empty() { name } else { path }
-}
-
-fn stremthru_request(builder: RequestBuilder, store: &str, api_key: &str) -> RequestBuilder {
-    builder
-        .header(header::ACCEPT, "application/json")
-        .header("x-stremthru-store-name", store)
-        .header(
-            "x-stremthru-store-authorization",
-            format!("Bearer {api_key}"),
-        )
 }
 
 pub async fn check_cache(
@@ -78,11 +68,13 @@ pub async fn check_cache(
     );
 
     let mut fetched_results = Vec::new();
-    for hash in &missing_hashes {
-        tracing::debug!(store, hash, "requesting stremthru cache-check");
-        fetched_results.extend(
-            fetch_cache_check(client, base_url, store, api_key, std::slice::from_ref(hash)).await?,
+    for batch in missing_hashes.chunks(CACHE_CHECK_BATCH_SIZE) {
+        tracing::debug!(
+            store,
+            batch_hashes = batch.len(),
+            "requesting stremthru cache-check batch"
         );
+        fetched_results.extend(fetch_cache_check(client, base_url, store, api_key, batch).await?);
     }
 
     for result in &fetched_results {
@@ -124,9 +116,14 @@ pub async fn add_torrent(
     tracing::debug!(store, url = %url, "adding torrent via stremthru torz endpoint");
 
     let response = riven_core::http::send(|| {
-        stremthru_request(client.post(&url), store, api_key).json(&serde_json::json!({
-            "link": magnet
-        }))
+        client
+            .post(&url)
+            .header("x-stremthru-store-name", store)
+            .header(
+                "x-stremthru-store-authorization",
+                format!("Bearer {api_key}"),
+            )
+            .json(&serde_json::json!({ "link": magnet }))
     })
     .await?;
 
@@ -177,7 +174,14 @@ async fn fetch_cache_check(
     let url = format!("{base_url}v0/store/torz/check");
     tracing::debug!(store, url = %url, "requesting stremthru torz cache check");
     let response = riven_core::http::send(|| {
-        stremthru_request(client.get(&url), store, api_key).query(&[("hash", hash_str.as_str())])
+        client
+            .get(&url)
+            .query(&[("hash", hash_str.as_str())])
+            .header("x-stremthru-store-name", store)
+            .header(
+                "x-stremthru-store-authorization",
+                format!("Bearer {api_key}"),
+            )
     })
     .await?;
 
@@ -237,8 +241,16 @@ async fn delete_torrent(
     torrent_id: &str,
 ) -> anyhow::Result<()> {
     let url = format!("{base_url}v0/store/torz/{torrent_id}");
-    let response =
-        riven_core::http::send(|| stremthru_request(client.delete(&url), store, api_key)).await?;
+    let response = riven_core::http::send(|| {
+        client
+            .delete(&url)
+            .header("x-stremthru-store-name", store)
+            .header(
+                "x-stremthru-store-authorization",
+                format!("Bearer {api_key}"),
+            )
+    })
+    .await?;
 
     if response.status().is_success() {
         Ok(())
@@ -291,9 +303,14 @@ pub async fn generate_link(
     let url = format!("{base_url}v0/store/torz/link/generate");
     tracing::debug!(store, url = %url, "generating stremthru torz link");
     let response = riven_core::http::send(|| {
-        stremthru_request(client.post(&url), store, api_key).json(&serde_json::json!({
-            "link": magnet
-        }))
+        client
+            .post(&url)
+            .header("x-stremthru-store-name", store)
+            .header(
+                "x-stremthru-store-authorization",
+                format!("Bearer {api_key}"),
+            )
+            .json(&serde_json::json!({ "link": magnet }))
     })
     .await?;
 
@@ -343,12 +360,17 @@ pub async fn fetch_user_info(
     api_key: &str,
 ) -> anyhow::Result<riven_core::types::DebridUserInfo> {
     let url = format!("{base_url}v0/store/user");
-    let resp: StremthruResponse<StremthruUser> =
-        stremthru_request(client.get(&url), store, api_key)
-            .send()
-            .await?
-            .json()
-            .await?;
+    let resp: StremthruResponse<StremthruUser> = client
+        .get(&url)
+        .header("x-stremthru-store-name", store)
+        .header(
+            "x-stremthru-store-authorization",
+            format!("Bearer {api_key}"),
+        )
+        .send()
+        .await?
+        .json()
+        .await?;
     let user = resp
         .data
         .ok_or_else(|| anyhow::anyhow!("store returned no user data"))?;
