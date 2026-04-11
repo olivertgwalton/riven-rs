@@ -14,7 +14,6 @@ serde = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 lru = { workspace = true }
-parking_lot = { workspace = true }
 dashmap = { workspace = true }
 libc = { workspace = true }
 chrono = { workspace = true }

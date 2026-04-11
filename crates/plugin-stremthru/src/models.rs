@@ -44,14 +44,15 @@ pub struct StremthruCacheFile {
 }
 
 #[derive(Deserialize)]
-pub struct StremthruMagnet {
+pub struct StremthruTorz {
+    pub id: String,
     pub status: String,
     #[serde(default)]
-    pub files: Vec<StremthruMagnetFile>,
+    pub files: Vec<StremthruTorzFile>,
 }
 
 #[derive(Deserialize)]
-pub struct StremthruMagnetFile {
+pub struct StremthruTorzFile {
     #[serde(default)]
     pub index: i32,
     pub name: String,

@@ -6,7 +6,7 @@ use riven_core::types::{
 };
 
 use crate::models::{
-    StremthruCacheCheck, StremthruLink, StremthruMagnet, StremthruResponse, StremthruUser,
+    StremthruCacheCheck, StremthruLink, StremthruResponse, StremthruTorz, StremthruUser,
     parse_torrent_status,
 };
 
@@ -61,19 +61,19 @@ pub async fn check_cache(
         return Ok(cached_results);
     }
 
-    let magnet_str = missing_queries
+    let hash_str = missing_queries
         .iter()
-        .map(|query| query.magnet.as_str())
+        .map(|query| query.hash.as_str())
         .collect::<Vec<_>>()
         .join(",");
     tracing::debug!(
         store,
         hashes = missing_queries.len(),
         cached = cached_results.len(),
-        "checking debrid cache via stremthru magnets endpoint"
+        "checking debrid cache via stremthru torz endpoint"
     );
 
-    let fetched_results = fetch_cache_check(client, base_url, store, api_key, &magnet_str).await?;
+    let fetched_results = fetch_cache_check(client, base_url, store, api_key, &hash_str).await?;
 
     for result in &fetched_results {
         match serde_json::to_string(result) {
@@ -98,9 +98,9 @@ pub async fn check_cache(
     Ok(cached_results)
 }
 
-/// Adds a magnet to the store and returns the cached result with file links.
-/// Unlike the cache-check endpoint, the magnets endpoint returns per-file download
-/// links for cached torrents. Returns `None` if the torrent is not in a ready state.
+/// Adds a torrent to the store and returns the downloaded result with file links.
+/// Mirrors the TypeScript plugin's torz flow: a newly-added torrent must report
+/// `downloaded` immediately or it is removed and treated as unavailable.
 pub async fn check_cache_live(
     client: &reqwest::Client,
     base_url: &str,
@@ -110,8 +110,8 @@ pub async fn check_cache_live(
 ) -> anyhow::Result<Option<CacheCheckResult>> {
     let hash = hash.to_lowercase();
     let magnet = build_magnet_uri(&hash);
-    let url = format!("{base_url}v0/store/magnets");
-    tracing::debug!(store, url = %url, "adding magnet via stremthru magnets endpoint");
+    let url = format!("{base_url}v0/store/torz");
+    tracing::debug!(store, url = %url, "adding torrent via stremthru torz endpoint");
 
     let response = riven_core::http::send(|| {
         client
@@ -121,26 +121,36 @@ pub async fn check_cache_live(
                 "x-stremthru-store-authorization",
                 format!("Bearer {api_key}"),
             )
-            .json(&serde_json::json!({ "magnet": magnet }))
+            .json(&serde_json::json!({ "link": magnet }))
     })
     .await?;
 
     if !response.status().is_success() {
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
-        anyhow::bail!("store magnets request rejected: HTTP {} - {}", status, body);
+        anyhow::bail!("store torz request rejected: HTTP {} - {}", status, body);
     }
 
     let text = response.text().await?;
-    let resp: StremthruResponse<StremthruMagnet> = serde_json::from_str(&text)
-        .map_err(|e| anyhow::anyhow!("invalid magnets response: {e}; body={text}"))?;
+    let resp: StremthruResponse<StremthruTorz> = serde_json::from_str(&text)
+        .map_err(|e| anyhow::anyhow!("invalid torz response: {e}; body={text}"))?;
 
     let Some(data) = resp.data else {
         return Ok(None);
     };
 
-    if !matches!(data.status.as_str(), "cached" | "downloaded") {
-        tracing::debug!(store, hash, status = %data.status, "magnet not in ready state; skipping");
+    if data.status != "downloaded" {
+        let torrent_id = data.id;
+        tracing::debug!(
+            store,
+            hash,
+            torrent_id,
+            status = %data.status,
+            "torrent not in downloaded state; deleting torz item"
+        );
+        if let Err(error) = delete_torz(client, base_url, store, api_key, &torrent_id).await {
+            tracing::warn!(store, hash, torrent_id, error = %error, "failed to delete torz item");
+        }
         return Ok(None);
     }
 
@@ -171,10 +181,10 @@ async fn fetch_cache_check(
     base_url: &str,
     store: &str,
     api_key: &str,
-    magnet_str: &str,
+    hash_str: &str,
 ) -> anyhow::Result<Vec<CacheCheckResult>> {
-    let url = format!("{base_url}v0/store/magnets/check?magnet={magnet_str}");
-    tracing::debug!(store, url = %url, "requesting stremthru magnets cache check");
+    let url = format!("{base_url}v0/store/torz/check?hash={hash_str}");
+    tracing::debug!(store, url = %url, "requesting stremthru torz cache check");
     let response = riven_core::http::send(|| {
         client
             .get(&url)
@@ -195,7 +205,7 @@ async fn fetch_cache_check(
     let text = response.text().await?;
     let resp =
         serde_json::from_str::<StremthruResponse<StremthruCacheCheck>>(&text).map_err(|e| {
-            anyhow::anyhow!("store returned invalid cache-check data: {e}; body={text}")
+            anyhow::anyhow!("store returned invalid torz cache-check data: {e}; body={text}")
         })?;
     let items = resp
         .data
@@ -227,6 +237,34 @@ async fn fetch_cache_check(
             }
         })
         .collect())
+}
+
+async fn delete_torz(
+    client: &reqwest::Client,
+    base_url: &str,
+    store: &str,
+    api_key: &str,
+    torrent_id: &str,
+) -> anyhow::Result<()> {
+    let url = format!("{base_url}v0/store/torz/{torrent_id}");
+    let response = riven_core::http::send(|| {
+        client
+            .delete(&url)
+            .header("x-stremthru-store-name", store)
+            .header(
+                "x-stremthru-store-authorization",
+                format!("Bearer {api_key}"),
+            )
+    })
+    .await?;
+
+    if response.status().is_success() {
+        Ok(())
+    } else {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        anyhow::bail!("store torz delete rejected: HTTP {} - {}", status, body);
+    }
 }
 
 fn cache_check_key(store: &str, hash: &str) -> String {
@@ -263,8 +301,8 @@ pub async fn generate_link(
     api_key: &str,
     magnet: &str,
 ) -> anyhow::Result<String> {
-    let url = format!("{base_url}v0/store/link/generate");
-    tracing::debug!(store, url = %url, "generating stremthru link");
+    let url = format!("{base_url}v0/store/torz/link/generate");
+    tracing::debug!(store, url = %url, "generating stremthru torz link");
     let response = riven_core::http::send(|| {
         client
             .post(&url)

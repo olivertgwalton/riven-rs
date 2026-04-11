@@ -86,7 +86,7 @@ struct FileHandle {
     path: Arc<str>,
     stream_url: Arc<str>,
     download_url: Option<Arc<str>>,
-    media_stream: MediaStream,
+    stream_session: MediaStream,
 }
 
 #[derive(Clone)]
@@ -139,8 +139,6 @@ pub struct RivenFs {
     range_cache: RangeCache,
     readdir_cache: DashMap<u64, (Vec<DirEntry>, Instant)>,
     entry_cache: DashMap<String, (Option<Arc<CachedEntry>>, Instant)>,
-    // No TTL — URL is valid until the DB entry is explicitly cleared.
-    stream_url_cache: DashMap<i64, String>,
 }
 
 impl RivenFs {
@@ -185,7 +183,6 @@ impl RivenFs {
             range_cache: RangeCache::new(entries),
             readdir_cache: DashMap::new(),
             entry_cache: DashMap::new(),
-            stream_url_cache: DashMap::new(),
         }
     }
 
@@ -253,30 +250,7 @@ impl RivenFs {
         result
     }
 
-    fn get_stream_url_cached(&self, path: &str, entry: &CachedEntry) -> Option<String> {
-        if let Some(url) = self.stream_url_cache.get(&entry.id) {
-            return Some(url.clone());
-        }
-        if let Some(url) = entry.stream_url.as_deref() {
-            self.stream_url_cache.insert(entry.id, url.to_string());
-            return Some(url.to_string());
-        }
-        let url = request_stream_url(
-            entry.download_url.as_deref().map(|url| url.as_ref()),
-            &self.link_request_tx,
-            &self.runtime,
-        )?;
-        let _ = self.runtime.block_on(riven_db::repo::update_stream_url(
-            &self.db_pool,
-            entry.id,
-            &url,
-        ));
-        self.stream_url_cache.insert(entry.id, url.clone());
-        self.entry_cache.remove(path);
-        Some(url)
-    }
-
-    fn refresh_stream_url(
+    fn request_and_persist_stream_url(
         &self,
         path: &str,
         entry_id: i64,
@@ -288,19 +262,20 @@ impl RivenFs {
             entry_id,
             &url,
         ));
-        self.stream_url_cache.insert(entry_id, url.clone());
         self.entry_cache.remove(path);
         Some(url)
     }
 
-    fn get_stream_url_for_open(&self, path: &str, entry: &CachedEntry) -> Option<String> {
-        self.get_stream_url_cached(path, entry).or_else(|| {
-            self.refresh_stream_url(
-                path,
-                entry.id,
-                entry.download_url.as_deref().map(|url| url.as_ref()),
-            )
-        })
+    fn resolve_stream_url(&self, path: &str, entry: &CachedEntry) -> Option<String> {
+        if let Some(url) = entry.stream_url.as_deref() {
+            return Some(url.to_string());
+        }
+
+        self.request_and_persist_stream_url(
+            path,
+            entry.id,
+            entry.download_url.as_deref().map(|url| url.as_ref()),
+        )
     }
 
     fn resolve_path(&self, parent_ino: u64, name: &str) -> Arc<str> {
@@ -319,6 +294,24 @@ impl RivenFs {
         } else {
             format!("{parent}/{name}")
         })
+    }
+
+    fn read_handle(
+        &self,
+        handle: &mut FileHandle,
+        start: u64,
+        end: u64,
+        stream_url: &str,
+    ) -> ReadOutcome {
+        handle.stream_session.read(
+            start,
+            end,
+            stream_url,
+            &self.range_cache,
+            &self.stream_client,
+            &self.runtime,
+            self.debug_logging,
+        )
     }
 }
 
@@ -485,7 +478,7 @@ impl Filesystem for RivenFs {
             reply.error(libc::ENOENT);
             return;
         };
-        let Some(stream_url) = self.get_stream_url_for_open(&path, &entry) else {
+        let Some(stream_url) = self.resolve_stream_url(&path, &entry) else {
             reply.error(if entry.download_url.is_some() {
                 libc::EIO
             } else {
@@ -503,7 +496,7 @@ impl Filesystem for RivenFs {
                 path,
                 stream_url: Arc::from(stream_url),
                 download_url: entry.download_url.clone(),
-                media_stream: MediaStream::new(ino, file_size),
+                stream_session: MediaStream::new(ino, file_size),
             },
         );
         reply.opened(fd, FOPEN_KEEP_CACHE);
@@ -526,26 +519,18 @@ impl Filesystem for RivenFs {
         };
 
         let start = offset as u64;
-        if start >= handle.media_stream.file_size() {
+        if start >= handle.stream_session.file_size() {
             reply.data(&[]);
             return;
         }
-        let end = (start + size as u64 - 1).min(handle.media_stream.file_size() - 1);
+        let end = (start + size as u64 - 1).min(handle.stream_session.file_size() - 1);
 
         if self.debug_logging {
             tracing::debug!(path = %handle.path, offset = start, size, "read");
         }
 
         let stream_url = Arc::clone(&handle.stream_url);
-        let outcome = match handle.media_stream.read(
-            start,
-            end,
-            &stream_url,
-            &self.range_cache,
-            &self.stream_client,
-            &self.runtime,
-            self.debug_logging,
-        ) {
+        let outcome = match self.read_handle(&mut handle, start, end, &stream_url) {
             ReadOutcome::Data(buf) => ReadOutcome::Data(buf),
             ReadOutcome::Error(code) => {
                 let Some(download_url) = handle.download_url.as_ref().map(Arc::clone) else {
@@ -562,22 +547,16 @@ impl Filesystem for RivenFs {
                     "read failed, refreshing stream url and retrying once"
                 );
 
-                let Some(url) =
-                    self.refresh_stream_url(&path, entry_id, Some(download_url.as_ref()))
-                else {
+                let Some(url) = self.request_and_persist_stream_url(
+                    &path,
+                    entry_id,
+                    Some(download_url.as_ref()),
+                ) else {
                     return reply.error(code);
                 };
                 handle.stream_url = Arc::from(url);
                 let refreshed = Arc::clone(&handle.stream_url);
-                handle.media_stream.read(
-                    start,
-                    end,
-                    &refreshed,
-                    &self.range_cache,
-                    &self.stream_client,
-                    &self.runtime,
-                    self.debug_logging,
-                )
+                self.read_handle(&mut handle, start, end, &refreshed)
             }
         };
 

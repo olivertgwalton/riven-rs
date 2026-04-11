@@ -2935,7 +2935,6 @@ dependencies = [
  "futures",
  "libc",
  "lru",
- "parking_lot",
  "regex",
  "reqwest",
  "riven-core",

@@ -1004,7 +1004,10 @@ impl RankSettings {
         apply(&mut model.aac, &custom.audio.aac);
         apply(&mut model.atmos, &custom.audio.atmos);
         apply(&mut model.dolby_digital, &custom.audio.dolby_digital);
-        apply(&mut model.dolby_digital_plus, &custom.audio.dolby_digital_plus);
+        apply(
+            &mut model.dolby_digital_plus,
+            &custom.audio.dolby_digital_plus,
+        );
         apply(&mut model.dts_lossy, &custom.audio.dts_lossy);
         apply(&mut model.dts_lossless, &custom.audio.dts_lossless);
         apply(&mut model.flac, &custom.audio.flac);
