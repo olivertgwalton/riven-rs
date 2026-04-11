@@ -2798,6 +2798,7 @@ dependencies = [
  "plugin-dashboard",
  "plugin-logs",
  "redis 0.27.6",
+ "reqwest",
  "riven-core",
  "riven-db",
  "riven-queue",

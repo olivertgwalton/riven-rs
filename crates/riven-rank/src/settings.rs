@@ -1,6 +1,8 @@
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
+use crate::defaults::RankingModel;
+
 const fn default_true() -> bool {
     true
 }
@@ -914,6 +916,8 @@ pub struct RankSettings {
     pub options: RankOptions,
     pub languages: LanguageSettings,
     pub custom_ranks: CustomRanksConfig,
+    #[serde(skip)]
+    pub compiled_model: Option<RankingModel>,
 }
 
 impl Default for RankSettings {
@@ -931,6 +935,7 @@ impl Default for RankSettings {
             options: RankOptions::default(),
             languages: LanguageSettings::default(),
             custom_ranks: CustomRanksConfig::default(),
+            compiled_model: None,
         }
     }
 }
@@ -950,6 +955,91 @@ impl RankSettings {
         self.require_compiled = compile_patterns(&self.require);
         self.exclude_compiled = compile_patterns(&self.exclude);
         self.preferred_compiled = compile_patterns(&self.preferred);
+        self.compiled_model = Some(self.build_compiled_model());
         self
+    }
+
+    fn build_compiled_model(&self) -> RankingModel {
+        fn apply(dst: &mut i64, rank: &CustomRank) {
+            if let Some(value) = rank.rank {
+                *dst = value;
+            }
+        }
+
+        let mut model = RankingModel::default();
+        let custom = &self.custom_ranks;
+
+        apply(&mut model.av1, &custom.quality.av1);
+        apply(&mut model.avc, &custom.quality.avc);
+        apply(&mut model.bluray, &custom.quality.bluray);
+        apply(&mut model.dvd, &custom.quality.dvd);
+        apply(&mut model.hdtv, &custom.quality.hdtv);
+        apply(&mut model.hevc, &custom.quality.hevc);
+        apply(&mut model.mpeg, &custom.quality.mpeg);
+        apply(&mut model.remux, &custom.quality.remux);
+        apply(&mut model.vhs, &custom.quality.vhs);
+        apply(&mut model.web, &custom.quality.web);
+        apply(&mut model.webdl, &custom.quality.webdl);
+        apply(&mut model.webmux, &custom.quality.webmux);
+        apply(&mut model.xvid, &custom.quality.xvid);
+
+        apply(&mut model.bdrip, &custom.rips.bdrip);
+        apply(&mut model.brrip, &custom.rips.brrip);
+        apply(&mut model.dvdrip, &custom.rips.dvdrip);
+        apply(&mut model.hdrip, &custom.rips.hdrip);
+        apply(&mut model.ppvrip, &custom.rips.ppvrip);
+        apply(&mut model.satrip, &custom.rips.satrip);
+        apply(&mut model.tvrip, &custom.rips.tvrip);
+        apply(&mut model.uhdrip, &custom.rips.uhdrip);
+        apply(&mut model.vhsrip, &custom.rips.vhsrip);
+        apply(&mut model.webdlrip, &custom.rips.webdlrip);
+        apply(&mut model.webrip, &custom.rips.webrip);
+
+        apply(&mut model.bit10, &custom.hdr.bit10);
+        apply(&mut model.dolby_vision, &custom.hdr.dolby_vision);
+        apply(&mut model.hdr, &custom.hdr.hdr);
+        apply(&mut model.hdr10plus, &custom.hdr.hdr10plus);
+        apply(&mut model.sdr, &custom.hdr.sdr);
+
+        apply(&mut model.aac, &custom.audio.aac);
+        apply(&mut model.atmos, &custom.audio.atmos);
+        apply(&mut model.dolby_digital, &custom.audio.dolby_digital);
+        apply(&mut model.dolby_digital_plus, &custom.audio.dolby_digital_plus);
+        apply(&mut model.dts_lossy, &custom.audio.dts_lossy);
+        apply(&mut model.dts_lossless, &custom.audio.dts_lossless);
+        apply(&mut model.flac, &custom.audio.flac);
+        apply(&mut model.mono, &custom.audio.mono);
+        apply(&mut model.mp3, &custom.audio.mp3);
+        apply(&mut model.stereo, &custom.audio.stereo);
+        apply(&mut model.surround, &custom.audio.surround);
+        apply(&mut model.truehd, &custom.audio.truehd);
+
+        apply(&mut model.three_d, &custom.extras.three_d);
+        apply(&mut model.converted, &custom.extras.converted);
+        apply(&mut model.commentary, &custom.extras.commentary);
+        apply(&mut model.documentary, &custom.extras.documentary);
+        apply(&mut model.dubbed, &custom.extras.dubbed);
+        apply(&mut model.edition, &custom.extras.edition);
+        apply(&mut model.hardcoded, &custom.extras.hardcoded);
+        apply(&mut model.network, &custom.extras.network);
+        apply(&mut model.proper, &custom.extras.proper);
+        apply(&mut model.repack, &custom.extras.repack);
+        apply(&mut model.retail, &custom.extras.retail);
+        apply(&mut model.site, &custom.extras.site);
+        apply(&mut model.subbed, &custom.extras.subbed);
+        apply(&mut model.upscaled, &custom.extras.upscaled);
+        apply(&mut model.scene, &custom.extras.scene);
+        apply(&mut model.uncensored, &custom.extras.uncensored);
+
+        apply(&mut model.cam, &custom.trash.cam);
+        apply(&mut model.clean_audio, &custom.trash.clean_audio);
+        apply(&mut model.pdtv, &custom.trash.pdtv);
+        apply(&mut model.r5, &custom.trash.r5);
+        apply(&mut model.screener, &custom.trash.screener);
+        apply(&mut model.size, &custom.trash.size);
+        apply(&mut model.telecine, &custom.trash.telecine);
+        apply(&mut model.telesync, &custom.trash.telesync);
+
+        model
     }
 }

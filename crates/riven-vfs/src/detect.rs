@@ -66,12 +66,9 @@ mod tests {
     use crate::cache::{RangeCache, cache_put};
     use crate::chunks::FileLayout;
     use bytes::Bytes;
-    use lru::LruCache;
-    use parking_lot::Mutex;
-    use std::num::NonZeroUsize;
 
     fn empty_cache() -> RangeCache {
-        Mutex::new(LruCache::new(NonZeroUsize::new(16).unwrap()))
+        RangeCache::new(16)
     }
 
     #[test]

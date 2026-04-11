@@ -25,3 +25,4 @@ redis = { workspace = true }
 sqlx = { workspace = true }
 futures = { workspace = true }
 chrono = { workspace = true }
+reqwest = { workspace = true }

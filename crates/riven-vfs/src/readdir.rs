@@ -3,7 +3,8 @@ use std::collections::HashSet;
 use fuser::FileType;
 use riven_core::settings::LibraryProfileMembership;
 use riven_core::vfs_layout::VfsLibraryLayout;
-use riven_db::repo::{self, VfsEntryPath};
+use riven_db::entities::{VfsDirName, VfsFileName};
+use riven_db::repo;
 
 use crate::path_info::{CanonicalPath, PathTarget, parse_path};
 
@@ -120,15 +121,19 @@ fn push_item_dirs(
     dir_index: usize,
     profile_key: Option<&str>,
 ) {
-    let Ok(paths) = runtime.block_on(repo::list_vfs_entry_paths(pool, pattern)) else {
+    let Ok(paths) = runtime.block_on(repo::list_vfs_dir_names(
+        pool,
+        pattern,
+        (dir_index + 2) as u32,
+    )) else {
         return;
     };
     let mut seen = HashSet::new();
     for entry in paths {
-        if !matches_profile(&entry, profile_key) {
+        if !matches_dir_profile(&entry, profile_key) {
             continue;
         }
-        let Some(name) = entry.path.trim_matches('/').split('/').nth(dir_index) else {
+        let Some(name) = entry.name.as_deref() else {
             continue;
         };
         if seen.insert(name.to_string()) {
@@ -146,22 +151,28 @@ fn push_file_entries(
     actual_dir: &str,
     profile_key: Option<&str>,
 ) {
-    let pattern = format!("{actual_dir}/%");
-    let Ok(paths) = runtime.block_on(repo::list_vfs_entry_paths(pool, &pattern)) else {
+    let Ok(paths) = runtime.block_on(repo::list_vfs_file_names(pool, actual_dir)) else {
         return;
     };
     for entry in paths {
-        if !matches_profile(&entry, profile_key) {
+        if !matches_file_profile(&entry, profile_key) {
             continue;
         }
-        let Some((_, name)) = entry.path.rsplit_once('/') else {
+        let Some(name) = entry.name.as_deref() else {
             continue;
         };
         push_file_entry(entries, get_ino, virtual_parent, name);
     }
 }
 
-fn matches_profile(entry: &VfsEntryPath, profile_key: Option<&str>) -> bool {
+fn matches_dir_profile(entry: &VfsDirName, profile_key: Option<&str>) -> bool {
+    let Some(profile_key) = profile_key else {
+        return true;
+    };
+    LibraryProfileMembership::from_json(entry.library_profiles.as_ref()).contains(profile_key)
+}
+
+fn matches_file_profile(entry: &VfsFileName, profile_key: Option<&str>) -> bool {
     let Some(profile_key) = profile_key else {
         return true;
     };

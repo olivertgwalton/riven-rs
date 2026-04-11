@@ -5,5 +5,6 @@ pub mod http;
 pub mod plugin;
 pub mod reindex;
 pub mod settings;
+pub mod stream_link;
 pub mod types;
 pub mod vfs_layout;

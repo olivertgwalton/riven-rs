@@ -1,6 +1,12 @@
 use crate::rank::RankedTorrent;
 use crate::settings::RankSettings;
 
+struct SortKeyedTorrent {
+    bucket: usize,
+    resolution_rank: i32,
+    torrent: RankedTorrent,
+}
+
 /// Map a resolution string to one of six canonical bucket indices.
 ///   1440p → 1080p bucket, 576p → 480p, 240p → 360p.
 #[inline]
@@ -39,42 +45,50 @@ const fn bucket_enabled(idx: usize, settings: &RankSettings) -> bool {
 /// A `bucket_limit` of `usize::MAX` disables the limit.
 #[must_use]
 pub fn sort_torrents(
-    mut torrents: Vec<RankedTorrent>,
+    torrents: Vec<RankedTorrent>,
     settings: &RankSettings,
     bucket_limit: usize,
 ) -> Vec<RankedTorrent> {
-    // 1. Filter disabled resolution buckets.
-    torrents.retain(|t| {
-        let idx = bucket(&t.data.resolution);
-        bucket_enabled(idx, settings)
-    });
+    // 1. Filter disabled resolutions and cache sort keys once.
+    let mut torrents: Vec<SortKeyedTorrent> = torrents
+        .into_iter()
+        .filter_map(|torrent| {
+            let bucket = bucket(&torrent.data.resolution);
+            if !bucket_enabled(bucket, settings) {
+                return None;
+            }
+
+            Some(SortKeyedTorrent {
+                bucket,
+                resolution_rank: settings.resolution_ranks.rank_for(&torrent.data.resolution),
+                torrent,
+            })
+        })
+        .collect();
 
     // 2. Sort: rank desc, then resolution rank desc as tiebreaker.
-    torrents.sort_by(|a, b| {
-        b.rank.cmp(&a.rank).then_with(|| {
-            settings
-                .resolution_ranks
-                .rank_for(&b.data.resolution)
-                .cmp(&settings.resolution_ranks.rank_for(&a.data.resolution))
-        })
+    torrents.sort_unstable_by(|a, b| {
+        b.torrent
+            .rank
+            .cmp(&a.torrent.rank)
+            .then_with(|| b.resolution_rank.cmp(&a.resolution_rank))
     });
 
     if bucket_limit == usize::MAX {
-        return torrents;
+        return torrents.into_iter().map(|entry| entry.torrent).collect();
     }
 
     // 3. Per-resolution bucket limit — fixed-size array, zero allocation.
     //    Walk in rank order; admit each torrent into its bucket until full.
     let mut counts = [0usize; 6];
-    torrents.retain(|t| {
-        let idx = bucket(&t.data.resolution);
-        if counts[idx] < bucket_limit {
-            counts[idx] += 1;
+    torrents.retain(|entry| {
+        if counts[entry.bucket] < bucket_limit {
+            counts[entry.bucket] += 1;
             true
         } else {
             false
         }
     });
 
-    torrents
+    torrents.into_iter().map(|entry| entry.torrent).collect()
 }

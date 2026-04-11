@@ -112,8 +112,8 @@ async fn main() -> Result<()> {
             job_queue.vfs_layout.clone(),
             job_queue.filesystem_settings_revision.clone(),
             db_pool.clone(),
-            stream_http_client,
-            link_tx,
+            stream_http_client.clone(),
+            link_tx.clone(),
             log_settings.vfs_debug_logging,
             settings.vfs_cache_max_size_mb,
         )?;
@@ -165,6 +165,8 @@ async fn main() -> Result<()> {
                 notif_tx,
                 jq.downloader_config.clone(),
                 log_control,
+                stream_http_client.clone(),
+                link_tx.clone(),
             )
             .await
             {

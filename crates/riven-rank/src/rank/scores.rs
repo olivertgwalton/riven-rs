@@ -4,6 +4,8 @@ use crate::defaults::RankingModel;
 use crate::parse::ParsedData;
 use crate::settings::RankSettings;
 
+const SCORE_PARTS_CAPACITY: usize = 8;
+
 fn calculate_quality_rank(data: &ParsedData, settings: &RankSettings, model: &RankingModel) -> i64 {
     let Some(q) = data.quality.as_deref() else {
         return 0;
@@ -134,13 +136,13 @@ fn calculate_preferred_langs(data: &ParsedData, settings: &RankSettings) -> i64 
     }
 }
 
-#[must_use]
-pub fn get_rank(
+fn compute_rank(
     data: &ParsedData,
     settings: &RankSettings,
     model: &RankingModel,
-) -> (i64, HashMap<String, i64>) {
-    let mut parts = HashMap::with_capacity(8);
+    mut parts: Option<&mut HashMap<String, i64>>,
+) -> i64 {
+    let model = settings.compiled_model.as_ref().unwrap_or(model);
     let mut rank: i64 = 0;
 
     let categories: &[(&str, i64)] = &[
@@ -153,7 +155,9 @@ pub fn get_rank(
     ];
 
     for &(name, score) in categories {
-        parts.insert(name.into(), score);
+        if let Some(parts) = parts.as_deref_mut() {
+            parts.insert(name.into(), score);
+        }
         rank += score;
     }
 
@@ -164,11 +168,29 @@ pub fn get_rank(
             calculate_preferred_langs(data, settings),
         ),
     ] {
-        if score != 0 {
+        if let Some(parts) = parts.as_deref_mut()
+            && score != 0
+        {
             parts.insert(name.into(), score);
         }
         rank += score;
     }
 
+    rank
+}
+
+#[must_use]
+pub fn get_rank_total(data: &ParsedData, settings: &RankSettings, model: &RankingModel) -> i64 {
+    compute_rank(data, settings, model, None)
+}
+
+#[must_use]
+pub fn get_rank(
+    data: &ParsedData,
+    settings: &RankSettings,
+    model: &RankingModel,
+) -> (i64, HashMap<String, i64>) {
+    let mut parts = HashMap::with_capacity(SCORE_PARTS_CAPACITY);
+    let rank = compute_rank(data, settings, model, Some(&mut parts));
     (rank, parts)
 }

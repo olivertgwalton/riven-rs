@@ -11,7 +11,7 @@ use crate::parse::{ParsedData, parse};
 use crate::settings::RankSettings;
 
 pub use fetch::check_fetch;
-pub use scores::get_rank;
+pub use scores::{get_rank, get_rank_total};
 
 static DEFAULT_MODEL: LazyLock<crate::defaults::RankingModel> =
     LazyLock::new(crate::defaults::RankingModel::default);
@@ -145,6 +145,80 @@ pub fn rank_torrent<S: BuildHasher>(
         fetch,
         failed_checks,
         score_parts,
+        lev_ratio: best_ratio,
+    })
+}
+
+/// Ranking pipeline variant that skips score-part materialization.
+///
+/// This is intended for internal hot paths that only need the final rank and
+/// fetch outcome, not the per-category score breakdown.
+pub fn rank_torrent_fast<S: BuildHasher>(
+    raw_title: &str,
+    hash: &str,
+    correct_title: &str,
+    aliases: &HashMap<String, Vec<String>, S>,
+    settings: &RankSettings,
+) -> Result<RankedTorrent, RankError> {
+    let hash_len = hash.len();
+    if (hash_len != 32 && hash_len != 40) || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(RankError::InvalidHash);
+    }
+
+    let data = parse(raw_title);
+
+    if settings.options.content.remove_adult_content && data.adult {
+        return Err(RankError::AdultContent);
+    }
+
+    let best_ratio = if correct_title.is_empty() {
+        0.0
+    } else {
+        let normalized_query = crate::parse::normalize_title(correct_title);
+        let mut best_ratio = lev_ratio(&data.normalized_title, &normalized_query);
+        for alias_list in aliases.values() {
+            for alias in alias_list {
+                let normalized_alias = crate::parse::normalize_title(alias);
+                let r = lev_ratio(&data.normalized_title, &normalized_alias);
+                if r > best_ratio {
+                    best_ratio = r;
+                }
+            }
+        }
+
+        if best_ratio < settings.options.title_similarity {
+            return Err(RankError::TitleSimilarity {
+                ratio: best_ratio,
+                threshold: settings.options.title_similarity,
+            });
+        }
+
+        best_ratio
+    };
+
+    let total_score = get_rank_total(&data, settings, &DEFAULT_MODEL);
+    let (fetch, failed_checks) = check_fetch(&data, settings);
+
+    if !fetch {
+        return Err(RankError::FetchChecksFailed {
+            checks: failed_checks,
+        });
+    }
+
+    if total_score < settings.options.remove_ranks_under {
+        return Err(RankError::RankUnderThreshold {
+            rank: total_score,
+            threshold: settings.options.remove_ranks_under,
+        });
+    }
+
+    Ok(RankedTorrent {
+        data,
+        hash: hash.to_lowercase(),
+        rank: total_score,
+        fetch,
+        failed_checks: Vec::new(),
+        score_parts: HashMap::new(),
         lev_ratio: best_ratio,
     })
 }

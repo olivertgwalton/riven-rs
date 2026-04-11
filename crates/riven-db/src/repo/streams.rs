@@ -225,6 +225,62 @@ pub async fn get_media_entry_by_path(pool: &PgPool, path: &str) -> Result<Option
     .await?)
 }
 
+pub async fn get_media_entry_by_id(
+    pool: &PgPool,
+    entry_id: i64,
+) -> Result<Option<FileSystemEntry>> {
+    Ok(sqlx::query_as::<_, FileSystemEntry>(
+        "SELECT * FROM filesystem_entries WHERE id = $1 AND entry_type = 'media'",
+    )
+    .bind(entry_id)
+    .fetch_optional(pool)
+    .await?)
+}
+
+/// Return the most likely next playback target for episodic content.
+/// Movies and non-episodic items return `None`.
+pub async fn get_next_playback_entry(
+    pool: &PgPool,
+    entry_id: i64,
+) -> Result<Option<FileSystemEntry>> {
+    Ok(sqlx::query_as::<_, FileSystemEntry>(
+        r#"SELECT next_fe.*
+           FROM filesystem_entries current_fe
+           INNER JOIN media_items current_ep
+               ON current_ep.id = current_fe.media_item_id
+              AND current_ep.item_type = 'episode'
+           INNER JOIN media_items current_season
+               ON current_season.id = current_ep.parent_id
+              AND current_season.item_type = 'season'
+           INNER JOIN media_items next_season
+               ON next_season.parent_id = current_season.parent_id
+              AND next_season.item_type = 'season'
+           INNER JOIN media_items next_ep
+               ON next_ep.parent_id = next_season.id
+              AND next_ep.item_type = 'episode'
+           INNER JOIN filesystem_entries next_fe
+               ON next_fe.media_item_id = next_ep.id
+              AND next_fe.entry_type = 'media'
+           WHERE current_fe.id = $1
+             AND current_fe.entry_type = 'media'
+             AND (
+                   next_season.season_number > current_season.season_number
+                OR (
+                       next_season.season_number = current_season.season_number
+                   AND next_ep.episode_number > current_ep.episode_number
+                )
+             )
+           ORDER BY
+               next_season.season_number ASC NULLS LAST,
+               next_ep.episode_number ASC NULLS LAST,
+               next_fe.id ASC
+           LIMIT 1"#,
+    )
+    .bind(entry_id)
+    .fetch_optional(pool)
+    .await?)
+}
+
 pub async fn list_filesystem_profile_entry_candidates(
     pool: &PgPool,
 ) -> Result<Vec<FilesystemProfileEntryCandidate>> {
@@ -455,6 +511,34 @@ async fn list_vfs_dirs_at_depth(pool: &PgPool, pattern: &str, depth: u32) -> Res
         .fetch_all(pool)
         .await?;
     Ok(rows.into_iter().flatten().collect())
+}
+
+pub async fn list_vfs_dir_names(
+    pool: &PgPool,
+    pattern: &str,
+    depth: u32,
+) -> Result<Vec<VfsDirName>> {
+    let sql = format!(
+        "SELECT split_part(path, '/', {depth}) AS name, library_profiles \
+         FROM filesystem_entries \
+         WHERE path LIKE $1 AND entry_type = 'media' \
+         ORDER BY 1"
+    );
+    Ok(sqlx::query_as::<_, VfsDirName>(&sql)
+        .bind(pattern)
+        .fetch_all(pool)
+        .await?)
+}
+
+pub async fn list_vfs_file_names(pool: &PgPool, dir_path: &str) -> Result<Vec<VfsFileName>> {
+    let sql = "SELECT split_part(path, '/', array_length(string_to_array(trim(both '/' from $1), '/'), 1) + 2) AS name, library_profiles \
+         FROM filesystem_entries \
+         WHERE path LIKE ($1 || '/%') AND entry_type = 'media' \
+         ORDER BY 1";
+    Ok(sqlx::query_as::<_, VfsFileName>(sql)
+        .bind(dir_path)
+        .fetch_all(pool)
+        .await?)
 }
 
 pub async fn list_vfs_entry_paths(pool: &PgPool, pattern: &str) -> Result<Vec<VfsEntryPath>> {

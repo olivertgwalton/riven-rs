@@ -503,6 +503,7 @@ impl MutationRoot {
 
         let stream = repo::upsert_stream(pool, &info_hash, &magnet, parsed_data, rank).await?;
         repo::link_stream_to_item(pool, target.id, stream.id).await?;
+        repo::refresh_state_cascade(pool, &target).await?;
 
         job_queue
             .push_download(DownloadJob {

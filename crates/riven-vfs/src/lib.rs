@@ -2,7 +2,6 @@ pub mod cache;
 pub mod chunks;
 pub mod detect;
 pub mod filesystem;
-pub mod link;
 pub mod media_stream;
 pub mod path_info;
 pub mod prefetch;
@@ -19,13 +18,6 @@ use tokio::sync::RwLock;
 use tokio::sync::mpsc;
 
 use crate::filesystem::RivenFs;
-
-/// Request to resolve a stream link for a file.
-#[derive(Debug)]
-pub struct LinkRequest {
-    pub download_url: String,
-    pub response_tx: tokio::sync::oneshot::Sender<Option<String>>,
-}
 
 pub struct FuseSession {
     session: fuser::BackgroundSession,
@@ -44,7 +36,7 @@ pub fn mount(
     filesystem_settings_revision: Arc<AtomicU64>,
     db_pool: sqlx::PgPool,
     stream_client: reqwest::Client,
-    link_request_tx: mpsc::Sender<LinkRequest>,
+    link_request_tx: mpsc::Sender<riven_core::stream_link::LinkRequest>,
     debug_logging: bool,
     cache_max_size_mb: u64,
 ) -> Result<FuseSession> {

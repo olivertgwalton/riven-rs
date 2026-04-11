@@ -60,6 +60,21 @@ fn inject_rank_defaults(json: &mut serde_json::Value) {
     }
 }
 
+async fn infer_setup_completed(
+    pool: &sqlx::PgPool,
+    registry: &PluginRegistry,
+) -> Result<bool> {
+    let enabled_profile_count = repo::get_enabled_profiles(pool).await?.len();
+    let valid_enabled_plugin_count = registry
+        .all_plugins_info()
+        .await
+        .into_iter()
+        .filter(|plugin| plugin.enabled && plugin.valid)
+        .count();
+
+    Ok(valid_enabled_plugin_count > 0 && enabled_profile_count > 0)
+}
+
 // ── Core query ──
 
 #[derive(Default)]
@@ -316,12 +331,21 @@ impl CoreQuery {
     /// Return instance-level status flags used by frontend bootstrap flows.
     async fn instance_status(&self, ctx: &Context<'_>) -> Result<InstanceStatus> {
         let pool = ctx.data::<sqlx::PgPool>()?;
-        let setup_completed = match repo::get_setting(pool, "instance.setup_completed").await? {
+        let explicit_setup_completed = match repo::get_setting(pool, "instance.setup_completed").await?
+        {
             Some(serde_json::Value::Bool(value)) => value,
             _ => false,
         };
+        let inferred_setup_completed = if explicit_setup_completed {
+            false
+        } else {
+            let registry = ctx.data::<Arc<PluginRegistry>>()?;
+            infer_setup_completed(pool, registry).await?
+        };
 
-        Ok(InstanceStatus { setup_completed })
+        Ok(InstanceStatus {
+            setup_completed: explicit_setup_completed || inferred_setup_completed,
+        })
     }
 
     /// Get info about all registered plugins.

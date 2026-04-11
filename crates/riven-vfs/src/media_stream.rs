@@ -1,3 +1,5 @@
+use std::collections::VecDeque;
+
 use bytes::{Bytes, BytesMut};
 
 use crate::cache::{RangeCache, cache_get, cache_put};
@@ -17,6 +19,7 @@ pub struct MediaStream {
     layout: FileLayout,
     last_read_end: Option<u64>,
     prefetch: Option<Prefetch>,
+    stream_buffer: SequentialBuffer,
 }
 
 struct ReadContext<'a> {
@@ -27,6 +30,100 @@ struct ReadContext<'a> {
     debug_logging: bool,
 }
 
+struct BufferedChunk {
+    range: ChunkRange,
+    data: Bytes,
+}
+
+struct SequentialBuffer {
+    chunks: VecDeque<BufferedChunk>,
+    capacity_bytes: usize,
+    total_bytes: usize,
+}
+
+impl SequentialBuffer {
+    fn new(capacity_bytes: usize) -> Self {
+        Self {
+            chunks: VecDeque::new(),
+            capacity_bytes: capacity_bytes.max(1),
+            total_bytes: 0,
+        }
+    }
+
+    fn clear(&mut self) {
+        self.chunks.clear();
+        self.total_bytes = 0;
+    }
+
+    fn get_chunk(&self, range: ChunkRange) -> Option<Bytes> {
+        self.chunks
+            .iter()
+            .find(|chunk| chunk.range == range)
+            .map(|chunk| chunk.data.clone())
+    }
+
+    fn read_range(&self, start: u64, end: u64) -> Option<Bytes> {
+        let mut cursor = start;
+        let mut segments = Vec::new();
+
+        for chunk in &self.chunks {
+            if cursor < chunk.range.start {
+                break;
+            }
+            if cursor > chunk.range.end {
+                continue;
+            }
+
+            let slice_start = (cursor - chunk.range.start) as usize;
+            let slice_end = ((end.min(chunk.range.end) - chunk.range.start) + 1) as usize;
+            segments.push(chunk.data.slice(slice_start..slice_end));
+            cursor = chunk.range.start + slice_end as u64;
+
+            if cursor > end {
+                break;
+            }
+        }
+
+        if cursor <= end {
+            return None;
+        }
+
+        if segments.len() == 1 {
+            return segments.pop();
+        }
+
+        let total_len = (end - start + 1) as usize;
+        let mut full = BytesMut::with_capacity(total_len);
+        for segment in segments {
+            full.extend_from_slice(&segment);
+        }
+        Some(full.freeze())
+    }
+
+    fn insert(&mut self, range: ChunkRange, data: Bytes) {
+        if self.get_chunk(range).is_some() {
+            return;
+        }
+
+        if let Some(back) = self.chunks.back()
+            && range.start > back.range.end.saturating_add(1)
+        {
+            self.clear();
+        }
+
+        self.total_bytes += data.len();
+        self.chunks.push_back(BufferedChunk { range, data });
+
+        while self.total_bytes > self.capacity_bytes {
+            if let Some(evicted) = self.chunks.pop_front() {
+                self.total_bytes = self.total_bytes.saturating_sub(evicted.data.len());
+            } else {
+                break;
+            }
+        }
+    }
+}
+
 impl MediaStream {
     pub fn new(ino: u64, file_size: u64) -> Self {
         Self {
@@ -35,6 +132,9 @@ impl MediaStream {
             layout: FileLayout::new(file_size),
             last_read_end: None,
             prefetch: None,
+            stream_buffer: SequentialBuffer::new(
+                riven_core::config::vfs::STREAM_BUFFER_SIZE as usize,
+            ),
         }
     }
 
@@ -111,20 +211,15 @@ impl MediaStream {
         runtime: &tokio::runtime::Handle,
     ) -> Result<Bytes, ()> {
         let key = (self.ino, chunk.start, chunk.end);
-        if let Some(data) = cache_get(cache, key) {
-            return Ok(data);
-        }
-
-        match runtime.block_on(fetch_range(client, stream_url, chunk.start, chunk.end)) {
-            Ok(data) => {
-                cache_put(cache, key, data.clone());
-                Ok(data)
+        cache.get_or_fetch(key, || {
+            match runtime.block_on(fetch_range(client, stream_url, chunk.start, chunk.end)) {
+                Ok(data) => Ok(data),
+                Err(e) => {
+                    tracing::error!(ino = self.ino, error = %e, "range fetch failed");
+                    Err(())
+                }
             }
-            Err(e) => {
-                tracing::error!(ino = self.ino, error = %e, "range fetch failed");
-                Err(())
-            }
-        }
+        })
     }
 
     fn read_cached_chunks(
@@ -134,6 +229,10 @@ impl MediaStream {
         chunks: &[ChunkRange],
         cache: &RangeCache,
     ) -> ReadOutcome {
+        if let Some(buffered) = self.stream_buffer.read_range(start, end) {
+            return ReadOutcome::Data(buffered);
+        }
+
         let total_len: usize = chunks.iter().map(|chunk| chunk.len()).sum();
         let mut full = BytesMut::with_capacity(total_len);
 
@@ -170,6 +269,7 @@ impl MediaStream {
         ctx: &ReadContext<'_>,
     ) -> ReadOutcome {
         self.prefetch = None;
+        self.stream_buffer.clear();
 
         let full = if should_cache {
             match self.fetch_and_cache_range(
@@ -245,9 +345,16 @@ impl MediaStream {
         end: u64,
         ctx: &ReadContext<'_>,
     ) -> ReadOutcome {
+        if let Some(buffered) = self.stream_buffer.read_range(start, end) {
+            return ReadOutcome::Data(buffered);
+        }
+
         let Some(first_missing) = chunks
             .iter()
-            .find(|chunk| cache_get(ctx.cache, (self.ino, chunk.start, chunk.end)).is_none())
+            .find(|chunk| {
+                self.stream_buffer.get_chunk(**chunk).is_none()
+                    && cache_get(ctx.cache, (self.ino, chunk.start, chunk.end)).is_none()
+            })
             .copied()
         else {
             return self.read_cached_chunks(start, end, chunks, ctx.cache);
@@ -264,7 +371,10 @@ impl MediaStream {
 
             for chunk in chunks {
                 let key = (self.ino, chunk.start, chunk.end);
-                let data = if let Some(cached) = cache_get(ctx.cache, key) {
+                let data = if let Some(buffered) = self.stream_buffer.get_chunk(*chunk) {
+                    buffered
+                } else if let Some(cached) = cache_get(ctx.cache, key) {
+                    self.stream_buffer.insert(*chunk, cached.clone());
                     cached
                 } else {
                     match self
@@ -275,6 +385,7 @@ impl MediaStream {
                     {
                         Ok(data) => {
                             cache_put(ctx.cache, key, data.clone());
+                            self.stream_buffer.insert(*chunk, data.clone());
                             data
                         }
                         Err(e) => {

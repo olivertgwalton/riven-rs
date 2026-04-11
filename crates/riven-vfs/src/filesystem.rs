@@ -7,22 +7,19 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use dashmap::DashMap;
 use fuser::{
     FileAttr, FileType, Filesystem, ReplyAttr, ReplyData, ReplyDirectory, ReplyEntry, ReplyOpen,
-    Request,
+    Request, consts::FOPEN_KEEP_CACHE,
 };
-use lru::LruCache;
-use parking_lot::Mutex;
 use tokio::sync::RwLock;
 use tokio::sync::mpsc;
 
 use riven_core::config::vfs::*;
 use riven_core::settings::LibraryProfileMembership;
+use riven_core::stream_link::request_stream_url;
 use riven_core::vfs_layout::VfsLibraryLayout;
 use riven_db::entities::FileSystemEntry;
 use riven_db::repo;
 
-use crate::LinkRequest;
 use crate::cache::RangeCache;
-use crate::link::resolve_stream_url;
 use crate::media_stream::{MediaStream, ReadOutcome};
 use crate::path_info::{CanonicalPath, PathTarget, parse_path};
 use crate::readdir::{DirEntry, populate_entries};
@@ -85,9 +82,41 @@ fn entry_mtime(entry: &FileSystemEntry) -> SystemTime {
 }
 
 struct FileHandle {
+    entry_id: i64,
     path: Arc<str>,
     stream_url: Arc<str>,
+    download_url: Option<Arc<str>>,
     media_stream: MediaStream,
+}
+
+#[derive(Clone)]
+struct CachedEntry {
+    id: i64,
+    file_size: u64,
+    mtime: SystemTime,
+    download_url: Option<Arc<str>>,
+    stream_url: Option<Arc<str>>,
+    library_profiles: LibraryProfileMembership,
+}
+
+impl CachedEntry {
+    fn from_db(entry: FileSystemEntry) -> Self {
+        Self {
+            id: entry.id,
+            file_size: entry.file_size as u64,
+            mtime: entry_mtime(&entry),
+            download_url: entry.download_url.map(Arc::from),
+            stream_url: entry.stream_url.map(Arc::from),
+            library_profiles: LibraryProfileMembership::from_json(entry.library_profiles.as_ref()),
+        }
+    }
+
+    fn matches_profile(&self, profile_key: Option<&str>) -> bool {
+        let Some(profile_key) = profile_key else {
+            return true;
+        };
+        self.library_profiles.contains(profile_key)
+    }
 }
 
 pub struct RivenFs {
@@ -96,7 +125,7 @@ pub struct RivenFs {
     cache_revision: AtomicU64,
     db_pool: sqlx::PgPool,
     stream_client: reqwest::Client,
-    link_request_tx: mpsc::Sender<LinkRequest>,
+    link_request_tx: mpsc::Sender<riven_core::stream_link::LinkRequest>,
     debug_logging: bool,
     runtime: tokio::runtime::Handle,
 
@@ -109,7 +138,7 @@ pub struct RivenFs {
 
     range_cache: RangeCache,
     readdir_cache: DashMap<u64, (Vec<DirEntry>, Instant)>,
-    entry_cache: DashMap<String, (Option<FileSystemEntry>, Instant)>,
+    entry_cache: DashMap<String, (Option<Arc<CachedEntry>>, Instant)>,
     // No TTL — URL is valid until the DB entry is explicitly cleared.
     stream_url_cache: DashMap<i64, String>,
 }
@@ -120,7 +149,7 @@ impl RivenFs {
         filesystem_settings_revision: Arc<AtomicU64>,
         db_pool: sqlx::PgPool,
         stream_client: reqwest::Client,
-        link_request_tx: mpsc::Sender<LinkRequest>,
+        link_request_tx: mpsc::Sender<riven_core::stream_link::LinkRequest>,
         debug_logging: bool,
         cache_max_size_mb: u64,
     ) -> Self {
@@ -153,7 +182,7 @@ impl RivenFs {
             path_to_ino,
             ino_to_path,
             next_ino: AtomicU64::new(FIRST_DYNAMIC_INO),
-            range_cache: Mutex::new(LruCache::new(std::num::NonZeroUsize::new(entries).unwrap())),
+            range_cache: RangeCache::new(entries),
             readdir_cache: DashMap::new(),
             entry_cache: DashMap::new(),
             stream_url_cache: DashMap::new(),
@@ -187,7 +216,7 @@ impl RivenFs {
         ino
     }
 
-    fn get_entry_cached(&self, path: &str) -> Option<FileSystemEntry> {
+    fn get_entry_cached(&self, path: &str) -> Option<Arc<CachedEntry>> {
         self.refresh_caches_if_needed();
         if let Some(cached) = self.entry_cache.get(path)
             && cached.1.elapsed() < TTL
@@ -212,7 +241,9 @@ impl RivenFs {
                         .block_on(repo::get_media_entry_by_path(&self.db_pool, &actual_path))
                         .ok()
                         .flatten()
-                        .filter(|entry| matches_profile(entry, profile_key.as_deref()))
+                        .map(CachedEntry::from_db)
+                        .filter(|entry| entry.matches_profile(profile_key.as_deref()))
+                        .map(Arc::new)
                 }
             }
             _ => None,
@@ -222,7 +253,7 @@ impl RivenFs {
         result
     }
 
-    fn get_stream_url_cached(&self, path: &str, entry: &FileSystemEntry) -> Option<String> {
+    fn get_stream_url_cached(&self, path: &str, entry: &CachedEntry) -> Option<String> {
         if let Some(url) = self.stream_url_cache.get(&entry.id) {
             return Some(url.clone());
         }
@@ -230,35 +261,46 @@ impl RivenFs {
             self.stream_url_cache.insert(entry.id, url.to_string());
             return Some(url.to_string());
         }
-        let url = resolve_stream_url(
-            entry.download_url.as_deref(),
+        let url = request_stream_url(
+            entry.download_url.as_deref().map(|url| url.as_ref()),
             &self.link_request_tx,
-            &self.db_pool,
-            entry.id,
             &self.runtime,
         )?;
+        let _ = self.runtime.block_on(riven_db::repo::update_stream_url(
+            &self.db_pool,
+            entry.id,
+            &url,
+        ));
         self.stream_url_cache.insert(entry.id, url.clone());
         self.entry_cache.remove(path);
         Some(url)
     }
 
-    fn get_stream_url_for_open(&self, path: &str, entry: &FileSystemEntry) -> Option<String> {
-        // Direct debrid URLs expire, so refresh them when playback starts.
-        if entry.download_url.is_some()
-            && let Some(url) = resolve_stream_url(
-                entry.download_url.as_deref(),
-                &self.link_request_tx,
-                &self.db_pool,
-                entry.id,
-                &self.runtime,
-            )
-        {
-            self.stream_url_cache.insert(entry.id, url.clone());
-            self.entry_cache.remove(path);
-            return Some(url);
-        }
+    fn refresh_stream_url(
+        &self,
+        path: &str,
+        entry_id: i64,
+        download_url: Option<&str>,
+    ) -> Option<String> {
+        let url = request_stream_url(download_url, &self.link_request_tx, &self.runtime)?;
+        let _ = self.runtime.block_on(riven_db::repo::update_stream_url(
+            &self.db_pool,
+            entry_id,
+            &url,
+        ));
+        self.stream_url_cache.insert(entry_id, url.clone());
+        self.entry_cache.remove(path);
+        Some(url)
+    }
 
-        self.get_stream_url_cached(path, entry)
+    fn get_stream_url_for_open(&self, path: &str, entry: &CachedEntry) -> Option<String> {
+        self.get_stream_url_cached(path, entry).or_else(|| {
+            self.refresh_stream_url(
+                path,
+                entry.id,
+                entry.download_url.as_deref().map(|url| url.as_ref()),
+            )
+        })
     }
 
     fn resolve_path(&self, parent_ino: u64, name: &str) -> Arc<str> {
@@ -340,11 +382,7 @@ impl Filesystem for RivenFs {
                     match self.get_entry_cached(&path) {
                         Some(entry) => {
                             let ino = self.get_or_create_ino(&path);
-                            reply.entry(
-                                &TTL,
-                                &file_attr(ino, entry.file_size as u64, entry_mtime(&entry)),
-                                0,
-                            );
+                            reply.entry(&TTL, &file_attr(ino, entry.file_size, entry.mtime), 0);
                         }
                         None => reply.error(libc::ENOENT),
                     }
@@ -372,10 +410,9 @@ impl Filesystem for RivenFs {
                         path: CanonicalPath::MovieFile { .. } | CanonicalPath::EpisodeFile { .. },
                         ..
                     } => match self.get_entry_cached(&path) {
-                        Some(entry) => reply.attr(
-                            &TTL,
-                            &file_attr(ino, entry.file_size as u64, entry_mtime(&entry)),
-                        ),
+                        Some(entry) => {
+                            reply.attr(&TTL, &file_attr(ino, entry.file_size, entry.mtime))
+                        }
                         None => reply.error(libc::ENOENT),
                     },
                     _ => reply.attr(&TTL, &dir_attr(ino)),
@@ -458,16 +495,18 @@ impl Filesystem for RivenFs {
         };
 
         let fd = self.next_fd.fetch_add(1, Ordering::SeqCst);
-        let file_size = entry.file_size as u64;
+        let file_size = entry.file_size;
         self.file_handles.insert(
             fd,
             FileHandle {
+                entry_id: entry.id,
                 path,
                 stream_url: Arc::from(stream_url),
+                download_url: entry.download_url.clone(),
                 media_stream: MediaStream::new(ino, file_size),
             },
         );
-        reply.opened(fd, 0);
+        reply.opened(fd, FOPEN_KEEP_CACHE);
     }
 
     fn read(
@@ -498,7 +537,7 @@ impl Filesystem for RivenFs {
         }
 
         let stream_url = Arc::clone(&handle.stream_url);
-        match handle.media_stream.read(
+        let outcome = match handle.media_stream.read(
             start,
             end,
             &stream_url,
@@ -507,6 +546,42 @@ impl Filesystem for RivenFs {
             &self.runtime,
             self.debug_logging,
         ) {
+            ReadOutcome::Data(buf) => ReadOutcome::Data(buf),
+            ReadOutcome::Error(code) => {
+                let Some(download_url) = handle.download_url.as_ref().map(Arc::clone) else {
+                    return reply.error(code);
+                };
+                let path = Arc::clone(&handle.path);
+                let entry_id = handle.entry_id;
+
+                tracing::warn!(
+                    path = %path,
+                    offset = start,
+                    size,
+                    code,
+                    "read failed, refreshing stream url and retrying once"
+                );
+
+                let Some(url) =
+                    self.refresh_stream_url(&path, entry_id, Some(download_url.as_ref()))
+                else {
+                    return reply.error(code);
+                };
+                handle.stream_url = Arc::from(url);
+                let refreshed = Arc::clone(&handle.stream_url);
+                handle.media_stream.read(
+                    start,
+                    end,
+                    &refreshed,
+                    &self.range_cache,
+                    &self.stream_client,
+                    &self.runtime,
+                    self.debug_logging,
+                )
+            }
+        };
+
+        match outcome {
             ReadOutcome::Data(buf) => reply.data(&buf),
             ReadOutcome::Error(code) => reply.error(code),
         }
@@ -528,11 +603,4 @@ impl Filesystem for RivenFs {
         self.file_handles.remove(&fh);
         reply.ok();
     }
-}
-
-fn matches_profile(entry: &FileSystemEntry, profile_key: Option<&str>) -> bool {
-    let Some(profile_key) = profile_key else {
-        return true;
-    };
-    LibraryProfileMembership::from_json(entry.library_profiles.as_ref()).contains(profile_key)
 }

@@ -18,6 +18,9 @@ pub mod vfs {
     /// Chunk size (in bytes) used for streaming calculations.
     pub const CHUNK_SIZE: u64 = 1_048_576; // 1 MB
 
+    /// Per-handle RAM budget for sequential playback buffering.
+    pub const STREAM_BUFFER_SIZE: u64 = 32 * 1_048_576; // 32 MB
+
     /// Timeout for detecting stalled streams.
     pub const ACTIVITY_TIMEOUT_SECS: u64 = 60;
 

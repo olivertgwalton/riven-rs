@@ -227,7 +227,7 @@ pub fn rank_streams(
             }
 
             let best = if let Some(ref settings) = ctx.fallback_settings {
-                match riven_rank::rank_torrent(
+                match riven_rank::rank_torrent_fast(
                     title,
                     info_hash,
                     &ctx.correct_title,
@@ -244,7 +244,7 @@ pub fn rank_streams(
                 ctx.profiles
                     .iter()
                     .filter_map(|(profile_name, settings)| {
-                        match riven_rank::rank_torrent(
+                        match riven_rank::rank_torrent_fast(
                             title,
                             info_hash,
                             &ctx.correct_title,

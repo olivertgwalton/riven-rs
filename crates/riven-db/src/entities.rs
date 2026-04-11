@@ -171,6 +171,18 @@ pub struct FilesystemProfileEntryCandidate {
     pub is_anime: bool,
 }
 
+#[derive(Debug, Clone, FromRow)]
+pub struct VfsDirName {
+    pub name: Option<String>,
+    pub library_profiles: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, FromRow)]
+pub struct VfsFileName {
+    pub name: Option<String>,
+    pub library_profiles: Option<serde_json::Value>,
+}
+
 impl FilesystemProfileEntryCandidate {
     pub fn filesystem_content_type(&self) -> FilesystemContentType {
         match self.content_type.as_str() {
