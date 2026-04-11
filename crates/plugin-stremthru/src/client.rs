@@ -59,11 +59,6 @@ pub async fn check_cache(
         return Ok(cached_results);
     }
 
-    let hash_str = missing_hashes
-        .iter()
-        .map(String::as_str)
-        .collect::<Vec<_>>()
-        .join(",");
     tracing::debug!(
         store,
         hashes = missing_hashes.len(),
@@ -71,7 +66,8 @@ pub async fn check_cache(
         "checking debrid cache via stremthru torz endpoint"
     );
 
-    let fetched_results = fetch_cache_check(client, base_url, store, api_key, &hash_str).await?;
+    let fetched_results =
+        fetch_cache_check(client, base_url, store, api_key, &missing_hashes).await?;
 
     for result in &fetched_results {
         match serde_json::to_string(result) {
@@ -96,7 +92,7 @@ pub async fn check_cache(
     Ok(cached_results)
 }
 
-/// Adds a torrent to the store and returns the downloaded torz payload with file links.
+/// Adds a torrent to the store and returns the downloaded payload with file links.
 /// The torrent must report `downloaded` immediately or it is removed and treated as
 /// unavailable for this attempt.
 pub async fn add_torrent(
@@ -146,7 +142,7 @@ pub async fn add_torrent(
             status = %data.status,
             "torrent not in downloaded state; deleting torz item"
         );
-        if let Err(error) = delete_torz(client, base_url, store, api_key, &torrent_id).await {
+        if let Err(error) = delete_torrent(client, base_url, store, api_key, &torrent_id).await {
             tracing::warn!(store, hash, torrent_id, error = %error, "failed to delete torz item");
         }
         return Ok(None);
@@ -160,13 +156,19 @@ async fn fetch_cache_check(
     base_url: &str,
     store: &str,
     api_key: &str,
-    hash_str: &str,
+    hashes: &[String],
 ) -> anyhow::Result<Vec<CacheCheckResult>> {
-    let url = format!("{base_url}v0/store/torz/check?hash={hash_str}");
+    let hash_str = hashes
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join(",");
+    let url = format!("{base_url}v0/store/torz/check");
     tracing::debug!(store, url = %url, "requesting stremthru torz cache check");
     let response = riven_core::http::send(|| {
         client
             .get(&url)
+            .query(&[("hash", hash_str.as_str())])
             .header("x-stremthru-store-name", store)
             .header(
                 "x-stremthru-store-authorization",
@@ -223,7 +225,7 @@ async fn fetch_cache_check(
         .collect())
 }
 
-async fn delete_torz(
+async fn delete_torrent(
     client: &reqwest::Client,
     base_url: &str,
     store: &str,

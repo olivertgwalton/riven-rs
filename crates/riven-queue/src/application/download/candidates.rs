@@ -110,11 +110,13 @@ pub fn pick_best_for_profile<'a>(
                     audio = ?parsed.audio,
                     hdr = ?parsed.hdr,
                     checks = ?failed_checks,
-                    "cached stream does not match download preference checks; keeping for fallback scoring"
+                    "cached stream does not match download preference checks"
                 );
+                return None;
             }
 
-            let score = riven_rank::rank::scores::get_rank_total(&parsed, &download_profile, &model);
+            let score =
+                riven_rank::rank::scores::get_rank_total(&parsed, &download_profile, &model);
             Some((candidate.stream, score, pack_preference(item, &parsed)))
         })
         .collect();

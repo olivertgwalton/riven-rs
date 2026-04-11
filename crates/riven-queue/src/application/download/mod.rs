@@ -285,15 +285,6 @@ async fn run_multi_version(
     }
 
     if !any_success {
-        if downloaded_profiles.is_empty() {
-            tracing::debug!(
-                id,
-                title = %item.title,
-                "no cached stream matched the active profile settings; falling back to general selection"
-            );
-            return run_single_version(id, item, queue, start_time, candidates, hierarchy).await;
-        }
-
         tracing::debug!(id, title = %item.title, "no valid torrent found after trying cached candidates");
         queue
             .notify(RivenEvent::MediaItemDownloadError {

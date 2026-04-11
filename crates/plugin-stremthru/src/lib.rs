@@ -199,7 +199,7 @@ impl Plugin for StremthruPlugin {
                                 store,
                                 info_hash,
                                 files = torz.files.len(),
-                                "torrent cached; building download result from torz add"
+                                "torrent cached; building download result from stremthru add"
                             );
                             let download = download_result_from_torz(store, info_hash, torz);
                             return Ok(HookResponse::Download(Box::new(download)));
@@ -210,7 +210,7 @@ impl Plugin for StremthruPlugin {
                                 store,
                                 info_hash,
                                 files = cache_result.files.len(),
-                                "store passed cache check but torz add returned unavailable"
+                                "store passed cache check but add returned unavailable"
                             );
                         }
                         Err(error) => {
