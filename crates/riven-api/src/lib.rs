@@ -619,7 +619,10 @@ pub async fn start_server(
 
     let board_api = ApiBuilder::new(Router::new())
         .register(job_queue.index_storage.clone())
+        .register(job_queue.index_plugin_storage.clone())
         .register(job_queue.scrape_storage.clone())
+        .register(job_queue.scrape_plugin_storage.clone())
+        .register(job_queue.parse_storage.clone())
         .register(job_queue.download_storage.clone())
         .register(job_queue.content_storage.clone())
         .build();

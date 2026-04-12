@@ -55,9 +55,9 @@ tower-http = { version = "0.6", features = ["cors"] }
 redis = { version = "0.27", features = ["tokio-comp", "connection-manager"] }
 
 # Job queue
-apalis = { version = "1.0.0-rc.6", features = ["limit"] }
-apalis-redis = { version = "1.0.0-rc.6" }
-apalis-board-api = { version = "1.0.0-rc.6", features = ["axum", "ui"] }
+apalis = { version = "1.0.0-rc.7", features = ["limit"] }
+apalis-redis = { version = "1.0.0-rc.7" }
+apalis-board-api = { version = "1.0.0-rc.7", features = ["axum", "ui"] }
 
 # FUSE
 fuser = "0.15"
@@ -88,3 +88,6 @@ libc = "0.2"
 bytes = "1"
 tokio-util = { version = "0.7", features = ["io"] }
 ulid = "1"
+
+[patch.crates-io]
+apalis-redis = { path = "vendor/apalis-redis" }
