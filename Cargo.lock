@@ -2862,6 +2862,7 @@ dependencies = [
  "dashmap",
  "figment",
  "futures",
+ "hyper",
  "inventory",
  "parking_lot",
  "redis 0.27.6",

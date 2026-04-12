@@ -33,20 +33,9 @@ fn event_item_id(event: &RivenEvent) -> Option<i64> {
 }
 
 async fn item_relates_to_target(pool: &sqlx::PgPool, item_id: i64, target_id: i64) -> bool {
-    let mut current_id = Some(item_id);
-
-    while let Some(id) = current_id {
-        if id == target_id {
-            return true;
-        }
-
-        current_id = match repo::get_media_item(pool, id).await {
-            Ok(Some(item)) => item.parent_id,
-            _ => None,
-        };
-    }
-
-    false
+    repo::is_item_descendant_of(pool, item_id, target_id)
+        .await
+        .unwrap_or(false)
 }
 
 async fn load_item_state_by_tmdb(
@@ -115,15 +104,9 @@ async fn wait_for_relevant_event(
         };
 
         if should_emit_for_external_target(pool, &event, target).await {
-            while let Ok(raw) = rx.try_recv() {
-                let Ok(event) = serde_json::from_str::<RivenEvent>(&raw) else {
-                    continue;
-                };
-
-                if should_emit_for_external_target(pool, &event, target).await {
-                    continue;
-                }
-            }
+            // Drain any other queued events so a burst of activity produces
+            // one emission (with a fresh DB query) rather than one per event.
+            while rx.try_recv().is_ok() {}
 
             return Some(());
         }

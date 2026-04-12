@@ -6,7 +6,7 @@ use dashmap::DashMap;
 use parking_lot::Mutex;
 use reqwest::StatusCode;
 use serde::de::DeserializeOwned;
-use tokio::sync::Notify;
+use tokio::sync::watch;
 use tokio::time::sleep;
 
 /// Number of attempts matching riven-ts `BaseDataSource.requestAttempts`.
@@ -156,48 +156,44 @@ impl HttpClient {
     }
 }
 
+/// Shared state for a deduplicated in-flight HTTP request.
+///
+/// Uses `watch` rather than `Mutex` + `Notify` to avoid a race where
+/// `notify_waiters()` fires between the condition check and `notified().await`
+/// registration, leaving waiters blocked forever.  `watch::Receiver::wait_for`
+/// always inspects the current value before suspending, so late subscribers
+/// see the result immediately regardless of when `finish` was called.
 #[derive(Debug)]
 struct InFlightRequest {
-    notify: Notify,
-    state: Mutex<InFlightState>,
-}
-
-#[derive(Debug, Default)]
-struct InFlightState {
-    finished: bool,
-    result: Option<Result<Arc<HttpResponseData>, String>>,
+    tx: watch::Sender<Option<Result<Arc<HttpResponseData>, String>>>,
 }
 
 impl InFlightRequest {
     fn new() -> Self {
-        Self {
-            notify: Notify::new(),
-            state: Mutex::new(InFlightState::default()),
-        }
+        let (tx, _) = watch::channel(None);
+        Self { tx }
     }
 
     fn finish(&self, result: Result<Arc<HttpResponseData>, String>) {
-        let mut state = self.state.lock();
-        state.result = Some(result);
-        state.finished = true;
-        drop(state);
-        self.notify.notify_waiters();
+        // Errors only occur if all receivers were dropped (i.e. all waiters
+        // cancelled), which is harmless.
+        let _ = self.tx.send(Some(result));
     }
 
     async fn wait(&self) -> Result<Arc<HttpResponseData>, String> {
-        loop {
-            if let Some(result) = {
-                let state = self.state.lock();
-                if state.finished {
-                    state.result.clone()
-                } else {
-                    None
-                }
-            } {
-                return result;
-            }
-            self.notify.notified().await;
-        }
+        let mut rx = self.tx.subscribe();
+        // wait_for checks the current value first, then waits for changes —
+        // no missed-notification race possible.
+        //
+        // RecvError means the Sender was dropped before finish() was called,
+        // which can happen if the leader future was cancelled (e.g. by a
+        // select! timeout).  Treat it as a transient failure so the caller
+        // retries the request independently rather than panicking.
+        rx.wait_for(|v| v.is_some())
+            .await
+            .map_err(|_| "inflight leader cancelled before completing request".to_string())?
+            .clone()
+            .unwrap() // safe: predicate guarantees Some(_)
     }
 }
 
@@ -348,10 +344,36 @@ impl LimiterState {
 }
 
 /// Returns `true` for transient network errors that warrant a retry.
-/// Covers TCP connection failures and timeouts, but not application-level
-/// errors (bad status codes, decode failures, invalid URLs).
+///
+/// Covers TCP connection failures, timeouts, and the stale keep-alive race
+/// where the server closes a pooled connection just before we reuse it,
+/// producing a hyper `IncompleteMessage` before any response bytes arrive.
+///
+/// Strategy: if `is_request()` is true (transport-level error during the HTTP
+/// exchange) we walk the source chain for a `hyper::Error` to confirm it is
+/// specifically `IncompleteMessage`.  If reqwest's error chain is opaque and we
+/// cannot reach `hyper::Error`, we fall back to treating all request-level
+/// transport errors as transient — they share the same retry-safe profile.
 fn is_transient(e: &reqwest::Error) -> bool {
-    e.is_connect() || e.is_timeout()
+    if e.is_connect() || e.is_timeout() {
+        return true;
+    }
+
+    if e.is_request() {
+        use std::error::Error as StdError;
+        let mut src: Option<&dyn StdError> = Some(e);
+        while let Some(err) = src {
+            if let Some(hyper_err) = err.downcast_ref::<hyper::Error>() {
+                return hyper_err.is_incomplete_message();
+            }
+            src = err.source();
+        }
+        // Could not reach hyper::Error through the chain (reqwest may wrap via
+        // hyper_util); treat all request-level transport errors as transient.
+        return true;
+    }
+
+    false
 }
 
 /// Apply ±50% jitter to a duration, matching riven-ts backoff jitter.

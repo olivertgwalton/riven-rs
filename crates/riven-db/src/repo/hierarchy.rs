@@ -78,43 +78,61 @@ pub async fn count_episodes_in_season(pool: &PgPool, season_id: i64) -> Result<i
 /// Only processable seasons (not unreleased/ongoing, not specials, is_requested) are counted.
 /// For continuing shows the last season is excluded (still airing). Mirrors the TypeScript
 /// `expectedFileCount` field resolver on `Show`.
+///
+/// Executes as a single SQL query.
 pub async fn count_expected_files_for_show(pool: &PgPool, show_id: i64) -> Result<i64> {
-    let season_ids: Vec<i64> = sqlx::query_scalar(
-        "SELECT id FROM media_items \
-         WHERE parent_id = $1 AND item_type = 'season' \
-           AND is_requested = true AND is_special = false \
-           AND state NOT IN ('unreleased', 'ongoing') \
-         ORDER BY season_number ASC",
-    )
-    .bind(show_id)
-    .fetch_all(pool)
-    .await?;
-
-    if season_ids.is_empty() {
-        return Ok(0);
-    }
-
-    let is_continuing: bool = sqlx::query_scalar(
-        "SELECT COALESCE(show_status = 'continuing', false) \
-         FROM media_items WHERE id = $1 AND item_type = 'show'",
-    )
-    .bind(show_id)
-    .fetch_optional(pool)
-    .await?
-    .unwrap_or(false);
-
-    let expected_count = if is_continuing {
-        (season_ids.len().saturating_sub(1)).max(1)
-    } else {
-        season_ids.len()
-    };
-
-    let ids_to_count = &season_ids[..expected_count];
-
     Ok(sqlx::query_scalar(
-        "SELECT COUNT(*) FROM media_items WHERE item_type = 'episode' AND parent_id = ANY($1)",
+        r#"WITH qualifying_seasons AS (
+               SELECT
+                   id,
+                   ROW_NUMBER() OVER (ORDER BY season_number ASC) AS rn
+               FROM media_items
+               WHERE parent_id = $1
+                 AND item_type  = 'season'
+                 AND is_requested = true
+                 AND is_special   = false
+                 AND state NOT IN ('unreleased', 'ongoing')
+           ),
+           show_info AS (
+               SELECT COALESCE(show_status = 'continuing', false) AS is_continuing
+               FROM media_items
+               WHERE id = $1 AND item_type = 'show'
+           ),
+           season_cap AS (
+               SELECT CASE
+                   WHEN (SELECT is_continuing FROM show_info)
+                   THEN GREATEST(1, COUNT(*) - 1)
+                   ELSE COUNT(*)
+               END AS cap
+               FROM qualifying_seasons
+           )
+           SELECT COALESCE(COUNT(e.id), 0)
+           FROM qualifying_seasons qs
+           JOIN media_items e ON e.parent_id = qs.id AND e.item_type = 'episode'
+           WHERE qs.rn <= COALESCE((SELECT cap FROM season_cap), 0)"#,
     )
-    .bind(ids_to_count)
+    .bind(show_id)
+    .fetch_one(pool)
+    .await?)
+}
+
+/// Return true if `item_id` is equal to `target_id` or is a descendant of it
+/// (i.e. following parent_id links from `item_id` eventually reaches `target_id`).
+///
+/// Uses a recursive CTE — one query regardless of hierarchy depth.
+pub async fn is_item_descendant_of(pool: &PgPool, item_id: i64, target_id: i64) -> Result<bool> {
+    Ok(sqlx::query_scalar(
+        r#"WITH RECURSIVE ancestors AS (
+               SELECT id, parent_id FROM media_items WHERE id = $1
+               UNION ALL
+               SELECT m.id, m.parent_id
+               FROM media_items m
+               INNER JOIN ancestors a ON m.id = a.parent_id
+           )
+           SELECT EXISTS(SELECT 1 FROM ancestors WHERE id = $2)"#,
+    )
+    .bind(item_id)
+    .bind(target_id)
     .fetch_one(pool)
     .await?)
 }

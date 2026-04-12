@@ -9,6 +9,7 @@ futures = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 reqwest = { workspace = true }
+hyper = { workspace = true }
 async-trait = { workspace = true }
 async-graphql = { workspace = true }
 chrono = { workspace = true }

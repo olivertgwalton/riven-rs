@@ -578,7 +578,7 @@ impl CoreQuery {
         pool: &sqlx::PgPool,
         item: MediaItem,
     ) -> async_graphql::Result<MediaItemStateTree> {
-        let seasons = if item.item_type == MediaItemType::Show {
+        let (seasons, expected_file_count) = if item.item_type == MediaItemType::Show {
             let seasons = repo::list_seasons(pool, item.id).await?;
             let season_ids: Vec<i64> = seasons.iter().map(|season| season.id).collect();
             let episodes = if season_ids.is_empty() {
@@ -602,14 +602,34 @@ impl CoreQuery {
                     .push(episode);
             }
 
-            seasons
+            // Compute the show-level expected file count from already-loaded data
+            // (same logic as count_expected_files_for_show, no extra DB query).
+            let show_expected: i64 = {
+                let qualifying: Vec<&MediaItem> = seasons
+                    .iter()
+                    .filter(|s| {
+                        s.is_requested
+                            && s.is_special != Some(true)
+                            && s.state != MediaItemState::Unreleased
+                            && s.state != MediaItemState::Ongoing
+                    })
+                    .collect();
+                let n = qualifying.len();
+                let cap = if item.show_status == Some(ShowStatus::Continuing) {
+                    n.saturating_sub(1).max(1)
+                } else {
+                    n
+                };
+                qualifying[..cap.min(n)]
+                    .iter()
+                    .map(|s| episodes_by_season.get(&s.id).map_or(0, |eps| eps.len()) as i64)
+                    .sum()
+            };
+
+            let seasons: Vec<SeasonState> = seasons
                 .into_iter()
-                .map(|season| SeasonState {
-                    id: season.id,
-                    season_number: season.season_number,
-                    state: season.state,
-                    is_requested: season.is_requested,
-                    episodes: episodes_by_season
+                .map(|season| {
+                    let eps: Vec<EpisodeState> = episodes_by_season
                         .remove(&season.id)
                         .unwrap_or_default()
                         .into_iter()
@@ -618,11 +638,22 @@ impl CoreQuery {
                             episode_number: episode.episode_number,
                             state: episode.state,
                         })
-                        .collect(),
+                        .collect();
+                    let expected_file_count = eps.len() as i64;
+                    SeasonState {
+                        id: season.id,
+                        season_number: season.season_number,
+                        state: season.state,
+                        is_requested: season.is_requested,
+                        expected_file_count,
+                        episodes: eps,
+                    }
                 })
-                .collect()
+                .collect();
+
+            (seasons, show_expected)
         } else {
-            vec![]
+            (vec![], 1i64)
         };
 
         Ok(MediaItemStateTree {
@@ -631,6 +662,7 @@ impl CoreQuery {
             imdb_id: item.imdb_id,
             tmdb_id: item.tmdb_id,
             tvdb_id: item.tvdb_id,
+            expected_file_count,
             seasons,
         })
     }

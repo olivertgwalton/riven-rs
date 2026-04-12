@@ -44,6 +44,7 @@ pub struct SeasonState {
     pub season_number: Option<i32>,
     pub state: MediaItemState,
     pub is_requested: bool,
+    pub expected_file_count: i64,
     pub episodes: Vec<EpisodeState>,
 }
 
@@ -55,6 +56,7 @@ pub struct MediaItemStateTree {
     pub imdb_id: Option<String>,
     pub tmdb_id: Option<String>,
     pub tvdb_id: Option<String>,
+    pub expected_file_count: i64,
     pub seasons: Vec<SeasonState>,
 }
 
