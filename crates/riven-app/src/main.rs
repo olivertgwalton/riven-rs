@@ -28,7 +28,6 @@ fn build_http_client() -> Result<reqwest::Client> {
         .tcp_keepalive(Duration::from_secs(30))
         .tcp_nodelay(true)
         .http1_only()
-        .user_agent("Mozilla/5.0 (compatible; riven/1.0)")
         .connection_verbose(false)
         .build()?)
 }
@@ -46,7 +45,6 @@ fn build_streaming_http_client() -> Result<reqwest::Client> {
         .tcp_keepalive(Duration::from_secs(30))
         .tcp_nodelay(true)
         .http1_only()
-        .user_agent("Mozilla/5.0 (compatible; riven/1.0)")
         .connection_verbose(false)
         .build()?)
 }
