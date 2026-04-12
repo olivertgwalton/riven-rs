@@ -12,6 +12,7 @@ use std::collections::HashMap;
 
 use crate::client::{
     add_torrent, check_cache, download_result_from_torz, fetch_user_info, generate_link,
+    scrape_torznab,
 };
 const DEFAULT_URL: &str = "https://stremthru.13377001.xyz/";
 const STORE_SCORE_TTL_SECS: u64 = 60 * 60 * 24 * 7;
@@ -90,6 +91,7 @@ impl Plugin for StremthruPlugin {
 
     fn subscribed_events(&self) -> &[EventType] {
         &[
+            EventType::MediaItemScrapeRequested,
             EventType::MediaItemDownloadRequested,
             EventType::MediaItemDownloadCacheCheckRequested,
             EventType::MediaItemDownloadProviderListRequested,
@@ -98,7 +100,11 @@ impl Plugin for StremthruPlugin {
         ]
     }
 
-    async fn validate(&self, settings: &PluginSettings) -> anyhow::Result<bool> {
+    async fn validate(
+        &self,
+        settings: &PluginSettings,
+        _http: &riven_core::http::HttpClient,
+    ) -> anyhow::Result<bool> {
         Ok(!get_configured_stores(settings).is_empty())
     }
 
@@ -129,21 +135,22 @@ impl Plugin for StremthruPlugin {
         let stores = get_configured_stores(&ctx.settings);
 
         match event {
+            RivenEvent::MediaItemScrapeRequested { .. } => {
+                let Some(req) = event.scrape_request() else {
+                    return Ok(HookResponse::Empty);
+                };
+                let results = scrape_torznab(&ctx.http, &base_url, &req).await?;
+                Ok(HookResponse::Scrape(results))
+            }
             RivenEvent::MediaItemDownloadRequested { info_hash, .. } => {
                 let mut any_network_error = false;
                 let hashes = vec![info_hash.to_lowercase()];
                 let score_map = get_store_scores(&ctx.redis, &stores).await;
                 let cache_checks =
                     futures::future::join_all(stores.iter().map(|(store, api_key)| async {
-                        let result = check_cache(
-                            &ctx.http_client,
-                            &ctx.redis,
-                            &base_url,
-                            store,
-                            api_key,
-                            &hashes,
-                        )
-                        .await;
+                        let result =
+                            check_cache(&ctx.http, &ctx.redis, &base_url, store, api_key, &hashes)
+                                .await;
                         (*store, api_key.as_str(), result)
                     }))
                     .await;
@@ -191,8 +198,7 @@ impl Plugin for StremthruPlugin {
                 });
 
                 for (store, api_key, cache_result) in cached_stores {
-                    match add_torrent(&ctx.http_client, &base_url, store, api_key, info_hash).await
-                    {
+                    match add_torrent(&ctx.http, &base_url, store, api_key, info_hash).await {
                         Ok(Some(torz)) => {
                             adjust_store_score(&ctx.redis, store, 5).await;
                             tracing::debug!(
@@ -236,12 +242,7 @@ impl Plugin for StremthruPlugin {
                 let mut futures = Vec::new();
                 for (store, api_key) in &stores {
                     futures.push(check_cache(
-                        &ctx.http_client,
-                        &ctx.redis,
-                        &base_url,
-                        store,
-                        api_key,
-                        hashes,
+                        &ctx.http, &ctx.redis, &base_url, store, api_key, hashes,
                     ));
                 }
 
@@ -280,8 +281,7 @@ impl Plugin for StremthruPlugin {
                 });
 
                 for (store, api_key) in ordered_stores {
-                    let result =
-                        generate_link(&ctx.http_client, &base_url, store, api_key, magnet).await;
+                    let result = generate_link(&ctx.http, &base_url, store, api_key, magnet).await;
                     match result {
                         Ok(link) => {
                             adjust_store_score(&ctx.redis, store, 1).await;
@@ -298,7 +298,7 @@ impl Plugin for StremthruPlugin {
             RivenEvent::DebridUserInfoRequested => {
                 let mut infos = Vec::new();
                 for (store, api_key) in &stores {
-                    match fetch_user_info(&ctx.http_client, &base_url, store, api_key).await {
+                    match fetch_user_info(&ctx.http, &base_url, store, api_key).await {
                         Ok(info) => infos.push(info),
                         Err(error) => {
                             tracing::warn!(store, error = %error, "failed to fetch debrid user info");

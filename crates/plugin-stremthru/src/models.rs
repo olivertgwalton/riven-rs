@@ -72,3 +72,33 @@ pub struct StremthruUser {
     pub email: Option<String>,
     pub subscription_status: Option<String>,
 }
+
+#[derive(Deserialize)]
+pub struct StremthruTorznabResponse {
+    pub channel: StremthruTorznabChannel,
+}
+
+#[derive(Deserialize)]
+pub struct StremthruTorznabChannel {
+    #[serde(default)]
+    pub items: Vec<StremthruTorznabItem>,
+}
+
+#[derive(Deserialize)]
+pub struct StremthruTorznabItem {
+    pub title: String,
+    #[serde(default)]
+    pub attr: Vec<StremthruTorznabAttr>,
+}
+
+#[derive(Deserialize)]
+pub struct StremthruTorznabAttr {
+    #[serde(rename = "@attributes")]
+    pub attributes: StremthruTorznabAttrValue,
+}
+
+#[derive(Deserialize)]
+pub struct StremthruTorznabAttrValue {
+    pub name: String,
+    pub value: String,
+}

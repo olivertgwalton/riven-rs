@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use super::helpers::derive_media_metadata;
+use super::typed_items::MediaItemUnion;
 use super::types::InstanceStatus;
 use super::types::MediaItemStateTree;
 use super::types::PluginInfo;
@@ -79,6 +80,25 @@ pub struct CoreQuery;
 
 #[Object]
 impl CoreQuery {
+    /// Get a media item by ID as a discriminated union (Movie | Show | Season | Episode).
+    async fn media_item_by_id(&self, ctx: &Context<'_>, id: i64) -> Result<Option<MediaItemUnion>> {
+        let pool = ctx.data::<sqlx::PgPool>()?;
+        Ok(repo::get_media_item(pool, id)
+            .await?
+            .map(MediaItemUnion::from))
+    }
+
+    /// List up to 25 media items across all types, newest first.
+    async fn media_items(&self, ctx: &Context<'_>) -> Result<Vec<MediaItemUnion>> {
+        let pool = ctx.data::<sqlx::PgPool>()?;
+        let items = sqlx::query_as::<_, MediaItem>(
+            "SELECT * FROM media_items ORDER BY created_at DESC LIMIT 25",
+        )
+        .fetch_all(pool)
+        .await?;
+        Ok(items.into_iter().map(MediaItemUnion::from).collect())
+    }
+
     /// Get a media item by ID.
     async fn media_item(&self, ctx: &Context<'_>, id: i64) -> Result<Option<MediaItem>> {
         let pool = ctx.data::<sqlx::PgPool>()?;
@@ -189,9 +209,20 @@ impl CoreQuery {
     }
 
     /// Get seasons for a show.
-    async fn seasons(&self, ctx: &Context<'_>, show_id: i64) -> Result<Vec<MediaItem>> {
+    /// Pass `include_specials: false` to exclude season 0 (special episodes), matching
+    /// the default TypeScript behaviour. Omitting the argument returns all seasons.
+    async fn seasons(
+        &self,
+        ctx: &Context<'_>,
+        show_id: i64,
+        include_specials: Option<bool>,
+    ) -> Result<Vec<MediaItem>> {
         let pool = ctx.data::<sqlx::PgPool>()?;
-        Ok(repo::list_seasons(pool, show_id).await?)
+        if include_specials == Some(false) {
+            Ok(repo::list_seasons_excluding_specials(pool, show_id).await?)
+        } else {
+            Ok(repo::list_seasons(pool, show_id).await?)
+        }
     }
 
     /// Get episodes for a season.
@@ -464,6 +495,53 @@ impl CoreQuery {
                 ]),
         ];
         Ok(serde_json::to_value(schema).unwrap_or(serde_json::Value::Array(vec![])))
+    }
+
+    /// Fetch an episode by the parent show's TVDB ID, episode number, and optional season
+    /// number. When `season_number` is omitted the lookup uses absolute episode numbering.
+    async fn episode_by_tvdb(
+        &self,
+        ctx: &Context<'_>,
+        tvdb_id: String,
+        episode_number: i32,
+        season_number: Option<i32>,
+    ) -> Result<Option<MediaItem>> {
+        let pool = ctx.data::<sqlx::PgPool>()?;
+        Ok(repo::find_episode_by_show_tvdb(pool, &tvdb_id, episode_number, season_number).await?)
+    }
+
+    /// Return the number of media files expected for a media item:
+    /// - Movie / Episode → 1
+    /// - Season → total episode count
+    /// - Show → total processable episode count (continuing shows exclude the last season)
+    async fn expected_file_count(&self, ctx: &Context<'_>, id: i64) -> Result<i64> {
+        let pool = ctx.data::<sqlx::PgPool>()?;
+        let item = repo::get_media_item(pool, id)
+            .await?
+            .ok_or_else(|| Error::new("Item not found"))?;
+        let count = match item.item_type {
+            MediaItemType::Movie | MediaItemType::Episode => 1,
+            MediaItemType::Season => repo::count_episodes_in_season(pool, id).await?,
+            MediaItemType::Show => repo::count_expected_files_for_show(pool, id).await?,
+        };
+        Ok(count)
+    }
+
+    /// Return lookup key strings for an episode:
+    /// `["abs:{absolute_number}", "{season_number}:{episode_number}"]`.
+    async fn lookup_keys(&self, ctx: &Context<'_>, id: i64) -> Result<Vec<String>> {
+        let pool = ctx.data::<sqlx::PgPool>()?;
+        let item = repo::get_media_item(pool, id)
+            .await?
+            .ok_or_else(|| Error::new("Item not found"))?;
+        let mut keys = Vec::new();
+        if let Some(abs) = item.absolute_number {
+            keys.push(format!("abs:{abs}"));
+        }
+        if let (Some(season), Some(episode)) = (item.season_number, item.episode_number) {
+            keys.push(format!("{season}:{episode}"));
+        }
+        Ok(keys)
     }
 
     /// Get general (non-plugin) settings. Returns defaults merged with DB values.

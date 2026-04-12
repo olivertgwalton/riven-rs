@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use riven_core::events::{EventType, HookResponse, RivenEvent};
+use riven_core::http::profiles;
 use riven_core::plugin::{ContentCollection, Plugin, PluginContext, validate_api_key};
 use riven_core::register_plugin;
 use riven_core::settings::PluginSettings;
@@ -29,10 +30,15 @@ impl Plugin for SeerrPlugin {
         ]
     }
 
-    async fn validate(&self, settings: &PluginSettings) -> anyhow::Result<bool> {
+    async fn validate(
+        &self,
+        settings: &PluginSettings,
+        http: &riven_core::http::HttpClient,
+    ) -> anyhow::Result<bool> {
         let url = settings.get_or("url", DEFAULT_URL);
         let base_url = url.trim_end_matches('/');
         validate_api_key(
+            http,
             settings,
             "apikey",
             &format!("{base_url}/api/v1/auth/me"),
@@ -53,6 +59,34 @@ impl Plugin for SeerrPlugin {
                 .with_placeholder("approved")
                 .with_description("Which request status to import (approved, all, pending)."),
         ]
+    }
+
+    async fn query_content(
+        &self,
+        query: &str,
+        args: &serde_json::Value,
+        ctx: &PluginContext,
+    ) -> anyhow::Result<riven_core::types::ContentServiceResponse> {
+        let api_key = ctx.require_setting("apikey")?;
+        let url = ctx.settings.get_or("url", DEFAULT_URL);
+        let base_url_owned = url.trim_end_matches('/').to_string();
+        let filter = args
+            .get("filter")
+            .and_then(|v| v.as_str())
+            .unwrap_or(DEFAULT_FILTER)
+            .to_string();
+        let full = fetch_seerr_content(&ctx.http, api_key, &base_url_owned, &filter).await?;
+        Ok(match query {
+            "movies" => riven_core::types::ContentServiceResponse {
+                movies: full.movies,
+                shows: vec![],
+            },
+            "shows" => riven_core::types::ContentServiceResponse {
+                movies: vec![],
+                shows: full.shows,
+            },
+            _ => full,
+        })
     }
 
     async fn handle_event(
@@ -76,10 +110,10 @@ impl Plugin for SeerrPlugin {
                     let mark_url = format!("{base_url}/api/v1/request/{rid}/available");
                     tracing::debug!(request_id = rid, target_url = %mark_url, "marking seerr request as available");
                     if let Err(e) = ctx
-                        .http_client
-                        .post(&mark_url)
-                        .header("x-api-key", api_key)
-                        .send()
+                        .http
+                        .send(profiles::SEERR, |client| {
+                            client.post(&mark_url).header("x-api-key", api_key)
+                        })
                         .await
                         .and_then(|r| r.error_for_status())
                     {
@@ -99,10 +133,10 @@ impl Plugin for SeerrPlugin {
                     let del_url = format!("{base_url}/api/v1/request/{rid}");
                     tracing::debug!(request_id = rid, target_url = %del_url, "deleting seerr request");
                     if let Err(e) = ctx
-                        .http_client
-                        .delete(&del_url)
-                        .header("x-api-key", api_key)
-                        .send()
+                        .http
+                        .send(profiles::SEERR, |client| {
+                            client.delete(&del_url).header("x-api-key", api_key)
+                        })
                         .await
                         .and_then(|r| r.error_for_status())
                     {
@@ -130,34 +164,27 @@ async fn get_seerr_request_id(pool: &sqlx::PgPool, id: i64) -> Option<String> {
     request.external_request_id
 }
 
-async fn fetch_content(
-    ctx: &PluginContext,
+async fn fetch_seerr_content(
+    http: &riven_core::http::HttpClient,
     api_key: &str,
     base_url: &str,
-) -> anyhow::Result<HookResponse> {
-    let filter = ctx.settings.get_or("filter", DEFAULT_FILTER);
-
+    filter: &str,
+) -> anyhow::Result<riven_core::types::ContentServiceResponse> {
     let mut content = ContentCollection::default();
-
     let mut skip = 0u32;
     loop {
         let req_url = format!(
             "{base_url}/api/v1/request?take={PAGE_SIZE}&skip={skip}&filter={filter}&sort=added"
         );
         tracing::debug!(target_url = %req_url, skip, filter, "fetching seerr requests");
-        let resp: SeerrRequestResponse = ctx
-            .http_client
-            .get(&req_url)
-            .header("x-api-key", api_key)
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
+        let resp: SeerrRequestResponse = http
+            .get_json(profiles::SEERR, req_url.clone(), |client| {
+                client.get(&req_url).header("x-api-key", api_key)
+            })
             .await?;
 
         for request in &resp.results {
             let requested_by = request.requested_by.as_ref().and_then(|u| u.email.clone());
-
             match request.media_type.as_deref() {
                 Some("movie") => {
                     if let Some(ref media) = request.media
@@ -181,7 +208,6 @@ async fn fetch_content(
                             .flatten()
                             .filter_map(|s| s.season_number)
                             .collect();
-
                         content.insert_show(ExternalIds {
                             tvdb_id: Some(tvdb_id.to_string()),
                             external_request_id: Some(request.id.to_string()),
@@ -204,8 +230,24 @@ async fn fetch_content(
         }
         skip += PAGE_SIZE;
     }
+    Ok(content.into_response())
+}
 
-    Ok(content.into_hook_response())
+async fn fetch_content(
+    ctx: &PluginContext,
+    api_key: &str,
+    base_url: &str,
+) -> anyhow::Result<HookResponse> {
+    let filter = ctx.settings.get_or("filter", DEFAULT_FILTER);
+    let content = fetch_seerr_content(&ctx.http, api_key, base_url, &filter).await?;
+    let mut collection = ContentCollection::default();
+    for m in content.movies {
+        collection.insert_movie(m);
+    }
+    for s in content.shows {
+        collection.insert_show(s);
+    }
+    Ok(collection.into_hook_response())
 }
 
 #[derive(Deserialize)]

@@ -17,5 +17,10 @@ tracing = { workspace = true }
 figment = { workspace = true }
 inventory = { workspace = true }
 parking_lot = { workspace = true }
+dashmap = { workspace = true }
+bytes = { workspace = true }
 redis = { workspace = true }
 sqlx = { workspace = true }
+
+[dev-dependencies]
+axum = { workspace = true }

@@ -4,6 +4,7 @@ use riven_db::repo;
 use serde::{Deserialize, Serialize};
 
 use riven_core::events::{EventType, HookResponse, RivenEvent};
+use riven_core::http::profiles;
 use riven_core::plugin::{Plugin, PluginContext};
 use riven_core::register_plugin;
 use riven_core::settings::PluginSettings;
@@ -28,7 +29,11 @@ impl Plugin for NotificationsPlugin {
         &[EventType::MediaItemDownloadSuccess]
     }
 
-    async fn validate(&self, settings: &PluginSettings) -> anyhow::Result<bool> {
+    async fn validate(
+        &self,
+        settings: &PluginSettings,
+        _http: &riven_core::http::HttpClient,
+    ) -> anyhow::Result<bool> {
         let urls = settings.get_list("urls");
         Ok(!urls.is_empty())
     }
@@ -99,11 +104,10 @@ impl Plugin for NotificationsPlugin {
 
                 if detailed {
                     if let Some(api_key) = ctx.settings.get("tmdb_api_key") {
-                        payload.overview =
-                            fetch_tmdb_overview(&ctx.http_client, api_key, &payload).await;
+                        payload.overview = fetch_tmdb_overview(&ctx.http, api_key, &payload).await;
                     }
                     if let Some(ref tvdb_id) = payload.tvdb_id.clone() {
-                        payload.tvdb_slug = fetch_tvdb_slug(&ctx.http_client, tvdb_id).await;
+                        payload.tvdb_slug = fetch_tvdb_slug(&ctx.http, tvdb_id).await;
                     }
                 }
 
@@ -169,7 +173,7 @@ async fn rewrite_for_request_root(
 }
 
 async fn fetch_tmdb_overview(
-    client: &reqwest::Client,
+    http: &riven_core::http::HttpClient,
     api_key: &str,
     payload: &NotificationPayload,
 ) -> Option<String> {
@@ -181,25 +185,19 @@ async fn fetch_tmdb_overview(
     };
     let url = format!("{TMDB_BASE_URL}/{media_type}/{tmdb_id}");
     tracing::debug!(target_url = %url, tmdb_id, "fetching tmdb overview for notification");
-    let resp = match client.get(&url).bearer_auth(api_key).send().await {
+    let resp = match http
+        .get_json::<TmdbOverviewResponse, _>(profiles::TMDB, url.clone(), |client| {
+            client.get(&url).bearer_auth(api_key)
+        })
+        .await
+    {
         Ok(resp) => resp,
         Err(error) => {
             tracing::warn!(error = %error, target_url = %url, tmdb_id, "failed to fetch tmdb overview for notification");
             return None;
         }
     };
-    if !resp.status().is_success() {
-        tracing::warn!(status = %resp.status(), target_url = %url, tmdb_id, "tmdb overview request returned non-success status");
-        return None;
-    }
-    let json: TmdbOverviewResponse = match resp.json().await {
-        Ok(json) => json,
-        Err(error) => {
-            tracing::warn!(error = %error, target_url = %url, tmdb_id, "failed to decode tmdb overview response");
-            return None;
-        }
-    };
-    json.overview.filter(|s| !s.is_empty())
+    resp.overview.filter(|s| !s.is_empty())
 }
 
 async fn dispatch_webhooks(
@@ -214,20 +212,14 @@ async fn dispatch_webhooks(
                 webhook_id,
                 webhook_token,
             }) => {
-                if let Err(error) = send_discord(
-                    &ctx.http_client,
-                    &webhook_id,
-                    &webhook_token,
-                    payload,
-                    detailed,
-                )
-                .await
+                if let Err(error) =
+                    send_discord(&ctx.http, &webhook_id, &webhook_token, payload, detailed).await
                 {
                     tracing::error!(error = %error, url = url_str, "failed to send discord notification");
                 }
             }
             Some(NotificationService::Json { url }) => {
-                if let Err(error) = send_json_webhook(&ctx.http_client, &url, payload).await {
+                if let Err(error) = send_json_webhook(&ctx.http, &url, payload).await {
                     tracing::error!(error = %error, url = url_str, "failed to send json notification");
                 }
             }
@@ -318,7 +310,7 @@ fn parse_notification_url(url: &str) -> Option<NotificationService> {
 }
 
 async fn send_discord(
-    client: &reqwest::Client,
+    http: &riven_core::http::HttpClient,
     webhook_id: &str,
     webhook_token: &str,
     payload: &NotificationPayload,
@@ -335,12 +327,11 @@ async fn send_discord(
         title = %payload.full_title,
         "sending discord notification webhook"
     );
-    client
-        .post(&url)
-        .json(&body)
-        .send()
-        .await?
-        .error_for_status()?;
+    http.send(profiles::DISCORD_WEBHOOK, |client| {
+        client.post(&url).json(&body)
+    })
+    .await?
+    .error_for_status()?;
     Ok(())
 }
 
@@ -486,7 +477,7 @@ fn build_detailed_embed(payload: &NotificationPayload) -> serde_json::Value {
 }
 
 async fn send_json_webhook(
-    client: &reqwest::Client,
+    http: &riven_core::http::HttpClient,
     url: &str,
     payload: &NotificationPayload,
 ) -> anyhow::Result<()> {
@@ -495,12 +486,11 @@ async fn send_json_webhook(
         title = %payload.full_title,
         "sending json notification webhook"
     );
-    client
-        .post(url)
-        .json(payload)
-        .send()
-        .await?
-        .error_for_status()?;
+    http.send(profiles::WEBHOOK_JSON, |client| {
+        client.post(url).json(payload)
+    })
+    .await?
+    .error_for_status()?;
     Ok(())
 }
 
@@ -519,13 +509,15 @@ fn format_duration(seconds: f64) -> String {
     }
 }
 
-async fn fetch_tvdb_slug(client: &reqwest::Client, tvdb_id: &str) -> Option<String> {
+async fn fetch_tvdb_slug(http: &riven_core::http::HttpClient, tvdb_id: &str) -> Option<String> {
     let login_url = format!("{TVDB_BASE_URL}/login");
     tracing::debug!(target_url = %login_url, tvdb_id, "logging in to tvdb for notification slug lookup");
-    let login: TvdbResponse<TvdbLoginData> = match client
-        .post(format!("{TVDB_BASE_URL}/login"))
-        .json(&serde_json::json!({ "apikey": TVDB_DEFAULT_API_KEY }))
-        .send()
+    let login: TvdbResponse<TvdbLoginData> = match http
+        .send(profiles::TVDB, |client| {
+            client
+                .post(format!("{TVDB_BASE_URL}/login"))
+                .json(&serde_json::json!({ "apikey": TVDB_DEFAULT_API_KEY }))
+        })
         .await
     {
         Ok(resp) => match resp.json().await {
@@ -545,19 +537,13 @@ async fn fetch_tvdb_slug(client: &reqwest::Client, tvdb_id: &str) -> Option<Stri
     let series_url = format!("{TVDB_BASE_URL}/series/{tvdb_id}");
     tracing::debug!(target_url = %series_url, tvdb_id, "fetching tvdb slug for notification");
 
-    let resp: TvdbResponse<TvdbSeriesSlug> = match client
-        .get(&series_url)
-        .bearer_auth(&token)
-        .send()
+    let resp: TvdbResponse<TvdbSeriesSlug> = match http
+        .get_json(profiles::TVDB, series_url.clone(), |client| {
+            client.get(&series_url).bearer_auth(&token)
+        })
         .await
     {
-        Ok(resp) => match resp.json().await {
-            Ok(json) => json,
-            Err(error) => {
-                tracing::warn!(error = %error, target_url = %series_url, tvdb_id, "failed to decode tvdb slug response");
-                return None;
-            }
-        },
+        Ok(json) => json,
         Err(error) => {
             tracing::warn!(error = %error, target_url = %series_url, tvdb_id, "failed to fetch tvdb slug for notification");
             return None;

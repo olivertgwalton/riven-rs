@@ -10,18 +10,29 @@ use tokio::sync::RwLock;
 pub mod discovery;
 mod helpers;
 mod mutations;
+pub mod plugins;
 mod queries;
 mod subscriptions;
+pub mod typed_items;
 pub mod types;
+mod vfs;
 
 pub use mutations::MutationRoot;
 pub use queries::CoreQuery;
 pub use subscriptions::SubscriptionRoot;
+pub use vfs::VfsQuery;
 
 // ── Merged query root ──
 
 #[derive(MergedObject, Default)]
-pub struct QueryRoot(CoreQuery, DashboardQuery, LogsQuery, CalendarQuery);
+pub struct QueryRoot(
+    CoreQuery,
+    DashboardQuery,
+    LogsQuery,
+    CalendarQuery,
+    VfsQuery,
+    plugins::PluginsQuery,
+);
 
 pub type AppSchema = Schema<QueryRoot, MutationRoot, SubscriptionRoot>;
 

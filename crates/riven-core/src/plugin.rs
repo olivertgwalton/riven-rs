@@ -106,7 +106,11 @@ pub trait Plugin: Send + Sync + 'static {
     fn subscribed_events(&self) -> &[EventType] {
         &[]
     }
-    async fn validate(&self, _settings: &PluginSettings) -> anyhow::Result<bool> {
+    async fn validate(
+        &self,
+        _settings: &PluginSettings,
+        _http: &crate::http::HttpClient,
+    ) -> anyhow::Result<bool> {
         Ok(true)
     }
     async fn handle_event(
@@ -118,6 +122,17 @@ pub trait Plugin: Send + Sync + 'static {
     }
     fn settings_schema(&self) -> Vec<SettingField> {
         vec![]
+    }
+    /// Fetch content on-demand for a GraphQL query.
+    /// `query` is `"movies"`, `"shows"`, or `"all"`; `args` is plugin-specific JSON.
+    /// Returns empty by default; content-provider plugins override this.
+    async fn query_content(
+        &self,
+        _query: &str,
+        _args: &serde_json::Value,
+        _ctx: &PluginContext,
+    ) -> anyhow::Result<ContentServiceResponse> {
+        Ok(ContentServiceResponse::default())
     }
 }
 
@@ -158,7 +173,7 @@ impl ContentCollection {
 
 pub struct PluginContext {
     pub settings: PluginSettings,
-    pub http_client: reqwest::Client,
+    pub http: crate::http::HttpClient,
     pub db_pool: sqlx::PgPool,
     pub redis: redis::aio::ConnectionManager,
 }
@@ -166,13 +181,13 @@ pub struct PluginContext {
 impl PluginContext {
     pub fn new(
         settings: PluginSettings,
-        http_client: reqwest::Client,
+        http: crate::http::HttpClient,
         db_pool: sqlx::PgPool,
         redis: redis::aio::ConnectionManager,
     ) -> Self {
         Self {
             settings,
-            http_client,
+            http,
             db_pool,
             redis,
         }
@@ -186,6 +201,7 @@ impl PluginContext {
 }
 
 pub async fn validate_api_key(
+    http: &crate::http::HttpClient,
     settings: &PluginSettings,
     key_name: &str,
     url: &str,
@@ -195,10 +211,11 @@ pub async fn validate_api_key(
         Some(k) => k,
         None => return Ok(false),
     };
-    let resp = reqwest::Client::new()
-        .get(url)
-        .header(header, api_key)
-        .send()
+    let resp = http
+        .send(
+            crate::http::HttpServiceProfile::new("plugin_validation"),
+            |client| client.get(url).header(header, api_key),
+        )
         .await;
     Ok(resp.is_ok())
 }
@@ -254,12 +271,12 @@ impl PluginRegistry {
         plugin: Box<dyn Plugin>,
         enabled: bool,
         settings: PluginSettings,
-        http_client: reqwest::Client,
+        http: crate::http::HttpClient,
         db_pool: sqlx::PgPool,
         redis: redis::aio::ConnectionManager,
     ) {
         let plugin: Arc<dyn Plugin> = Arc::from(plugin);
-        let valid = enabled && plugin.validate(&settings).await.unwrap_or(false);
+        let valid = enabled && plugin.validate(&settings, &http).await.unwrap_or(false);
 
         if !enabled {
             tracing::info!(plugin = plugin.name(), "plugin disabled");
@@ -269,7 +286,7 @@ impl PluginRegistry {
             tracing::info!(plugin = plugin.name(), "plugin registered successfully");
         }
 
-        let context = Arc::new(PluginContext::new(settings, http_client, db_pool, redis));
+        let context = Arc::new(PluginContext::new(settings, http, db_pool, redis));
 
         self.plugins.write().await.push(ActivePlugin {
             plugin,
@@ -289,10 +306,15 @@ impl PluginRegistry {
         if let Some(active) = plugins.iter_mut().find(|p| p.plugin.name() == name) {
             let mut new_settings = active.context.settings.clone();
             new_settings.merge_db_override(db_override);
-            let valid = enabled && active.plugin.validate(&new_settings).await.unwrap_or(false);
+            let valid = enabled
+                && active
+                    .plugin
+                    .validate(&new_settings, &active.context.http)
+                    .await
+                    .unwrap_or(false);
             active.context = Arc::new(PluginContext::new(
                 new_settings,
-                active.context.http_client.clone(),
+                active.context.http.clone(),
                 active.context.db_pool.clone(),
                 active.context.redis.clone(),
             ));
@@ -393,6 +415,38 @@ impl PluginRegistry {
             .iter()
             .find(|p| p.plugin.name() == name)
             .map(|p| p.context.settings.to_json())
+    }
+
+    /// Validate a plugin against its current settings without mutating state.
+    pub async fn validate_plugin_current(&self, name: &str) -> bool {
+        let plugins = self.plugins.read().await;
+        if let Some(active) = plugins.iter().find(|p| p.plugin.name() == name) {
+            active
+                .plugin
+                .validate(&active.context.settings, &active.context.http)
+                .await
+                .unwrap_or(false)
+        } else {
+            false
+        }
+    }
+
+    /// Call a plugin's `query_content` with the given query type and args.
+    pub async fn query_plugin_content(
+        &self,
+        name: &str,
+        query: &str,
+        args: &serde_json::Value,
+    ) -> anyhow::Result<ContentServiceResponse> {
+        let plugins = self.plugins.read().await;
+        let active = plugins
+            .iter()
+            .find(|p| p.plugin.name() == name)
+            .ok_or_else(|| anyhow::anyhow!("plugin '{name}' not found"))?;
+        active
+            .plugin
+            .query_content(query, args, &active.context)
+            .await
     }
 
     pub async fn valid_plugin_names(&self) -> Vec<String> {

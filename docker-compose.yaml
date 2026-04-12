@@ -45,7 +45,7 @@ services:
       - jellyfin_data:/config
       - jellyfin_cache:/cache
       - type: bind
-        source: /mnt/riven
+        source: /Users/oliverwalton/server/riven-storage
         target: /mnt/riven
         read_only: true
         bind:
@@ -63,7 +63,7 @@ services:
       - "8080:8080"
     volumes:
       - type: bind
-        source: /mnt/riven
+        source: /Users/oliverwalton/server/riven-storage
         target: /mnt/riven
         bind:
           propagation: shared

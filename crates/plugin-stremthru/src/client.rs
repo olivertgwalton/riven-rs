@@ -1,12 +1,16 @@
+use std::collections::HashMap;
+
 use redis::AsyncCommands;
 
+use riven_core::events::ScrapeRequest;
+use riven_core::http::{HttpClient, profiles};
 use riven_core::types::{
-    CacheCheckFile, CacheCheckResult, DownloadFile, DownloadResult, build_magnet_uri,
+    CacheCheckFile, CacheCheckResult, DownloadFile, DownloadResult, MediaItemType, build_magnet_uri,
 };
 
 use crate::models::{
-    StremthruCacheCheck, StremthruLink, StremthruResponse, StremthruTorz, StremthruUser,
-    parse_torrent_status,
+    StremthruCacheCheck, StremthruLink, StremthruResponse, StremthruTorz, StremthruTorznabResponse,
+    StremthruUser, parse_torrent_status,
 };
 
 pub const CACHE_CHECK_TTL_SECS: u64 = 60 * 60 * 24;
@@ -17,7 +21,7 @@ fn file_name_or_path(name: String, path: String) -> String {
 }
 
 pub async fn check_cache(
-    client: &reqwest::Client,
+    http: &HttpClient,
     redis: &redis::aio::ConnectionManager,
     base_url: &str,
     store: &str,
@@ -74,7 +78,7 @@ pub async fn check_cache(
             batch_hashes = batch.len(),
             "requesting stremthru cache-check batch"
         );
-        fetched_results.extend(fetch_cache_check(client, base_url, store, api_key, batch).await?);
+        fetched_results.extend(fetch_cache_check(http, base_url, store, api_key, batch).await?);
     }
 
     for result in &fetched_results {
@@ -104,7 +108,7 @@ pub async fn check_cache(
 /// The torrent must report `downloaded` immediately or it is removed and treated as
 /// unavailable for this attempt.
 pub async fn add_torrent(
-    client: &reqwest::Client,
+    http: &HttpClient,
     base_url: &str,
     store: &str,
     api_key: &str,
@@ -115,17 +119,18 @@ pub async fn add_torrent(
     let url = format!("{base_url}v0/store/torz");
     tracing::debug!(store, url = %url, "adding torrent via stremthru torz endpoint");
 
-    let response = riven_core::http::send(|| {
-        client
-            .post(&url)
-            .header("x-stremthru-store-name", store)
-            .header(
-                "x-stremthru-store-authorization",
-                format!("Bearer {api_key}"),
-            )
-            .json(&serde_json::json!({ "link": magnet }))
-    })
-    .await?;
+    let response = http
+        .send(profiles::STREMTHRU, |client| {
+            client
+                .post(&url)
+                .header("x-stremthru-store-name", store)
+                .header(
+                    "x-stremthru-store-authorization",
+                    format!("Bearer {api_key}"),
+                )
+                .json(&serde_json::json!({ "link": magnet }))
+        })
+        .await?;
 
     if !response.status().is_success() {
         let status = response.status();
@@ -150,7 +155,7 @@ pub async fn add_torrent(
             status = %data.status,
             "torrent not in downloaded state; deleting torz item"
         );
-        if let Err(error) = delete_torrent(client, base_url, store, api_key, &torrent_id).await {
+        if let Err(error) = delete_torrent(http, base_url, store, api_key, &torrent_id).await {
             tracing::warn!(store, hash, torrent_id, error = %error, "failed to delete torz item");
         }
         return Ok(None);
@@ -160,7 +165,7 @@ pub async fn add_torrent(
 }
 
 async fn fetch_cache_check(
-    client: &reqwest::Client,
+    http: &HttpClient,
     base_url: &str,
     store: &str,
     api_key: &str,
@@ -173,25 +178,30 @@ async fn fetch_cache_check(
         .join(",");
     let url = format!("{base_url}v0/store/torz/check");
     tracing::debug!(store, url = %url, "requesting stremthru torz cache check");
-    let response = riven_core::http::send(|| {
-        client
-            .get(&url)
-            .query(&[("hash", hash_str.as_str())])
-            .header("x-stremthru-store-name", store)
-            .header(
-                "x-stremthru-store-authorization",
-                format!("Bearer {api_key}"),
-            )
-    })
-    .await?;
+    let response = http
+        .send_data(
+            profiles::STREMTHRU,
+            Some(format!("{store}:{url}?hash={hash_str}")),
+            |client| {
+                client
+                    .get(&url)
+                    .query(&[("hash", hash_str.as_str())])
+                    .header("x-stremthru-store-name", store)
+                    .header(
+                        "x-stremthru-store-authorization",
+                        format!("Bearer {api_key}"),
+                    )
+            },
+        )
+        .await?;
 
     if !response.status().is_success() {
         let status = response.status();
-        let body = response.text().await.unwrap_or_default();
+        let body = response.text().unwrap_or_default();
         anyhow::bail!("store cache check rejected: HTTP {} - {}", status, body);
     }
 
-    let text = response.text().await?;
+    let text = response.text()?;
     let resp =
         serde_json::from_str::<StremthruResponse<StremthruCacheCheck>>(&text).map_err(|e| {
             anyhow::anyhow!("store returned invalid torz cache-check data: {e}; body={text}")
@@ -234,23 +244,24 @@ async fn fetch_cache_check(
 }
 
 async fn delete_torrent(
-    client: &reqwest::Client,
+    http: &HttpClient,
     base_url: &str,
     store: &str,
     api_key: &str,
     torrent_id: &str,
 ) -> anyhow::Result<()> {
     let url = format!("{base_url}v0/store/torz/{torrent_id}");
-    let response = riven_core::http::send(|| {
-        client
-            .delete(&url)
-            .header("x-stremthru-store-name", store)
-            .header(
-                "x-stremthru-store-authorization",
-                format!("Bearer {api_key}"),
-            )
-    })
-    .await?;
+    let response = http
+        .send(profiles::STREMTHRU, |client| {
+            client
+                .delete(&url)
+                .header("x-stremthru-store-name", store)
+                .header(
+                    "x-stremthru-store-authorization",
+                    format!("Bearer {api_key}"),
+                )
+        })
+        .await?;
 
     if response.status().is_success() {
         Ok(())
@@ -259,6 +270,93 @@ async fn delete_torrent(
         let body = response.text().await.unwrap_or_default();
         anyhow::bail!("store torz delete rejected: HTTP {} - {}", status, body);
     }
+}
+
+pub async fn scrape_torznab(
+    http: &HttpClient,
+    base_url: &str,
+    req: &ScrapeRequest<'_>,
+) -> anyhow::Result<HashMap<String, String>> {
+    let url = format!("{base_url}v0/torznab/api");
+
+    let mut params: Vec<(&str, String)> = vec![("o", "json".to_string())];
+
+    match req.item_type {
+        MediaItemType::Movie => {
+            params.push(("t", "movie".to_string()));
+            params.push(("cat", "2000".to_string()));
+        }
+        _ => {
+            params.push(("t", "tvsearch".to_string()));
+            params.push(("cat", "5000".to_string()));
+            params.push(("season", req.season_or_1().to_string()));
+            if let Some(ep) = req.episode {
+                params.push(("ep", ep.to_string()));
+            }
+        }
+    }
+
+    if let Some(imdb_id) = req.imdb_id {
+        params.push(("imdbid", imdb_id.to_string()));
+    } else {
+        params.push(("q", req.title.to_string()));
+    }
+
+    tracing::debug!(
+        url = %url,
+        imdb_id = req.imdb_id,
+        title = req.title,
+        season = req.season,
+        episode = req.episode,
+        "requesting stremthru torznab scrape"
+    );
+
+    let dedupe_params = params
+        .iter()
+        .map(|(k, v)| format!("{k}={v}"))
+        .collect::<Vec<_>>()
+        .join("&");
+    let response = http
+        .send_data(
+            profiles::STREMTHRU,
+            Some(format!("{url}?{dedupe_params}")),
+            |client| client.get(&url).query(&params),
+        )
+        .await?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().unwrap_or_default();
+        anyhow::bail!("torznab request rejected: HTTP {} - {}", status, body);
+    }
+
+    let text = response.text()?;
+    let resp: StremthruTorznabResponse = serde_json::from_str(&text)
+        .map_err(|e| anyhow::anyhow!("invalid torznab response: {e}; body={text}"))?;
+
+    let mut results = HashMap::new();
+    for item in resp.channel.items {
+        let Some(info_hash) = item.attr.iter().find_map(|a| {
+            if a.attributes.name == "infohash" {
+                Some(a.attributes.value.to_lowercase())
+            } else {
+                None
+            }
+        }) else {
+            continue;
+        };
+        if !info_hash.is_empty() && !item.title.is_empty() {
+            results.insert(info_hash, item.title);
+        }
+    }
+
+    tracing::info!(
+        count = results.len(),
+        imdb_id = req.imdb_id,
+        title = req.title,
+        "torznab scrape complete"
+    );
+    Ok(results)
 }
 
 fn cache_check_key(store: &str, hash: &str) -> String {
@@ -294,7 +392,7 @@ pub fn download_result_from_torz(
 }
 
 pub async fn generate_link(
-    client: &reqwest::Client,
+    http: &HttpClient,
     base_url: &str,
     store: &str,
     api_key: &str,
@@ -302,17 +400,18 @@ pub async fn generate_link(
 ) -> anyhow::Result<String> {
     let url = format!("{base_url}v0/store/torz/link/generate");
     tracing::debug!(store, url = %url, "generating stremthru torz link");
-    let response = riven_core::http::send(|| {
-        client
-            .post(&url)
-            .header("x-stremthru-store-name", store)
-            .header(
-                "x-stremthru-store-authorization",
-                format!("Bearer {api_key}"),
-            )
-            .json(&serde_json::json!({ "link": magnet }))
-    })
-    .await?;
+    let response = http
+        .send(profiles::STREMTHRU, |client| {
+            client
+                .post(&url)
+                .header("x-stremthru-store-name", store)
+                .header(
+                    "x-stremthru-store-authorization",
+                    format!("Bearer {api_key}"),
+                )
+                .json(&serde_json::json!({ "link": magnet }))
+        })
+        .await?;
 
     if !response.status().is_success() {
         let status = response.status();
@@ -354,28 +453,28 @@ fn describe_empty_link_response(body: &str) -> String {
 }
 
 pub async fn fetch_user_info(
-    client: &reqwest::Client,
+    http: &HttpClient,
     base_url: &str,
     store: &str,
     api_key: &str,
 ) -> anyhow::Result<riven_core::types::DebridUserInfo> {
     let url = format!("{base_url}v0/store/user");
-    let resp: StremthruResponse<StremthruUser> = client
-        .get(&url)
-        .header("x-stremthru-store-name", store)
-        .header(
-            "x-stremthru-store-authorization",
-            format!("Bearer {api_key}"),
-        )
-        .send()
-        .await?
-        .json()
+    let resp: StremthruResponse<StremthruUser> = http
+        .get_json(profiles::STREMTHRU, format!("{store}:{url}"), |client| {
+            client
+                .get(&url)
+                .header("x-stremthru-store-name", store)
+                .header(
+                    "x-stremthru-store-authorization",
+                    format!("Bearer {api_key}"),
+                )
+        })
         .await?;
     let user = resp
         .data
         .ok_or_else(|| anyhow::anyhow!("store returned no user data"))?;
 
-    let premium_until = fetch_premium_until(client, store, api_key)
+    let premium_until = fetch_premium_until(http, store, api_key)
         .await
         .inspect_err(|e| tracing::debug!(store, error = %e, "could not fetch premium_until"))
         .ok()
@@ -390,7 +489,7 @@ pub async fn fetch_user_info(
 }
 
 async fn fetch_premium_until(
-    client: &reqwest::Client,
+    http: &HttpClient,
     store: &str,
     api_key: &str,
 ) -> anyhow::Result<Option<String>> {
@@ -428,11 +527,20 @@ async fn fetch_premium_until(
         _ => return Ok(None),
     };
 
-    let mut req = client.get(&url);
-    if let Some(token) = bearer {
-        req = req.header("Authorization", token);
-    }
-    let body: serde_json::Value = req.send().await?.json().await?;
+    let body: serde_json::Value = http
+        .get_json(
+            profiles::debrid_service(store),
+            format!("{store}:{url}"),
+            |client| {
+                let request = client.get(&url);
+                if let Some(token) = bearer.clone() {
+                    request.header("Authorization", token)
+                } else {
+                    request
+                }
+            },
+        )
+        .await?;
 
     let expiry = body.pointer(pointer).and_then(|v| {
         if is_unix {

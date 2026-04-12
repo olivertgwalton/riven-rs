@@ -3,6 +3,7 @@ use serde::Deserialize;
 use std::collections::HashMap;
 
 use riven_core::events::{EventType, HookResponse, RivenEvent};
+use riven_core::http::profiles;
 use riven_core::plugin::{Plugin, PluginContext, SettingField};
 use riven_core::register_plugin;
 use riven_core::settings::PluginSettings;
@@ -25,12 +26,15 @@ impl Plugin for CometPlugin {
         &[EventType::MediaItemScrapeRequested]
     }
 
-    async fn validate(&self, settings: &PluginSettings) -> anyhow::Result<bool> {
+    async fn validate(
+        &self,
+        settings: &PluginSettings,
+        http: &riven_core::http::HttpClient,
+    ) -> anyhow::Result<bool> {
         let base_url = settings.get_or("url", DEFAULT_URL);
         let base_url = base_url.trim_end_matches('/');
         let url = format!("{base_url}/manifest.json");
-        let client = reqwest::Client::new();
-        match client.get(&url).send().await {
+        match http.send(profiles::COMET, |client| client.get(&url)).await {
             Ok(resp) => Ok(resp.status().is_success()),
             Err(_) => Ok(false),
         }
@@ -79,11 +83,20 @@ impl Plugin for CometPlugin {
 
         let url = format!("{base_url}/stream/{scrape_type}/{imdb_id}{identifier}.json");
 
-        let resp: CometResponse = match riven_core::http::send(|| ctx.http_client.get(&url))
-            .await?
-            .json()
+        let resp_data = match ctx
+            .http
+            .send_data(profiles::COMET, Some(url.clone()), |client| {
+                client.get(&url)
+            })
             .await
         {
+            Ok(resp) => resp,
+            Err(e) => {
+                tracing::warn!(error = %e, imdb_id, title = request.title, "comet request failed");
+                return Ok(HookResponse::Scrape(HashMap::new()));
+            }
+        };
+        let resp: CometResponse = match resp_data.json() {
             Ok(r) => r,
             Err(e) => {
                 tracing::warn!(error = %e, imdb_id, title = request.title, "comet response parse failed");

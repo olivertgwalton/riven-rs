@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use serde::Deserialize;
 
 use riven_core::events::{EventType, HookResponse, RivenEvent};
+use riven_core::http::profiles;
 use riven_core::plugin::{ContentCollection, Plugin, PluginContext};
 use riven_core::register_plugin;
 use riven_core::settings::PluginSettings;
@@ -25,7 +26,11 @@ impl Plugin for TraktPlugin {
         &[EventType::ContentServiceRequested]
     }
 
-    async fn validate(&self, settings: &PluginSettings) -> anyhow::Result<bool> {
+    async fn validate(
+        &self,
+        settings: &PluginSettings,
+        _http: &riven_core::http::HttpClient,
+    ) -> anyhow::Result<bool> {
         Ok(settings.has("clientid"))
     }
 
@@ -73,12 +78,12 @@ impl Plugin for TraktPlugin {
                 if ctx.settings.get_bool("watchlist") {
                     if let Some(token) = access_token {
                         collect_wrapped(
-                            fetch_watchlist(&ctx.http_client, client_id, token, "movies").await?,
+                            fetch_watchlist(&ctx.http, client_id, token, "movies").await?,
                             &mut content,
                             true,
                         );
                         collect_wrapped(
-                            fetch_watchlist(&ctx.http_client, client_id, token, "shows").await?,
+                            fetch_watchlist(&ctx.http, client_id, token, "shows").await?,
                             &mut content,
                             false,
                         );
@@ -92,19 +97,13 @@ impl Plugin for TraktPlugin {
                 if let Some(token) = access_token {
                     for list_slug in &user_lists {
                         collect_wrapped(
-                            fetch_user_list(
-                                &ctx.http_client,
-                                client_id,
-                                token,
-                                list_slug,
-                                "movies",
-                            )
-                            .await?,
+                            fetch_user_list(&ctx.http, client_id, token, list_slug, "movies")
+                                .await?,
                             &mut content,
                             true,
                         );
                         collect_wrapped(
-                            fetch_user_list(&ctx.http_client, client_id, token, list_slug, "shows")
+                            fetch_user_list(&ctx.http, client_id, token, list_slug, "shows")
                                 .await?,
                             &mut content,
                             false,
@@ -115,14 +114,12 @@ impl Plugin for TraktPlugin {
                 // Trending
                 if ctx.settings.get_bool("fetchtrending") {
                     collect_wrapped(
-                        fetch_trending(&ctx.http_client, client_id, "movies", trending_count)
-                            .await?,
+                        fetch_trending(&ctx.http, client_id, "movies", trending_count).await?,
                         &mut content,
                         true,
                     );
                     collect_wrapped(
-                        fetch_trending(&ctx.http_client, client_id, "shows", trending_count)
-                            .await?,
+                        fetch_trending(&ctx.http, client_id, "shows", trending_count).await?,
                         &mut content,
                         false,
                     );
@@ -131,12 +128,12 @@ impl Plugin for TraktPlugin {
                 // Popular
                 if ctx.settings.get_bool("fetchpopular") {
                     collect_direct(
-                        fetch_popular(&ctx.http_client, client_id, "movies", popular_count).await?,
+                        fetch_popular(&ctx.http, client_id, "movies", popular_count).await?,
                         &mut content,
                         true,
                     );
                     collect_direct(
-                        fetch_popular(&ctx.http_client, client_id, "shows", popular_count).await?,
+                        fetch_popular(&ctx.http, client_id, "shows", popular_count).await?,
                         &mut content,
                         false,
                     );
@@ -146,7 +143,7 @@ impl Plugin for TraktPlugin {
                 if ctx.settings.get_bool("fetchwatched") {
                     collect_wrapped(
                         fetch_watched(
-                            &ctx.http_client,
+                            &ctx.http,
                             client_id,
                             "movies",
                             &watched_period,
@@ -158,7 +155,7 @@ impl Plugin for TraktPlugin {
                     );
                     collect_wrapped(
                         fetch_watched(
-                            &ctx.http_client,
+                            &ctx.http,
                             client_id,
                             "shows",
                             &watched_period,
@@ -245,40 +242,28 @@ fn insert_external_ids(content: &mut ContentCollection, ext: ExternalIds, is_mov
     }
 }
 
-fn trakt_get(client: &reqwest::Client, url: &str, client_id: &str) -> reqwest::RequestBuilder {
-    client
-        .get(url)
-        .header("trakt-api-key", client_id)
-        .header("trakt-api-version", TRAKT_API_VERSION)
-}
-
-fn trakt_auth_get(
-    client: &reqwest::Client,
-    url: &str,
-    client_id: &str,
-    access_token: &str,
-) -> reqwest::RequestBuilder {
-    trakt_get(client, url, client_id).header("Authorization", format!("Bearer {access_token}"))
-}
-
 async fn fetch_watchlist(
-    client: &reqwest::Client,
+    http: &riven_core::http::HttpClient,
     client_id: &str,
     access_token: &str,
     media_type: &str,
 ) -> anyhow::Result<Vec<WrappedItem>> {
     let url = format!("{TRAKT_BASE_URL}/sync/watchlist/{media_type}");
     tracing::debug!(url = %url, media_type, "requesting trakt watchlist");
-    let items: Vec<WrappedItem> = trakt_auth_get(client, &url, client_id, access_token)
-        .send()
-        .await?
-        .json()
+    let items: Vec<WrappedItem> = http
+        .get_json(profiles::TRAKT, url.clone(), |client| {
+            client
+                .get(&url)
+                .header("trakt-api-key", client_id)
+                .header("trakt-api-version", TRAKT_API_VERSION)
+                .header("Authorization", format!("Bearer {access_token}"))
+        })
         .await?;
     Ok(items)
 }
 
 async fn fetch_user_list(
-    client: &reqwest::Client,
+    http: &riven_core::http::HttpClient,
     client_id: &str,
     access_token: &str,
     list_slug: &str,
@@ -294,48 +279,58 @@ async fn fetch_user_list(
         list = listname,
         "requesting trakt user list"
     );
-    let items: Vec<WrappedItem> = trakt_auth_get(client, &url, client_id, access_token)
-        .send()
-        .await?
-        .json()
+    let items: Vec<WrappedItem> = http
+        .get_json(profiles::TRAKT, url.clone(), |client| {
+            client
+                .get(&url)
+                .header("trakt-api-key", client_id)
+                .header("trakt-api-version", TRAKT_API_VERSION)
+                .header("Authorization", format!("Bearer {access_token}"))
+        })
         .await?;
     Ok(items)
 }
 
 async fn fetch_trending(
-    client: &reqwest::Client,
+    http: &riven_core::http::HttpClient,
     client_id: &str,
     media_type: &str,
     limit: usize,
 ) -> anyhow::Result<Vec<WrappedItem>> {
     let url = format!("{TRAKT_BASE_URL}/{media_type}/trending?limit={limit}");
     tracing::debug!(url = %url, media_type, limit, "requesting trakt trending");
-    let items: Vec<WrappedItem> = trakt_get(client, &url, client_id)
-        .send()
-        .await?
-        .json()
+    let items: Vec<WrappedItem> = http
+        .get_json(profiles::TRAKT, url.clone(), |client| {
+            client
+                .get(&url)
+                .header("trakt-api-key", client_id)
+                .header("trakt-api-version", TRAKT_API_VERSION)
+        })
         .await?;
     Ok(items)
 }
 
 async fn fetch_popular(
-    client: &reqwest::Client,
+    http: &riven_core::http::HttpClient,
     client_id: &str,
     media_type: &str,
     limit: usize,
 ) -> anyhow::Result<Vec<DirectItem>> {
     let url = format!("{TRAKT_BASE_URL}/{media_type}/popular?limit={limit}");
     tracing::debug!(url = %url, media_type, limit, "requesting trakt popular");
-    let items: Vec<DirectItem> = trakt_get(client, &url, client_id)
-        .send()
-        .await?
-        .json()
+    let items: Vec<DirectItem> = http
+        .get_json(profiles::TRAKT, url.clone(), |client| {
+            client
+                .get(&url)
+                .header("trakt-api-key", client_id)
+                .header("trakt-api-version", TRAKT_API_VERSION)
+        })
         .await?;
     Ok(items)
 }
 
 async fn fetch_watched(
-    client: &reqwest::Client,
+    http: &riven_core::http::HttpClient,
     client_id: &str,
     media_type: &str,
     period: &str,
@@ -343,10 +338,13 @@ async fn fetch_watched(
 ) -> anyhow::Result<Vec<WrappedItem>> {
     let url = format!("{TRAKT_BASE_URL}/{media_type}/watched/{period}?limit={limit}");
     tracing::debug!(url = %url, media_type, period, limit, "requesting trakt watched");
-    let items: Vec<WrappedItem> = trakt_get(client, &url, client_id)
-        .send()
-        .await?
-        .json()
+    let items: Vec<WrappedItem> = http
+        .get_json(profiles::TRAKT, url.clone(), |client| {
+            client
+                .get(&url)
+                .header("trakt-api-key", client_id)
+                .header("trakt-api-version", TRAKT_API_VERSION)
+        })
         .await?;
     Ok(items)
 }

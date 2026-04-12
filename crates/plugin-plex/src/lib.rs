@@ -3,6 +3,7 @@ use serde::Deserialize;
 use std::collections::HashSet;
 
 use riven_core::events::{EventType, HookResponse, RivenEvent};
+use riven_core::http::profiles;
 use riven_core::plugin::{Plugin, PluginContext};
 use riven_core::register_plugin;
 use riven_core::settings::PluginSettings;
@@ -28,7 +29,11 @@ impl Plugin for PlexPlugin {
         ]
     }
 
-    async fn validate(&self, settings: &PluginSettings) -> anyhow::Result<bool> {
+    async fn validate(
+        &self,
+        settings: &PluginSettings,
+        _http: &riven_core::http::HttpClient,
+    ) -> anyhow::Result<bool> {
         Ok(settings.has("plextoken") && settings.has("plexserverurl"))
     }
 
@@ -62,7 +67,7 @@ impl Plugin for PlexPlugin {
                     anyhow::bail!("no filesystem entries found for media item {id}");
                 }
 
-                let sections = get_library_sections(&ctx.http_client, plex_url, plex_token).await?;
+                let sections = get_library_sections(&ctx.http, plex_url, plex_token).await?;
 
                 for entry in &entries {
                     let dir_path = entry
@@ -77,7 +82,7 @@ impl Plugin for PlexPlugin {
                         for location in &section.locations {
                             if full_path.starts_with(&location.path) {
                                 refresh_section(
-                                    &ctx.http_client,
+                                    &ctx.http,
                                     plex_url,
                                     plex_token,
                                     &section.key,
@@ -104,7 +109,7 @@ impl Plugin for PlexPlugin {
                 let plex_token = ctx.require_setting("plextoken")?;
                 let plex_url = ctx.require_setting("plexserverurl")?.trim_end_matches('/');
                 let library_path = ctx.settings.get_or("plexlibrarypath", "/mount");
-                let sections = get_library_sections(&ctx.http_client, plex_url, plex_token).await?;
+                let sections = get_library_sections(&ctx.http, plex_url, plex_token).await?;
 
                 let dirs: HashSet<String> = deleted_paths
                     .iter()
@@ -122,7 +127,7 @@ impl Plugin for PlexPlugin {
                         for location in &section.locations {
                             if full_path.starts_with(&location.path) {
                                 refresh_section(
-                                    &ctx.http_client,
+                                    &ctx.http,
                                     plex_url,
                                     plex_token,
                                     &section.key,
@@ -144,7 +149,7 @@ impl Plugin for PlexPlugin {
             RivenEvent::ActivePlaybackSessionsRequested => {
                 let plex_token = ctx.require_setting("plextoken")?;
                 let plex_url = ctx.require_setting("plexserverurl")?.trim_end_matches('/');
-                let sessions = get_active_sessions(&ctx.http_client, plex_url, plex_token).await?;
+                let sessions = get_active_sessions(&ctx.http, plex_url, plex_token).await?;
                 Ok(HookResponse::ActivePlaybackSessions(sessions))
             }
             _ => Ok(HookResponse::Empty),
@@ -153,26 +158,26 @@ impl Plugin for PlexPlugin {
 }
 
 async fn get_library_sections(
-    client: &reqwest::Client,
+    http: &riven_core::http::HttpClient,
     plex_url: &str,
     token: &str,
 ) -> anyhow::Result<Vec<PlexSection>> {
     let url = format!("{plex_url}/library/sections");
     tracing::debug!(target_url = %url, "fetching plex library sections");
-    let resp: PlexSectionsResponse = client
-        .get(&url)
-        .header("x-plex-token", token)
-        .header("accept", "application/json")
-        .send()
-        .await?
-        .json()
+    let resp: PlexSectionsResponse = http
+        .get_json(profiles::PLEX, url.clone(), |client| {
+            client
+                .get(&url)
+                .header("x-plex-token", token)
+                .header("accept", "application/json")
+        })
         .await?;
 
     Ok(resp.media_container.directory)
 }
 
 async fn refresh_section(
-    client: &reqwest::Client,
+    http: &riven_core::http::HttpClient,
     plex_url: &str,
     token: &str,
     section_key: &str,
@@ -181,29 +186,30 @@ async fn refresh_section(
     let encoded_path = urlencoding::encode(path);
     let url = format!("{plex_url}/library/sections/{section_key}/refresh?path={encoded_path}");
     tracing::debug!(target_url = %url, section_key, path, "refreshing plex library section");
-    client
-        .post(&url)
-        .header("x-plex-token", token)
-        .header("accept", "application/json")
-        .send()
-        .await?;
+    http.send(profiles::PLEX, |client| {
+        client
+            .post(&url)
+            .header("x-plex-token", token)
+            .header("accept", "application/json")
+    })
+    .await?;
     Ok(())
 }
 
 async fn get_active_sessions(
-    client: &reqwest::Client,
+    http: &riven_core::http::HttpClient,
     plex_url: &str,
     token: &str,
 ) -> anyhow::Result<Vec<ActivePlaybackSession>> {
     let url = format!("{plex_url}/status/sessions");
     tracing::debug!(target_url = %url, "fetching plex active sessions");
-    let resp: PlexSessionsResponse = client
-        .get(&url)
-        .header("x-plex-token", token)
-        .header("accept", "application/json")
-        .send()
-        .await?
-        .json()
+    let resp: PlexSessionsResponse = http
+        .get_json(profiles::PLEX, url.clone(), |client| {
+            client
+                .get(&url)
+                .header("x-plex-token", token)
+                .header("accept", "application/json")
+        })
         .await?;
 
     Ok(resp

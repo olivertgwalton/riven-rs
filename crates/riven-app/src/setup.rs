@@ -4,7 +4,7 @@ use riven_core::plugin::{PluginRegistry, collect_plugins};
 use riven_core::settings::PluginSettings;
 
 pub async fn register_plugins(
-    http_client: reqwest::Client,
+    http: riven_core::http::HttpClient,
     db_pool: sqlx::PgPool,
     redis_conn: redis::aio::ConnectionManager,
 ) -> Arc<PluginRegistry> {
@@ -33,7 +33,7 @@ pub async fn register_plugins(
                 plugin,
                 enabled,
                 plugin_settings,
-                http_client.clone(),
+                http.clone(),
                 db_pool.clone(),
                 redis_conn.clone(),
             )

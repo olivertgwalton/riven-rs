@@ -3,6 +3,7 @@ use chrono::NaiveDate;
 use serde::Deserialize;
 
 use riven_core::events::{EventType, HookResponse, RivenEvent};
+use riven_core::http::profiles;
 use riven_core::plugin::{Plugin, PluginContext};
 use riven_core::register_plugin;
 use riven_core::settings::PluginSettings;
@@ -25,7 +26,11 @@ impl Plugin for TmdbPlugin {
         &[EventType::MediaItemIndexRequested]
     }
 
-    async fn validate(&self, settings: &PluginSettings) -> anyhow::Result<bool> {
+    async fn validate(
+        &self,
+        settings: &PluginSettings,
+        _http: &riven_core::http::HttpClient,
+    ) -> anyhow::Result<bool> {
         Ok(settings.has("apikey"))
     }
 
@@ -49,10 +54,10 @@ impl Plugin for TmdbPlugin {
         let api_key = ctx.require_setting("apikey")?;
 
         let indexed = if let Some(tmdb_id) = request.tmdb_id {
-            fetch_movie_by_tmdb_id(&ctx.http_client, api_key, tmdb_id).await?
+            fetch_movie_by_tmdb_id(&ctx.http, api_key, tmdb_id).await?
         } else if let Some(imdb_id) = request.imdb_id {
-            let tmdb_id = find_tmdb_id(&ctx.http_client, api_key, imdb_id).await?;
-            fetch_movie_by_tmdb_id(&ctx.http_client, api_key, &tmdb_id).await?
+            let tmdb_id = find_tmdb_id(&ctx.http, api_key, imdb_id).await?;
+            fetch_movie_by_tmdb_id(&ctx.http, api_key, &tmdb_id).await?
         } else {
             return Ok(HookResponse::Empty);
         };
@@ -62,18 +67,16 @@ impl Plugin for TmdbPlugin {
 }
 
 async fn find_tmdb_id(
-    client: &reqwest::Client,
+    http: &riven_core::http::HttpClient,
     api_key: &str,
     imdb_id: &str,
 ) -> anyhow::Result<String> {
     let url = format!("{TMDB_BASE_URL}find/{imdb_id}?external_source=imdb_id");
     tracing::debug!(url = %url, imdb_id, "requesting tmdb id lookup");
-    let resp: TmdbFindResponse = client
-        .get(&url)
-        .bearer_auth(api_key)
-        .send()
-        .await?
-        .json()
+    let resp: TmdbFindResponse = http
+        .get_json(profiles::TMDB, url.clone(), |client| {
+            client.get(&url).bearer_auth(api_key)
+        })
         .await?;
 
     resp.movie_results
@@ -83,19 +86,17 @@ async fn find_tmdb_id(
 }
 
 async fn fetch_movie_by_tmdb_id(
-    client: &reqwest::Client,
+    http: &riven_core::http::HttpClient,
     api_key: &str,
     tmdb_id: &str,
 ) -> anyhow::Result<IndexedMediaItem> {
     let url =
         format!("{TMDB_BASE_URL}movie/{tmdb_id}?append_to_response=external_ids,release_dates");
     tracing::debug!(url = %url, tmdb_id, "requesting tmdb movie details");
-    let movie: TmdbMovieResponse = client
-        .get(&url)
-        .bearer_auth(api_key)
-        .send()
-        .await?
-        .json()
+    let movie: TmdbMovieResponse = http
+        .get_json(profiles::TMDB, url.clone(), |client| {
+            client.get(&url).bearer_auth(api_key)
+        })
         .await?;
 
     let year = movie

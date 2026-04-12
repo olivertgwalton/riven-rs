@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use riven_core::events::{EventType, HookResponse, RivenEvent};
+use riven_core::http::profiles;
 use riven_core::plugin::{ContentCollection, Plugin, PluginContext};
 use riven_core::register_plugin;
 use riven_core::settings::PluginSettings;
@@ -25,15 +26,20 @@ impl Plugin for MdblistPlugin {
         &[EventType::ContentServiceRequested]
     }
 
-    async fn validate(&self, settings: &PluginSettings) -> anyhow::Result<bool> {
+    async fn validate(
+        &self,
+        settings: &PluginSettings,
+        http: &riven_core::http::HttpClient,
+    ) -> anyhow::Result<bool> {
         let api_key = match settings.get("apikey") {
             Some(k) => k,
             None => return Ok(false),
         };
         // mdblist uses query param auth, not header
-        let resp = reqwest::Client::new()
-            .get(format!("{MDBLIST_BASE_URL}user?apikey={api_key}"))
-            .send()
+        let resp = http
+            .send(profiles::MDBLIST, |client| {
+                client.get(format!("{MDBLIST_BASE_URL}user?apikey={api_key}"))
+            })
             .await;
         Ok(resp.is_ok())
     }
@@ -48,6 +54,21 @@ impl Plugin for MdblistPlugin {
         ]
     }
 
+    async fn query_content(
+        &self,
+        _query: &str,
+        args: &serde_json::Value,
+        ctx: &PluginContext,
+    ) -> anyhow::Result<riven_core::types::ContentServiceResponse> {
+        let api_key = ctx.require_setting("apikey")?;
+        let list_names: Vec<String> = args
+            .get("list_names")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default();
+        let content = fetch_and_build_content(&ctx.http, api_key, &list_names).await?;
+        Ok(content.into_response())
+    }
+
     async fn handle_event(
         &self,
         event: &RivenEvent,
@@ -59,62 +80,7 @@ impl Plugin for MdblistPlugin {
 
                 let lists = ctx.settings.get_list("lists");
 
-                let mut content = ContentCollection::default();
-                let mut seen_movie_ids = HashSet::new();
-                let mut seen_show_ids = HashSet::new();
-
-                for raw_list in &lists {
-                    let Some(list_name) = normalize_list_name(raw_list) else {
-                        tracing::warn!(list = raw_list, "invalid MDBList list reference");
-                        continue;
-                    };
-
-                    let items = fetch_list_items(&ctx.http_client, api_key, &list_name).await?;
-
-                    for item in items.movies {
-                        let Some(dedupe_key) = item
-                            .id
-                            .map(|id| id.to_string())
-                            .or_else(|| item.ids.tmdb.map(|id| id.to_string()))
-                            .or_else(|| item.ids.imdb.clone())
-                        else {
-                            continue;
-                        };
-
-                        if !seen_movie_ids.insert(dedupe_key) {
-                            continue;
-                        }
-
-                        content.insert_movie(ExternalIds {
-                            imdb_id: item.ids.imdb,
-                            tmdb_id: item.ids.tmdb.map(|id| id.to_string()),
-                            tvdb_id: item.ids.tvdb.map(|id| id.to_string()),
-                            ..Default::default()
-                        });
-                    }
-
-                    for item in items.shows {
-                        let Some(dedupe_key) = item
-                            .id
-                            .map(|id| id.to_string())
-                            .or_else(|| item.tvdb_id.map(|id| id.to_string()))
-                            .or_else(|| item.imdb_id.clone())
-                        else {
-                            continue;
-                        };
-
-                        if !seen_show_ids.insert(dedupe_key) {
-                            continue;
-                        }
-
-                        content.insert_show(ExternalIds {
-                            imdb_id: item.imdb_id,
-                            tvdb_id: item.tvdb_id.map(|id| id.to_string()),
-                            ..Default::default()
-                        });
-                    }
-                }
-
+                let content = fetch_and_build_content(&ctx.http, api_key, &lists).await?;
                 Ok(content.into_hook_response())
             }
             _ => Ok(HookResponse::Empty),
@@ -122,8 +88,66 @@ impl Plugin for MdblistPlugin {
     }
 }
 
+async fn fetch_and_build_content(
+    http: &riven_core::http::HttpClient,
+    api_key: &str,
+    raw_lists: &[String],
+) -> anyhow::Result<ContentCollection> {
+    let mut content = ContentCollection::default();
+    let mut seen_movie_ids = HashSet::new();
+    let mut seen_show_ids = HashSet::new();
+
+    for raw_list in raw_lists {
+        let Some(list_name) = normalize_list_name(raw_list) else {
+            tracing::warn!(list = raw_list, "invalid MDBList list reference");
+            continue;
+        };
+        let items = fetch_list_items(http, api_key, &list_name).await?;
+
+        for item in items.movies {
+            let Some(dedupe_key) = item
+                .id
+                .map(|id| id.to_string())
+                .or_else(|| item.ids.tmdb.map(|id| id.to_string()))
+                .or_else(|| item.ids.imdb.clone())
+            else {
+                continue;
+            };
+            if !seen_movie_ids.insert(dedupe_key) {
+                continue;
+            }
+            content.insert_movie(ExternalIds {
+                imdb_id: item.ids.imdb,
+                tmdb_id: item.ids.tmdb.map(|id| id.to_string()),
+                tvdb_id: item.ids.tvdb.map(|id| id.to_string()),
+                ..Default::default()
+            });
+        }
+
+        for item in items.shows {
+            let Some(dedupe_key) = item
+                .id
+                .map(|id| id.to_string())
+                .or_else(|| item.tvdb_id.map(|id| id.to_string()))
+                .or_else(|| item.imdb_id.clone())
+            else {
+                continue;
+            };
+            if !seen_show_ids.insert(dedupe_key) {
+                continue;
+            }
+            content.insert_show(ExternalIds {
+                imdb_id: item.imdb_id,
+                tvdb_id: item.tvdb_id.map(|id| id.to_string()),
+                ..Default::default()
+            });
+        }
+    }
+    Ok(content)
+}
+
 async fn fetch_list_items(
-    client: &reqwest::Client,
+    http: &riven_core::http::HttpClient,
     api_key: &str,
     list_name: &str,
 ) -> anyhow::Result<MdblistListItems> {
@@ -135,14 +159,18 @@ async fn fetch_list_items(
         let url =
             format!("{MDBLIST_BASE_URL}lists/{list_name}/items?apikey={api_key}&offset={offset}");
 
-        let resp = client.get(&url).send().await?;
+        let resp = http
+            .send_data(profiles::MDBLIST, Some(url.clone()), |client| {
+                client.get(&url)
+            })
+            .await?;
         let has_more = resp
             .headers()
             .get("x-has-more")
             .and_then(|v| v.to_str().ok())
             == Some("true");
 
-        let items: MdblistListItemsResponse = resp.json().await?;
+        let items: MdblistListItemsResponse = resp.json()?;
         let mut count = 0;
 
         for item in items.movies.unwrap_or_default() {

@@ -3,6 +3,7 @@ use serde::Deserialize;
 use std::collections::HashMap;
 
 use riven_core::events::{EventType, HookResponse, RivenEvent};
+use riven_core::http::profiles;
 use riven_core::plugin::{Plugin, PluginContext};
 use riven_core::register_plugin;
 use riven_core::types::MediaItemType;
@@ -69,10 +70,15 @@ impl Plugin for TorrentioPlugin {
             episode = request.episode,
             "requesting torrentio streams"
         );
-        let http_resp = riven_core::http::send(|| ctx.http_client.get(&url)).await?;
+        let http_resp = ctx
+            .http
+            .send_data(profiles::TORRENTIO, Some(url.clone()), |client| {
+                client.get(&url)
+            })
+            .await?;
         let status = http_resp.status();
         if !status.is_success() {
-            let body = http_resp.text().await.unwrap_or_default();
+            let body = http_resp.text().unwrap_or_default();
             anyhow::bail!(
                 "torrentio returned HTTP {status}: {}",
                 body.chars().take(200).collect::<String>()
@@ -80,7 +86,6 @@ impl Plugin for TorrentioPlugin {
         }
         let resp: TorrentioResponse = http_resp
             .json()
-            .await
             .map_err(|e| anyhow::anyhow!("torrentio response parse error for {url}: {e}"))?;
 
         let mut results = HashMap::new();

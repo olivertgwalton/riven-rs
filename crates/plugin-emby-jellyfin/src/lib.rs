@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use riven_core::events::{EventType, HookResponse, RivenEvent};
+use riven_core::http::profiles;
 use riven_core::plugin::{Plugin, PluginContext, SettingField};
 use riven_core::register_plugin;
 use riven_core::settings::PluginSettings;
@@ -34,7 +35,7 @@ struct PathUpdate<'a> {
 /// Notify a Jellyfin/Emby server that the given VFS paths were created.
 /// All paths are sent in a single request.
 pub(crate) async fn notify_paths(
-    client: &reqwest::Client,
+    http: &riven_core::http::HttpClient,
     base_url: &str,
     api_key: &str,
     paths: &[String],
@@ -51,11 +52,11 @@ pub(crate) async fn notify_paths(
         .collect();
 
     tracing::debug!(plugin, target_url = %url, path_count = paths.len(), update_type, "notifying media server about updated library paths");
-    let resp = client
-        .post(&url)
-        .query(&[("api_key", api_key)])
-        .json(&LibraryUpdate { updates })
-        .send()
+    let body = LibraryUpdate { updates };
+    let resp = http
+        .send(profiles::media_server(plugin), |client| {
+            client.post(&url).query(&[("api_key", api_key)]).json(&body)
+        })
         .await?;
 
     if !resp.status().is_success() {
@@ -67,17 +68,17 @@ pub(crate) async fn notify_paths(
 }
 
 async fn refresh_library(
-    client: &reqwest::Client,
+    http: &riven_core::http::HttpClient,
     base_url: &str,
     api_key: &str,
     plugin: &'static str,
 ) -> anyhow::Result<()> {
     let url = format!("{base_url}/Library/Refresh");
     tracing::debug!(plugin, target_url = %url, "requesting media server library refresh");
-    let resp = client
-        .post(&url)
-        .query(&[("api_key", api_key)])
-        .send()
+    let resp = http
+        .send(profiles::media_server(plugin), |client| {
+            client.post(&url).query(&[("api_key", api_key)])
+        })
         .await?;
 
     if !resp.status().is_success() {
@@ -125,9 +126,9 @@ async fn notify_media_server(
                 .map(|entry| rewrite_media_path(&library_path, &entry.path))
                 .collect();
             if plugin == "jellyfin" {
-                refresh_library(&ctx.http_client, &url, api_key, plugin).await?;
+                refresh_library(&ctx.http, &url, api_key, plugin).await?;
             } else {
-                notify_paths(&ctx.http_client, &url, api_key, &paths, "Created", plugin).await?;
+                notify_paths(&ctx.http, &url, api_key, &paths, "Created", plugin).await?;
             }
         }
         RivenEvent::MediaItemsDeleted { deleted_paths, .. } => {
@@ -135,13 +136,13 @@ async fn notify_media_server(
                 return Ok(HookResponse::Empty);
             }
             if plugin == "jellyfin" {
-                refresh_library(&ctx.http_client, &url, api_key, plugin).await?;
+                refresh_library(&ctx.http, &url, api_key, plugin).await?;
             } else {
                 let paths: Vec<String> = deleted_paths
                     .iter()
                     .map(|path| rewrite_media_path(&library_path, path))
                     .collect();
-                notify_paths(&ctx.http_client, &url, api_key, &paths, "Deleted", plugin).await?;
+                notify_paths(&ctx.http, &url, api_key, &paths, "Deleted", plugin).await?;
             }
         }
         _ => {}
@@ -172,7 +173,11 @@ macro_rules! impl_media_server_plugin {
                 ]
             }
 
-            async fn validate(&self, settings: &PluginSettings) -> anyhow::Result<bool> {
+            async fn validate(
+                &self,
+                settings: &PluginSettings,
+                _http: &riven_core::http::HttpClient,
+            ) -> anyhow::Result<bool> {
                 Ok(settings.has("url") && settings.has("apikey"))
             }
 
@@ -192,8 +197,7 @@ macro_rules! impl_media_server_plugin {
                             .trim_end_matches('/')
                             .to_string();
                         let api_key = ctx.require_setting("apikey")?;
-                        let sessions =
-                            get_active_sessions(&ctx.http_client, &url, api_key, $name).await?;
+                        let sessions = get_active_sessions(&ctx.http, &url, api_key, $name).await?;
                         Ok(HookResponse::ActivePlaybackSessions(sessions))
                     }
                     _ => notify_media_server($name, event, ctx).await,
@@ -207,19 +211,17 @@ impl_media_server_plugin!(EmbyPlugin, "emby");
 impl_media_server_plugin!(JellyfinPlugin, "jellyfin");
 
 async fn get_active_sessions(
-    client: &reqwest::Client,
+    http: &riven_core::http::HttpClient,
     base_url: &str,
     api_key: &str,
     server: &'static str,
 ) -> anyhow::Result<Vec<ActivePlaybackSession>> {
     let url = format!("{base_url}/Sessions");
     tracing::debug!(server, target_url = %url, "fetching active playback sessions from media server");
-    let resp: Vec<MediaServerSession> = client
-        .get(&url)
-        .query(&[("api_key", api_key)])
-        .send()
-        .await?
-        .json()
+    let resp: Vec<MediaServerSession> = http
+        .get_json(profiles::media_server(server), url.clone(), |client| {
+            client.get(&url).query(&[("api_key", api_key)])
+        })
         .await?;
 
     Ok(resp

@@ -79,7 +79,7 @@ async fn main() -> Result<()> {
     let redis_conn = redis::aio::ConnectionManager::new(redis_client).await?;
     tracing::info!("redis connection established");
 
-    let http_client = build_http_client()?;
+    let http_client = riven_core::http::HttpClient::new(build_http_client()?);
     let stream_http_client = build_streaming_http_client()?;
 
     let registry = setup::register_plugins(http_client.clone(), db_pool.clone(), redis_conn).await;

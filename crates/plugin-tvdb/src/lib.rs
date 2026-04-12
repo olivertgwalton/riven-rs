@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use riven_core::events::{EventType, HookResponse, RivenEvent};
+use riven_core::http::profiles;
 use riven_core::plugin::{Plugin, PluginContext};
 use riven_core::register_plugin;
 use riven_core::types::*;
@@ -20,7 +21,11 @@ pub struct TvdbPlugin {
 }
 
 impl TvdbPlugin {
-    async fn get_token(&self, client: &reqwest::Client, api_key: &str) -> anyhow::Result<String> {
+    async fn get_token(
+        &self,
+        http: &riven_core::http::HttpClient,
+        api_key: &str,
+    ) -> anyhow::Result<String> {
         {
             let guard = self.token.lock();
             if let Some((ref token, ref created)) = *guard
@@ -31,10 +36,12 @@ impl TvdbPlugin {
         }
 
         tracing::debug!(url = %format!("{TVDB_BASE_URL}login"), "requesting tvdb token");
-        let resp: TvdbResponse<TvdbLoginData> = client
-            .post(format!("{TVDB_BASE_URL}login"))
-            .json(&serde_json::json!({ "apikey": api_key }))
-            .send()
+        let resp: TvdbResponse<TvdbLoginData> = http
+            .send(profiles::TVDB, |client| {
+                client
+                    .post(format!("{TVDB_BASE_URL}login"))
+                    .json(&serde_json::json!({ "apikey": api_key }))
+            })
             .await?
             .json()
             .await?;
@@ -78,30 +85,28 @@ impl Plugin for TvdbPlugin {
         };
 
         let api_key = ctx.settings.get_or("apikey", DEFAULT_API_KEY);
-        let token = self.get_token(&ctx.http_client, &api_key).await?;
+        let token = self.get_token(&ctx.http, &api_key).await?;
 
-        let indexed = fetch_series(&ctx.http_client, &token, tvdb_id).await?;
+        let indexed = fetch_series(&ctx.http, &token, tvdb_id).await?;
         Ok(HookResponse::Index(Box::new(indexed)))
     }
 }
 
 async fn fetch_series(
-    client: &reqwest::Client,
+    http: &riven_core::http::HttpClient,
     token: &str,
     tvdb_id: &str,
 ) -> anyhow::Result<IndexedMediaItem> {
     let url = format!("{TVDB_BASE_URL}series/{tvdb_id}/extended?short=true&meta=translations");
     tracing::debug!(url = %url, tvdb_id, "requesting tvdb series details");
-    let resp: TvdbResponse<TvdbSeries> = client
-        .get(&url)
-        .bearer_auth(token)
-        .send()
-        .await?
-        .json()
+    let resp: TvdbResponse<TvdbSeries> = http
+        .get_json(profiles::TVDB, url.clone(), |client| {
+            client.get(&url).bearer_auth(token)
+        })
         .await?;
     let series = resp.data;
 
-    let episodes = fetch_all_episodes(client, token, tvdb_id).await?;
+    let episodes = fetch_all_episodes(http, token, tvdb_id).await?;
 
     let title =
         extract_english_name(&series).unwrap_or_else(|| series.name.clone().unwrap_or_default());
@@ -241,7 +246,7 @@ async fn fetch_series(
 }
 
 async fn fetch_all_episodes(
-    client: &reqwest::Client,
+    http: &riven_core::http::HttpClient,
     token: &str,
     tvdb_id: &str,
 ) -> anyhow::Result<Vec<TvdbEpisode>> {
@@ -250,12 +255,10 @@ async fn fetch_all_episodes(
 
     loop {
         let url = format!("{TVDB_BASE_URL}series/{tvdb_id}/episodes/official/eng?page={page}");
-        let resp: TvdbResponse<TvdbEpisodePage> = client
-            .get(&url)
-            .bearer_auth(token)
-            .send()
-            .await?
-            .json()
+        let resp: TvdbResponse<TvdbEpisodePage> = http
+            .get_json(profiles::TVDB, url.clone(), |client| {
+                client.get(&url).bearer_auth(token)
+            })
             .await?;
 
         all_episodes.extend(resp.data.episodes);

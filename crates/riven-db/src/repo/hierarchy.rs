@@ -16,6 +16,109 @@ pub async fn list_seasons(pool: &PgPool, show_id: i64) -> Result<Vec<MediaItem>>
     )
 }
 
+/// List seasons for a show, excluding season 0 (specials).
+pub async fn list_seasons_excluding_specials(
+    pool: &PgPool,
+    show_id: i64,
+) -> Result<Vec<MediaItem>> {
+    Ok(sqlx::query_as::<_, MediaItem>(
+        "SELECT * FROM media_items \
+         WHERE item_type = 'season' AND parent_id = $1 \
+           AND (season_number IS NULL OR season_number <> 0) \
+         ORDER BY season_number",
+    )
+    .bind(show_id)
+    .fetch_all(pool)
+    .await?)
+}
+
+/// Find an episode by the parent show's TVDB ID, episode number, and optional season number.
+/// When `season_number` is `None`, looks up by absolute episode numbering.
+pub async fn find_episode_by_show_tvdb(
+    pool: &PgPool,
+    tvdb_id: &str,
+    episode_number: i32,
+    season_number: Option<i32>,
+) -> Result<Option<MediaItem>> {
+    Ok(sqlx::query_as::<_, MediaItem>(
+        r#"SELECT ep.*
+           FROM media_items ep
+           INNER JOIN media_items season ON season.id = ep.parent_id AND season.item_type = 'season'
+           INNER JOIN media_items show ON show.id = season.parent_id AND show.item_type = 'show'
+           WHERE ep.item_type = 'episode'
+             AND show.tvdb_id = $1
+             AND (
+               CASE WHEN $3::integer IS NULL
+                    THEN ep.absolute_number = $2
+                    ELSE ep.episode_number = $2 AND season.season_number = $3
+               END
+             )
+           ORDER BY season.season_number, ep.episode_number
+           LIMIT 1"#,
+    )
+    .bind(tvdb_id)
+    .bind(episode_number)
+    .bind(season_number)
+    .fetch_optional(pool)
+    .await?)
+}
+
+/// Count episodes in a season.
+pub async fn count_episodes_in_season(pool: &PgPool, season_id: i64) -> Result<i64> {
+    Ok(sqlx::query_scalar(
+        "SELECT COUNT(*) FROM media_items WHERE item_type = 'episode' AND parent_id = $1",
+    )
+    .bind(season_id)
+    .fetch_one(pool)
+    .await?)
+}
+
+/// Count the total expected downloadable episode files for a show.
+///
+/// Only processable seasons (not unreleased/ongoing, not specials, is_requested) are counted.
+/// For continuing shows the last season is excluded (still airing). Mirrors the TypeScript
+/// `expectedFileCount` field resolver on `Show`.
+pub async fn count_expected_files_for_show(pool: &PgPool, show_id: i64) -> Result<i64> {
+    let season_ids: Vec<i64> = sqlx::query_scalar(
+        "SELECT id FROM media_items \
+         WHERE parent_id = $1 AND item_type = 'season' \
+           AND is_requested = true AND is_special = false \
+           AND state NOT IN ('unreleased', 'ongoing') \
+         ORDER BY season_number ASC",
+    )
+    .bind(show_id)
+    .fetch_all(pool)
+    .await?;
+
+    if season_ids.is_empty() {
+        return Ok(0);
+    }
+
+    let is_continuing: bool = sqlx::query_scalar(
+        "SELECT COALESCE(show_status = 'continuing', false) \
+         FROM media_items WHERE id = $1 AND item_type = 'show'",
+    )
+    .bind(show_id)
+    .fetch_optional(pool)
+    .await?
+    .unwrap_or(false);
+
+    let expected_count = if is_continuing {
+        (season_ids.len().saturating_sub(1)).max(1)
+    } else {
+        season_ids.len()
+    };
+
+    let ids_to_count = &season_ids[..expected_count];
+
+    Ok(sqlx::query_scalar(
+        "SELECT COUNT(*) FROM media_items WHERE item_type = 'episode' AND parent_id = ANY($1)",
+    )
+    .bind(ids_to_count)
+    .fetch_one(pool)
+    .await?)
+}
+
 pub async fn list_episodes(pool: &PgPool, season_id: i64) -> Result<Vec<MediaItem>> {
     Ok(
         sqlx::query_as::<_, MediaItem>(

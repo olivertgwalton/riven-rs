@@ -1,4 +1,5 @@
 use anyhow::Result;
+use chrono::{DateTime, Utc};
 use sqlx::{PgPool, Postgres, QueryBuilder};
 
 use crate::entities::*;
@@ -562,6 +563,46 @@ pub async fn list_vfs_show_dirs(pool: &PgPool) -> Result<Vec<String>> {
 
 pub async fn list_vfs_season_dirs(pool: &PgPool, show_path: &str) -> Result<Vec<String>> {
     list_vfs_dirs_at_depth(pool, &format!("{show_path}/%/%"), 4).await
+}
+
+// ── VFS stat helpers ──
+
+/// Aggregate stat (timestamps + entry count) for all media entries under `path_prefix`.
+/// A `path_prefix` of `""` covers all entries; `/movies` covers only movies, etc.
+#[derive(sqlx::FromRow)]
+pub struct VfsDirStatResult {
+    pub ctime: Option<DateTime<Utc>>,
+    pub mtime: Option<DateTime<Utc>>,
+    pub entry_count: i64,
+}
+
+pub async fn get_vfs_dir_stat(pool: &PgPool, path_prefix: &str) -> Result<VfsDirStatResult> {
+    let pattern = format!("{path_prefix}/%");
+    Ok(sqlx::query_as::<_, VfsDirStatResult>(
+        "SELECT \
+           MIN(created_at) AS ctime, \
+           MAX(COALESCE(updated_at, created_at)) AS mtime, \
+           COUNT(*) AS entry_count \
+         FROM filesystem_entries \
+         WHERE path LIKE $1 AND entry_type = 'media'",
+    )
+    .bind(pattern)
+    .fetch_one(pool)
+    .await?)
+}
+
+/// Count distinct directory names at `depth` (1-based split_part index) for entries
+/// matching `pattern`.
+pub async fn count_vfs_distinct_dirs(pool: &PgPool, pattern: &str, depth: u32) -> Result<i64> {
+    let sql = format!(
+        "SELECT COUNT(DISTINCT split_part(path, '/', {depth})) \
+         FROM filesystem_entries \
+         WHERE path LIKE $1 AND entry_type = 'media'"
+    );
+    Ok(sqlx::query_scalar::<_, i64>(&sql)
+        .bind(pattern)
+        .fetch_one(pool)
+        .await?)
 }
 
 pub async fn list_vfs_file_paths(pool: &PgPool, dir_path: &str) -> Result<Vec<String>> {
