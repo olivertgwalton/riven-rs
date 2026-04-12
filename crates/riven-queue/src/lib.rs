@@ -461,15 +461,15 @@ impl JobQueue {
         }
     }
 
-    /// SET NX with EX. Returns true if the key was set (acquired), false if already set (duplicate).
-    async fn set_nx(&self, key: &str, ttl_secs: usize) -> bool {
+    /// SET NX (no TTL). Returns true if the key was set (acquired), false if already set (duplicate).
+    /// Keys have no TTL — they are explicitly released via `release_dedup` when the job completes,
+    /// or recovered by `recover_stale_workers` when a worker dies mid-job.
+    async fn set_nx(&self, key: &str) -> bool {
         let mut conn = self.redis.clone();
         let result: Option<String> = redis::cmd("SET")
             .arg(key)
             .arg("1")
             .arg("NX")
-            .arg("EX")
-            .arg(ttl_secs)
             .query_async(&mut conn)
             .await
             .unwrap_or(None);
@@ -578,12 +578,13 @@ impl JobQueue {
         Fut: Future<Output = std::result::Result<(), E>>,
         E: std::fmt::Display,
     {
-        if self
-            .set_nx(&format!("riven:dedup:{prefix}:{id}"), 300)
-            .await
-            && let Err(e) = push().await
-        {
-            tracing::error!(error = %e, label, "failed to push job");
+        if self.set_nx(&format!("riven:dedup:{prefix}:{id}")).await {
+            if let Err(e) = push().await {
+                // Push failed — release the key immediately so the job can be retried
+                // rather than waiting for a (now absent) TTL to expire.
+                self.release_dedup(prefix, id).await;
+                tracing::error!(error = %e, label, "failed to push job");
+            }
         }
     }
 }
@@ -681,97 +682,117 @@ const QUEUE_NAMES: &[&str] = &[
     "riven:content",
 ];
 
-/// Re-enqueue inflight jobs from dead workers and clean up their registrations.
+/// Re-enqueue inflight jobs from all workers and clear their registrations.
 ///
-/// apalis-redis stores the full inflight-set key (e.g. `riven:index:inflight:riven-index`)
-/// as the member of `{queue}:workers`.  Each member IS the inflight set key — jobs still
-/// held by a dead worker live there and must be pushed back to `{queue}:active` before
-/// the registration is deleted, otherwise they are permanently lost.
+/// Called at startup when all previous worker registrations are stale. Rescued
+/// jobs re-enter the active queue and will release their own dedup keys when
+/// they complete normally — no separate dedup cleanup is needed here.
 pub async fn clear_worker_registrations(redis: &mut redis::aio::ConnectionManager) {
+    rescue_workers(redis, None).await;
+}
+
+/// Periodically re-enqueue inflight jobs from workers whose heartbeat has gone
+/// stale (score in the workers sorted set is older than `stale_threshold_secs`).
+///
+/// apalis-redis workers re-register (ZADD with current timestamp) on a 30-second
+/// keep-alive interval. A worker that has not refreshed for longer than the
+/// threshold is assumed dead and its inflight jobs are rescued. Rescued jobs
+/// release their own dedup keys when they complete, so no separate dedup scan
+/// is required — this matches BullMQ's stalled-job detection model.
+pub async fn recover_stale_workers(
+    redis: &mut redis::aio::ConnectionManager,
+    stale_threshold_secs: i64,
+) {
+    let cutoff = chrono::Utc::now().timestamp() - stale_threshold_secs;
+    rescue_workers(redis, Some(cutoff)).await;
+}
+
+/// Shared rescue logic. `max_score` = None means rescue all workers (startup);
+/// `max_score` = Some(ts) means rescue only workers with score ≤ ts (periodic).
+async fn rescue_workers(
+    redis: &mut redis::aio::ConnectionManager,
+    max_score: Option<i64>,
+) {
     for &queue_name in QUEUE_NAMES {
         let config = RedisConfig::new(queue_name);
-        // Each member is the full inflight-set key, e.g. "riven:index:inflight:riven-index"
-        let members: Vec<String> = redis::cmd("ZRANGE")
-            .arg(config.workers_set())
-            .arg(0i64)
-            .arg(-1i64)
-            .query_async(redis)
-            .await
-            .unwrap_or_default();
 
-        if !members.is_empty() {
-            // Collect all inflight jobs across all dead workers, then signal once.
-            let mut rescued_jobs: Vec<String> = Vec::new();
-            for inflight_key in &members {
-                let meta_key = format!("{APALIS_WORKERS_METADATA_PREFIX}{inflight_key}");
-
-                let jobs: Vec<String> = redis::cmd("SMEMBERS")
-                    .arg(inflight_key)
-                    .query_async(redis)
-                    .await
-                    .unwrap_or_default();
-                rescued_jobs.extend(jobs);
-
-                let _: Result<(), _> = redis::pipe()
-                    .del(&meta_key)
-                    .del(inflight_key)
-                    .query_async(redis)
-                    .await;
-            }
-
-            if !rescued_jobs.is_empty() {
-                let _: Result<(), _> = redis::pipe()
-                    .rpush(config.active_jobs_list(), &rescued_jobs)
-                    .del(config.signal_list())
-                    .lpush(config.signal_list(), 1u8)
-                    .query_async(redis)
-                    .await;
-                tracing::info!(
-                    queue = queue_name,
-                    count = rescued_jobs.len(),
-                    "re-enqueued inflight jobs from dead workers"
-                );
-            }
-
-            let _: Result<(), _> = redis::cmd("DEL")
+        // Fetch stale worker entries. Members ARE the inflight-set keys,
+        // e.g. `riven:scrape:inflight:riven-scrape`.
+        let members: Vec<String> = match max_score {
+            None => redis::cmd("ZRANGE")
                 .arg(config.workers_set())
+                .arg(0i64)
+                .arg(-1i64)
+                .query_async(redis)
+                .await
+                .unwrap_or_default(),
+            Some(cutoff) => redis::cmd("ZRANGEBYSCORE")
+                .arg(config.workers_set())
+                .arg(0i64)
+                .arg(cutoff)
+                .query_async(redis)
+                .await
+                .unwrap_or_default(),
+        };
+
+        if members.is_empty() {
+            continue;
+        }
+
+        let mut rescued_jobs: Vec<String> = Vec::new();
+        for inflight_key in &members {
+            let meta_key = format!("{APALIS_WORKERS_METADATA_PREFIX}{inflight_key}");
+
+            let jobs: Vec<String> = redis::cmd("SMEMBERS")
+                .arg(inflight_key)
+                .query_async(redis)
+                .await
+                .unwrap_or_default();
+            rescued_jobs.extend(jobs);
+
+            let _: Result<(), _> = redis::pipe()
+                .del(&meta_key)
+                .del(inflight_key)
+                .query_async(redis)
+                .await;
+        }
+
+        if !rescued_jobs.is_empty() {
+            let _: Result<(), _> = redis::pipe()
+                .rpush(config.active_jobs_list(), &rescued_jobs)
+                .del(config.signal_list())
+                .lpush(config.signal_list(), 1u8)
                 .query_async(redis)
                 .await;
             tracing::info!(
                 queue = queue_name,
-                count = members.len(),
-                "cleared stale worker registrations"
+                count = rescued_jobs.len(),
+                "re-enqueued inflight jobs from stale workers"
             );
         }
-    }
 
-    // Clear all dedup keys. Inflight jobs whose workers just died will have
-    // their dedup keys expire normally (300s TTL) unless we clear them here,
-    // blocking the scheduler from re-queuing for up to 5 minutes.
-    let dedup_keys: Vec<String> = {
-        let mut cursor = 0u64;
-        let mut keys = Vec::new();
-        loop {
-            let (next, batch): (u64, Vec<String>) = redis::cmd("SCAN")
-                .arg(cursor)
-                .arg("MATCH")
-                .arg("riven:dedup:*")
-                .arg("COUNT")
-                .arg(100u32)
+        // Remove stale worker registrations. For startup (max_score = None)
+        // we drop the whole set; for periodic we remove only the stale members.
+        if max_score.is_none() {
+            let _: Result<(), _> = redis::cmd("DEL")
+                .arg(config.workers_set())
                 .query_async(redis)
-                .await
-                .unwrap_or((0, vec![]));
-            keys.extend(batch);
-            cursor = next;
-            if cursor == 0 {
-                break;
+                .await;
+        } else {
+            for inflight_key in &members {
+                let _: Result<(), _> = redis::cmd("ZREM")
+                    .arg(config.workers_set())
+                    .arg(inflight_key)
+                    .query_async(redis)
+                    .await;
             }
         }
-        keys
-    };
-    if !dedup_keys.is_empty() {
-        let _: Result<(), _> = redis::cmd("DEL").arg(&dedup_keys).query_async(redis).await;
-        tracing::info!("cleared {} stale dedup keys", dedup_keys.len());
+
+        tracing::info!(
+            queue = queue_name,
+            count = members.len(),
+            "cleared stale worker registrations"
+        );
     }
 }
 

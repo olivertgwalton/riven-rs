@@ -22,6 +22,9 @@ impl Scheduler {
     pub async fn run(self) {
         let mut content_tick = tokio::time::interval(Duration::from_secs(120));
         let mut cleanup_tick = tokio::time::interval(Duration::from_secs(60 * 60));
+        // Check for stale workers every 60s (2× the apalis default keep-alive of 30s).
+        // Rescued jobs will release their own dedup keys on completion, mirroring
+        let mut worker_recovery_tick = tokio::time::interval(Duration::from_secs(60));
         let retry_wait =
             Self::retry_wait_duration(self.job_queue.retry_interval_secs.load(Ordering::SeqCst));
         let mut retry_sleep = std::pin::pin!(tokio::time::sleep(retry_wait));
@@ -30,8 +33,8 @@ impl Scheduler {
 
         loop {
             tokio::select! {
-                _ = content_tick.tick()    => self.job_queue.push_content_service().await,
-                _ = &mut retry_sleep       => {
+                _ = content_tick.tick()        => self.job_queue.push_content_service().await,
+                _ = &mut retry_sleep           => {
                     self.retry_library().await;
                     let next_wait = Self::retry_wait_duration(
                         self.job_queue.retry_interval_secs.load(Ordering::SeqCst),
@@ -40,7 +43,12 @@ impl Scheduler {
                         .as_mut()
                         .reset(tokio::time::Instant::now() + next_wait);
                 }
-                _ = cleanup_tick.tick()    => self.cleanup_runtime_state().await,
+                _ = cleanup_tick.tick()        => self.cleanup_runtime_state().await,
+                _ = worker_recovery_tick.tick() => {
+                    let mut redis = self.job_queue.redis.clone();
+                    // 60s threshold: a worker missing two heartbeats is considered dead.
+                    crate::recover_stale_workers(&mut redis, 60).await;
+                }
             }
         }
     }
@@ -99,9 +107,16 @@ impl Scheduler {
                         self.job_queue.push_index(IndexJob::from_item(&item)).await;
                     }
                     MediaItemState::Indexed | MediaItemState::PartiallyCompleted => {
+                        // Release any stale dedup key before retrying. If a worker crashed
+                        // mid-scrape, the key can linger for up to 300s and block re-queuing
+                        // until the next retry cycle. Releasing here is safe: scraping is
+                        // idempotent, and this path only runs on the periodic retry schedule.
+                        self.job_queue.release_dedup("scrape", item.id).await;
                         orchestrator.queue_scrape_for_item(&item, None, true).await;
                     }
                     MediaItemState::Scraped => {
+                        // Same rationale: release stale download dedup key before retrying.
+                        self.job_queue.release_dedup("download", item.id).await;
                         orchestrator.queue_download_for_item(&item).await;
                     }
                     _ => {}

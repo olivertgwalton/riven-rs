@@ -377,6 +377,9 @@ impl<'a> LibraryOrchestrator<'a> {
                                 MediaItemState::Scraped
                                 | MediaItemState::Ongoing
                                 | MediaItemState::PartiallyCompleted => {
+                                    // Release any stale download dedup key so a previously
+                                    // stuck episode isn't silently skipped.
+                                    self.queue.release_dedup("download", episode.id).await;
                                     if !self.queue.push_download_from_best_stream(episode.id).await
                                     {
                                         let _ = repo::refresh_state_cascade(
