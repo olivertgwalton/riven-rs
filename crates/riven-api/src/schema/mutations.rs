@@ -9,11 +9,87 @@ use riven_core::types::*;
 use riven_core::vfs_layout::VfsLibraryLayout;
 use riven_db::entities::*;
 use riven_db::repo;
+use riven_db::repo::ItemRequestUpsertAction;
 use riven_queue::orchestrator::LibraryOrchestrator;
 use riven_queue::{DownloadJob, IndexJob, JobQueue};
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use tokio::sync::RwLock;
+
+// ── Mutation status enum ──
+
+#[derive(Enum, Copy, Clone, PartialEq, Eq)]
+pub enum MutationStatusText {
+    Ok,
+    Created,
+    BadRequest,
+    NotFound,
+    Conflict,
+    InternalServerError,
+}
+
+// ── Mutation input types ──
+
+/// Input for requesting a movie to be tracked.
+#[derive(InputObject)]
+struct MovieRequestInput {
+    /// Title used as a placeholder until indexing fills in the canonical name.
+    title: String,
+    imdb_id: Option<String>,
+    tmdb_id: Option<String>,
+    /// Identifier of the external system (e.g. Seerr) that originated this request.
+    requested_by: Option<String>,
+    /// External request ID for correlation with the originating content service.
+    external_request_id: Option<String>,
+}
+
+/// Input for requesting a show (and optionally specific seasons) to be tracked.
+#[derive(InputObject)]
+struct ShowRequestInput {
+    /// Title used as a placeholder until indexing fills in the canonical name.
+    title: String,
+    imdb_id: Option<String>,
+    tvdb_id: Option<String>,
+    /// Season numbers to request. When omitted all non-special seasons are requested.
+    seasons: Option<Vec<i32>>,
+    /// Identifier of the external system (e.g. Seerr) that originated this request.
+    requested_by: Option<String>,
+    /// External request ID for correlation with the originating content service.
+    external_request_id: Option<String>,
+}
+
+// ── Mutation response types ──
+
+/// Structured response returned by `requestMovie` and `requestShow`.
+#[derive(SimpleObject)]
+struct RequestItemMutationResponse {
+    success: bool,
+    message: String,
+    status_text: MutationStatusText,
+    /// The item request that was created or updated; `null` on conflict.
+    item: Option<ItemRequest>,
+}
+
+/// Structured response returned by `saveStreamUrl`.
+#[derive(SimpleObject)]
+struct SaveStreamUrlMutationResponse {
+    success: bool,
+    message: String,
+    status_text: MutationStatusText,
+    item: Option<FileSystemEntry>,
+}
+
+/// Returned by `requestItems` — a summary of a bulk upsert operation.
+#[derive(SimpleObject)]
+struct RequestItemsResult {
+    /// Total number of unique items processed after deduplication.
+    count: i32,
+    /// Newly created item requests.
+    new_items: Vec<ItemRequest>,
+    /// Item requests that were updated (e.g. new seasons added to an existing show request).
+    updated_items: Vec<ItemRequest>,
+}
 
 // ── Mutation root ──
 
@@ -642,5 +718,246 @@ impl MutationRoot {
             .await;
 
         Ok(outcome.item)
+    }
+
+    /// Request a movie to be tracked and indexed.
+    ///
+    /// Returns a structured response. If an identical request already exists
+    /// the mutation succeeds without error but the `statusText` is `CONFLICT`
+    /// and `item` is `null`.
+    async fn request_movie(
+        &self,
+        ctx: &Context<'_>,
+        input: MovieRequestInput,
+    ) -> Result<RequestItemMutationResponse> {
+        let job_queue = ctx.data::<Arc<JobQueue>>()?;
+        let orchestrator = LibraryOrchestrator::new(job_queue.as_ref());
+
+        let outcome = orchestrator
+            .upsert_requested_movie(
+                &input.title,
+                input.imdb_id.as_deref(),
+                input.tmdb_id.as_deref(),
+                input.requested_by.as_deref(),
+                input.external_request_id.as_deref(),
+            )
+            .await
+            .map_err(Error::from)?;
+
+        if outcome.action == ItemRequestUpsertAction::Unchanged {
+            return Ok(RequestItemMutationResponse {
+                success: false,
+                message: "A request for this movie already exists.".to_string(),
+                status_text: MutationStatusText::Conflict,
+                item: None,
+            });
+        }
+
+        orchestrator.enqueue_after_request(&outcome, None).await;
+
+        Ok(RequestItemMutationResponse {
+            success: true,
+            message: "Movie request created successfully.".to_string(),
+            status_text: MutationStatusText::Created,
+            item: Some(outcome.request),
+        })
+    }
+
+    /// Request a show (and optionally specific seasons) to be tracked and indexed.
+    ///
+    /// If the show was already requested but new seasons are included the request
+    /// is updated and `statusText` is `OK`. If nothing has changed `statusText`
+    /// is `CONFLICT` and `item` is `null`.
+    async fn request_show(
+        &self,
+        ctx: &Context<'_>,
+        input: ShowRequestInput,
+    ) -> Result<RequestItemMutationResponse> {
+        let job_queue = ctx.data::<Arc<JobQueue>>()?;
+        let orchestrator = LibraryOrchestrator::new(job_queue.as_ref());
+
+        let outcome = orchestrator
+            .upsert_requested_show(
+                &input.title,
+                input.imdb_id.as_deref(),
+                input.tvdb_id.as_deref(),
+                input.requested_by.as_deref(),
+                input.external_request_id.as_deref(),
+                input.seasons.as_deref(),
+            )
+            .await
+            .map_err(Error::from)?;
+
+        let (success, message, status_text) = match outcome.action {
+            ItemRequestUpsertAction::Created => (
+                true,
+                "Show request created successfully.".to_string(),
+                MutationStatusText::Created,
+            ),
+            ItemRequestUpsertAction::Updated => (
+                true,
+                "Show request updated successfully.".to_string(),
+                MutationStatusText::Ok,
+            ),
+            ItemRequestUpsertAction::Unchanged => {
+                return Ok(RequestItemMutationResponse {
+                    success: false,
+                    message: "A request for this show already exists.".to_string(),
+                    status_text: MutationStatusText::Conflict,
+                    item: None,
+                });
+            }
+        };
+
+        orchestrator
+            .enqueue_after_request(&outcome, input.seasons.as_deref())
+            .await;
+
+        Ok(RequestItemMutationResponse {
+            success,
+            message,
+            status_text,
+            item: Some(outcome.request),
+        })
+    }
+
+    /// Bulk-request movies and shows in a single call.
+    ///
+    /// Items are deduplicated by their primary external ID (TMDB for movies,
+    /// TVDB for shows, with IMDB as fallback) so duplicate entries from a
+    /// single content-service payload are collapsed before processing.
+    ///
+    /// Returns the count of unique items processed and separate lists of newly
+    /// created vs updated item requests. Conflicts (already-requested items
+    /// with no change) are silently skipped.
+    async fn request_items(
+        &self,
+        ctx: &Context<'_>,
+        movies: Vec<MovieRequestInput>,
+        shows: Vec<ShowRequestInput>,
+    ) -> Result<RequestItemsResult> {
+        let job_queue = ctx.data::<Arc<JobQueue>>()?;
+        let orchestrator = LibraryOrchestrator::new(job_queue.as_ref());
+
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut new_items: Vec<ItemRequest> = Vec::new();
+        let mut updated_items: Vec<ItemRequest> = Vec::new();
+        let mut count: i32 = 0;
+
+        for movie in movies {
+            let key = movie
+                .tmdb_id
+                .as_deref()
+                .or(movie.imdb_id.as_deref())
+                .map(str::to_owned);
+
+            if let Some(ref k) = key {
+                if !seen.insert(k.clone()) {
+                    continue;
+                }
+            }
+
+            count += 1;
+
+            let outcome = orchestrator
+                .upsert_requested_movie(
+                    &movie.title,
+                    movie.imdb_id.as_deref(),
+                    movie.tmdb_id.as_deref(),
+                    movie.requested_by.as_deref(),
+                    movie.external_request_id.as_deref(),
+                )
+                .await
+                .map_err(Error::from)?;
+
+            match outcome.action {
+                ItemRequestUpsertAction::Created => {
+                    orchestrator.enqueue_after_request(&outcome, None).await;
+                    new_items.push(outcome.request);
+                }
+                ItemRequestUpsertAction::Updated => {
+                    updated_items.push(outcome.request);
+                }
+                ItemRequestUpsertAction::Unchanged => {}
+            }
+        }
+
+        for show in shows {
+            let key = show
+                .tvdb_id
+                .as_deref()
+                .or(show.imdb_id.as_deref())
+                .map(str::to_owned);
+
+            if let Some(ref k) = key {
+                if !seen.insert(k.clone()) {
+                    continue;
+                }
+            }
+
+            count += 1;
+
+            let seasons = show.seasons.as_deref();
+
+            let outcome = orchestrator
+                .upsert_requested_show(
+                    &show.title,
+                    show.imdb_id.as_deref(),
+                    show.tvdb_id.as_deref(),
+                    show.requested_by.as_deref(),
+                    show.external_request_id.as_deref(),
+                    seasons,
+                )
+                .await
+                .map_err(Error::from)?;
+
+            match outcome.action {
+                ItemRequestUpsertAction::Created => {
+                    orchestrator
+                        .enqueue_after_request(&outcome, seasons)
+                        .await;
+                    new_items.push(outcome.request);
+                }
+                ItemRequestUpsertAction::Updated => {
+                    orchestrator
+                        .enqueue_after_request(&outcome, seasons)
+                        .await;
+                    updated_items.push(outcome.request);
+                }
+                ItemRequestUpsertAction::Unchanged => {}
+            }
+        }
+
+        Ok(RequestItemsResult {
+            count,
+            new_items,
+            updated_items,
+        })
+    }
+
+    /// Save a stream URL on a filesystem entry (media entry).
+    ///
+    /// Used by players and integrations to store the resolved playback URL
+    /// alongside the downloaded file record.
+    async fn save_stream_url(
+        &self,
+        ctx: &Context<'_>,
+        id: i64,
+        url: String,
+    ) -> Result<SaveStreamUrlMutationResponse> {
+        let pool = ctx.data::<sqlx::PgPool>()?;
+
+        repo::update_stream_url(pool, id, &url).await?;
+
+        let entry = repo::get_media_entry_by_id(pool, id)
+            .await?
+            .ok_or_else(|| Error::new("Filesystem entry not found"))?;
+
+        Ok(SaveStreamUrlMutationResponse {
+            success: true,
+            message: "Stream URL saved successfully.".to_string(),
+            status_text: MutationStatusText::Ok,
+            item: Some(entry),
+        })
     }
 }

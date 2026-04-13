@@ -10,6 +10,7 @@ use crate::{IndexJob, JobQueue, ScrapeJob};
 
 pub struct RequestedItemOutcome {
     pub item: MediaItem,
+    pub request: ItemRequest,
     pub action: ItemRequestUpsertAction,
 }
 
@@ -55,6 +56,7 @@ impl<'a> LibraryOrchestrator<'a> {
 
         Ok(RequestedItemOutcome {
             item,
+            request: request.request,
             action: request.action,
         })
     }
@@ -91,6 +93,7 @@ impl<'a> LibraryOrchestrator<'a> {
 
         Ok(RequestedItemOutcome {
             item,
+            request: request.request,
             action: request.action,
         })
     }
@@ -387,6 +390,22 @@ impl<'a> LibraryOrchestrator<'a> {
                                             episode,
                                         )
                                         .await;
+                                    }
+                                    // If the episode has been stuck in Scraped without a
+                                    // successful download for an extended period, also push a
+                                    // re-scrape so new or different (potentially cached) streams
+                                    // can be found. The scrape dedup key prevents double-scraping.
+                                    let stale = episode.scraped_at.map_or(true, |t| {
+                                        Utc::now().signed_duration_since(t) > Duration::hours(6)
+                                    });
+                                    if stale {
+                                        self.queue
+                                            .push_scrape(ScrapeJob::for_episode(
+                                                episode,
+                                                show_title.clone(),
+                                                show_imdb_id.clone(),
+                                            ))
+                                            .await;
                                     }
                                 }
                                 MediaItemState::Indexed => {
