@@ -24,7 +24,7 @@ pub fn build_cached_candidates<'a>(
         .iter()
         .filter_map(|stream| {
             let files = cached_info.get(&stream.info_hash.to_lowercase())?;
-            let total_size: u64 = files.iter().map(|file| file.size).sum();
+            let total_size: u64 = files.iter().filter_map(|file| file.size).sum();
             tracing::debug!(id, info_hash = %stream.info_hash, total_size, "stream is cached");
 
             if max_size_bytes.is_some_and(|max| total_size > max) {

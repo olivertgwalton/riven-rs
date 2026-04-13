@@ -39,7 +39,7 @@ pub struct StremthruCacheFile {
     pub name: String,
     #[serde(default)]
     pub path: String,
-    pub size: u64,
+    pub size: i64,
     #[serde(default)]
     pub link: String,
 }
@@ -57,7 +57,7 @@ pub struct StremthruTorzFile {
     pub name: String,
     #[serde(default)]
     pub path: String,
-    pub size: u64,
+    pub size: i64,
     #[serde(default)]
     pub link: String,
 }

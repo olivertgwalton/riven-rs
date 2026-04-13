@@ -268,7 +268,7 @@ impl Plugin for StremthruPlugin {
                     .collect();
                 Ok(HookResponse::ProviderList(providers))
             }
-            RivenEvent::MediaItemStreamLinkRequested { magnet, .. } => {
+            RivenEvent::MediaItemStreamLinkRequested { magnet, provider, .. } => {
                 let score_map = get_store_scores(&ctx.redis, &stores).await;
                 let mut ordered_stores: Vec<(&str, &str)> = stores
                     .iter()
@@ -281,6 +281,11 @@ impl Plugin for StremthruPlugin {
                 });
 
                 for (store, api_key) in ordered_stores {
+                    if let Some(p) = provider.as_deref() {
+                        if store != p {
+                            continue;
+                        }
+                    }
                     let result = generate_link(&ctx.http, &base_url, store, api_key, magnet).await;
                     match result {
                         Ok(link) => {

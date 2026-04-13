@@ -226,7 +226,7 @@ async fn fetch_cache_check(
                         f.path.clone()
                     },
                     name: f.name,
-                    size: f.size,
+                    size: (f.size > 0).then_some(f.size as u64),
                     link: if f.link.is_empty() {
                         None
                     } else {
@@ -373,7 +373,7 @@ pub fn download_result_from_torz(
         .into_iter()
         .map(|f| DownloadFile {
             filename: file_name_or_path(f.name, f.path),
-            file_size: f.size,
+            file_size: f.size.max(0) as u64,
             download_url: if f.link.is_empty() {
                 None
             } else {
@@ -474,38 +474,83 @@ pub async fn fetch_user_info(
         .data
         .ok_or_else(|| anyhow::anyhow!("store returned no user data"))?;
 
-    let premium_until = fetch_premium_until(http, store, api_key)
+    let extra = fetch_debrid_extra(http, store, api_key)
         .await
-        .inspect_err(|e| tracing::debug!(store, error = %e, "could not fetch premium_until"))
+        .inspect_err(|e| tracing::debug!(store, error = %e, "could not fetch debrid extra info"))
         .ok()
-        .flatten();
+        .unwrap_or_default();
 
     Ok(riven_core::types::DebridUserInfo {
         store: store.to_string(),
         email: user.email,
+        username: extra.username,
         subscription_status: user.subscription_status,
-        premium_until,
+        premium_until: extra.premium_until,
+        cooldown_until: extra.cooldown_until,
+        total_downloaded_bytes: extra.total_downloaded_bytes,
+        points: extra.points,
     })
 }
 
-async fn fetch_premium_until(
+#[derive(Default)]
+struct DebridExtra {
+    premium_until: Option<String>,
+    cooldown_until: Option<String>,
+    total_downloaded_bytes: Option<i64>,
+    username: Option<String>,
+    points: Option<i64>,
+}
+
+async fn fetch_debrid_extra(
     http: &HttpClient,
     store: &str,
     api_key: &str,
-) -> anyhow::Result<Option<String>> {
+) -> anyhow::Result<DebridExtra> {
+    // TorBox: single API call returns all extra fields
+    if store == "torbox" {
+        let body: serde_json::Value = http
+            .get_json(
+                profiles::debrid_service(store),
+                format!("{store}:https://api.torbox.app/v1/api/user/me"),
+                |client| {
+                    client
+                        .get("https://api.torbox.app/v1/api/user/me")
+                        .header("Authorization", format!("Bearer {api_key}"))
+                },
+            )
+            .await?;
+        let data = &body["data"];
+        return Ok(DebridExtra {
+            premium_until: data["premium_expires_at"].as_str().map(str::to_owned),
+            cooldown_until: data["cooldown_until"].as_str().map(str::to_owned),
+            total_downloaded_bytes: data["total_bytes_downloaded"].as_i64(),
+            ..Default::default()
+        });
+    }
+
+    // Real-Debrid: single API call returns all extra fields
+    if store == "realdebrid" {
+        let body: serde_json::Value = http
+            .get_json(
+                profiles::debrid_service(store),
+                format!("{store}:https://api.real-debrid.com/rest/1.0/user"),
+                |client| {
+                    client
+                        .get("https://api.real-debrid.com/rest/1.0/user")
+                        .header("Authorization", format!("Bearer {api_key}"))
+                },
+            )
+            .await?;
+        return Ok(DebridExtra {
+            premium_until: body["expiration"].as_str().map(str::to_owned),
+            username: body["username"].as_str().map(str::to_owned),
+            points: body["points"].as_i64(),
+            ..Default::default()
+        });
+    }
+
+    // Other stores: fetch only premium_until
     let (url, bearer, pointer, is_unix): (String, Option<String>, &str, bool) = match store {
-        "realdebrid" => (
-            "https://api.real-debrid.com/rest/1.0/user".into(),
-            Some(format!("Bearer {api_key}")),
-            "/expiration",
-            false,
-        ),
-        "torbox" => (
-            "https://api.torbox.app/v1/api/user/me".into(),
-            Some(format!("Bearer {api_key}")),
-            "/data/expiration",
-            false,
-        ),
         "alldebrid" => (
             "https://api.alldebrid.com/v4/user".into(),
             Some(format!("Bearer {api_key}")),
@@ -524,7 +569,7 @@ async fn fetch_premium_until(
             "/premium_until",
             true,
         ),
-        _ => return Ok(None),
+        _ => return Ok(DebridExtra::default()),
     };
 
     let body: serde_json::Value = http
@@ -542,7 +587,7 @@ async fn fetch_premium_until(
         )
         .await?;
 
-    let expiry = body.pointer(pointer).and_then(|v| {
+    let premium_until = body.pointer(pointer).and_then(|v| {
         if is_unix {
             v.as_i64()
                 .and_then(|ts| chrono::DateTime::from_timestamp(ts, 0))
@@ -552,5 +597,5 @@ async fn fetch_premium_until(
         }
     });
 
-    Ok(expiry)
+    Ok(DebridExtra { premium_until, ..Default::default() })
 }

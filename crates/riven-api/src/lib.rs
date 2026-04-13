@@ -379,6 +379,7 @@ async fn resolve_media_stream_url(
 ) -> Option<String> {
     let url = request_stream_url(
         entry.download_url.as_deref(),
+        entry.provider.as_deref(),
         &state.link_request_tx,
         &state.runtime,
     )?;

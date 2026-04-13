@@ -86,6 +86,7 @@ struct FileHandle {
     path: Arc<str>,
     stream_url: Arc<str>,
     download_url: Option<Arc<str>>,
+    provider: Option<Arc<str>>,
     stream_session: MediaStream,
 }
 
@@ -96,6 +97,7 @@ struct CachedEntry {
     mtime: SystemTime,
     download_url: Option<Arc<str>>,
     stream_url: Option<Arc<str>>,
+    provider: Option<Arc<str>>,
     library_profiles: LibraryProfileMembership,
 }
 
@@ -107,6 +109,7 @@ impl CachedEntry {
             mtime: entry_mtime(&entry),
             download_url: entry.download_url.map(Arc::from),
             stream_url: entry.stream_url.map(Arc::from),
+            provider: entry.provider.map(Arc::from),
             library_profiles: LibraryProfileMembership::from_json(entry.library_profiles.as_ref()),
         }
     }
@@ -255,8 +258,9 @@ impl RivenFs {
         path: &str,
         entry_id: i64,
         download_url: Option<&str>,
+        provider: Option<&str>,
     ) -> Option<String> {
-        let url = request_stream_url(download_url, &self.link_request_tx, &self.runtime)?;
+        let url = request_stream_url(download_url, provider, &self.link_request_tx, &self.runtime)?;
         let _ = self.runtime.block_on(riven_db::repo::update_stream_url(
             &self.db_pool,
             entry_id,
@@ -275,6 +279,7 @@ impl RivenFs {
             path,
             entry.id,
             entry.download_url.as_deref().map(|url| url.as_ref()),
+            entry.provider.as_deref().map(|p| p.as_ref()),
         )
     }
 
@@ -496,6 +501,7 @@ impl Filesystem for RivenFs {
                 path,
                 stream_url: Arc::from(stream_url),
                 download_url: entry.download_url.clone(),
+                provider: entry.provider.clone(),
                 stream_session: MediaStream::new(ino, file_size),
             },
         );
@@ -538,6 +544,7 @@ impl Filesystem for RivenFs {
                 };
                 let path = Arc::clone(&handle.path);
                 let entry_id = handle.entry_id;
+                let provider = handle.provider.as_ref().map(Arc::clone);
 
                 tracing::warn!(
                     path = %path,
@@ -551,6 +558,7 @@ impl Filesystem for RivenFs {
                     &path,
                     entry_id,
                     Some(download_url.as_ref()),
+                    provider.as_deref().map(|p| p.as_ref()),
                 ) else {
                     return reply.error(code);
                 };

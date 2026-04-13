@@ -209,7 +209,8 @@ pub struct CacheCheckFile {
     pub name: String,
     #[serde(default)]
     pub path: String,
-    pub size: u64,
+    /// File size in bytes. `None` when the store did not report a size (e.g. returns -1).
+    pub size: Option<u64>,
     /// Direct download link for this file, populated from a live cache-check
     /// response when `status == Cached`.  Intentionally not serialized so that
     /// expiring links are never written into the Redis 24-hour cache.
@@ -231,8 +232,12 @@ pub struct ProviderInfo {
 pub struct DebridUserInfo {
     pub store: String,
     pub email: Option<String>,
+    pub username: Option<String>,
     pub subscription_status: Option<String>,
     pub premium_until: Option<String>,
+    pub cooldown_until: Option<String>,
+    pub total_downloaded_bytes: Option<i64>,
+    pub points: Option<i64>,
 }
 
 // ── Active playback sessions ──

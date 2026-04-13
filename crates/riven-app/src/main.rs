@@ -128,6 +128,7 @@ async fn main() -> Result<()> {
                 let event = RivenEvent::MediaItemStreamLinkRequested {
                     magnet: req.download_url,
                     info_hash: String::new(),
+                    provider: req.provider,
                 };
                 let results = link_registry.dispatch(&event).await;
                 let link = results.into_iter().find_map(|(_, r)| {

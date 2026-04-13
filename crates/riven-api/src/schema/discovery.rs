@@ -305,7 +305,8 @@ async fn apply_cache_status(registry: &PluginRegistry, streams: &mut [Discovered
                 let total_size = cache_result
                     .files
                     .iter()
-                    .map(|file| file.size as i64)
+                    .filter_map(|file| file.size)
+                    .map(|s| s as i64)
                     .sum::<i64>();
                 file_sizes
                     .entry(hash)
