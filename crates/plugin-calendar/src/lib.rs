@@ -64,11 +64,7 @@ async fn regenerate_feed(ctx: &PluginContext) -> anyhow::Result<()> {
         .set::<_, _, ()>(CALENDAR_REDIS_KEY, ical.as_bytes())
         .await?;
 
-    tracing::info!(
-        count = items.len(),
-        key = CALENDAR_REDIS_KEY,
-        "calendar feed regenerated"
-    );
+    tracing::info!("calendar feed regenerated count={}", items.len());
 
     Ok(())
 }
