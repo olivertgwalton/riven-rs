@@ -20,7 +20,6 @@ fn index_event(job: &IndexJob) -> RivenEvent {
 
 pub async fn start(job: &IndexJob, queue: &JobQueue) {
     let Some(_item) = load_media_item_or_log(&queue.db_pool, job.id, "indexing").await else {
-        queue.release_dedup("index", job.id).await;
         return;
     };
 
@@ -53,7 +52,6 @@ pub async fn start(job: &IndexJob, queue: &JobQueue) {
                 error: "no indexer plugin responded".into(),
             })
             .await;
-        queue.release_dedup("index", job.id).await;
     }
 }
 
@@ -87,7 +85,6 @@ pub async fn handle_plugin(job: &IndexPluginJob, queue: &JobQueue) {
 pub async fn finalize(id: i64, queue: &JobQueue) {
     let Some(item) = load_media_item_or_log(&queue.db_pool, id, "index finalize").await else {
         queue.clear_flow("index", id).await;
-        queue.release_dedup("index", id).await;
         return;
     };
 
@@ -95,7 +92,6 @@ pub async fn finalize(id: i64, queue: &JobQueue) {
     let responses: Vec<IndexedMediaItem> = queue.flow_load_results("index", id).await;
     queue.clear_flow_results("index", id).await;
     queue.clear_flow("index", id).await;
-    queue.release_dedup("index", id).await;
 
     if responses.is_empty() {
         tracing::warn!(id, "no indexer plugin responded");

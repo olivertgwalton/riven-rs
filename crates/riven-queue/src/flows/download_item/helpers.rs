@@ -41,7 +41,6 @@ pub async fn load_item_or_err(id: i64, queue: &JobQueue, error_msg: &str) -> Opt
 const VALID_VIDEO_EXTENSIONS: &[&str] = &["mp4", "mkv", "avi", "mov", "wmv", "flv", "webm"];
 
 /// Returns true if the filename has a recognised video extension.
-/// Matches riven-ts VALID_FILE_EXTENSIONS list.
 pub fn is_video_file(filename: &str) -> bool {
     let ext = filename
         .rsplit('.')
@@ -53,7 +52,7 @@ pub fn is_video_file(filename: &str) -> bool {
 
 /// Returns true if the cached file list contains at least one file that matches
 /// the media item. Used to skip add_torrent when the torrent clearly won't
-/// satisfy the item (matches riven-ts getCachedTorrentFiles pre-validation).
+/// satisfy the item.
 pub fn has_matching_file(
     files: &[CacheCheckFile],
     item: &MediaItem,

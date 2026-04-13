@@ -197,7 +197,7 @@ pub async fn update_item_request_state(
     .await?)
 }
 
-pub async fn get_retryable_item_requests(pool: &PgPool, limit: i64) -> Result<Vec<ItemRequest>> {
+pub async fn get_retryable_item_requests(pool: &PgPool) -> Result<Vec<ItemRequest>> {
     Ok(sqlx::query_as::<_, ItemRequest>(
         "SELECT * FROM item_requests
          WHERE state = ANY(ARRAY['requested'::item_request_state, 'failed'::item_request_state])
@@ -210,10 +210,8 @@ pub async fn get_retryable_item_requests(pool: &PgPool, limit: i64) -> Result<Ve
                  AND mi.item_type = ANY(ARRAY['movie'::media_item_type, 'show'::media_item_type])
              )
            )
-         ORDER BY created_at ASC
-         LIMIT $1",
+         ORDER BY created_at ASC",
     )
-    .bind(limit)
     .fetch_all(pool)
     .await?)
 }

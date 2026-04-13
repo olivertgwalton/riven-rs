@@ -6,7 +6,7 @@ use riven_core::types::*;
 use riven_db::repo;
 
 use crate::orchestrator::LibraryOrchestrator;
-use crate::{IndexJob, JobQueue};
+use crate::JobQueue;
 
 /// Periodic scheduler.
 pub struct Scheduler {
@@ -79,7 +79,7 @@ impl Scheduler {
     async fn retry_library(&self) {
         let orchestrator = LibraryOrchestrator::new(&self.job_queue);
 
-        let requests = match repo::get_retryable_item_requests(&self.db_pool, 50).await {
+        let requests = match repo::get_retryable_item_requests(&self.db_pool).await {
             Ok(requests) => requests,
             Err(error) => {
                 tracing::error!(%error, "failed to fetch retryable item requests");
@@ -92,8 +92,7 @@ impl Scheduler {
         }
 
         for item_type in [MediaItemType::Movie, MediaItemType::Show] {
-            let items = match repo::get_pending_items_for_retry(&self.db_pool, item_type, 50).await
-            {
+            let items = match repo::get_pending_items_for_retry(&self.db_pool, item_type).await {
                 Ok(items) => items,
                 Err(e) => {
                     tracing::error!(error = %e, "failed to fetch pending items for retry");
@@ -103,19 +102,11 @@ impl Scheduler {
 
             for item in items {
                 match item.state {
-                    MediaItemState::Indexed if item.indexed_at.is_none() => {
-                        self.job_queue.push_index(IndexJob::from_item(&item)).await;
-                    }
                     MediaItemState::Indexed | MediaItemState::PartiallyCompleted => {
-                        // Release any stale dedup key before retrying. If a worker crashed
-                        // mid-scrape, the key can linger for up to 300s and block re-queuing
-                        // until the next retry cycle. Releasing here is safe: scraping is
-                        // idempotent, and this path only runs on the periodic retry schedule.
                         self.job_queue.release_dedup("scrape", item.id).await;
                         orchestrator.queue_scrape_for_item(&item, None, true).await;
                     }
                     MediaItemState::Scraped => {
-                        // Same rationale: release stale download dedup key before retrying.
                         self.job_queue.release_dedup("download", item.id).await;
                         orchestrator.queue_download_for_item(&item).await;
                     }

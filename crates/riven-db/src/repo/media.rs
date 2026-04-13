@@ -152,18 +152,15 @@ pub async fn get_items_ready_for_processing(
 pub async fn get_pending_items_for_retry(
     pool: &PgPool,
     item_type: MediaItemType,
-    limit: i64,
 ) -> Result<Vec<MediaItem>> {
     Ok(sqlx::query_as::<_, MediaItem>(
         "SELECT * FROM media_items
          WHERE state = ANY(ARRAY['indexed'::media_item_state, 'scraped'::media_item_state, 'partially_completed'::media_item_state])
            AND item_type = $1
            AND is_requested = true
-         ORDER BY updated_at ASC NULLS FIRST, created_at ASC
-         LIMIT $2",
+         ORDER BY updated_at ASC NULLS FIRST, created_at ASC",
     )
     .bind(item_type)
-    .bind(limit)
     .fetch_all(pool)
     .await?)
 }

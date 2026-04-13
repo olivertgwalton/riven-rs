@@ -9,13 +9,8 @@ use serde::de::DeserializeOwned;
 use tokio::sync::watch;
 use tokio::time::sleep;
 
-/// Number of attempts matching riven-ts `BaseDataSource.requestAttempts`.
 pub const DEFAULT_ATTEMPTS: u32 = 3;
-
-/// Base backoff delay in seconds, matching riven-ts (5 s base, exponential).
 const BACKOFF_BASE_SECS: u64 = 5;
-
-/// Jitter factor matching riven-ts (50%).
 const JITTER: f64 = 0.5;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -376,7 +371,6 @@ fn is_transient(e: &reqwest::Error) -> bool {
     false
 }
 
-/// Apply ±50% jitter to a duration, matching riven-ts backoff jitter.
 fn with_jitter(d: Duration) -> Duration {
     let secs = d.as_secs_f64();
     let jitter = secs * JITTER * (rand() * 2.0 - 1.0);
@@ -396,7 +390,7 @@ fn rand() -> f64 {
 
 /// Parse the `Retry-After` header as a delay duration.
 /// Supports both the delay-seconds form ("120") and the HTTP-date form
-/// ("Wed, 21 Oct 2015 07:28:00 GMT"), matching riven-ts behaviour.
+/// ("Wed, 21 Oct 2015 07:28:00 GMT").
 /// Falls back to `None` if the header is absent or unparseable.
 fn parse_retry_after(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
     let value = headers
@@ -428,7 +422,7 @@ fn parse_retry_after(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
 /// `make_request` is called once per attempt and must return a fresh
 /// `RequestBuilder` each time (the builder is consumed by `.send()`).
 ///
-/// Retry schedule (matching riven-ts exponential backoff, 5 s base, 50% jitter):
+/// Retry schedule
 /// - attempt 1 fails → wait  5 s → attempt 2
 /// - attempt 2 fails → wait 10 s → attempt 3
 /// - attempt 3 fails → propagate error

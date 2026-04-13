@@ -319,7 +319,7 @@ pub async fn get_scraped_seasons_for_show(pool: &PgPool, show_id: i64) -> Result
     seasons_for_show(pool, show_id, "state = 'scraped'").await
 }
 
-/// Fetch incomplete (indexed/scraped/ongoing) requested episodes for a season.
+/// Fetch incomplete (indexed/scraped/ongoing) episodes for a season.
 pub async fn get_incomplete_episodes_for_season(
     pool: &PgPool,
     season_id: i64,
@@ -328,11 +328,25 @@ pub async fn get_incomplete_episodes_for_season(
         "SELECT * FROM media_items
          WHERE parent_id = $1
            AND item_type = 'episode'
-           AND is_requested = true
            AND state = ANY(ARRAY['indexed'::media_item_state, 'scraped'::media_item_state, 'ongoing'::media_item_state])
          ORDER BY episode_number ASC",
     )
     .bind(season_id)
+    .fetch_all(pool)
+    .await?)
+}
+
+/// Fetch all requested seasons for a show, with no state or special filtering.
+pub async fn get_all_requested_seasons_for_show(
+    pool: &PgPool,
+    show_id: i64,
+) -> Result<Vec<MediaItem>> {
+    Ok(sqlx::query_as::<_, MediaItem>(
+        "SELECT * FROM media_items
+         WHERE parent_id = $1 AND item_type = 'season' AND is_requested = true
+         ORDER BY season_number ASC",
+    )
+    .bind(show_id)
     .fetch_all(pool)
     .await?)
 }

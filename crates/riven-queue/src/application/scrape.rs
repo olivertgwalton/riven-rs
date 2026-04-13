@@ -28,7 +28,6 @@ fn scrape_event(job: &ScrapeJob) -> RivenEvent {
 pub async fn start(id: i64, job: &ScrapeJob, queue: &JobQueue) {
     tracing::debug!(id, "running scrape flow");
     let Some(item) = load_media_item_or_log(&queue.db_pool, id, "scrape").await else {
-        queue.release_dedup("scrape", id).await;
         return;
     };
 
@@ -41,7 +40,6 @@ pub async fn start(id: i64, job: &ScrapeJob, queue: &JobQueue) {
             | MediaItemState::Completed
     ) {
         tracing::debug!(id, state = ?item.state, "skipping scrape");
-        queue.release_dedup("scrape", id).await;
         return;
     }
 
@@ -107,12 +105,10 @@ pub async fn finalize(id: i64, requested_title: &str, auto_download: bool, queue
     let Some(item) = load_media_item_or_log(&queue.db_pool, id, "scrape finalize").await else {
         queue.clear_flow_results("scrape", id).await;
         queue.clear_flow("scrape", id).await;
-        queue.release_dedup("scrape", id).await;
         return;
     };
 
     queue.clear_flow("scrape", id).await;
-    queue.release_dedup("scrape", id).await;
     if queue.flow_result_count("scrape", id).await == 0 {
         queue.clear_flow_results("scrape", id).await;
         tracing::info!(id, "no streams found by any scraper");
@@ -129,7 +125,6 @@ pub async fn finalize(id: i64, requested_title: &str, auto_download: bool, queue
                 item_type: item.item_type,
             })
             .await;
-        retry_existing_download_if_scraped(&item, auto_download, queue).await;
         return;
     }
 
@@ -140,7 +135,7 @@ pub async fn finalize(id: i64, requested_title: &str, auto_download: bool, queue
         .await;
 }
 
-pub async fn parse_results(id: i64, job: &ParseScrapeResultsJob, queue: &JobQueue) {
+pub async fn parse_results(id: i64, _job: &ParseScrapeResultsJob, queue: &JobQueue) {
     tracing::debug!(id, "running parse-scrape-results flow");
 
     let Some(item) = load_media_item_or_log(&queue.db_pool, id, "parse-scrape-results").await
@@ -235,7 +230,6 @@ pub async fn parse_results(id: i64, job: &ParseScrapeResultsJob, queue: &JobQueu
                 item_type,
             })
             .await;
-        retry_existing_download_if_scraped(&item, job.auto_download, queue).await;
     } else {
         let _ = repo::reset_failed_attempts(&queue.db_pool, id).await;
         queue
@@ -246,22 +240,5 @@ pub async fn parse_results(id: i64, job: &ParseScrapeResultsJob, queue: &JobQueu
                 stream_count,
             })
             .await;
-    }
-}
-
-async fn retry_existing_download_if_scraped(
-    item: &riven_db::entities::MediaItem,
-    auto_download: bool,
-    queue: &JobQueue,
-) {
-    if !auto_download {
-        return;
-    }
-
-    if matches!(
-        item.state,
-        MediaItemState::Scraped | MediaItemState::PartiallyCompleted
-    ) {
-        queue.push_download_from_best_stream(item.id).await;
     }
 }

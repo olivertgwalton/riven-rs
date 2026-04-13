@@ -7,7 +7,7 @@ use std::sync::Arc;
 // ── Settings type ──────────────────────────────────────────────────────────────
 
 /// Merged plugin settings. Each field returns that plugin's current settings
-/// JSON with an `enabled` key injected, mirroring the riven-ts Settings type.
+/// JSON with an `enabled` key injected.
 pub struct Settings {
     registry: Arc<PluginRegistry>,
     pool: sqlx::PgPool,

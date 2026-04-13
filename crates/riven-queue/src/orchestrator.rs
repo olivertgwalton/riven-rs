@@ -324,18 +324,12 @@ impl<'a> LibraryOrchestrator<'a> {
                     let _ = repo::refresh_state_cascade(&self.queue.db_pool, item).await;
                 }
             }
-            // For a season with no direct streams (episode-based shows like anime),
-            // fan out to re-scrape its incomplete episodes — mirrors riven-ts behaviour
-            // where a failed season download triggers fanOutDownload → re-scrape episodes.
             MediaItemType::Season => {
                 if !self.queue.push_download_from_best_stream(item.id).await {
                     self.fan_out_download_failure_for_item(item).await;
                 }
             }
-            // For a show, attempt to download each scraped season.  If a season has no
-            // direct streams (episode-based), fan out to its episodes — mirrors the
-            // riven-ts cascade: show download fail → fanOut seasons → season scrape fail
-            // → fanOut episodes → episode scrape → download.
+
             MediaItemType::Show => {
                 match repo::get_scraped_seasons_for_show(&self.queue.db_pool, item.id).await {
                     Ok(seasons) => {
@@ -369,56 +363,42 @@ impl<'a> LibraryOrchestrator<'a> {
     async fn fan_out_download_failure_for_item(&self, item: &MediaItem) {
         match item.item_type {
             MediaItemType::Show => {
-                self.queue_scrape_for_item(item, None, true).await;
+                // `requestedSeasons` relation which is simply `isRequested = true`.
+                // This differs from requestScrape (post-index) which excludes
+                // completed/unreleased/paused/failed seasons — fan-out is more aggressive.
+                match repo::get_all_requested_seasons_for_show(&self.queue.db_pool, item.id).await {
+                    Ok(seasons) => {
+                        for season in &seasons {
+                            let mut job = ScrapeJob::for_season(
+                                season,
+                                item.title.clone(),
+                                item.imdb_id.clone(),
+                            );
+                            job.auto_download = true;
+                            self.queue.push_scrape(job).await;
+                        }
+                    }
+                    Err(error) => {
+                        tracing::error!(
+                            show_id = item.id,
+                            error = %error,
+                            "failed to fetch requested seasons for fan-out"
+                        );
+                    }
+                }
             }
             MediaItemType::Season => {
                 let (show_title, show_imdb_id) = self.show_context(item).await;
                 match repo::get_incomplete_episodes_for_season(&self.queue.db_pool, item.id).await {
                     Ok(episodes) => {
                         for episode in &episodes {
-                            match episode.state {
-                                MediaItemState::Scraped
-                                | MediaItemState::Ongoing
-                                | MediaItemState::PartiallyCompleted => {
-                                    // Release any stale download dedup key so a previously
-                                    // stuck episode isn't silently skipped.
-                                    self.queue.release_dedup("download", episode.id).await;
-                                    if !self.queue.push_download_from_best_stream(episode.id).await
-                                    {
-                                        let _ = repo::refresh_state_cascade(
-                                            &self.queue.db_pool,
-                                            episode,
-                                        )
-                                        .await;
-                                    }
-                                    // If the episode has been stuck in Scraped without a
-                                    // successful download for an extended period, also push a
-                                    // re-scrape so new or different (potentially cached) streams
-                                    // can be found. The scrape dedup key prevents double-scraping.
-                                    let stale = episode.scraped_at.map_or(true, |t| {
-                                        Utc::now().signed_duration_since(t) > Duration::hours(6)
-                                    });
-                                    if stale {
-                                        self.queue
-                                            .push_scrape(ScrapeJob::for_episode(
-                                                episode,
-                                                show_title.clone(),
-                                                show_imdb_id.clone(),
-                                            ))
-                                            .await;
-                                    }
-                                }
-                                MediaItemState::Indexed => {
-                                    self.queue
-                                        .push_scrape(ScrapeJob::for_episode(
-                                            episode,
-                                            show_title.clone(),
-                                            show_imdb_id.clone(),
-                                        ))
-                                        .await;
-                                }
-                                _ => {}
-                            }
+                            self.queue
+                                .push_scrape(ScrapeJob::for_episode(
+                                    episode,
+                                    show_title.clone(),
+                                    show_imdb_id.clone(),
+                                ))
+                                .await;
                         }
                     }
                     Err(error) => {

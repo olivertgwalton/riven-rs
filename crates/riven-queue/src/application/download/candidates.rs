@@ -138,10 +138,6 @@ pub fn pick_best_for_profile<'a>(
 
 fn build_download_candidate_profile(profile: &RankSettings) -> RankSettings {
     let mut download_profile = profile.clone();
-
-    // Match riven-ts download selection more closely: use active profiles to
-    // prefer better candidates, but don't hard-reject normal TV/web releases
-    // just because their cached metadata is sparse.
     download_profile.resolutions.high_definition.r2160p = true;
     download_profile.resolutions.high_definition.r1080p = true;
     download_profile.resolutions.high_definition.r720p = true;
