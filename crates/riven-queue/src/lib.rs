@@ -52,6 +52,9 @@ pub struct JobQueue {
     pub redis: redis::aio::ConnectionManager,
     pub registry: Arc<PluginRegistry>,
     pub notification_tx: broadcast::Sender<String>,
+    /// Broadcast channel fired after a media item is successfully indexed.
+    /// Subscribe in the API layer to forward events to the GraphQL pub-sub.
+    pub indexed_tx: broadcast::Sender<riven_db::entities::MediaItem>,
     pub db_pool: sqlx::PgPool,
     pub downloader_config: Arc<RwLock<DownloaderConfig>>,
     pub reindex_config: Arc<RwLock<ReindexConfig>>,
@@ -101,6 +104,7 @@ impl JobQueue {
         let redis = redis::aio::ConnectionManager::new(redis_client).await?;
 
         let resolution_ranks = riven_db::repo::load_resolution_ranks(&db_pool).await;
+        let (indexed_tx, _) = broadcast::channel(256);
 
         Ok(Self {
             index_storage,
@@ -113,6 +117,7 @@ impl JobQueue {
             redis,
             registry,
             notification_tx,
+            indexed_tx,
             db_pool,
             downloader_config: Arc::new(RwLock::new(downloader_config)),
             reindex_config: Arc::new(RwLock::new(reindex_config)),

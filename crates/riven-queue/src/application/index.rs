@@ -125,13 +125,20 @@ pub async fn finalize(id: i64, queue: &JobQueue) {
         return;
     }
 
-    let title = merged.title.clone().unwrap_or_else(|| item.title.clone());
+    let fresh = match riven_db::repo::get_media_item(&queue.db_pool, id).await {
+        Ok(Some(item)) => item,
+        _ => item,
+    };
+
+    let title = merged.title.clone().unwrap_or_else(|| fresh.title.clone());
     queue
         .notify(RivenEvent::MediaItemIndexSuccess {
             id,
             title: title.clone(),
-            item_type: item.item_type,
+            item_type: fresh.item_type,
         })
         .await;
+
+    let _ = queue.indexed_tx.send(fresh);
     tracing::info!(id, "index flow completed");
 }

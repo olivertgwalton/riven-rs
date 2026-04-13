@@ -335,6 +335,7 @@ pub async fn update_media_item_index(
             aliases        = COALESCE($16, aliases),
             aired_at       = COALESCE($17, aired_at),
             show_status    = COALESCE($19, show_status),
+            rating         = COALESCE($20, rating),
             indexed_at = $18, updated_at = $18,
             failed_attempts = 0
            WHERE id = $1"#,
@@ -356,7 +357,8 @@ pub async fn update_media_item_index(
         indexed.aliases.as_ref().map(to_json),
         indexed.aired_at,
         now,
-        indexed.status as Option<riven_core::types::ShowStatus>
+        indexed.status as Option<riven_core::types::ShowStatus>,
+        indexed.rating,
     )
     .execute(pool)
     .await?;

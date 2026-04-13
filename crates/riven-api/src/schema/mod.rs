@@ -11,6 +11,7 @@ pub mod discovery;
 mod helpers;
 mod mutations;
 pub mod plugins;
+pub mod pub_sub;
 mod queries;
 mod subscriptions;
 pub mod typed_items;
@@ -43,8 +44,9 @@ pub fn build_schema(
     log_directory: String,
     downloader_config: Arc<RwLock<DownloaderConfig>>,
     log_control: Arc<LogControl>,
+    log_tx: tokio::sync::broadcast::Sender<String>,
 ) -> AppSchema {
-    Schema::build(QueryRoot::default(), MutationRoot, SubscriptionRoot)
+    Schema::build(QueryRoot::default(), MutationRoot::default(), SubscriptionRoot)
         .data(db_pool)
         .data(registry)
         .data(job_queue)
@@ -52,5 +54,7 @@ pub fn build_schema(
         .data(Arc::new(PlaybackSessionsCache::default()))
         .data(downloader_config)
         .data(log_control)
+        .data(Arc::new(pub_sub::PubSub::new()))
+        .data(log_tx)
         .finish()
 }

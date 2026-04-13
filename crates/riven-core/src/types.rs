@@ -295,6 +295,7 @@ pub struct IndexedMediaItem {
     pub language: Option<String>,
     pub network: Option<String>,
     pub content_rating: Option<ContentRating>,
+    pub rating: Option<f64>,
     pub is_anime: Option<bool>,
     pub runtime: Option<i32>,
     pub aliases: Option<HashMap<String, Vec<String>>>,
@@ -320,6 +321,7 @@ impl IndexedMediaItem {
             language: other.language.or(self.language),
             network: other.network.or(self.network),
             content_rating: other.content_rating.or(self.content_rating),
+            rating: other.rating.or(self.rating),
             is_anime: match (self.is_anime, other.is_anime) {
                 (Some(a), Some(b)) => Some(a || b),
                 (Some(a), None) => Some(a),

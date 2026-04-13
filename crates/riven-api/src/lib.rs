@@ -1,20 +1,21 @@
 pub mod schema;
 
-use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::Result;
 use async_graphql::http::{
-    GraphiQLSource, create_multipart_mixed_stream, is_accept_multipart_mixed,
+    ALL_WEBSOCKET_PROTOCOLS, GraphiQLSource, create_multipart_mixed_stream,
+    is_accept_multipart_mixed,
 };
 use async_graphql_axum::{
-    GraphQLBatchRequest, GraphQLRequest, GraphQLResponse, rejection::GraphQLRejection,
+    GraphQLBatchRequest, GraphQLProtocol, GraphQLRequest, GraphQLResponse, GraphQLWebSocket,
+    rejection::GraphQLRejection,
 };
 use axum::{
     Router,
     body::Body,
-    extract::{FromRequest, Path, State},
+    extract::{FromRequest, FromRequestParts, Path, State, WebSocketUpgrade},
     http::{
         HeaderMap, HeaderName, HeaderValue, Method, Request, StatusCode,
         header::{
@@ -22,10 +23,7 @@ use axum::{
             CONTENT_RANGE, CONTENT_TYPE, ETAG, IF_RANGE, LAST_MODIFIED, RANGE,
         },
     },
-    response::{
-        Html, IntoResponse, Response,
-        sse::{Event, KeepAlive, Sse},
-    },
+    response::{Html, IntoResponse, Response},
     routing::{get, post},
 };
 use futures::StreamExt;
@@ -69,7 +67,7 @@ use riven_core::plugin::PluginRegistry;
 use riven_core::stream_link::{LinkRequest, request_stream_url};
 use riven_queue::JobQueue;
 
-use crate::schema::{AppSchema, build_schema};
+use crate::schema::{AppSchema, build_schema, pub_sub::{PubSub, PubSubEvent}};
 
 #[derive(Clone)]
 pub struct ApiState {
@@ -145,8 +143,38 @@ async fn graphql_handler(
     gql_resp.into_response()
 }
 
-async fn graphiql() -> impl IntoResponse {
-    Html(GraphiQLSource::build().endpoint("/graphql").finish())
+async fn graphql_get_handler(
+    State(state): State<ApiState>,
+    req: Request<Body>,
+) -> Response {
+    let is_ws = req
+        .headers()
+        .get("upgrade")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.eq_ignore_ascii_case("websocket"))
+        .unwrap_or(false);
+
+    if is_ws {
+        if !check_api_key(&state, req.headers()) {
+            return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
+        }
+        let (mut parts, _body) = req.into_parts();
+        let protocol = match GraphQLProtocol::from_request_parts(&mut parts, &()).await {
+            Ok(p) => p,
+            Err(e) => return e.into_response(),
+        };
+        let ws = match WebSocketUpgrade::from_request_parts(&mut parts, &()).await {
+            Ok(ws) => ws,
+            Err(e) => return e.into_response(),
+        };
+        let schema = state.schema.clone();
+        return ws
+            .protocols(ALL_WEBSOCKET_PROTOCOLS)
+            .on_upgrade(move |socket| GraphQLWebSocket::new(socket, schema, protocol).serve())
+            .into_response();
+    }
+
+    Html(GraphiQLSource::build().endpoint("/graphql").finish()).into_response()
 }
 
 // ── Webhooks ──
@@ -157,59 +185,6 @@ async fn seerr_webhook(State(state): State<ApiState>) -> impl IntoResponse {
     StatusCode::OK
 }
 
-/// Convert a broadcast receiver into an SSE stream, labelling each event with `event_name`.
-/// Silently skips lagged messages and terminates when the channel closes.
-fn broadcast_to_sse(
-    rx: broadcast::Receiver<String>,
-    event_name: &'static str,
-) -> impl futures::Stream<Item = Result<Event, Infallible>> {
-    futures::stream::unfold(rx, move |mut rx| async move {
-        let data = loop {
-            match rx.recv().await {
-                Ok(line) => break line,
-                Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                Err(broadcast::error::RecvError::Closed) => return None,
-            }
-        };
-        Some((Ok(Event::default().event(event_name).data(data)), rx))
-    })
-}
-
-// ── SSE: live logs ──
-
-async fn logs_stream_handler(State(state): State<ApiState>, headers: HeaderMap) -> Response {
-    if !check_api_key(&state, &headers) {
-        return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
-    }
-
-    let ping = futures::stream::once(async {
-        Ok::<Event, Infallible>(Event::default().event("connected").data("ok"))
-    });
-    let rest = broadcast_to_sse(state.log_tx.subscribe(), "log");
-    Sse::new(ping.chain(rest))
-        .keep_alive(KeepAlive::new().interval(std::time::Duration::from_secs(3)))
-        .into_response()
-}
-
-// ── SSE: real-time notifications ──
-
-async fn notifications_stream_handler(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-) -> Response {
-    if !check_api_key(&state, &headers) {
-        return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
-    }
-
-    let ping = futures::stream::once(async {
-        Ok::<Event, Infallible>(Event::default().event("connected").data("ok"))
-    });
-    let rest = broadcast_to_sse(state.notification_tx.subscribe(), "notification");
-
-    Sse::new(ping.chain(rest))
-        .keep_alive(KeepAlive::new().interval(std::time::Duration::from_secs(3)))
-        .into_response()
-}
 
 const MEDIA_RESPONSE_HEADERS: [HeaderName; 7] = [
     ACCEPT_RANGES,
@@ -616,7 +591,26 @@ pub async fn start_server(
         log_directory,
         downloader_config,
         log_control,
+        log_tx.clone(),
     );
+
+    // Bridge: forward items indexed by the background queue into the GraphQL pub-sub.
+    {
+        let pubsub = schema
+            .data::<std::sync::Arc<PubSub>>()
+            .expect("PubSub not registered in schema")
+            .clone();
+        let mut indexed_rx = job_queue.indexed_tx.subscribe();
+        tokio::spawn(async move {
+            loop {
+                match indexed_rx.recv().await {
+                    Ok(item) => pubsub.publish(PubSubEvent::MediaItemIndexed(item)),
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
+    }
 
     let board_api = ApiBuilder::new(Router::new())
         .register(job_queue.index_storage.clone())
@@ -648,14 +642,12 @@ pub async fn start_server(
 
     let app = Router::new()
         .nest("/api/v1", board_api.with_state(()))
-        .route("/graphql", get(graphiql).post(graphql_handler))
+        .route("/graphql", get(graphql_get_handler).post(graphql_handler))
         .route(
             "/media/{entry_id}",
             get(media_bridge_handler).head(media_bridge_handler),
         )
         .route("/webhook/seerr", post(seerr_webhook))
-        .route("/logs/stream", get(logs_stream_handler))
-        .route("/notifications/stream", get(notifications_stream_handler))
         .nest("/board", board_ui.with_state(()))
         .fallback_service(serve_frontend)
         .layer(axum::middleware::from_fn(board_assets_middleware))

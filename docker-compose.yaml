@@ -59,8 +59,6 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-    extra_hosts:
-      - "${STREMTHRU_HOST_ENTRY}"
     ports:
       - "8080:8080"
     volumes:
