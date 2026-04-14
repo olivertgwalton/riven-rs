@@ -115,13 +115,7 @@ impl LibraryMutations {
 
         let outcome = match item_type {
             MediaItemType::Movie => orchestrator
-                .upsert_requested_movie(
-                    &title,
-                    imdb_id.as_deref(),
-                    tmdb_id.as_deref(),
-                    None,
-                    None,
-                )
+                .upsert_requested_movie(&title, imdb_id.as_deref(), tmdb_id.as_deref(), None, None)
                 .await
                 .map_err(Error::from)?,
             MediaItemType::Show => orchestrator

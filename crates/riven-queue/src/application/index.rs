@@ -56,6 +56,18 @@ pub async fn start(job: &IndexJob, queue: &JobQueue) {
 }
 
 pub async fn handle_plugin(job: &IndexPluginJob, queue: &JobQueue) {
+    // Guard against items deleted while this job was waiting in the queue.
+    if load_media_item_or_log(&queue.db_pool, job.id, "index-plugin")
+        .await
+        .is_none()
+    {
+        if queue.flow_complete_child("index", job.id).await {
+            queue.clear_flow("index", job.id).await;
+            queue.clear_flow_results("index", job.id).await;
+        }
+        return;
+    }
+
     let event = index_event(&IndexJob {
         id: job.id,
         item_type: job.item_type,

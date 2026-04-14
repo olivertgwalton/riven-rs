@@ -46,15 +46,19 @@ pub fn build_schema(
     log_control: Arc<LogControl>,
     log_tx: tokio::sync::broadcast::Sender<String>,
 ) -> AppSchema {
-    Schema::build(QueryRoot::default(), MutationRoot::default(), SubscriptionRoot)
-        .data(db_pool)
-        .data(registry)
-        .data(job_queue)
-        .data(LogDirectory(log_directory))
-        .data(Arc::new(PlaybackSessionsCache::default()))
-        .data(downloader_config)
-        .data(log_control)
-        .data(Arc::new(pub_sub::PubSub::new()))
-        .data(log_tx)
-        .finish()
+    Schema::build(
+        QueryRoot::default(),
+        MutationRoot::default(),
+        SubscriptionRoot,
+    )
+    .data(db_pool)
+    .data(registry)
+    .data(job_queue)
+    .data(LogDirectory(log_directory))
+    .data(Arc::new(PlaybackSessionsCache::default()))
+    .data(downloader_config)
+    .data(log_control)
+    .data(Arc::new(pub_sub::PubSub::new()))
+    .data(log_tx)
+    .finish()
 }

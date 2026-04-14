@@ -597,5 +597,8 @@ async fn fetch_debrid_extra(
         }
     });
 
-    Ok(DebridExtra { premium_until, ..Default::default() })
+    Ok(DebridExtra {
+        premium_until,
+        ..Default::default()
+    })
 }

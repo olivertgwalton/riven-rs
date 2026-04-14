@@ -73,6 +73,21 @@ pub async fn start(id: i64, job: &ScrapeJob, queue: &JobQueue) {
 }
 
 pub async fn handle_plugin(job: &ScrapePluginJob, queue: &JobQueue) {
+    // Guard against items deleted while this job was waiting in the queue.
+    // Without this check the plugin would make a full external HTTP request
+    // before discovering in `finalize` that the item is gone.
+    if load_media_item_or_log(&queue.db_pool, job.id, "scrape-plugin")
+        .await
+        .is_none()
+    {
+        // Last plugin to drain also clears the flow keys so they don't linger until TTL.
+        if queue.flow_complete_child("scrape", job.id).await {
+            queue.clear_flow("scrape", job.id).await;
+            queue.clear_flow_results("scrape", job.id).await;
+        }
+        return;
+    }
+
     let event = scrape_event(&ScrapeJob {
         id: job.id,
         item_type: job.item_type,

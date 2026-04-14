@@ -2,11 +2,12 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
+use futures::stream::{self, StreamExt};
 use riven_core::types::*;
 use riven_db::repo;
 
-use crate::orchestrator::LibraryOrchestrator;
 use crate::JobQueue;
+use crate::orchestrator::LibraryOrchestrator;
 
 /// Periodic scheduler.
 pub struct Scheduler {
@@ -61,24 +62,12 @@ impl Scheduler {
     }
 
     async fn cleanup_runtime_state(&self) {
-        match repo::delete_stale_flow_artifacts(&self.db_pool, 6).await {
-            Ok(count) if count > 0 => {
-                tracing::info!(count, "deleted stale flow artifacts");
-            }
-            Ok(_) => {}
-            Err(error) => {
-                tracing::error!(%error, "failed to delete stale flow artifacts");
-            }
-        }
-
         let mut redis = self.job_queue.redis.clone();
         crate::prune_queue_history(&mut redis).await;
     }
 
     /// Retry pending top-level items.
     async fn retry_library(&self) {
-        let orchestrator = LibraryOrchestrator::new(&self.job_queue);
-
         let requests = match repo::get_retryable_item_requests(&self.db_pool).await {
             Ok(requests) => requests,
             Err(error) => {
@@ -87,9 +76,14 @@ impl Scheduler {
             }
         };
 
-        for request in requests {
-            orchestrator.retry_item_request(&request).await;
-        }
+        let jq = &self.job_queue;
+        stream::iter(requests)
+            .for_each_concurrent(32, |request| async move {
+                LibraryOrchestrator::new(jq)
+                    .retry_item_request(&request)
+                    .await;
+            })
+            .await;
 
         for item_type in [MediaItemType::Movie, MediaItemType::Show] {
             let items = match repo::get_pending_items_for_retry(&self.db_pool, item_type).await {
@@ -100,19 +94,25 @@ impl Scheduler {
                 }
             };
 
-            for item in items {
-                match item.state {
-                    MediaItemState::Indexed | MediaItemState::PartiallyCompleted => {
-                        self.job_queue.release_dedup("scrape", item.id).await;
-                        orchestrator.queue_scrape_for_item(&item, None, true).await;
+            stream::iter(items)
+                .for_each_concurrent(32, |item| async move {
+                    match item.state {
+                        MediaItemState::Indexed | MediaItemState::PartiallyCompleted => {
+                            jq.release_dedup("scrape", item.id).await;
+                            LibraryOrchestrator::new(jq)
+                                .queue_scrape_for_item(&item, None, true)
+                                .await;
+                        }
+                        MediaItemState::Scraped => {
+                            jq.release_dedup("download", item.id).await;
+                            LibraryOrchestrator::new(jq)
+                                .queue_download_for_item(&item)
+                                .await;
+                        }
+                        _ => {}
                     }
-                    MediaItemState::Scraped => {
-                        self.job_queue.release_dedup("download", item.id).await;
-                        orchestrator.queue_download_for_item(&item).await;
-                    }
-                    _ => {}
-                }
-            }
+                })
+                .await;
         }
     }
 }

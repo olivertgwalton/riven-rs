@@ -258,7 +258,11 @@ pub enum RivenEvent {
 
     // Streaming
     #[serde(rename = "riven.media-item.stream-link.requested")]
-    MediaItemStreamLinkRequested { magnet: String, info_hash: String, provider: Option<String> },
+    MediaItemStreamLinkRequested {
+        magnet: String,
+        info_hash: String,
+        provider: Option<String>,
+    },
 
     // Deletion — carries the external content-service request IDs so plugins
     // (e.g. Seerr) can cancel/delete the corresponding requests.

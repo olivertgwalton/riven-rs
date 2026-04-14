@@ -1,8 +1,8 @@
 use async_graphql::*;
 use riven_db::entities::ItemRequest;
 use riven_db::repo::ItemRequestUpsertAction;
-use riven_queue::orchestrator::LibraryOrchestrator;
 use riven_queue::JobQueue;
+use riven_queue::orchestrator::LibraryOrchestrator;
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -277,15 +277,11 @@ impl ItemRequestMutations {
 
             match outcome.action {
                 ItemRequestUpsertAction::Created => {
-                    orchestrator
-                        .enqueue_after_request(&outcome, seasons)
-                        .await;
+                    orchestrator.enqueue_after_request(&outcome, seasons).await;
                     new_items.push(outcome.request);
                 }
                 ItemRequestUpsertAction::Updated => {
-                    orchestrator
-                        .enqueue_after_request(&outcome, seasons)
-                        .await;
+                    orchestrator.enqueue_after_request(&outcome, seasons).await;
                     updated_items.push(outcome.request);
                 }
                 ItemRequestUpsertAction::Unchanged => {}

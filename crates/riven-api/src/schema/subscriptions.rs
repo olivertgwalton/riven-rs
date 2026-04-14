@@ -171,9 +171,7 @@ async fn wait_for_relevant_event(
     }
 }
 
-fn pubsub_stream(
-    pubsub: &PubSub,
-) -> impl Stream<Item = PubSubEvent> {
+fn pubsub_stream(pubsub: &PubSub) -> impl Stream<Item = PubSubEvent> {
     let rx = pubsub.subscribe();
     stream::unfold(rx, |mut rx| async move {
         loop {

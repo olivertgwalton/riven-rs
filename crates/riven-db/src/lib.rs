@@ -10,8 +10,9 @@ pub async fn connect(database_url: &str) -> Result<PgPool> {
     let parallelism = std::thread::available_parallelism()
         .map(|n| n.get() as u32)
         .unwrap_or(4);
-    // Peak demand: parallelism × 4 (parse) + parallelism × 3 (other workers) + API headroom.
-    let max_connections = (parallelism * 8).max(40);
+    // Peak demand: IO-bound workers (scrape-plugin, index-plugin, download) run at 8× CPU
+    // concurrency each, so size the pool to cover them plus parse + API headroom.
+    let max_connections = (parallelism * 16).max(64);
 
     let pool = PgPoolOptions::new()
         .max_connections(max_connections)

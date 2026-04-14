@@ -1,4 +1,3 @@
-pub mod flow_artifacts;
 pub mod hierarchy;
 pub mod media;
 pub mod requests;
@@ -6,7 +5,6 @@ pub mod state;
 pub mod stats;
 pub mod streams;
 
-pub use flow_artifacts::*;
 pub use hierarchy::*;
 pub use media::*;
 pub use requests::*;

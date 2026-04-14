@@ -67,7 +67,10 @@ use riven_core::plugin::PluginRegistry;
 use riven_core::stream_link::{LinkRequest, request_stream_url};
 use riven_queue::JobQueue;
 
-use crate::schema::{AppSchema, build_schema, pub_sub::{PubSub, PubSubEvent}};
+use crate::schema::{
+    AppSchema, build_schema,
+    pub_sub::{PubSub, PubSubEvent},
+};
 
 #[derive(Clone)]
 pub struct ApiState {
@@ -143,10 +146,7 @@ async fn graphql_handler(
     gql_resp.into_response()
 }
 
-async fn graphql_get_handler(
-    State(state): State<ApiState>,
-    req: Request<Body>,
-) -> Response {
+async fn graphql_get_handler(State(state): State<ApiState>, req: Request<Body>) -> Response {
     let is_ws = req
         .headers()
         .get("upgrade")
@@ -184,7 +184,6 @@ async fn seerr_webhook(State(state): State<ApiState>) -> impl IntoResponse {
     state.job_queue.push_content_service().await;
     StatusCode::OK
 }
-
 
 const MEDIA_RESPONSE_HEADERS: [HeaderName; 7] = [
     ACCEPT_RANGES,

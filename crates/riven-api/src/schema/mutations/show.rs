@@ -1,16 +1,18 @@
 use async_graphql::*;
 use riven_core::events::RivenEvent;
-use riven_core::types::{ContentRating, IndexedEpisode, IndexedMediaItem, IndexedSeason, ShowStatus};
+use riven_core::types::{
+    ContentRating, IndexedEpisode, IndexedMediaItem, IndexedSeason, ShowStatus,
+};
 use riven_db::entities::MediaItem;
 use riven_db::repo;
-use riven_queue::orchestrator::LibraryOrchestrator;
 use riven_queue::JobQueue;
+use riven_queue::orchestrator::LibraryOrchestrator;
 use std::sync::Arc;
 
 use crate::schema::pub_sub::{PubSub, PubSubEvent};
 
-use super::movie::{parse_aliases, parse_naive_date};
 use super::MutationStatusText;
+use super::movie::{parse_aliases, parse_naive_date};
 
 // ── Input types ──
 
@@ -88,8 +90,7 @@ impl ShowMutations {
             .await?
             .ok_or_else(|| Error::new("Item request not found"))?;
 
-        let requested_seasons =
-            riven_queue::context::load_requested_seasons(pool, &item).await;
+        let requested_seasons = riven_queue::context::load_requested_seasons(pool, &item).await;
 
         let seasons: Vec<IndexedSeason> = input
             .seasons
@@ -147,9 +148,7 @@ impl ShowMutations {
             });
         }
 
-        let fresh = repo::get_media_item(pool, item.id)
-            .await?
-            .unwrap_or(item);
+        let fresh = repo::get_media_item(pool, item.id).await?.unwrap_or(item);
 
         let orchestrator = LibraryOrchestrator::new(job_queue.as_ref());
         orchestrator

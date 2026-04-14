@@ -6,6 +6,7 @@ pub mod scrape_item;
 
 use std::future::Future;
 
+use futures::future;
 use riven_core::events::{EventType, HookResponse, RivenEvent};
 use riven_db::repo;
 use riven_rank::{QualityProfile, RankSettings};
@@ -34,9 +35,8 @@ where
 
     queue.init_flow(prefix, id, pending).await;
 
-    for plugin_name in subscribers {
-        push_plugin_job(plugin_name).await;
-    }
+    // Push all plugin jobs concurrently — each is an independent Redis RPUSH.
+    future::join_all(subscribers.into_iter().map(|name| push_plugin_job(name))).await;
 
     pending
 }

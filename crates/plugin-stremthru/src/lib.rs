@@ -268,7 +268,9 @@ impl Plugin for StremthruPlugin {
                     .collect();
                 Ok(HookResponse::ProviderList(providers))
             }
-            RivenEvent::MediaItemStreamLinkRequested { magnet, provider, .. } => {
+            RivenEvent::MediaItemStreamLinkRequested {
+                magnet, provider, ..
+            } => {
                 let score_map = get_store_scores(&ctx.redis, &stores).await;
                 let mut ordered_stores: Vec<(&str, &str)> = stores
                     .iter()

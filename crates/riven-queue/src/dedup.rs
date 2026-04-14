@@ -14,11 +14,7 @@ pub struct DedupGuard {
 }
 
 impl DedupGuard {
-    pub(crate) fn new(
-        prefix: &'static str,
-        id: i64,
-        redis: redis::aio::ConnectionManager,
-    ) -> Self {
+    pub(crate) fn new(prefix: &'static str, id: i64, redis: redis::aio::ConnectionManager) -> Self {
         Self {
             key: format!("riven:dedup:{prefix}:{id}"),
             redis,

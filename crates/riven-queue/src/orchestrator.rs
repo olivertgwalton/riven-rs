@@ -1,5 +1,6 @@
 use anyhow::Result;
 use chrono::{DateTime, Duration, NaiveDate, Utc};
+use futures::future;
 
 use riven_core::types::*;
 use riven_db::entities::{ItemRequest, MediaItem};
@@ -277,21 +278,27 @@ impl<'a> LibraryOrchestrator<'a> {
 
                 match repo::get_requested_seasons_for_show(&self.queue.db_pool, item.id).await {
                     Ok(seasons) => {
-                        for season in seasons.into_iter().filter(|season| {
-                            season_numbers.is_none_or(|numbers| {
-                                season
-                                    .season_number
-                                    .is_some_and(|number| numbers.contains(&number))
+                        let jobs: Vec<_> = seasons
+                            .into_iter()
+                            .filter(|season| {
+                                season_numbers.is_none_or(|numbers| {
+                                    season
+                                        .season_number
+                                        .is_some_and(|number| numbers.contains(&number))
+                                })
                             })
-                        }) {
-                            let mut job = ScrapeJob::for_season(
-                                &season,
-                                item.title.clone(),
-                                item.imdb_id.clone(),
-                            );
-                            job.auto_download = auto_download;
-                            self.queue.push_scrape(job).await;
-                        }
+                            .map(|season| {
+                                let mut job = ScrapeJob::for_season(
+                                    &season,
+                                    item.title.clone(),
+                                    item.imdb_id.clone(),
+                                );
+                                job.auto_download = auto_download;
+                                job
+                            })
+                            .collect();
+                        future::join_all(jobs.into_iter().map(|job| self.queue.push_scrape(job)))
+                            .await;
                     }
                     Err(error) => {
                         tracing::error!(
@@ -333,8 +340,15 @@ impl<'a> LibraryOrchestrator<'a> {
             MediaItemType::Show => {
                 match repo::get_scraped_seasons_for_show(&self.queue.db_pool, item.id).await {
                     Ok(seasons) => {
-                        for season in &seasons {
-                            if !self.queue.push_download_from_best_stream(season.id).await {
+                        // Push all season downloads in parallel, then handle any failures.
+                        let pushed = future::join_all(
+                            seasons
+                                .iter()
+                                .map(|s| self.queue.push_download_from_best_stream(s.id)),
+                        )
+                        .await;
+                        for (season, ok) in seasons.iter().zip(pushed) {
+                            if !ok {
                                 self.fan_out_download_failure_for_item(season).await;
                             }
                         }
@@ -363,20 +377,20 @@ impl<'a> LibraryOrchestrator<'a> {
     async fn fan_out_download_failure_for_item(&self, item: &MediaItem) {
         match item.item_type {
             MediaItemType::Show => {
-                // `requestedSeasons` relation which is simply `isRequested = true`.
-                // This differs from requestScrape (post-index) which excludes
-                // completed/unreleased/paused/failed seasons — fan-out is more aggressive.
+                // Fan-out is intentionally aggressive here — includes all requested seasons
+                // regardless of state, unlike post-index scrape which filters by state.
                 match repo::get_all_requested_seasons_for_show(&self.queue.db_pool, item.id).await {
                     Ok(seasons) => {
-                        for season in &seasons {
+                        let jobs = seasons.iter().map(|season| {
                             let mut job = ScrapeJob::for_season(
                                 season,
                                 item.title.clone(),
                                 item.imdb_id.clone(),
                             );
                             job.auto_download = true;
-                            self.queue.push_scrape(job).await;
-                        }
+                            self.queue.push_scrape(job)
+                        });
+                        future::join_all(jobs).await;
                     }
                     Err(error) => {
                         tracing::error!(
@@ -391,15 +405,14 @@ impl<'a> LibraryOrchestrator<'a> {
                 let (show_title, show_imdb_id) = self.show_context(item).await;
                 match repo::get_incomplete_episodes_for_season(&self.queue.db_pool, item.id).await {
                     Ok(episodes) => {
-                        for episode in &episodes {
-                            self.queue
-                                .push_scrape(ScrapeJob::for_episode(
-                                    episode,
-                                    show_title.clone(),
-                                    show_imdb_id.clone(),
-                                ))
-                                .await;
-                        }
+                        let jobs = episodes.iter().map(|episode| {
+                            self.queue.push_scrape(ScrapeJob::for_episode(
+                                episode,
+                                show_title.clone(),
+                                show_imdb_id.clone(),
+                            ))
+                        });
+                        future::join_all(jobs).await;
                     }
                     Err(error) => {
                         tracing::error!(

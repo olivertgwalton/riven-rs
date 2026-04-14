@@ -4,8 +4,8 @@ use riven_core::events::RivenEvent;
 use riven_core::types::{ContentRating, IndexedMediaItem};
 use riven_db::entities::MediaItem;
 use riven_db::repo;
-use riven_queue::orchestrator::LibraryOrchestrator;
 use riven_queue::JobQueue;
+use riven_queue::orchestrator::LibraryOrchestrator;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -98,9 +98,7 @@ impl MovieMutations {
             });
         }
 
-        let fresh = repo::get_media_item(pool, item.id)
-            .await?
-            .unwrap_or(item);
+        let fresh = repo::get_media_item(pool, item.id).await?.unwrap_or(item);
 
         let orchestrator = LibraryOrchestrator::new(job_queue.as_ref());
         orchestrator.enqueue_after_index(&fresh, None).await;
@@ -128,7 +126,9 @@ impl MovieMutations {
 
 // ── Helpers ──
 
-pub(super) fn parse_aliases(value: Option<serde_json::Value>) -> Option<HashMap<String, Vec<String>>> {
+pub(super) fn parse_aliases(
+    value: Option<serde_json::Value>,
+) -> Option<HashMap<String, Vec<String>>> {
     value.and_then(|v| serde_json::from_value(v).ok())
 }
 

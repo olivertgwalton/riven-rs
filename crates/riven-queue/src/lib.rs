@@ -18,8 +18,8 @@ use anyhow::Result;
 use apalis::prelude::TaskSink;
 use apalis_redis::{RedisConfig, RedisStorage};
 use chrono::{DateTime, Utc};
-use serde::de::DeserializeOwned;
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 use tokio::sync::{RwLock, broadcast};
 use ulid::Ulid;
 
@@ -93,10 +93,8 @@ impl JobQueue {
         );
         let parse_storage =
             RedisStorage::new_with_config(apalis_conn.clone(), RedisConfig::new("riven:parse"));
-        let download_storage = RedisStorage::new_with_config(
-            apalis_conn.clone(),
-            RedisConfig::new("riven:download"),
-        );
+        let download_storage =
+            RedisStorage::new_with_config(apalis_conn.clone(), RedisConfig::new("riven:download"));
         let content_storage =
             RedisStorage::new_with_config(apalis_conn, RedisConfig::new("riven:content"));
 
@@ -134,16 +132,28 @@ impl JobQueue {
     // ── Job push ──────────────────────────────────────────────────────────────
 
     pub async fn push_index(&self, job: IndexJob) {
-        self.push_deduped("index", job.id, "IndexJob", || async { self.index_storage.clone().push(job).await }).await;
+        self.push_deduped("index", job.id, "IndexJob", || async {
+            self.index_storage.clone().push(job).await
+        })
+        .await;
     }
     pub async fn push_scrape(&self, job: ScrapeJob) {
-        self.push_deduped("scrape", job.id, "ScrapeJob", || async { self.scrape_storage.clone().push(job).await }).await;
+        self.push_deduped("scrape", job.id, "ScrapeJob", || async {
+            self.scrape_storage.clone().push(job).await
+        })
+        .await;
     }
     pub async fn push_parse_scrape_results(&self, job: ParseScrapeResultsJob) {
-        self.push_deduped("parse", job.id, "ParseScrapeResultsJob", || async { self.parse_storage.clone().push(job).await }).await;
+        self.push_deduped("parse", job.id, "ParseScrapeResultsJob", || async {
+            self.parse_storage.clone().push(job).await
+        })
+        .await;
     }
     pub async fn push_download(&self, job: DownloadJob) {
-        self.push_deduped("download", job.id, "DownloadJob", || async { self.download_storage.clone().push(job).await }).await;
+        self.push_deduped("download", job.id, "DownloadJob", || async {
+            self.download_storage.clone().push(job).await
+        })
+        .await;
     }
 
     pub async fn push_index_plugin(&self, job: IndexPluginJob) {
@@ -166,10 +176,20 @@ impl JobQueue {
     /// Returns `true` if a stream was found and enqueued, `false` if none remain.
     pub async fn push_download_from_best_stream(&self, id: i64) -> bool {
         let ranks = self.resolution_ranks.read().await.clone();
-        let Some(stream) = riven_db::repo::get_best_stream(&self.db_pool, id, &ranks).await.ok().flatten() else {
+        let Some(stream) = riven_db::repo::get_best_stream(&self.db_pool, id, &ranks)
+            .await
+            .ok()
+            .flatten()
+        else {
             return false;
         };
-        self.push_download(DownloadJob { id, magnet: stream.magnet, info_hash: stream.info_hash, preferred_info_hash: None }).await;
+        self.push_download(DownloadJob {
+            id,
+            magnet: stream.magnet,
+            info_hash: stream.info_hash,
+            preferred_info_hash: None,
+        })
+        .await;
         true
     }
 
@@ -178,15 +198,27 @@ impl JobQueue {
     /// Release the dedup key for a job, allowing it to be re-queued.
     pub async fn release_dedup(&self, prefix: &str, id: i64) {
         let mut conn = self.redis.clone();
-        let _: Result<(), _> = redis::cmd("DEL").arg(format!("riven:dedup:{prefix}:{id}")).query_async(&mut conn).await;
+        let _: Result<(), _> = redis::cmd("DEL")
+            .arg(format!("riven:dedup:{prefix}:{id}"))
+            .query_async(&mut conn)
+            .await;
     }
 
     /// SET NX with a 30-min safety TTL. Returns `true` if the key was acquired.
     /// TTL fires only on hard process kill; normal path is `DedupGuard::drop`.
     async fn set_nx(&self, key: &str) -> bool {
         let mut conn = self.redis.clone();
-        redis::cmd("SET").arg(key).arg("1").arg("NX").arg("EX").arg(dedup::DEDUP_KEY_TTL_SECS)
-            .query_async::<Option<String>>(&mut conn).await.unwrap_or(None).is_some()
+        redis::cmd("SET")
+            .arg(key)
+            .arg(1u8)
+            .arg("NX")
+            .arg("EX")
+            .arg(dedup::DEDUP_KEY_TTL_SECS)
+            .query_async::<Option<String>>(&mut conn)
+            .await
+            .ok()
+            .flatten()
+            .is_some()
     }
 
     async fn push_deduped<F, Fut, E>(&self, prefix: &str, id: i64, label: &'static str, push: F)
@@ -248,7 +280,9 @@ impl JobQueue {
 
         match result {
             Ok(()) => tracing::info!(id = job.id, run_at = %run_at, "scheduled delayed index job"),
-            Err(error) => tracing::error!(id = job.id, error = %error, "failed to schedule delayed index job"),
+            Err(error) => {
+                tracing::error!(id = job.id, error = %error, "failed to schedule delayed index job")
+            }
         }
     }
 
@@ -275,14 +309,16 @@ impl JobQueue {
 
     pub async fn init_flow(&self, prefix: &str, id: i64, pending: usize) {
         let pending_key = format!("riven:flow:{prefix}:{id}:pending");
-        if let Err(error) = riven_db::repo::clear_flow_artifacts(&self.db_pool, prefix, id).await {
-            tracing::error!(prefix, id, error = %error, "failed to clear stale flow artifacts");
-        }
+        let results_key = format!("riven:flow:{prefix}:{id}:results");
         let mut conn = self.redis.clone();
+        // Clear any stale results from a previous run and reset the pending counter atomically.
         let _: Result<(), _> = redis::pipe()
-            .atomic()
-            .set(&pending_key, pending)
-            .expire(&pending_key, 3600)
+            .del(&results_key)
+            .cmd("SET")
+            .arg(&pending_key)
+            .arg(pending)
+            .arg("EX")
+            .arg(3600i64)
             .query_async(&mut conn)
             .await;
     }
@@ -294,45 +330,46 @@ impl JobQueue {
         field: &str,
         value: &T,
     ) {
-        let Ok(payload) = serde_json::to_value(value) else {
+        let Ok(payload) = serde_json::to_string(value) else {
             tracing::error!(prefix, id, field, "failed to serialize flow result");
             return;
         };
-        if let Err(error) =
-            riven_db::repo::upsert_flow_artifact(&self.db_pool, prefix, id, field, payload).await
-        {
-            tracing::error!(prefix, id, field, error = %error, "failed to store flow result");
-        }
+        let key = format!("riven:flow:{prefix}:{id}:results");
+        let mut conn = self.redis.clone();
+        let _: Result<(), _> = redis::pipe()
+            .hset(&key, field, &payload)
+            .expire(&key, 3600i64)
+            .query_async(&mut conn)
+            .await;
     }
 
     pub async fn flow_complete_child(&self, prefix: &str, id: i64) -> bool {
         let pending_key = format!("riven:flow:{prefix}:{id}:pending");
         let mut conn = self.redis.clone();
-        let remaining: i64 = redis::cmd("DECR")
+        // Pipeline DECR + EXPIRE to save a round-trip on every plugin job completion.
+        let (remaining, _): (i64, i64) = redis::pipe()
+            .cmd("DECR")
             .arg(&pending_key)
+            .cmd("EXPIRE")
+            .arg(&pending_key)
+            .arg(3600i64)
             .query_async(&mut conn)
             .await
-            .unwrap_or(-1);
-        let _: Result<(), _> = redis::cmd("EXPIRE")
-            .arg(&pending_key)
-            .arg(3600)
-            .query_async(&mut conn)
-            .await;
+            .unwrap_or((-1, 0));
         remaining == 0
     }
 
     pub async fn flow_load_results<T: DeserializeOwned>(&self, prefix: &str, id: i64) -> Vec<T> {
-        let values = match riven_db::repo::load_flow_artifacts(&self.db_pool, prefix, id).await {
-            Ok(v) => v,
-            Err(error) => {
-                tracing::error!(prefix, id, error = %error, "failed to load flow results");
-                return vec![];
-            }
-        };
-        values
-            .into_iter()
-            .filter_map(|value| match serde_json::from_value(value) {
-                Ok(parsed) => Some(parsed),
+        let key = format!("riven:flow:{prefix}:{id}:results");
+        let mut conn = self.redis.clone();
+        let raw: Vec<String> = redis::cmd("HVALS")
+            .arg(&key)
+            .query_async(&mut conn)
+            .await
+            .unwrap_or_default();
+        raw.into_iter()
+            .filter_map(|s| match serde_json::from_str(&s) {
+                Ok(v) => Some(v),
                 Err(e) => {
                     tracing::error!(prefix, id, error = %e, "failed to deserialize flow result");
                     None
@@ -344,27 +381,26 @@ impl JobQueue {
     pub async fn clear_flow(&self, prefix: &str, id: i64) {
         let pending_key = format!("riven:flow:{prefix}:{id}:pending");
         let mut conn = self.redis.clone();
-        let _: Result<(), _> = redis::pipe()
-            .atomic()
-            .del(&pending_key)
+        let _: Result<(), _> = redis::cmd("DEL")
+            .arg(&pending_key)
             .query_async(&mut conn)
             .await;
     }
 
     pub async fn clear_flow_results(&self, prefix: &str, id: i64) {
-        if let Err(error) = riven_db::repo::clear_flow_artifacts(&self.db_pool, prefix, id).await {
-            tracing::error!(prefix, id, error = %error, "failed to clear flow results");
-        }
+        let key = format!("riven:flow:{prefix}:{id}:results");
+        let mut conn = self.redis.clone();
+        let _: Result<(), _> = redis::cmd("DEL").arg(&key).query_async(&mut conn).await;
     }
 
     pub async fn flow_result_count(&self, prefix: &str, id: i64) -> i64 {
-        match riven_db::repo::count_flow_artifacts(&self.db_pool, prefix, id).await {
-            Ok(count) => count,
-            Err(error) => {
-                tracing::error!(prefix, id, error = %error, "failed to count flow results");
-                0
-            }
-        }
+        let key = format!("riven:flow:{prefix}:{id}:results");
+        let mut conn = self.redis.clone();
+        redis::cmd("HLEN")
+            .arg(&key)
+            .query_async(&mut conn)
+            .await
+            .unwrap_or(0)
     }
 
     // ── Notifications & event reactor ─────────────────────────────────────────
@@ -401,8 +437,7 @@ impl JobQueue {
                 else {
                     return;
                 };
-                let requested_seasons =
-                    context::load_requested_seasons(&self.db_pool, &item).await;
+                let requested_seasons = context::load_requested_seasons(&self.db_pool, &item).await;
                 orchestrator()
                     .enqueue_after_index(&item, requested_seasons.as_deref())
                     .await;

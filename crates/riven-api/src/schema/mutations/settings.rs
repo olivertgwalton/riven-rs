@@ -37,8 +37,7 @@ pub(super) async fn rematch_filesystem_library_profiles_inner(
                 &candidate.filesystem_metadata(),
                 candidate.filesystem_content_type(),
             );
-            let current =
-                LibraryProfileMembership::from_json(candidate.library_profiles.as_ref());
+            let current = LibraryProfileMembership::from_json(candidate.library_profiles.as_ref());
             (next != current).then(|| (candidate.id, next.into_json()))
         })
         .collect::<Vec<_>>();
@@ -327,8 +326,7 @@ impl SettingsMutations {
         *queue.vfs_layout.write().await = VfsLibraryLayout::new(filesystem.clone());
         let mut rematch_count = 0_i64;
         if previous_filesystem != filesystem {
-            rematch_count =
-                rematch_filesystem_library_profiles_inner(pool, &filesystem).await?;
+            rematch_count = rematch_filesystem_library_profiles_inner(pool, &filesystem).await?;
             queue
                 .filesystem_settings_revision
                 .fetch_add(1, Ordering::SeqCst);
@@ -349,8 +347,7 @@ impl SettingsMutations {
         let pool = ctx.data::<PgPool>()?;
         let queue = ctx.data::<Arc<JobQueue>>()?;
         let filesystem_settings = queue.filesystem_settings.read().await.clone();
-        let updated =
-            rematch_filesystem_library_profiles_inner(pool, &filesystem_settings).await?;
+        let updated = rematch_filesystem_library_profiles_inner(pool, &filesystem_settings).await?;
 
         queue
             .filesystem_settings_revision
