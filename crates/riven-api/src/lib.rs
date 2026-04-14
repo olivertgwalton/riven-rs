@@ -68,8 +68,7 @@ use riven_core::stream_link::{LinkRequest, request_stream_url};
 use riven_queue::JobQueue;
 
 use crate::schema::{
-    AppSchema, build_schema,
-    pub_sub::{PubSub, PubSubEvent},
+    AppSchema, build_schema, start_event_controller,
 };
 
 #[derive(Clone)]
@@ -593,23 +592,7 @@ pub async fn start_server(
         log_tx.clone(),
     );
 
-    // Bridge: forward items indexed by the background queue into the GraphQL pub-sub.
-    {
-        let pubsub = schema
-            .data::<std::sync::Arc<PubSub>>()
-            .expect("PubSub not registered in schema")
-            .clone();
-        let mut indexed_rx = job_queue.indexed_tx.subscribe();
-        tokio::spawn(async move {
-            loop {
-                match indexed_rx.recv().await {
-                    Ok(item) => pubsub.publish(PubSubEvent::MediaItemIndexed(item)),
-                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(broadcast::error::RecvError::Closed) => break,
-                }
-            }
-        });
-    }
+    start_event_controller(job_queue.clone());
 
     let board_api = ApiBuilder::new(Router::new())
         .register(job_queue.index_storage.clone())

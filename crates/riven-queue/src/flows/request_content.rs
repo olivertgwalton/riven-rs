@@ -51,9 +51,6 @@ pub async fn run(queue: &JobQueue) {
     let all_movies = response.movies;
     let all_shows = response.shows;
 
-    let mut new_items = 0usize;
-    let mut updated_items = 0usize;
-
     for movie in &all_movies {
         let title = movie
             .imdb_id
@@ -72,13 +69,9 @@ pub async fn run(queue: &JobQueue) {
             .await
         {
             Ok(outcome) => {
-                match outcome.action {
-                    repo::ItemRequestUpsertAction::Created => new_items += 1,
-                    repo::ItemRequestUpsertAction::Updated => updated_items += 1,
-                    repo::ItemRequestUpsertAction::Unchanged => {}
+                if let Some(event) = outcome.lifecycle_event(None) {
+                    queue.notify(event).await;
                 }
-
-                orchestrator.enqueue_after_request(&outcome, None).await;
             }
             Err(error) => {
                 tracing::warn!(error = %error, "failed to upsert requested movie");
@@ -105,15 +98,9 @@ pub async fn run(queue: &JobQueue) {
             .await
         {
             Ok(outcome) => {
-                match outcome.action {
-                    repo::ItemRequestUpsertAction::Created => new_items += 1,
-                    repo::ItemRequestUpsertAction::Updated => updated_items += 1,
-                    repo::ItemRequestUpsertAction::Unchanged => {}
+                if let Some(event) = outcome.lifecycle_event(show.requested_seasons.as_deref()) {
+                    queue.notify(event).await;
                 }
-
-                orchestrator
-                    .enqueue_after_request(&outcome, show.requested_seasons.as_deref())
-                    .await;
             }
             Err(error) => {
                 tracing::warn!(error = %error, "failed to upsert requested show");
@@ -144,23 +131,8 @@ pub async fn run(queue: &JobQueue) {
             }
         }
     }
-
-    let count = all_movies.len() + all_shows.len();
-
-    if new_items > 0 || updated_items > 0 {
-        queue
-            .notify(RivenEvent::ItemRequestCreateSuccess {
-                count,
-                new_items,
-                updated_items,
-            })
-            .await;
-    }
-
     tracing::debug!(
-        count,
-        new_items,
-        updated_items,
+        count = all_movies.len() + all_shows.len(),
         "content service flow completed"
     );
 }

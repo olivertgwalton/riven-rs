@@ -8,10 +8,10 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 pub mod discovery;
+mod event_controller;
 mod helpers;
 mod mutations;
 pub mod plugins;
-pub mod pub_sub;
 mod queries;
 mod subscriptions;
 pub mod typed_items;
@@ -22,6 +22,7 @@ pub use mutations::MutationRoot;
 pub use queries::CoreQuery;
 pub use subscriptions::SubscriptionRoot;
 pub use vfs::VfsQuery;
+pub use event_controller::start as start_event_controller;
 
 // ── Merged query root ──
 
@@ -58,7 +59,6 @@ pub fn build_schema(
     .data(Arc::new(PlaybackSessionsCache::default()))
     .data(downloader_config)
     .data(log_control)
-    .data(Arc::new(pub_sub::PubSub::new()))
     .data(log_tx)
     .finish()
 }

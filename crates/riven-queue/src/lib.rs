@@ -51,10 +51,8 @@ pub struct JobQueue {
     pub content_storage: RedisStorage<ContentServiceJob>,
     pub redis: redis::aio::ConnectionManager,
     pub registry: Arc<PluginRegistry>,
+    pub event_tx: broadcast::Sender<RivenEvent>,
     pub notification_tx: broadcast::Sender<String>,
-    /// Broadcast channel fired after a media item is successfully indexed.
-    /// Subscribe in the API layer to forward events to the GraphQL pub-sub.
-    pub indexed_tx: broadcast::Sender<riven_db::entities::MediaItem>,
     pub db_pool: sqlx::PgPool,
     pub downloader_config: Arc<RwLock<DownloaderConfig>>,
     pub reindex_config: Arc<RwLock<ReindexConfig>>,
@@ -102,7 +100,7 @@ impl JobQueue {
         let redis = redis::aio::ConnectionManager::new(redis_client).await?;
 
         let resolution_ranks = riven_db::repo::load_resolution_ranks(&db_pool).await;
-        let (indexed_tx, _) = broadcast::channel(256);
+        let (event_tx, _) = broadcast::channel(256);
 
         Ok(Self {
             index_storage,
@@ -114,8 +112,8 @@ impl JobQueue {
             content_storage,
             redis,
             registry,
+            event_tx,
             notification_tx,
-            indexed_tx,
             db_pool,
             downloader_config: Arc::new(RwLock::new(downloader_config)),
             reindex_config: Arc::new(RwLock::new(reindex_config)),
@@ -404,17 +402,18 @@ impl JobQueue {
             .unwrap_or(0)
     }
 
-    // ── Notifications & event reactor ─────────────────────────────────────────
+    // ── Domain events ─────────────────────────────────────────────────────────
 
-    /// Dispatch a notification event to plugins and (if notable) to the UI broadcast channel.
+    /// Publish a domain event to the in-process event bus, enabled plugins,
+    /// and the UI notification stream when the event is user-visible.
     pub async fn notify(&self, event: RivenEvent) {
+        let _ = self.event_tx.send(event.clone());
+
         if event.event_type().is_ui_streamed()
             && let Ok(json) = serde_json::to_string(&event)
         {
             let _ = self.notification_tx.send(json);
         }
-
-        self.react_to_event(&event).await;
 
         let registry = Arc::clone(&self.registry);
         tokio::spawn(async move {
@@ -425,43 +424,6 @@ impl JobQueue {
                 }
             }
         });
-    }
-
-    async fn react_to_event(&self, event: &RivenEvent) {
-        let orchestrator = || orchestrator::LibraryOrchestrator::new(self);
-        match event {
-            RivenEvent::MediaItemIndexSuccess { id, .. } => {
-                let Some(item) = riven_db::repo::get_media_item(&self.db_pool, *id)
-                    .await
-                    .ok()
-                    .flatten()
-                else {
-                    return;
-                };
-                let requested_seasons = context::load_requested_seasons(&self.db_pool, &item).await;
-                orchestrator()
-                    .enqueue_after_index(&item, requested_seasons.as_deref())
-                    .await;
-            }
-            RivenEvent::MediaItemScrapeSuccess { id, .. } => {
-                let Some(item) = riven_db::repo::get_media_item(&self.db_pool, *id)
-                    .await
-                    .ok()
-                    .flatten()
-                else {
-                    return;
-                };
-                if item.is_requested {
-                    orchestrator().queue_download_for_item(&item).await;
-                }
-            }
-            RivenEvent::MediaItemScrapeErrorNoNewStreams { id, .. }
-            | RivenEvent::MediaItemDownloadPartialSuccess { id }
-            | RivenEvent::MediaItemDownloadError { id, .. } => {
-                orchestrator().fan_out_download_failure(*id).await;
-            }
-            _ => {}
-        }
     }
 
     /// Reload the resolution ranks cache from the DB (call after settings are saved).

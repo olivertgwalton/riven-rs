@@ -6,10 +6,7 @@ use riven_core::types::{
 use riven_db::entities::MediaItem;
 use riven_db::repo;
 use riven_queue::JobQueue;
-use riven_queue::orchestrator::LibraryOrchestrator;
 use std::sync::Arc;
-
-use crate::schema::pub_sub::{PubSub, PubSubEvent};
 
 use super::MutationStatusText;
 use super::movie::{parse_aliases, parse_naive_date};
@@ -150,11 +147,6 @@ impl ShowMutations {
 
         let fresh = repo::get_media_item(pool, item.id).await?.unwrap_or(item);
 
-        let orchestrator = LibraryOrchestrator::new(job_queue.as_ref());
-        orchestrator
-            .enqueue_after_index(&fresh, requested_seasons.as_deref())
-            .await;
-
         job_queue
             .notify(RivenEvent::MediaItemIndexSuccess {
                 id: fresh.id,
@@ -162,10 +154,6 @@ impl ShowMutations {
                 item_type: fresh.item_type,
             })
             .await;
-
-        if let Ok(pubsub) = ctx.data::<Arc<PubSub>>() {
-            pubsub.publish(PubSubEvent::MediaItemIndexed(fresh.clone()));
-        }
 
         Ok(IndexShowMutationResponse {
             success: true,

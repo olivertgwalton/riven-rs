@@ -6,8 +6,6 @@ use riven_queue::orchestrator::LibraryOrchestrator;
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use crate::schema::pub_sub::{PubSub, PubSubEvent};
-
 use super::MutationStatusText;
 
 // ── Input types ──
@@ -103,10 +101,8 @@ impl ItemRequestMutations {
             });
         }
 
-        orchestrator.enqueue_after_request(&outcome, None).await;
-
-        if let Ok(pubsub) = ctx.data::<Arc<PubSub>>() {
-            pubsub.publish(PubSubEvent::ItemRequestCreated(outcome.request.clone()));
+        if let Some(event) = outcome.lifecycle_event(None) {
+            job_queue.notify(event).await;
         }
 
         Ok(RequestItemMutationResponse {
@@ -163,18 +159,8 @@ impl ItemRequestMutations {
             }
         };
 
-        orchestrator
-            .enqueue_after_request(&outcome, input.seasons.as_deref())
-            .await;
-
-        if let Ok(pubsub) = ctx.data::<Arc<PubSub>>() {
-            let event = match outcome.action {
-                ItemRequestUpsertAction::Created => {
-                    PubSubEvent::ItemRequestCreated(outcome.request.clone())
-                }
-                _ => PubSubEvent::ItemRequestUpdated(outcome.request.clone()),
-            };
-            pubsub.publish(event);
+        if let Some(event) = outcome.lifecycle_event(input.seasons.as_deref()) {
+            job_queue.notify(event).await;
         }
 
         Ok(RequestItemMutationResponse {
@@ -236,10 +222,15 @@ impl ItemRequestMutations {
 
             match outcome.action {
                 ItemRequestUpsertAction::Created => {
-                    orchestrator.enqueue_after_request(&outcome, None).await;
+                    if let Some(event) = outcome.lifecycle_event(None) {
+                        job_queue.notify(event).await;
+                    }
                     new_items.push(outcome.request);
                 }
                 ItemRequestUpsertAction::Updated => {
+                    if let Some(event) = outcome.lifecycle_event(None) {
+                        job_queue.notify(event).await;
+                    }
                     updated_items.push(outcome.request);
                 }
                 ItemRequestUpsertAction::Unchanged => {}
@@ -277,11 +268,15 @@ impl ItemRequestMutations {
 
             match outcome.action {
                 ItemRequestUpsertAction::Created => {
-                    orchestrator.enqueue_after_request(&outcome, seasons).await;
+                    if let Some(event) = outcome.lifecycle_event(show.seasons.as_deref()) {
+                        job_queue.notify(event).await;
+                    }
                     new_items.push(outcome.request);
                 }
                 ItemRequestUpsertAction::Updated => {
-                    orchestrator.enqueue_after_request(&outcome, seasons).await;
+                    if let Some(event) = outcome.lifecycle_event(show.seasons.as_deref()) {
+                        job_queue.notify(event).await;
+                    }
                     updated_items.push(outcome.request);
                 }
                 ItemRequestUpsertAction::Unchanged => {}

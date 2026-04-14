@@ -2,8 +2,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::types::{
     ActivePlaybackSession, CacheCheckResult, ContentServiceResponse, DebridUserInfo,
-    DownloadResult, IndexedMediaItem, MediaItemType, ProviderInfo, ScrapeResponse,
-    StreamLinkResponse,
+    DownloadResult, IndexedMediaItem, ItemRequestType, MediaItemType, ProviderInfo,
+    ScrapeResponse, StreamLinkResponse,
 };
 
 pub struct ScrapeRequest<'a> {
@@ -47,14 +47,10 @@ pub enum EventType {
     ContentServiceRequested,
 
     // Item request
-    #[serde(rename = "riven.item-request.create.success")]
-    ItemRequestCreateSuccess,
-    #[serde(rename = "riven.item-request.create.error")]
-    ItemRequestCreateError,
-    #[serde(rename = "riven.item-request.create.error.conflict")]
-    ItemRequestCreateErrorConflict,
-    #[serde(rename = "riven.item-request.update.success")]
-    ItemRequestUpdateSuccess,
+    #[serde(rename = "riven.item-request.created")]
+    ItemRequestCreated,
+    #[serde(rename = "riven.item-request.updated")]
+    ItemRequestUpdated,
 
     // Item indexing
     #[serde(rename = "riven.media-item.index.requested")]
@@ -121,8 +117,8 @@ impl EventType {
                 | Self::MediaItemDownloadError
                 | Self::MediaItemScrapeError
                 | Self::MediaItemScrapeErrorNoNewStreams
-                | Self::ItemRequestCreateSuccess
-                | Self::ItemRequestCreateError
+                | Self::ItemRequestCreated
+                | Self::ItemRequestUpdated
         )
     }
 
@@ -134,7 +130,6 @@ impl EventType {
                     | Self::MediaItemScrapeRequested
                     | Self::MediaItemDownloadRequested
                     | Self::MediaItemDownloadPartialSuccess
-                    | Self::ItemRequestUpdateSuccess
                     | Self::MediaItemsDeleted
             )
     }
@@ -155,18 +150,20 @@ pub enum RivenEvent {
     ContentServiceRequested,
 
     // Item requests
-    #[serde(rename = "riven.item-request.create.success")]
-    ItemRequestCreateSuccess {
-        count: usize,
-        new_items: usize,
-        updated_items: usize,
+    #[serde(rename = "riven.item-request.created")]
+    ItemRequestCreated {
+        request_id: i64,
+        item_id: i64,
+        request_type: ItemRequestType,
+        requested_seasons: Option<Vec<i32>>,
     },
-    #[serde(rename = "riven.item-request.create.error")]
-    ItemRequestCreateError { error: String },
-    #[serde(rename = "riven.item-request.create.error.conflict")]
-    ItemRequestCreateErrorConflict { imdb_id: Option<String> },
-    #[serde(rename = "riven.item-request.update.success")]
-    ItemRequestUpdateSuccess { id: i64 },
+    #[serde(rename = "riven.item-request.updated")]
+    ItemRequestUpdated {
+        request_id: i64,
+        item_id: i64,
+        request_type: ItemRequestType,
+        requested_seasons: Option<Vec<i32>>,
+    },
 
     // Indexing
     #[serde(rename = "riven.media-item.index.requested")]
@@ -333,12 +330,8 @@ impl RivenEvent {
             Self::CoreStarted => EventType::CoreStarted,
             Self::CoreShutdown => EventType::CoreShutdown,
             Self::ContentServiceRequested => EventType::ContentServiceRequested,
-            Self::ItemRequestCreateSuccess { .. } => EventType::ItemRequestCreateSuccess,
-            Self::ItemRequestCreateError { .. } => EventType::ItemRequestCreateError,
-            Self::ItemRequestCreateErrorConflict { .. } => {
-                EventType::ItemRequestCreateErrorConflict
-            }
-            Self::ItemRequestUpdateSuccess { .. } => EventType::ItemRequestUpdateSuccess,
+            Self::ItemRequestCreated { .. } => EventType::ItemRequestCreated,
+            Self::ItemRequestUpdated { .. } => EventType::ItemRequestUpdated,
             Self::MediaItemIndexRequested { .. } => EventType::MediaItemIndexRequested,
             Self::MediaItemIndexSuccess { .. } => EventType::MediaItemIndexSuccess,
             Self::MediaItemIndexError { .. } => EventType::MediaItemIndexError,

@@ -150,7 +150,5 @@ pub async fn finalize(id: i64, queue: &JobQueue) {
             item_type: fresh.item_type,
         })
         .await;
-
-    let _ = queue.indexed_tx.send(fresh);
     tracing::info!(id, "index flow completed");
 }

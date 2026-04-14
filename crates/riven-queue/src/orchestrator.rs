@@ -2,6 +2,7 @@ use anyhow::Result;
 use chrono::{DateTime, Duration, NaiveDate, Utc};
 use futures::future;
 
+use riven_core::events::RivenEvent;
 use riven_core::types::*;
 use riven_db::entities::{ItemRequest, MediaItem};
 use riven_db::repo::{self, ItemRequestUpsertAction};
@@ -13,6 +14,27 @@ pub struct RequestedItemOutcome {
     pub item: MediaItem,
     pub request: ItemRequest,
     pub action: ItemRequestUpsertAction,
+}
+
+impl RequestedItemOutcome {
+    pub fn lifecycle_event(&self, requested_seasons: Option<&[i32]>) -> Option<RivenEvent> {
+        let requested_seasons = requested_seasons.map(|seasons| seasons.to_vec());
+        match self.action {
+            ItemRequestUpsertAction::Created => Some(RivenEvent::ItemRequestCreated {
+                request_id: self.request.id,
+                item_id: self.item.id,
+                request_type: self.request.request_type,
+                requested_seasons,
+            }),
+            ItemRequestUpsertAction::Updated => Some(RivenEvent::ItemRequestUpdated {
+                request_id: self.request.id,
+                item_id: self.item.id,
+                request_type: self.request.request_type,
+                requested_seasons,
+            }),
+            ItemRequestUpsertAction::Unchanged => None,
+        }
+    }
 }
 
 /// Maximum number of episode jobs pushed per fan-out call.
@@ -104,31 +126,34 @@ impl<'a> LibraryOrchestrator<'a> {
         outcome: &RequestedItemOutcome,
         requested_seasons: Option<&[i32]>,
     ) {
-        match outcome.item.item_type {
+        self.enqueue_after_request_action(&outcome.item, outcome.action, requested_seasons)
+            .await;
+    }
+
+    pub async fn enqueue_after_request_action(
+        &self,
+        item: &MediaItem,
+        action: ItemRequestUpsertAction,
+        requested_seasons: Option<&[i32]>,
+    ) {
+        match item.item_type {
             MediaItemType::Movie => {
-                if outcome.action == ItemRequestUpsertAction::Created {
-                    self.queue
-                        .push_index(IndexJob::from_item(&outcome.item))
-                        .await;
+                if action == ItemRequestUpsertAction::Created {
+                    self.queue.push_index(IndexJob::from_item(item)).await;
                 }
             }
-            MediaItemType::Show => match outcome.action {
+            MediaItemType::Show => match action {
                 ItemRequestUpsertAction::Created => {
-                    self.queue
-                        .push_index(IndexJob::from_item(&outcome.item))
-                        .await;
+                    self.queue.push_index(IndexJob::from_item(item)).await;
                 }
                 ItemRequestUpsertAction::Updated => {
                     let requested_specific_seasons =
                         requested_seasons.is_some_and(|seasons| !seasons.is_empty());
 
-                    if outcome.item.imdb_id.is_none() || requested_specific_seasons {
-                        self.queue
-                            .push_index(IndexJob::from_item(&outcome.item))
-                            .await;
+                    if item.imdb_id.is_none() || requested_specific_seasons {
+                        self.queue.push_index(IndexJob::from_item(item)).await;
                     } else {
-                        self.queue_scrape_for_item(&outcome.item, requested_seasons, true)
-                            .await;
+                        self.queue_scrape_for_item(item, requested_seasons, true).await;
                     }
                 }
                 ItemRequestUpsertAction::Unchanged => {}

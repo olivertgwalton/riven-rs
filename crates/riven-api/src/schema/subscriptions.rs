@@ -7,7 +7,6 @@ use riven_db::repo;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 
-use super::pub_sub::{PubSub, PubSubEvent};
 use super::queries::CoreQuery;
 use super::types::MediaItemStateTree;
 
@@ -72,7 +71,9 @@ pub struct SubscriptionRoot;
 
 fn event_item_id(event: &RivenEvent) -> Option<i64> {
     match event {
-        RivenEvent::MediaItemIndexRequested { id, .. }
+        RivenEvent::ItemRequestCreated { item_id: id, .. }
+        | RivenEvent::ItemRequestUpdated { item_id: id, .. }
+        | RivenEvent::MediaItemIndexRequested { id, .. }
         | RivenEvent::MediaItemIndexSuccess { id, .. }
         | RivenEvent::MediaItemIndexError { id, .. }
         | RivenEvent::MediaItemIndexErrorIncorrectState { id }
@@ -124,6 +125,15 @@ async fn load_item_state_by_tvdb(
         .map(Some)
 }
 
+async fn load_item_request(
+    pool: &sqlx::PgPool,
+    request_id: i64,
+) -> async_graphql::Result<Option<ItemRequest>> {
+    repo::get_item_request_by_id(pool, request_id)
+        .await
+        .map_err(Into::into)
+}
+
 async fn should_emit_for_external_target(
     pool: &sqlx::PgPool,
     event: &RivenEvent,
@@ -133,32 +143,22 @@ async fn should_emit_for_external_target(
         return item_relates_to_target(pool, event_id, target.id).await;
     }
 
-    match event {
-        RivenEvent::ItemRequestCreateSuccess { .. } => false,
-        _ => matches!(
-            target.item_type,
-            MediaItemType::Movie
-                | MediaItemType::Show
-                | MediaItemType::Season
-                | MediaItemType::Episode
-        ),
-    }
+    matches!(
+        target.item_type,
+        MediaItemType::Movie | MediaItemType::Show | MediaItemType::Season | MediaItemType::Episode
+    )
 }
 
 async fn wait_for_relevant_event(
-    rx: &mut tokio::sync::broadcast::Receiver<String>,
+    rx: &mut tokio::sync::broadcast::Receiver<RivenEvent>,
     pool: &sqlx::PgPool,
     target: &MediaItem,
 ) -> Option<()> {
     loop {
-        let raw = match rx.recv().await {
-            Ok(raw) => raw,
+        let event = match rx.recv().await {
+            Ok(event) => event,
             Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
             Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
-        };
-
-        let Ok(event) = serde_json::from_str::<RivenEvent>(&raw) else {
-            continue;
         };
 
         if should_emit_for_external_target(pool, &event, target).await {
@@ -169,19 +169,6 @@ async fn wait_for_relevant_event(
             return Some(());
         }
     }
-}
-
-fn pubsub_stream(pubsub: &PubSub) -> impl Stream<Item = PubSubEvent> {
-    let rx = pubsub.subscribe();
-    stream::unfold(rx, |mut rx| async move {
-        loop {
-            match rx.recv().await {
-                Ok(event) => return Some((event, rx)),
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
-            }
-        }
-    })
 }
 
 #[Subscription]
@@ -215,14 +202,30 @@ impl SubscriptionRoot {
         &self,
         ctx: &Context<'_>,
     ) -> async_graphql::Result<impl Stream<Item = async_graphql::Result<ItemRequest>>> {
-        let pubsub = ctx.data::<Arc<PubSub>>()?;
-        Ok(pubsub_stream(pubsub).filter_map(|event| async move {
-            if let PubSubEvent::ItemRequestCreated(req) = event {
-                if req.request_type == ItemRequestType::Movie {
-                    return Some(Ok(req));
+        let pool = ctx.data::<sqlx::PgPool>()?.clone();
+        let queue = Arc::clone(ctx.data::<Arc<riven_queue::JobQueue>>()?);
+        Ok(broadcast_stream(queue.event_tx.subscribe()).filter_map(move |event| {
+            let pool = pool.clone();
+            async move {
+                let RivenEvent::ItemRequestCreated {
+                    request_id,
+                    request_type,
+                    ..
+                } = event
+                else {
+                    return None;
+                };
+
+                if request_type != ItemRequestType::Movie {
+                    return None;
+                }
+
+                match load_item_request(&pool, request_id).await {
+                    Ok(Some(request)) => Some(Ok(request)),
+                    Ok(None) => None,
+                    Err(error) => Some(Err(error)),
                 }
             }
-            None
         }))
     }
 
@@ -231,14 +234,30 @@ impl SubscriptionRoot {
         &self,
         ctx: &Context<'_>,
     ) -> async_graphql::Result<impl Stream<Item = async_graphql::Result<ItemRequest>>> {
-        let pubsub = ctx.data::<Arc<PubSub>>()?;
-        Ok(pubsub_stream(pubsub).filter_map(|event| async move {
-            if let PubSubEvent::ItemRequestCreated(req) = event {
-                if req.request_type == ItemRequestType::Show {
-                    return Some(Ok(req));
+        let pool = ctx.data::<sqlx::PgPool>()?.clone();
+        let queue = Arc::clone(ctx.data::<Arc<riven_queue::JobQueue>>()?);
+        Ok(broadcast_stream(queue.event_tx.subscribe()).filter_map(move |event| {
+            let pool = pool.clone();
+            async move {
+                let RivenEvent::ItemRequestCreated {
+                    request_id,
+                    request_type,
+                    ..
+                } = event
+                else {
+                    return None;
+                };
+
+                if request_type != ItemRequestType::Show {
+                    return None;
+                }
+
+                match load_item_request(&pool, request_id).await {
+                    Ok(Some(request)) => Some(Ok(request)),
+                    Ok(None) => None,
+                    Err(error) => Some(Err(error)),
                 }
             }
-            None
         }))
     }
 
@@ -247,14 +266,30 @@ impl SubscriptionRoot {
         &self,
         ctx: &Context<'_>,
     ) -> async_graphql::Result<impl Stream<Item = async_graphql::Result<ItemRequest>>> {
-        let pubsub = ctx.data::<Arc<PubSub>>()?;
-        Ok(pubsub_stream(pubsub).filter_map(|event| async move {
-            if let PubSubEvent::ItemRequestUpdated(req) = event {
-                if req.request_type == ItemRequestType::Show {
-                    return Some(Ok(req));
+        let pool = ctx.data::<sqlx::PgPool>()?.clone();
+        let queue = Arc::clone(ctx.data::<Arc<riven_queue::JobQueue>>()?);
+        Ok(broadcast_stream(queue.event_tx.subscribe()).filter_map(move |event| {
+            let pool = pool.clone();
+            async move {
+                let RivenEvent::ItemRequestUpdated {
+                    request_id,
+                    request_type,
+                    ..
+                } = event
+                else {
+                    return None;
+                };
+
+                if request_type != ItemRequestType::Show {
+                    return None;
+                }
+
+                match load_item_request(&pool, request_id).await {
+                    Ok(Some(request)) => Some(Ok(request)),
+                    Ok(None) => None,
+                    Err(error) => Some(Err(error)),
                 }
             }
-            None
         }))
     }
 
@@ -263,14 +298,25 @@ impl SubscriptionRoot {
         &self,
         ctx: &Context<'_>,
     ) -> async_graphql::Result<impl Stream<Item = async_graphql::Result<MediaItem>>> {
-        let pubsub = ctx.data::<Arc<PubSub>>()?;
-        Ok(pubsub_stream(pubsub).filter_map(|event| async move {
-            if let PubSubEvent::MediaItemIndexed(item) = event {
-                if item.item_type == MediaItemType::Show {
-                    return Some(Ok(item));
+        let pool = ctx.data::<sqlx::PgPool>()?.clone();
+        let queue = Arc::clone(ctx.data::<Arc<riven_queue::JobQueue>>()?);
+        Ok(broadcast_stream(queue.event_tx.subscribe()).filter_map(move |event| {
+            let pool = pool.clone();
+            async move {
+                let RivenEvent::MediaItemIndexSuccess { id, item_type, .. } = event else {
+                    return None;
+                };
+
+                if item_type != MediaItemType::Show {
+                    return None;
+                }
+
+                match repo::get_media_item(&pool, id).await {
+                    Ok(Some(item)) => Some(Ok(item)),
+                    Ok(None) => None,
+                    Err(error) => Some(Err(error.into())),
                 }
             }
-            None
         }))
     }
 
@@ -283,7 +329,7 @@ impl SubscriptionRoot {
         let pool = ctx.data::<sqlx::PgPool>()?.clone();
         let queue = Arc::clone(ctx.data::<Arc<riven_queue::JobQueue>>()?);
         Ok(stream::unfold(
-            (queue.notification_tx.subscribe(), pool, tmdb_id),
+            (queue.event_tx.subscribe(), pool, tmdb_id),
             |(mut rx, pool, tmdb_id)| async move {
                 loop {
                     let current_item = match repo::get_media_item_by_tmdb(&pool, &tmdb_id).await {
@@ -324,7 +370,7 @@ impl SubscriptionRoot {
         let pool = ctx.data::<sqlx::PgPool>()?.clone();
         let queue = Arc::clone(ctx.data::<Arc<riven_queue::JobQueue>>()?);
         Ok(stream::unfold(
-            (queue.notification_tx.subscribe(), pool, tvdb_id),
+            (queue.event_tx.subscribe(), pool, tvdb_id),
             |(mut rx, pool, tvdb_id)| async move {
                 loop {
                     let current_item = match repo::get_media_item_by_tvdb(&pool, &tvdb_id).await {

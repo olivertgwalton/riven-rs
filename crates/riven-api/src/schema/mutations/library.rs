@@ -136,9 +136,9 @@ impl LibraryMutations {
             }
         };
 
-        orchestrator
-            .enqueue_after_request(&outcome, seasons.as_deref())
-            .await;
+        if let Some(event) = outcome.lifecycle_event(seasons.as_deref()) {
+            job_queue.notify(event).await;
+        }
 
         Ok(outcome.item)
     }

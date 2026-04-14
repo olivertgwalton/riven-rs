@@ -5,11 +5,8 @@ use riven_core::types::{ContentRating, IndexedMediaItem};
 use riven_db::entities::MediaItem;
 use riven_db::repo;
 use riven_queue::JobQueue;
-use riven_queue::orchestrator::LibraryOrchestrator;
 use std::collections::HashMap;
 use std::sync::Arc;
-
-use crate::schema::pub_sub::{PubSub, PubSubEvent};
 
 use super::MutationStatusText;
 
@@ -100,9 +97,6 @@ impl MovieMutations {
 
         let fresh = repo::get_media_item(pool, item.id).await?.unwrap_or(item);
 
-        let orchestrator = LibraryOrchestrator::new(job_queue.as_ref());
-        orchestrator.enqueue_after_index(&fresh, None).await;
-
         job_queue
             .notify(RivenEvent::MediaItemIndexSuccess {
                 id: fresh.id,
@@ -110,10 +104,6 @@ impl MovieMutations {
                 item_type: fresh.item_type,
             })
             .await;
-
-        if let Ok(pubsub) = ctx.data::<Arc<PubSub>>() {
-            pubsub.publish(PubSubEvent::MediaItemIndexed(fresh.clone()));
-        }
 
         Ok(IndexMovieMutationResponse {
             success: true,
