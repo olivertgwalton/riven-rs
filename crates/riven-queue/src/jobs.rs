@@ -41,6 +41,11 @@ pub struct ScrapeJob {
     pub episode: Option<i32>,
     #[serde(default = "default_true")]
     pub auto_download: bool,
+    /// Number of times this job has been re-pushed because every scraper
+    /// plugin was rate-limited. Incremented in `finalize` before re-pushing;
+    /// existing jobs in Redis deserialise to 0 via the `default`.
+    #[serde(default)]
+    pub rate_limit_retries: u32,
 }
 
 impl ScrapeJob {
@@ -53,6 +58,7 @@ impl ScrapeJob {
             season: None,
             episode: None,
             auto_download: true,
+            rate_limit_retries: 0,
         }
     }
 
@@ -69,6 +75,7 @@ impl ScrapeJob {
             season: season.season_number,
             episode: None,
             auto_download: true,
+            rate_limit_retries: 0,
         }
     }
 
@@ -81,6 +88,7 @@ impl ScrapeJob {
             season: ep.season_number,
             episode: ep.episode_number,
             auto_download: true,
+            rate_limit_retries: 0,
         }
     }
 }
@@ -122,4 +130,7 @@ pub struct ScrapePluginJob {
     pub episode: Option<i32>,
     #[serde(default = "default_true")]
     pub auto_download: bool,
+    /// Carried from the parent `ScrapeJob` so `finalize` can reconstruct it.
+    #[serde(default)]
+    pub rate_limit_retries: u32,
 }

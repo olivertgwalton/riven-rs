@@ -56,7 +56,7 @@ impl Scheduler {
 
     fn retry_wait_duration(retry_interval_secs: u64) -> Duration {
         match retry_interval_secs {
-            0 => Duration::from_secs(60 * 60),
+            0 => Duration::from_secs(60 * 10),
             secs => Duration::from_secs(secs),
         }
     }

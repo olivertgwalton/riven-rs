@@ -14,6 +14,10 @@ use crate::discovery::rank_streams;
 use crate::flows::{run_plugin_hook, start_plugin_flow};
 use crate::{JobQueue, ParseScrapeResultsJob, ScrapeJob, ScrapePluginJob};
 
+/// How many times we will re-push a `ScrapeJob` whose entire scraper pool was
+/// rate-limited before giving up and letting the retry scheduler handle it.
+const MAX_RATE_LIMIT_REPUSH: u32 = 3;
+
 fn scrape_event(job: &ScrapeJob) -> RivenEvent {
     RivenEvent::MediaItemScrapeRequested {
         id: job.id,
@@ -61,6 +65,7 @@ pub async fn start(id: i64, job: &ScrapeJob, queue: &JobQueue) {
                     season: job.season,
                     episode: job.episode,
                     auto_download: job.auto_download,
+                    rate_limit_retries: job.rate_limit_retries,
                 })
                 .await;
         },
@@ -68,7 +73,7 @@ pub async fn start(id: i64, job: &ScrapeJob, queue: &JobQueue) {
     .await
         == 0
     {
-        finalize(id, &job.title, job.auto_download, queue).await;
+        finalize(job, queue).await;
     }
 }
 
@@ -96,7 +101,19 @@ pub async fn handle_plugin(job: &ScrapePluginJob, queue: &JobQueue) {
         season: job.season,
         episode: job.episode,
         auto_download: job.auto_download,
+        rate_limit_retries: job.rate_limit_retries,
     });
+
+    let parent = ScrapeJob {
+        id: job.id,
+        item_type: job.item_type,
+        imdb_id: job.imdb_id.clone(),
+        title: job.title.clone(),
+        season: job.season,
+        episode: job.episode,
+        auto_download: job.auto_download,
+        rate_limit_retries: job.rate_limit_retries,
+    };
 
     if run_plugin_hook(
         queue,
@@ -112,23 +129,52 @@ pub async fn handle_plugin(job: &ScrapePluginJob, queue: &JobQueue) {
     )
     .await
     {
-        finalize(job.id, &job.title, job.auto_download, queue).await;
+        finalize(&parent, queue).await;
     }
 }
 
-pub async fn finalize(id: i64, requested_title: &str, auto_download: bool, queue: &JobQueue) {
+pub async fn finalize(job: &ScrapeJob, queue: &JobQueue) {
+    let id = job.id;
     let Some(item) = load_media_item_or_log(&queue.db_pool, id, "scrape finalize").await else {
         queue.clear_flow_results("scrape", id).await;
         queue.clear_flow("scrape", id).await;
+        queue.clear_flow_rate_limited("scrape", id).await;
         return;
     };
 
     queue.clear_flow("scrape", id).await;
-    if queue.flow_result_count("scrape", id).await == 0 {
+
+    let result_count = queue.flow_result_count("scrape", id).await;
+    let rate_limited_count = queue.flow_rate_limited_count("scrape", id).await;
+    queue.clear_flow_rate_limited("scrape", id).await;
+
+    if result_count == 0 {
         queue.clear_flow_results("scrape", id).await;
-        tracing::info!(id, "no streams found by any scraper");
+
+        // If every plugin that ran was rate-limited (none returned a genuine
+        // "no streams" verdict) and we haven't exhausted our re-push budget,
+        // re-queue this scrape job immediately rather than leaving the item
+        // stuck in Indexed until the retry scheduler fires.
+        if rate_limited_count > 0 && job.rate_limit_retries < MAX_RATE_LIMIT_REPUSH {
+            tracing::warn!(
+                id,
+                rate_limited_count,
+                retry = job.rate_limit_retries + 1,
+                max = MAX_RATE_LIMIT_REPUSH,
+                "all scrapers rate-limited; re-pushing scrape job"
+            );
+            queue
+                .push_scrape(ScrapeJob {
+                    rate_limit_retries: job.rate_limit_retries + 1,
+                    ..job.clone()
+                })
+                .await;
+            return;
+        }
+
+        tracing::info!(id, rate_limited_count, "no streams found by any scraper");
         let item_title = if item.item_type == MediaItemType::Season {
-            format!("{requested_title} - {}", item.title)
+            format!("{} - {}", job.title, item.title)
         } else {
             item.title.clone()
         };
@@ -143,10 +189,12 @@ pub async fn finalize(id: i64, requested_title: &str, auto_download: bool, queue
         return;
     }
 
-    let result_count = queue.flow_result_count("scrape", id).await;
     tracing::debug!(id, count = result_count, "pushing parse-scrape-results job");
     queue
-        .push_parse_scrape_results(ParseScrapeResultsJob { id, auto_download })
+        .push_parse_scrape_results(ParseScrapeResultsJob {
+            id,
+            auto_download: job.auto_download,
+        })
         .await;
 }
 

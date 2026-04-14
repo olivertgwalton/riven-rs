@@ -424,8 +424,8 @@ impl CoreQuery {
             SettingField::new("dubbed_anime_only", "Dubbed anime only", "boolean")
                 .with_description("Only fetch dubbed versions of anime titles."),
             SettingField::new("retry_interval_secs", "Retry interval (seconds)", "number")
-                .with_default("86400")
-                .with_description("How often to retry stuck items. 0 = disabled. Default: 86400 (24 h)."),
+                .with_default("600")
+                .with_description("How often to retry stuck items. 0 = disabled. Default: 600 (10 m)."),
             SettingField::new("schedule_offset_minutes", "Re-index offset (minutes)", "number")
                 .with_default("30")
                 .with_description("How long after a known release/air date to wait before re-indexing an unreleased or ongoing item."),

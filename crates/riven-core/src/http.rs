@@ -12,6 +12,21 @@ use tokio::time::sleep;
 pub const DEFAULT_ATTEMPTS: u32 = 3;
 const BACKOFF_BASE_SECS: u64 = 5;
 const JITTER: f64 = 0.5;
+/// Cap on how long a 429 `Retry-After` pause is registered on the service state.
+const MAX_RETRY_AFTER_SECS: u64 = 60;
+
+/// Returned by [`HttpClient::get_json`] on HTTP 429. The worker slot is freed
+/// immediately; callers should re-queue with backoff rather than retrying inline.
+#[derive(Debug)]
+pub struct RateLimitedError;
+
+impl std::fmt::Display for RateLimitedError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "rate limited (429)")
+    }
+}
+
+impl std::error::Error for RateLimitedError {}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RateLimit {
@@ -106,17 +121,12 @@ impl HttpClient {
         };
 
         if is_leader {
-            let result = self
-                .send(profile, make_request)
-                .await
-                .map_err(|error| error.to_string())
-                .and_then(|response| Ok(response));
-            let result = match result {
+            let result = match self.send(profile, make_request).await {
                 Ok(response) => HttpResponseData::from_response(response)
                     .await
                     .map(Arc::new)
-                    .map_err(|error| error.to_string()),
-                Err(error) => Err(error),
+                    .map_err(|e| e.to_string()),
+                Err(e) => Err(e.to_string()),
             };
             state.finish(result.clone());
             self.inflight.remove(&dedupe_key);
@@ -139,6 +149,20 @@ impl HttpClient {
         let response = self
             .send_data(profile, Some(dedupe_key), make_request)
             .await?;
+
+        if response.status() == StatusCode::TOO_MANY_REQUESTS {
+            let delay = parse_retry_after(response.headers())
+                .unwrap_or_else(|| Duration::from_secs(BACKOFF_BASE_SECS))
+                .min(Duration::from_secs(MAX_RETRY_AFTER_SECS));
+            self.service_state(profile).register_retry_after(delay);
+            tracing::warn!(
+                service = profile.name,
+                delay_secs = delay.as_secs(),
+                "rate limited (429); freeing worker slot and deferring to job-level retry"
+            );
+            return Err(RateLimitedError.into());
+        }
+
         response.error_for_status_ref()?;
         response.json()
     }
@@ -151,13 +175,8 @@ impl HttpClient {
     }
 }
 
-/// Shared state for a deduplicated in-flight HTTP request.
-///
-/// Uses `watch` rather than `Mutex` + `Notify` to avoid a race where
-/// `notify_waiters()` fires between the condition check and `notified().await`
-/// registration, leaving waiters blocked forever.  `watch::Receiver::wait_for`
-/// always inspects the current value before suspending, so late subscribers
-/// see the result immediately regardless of when `finish` was called.
+/// Deduplicates concurrent in-flight requests. Uses `watch` so late subscribers
+/// see the result immediately if the leader has already finished.
 #[derive(Debug)]
 struct InFlightRequest {
     tx: watch::Sender<Option<Result<Arc<HttpResponseData>, String>>>,
@@ -170,20 +189,11 @@ impl InFlightRequest {
     }
 
     fn finish(&self, result: Result<Arc<HttpResponseData>, String>) {
-        // Errors only occur if all receivers were dropped (i.e. all waiters
-        // cancelled), which is harmless.
         let _ = self.tx.send(Some(result));
     }
 
     async fn wait(&self) -> Result<Arc<HttpResponseData>, String> {
         let mut rx = self.tx.subscribe();
-        // wait_for checks the current value first, then waits for changes —
-        // no missed-notification race possible.
-        //
-        // RecvError means the Sender was dropped before finish() was called,
-        // which can happen if the leader future was cancelled (e.g. by a
-        // select! timeout).  Treat it as a transient failure so the caller
-        // retries the request independently rather than panicking.
         rx.wait_for(|v| v.is_some())
             .await
             .map_err(|_| "inflight leader cancelled before completing request".to_string())?
@@ -260,40 +270,24 @@ impl ServiceState {
 
     async fn acquire_slot(&self) {
         loop {
-            let wait = {
-                let mut limiter = self.limiter.lock();
-                limiter.next_wait(self.profile)
-            };
-
-            if let Some(wait) = wait {
-                sleep(wait).await;
-            } else {
-                return;
+            let wait = self.limiter.lock().next_wait(self.profile);
+            match wait {
+                Some(d) => sleep(d).await,
+                None => return,
             }
         }
     }
 
     fn register_retry_after(&self, delay: Duration) {
-        let mut limiter = self.limiter.lock();
-        limiter.pause_for(delay);
+        self.limiter.lock().pause_for(delay);
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 struct LimiterState {
     window_started: Option<Instant>,
     used_in_window: u32,
     paused_until: Option<Instant>,
-}
-
-impl Default for LimiterState {
-    fn default() -> Self {
-        Self {
-            window_started: None,
-            used_in_window: 0,
-            paused_until: None,
-        }
-    }
 }
 
 impl LimiterState {
@@ -338,22 +332,12 @@ impl LimiterState {
     }
 }
 
-/// Returns `true` for transient network errors that warrant a retry.
-///
-/// Covers TCP connection failures, timeouts, and the stale keep-alive race
-/// where the server closes a pooled connection just before we reuse it,
-/// producing a hyper `IncompleteMessage` before any response bytes arrive.
-///
-/// Strategy: if `is_request()` is true (transport-level error during the HTTP
-/// exchange) we walk the source chain for a `hyper::Error` to confirm it is
-/// specifically `IncompleteMessage`.  If reqwest's error chain is opaque and we
-/// cannot reach `hyper::Error`, we fall back to treating all request-level
-/// transport errors as transient — they share the same retry-safe profile.
+/// Returns `true` for transient network errors that warrant a retry (connection
+/// failures, timeouts, stale keep-alive races producing `IncompleteMessage`).
 fn is_transient(e: &reqwest::Error) -> bool {
     if e.is_connect() || e.is_timeout() {
         return true;
     }
-
     if e.is_request() {
         use std::error::Error as StdError;
         let mut src: Option<&dyn StdError> = Some(e);
@@ -363,11 +347,8 @@ fn is_transient(e: &reqwest::Error) -> bool {
             }
             src = err.source();
         }
-        // Could not reach hyper::Error through the chain (reqwest may wrap via
-        // hyper_util); treat all request-level transport errors as transient.
         return true;
     }
-
     false
 }
 
@@ -388,10 +369,8 @@ fn rand() -> f64 {
     (x & 0xFFFFFF) as f64 / 0x1000000 as f64
 }
 
-/// Parse the `Retry-After` header as a delay duration.
-/// Supports both the delay-seconds form ("120") and the HTTP-date form
-/// ("Wed, 21 Oct 2015 07:28:00 GMT").
-/// Falls back to `None` if the header is absent or unparseable.
+/// Parse the `Retry-After` header as a duration. Supports both delay-seconds
+/// ("120") and HTTP-date ("Wed, 21 Oct 2015 07:28:00 GMT") forms.
 fn parse_retry_after(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
     let value = headers
         .get(reqwest::header::RETRY_AFTER)?
@@ -399,57 +378,18 @@ fn parse_retry_after(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
         .ok()?
         .trim();
 
-    // Try delay-seconds first.
     if let Ok(secs) = value.parse::<u64>() {
         return Some(Duration::from_secs(secs));
     }
 
-    // Try HTTP-date (RFC 7231 / RFC 1123): "Thu, 01 Jan 1970 00:00:00 GMT".
     if let Ok(dt) = chrono::DateTime::parse_from_rfc2822(value) {
-        let now = chrono::Utc::now();
-        let wait = dt.with_timezone(&chrono::Utc) - now;
+        let wait = dt.with_timezone(&chrono::Utc) - chrono::Utc::now();
         if wait > chrono::TimeDelta::zero() {
             return Some(Duration::from_millis(wait.num_milliseconds() as u64));
         }
     }
 
     None
-}
-
-/// Send an HTTP request with automatic retry on transient network errors and
-/// 429 rate-limit responses, honouring the `Retry-After` header.
-///
-/// `make_request` is called once per attempt and must return a fresh
-/// `RequestBuilder` each time (the builder is consumed by `.send()`).
-///
-/// Retry schedule
-/// - attempt 1 fails → wait  5 s → attempt 2
-/// - attempt 2 fails → wait 10 s → attempt 3
-/// - attempt 3 fails → propagate error
-///
-/// Non-transient errors (HTTP status, body decode, redirect loops) are
-/// returned immediately without retrying.
-pub async fn send_with_retry<F>(
-    attempts: u32,
-    make_request: F,
-) -> reqwest::Result<reqwest::Response>
-where
-    F: Fn() -> reqwest::RequestBuilder,
-{
-    let client = reqwest::Client::new();
-    execute_with_retry(&client, None, attempts, |client| {
-        let _ = client;
-        make_request()
-    })
-    .await
-}
-
-/// Convenience wrapper that uses [`DEFAULT_ATTEMPTS`].
-pub async fn send<F>(make_request: F) -> reqwest::Result<reqwest::Response>
-where
-    F: Fn() -> reqwest::RequestBuilder,
-{
-    send_with_retry(DEFAULT_ATTEMPTS, make_request).await
 }
 
 async fn execute_with_retry<F>(
@@ -472,30 +412,11 @@ where
         }
 
         match make_request(client).send().await {
-            Ok(resp) => {
-                if !is_last && resp.status() == StatusCode::TOO_MANY_REQUESTS {
-                    let retry_after = parse_retry_after(resp.headers())
-                        .unwrap_or_else(|| Duration::from_secs(BACKOFF_BASE_SECS));
-                    if let Some(service) = service {
-                        service.register_retry_after(retry_after);
-                    }
-                    let delay = with_jitter(retry_after);
-                    tracing::debug!(
-                        service = service.map(|service| service.profile.name),
-                        attempt = attempt + 1,
-                        delay_secs = delay.as_secs(),
-                        "request rate-limited (429), retrying"
-                    );
-                    sleep(delay).await;
-                    attempt += 1;
-                    continue;
-                }
-                return Ok(resp);
-            }
+            Ok(resp) => return Ok(resp),
             Err(e) if !is_last && is_transient(&e) => {
                 let delay = with_jitter(Duration::from_secs(BACKOFF_BASE_SECS * (1 << attempt)));
                 tracing::debug!(
-                    service = service.map(|service| service.profile.name),
+                    service = service.map(|s| s.profile.name),
                     attempt = attempt + 1,
                     delay_secs = delay.as_secs(),
                     error = %e,
@@ -571,7 +492,6 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::{Duration, Instant};
 
-    use axum::http::{HeaderValue, StatusCode};
     use axum::response::IntoResponse;
     use axum::{Json, Router, routing::get};
     use serde_json::json;
@@ -596,43 +516,6 @@ mod tests {
                 }
             }),
         );
-
-        let listener = TcpListener::bind("127.0.0.1:0").await?;
-        let addr = listener.local_addr()?;
-        let handle = tokio::spawn(async move {
-            axum::serve(listener, app)
-                .await
-                .expect("test server should run");
-        });
-        Ok((addr, handle))
-    }
-
-    async fn spawn_retry_after_server(
-        counter: Arc<AtomicUsize>,
-    ) -> anyhow::Result<(SocketAddr, tokio::task::JoinHandle<()>)> {
-        let app = Router::new().route(
-            "/retry",
-            get({
-                let counter = Arc::clone(&counter);
-                move || {
-                    let counter = Arc::clone(&counter);
-                    async move {
-                        let attempt = counter.fetch_add(1, Ordering::SeqCst);
-                        if attempt == 0 {
-                            let mut response =
-                                (StatusCode::TOO_MANY_REQUESTS, "retry later").into_response();
-                            response.headers_mut().insert(
-                                reqwest::header::RETRY_AFTER,
-                                HeaderValue::from_static("1"),
-                            );
-                            return response;
-                        }
-                        (StatusCode::OK, Json(json!({ "ok": true }))).into_response()
-                    }
-                }
-            }),
-        );
-
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let addr = listener.local_addr()?;
         let handle = tokio::spawn(async move {
@@ -659,30 +542,6 @@ mod tests {
         assert_eq!(first?, json!({ "ok": true }));
         assert_eq!(second?, json!({ "ok": true }));
         assert_eq!(counter.load(Ordering::SeqCst), 1);
-
-        handle.abort();
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn retries_429_with_retry_after() -> anyhow::Result<()> {
-        let counter = Arc::new(AtomicUsize::new(0));
-        let (addr, handle) = spawn_retry_after_server(Arc::clone(&counter)).await?;
-        let http = HttpClient::new(reqwest::Client::new());
-        let url = format!("http://{addr}/retry");
-        let profile = HttpServiceProfile::new("test-retry-after");
-
-        let started = Instant::now();
-        let body = http
-            .get_json::<serde_json::Value, _>(profile, url.clone(), |client| client.get(&url))
-            .await?;
-
-        assert_eq!(body, json!({ "ok": true }));
-        assert_eq!(counter.load(Ordering::SeqCst), 2);
-        assert!(
-            started.elapsed() >= Duration::from_millis(400),
-            "retry-after delay should have been honored"
-        );
 
         handle.abort();
         Ok(())

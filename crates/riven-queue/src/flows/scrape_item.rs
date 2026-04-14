@@ -9,8 +9,8 @@ pub async fn run_plugin(job: &ScrapePluginJob, queue: &JobQueue) {
     app::handle_plugin(job, queue).await;
 }
 
-pub async fn finalize(id: i64, requested_title: &str, auto_download: bool, queue: &JobQueue) {
-    app::finalize(id, requested_title, auto_download, queue).await;
+pub async fn finalize(job: &ScrapeJob, queue: &JobQueue) {
+    app::finalize(job, queue).await;
 }
 
 pub async fn parse_results(id: i64, job: &ParseScrapeResultsJob, queue: &JobQueue) {

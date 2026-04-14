@@ -393,6 +393,40 @@ impl JobQueue {
             .await;
     }
 
+    /// Increment the count of rate-limited plugin completions for this flow.
+    /// Called instead of (and before) `flow_complete_child` when a 429 is received
+    /// so `finalize` can distinguish "every scraper was rate-limited" from
+    /// "scrapers ran but found nothing".
+    pub async fn flow_increment_rate_limited(&self, prefix: &str, id: i64) {
+        let key = flow_rate_limited_key(prefix, id);
+        let mut conn = self.redis.clone();
+        let _: Result<(), _> = redis::pipe()
+            .cmd("INCR").arg(&key)
+            .cmd("EXPIRE").arg(&key).arg(3600i64)
+            .query_async(&mut conn)
+            .await;
+    }
+
+    /// Return the number of rate-limited plugin completions recorded for this flow.
+    pub async fn flow_rate_limited_count(&self, prefix: &str, id: i64) -> i64 {
+        let mut conn = self.redis.clone();
+        redis::cmd("GET")
+            .arg(flow_rate_limited_key(prefix, id))
+            .query_async::<Option<i64>>(&mut conn)
+            .await
+            .unwrap_or(None)
+            .unwrap_or(0)
+    }
+
+    /// Delete the rate-limited counter for this flow (called in `finalize`).
+    pub async fn clear_flow_rate_limited(&self, prefix: &str, id: i64) {
+        let mut conn = self.redis.clone();
+        let _: Result<(), _> = redis::cmd("DEL")
+            .arg(flow_rate_limited_key(prefix, id))
+            .query_async(&mut conn)
+            .await;
+    }
+
     pub async fn flow_result_count(&self, prefix: &str, id: i64) -> i64 {
         let mut conn = self.redis.clone();
         redis::cmd("HLEN")
@@ -443,6 +477,11 @@ fn flow_pending_key(prefix: &str, id: i64) -> String {
 #[inline]
 fn flow_results_key(prefix: &str, id: i64) -> String {
     format!("riven:flow:{prefix}:{id}:results")
+}
+
+#[inline]
+fn flow_rate_limited_key(prefix: &str, id: i64) -> String {
+    format!("riven:flow:{prefix}:{id}:rate_limited")
 }
 
 #[inline]

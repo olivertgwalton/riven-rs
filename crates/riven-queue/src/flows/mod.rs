@@ -8,6 +8,7 @@ use std::future::Future;
 
 use futures::future;
 use riven_core::events::{EventType, HookResponse, RivenEvent};
+use riven_core::http::RateLimitedError;
 use riven_db::repo;
 use riven_rank::{QualityProfile, RankSettings};
 use serde::Serialize;
@@ -62,6 +63,16 @@ where
                     .flow_store_result(prefix, id, plugin_name, &payload)
                     .await;
             }
+        }
+        Some(Err(ref error)) if error.is::<RateLimitedError>() => {
+            // Record that this child was rate-limited so `finalize` can
+            // distinguish a pure rate-limit failure from a genuine no-results.
+            queue.flow_increment_rate_limited(prefix, id).await;
+            tracing::warn!(
+                plugin = plugin_name,
+                id,
+                "{hook_label} rate-limited (429); worker slot freed"
+            );
         }
         Some(Err(error)) => {
             tracing::error!(

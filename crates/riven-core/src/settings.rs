@@ -271,7 +271,7 @@ pub struct RivenSettings {
     pub maximum_average_bitrate_episodes: Option<u32>,
 
     /// Retry items that have been stuck (failed_attempts > 0) for longer than
-    /// this many seconds. 0 = disabled. Default: 86400 (24 h).
+    /// this many seconds. 0 = disabled. Default: 600 (10 m).
     pub retry_interval_secs: u64,
     /// Minutes to wait after a known release/air date before re-indexing.
     pub schedule_offset_minutes: u64,
@@ -316,7 +316,7 @@ impl Default for RivenSettings {
             minimum_average_bitrate_episodes: None,
             maximum_average_bitrate_movies: None,
             maximum_average_bitrate_episodes: None,
-            retry_interval_secs: 86400,
+            retry_interval_secs: 60 * 10, // 10 minutes
             schedule_offset_minutes: 30,
             unknown_air_date_offset_days: 7,
             api_key: String::new(),
