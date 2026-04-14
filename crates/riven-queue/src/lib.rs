@@ -198,10 +198,13 @@ impl JobQueue {
     /// Release the dedup key for a job, allowing it to be re-queued.
     pub async fn release_dedup(&self, prefix: &str, id: i64) {
         let mut conn = self.redis.clone();
-        let _: Result<(), _> = redis::cmd("DEL")
-            .arg(format!("riven:dedup:{prefix}:{id}"))
-            .query_async(&mut conn)
-            .await;
+        if let Err(e) = redis::cmd("DEL")
+            .arg(dedup_key(prefix, id))
+            .query_async::<()>(&mut conn)
+            .await
+        {
+            tracing::error!(error = %e, prefix, id, "failed to release dedup key");
+        }
     }
 
     /// SET NX with a 30-min safety TTL. Returns `true` if the key was acquired.
@@ -227,7 +230,7 @@ impl JobQueue {
         Fut: Future<Output = std::result::Result<(), E>>,
         E: std::fmt::Display,
     {
-        if self.set_nx(&format!("riven:dedup:{prefix}:{id}")).await {
+        if self.set_nx(&dedup_key(prefix, id)).await {
             if let Err(e) = push().await {
                 self.release_dedup(prefix, id).await;
                 tracing::error!(error = %e, label, "failed to push job");
@@ -308,14 +311,12 @@ impl JobQueue {
     // ── Flow helpers ──────────────────────────────────────────────────────────
 
     pub async fn init_flow(&self, prefix: &str, id: i64, pending: usize) {
-        let pending_key = format!("riven:flow:{prefix}:{id}:pending");
-        let results_key = format!("riven:flow:{prefix}:{id}:results");
         let mut conn = self.redis.clone();
         // Clear any stale results from a previous run and reset the pending counter atomically.
         let _: Result<(), _> = redis::pipe()
-            .del(&results_key)
+            .del(flow_results_key(prefix, id))
             .cmd("SET")
-            .arg(&pending_key)
+            .arg(flow_pending_key(prefix, id))
             .arg(pending)
             .arg("EX")
             .arg(3600i64)
@@ -334,7 +335,7 @@ impl JobQueue {
             tracing::error!(prefix, id, field, "failed to serialize flow result");
             return;
         };
-        let key = format!("riven:flow:{prefix}:{id}:results");
+        let key = flow_results_key(prefix, id);
         let mut conn = self.redis.clone();
         let _: Result<(), _> = redis::pipe()
             .hset(&key, field, &payload)
@@ -344,7 +345,7 @@ impl JobQueue {
     }
 
     pub async fn flow_complete_child(&self, prefix: &str, id: i64) -> bool {
-        let pending_key = format!("riven:flow:{prefix}:{id}:pending");
+        let pending_key = flow_pending_key(prefix, id);
         let mut conn = self.redis.clone();
         // Pipeline DECR + EXPIRE to save a round-trip on every plugin job completion.
         let (remaining, _): (i64, i64) = redis::pipe()
@@ -360,7 +361,7 @@ impl JobQueue {
     }
 
     pub async fn flow_load_results<T: DeserializeOwned>(&self, prefix: &str, id: i64) -> Vec<T> {
-        let key = format!("riven:flow:{prefix}:{id}:results");
+        let key = flow_results_key(prefix, id);
         let mut conn = self.redis.clone();
         let raw: Vec<String> = redis::cmd("HVALS")
             .arg(&key)
@@ -379,25 +380,25 @@ impl JobQueue {
     }
 
     pub async fn clear_flow(&self, prefix: &str, id: i64) {
-        let pending_key = format!("riven:flow:{prefix}:{id}:pending");
         let mut conn = self.redis.clone();
         let _: Result<(), _> = redis::cmd("DEL")
-            .arg(&pending_key)
+            .arg(flow_pending_key(prefix, id))
             .query_async(&mut conn)
             .await;
     }
 
     pub async fn clear_flow_results(&self, prefix: &str, id: i64) {
-        let key = format!("riven:flow:{prefix}:{id}:results");
         let mut conn = self.redis.clone();
-        let _: Result<(), _> = redis::cmd("DEL").arg(&key).query_async(&mut conn).await;
+        let _: Result<(), _> = redis::cmd("DEL")
+            .arg(flow_results_key(prefix, id))
+            .query_async(&mut conn)
+            .await;
     }
 
     pub async fn flow_result_count(&self, prefix: &str, id: i64) -> i64 {
-        let key = format!("riven:flow:{prefix}:{id}:results");
         let mut conn = self.redis.clone();
         redis::cmd("HLEN")
-            .arg(&key)
+            .arg(flow_results_key(prefix, id))
             .query_async(&mut conn)
             .await
             .unwrap_or(0)
@@ -468,6 +469,23 @@ impl JobQueue {
         let ranks = riven_db::repo::load_resolution_ranks(&self.db_pool).await;
         *self.resolution_ranks.write().await = ranks;
     }
+}
+
+// ── Redis key helpers ─────────────────────────────────────────────────────────
+
+#[inline]
+fn flow_pending_key(prefix: &str, id: i64) -> String {
+    format!("riven:flow:{prefix}:{id}:pending")
+}
+
+#[inline]
+fn flow_results_key(prefix: &str, id: i64) -> String {
+    format!("riven:flow:{prefix}:{id}:results")
+}
+
+#[inline]
+fn dedup_key(prefix: &str, id: i64) -> String {
+    format!("riven:dedup:{prefix}:{id}")
 }
 
 // ── Scheduled index task ID ───────────────────────────────────────────────────

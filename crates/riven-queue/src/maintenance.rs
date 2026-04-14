@@ -59,20 +59,25 @@ async fn rescue_workers(redis: &mut redis::aio::ConnectionManager, max_score: Op
             continue;
         }
 
+        // Fetch all worker job sets in one pipelined round-trip.
+        let all_job_sets: Vec<Vec<String>> = {
+            let mut pipe = redis::pipe();
+            for key in &members {
+                pipe.cmd("SMEMBERS").arg(key);
+            }
+            pipe.query_async(redis).await.unwrap_or_default()
+        };
+
+        // Collect rescued jobs and pipeline all DEL commands together.
         let mut rescued: Vec<String> = Vec::new();
-        for key in &members {
-            let jobs: Vec<String> = redis::cmd("SMEMBERS")
-                .arg(key)
-                .query_async(redis)
-                .await
-                .unwrap_or_default();
+        let mut del_pipe = redis::pipe();
+        for (key, jobs) in members.iter().zip(all_job_sets) {
             rescued.extend(jobs);
-            let _: Result<(), _> = redis::pipe()
+            del_pipe
                 .del(format!("{APALIS_WORKERS_METADATA_PREFIX}{key}"))
-                .del(key)
-                .query_async(redis)
-                .await;
+                .del(key);
         }
+        let _: Result<(), _> = del_pipe.query_async(redis).await;
 
         if !rescued.is_empty() {
             let _: Result<(), _> = redis::pipe()
@@ -94,13 +99,12 @@ async fn rescue_workers(redis: &mut redis::aio::ConnectionManager, max_score: Op
                 .query_async(redis)
                 .await;
         } else {
-            for key in &members {
-                let _: Result<(), _> = redis::cmd("ZREM")
-                    .arg(config.workers_set())
-                    .arg(key)
-                    .query_async(redis)
-                    .await;
-            }
+            // Remove all stale worker entries in a single ZREM varargs call.
+            let _: Result<(), _> = redis::cmd("ZREM")
+                .arg(config.workers_set())
+                .arg(&members)
+                .query_async(redis)
+                .await;
         }
 
         tracing::info!(

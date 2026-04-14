@@ -123,12 +123,8 @@ async fn collect_cached_info(
     queue: &JobQueue,
     streams: &[Stream],
 ) -> HashMap<String, Vec<CacheCheckFile>> {
-    let hashes: Vec<String> = streams
-        .iter()
-        .map(|stream| stream.info_hash.clone())
-        .collect::<HashSet<_>>()
-        .into_iter()
-        .collect();
+    // Streams for a given item have unique info_hashes — no dedup needed.
+    let hashes: Vec<String> = streams.iter().map(|s| s.info_hash.clone()).collect();
     let cache_event = RivenEvent::MediaItemDownloadCacheCheckRequested { hashes };
     let cache_results = queue.registry.dispatch(&cache_event).await;
 
@@ -221,13 +217,15 @@ async fn run_multi_version(
     candidates: &[CachedCandidate<'_>],
     hierarchy: Option<&DownloadHierarchyContext>,
 ) -> bool {
-    let downloaded_profiles = fetch_done_profiles(queue, id, item.item_type).await;
+    // Seed with profiles already downloaded before this job ran; augmented
+    // below on each success so we avoid a second DB round-trip at the end.
+    let mut done_profiles: HashSet<String> =
+        fetch_done_profiles(queue, id, item.item_type).await.into_iter().collect();
     let mut any_success = false;
-
     let mut attempted_hashes: HashSet<String> = HashSet::new();
 
     for (profile_name, profile_settings) in active_profiles {
-        if downloaded_profiles.contains(profile_name) {
+        if done_profiles.contains(profile_name.as_str()) {
             tracing::debug!(
                 id,
                 profile = profile_name,
@@ -272,6 +270,7 @@ async fn run_multi_version(
             }
             DownloadAttemptOutcome::TerminalHandled => return true,
             DownloadAttemptOutcome::Succeeded => {
+                done_profiles.insert(profile_name.clone());
                 any_success = true;
                 tracing::debug!(
                     id,
@@ -294,8 +293,7 @@ async fn run_multi_version(
         return false;
     }
 
-    let done = fetch_done_profiles(queue, id, item.item_type).await;
-    if !active_profiles.iter().all(|(name, _)| done.contains(name)) {
+    if !active_profiles.iter().all(|(name, _)| done_profiles.contains(name.as_str())) {
         tracing::debug!(
             id,
             "downloads for some active profiles are still missing; re-queuing"
