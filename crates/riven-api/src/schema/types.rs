@@ -62,7 +62,7 @@ pub struct MediaItemStateTree {
 
 #[derive(SimpleObject)]
 pub struct ItemsPage {
-    pub items: Vec<MediaItem>,
+    pub items: Vec<MediaItemListRow>,
     pub page: i64,
     pub limit: i64,
     pub total_items: i64,

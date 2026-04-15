@@ -505,21 +505,41 @@ fn apply_item_filters(
     if let Some(t) = types
         && !t.is_empty()
     {
-        qb.push(" AND item_type = ANY(");
+        qb.push(" AND media_items.item_type = ANY(");
         qb.push_bind(t.to_vec());
         qb.push(")");
     }
     if let Some(s) = states
         && !s.is_empty()
     {
-        qb.push(" AND state = ANY(");
+        qb.push(" AND (media_items.state = ANY(");
         qb.push_bind(s.to_vec());
-        qb.push(")");
+        qb.push(") OR (media_items.item_type = 'show' AND (EXISTS (");
+        qb.push(
+            "SELECT 1 FROM media_items child_season \
+             WHERE child_season.item_type = 'season' \
+               AND child_season.parent_id = media_items.id \
+               AND child_season.is_requested = true \
+               AND child_season.state = ANY(",
+        );
+        qb.push_bind(s.to_vec());
+        qb.push(")) OR EXISTS (");
+        qb.push(
+            "SELECT 1 FROM media_items child_episode \
+             JOIN media_items episode_season ON episode_season.id = child_episode.parent_id \
+             WHERE child_episode.item_type = 'episode' \
+               AND episode_season.item_type = 'season' \
+               AND episode_season.parent_id = media_items.id \
+               AND child_episode.is_requested = true \
+               AND child_episode.state = ANY(",
+        );
+        qb.push_bind(s.to_vec());
+        qb.push(")))))");
     }
     if let Some(q) = search
         && !q.is_empty()
     {
-        qb.push(" AND LOWER(title) LIKE ");
+        qb.push(" AND LOWER(media_items.title) LIKE ");
         qb.push_bind(format!("%{}%", q.to_lowercase()));
     }
 }
@@ -532,12 +552,29 @@ pub async fn list_items_paginated(
     types: Option<Vec<MediaItemType>>,
     search: Option<String>,
     states: Option<Vec<MediaItemState>>,
-) -> Result<Vec<MediaItem>> {
+) -> Result<Vec<MediaItemListRow>> {
     let page = page.max(1);
     let limit = limit.clamp(1, 200);
     let offset = (page - 1) * limit;
 
-    let mut qb = sqlx::QueryBuilder::<sqlx::Postgres>::new("SELECT * FROM media_items WHERE 1=1");
+    let mut qb = sqlx::QueryBuilder::<sqlx::Postgres>::new(
+        "SELECT media_items.*, \
+                resolved_show.id AS show_id, \
+                resolved_show.title AS show_title, \
+                resolved_show.tmdb_id AS show_tmdb_id, \
+                resolved_show.tvdb_id AS show_tvdb_id, \
+                resolved_show.poster_path AS show_poster_path \
+         FROM media_items \
+         LEFT JOIN media_items parent_season \
+           ON media_items.item_type = 'episode' \
+          AND parent_season.id = media_items.parent_id \
+          AND parent_season.item_type = 'season' \
+         LEFT JOIN media_items resolved_show \
+           ON (media_items.item_type = 'show' AND resolved_show.id = media_items.id) \
+           OR (media_items.item_type = 'season' AND resolved_show.id = media_items.parent_id) \
+           OR (media_items.item_type = 'episode' AND resolved_show.id = parent_season.parent_id) \
+         WHERE 1=1",
+    );
     apply_item_filters(
         &mut qb,
         types.as_deref(),
@@ -546,17 +583,20 @@ pub async fn list_items_paginated(
     );
 
     let order = match sort.as_deref() {
-        Some("date_asc") => " ORDER BY created_at ASC NULLS LAST",
-        Some("title_asc") => " ORDER BY title ASC",
-        Some("title_desc") => " ORDER BY title DESC",
-        _ => " ORDER BY created_at DESC NULLS LAST",
+        Some("date_asc") => " ORDER BY media_items.created_at ASC NULLS LAST",
+        Some("title_asc") => " ORDER BY media_items.title ASC",
+        Some("title_desc") => " ORDER BY media_items.title DESC",
+        _ => " ORDER BY media_items.created_at DESC NULLS LAST",
     };
     qb.push(order);
     qb.push(" LIMIT ");
     qb.push_bind(limit);
     qb.push(" OFFSET ");
     qb.push_bind(offset);
-    Ok(qb.build_query_as::<MediaItem>().fetch_all(pool).await?)
+    Ok(qb
+        .build_query_as::<MediaItemListRow>()
+        .fetch_all(pool)
+        .await?)
 }
 
 pub async fn count_items_filtered(

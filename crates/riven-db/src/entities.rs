@@ -71,6 +71,18 @@ pub struct MediaItemHierarchy {
     pub resolved_show_is_anime: Option<bool>,
 }
 
+#[derive(Debug, Clone, FromRow, Serialize, Deserialize, async_graphql::SimpleObject)]
+pub struct MediaItemListRow {
+    #[sqlx(flatten)]
+    #[graphql(flatten)]
+    pub item: MediaItem,
+    pub show_id: Option<i64>,
+    pub show_title: Option<String>,
+    pub show_tmdb_id: Option<String>,
+    pub show_tvdb_id: Option<String>,
+    pub show_poster_path: Option<String>,
+}
+
 impl MediaItem {
     pub fn filesystem_metadata(&self) -> FilesystemItemMetadata {
         build_filesystem_metadata(
