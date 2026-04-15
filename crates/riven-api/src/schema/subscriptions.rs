@@ -351,6 +351,15 @@ impl SubscriptionRoot {
                         if rx.recv().await.is_err() {
                             return None;
                         }
+                        let next = match load_item_state_by_tmdb(&pool, &tmdb_id).await {
+                            Ok(value) => value,
+                            Err(error) => {
+                                return Some((Err(error), (rx, pool, tmdb_id)));
+                            }
+                        };
+                        if next.is_some() {
+                            return Some((Ok(next), (rx, pool, tmdb_id)));
+                        }
                         continue;
                     };
 
@@ -391,6 +400,15 @@ impl SubscriptionRoot {
                     let Some(item) = current_item.as_ref() else {
                         if rx.recv().await.is_err() {
                             return None;
+                        }
+                        let next = match load_item_state_by_tvdb(&pool, &tvdb_id).await {
+                            Ok(value) => value,
+                            Err(error) => {
+                                return Some((Err(error), (rx, pool, tvdb_id)));
+                            }
+                        };
+                        if next.is_some() {
+                            return Some((Ok(next), (rx, pool, tvdb_id)));
                         }
                         continue;
                     };
