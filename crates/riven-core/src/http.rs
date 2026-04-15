@@ -494,7 +494,6 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::{Duration, Instant};
 
-    use axum::response::IntoResponse;
     use axum::{Json, Router, routing::get};
     use serde_json::json;
     use tokio::net::TcpListener;
