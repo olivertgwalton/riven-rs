@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "UPDATE streams SET file_size_bytes = $1 WHERE info_hash = $2",
+  "query": "UPDATE streams SET file_size_bytes = $1, updated_at = NOW() WHERE info_hash = $2",
   "describe": {
     "columns": [],
     "parameters": {
@@ -11,5 +11,5 @@
     },
     "nullable": []
   },
-  "hash": "7ba631b49bcf0b86d82b6fd1a0859552760e3f00e2b0b3536bddfeaa4005bfaf"
+  "hash": "de2cd7749d4c0f8d0ef72b5ab697b6b9770017642f29a2927cb2ac2a79f83ece"
 }

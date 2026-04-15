@@ -275,6 +275,8 @@ pub struct Stream {
     pub id: i64,
     pub info_hash: String,
     pub magnet: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: Option<DateTime<Utc>>,
     #[sqlx(json)]
     pub parsed_data: Option<serde_json::Value>,
     pub rank: Option<i64>,

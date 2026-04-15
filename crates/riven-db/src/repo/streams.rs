@@ -24,7 +24,8 @@ pub async fn upsert_stream(
          ON CONFLICT (info_hash) DO UPDATE SET \
              magnet = CASE WHEN $2 <> '' THEN $2 ELSE streams.magnet END, \
              parsed_data = COALESCE($3, streams.parsed_data), \
-             rank = COALESCE($4, streams.rank) \
+             rank = COALESCE($4, streams.rank), \
+             updated_at = NOW() \
          RETURNING *",
     )
     .bind(info_hash)
@@ -43,7 +44,7 @@ pub async fn update_stream_file_size(
     file_size_bytes: u64,
 ) -> Result<()> {
     sqlx::query!(
-        "UPDATE streams SET file_size_bytes = $1 WHERE info_hash = $2",
+        "UPDATE streams SET file_size_bytes = $1, updated_at = NOW() WHERE info_hash = $2",
         file_size_bytes as i64,
         info_hash
     )
