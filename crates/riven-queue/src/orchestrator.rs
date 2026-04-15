@@ -153,7 +153,8 @@ impl<'a> LibraryOrchestrator<'a> {
                     if item.imdb_id.is_none() || requested_specific_seasons {
                         self.queue.push_index(IndexJob::from_item(item)).await;
                     } else {
-                        self.queue_scrape_for_item(item, requested_seasons, true).await;
+                        self.queue_scrape_for_item(item, requested_seasons, true)
+                            .await;
                     }
                 }
                 ItemRequestUpsertAction::Unchanged => {}

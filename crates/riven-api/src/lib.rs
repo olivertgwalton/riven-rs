@@ -67,9 +67,7 @@ use riven_core::plugin::PluginRegistry;
 use riven_core::stream_link::{LinkRequest, request_stream_url};
 use riven_queue::JobQueue;
 
-use crate::schema::{
-    AppSchema, build_schema, start_event_controller,
-};
+use crate::schema::{AppSchema, build_schema, start_event_controller};
 
 #[derive(Clone)]
 pub struct ApiState {

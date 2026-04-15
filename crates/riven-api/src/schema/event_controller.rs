@@ -2,9 +2,9 @@ use std::sync::Arc;
 
 use riven_core::events::RivenEvent;
 use riven_db::repo;
+use riven_queue::JobQueue;
 use riven_queue::context;
 use riven_queue::orchestrator::LibraryOrchestrator;
-use riven_queue::JobQueue;
 use tokio::sync::broadcast;
 
 pub fn start(job_queue: Arc<JobQueue>) {
@@ -77,7 +77,8 @@ async fn react_to_event(job_queue: &JobQueue, event: &RivenEvent) {
                 return;
             };
 
-            let requested_seasons = context::load_requested_seasons(&job_queue.db_pool, &item).await;
+            let requested_seasons =
+                context::load_requested_seasons(&job_queue.db_pool, &item).await;
             orchestrator
                 .enqueue_after_index(&item, requested_seasons.as_deref())
                 .await;

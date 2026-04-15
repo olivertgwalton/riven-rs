@@ -12,6 +12,7 @@ members = [
     "crates/plugin-tvdb",
     "crates/plugin-comet",
     "crates/plugin-torrentio",
+    "crates/plugin-aiostreams",
     "crates/plugin-stremthru",
     "crates/plugin-plex",
     "crates/plugin-seerr",

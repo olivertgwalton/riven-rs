@@ -219,8 +219,10 @@ async fn run_multi_version(
 ) -> bool {
     // Seed with profiles already downloaded before this job ran; augmented
     // below on each success so we avoid a second DB round-trip at the end.
-    let mut done_profiles: HashSet<String> =
-        fetch_done_profiles(queue, id, item.item_type).await.into_iter().collect();
+    let mut done_profiles: HashSet<String> = fetch_done_profiles(queue, id, item.item_type)
+        .await
+        .into_iter()
+        .collect();
     let mut any_success = false;
     let mut attempted_hashes: HashSet<String> = HashSet::new();
 
@@ -293,7 +295,10 @@ async fn run_multi_version(
         return false;
     }
 
-    if !active_profiles.iter().all(|(name, _)| done_profiles.contains(name.as_str())) {
+    if !active_profiles
+        .iter()
+        .all(|(name, _)| done_profiles.contains(name.as_str()))
+    {
         tracing::debug!(
             id,
             "downloads for some active profiles are still missing; re-queuing"

@@ -2,8 +2,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::types::{
     ActivePlaybackSession, CacheCheckResult, ContentServiceResponse, DebridUserInfo,
-    DownloadResult, IndexedMediaItem, ItemRequestType, MediaItemType, ProviderInfo,
-    ScrapeResponse, StreamLinkResponse,
+    DownloadResult, IndexedMediaItem, ItemRequestType, MediaItemType, ProviderInfo, ScrapeResponse,
+    StreamLinkResponse,
 };
 
 pub struct ScrapeRequest<'a> {

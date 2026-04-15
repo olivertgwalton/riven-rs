@@ -18,11 +18,11 @@ pub mod typed_items;
 pub mod types;
 mod vfs;
 
+pub use event_controller::start as start_event_controller;
 pub use mutations::MutationRoot;
 pub use queries::CoreQuery;
 pub use subscriptions::SubscriptionRoot;
 pub use vfs::VfsQuery;
-pub use event_controller::start as start_event_controller;
 
 // ── Merged query root ──
 

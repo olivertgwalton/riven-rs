@@ -54,6 +54,9 @@ impl Settings {
     async fn stremthru(&self) -> Result<serde_json::Value> {
         self.field("stremthru").await
     }
+    async fn aiostreams(&self) -> Result<serde_json::Value> {
+        self.field("aiostreams").await
+    }
     async fn tmdb(&self) -> Result<serde_json::Value> {
         self.field("tmdb").await
     }
@@ -108,6 +111,7 @@ is_valid_query!(PlexQuery, plex_is_valid, "plex");
 is_valid_query!(EmbyQuery, emby_is_valid, "emby");
 is_valid_query!(JellyfinQuery, jellyfin_is_valid, "jellyfin");
 is_valid_query!(StremThruQuery, stremthru_is_valid, "stremthru");
+is_valid_query!(AioStreamsQuery, aiostreams_is_valid, "aiostreams");
 is_valid_query!(TmdbQuery, tmdb_is_valid, "tmdb");
 is_valid_query!(TorrentioQuery, torrentio_is_valid, "torrentio");
 is_valid_query!(TraktQuery, trakt_is_valid, "trakt");
@@ -242,6 +246,7 @@ pub struct PluginsQuery(
     MdblistQuery,
     SeerrQuery,
     StremThruQuery,
+    AioStreamsQuery,
     TmdbQuery,
     TorrentioQuery,
     TraktQuery,

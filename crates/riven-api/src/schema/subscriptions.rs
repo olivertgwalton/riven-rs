@@ -204,29 +204,31 @@ impl SubscriptionRoot {
     ) -> async_graphql::Result<impl Stream<Item = async_graphql::Result<ItemRequest>>> {
         let pool = ctx.data::<sqlx::PgPool>()?.clone();
         let queue = Arc::clone(ctx.data::<Arc<riven_queue::JobQueue>>()?);
-        Ok(broadcast_stream(queue.event_tx.subscribe()).filter_map(move |event| {
-            let pool = pool.clone();
-            async move {
-                let RivenEvent::ItemRequestCreated {
-                    request_id,
-                    request_type,
-                    ..
-                } = event
-                else {
-                    return None;
-                };
+        Ok(
+            broadcast_stream(queue.event_tx.subscribe()).filter_map(move |event| {
+                let pool = pool.clone();
+                async move {
+                    let RivenEvent::ItemRequestCreated {
+                        request_id,
+                        request_type,
+                        ..
+                    } = event
+                    else {
+                        return None;
+                    };
 
-                if request_type != ItemRequestType::Movie {
-                    return None;
-                }
+                    if request_type != ItemRequestType::Movie {
+                        return None;
+                    }
 
-                match load_item_request(&pool, request_id).await {
-                    Ok(Some(request)) => Some(Ok(request)),
-                    Ok(None) => None,
-                    Err(error) => Some(Err(error)),
+                    match load_item_request(&pool, request_id).await {
+                        Ok(Some(request)) => Some(Ok(request)),
+                        Ok(None) => None,
+                        Err(error) => Some(Err(error)),
+                    }
                 }
-            }
-        }))
+            }),
+        )
     }
 
     /// Fires when a new show item request is created.
@@ -236,29 +238,31 @@ impl SubscriptionRoot {
     ) -> async_graphql::Result<impl Stream<Item = async_graphql::Result<ItemRequest>>> {
         let pool = ctx.data::<sqlx::PgPool>()?.clone();
         let queue = Arc::clone(ctx.data::<Arc<riven_queue::JobQueue>>()?);
-        Ok(broadcast_stream(queue.event_tx.subscribe()).filter_map(move |event| {
-            let pool = pool.clone();
-            async move {
-                let RivenEvent::ItemRequestCreated {
-                    request_id,
-                    request_type,
-                    ..
-                } = event
-                else {
-                    return None;
-                };
+        Ok(
+            broadcast_stream(queue.event_tx.subscribe()).filter_map(move |event| {
+                let pool = pool.clone();
+                async move {
+                    let RivenEvent::ItemRequestCreated {
+                        request_id,
+                        request_type,
+                        ..
+                    } = event
+                    else {
+                        return None;
+                    };
 
-                if request_type != ItemRequestType::Show {
-                    return None;
-                }
+                    if request_type != ItemRequestType::Show {
+                        return None;
+                    }
 
-                match load_item_request(&pool, request_id).await {
-                    Ok(Some(request)) => Some(Ok(request)),
-                    Ok(None) => None,
-                    Err(error) => Some(Err(error)),
+                    match load_item_request(&pool, request_id).await {
+                        Ok(Some(request)) => Some(Ok(request)),
+                        Ok(None) => None,
+                        Err(error) => Some(Err(error)),
+                    }
                 }
-            }
-        }))
+            }),
+        )
     }
 
     /// Fires when an existing show item request is updated (e.g. new seasons added).
@@ -268,29 +272,31 @@ impl SubscriptionRoot {
     ) -> async_graphql::Result<impl Stream<Item = async_graphql::Result<ItemRequest>>> {
         let pool = ctx.data::<sqlx::PgPool>()?.clone();
         let queue = Arc::clone(ctx.data::<Arc<riven_queue::JobQueue>>()?);
-        Ok(broadcast_stream(queue.event_tx.subscribe()).filter_map(move |event| {
-            let pool = pool.clone();
-            async move {
-                let RivenEvent::ItemRequestUpdated {
-                    request_id,
-                    request_type,
-                    ..
-                } = event
-                else {
-                    return None;
-                };
+        Ok(
+            broadcast_stream(queue.event_tx.subscribe()).filter_map(move |event| {
+                let pool = pool.clone();
+                async move {
+                    let RivenEvent::ItemRequestUpdated {
+                        request_id,
+                        request_type,
+                        ..
+                    } = event
+                    else {
+                        return None;
+                    };
 
-                if request_type != ItemRequestType::Show {
-                    return None;
-                }
+                    if request_type != ItemRequestType::Show {
+                        return None;
+                    }
 
-                match load_item_request(&pool, request_id).await {
-                    Ok(Some(request)) => Some(Ok(request)),
-                    Ok(None) => None,
-                    Err(error) => Some(Err(error)),
+                    match load_item_request(&pool, request_id).await {
+                        Ok(Some(request)) => Some(Ok(request)),
+                        Ok(None) => None,
+                        Err(error) => Some(Err(error)),
+                    }
                 }
-            }
-        }))
+            }),
+        )
     }
 
     /// Fires when a show has been indexed (metadata and episode structure persisted).
@@ -300,24 +306,26 @@ impl SubscriptionRoot {
     ) -> async_graphql::Result<impl Stream<Item = async_graphql::Result<MediaItem>>> {
         let pool = ctx.data::<sqlx::PgPool>()?.clone();
         let queue = Arc::clone(ctx.data::<Arc<riven_queue::JobQueue>>()?);
-        Ok(broadcast_stream(queue.event_tx.subscribe()).filter_map(move |event| {
-            let pool = pool.clone();
-            async move {
-                let RivenEvent::MediaItemIndexSuccess { id, item_type, .. } = event else {
-                    return None;
-                };
+        Ok(
+            broadcast_stream(queue.event_tx.subscribe()).filter_map(move |event| {
+                let pool = pool.clone();
+                async move {
+                    let RivenEvent::MediaItemIndexSuccess { id, item_type, .. } = event else {
+                        return None;
+                    };
 
-                if item_type != MediaItemType::Show {
-                    return None;
-                }
+                    if item_type != MediaItemType::Show {
+                        return None;
+                    }
 
-                match repo::get_media_item(&pool, id).await {
-                    Ok(Some(item)) => Some(Ok(item)),
-                    Ok(None) => None,
-                    Err(error) => Some(Err(error.into())),
+                    match repo::get_media_item(&pool, id).await {
+                        Ok(Some(item)) => Some(Ok(item)),
+                        Ok(None) => None,
+                        Err(error) => Some(Err(error.into())),
+                    }
                 }
-            }
-        }))
+            }),
+        )
     }
 
     async fn media_item_state_updates_by_tmdb(

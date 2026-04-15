@@ -435,6 +435,8 @@ pub mod profiles {
 
     use super::HttpServiceProfile;
 
+    pub const AIOSTREAMS: HttpServiceProfile =
+        HttpServiceProfile::new("aiostreams").with_rate_limit(120, Duration::from_secs(60));
     pub const COMET: HttpServiceProfile =
         HttpServiceProfile::new("comet").with_rate_limit(150, Duration::from_secs(60));
     pub const DISCORD_WEBHOOK: HttpServiceProfile = HttpServiceProfile::new("discord_webhook");

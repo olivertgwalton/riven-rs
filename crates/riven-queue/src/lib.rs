@@ -401,8 +401,11 @@ impl JobQueue {
         let key = flow_rate_limited_key(prefix, id);
         let mut conn = self.redis.clone();
         let _: Result<(), _> = redis::pipe()
-            .cmd("INCR").arg(&key)
-            .cmd("EXPIRE").arg(&key).arg(3600i64)
+            .cmd("INCR")
+            .arg(&key)
+            .cmd("EXPIRE")
+            .arg(&key)
+            .arg(3600i64)
             .query_async(&mut conn)
             .await;
     }

@@ -2138,6 +2138,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "plugin-aiostreams"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "inventory",
+ "reqwest",
+ "riven-core",
+ "serde",
+ "tracing",
+]
+
+[[package]]
 name = "plugin-calendar"
 version = "0.1.0"
 dependencies = [
@@ -2816,6 +2829,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "figment",
+ "plugin-aiostreams",
  "plugin-calendar",
  "plugin-comet",
  "plugin-dashboard",
