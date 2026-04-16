@@ -148,6 +148,9 @@ async fn main() -> Result<()> {
         let jq = job_queue.clone();
         let reg = registry.clone();
         let api_key = (!settings.api_key.is_empty()).then(|| settings.api_key.clone());
+        let frontend_auth_signing_secret =
+            (!settings.frontend_auth_signing_secret.is_empty())
+                .then(|| settings.frontend_auth_signing_secret.clone());
         let log_dir = settings.log_directory.clone();
         let log_tx = log_tx.clone();
         let notif_tx = notification_tx.clone();
@@ -159,6 +162,7 @@ async fn main() -> Result<()> {
                 reg,
                 jq.clone(),
                 api_key,
+                frontend_auth_signing_secret,
                 log_dir,
                 log_tx,
                 notif_tx,

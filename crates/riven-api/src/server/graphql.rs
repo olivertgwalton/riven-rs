@@ -1,3 +1,4 @@
+use async_graphql::Data;
 use async_graphql::http::{
     ALL_WEBSOCKET_PROTOCOLS, GraphiQLSource, create_multipart_mixed_stream,
     is_accept_multipart_mixed,
@@ -15,16 +16,20 @@ use axum::{
 use futures::StreamExt;
 
 use super::ApiState;
-use super::auth::check_api_key;
+use super::auth::{AuthError, authorize_request};
 
 pub(super) async fn graphql_handler(
     State(state): State<ApiState>,
     headers: HeaderMap,
     req: Request<Body>,
 ) -> Response {
-    if !check_api_key(&state, &headers) {
-        return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
-    }
+    let auth = match authorize_request(&state, &headers) {
+        Ok(auth) => auth,
+        Err(AuthError::Unauthorized) => {
+            return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
+        }
+        Err(AuthError::Forbidden) => return (StatusCode::FORBIDDEN, "Forbidden").into_response(),
+    };
 
     let accepts_multipart = headers
         .get("accept")
@@ -37,7 +42,7 @@ pub(super) async fn graphql_handler(
             Ok(req) => req,
             Err(error) => return error.into_response(),
         };
-        let stream = state.schema.execute_stream(req.into_inner());
+        let stream = state.schema.execute_stream(req.into_inner().data(auth));
         let body = Body::from_stream(
             create_multipart_mixed_stream(stream, std::time::Duration::from_secs(30))
                 .map(Ok::<_, std::io::Error>),
@@ -55,7 +60,11 @@ pub(super) async fn graphql_handler(
         Err(error) => return error.into_response(),
     };
 
-    let gql_resp: GraphQLResponse = state.schema.execute_batch(req.into_inner()).await.into();
+    let gql_resp: GraphQLResponse = state
+        .schema
+        .execute_batch(req.into_inner().data(auth))
+        .await
+        .into();
     gql_resp.into_response()
 }
 
@@ -71,9 +80,15 @@ pub(super) async fn graphql_get_handler(
         .unwrap_or(false);
 
     if is_ws {
-        if !check_api_key(&state, req.headers()) {
-            return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
-        }
+        let auth = match authorize_request(&state, req.headers()) {
+            Ok(auth) => auth,
+            Err(AuthError::Unauthorized) => {
+                return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
+            }
+            Err(AuthError::Forbidden) => {
+                return (StatusCode::FORBIDDEN, "Forbidden").into_response();
+            }
+        };
         let (mut parts, _body) = req.into_parts();
         let protocol = match GraphQLProtocol::from_request_parts(&mut parts, &()).await {
             Ok(p) => p,
@@ -84,9 +99,15 @@ pub(super) async fn graphql_get_handler(
             Err(e) => return e.into_response(),
         };
         let schema = state.schema.clone();
+        let mut connection_data = Data::default();
+        connection_data.insert(auth);
         return ws
             .protocols(ALL_WEBSOCKET_PROTOCOLS)
-            .on_upgrade(move |socket| GraphQLWebSocket::new(socket, schema, protocol).serve())
+            .on_upgrade(move |socket| {
+                GraphQLWebSocket::new(socket, schema, protocol)
+                    .with_data(connection_data)
+                    .serve()
+            })
             .into_response();
     }
 

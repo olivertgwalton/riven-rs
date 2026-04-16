@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::schema::typed_items::Movie;
+use crate::schema::auth::require_settings_access;
 
 use super::MutationStatusText;
 
@@ -60,6 +61,7 @@ impl MovieMutations {
         ctx: &Context<'_>,
         input: IndexMovieInput,
     ) -> Result<IndexMovieMutationResponse> {
+        require_settings_access(ctx)?;
         let pool = ctx.data::<sqlx::PgPool>()?;
         let job_queue = ctx.data::<Arc<JobQueue>>()?;
 

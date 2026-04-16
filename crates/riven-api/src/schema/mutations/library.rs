@@ -8,6 +8,8 @@ use riven_queue::{IndexJob, JobQueue};
 use sqlx::PgPool;
 use std::sync::Arc;
 
+use crate::schema::auth::require_library_access;
+
 // ── Resolver ──
 
 #[derive(Default)]
@@ -18,24 +20,28 @@ impl LibraryMutations {
     /// Delete a specific filesystem entry (a single downloaded version) by its ID.
     /// Returns true if the entry was found and deleted.
     async fn delete_filesystem_entry(&self, ctx: &Context<'_>, id: i64) -> Result<bool> {
+        require_library_access(ctx)?;
         let pool = ctx.data::<PgPool>()?;
         Ok(repo::delete_filesystem_entry(pool, id).await?)
     }
 
     /// Reset items to Indexed state and clear failed_attempts.
     async fn reset_items(&self, ctx: &Context<'_>, ids: Vec<i64>) -> Result<i64> {
+        require_library_access(ctx)?;
         let pool = ctx.data::<PgPool>()?;
         Ok(repo::reset_items_by_ids(pool, ids).await? as i64)
     }
 
     /// Clear failed_attempts for items so they will be retried.
     async fn retry_items(&self, ctx: &Context<'_>, ids: Vec<i64>) -> Result<i64> {
+        require_library_access(ctx)?;
         let pool = ctx.data::<PgPool>()?;
         Ok(repo::retry_items_by_ids(pool, ids).await? as i64)
     }
 
     /// Remove items by ID.
     async fn remove_items(&self, ctx: &Context<'_>, ids: Vec<i64>) -> Result<i64> {
+        require_library_access(ctx)?;
         let pool = ctx.data::<PgPool>()?;
         let job_queue = ctx.data::<Arc<JobQueue>>()?;
 
@@ -63,12 +69,14 @@ impl LibraryMutations {
 
     /// Pause items.
     async fn pause_items(&self, ctx: &Context<'_>, ids: Vec<i64>) -> Result<i64> {
+        require_library_access(ctx)?;
         let pool = ctx.data::<PgPool>()?;
         Ok(repo::pause_items_by_ids(pool, ids).await? as i64)
     }
 
     /// Unpause items (transitions back to Indexed).
     async fn unpause_items(&self, ctx: &Context<'_>, ids: Vec<i64>) -> Result<i64> {
+        require_library_access(ctx)?;
         let pool = ctx.data::<PgPool>()?;
         Ok(repo::unpause_items_by_ids(pool, ids).await? as i64)
     }
@@ -82,6 +90,7 @@ impl LibraryMutations {
         id: i64,
         season_numbers: Option<Vec<i32>>,
     ) -> Result<String> {
+        require_library_access(ctx)?;
         let pool = ctx.data::<PgPool>()?;
         let job_queue = ctx.data::<Arc<JobQueue>>()?;
         let orchestrator = LibraryOrchestrator::new(job_queue.as_ref());
@@ -110,6 +119,7 @@ impl LibraryMutations {
         tvdb_id: Option<String>,
         seasons: Option<Vec<i32>>,
     ) -> Result<MediaItem> {
+        require_library_access(ctx)?;
         let job_queue = ctx.data::<Arc<JobQueue>>()?;
         let orchestrator = LibraryOrchestrator::new(job_queue.as_ref());
 
@@ -154,6 +164,7 @@ impl LibraryMutations {
         tvdb_id: Option<String>,
         seasons: Option<Vec<i32>>,
     ) -> Result<MediaItem> {
+        require_library_access(ctx)?;
         if !matches!(item_type, MediaItemType::Movie | MediaItemType::Show) {
             return Err(Error::new(
                 "Only Movie and Show types can be discovered directly",

@@ -89,6 +89,9 @@ libc = "0.2"
 bytes = "1"
 tokio-util = { version = "0.7", features = ["io"] }
 ulid = "1"
+hmac = "0.12"
+sha2 = "0.10"
+hex = "0.4"
 
 [patch.crates-io]
 apalis-redis = { path = "vendor/apalis-redis" }

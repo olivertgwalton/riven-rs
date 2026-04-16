@@ -7,6 +7,7 @@ use riven_db::repo;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use super::auth::require_settings_access;
 use super::helpers::derive_media_metadata;
 use super::typed_items::MediaItemUnion;
 use super::types::InstanceStatus;
@@ -288,6 +289,7 @@ impl CoreQuery {
     /// the built-in score so the UI can display the effective value without a
     /// separate query.
     async fn rank_settings(&self, ctx: &Context<'_>) -> Result<serde_json::Value> {
+        require_settings_access(ctx)?;
         let pool = ctx.data::<sqlx::PgPool>()?;
         // Deserialise through RankSettings so serde fills in every missing field
         // with its default value — this ensures the canonical JSON always has the
@@ -307,7 +309,8 @@ impl CoreQuery {
     /// `{ id, label, description, settings }` objects.
     /// Each profile's `custom_ranks` entries include a `"default"` field so the
     /// UI shows the correct placeholder score after applying a profile.
-    async fn quality_profiles(&self) -> Result<serde_json::Value> {
+    async fn quality_profiles(&self, ctx: &Context<'_>) -> Result<serde_json::Value> {
+        require_settings_access(ctx)?;
         let profiles: serde_json::Value = riven_rank::QualityProfile::ALL
             .iter()
             .map(|&p| {
@@ -327,12 +330,14 @@ impl CoreQuery {
 
     /// Return the built-in default score for every CustomRank field, structured
     /// identically to `custom_ranks` in `rankSettings`.
-    async fn rank_defaults(&self) -> Result<serde_json::Value> {
+    async fn rank_defaults(&self, ctx: &Context<'_>) -> Result<serde_json::Value> {
+        require_settings_access(ctx)?;
         Ok(riven_rank::RankingModel::default().to_category_map())
     }
 
     /// Return all ranking profiles (built-in + custom) with their enabled status.
     async fn custom_profiles(&self, ctx: &Context<'_>) -> Result<serde_json::Value> {
+        require_settings_access(ctx)?;
         let pool = ctx.data::<sqlx::PgPool>()?;
         let profiles = repo::list_ranking_profiles(pool).await?;
         Ok(serde_json::to_value(profiles)?)
@@ -340,6 +345,7 @@ impl CoreQuery {
 
     /// Get all stored settings as a JSON object.
     async fn all_settings(&self, ctx: &Context<'_>) -> Result<serde_json::Value> {
+        require_settings_access(ctx)?;
         let pool = ctx.data::<sqlx::PgPool>()?;
         Ok(repo::get_all_settings(pool).await?)
     }
@@ -366,6 +372,7 @@ impl CoreQuery {
 
     /// Get info about all registered plugins.
     async fn plugin_info(&self, ctx: &Context<'_>) -> Result<Vec<PluginInfo>> {
+        require_settings_access(ctx)?;
         let registry = ctx.data::<Arc<PluginRegistry>>()?;
         Ok(registry
             .all_plugins_info()
@@ -387,6 +394,7 @@ impl CoreQuery {
         ctx: &Context<'_>,
         plugin: String,
     ) -> Result<serde_json::Value> {
+        require_settings_access(ctx)?;
         let registry = ctx.data::<Arc<PluginRegistry>>()?;
         let pool = ctx.data::<sqlx::PgPool>()?;
         let mut settings = registry
@@ -405,6 +413,7 @@ impl CoreQuery {
 
     /// Return whether a plugin is effectively enabled.
     async fn plugin_enabled(&self, ctx: &Context<'_>, plugin: String) -> Result<bool> {
+        require_settings_access(ctx)?;
         let registry = ctx.data::<Arc<PluginRegistry>>()?;
         let pool = ctx.data::<sqlx::PgPool>()?;
         Ok(registry
@@ -414,7 +423,8 @@ impl CoreQuery {
     }
 
     /// Return the SettingField schema for the general (non-plugin) settings.
-    async fn general_settings_schema(&self) -> Result<serde_json::Value> {
+    async fn general_settings_schema(&self, ctx: &Context<'_>) -> Result<serde_json::Value> {
+        require_settings_access(ctx)?;
         let schema: Vec<SettingField> = vec![
             SettingField::new("dubbed_anime_only", "Dubbed anime only", "boolean")
                 .with_description("Only fetch dubbed versions of anime titles."),
@@ -541,6 +551,7 @@ impl CoreQuery {
 
     /// Get general (non-plugin) settings. Returns defaults merged with DB values.
     async fn general_settings(&self, ctx: &Context<'_>) -> Result<serde_json::Value> {
+        require_settings_access(ctx)?;
         let pool = ctx.data::<sqlx::PgPool>()?;
         let defaults = RivenSettings::default();
         let mut result = serde_json::json!({

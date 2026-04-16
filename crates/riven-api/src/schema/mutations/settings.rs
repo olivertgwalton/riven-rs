@@ -11,6 +11,8 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use tokio::sync::RwLock;
 
+use crate::schema::auth::require_settings_access;
+
 // ── Helpers ──
 
 fn coerce_json_bool(value: &serde_json::Value) -> Option<bool> {
@@ -63,6 +65,7 @@ impl SettingsMutations {
         settings: serde_json::Value,
         enabled: Option<bool>,
     ) -> Result<serde_json::Value> {
+        require_settings_access(ctx)?;
         let validated: riven_rank::RankSettings = serde_json::from_value(settings)
             .map_err(|e| Error::new(format!("invalid rank settings: {e}")))?;
         let canonical = serde_json::to_value(&validated)
@@ -77,6 +80,7 @@ impl SettingsMutations {
 
     /// Delete a custom ranking profile by ID. Built-in profiles cannot be deleted.
     async fn delete_custom_profile(&self, ctx: &Context<'_>, id: i32) -> Result<bool> {
+        require_settings_access(ctx)?;
         let pool = ctx.data::<PgPool>()?;
         Ok(repo::delete_ranking_profile(pool, id).await?)
     }
@@ -89,6 +93,7 @@ impl SettingsMutations {
         name: String,
         enabled: bool,
     ) -> Result<bool> {
+        require_settings_access(ctx)?;
         let pool = ctx.data::<PgPool>()?;
         Ok(repo::set_profile_enabled(pool, &name, enabled).await?)
     }
@@ -102,6 +107,7 @@ impl SettingsMutations {
         name: String,
         settings: serde_json::Value,
     ) -> Result<bool> {
+        require_settings_access(ctx)?;
         let _validated: riven_rank::RankSettings = serde_json::from_value(settings.clone())
             .map_err(|e| Error::new(format!("invalid rank settings: {e}")))?;
 
@@ -117,6 +123,7 @@ impl SettingsMutations {
         ctx: &Context<'_>,
         settings: serde_json::Value,
     ) -> Result<serde_json::Value> {
+        require_settings_access(ctx)?;
         let validated: riven_rank::RankSettings = serde_json::from_value(settings)
             .map_err(|e| Error::new(format!("invalid rank settings: {e}")))?;
         let canonical = serde_json::to_value(&validated)
@@ -133,12 +140,14 @@ impl SettingsMutations {
         ctx: &Context<'_>,
         settings: serde_json::Value,
     ) -> Result<serde_json::Value> {
+        require_settings_access(ctx)?;
         let pool = ctx.data::<PgPool>()?;
         Ok(repo::set_all_settings(pool, settings).await?)
     }
 
     /// Mark the instance-wide first-run setup flow as completed.
     async fn complete_initial_setup(&self, ctx: &Context<'_>) -> Result<bool> {
+        require_settings_access(ctx)?;
         let pool = ctx.data::<PgPool>()?;
         repo::set_setting(
             pool,
@@ -158,6 +167,7 @@ impl SettingsMutations {
         plugin: String,
         mut settings: serde_json::Value,
     ) -> Result<serde_json::Value> {
+        require_settings_access(ctx)?;
         let pool = ctx.data::<PgPool>()?;
         let key = format!("plugin.{plugin}");
         let enabled = match settings
@@ -231,6 +241,7 @@ impl SettingsMutations {
         plugin: String,
         enabled: bool,
     ) -> Result<serde_json::Value> {
+        require_settings_access(ctx)?;
         let pool = ctx.data::<PgPool>()?;
         let settings_key = format!("plugin.{plugin}");
         let settings = match repo::get_setting(pool, &settings_key).await? {
@@ -288,6 +299,7 @@ impl SettingsMutations {
         ctx: &Context<'_>,
         settings: serde_json::Value,
     ) -> Result<serde_json::Value> {
+        require_settings_access(ctx)?;
         let pool = ctx.data::<PgPool>()?;
         repo::set_setting(pool, "general", settings.clone()).await?;
 

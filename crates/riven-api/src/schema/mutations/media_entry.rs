@@ -3,6 +3,8 @@ use riven_db::entities::FileSystemEntry;
 use riven_db::repo;
 use sqlx::PgPool;
 
+use crate::schema::auth::require_library_access;
+
 use super::MutationStatusText;
 
 // ── Response types ──
@@ -33,6 +35,7 @@ impl MediaEntryMutations {
         id: i64,
         url: String,
     ) -> Result<SaveStreamUrlMutationResponse> {
+        require_library_access(ctx)?;
         let pool = ctx.data::<PgPool>()?;
 
         repo::update_stream_url(pool, id, &url).await?;

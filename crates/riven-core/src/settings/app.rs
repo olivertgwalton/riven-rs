@@ -40,6 +40,8 @@ pub struct RivenSettings {
     /// Bearer token / API key required on the GraphQL endpoint.
     /// Empty string means no authentication is enforced.
     pub api_key: String,
+    /// Shared secret used to verify frontend-signed auth claims.
+    pub frontend_auth_signing_secret: String,
 
     /// VFS in-memory chunk cache capacity in MB. 0 = use default (1 024 MB).
     pub vfs_cache_max_size_mb: u64,
@@ -79,6 +81,7 @@ impl Default for RivenSettings {
             schedule_offset_minutes: 30,
             unknown_air_date_offset_days: 7,
             api_key: String::new(),
+            frontend_auth_signing_secret: String::new(),
             vfs_cache_max_size_mb: 0,
         }
     }

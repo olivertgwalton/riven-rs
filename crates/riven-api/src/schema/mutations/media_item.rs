@@ -12,6 +12,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use crate::schema::typed_items::MediaItemUnion;
+use crate::schema::auth::require_library_access;
 
 use super::MutationStatusText;
 
@@ -63,6 +64,7 @@ impl MediaItemMutations {
         ctx: &Context<'_>,
         input: ScrapeMediaItemMutationInput,
     ) -> Result<ScrapeMediaItemMutationResponse> {
+        require_library_access(ctx)?;
         let pool = ctx.data::<sqlx::PgPool>()?;
         let job_queue = ctx.data::<Arc<JobQueue>>()?;
 
@@ -182,6 +184,7 @@ impl MediaItemMutations {
         ctx: &Context<'_>,
         input: DownloadMediaItemMutationInput,
     ) -> Result<DownloadMediaItemMutationResponse> {
+        require_library_access(ctx)?;
         let job_queue = ctx.data::<Arc<JobQueue>>()?;
 
         let torrent: ManualDownloadTorrentInput = serde_json::from_value(input.torrent)

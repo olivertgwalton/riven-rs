@@ -4,6 +4,8 @@ use riven_core::types::{ContentServiceResponse, ExternalIds};
 use riven_db::repo;
 use std::sync::Arc;
 
+use crate::schema::auth::require_settings_access;
+
 // ── Settings type ──────────────────────────────────────────────────────────────
 
 /// Merged plugin settings. Each field returns that plugin's current settings
@@ -83,6 +85,7 @@ pub struct SettingsQuery;
 impl SettingsQuery {
     /// Return the current settings for every plugin as a typed object.
     async fn settings(&self, ctx: &Context<'_>) -> Result<Settings> {
+        require_settings_access(ctx)?;
         let registry = ctx.data::<Arc<PluginRegistry>>()?.clone();
         let pool = ctx.data::<sqlx::PgPool>()?.clone();
         Ok(Settings { registry, pool })

@@ -8,6 +8,7 @@ use riven_queue::JobQueue;
 use std::sync::Arc;
 
 use crate::schema::typed_items::Show;
+use crate::schema::auth::require_settings_access;
 
 use super::MutationStatusText;
 use super::movie::{parse_aliases, parse_naive_date};
@@ -81,6 +82,7 @@ impl ShowMutations {
         ctx: &Context<'_>,
         input: IndexShowInput,
     ) -> Result<IndexShowMutationResponse> {
+        require_settings_access(ctx)?;
         let pool = ctx.data::<sqlx::PgPool>()?;
         let job_queue = ctx.data::<Arc<JobQueue>>()?;
 

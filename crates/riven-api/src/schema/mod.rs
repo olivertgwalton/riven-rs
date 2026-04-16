@@ -7,6 +7,7 @@ use riven_core::plugin::PluginRegistry;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+pub(crate) mod auth;
 pub mod discovery;
 mod event_controller;
 mod helpers;

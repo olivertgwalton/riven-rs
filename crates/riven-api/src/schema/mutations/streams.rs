@@ -6,6 +6,7 @@ use riven_queue::{DownloadJob, JobQueue};
 use sqlx::PgPool;
 use std::sync::Arc;
 
+use crate::schema::auth::require_library_access;
 use crate::schema::discovery::{discover_streams, ensure_download_target};
 use crate::schema::types::DiscoveredStream;
 
@@ -28,6 +29,7 @@ impl StreamsMutations {
         seasons: Option<Vec<i32>>,
         cached_only: Option<bool>,
     ) -> Result<Vec<DiscoveredStream>> {
+        require_library_access(ctx)?;
         let pool = ctx.data::<PgPool>()?;
         let registry = ctx.data::<Arc<PluginRegistry>>()?;
 
@@ -60,6 +62,7 @@ impl StreamsMutations {
         parsed_data: Option<serde_json::Value>,
         rank: Option<i64>,
     ) -> Result<String> {
+        require_library_access(ctx)?;
         let pool = ctx.data::<PgPool>()?;
         let registry = ctx.data::<Arc<PluginRegistry>>()?;
         let job_queue = ctx.data::<Arc<JobQueue>>()?;

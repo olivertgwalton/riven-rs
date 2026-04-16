@@ -6,6 +6,8 @@ use riven_queue::orchestrator::LibraryOrchestrator;
 use std::collections::HashSet;
 use std::sync::Arc;
 
+use crate::schema::auth::require_request_access;
+
 use super::MutationStatusText;
 
 #[derive(Enum, Copy, Clone, PartialEq, Eq)]
@@ -85,6 +87,7 @@ impl ItemRequestMutations {
         ctx: &Context<'_>,
         input: MovieRequestInput,
     ) -> Result<RequestItemMutationResponse> {
+        require_request_access(ctx)?;
         let job_queue = ctx.data::<Arc<JobQueue>>()?;
         let orchestrator = LibraryOrchestrator::new(job_queue.as_ref());
 
@@ -143,6 +146,7 @@ impl ItemRequestMutations {
         ctx: &Context<'_>,
         input: ShowRequestInput,
     ) -> Result<RequestItemMutationResponse> {
+        require_request_access(ctx)?;
         let job_queue = ctx.data::<Arc<JobQueue>>()?;
         let orchestrator = LibraryOrchestrator::new(job_queue.as_ref());
 
@@ -219,6 +223,7 @@ impl ItemRequestMutations {
         movies: Vec<MovieRequestInput>,
         shows: Vec<ShowRequestInput>,
     ) -> Result<RequestItemsResult> {
+        require_request_access(ctx)?;
         let job_queue = ctx.data::<Arc<JobQueue>>()?;
         let orchestrator = LibraryOrchestrator::new(job_queue.as_ref());
 
