@@ -141,3 +141,6 @@ impl LogsQuery {
         Ok(entries)
     }
 }
+
+#[cfg(test)]
+mod tests;

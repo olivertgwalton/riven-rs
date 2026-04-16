@@ -248,3 +248,6 @@ struct TmdbReleaseDateCountry {
 struct TmdbReleaseDateResult {
     certification: String,
 }
+
+#[cfg(test)]
+mod tests;

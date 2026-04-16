@@ -10,6 +10,7 @@ use riven_core::types::MediaItemType;
 
 const TORRENTIO_BASE_URL: &str = "http://torrentio.strem.fun/";
 const DEFAULT_FILTER: &str = "sort=qualitysize%7Cqualityfilter=threed,480p,scr,cam";
+const PEER_COUNT_MARKER: &str = "\u{1F464}";
 
 #[derive(Default)]
 pub struct TorrentioPlugin;
@@ -50,17 +51,14 @@ impl Plugin for TorrentioPlugin {
 
         let filter = ctx.settings.get_or("filter", DEFAULT_FILTER);
 
-        let (scrape_type, identifier) = match request.item_type {
-            MediaItemType::Movie => ("movie", String::new()),
-            _ => {
-                let s = request.season_or_1();
-                let e = request.episode_or_1();
-                ("series", format!(":{s}:{e}"))
-            }
-        };
-
-        let url =
-            format!("{TORRENTIO_BASE_URL}{filter}/stream/{scrape_type}/{imdb_id}{identifier}.json");
+        let scrape_type = scrape_type(request.item_type);
+        let url = scrape_url(
+            &filter,
+            request.item_type,
+            imdb_id,
+            request.season,
+            request.episode,
+        );
 
         tracing::debug!(
             url = %url,
@@ -88,28 +86,7 @@ impl Plugin for TorrentioPlugin {
             .json()
             .map_err(|e| anyhow::anyhow!("torrentio response parse error for {url}: {e}"))?;
 
-        let mut results = HashMap::new();
-        for stream in resp.streams {
-            if let Some(info_hash) = stream.info_hash {
-                let title = stream
-                    .title
-                    .as_deref()
-                    .unwrap_or("")
-                    .lines()
-                    .next()
-                    .unwrap_or("")
-                    .split("👤")
-                    .next()
-                    .unwrap_or("")
-                    .trim()
-                    .to_string();
-
-                if !title.is_empty() {
-                    let info_hash = info_hash.to_lowercase();
-                    results.insert(info_hash, title);
-                }
-            }
-        }
+        let results = scrape_results_from_response(resp);
 
         tracing::info!(count = results.len(), imdb_id, "torrentio scrape complete");
         Ok(HookResponse::Scrape(results))
@@ -128,3 +105,59 @@ struct TorrentioStream {
     #[serde(rename = "infoHash")]
     info_hash: Option<String>,
 }
+
+fn scrape_url(
+    filter: &str,
+    item_type: MediaItemType,
+    imdb_id: &str,
+    season: Option<i32>,
+    episode: Option<i32>,
+) -> String {
+    let (scrape_type, identifier) = match item_type {
+        MediaItemType::Movie => (scrape_type(item_type), String::new()),
+        _ => {
+            let s = season.unwrap_or(1);
+            let e = episode.unwrap_or(1);
+            (scrape_type(item_type), format!(":{s}:{e}"))
+        }
+    };
+
+    format!("{TORRENTIO_BASE_URL}{filter}/stream/{scrape_type}/{imdb_id}{identifier}.json")
+}
+
+fn scrape_type(item_type: MediaItemType) -> &'static str {
+    match item_type {
+        MediaItemType::Movie => "movie",
+        MediaItemType::Show | MediaItemType::Season | MediaItemType::Episode => "series",
+    }
+}
+
+fn scrape_results_from_response(resp: TorrentioResponse) -> HashMap<String, String> {
+    let mut results = HashMap::new();
+    for stream in resp.streams {
+        if let Some(info_hash) = stream.info_hash {
+            let title = stream_title(stream.title.as_deref());
+
+            if !title.is_empty() {
+                results.insert(info_hash.to_lowercase(), title);
+            }
+        }
+    }
+    results
+}
+
+fn stream_title(title: Option<&str>) -> String {
+    title
+        .unwrap_or("")
+        .lines()
+        .next()
+        .unwrap_or("")
+        .split(PEER_COUNT_MARKER)
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_string()
+}
+
+#[cfg(test)]
+mod tests;

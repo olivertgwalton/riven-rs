@@ -409,3 +409,6 @@ where
         _ => None,
     }))
 }
+
+#[cfg(test)]
+mod tests;

@@ -102,3 +102,6 @@ pub struct StremthruTorznabAttrValue {
     pub name: String,
     pub value: String,
 }
+
+#[cfg(test)]
+mod tests;

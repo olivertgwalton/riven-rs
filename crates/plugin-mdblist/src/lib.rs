@@ -254,3 +254,6 @@ struct MdblistShow {
     imdb_id: Option<String>,
     tvdb_id: Option<i64>,
 }
+
+#[cfg(test)]
+mod tests;

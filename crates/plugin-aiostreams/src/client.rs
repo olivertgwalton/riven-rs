@@ -174,3 +174,6 @@ fn first_description_line(description: String) -> Option<String> {
         .filter(|line| !line.is_empty())
         .map(ToOwned::to_owned)
 }
+
+#[cfg(test)]
+mod tests;

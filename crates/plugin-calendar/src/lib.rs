@@ -251,3 +251,6 @@ impl CalendarQuery {
         Ok(entries)
     }
 }
+
+#[cfg(test)]
+mod tests;

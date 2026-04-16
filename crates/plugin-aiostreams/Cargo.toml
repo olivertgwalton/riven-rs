@@ -11,3 +11,6 @@ async-trait = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 inventory = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

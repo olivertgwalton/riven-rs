@@ -348,3 +348,6 @@ async fn fetch_watched(
         .await?;
     Ok(items)
 }
+
+#[cfg(test)]
+mod tests;

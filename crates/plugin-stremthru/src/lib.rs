@@ -34,7 +34,7 @@ pub struct StremthruPlugin;
 
 register_plugin!(StremthruPlugin);
 
-fn get_configured_stores(settings: &PluginSettings) -> Vec<(&str, String)> {
+fn get_configured_stores(settings: &PluginSettings) -> Vec<(&'static str, String)> {
     STORE_NAMES
         .iter()
         .filter_map(|name| {
@@ -318,3 +318,6 @@ impl Plugin for StremthruPlugin {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

@@ -285,3 +285,6 @@ struct SeerrSeason {
     #[serde(rename = "seasonNumber")]
     season_number: Option<i32>,
 }
+
+#[cfg(test)]
+mod tests;

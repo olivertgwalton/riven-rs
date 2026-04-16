@@ -104,35 +104,7 @@ impl Plugin for CometPlugin {
             }
         };
 
-        let mut results = HashMap::new();
-        for stream in resp.streams {
-            let Some(info_hash) = stream.info_hash else {
-                continue;
-            };
-
-            // Title priority:
-            // 1. behaviorHints.filename (exact original filename)
-            // 2. First line of description, strip leading emoji char
-            let title = if let Some(filename) = stream.behavior_hints.and_then(|h| h.filename) {
-                filename
-            } else if let Some(desc) = stream.description {
-                desc.lines()
-                    .next()
-                    .unwrap_or("")
-                    .chars()
-                    .skip(1) // strip leading emoji
-                    .collect::<String>()
-                    .trim()
-                    .to_string()
-            } else {
-                continue;
-            };
-
-            if !title.is_empty() {
-                let info_hash = info_hash.to_lowercase();
-                results.insert(info_hash, title);
-            }
-        }
+        let results = scrape_results_from_response(resp);
 
         tracing::info!(
             count = results.len(),
@@ -163,3 +135,41 @@ struct CometStream {
 struct CometBehaviorHints {
     filename: Option<String>,
 }
+
+fn scrape_results_from_response(resp: CometResponse) -> HashMap<String, String> {
+    let mut results = HashMap::new();
+    for stream in resp.streams {
+        let Some(info_hash) = stream.info_hash.clone() else {
+            continue;
+        };
+        let Some(title) = title_from_stream(stream) else {
+            continue;
+        };
+
+        if !title.is_empty() {
+            results.insert(info_hash.to_lowercase(), title);
+        }
+    }
+    results
+}
+
+fn title_from_stream(stream: CometStream) -> Option<String> {
+    // Title priority:
+    // 1. behaviorHints.filename (exact original filename)
+    // 2. First line of description, strip leading emoji char
+    stream.behavior_hints.and_then(|h| h.filename).or_else(|| {
+        stream.description.map(|desc| {
+            desc.lines()
+                .next()
+                .unwrap_or("")
+                .chars()
+                .skip(1)
+                .collect::<String>()
+                .trim()
+                .to_string()
+        })
+    })
+}
+
+#[cfg(test)]
+mod tests;

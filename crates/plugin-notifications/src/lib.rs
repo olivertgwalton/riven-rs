@@ -572,3 +572,6 @@ struct TvdbSeriesSlug {
 struct TmdbOverviewResponse {
     overview: Option<String>,
 }
+
+#[cfg(test)]
+mod tests;

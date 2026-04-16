@@ -175,3 +175,6 @@ struct ListrrItem {
     #[serde(rename = "tmDbId")]
     tmdb_id: Option<i64>,
 }
+
+#[cfg(test)]
+mod tests;

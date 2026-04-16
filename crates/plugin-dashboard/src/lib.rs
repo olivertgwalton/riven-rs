@@ -159,3 +159,6 @@ impl DashboardQuery {
         Ok(cache.get_or_refresh(registry).await)
     }
 }
+
+#[cfg(test)]
+mod tests;

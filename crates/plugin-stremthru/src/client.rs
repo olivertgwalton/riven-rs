@@ -452,6 +452,9 @@ fn describe_empty_link_response(body: &str) -> String {
     }
 }
 
+#[cfg(test)]
+mod tests;
+
 pub async fn fetch_user_info(
     http: &HttpClient,
     base_url: &str,

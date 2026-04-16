@@ -325,3 +325,6 @@ struct MediaServerPlayState {
     #[serde(rename = "PlayMethod")]
     play_method: Option<String>,
 }
+
+#[cfg(test)]
+mod tests;

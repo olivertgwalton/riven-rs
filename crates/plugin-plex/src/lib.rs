@@ -376,3 +376,6 @@ mod urlencoding {
         result
     }
 }
+
+#[cfg(test)]
+mod tests;

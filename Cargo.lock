@@ -2147,6 +2147,7 @@ dependencies = [
  "reqwest",
  "riven-core",
  "serde",
+ "serde_json",
  "tracing",
 ]
 

@@ -38,3 +38,6 @@ pub(crate) struct AioStreamsStream {
     pub name: Option<String>,
     pub description: Option<String>,
 }
+
+#[cfg(test)]
+mod tests;
