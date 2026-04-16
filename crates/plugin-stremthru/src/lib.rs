@@ -283,10 +283,10 @@ impl Plugin for StremthruPlugin {
                 });
 
                 for (store, api_key) in ordered_stores {
-                    if let Some(p) = provider.as_deref() {
-                        if store != p {
-                            continue;
-                        }
+                    if let Some(p) = provider.as_deref()
+                        && store != p
+                    {
+                        continue;
                     }
                     let result = generate_link(&ctx.http, &base_url, store, api_key, magnet).await;
                     match result {

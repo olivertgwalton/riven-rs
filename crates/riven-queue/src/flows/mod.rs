@@ -21,7 +21,7 @@ pub(crate) async fn start_plugin_flow<Push, Fut>(
     prefix: &str,
     id: i64,
     event_type: EventType,
-    mut push_plugin_job: Push,
+    push_plugin_job: Push,
 ) -> usize
 where
     Push: FnMut(String) -> Fut,
@@ -37,7 +37,7 @@ where
     queue.init_flow(prefix, id, pending).await;
 
     // Push all plugin jobs concurrently — each is an independent Redis RPUSH.
-    future::join_all(subscribers.into_iter().map(|name| push_plugin_job(name))).await;
+    future::join_all(subscribers.into_iter().map(push_plugin_job)).await;
 
     pending
 }

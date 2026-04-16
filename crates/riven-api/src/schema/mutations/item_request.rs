@@ -201,10 +201,10 @@ impl ItemRequestMutations {
                 .or(movie.imdb_id.as_deref())
                 .map(str::to_owned);
 
-            if let Some(ref k) = key {
-                if !seen.insert(k.clone()) {
-                    continue;
-                }
+            if let Some(ref k) = key
+                && !seen.insert(k.clone())
+            {
+                continue;
             }
 
             count += 1;
@@ -244,10 +244,10 @@ impl ItemRequestMutations {
                 .or(show.imdb_id.as_deref())
                 .map(str::to_owned);
 
-            if let Some(ref k) = key {
-                if !seen.insert(k.clone()) {
-                    continue;
-                }
+            if let Some(ref k) = key
+                && !seen.insert(k.clone())
+            {
+                continue;
             }
 
             count += 1;

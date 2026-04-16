@@ -144,8 +144,7 @@ fn is_truthy(value: &str) -> bool {
 fn target_display(target: &str) -> String {
     if target.starts_with("plugin_") {
         let crate_name = target.split("::").next().unwrap_or(target);
-        let name = crate_name.replace('_', "-");
-        name
+        crate_name.replace('_', "-")
     } else if target.starts_with("riven") {
         "core".to_string()
     } else {

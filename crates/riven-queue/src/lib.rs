@@ -228,11 +228,11 @@ impl JobQueue {
         Fut: Future<Output = std::result::Result<(), E>>,
         E: std::fmt::Display,
     {
-        if self.set_nx(&dedup_key(prefix, id)).await {
-            if let Err(e) = push().await {
-                self.release_dedup(prefix, id).await;
-                tracing::error!(error = %e, label, "failed to push job");
-            }
+        if self.set_nx(&dedup_key(prefix, id)).await
+            && let Err(e) = push().await
+        {
+            self.release_dedup(prefix, id).await;
+            tracing::error!(error = %e, label, "failed to push job");
         }
     }
 

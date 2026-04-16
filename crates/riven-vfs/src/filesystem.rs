@@ -278,8 +278,8 @@ impl RivenFs {
         self.request_and_persist_stream_url(
             path,
             entry.id,
-            entry.download_url.as_deref().map(|url| url.as_ref()),
-            entry.provider.as_deref().map(|p| p.as_ref()),
+            entry.download_url.as_deref(),
+            entry.provider.as_deref(),
         )
     }
 
@@ -558,7 +558,7 @@ impl Filesystem for RivenFs {
                     &path,
                     entry_id,
                     Some(download_url.as_ref()),
-                    provider.as_deref().map(|p| p.as_ref()),
+                    provider.as_deref(),
                 ) else {
                     return reply.error(code);
                 };

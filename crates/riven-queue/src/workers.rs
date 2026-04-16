@@ -145,13 +145,12 @@ pub fn start_workers(queue: Arc<JobQueue>) -> Monitor {
         download_n,
         handle_download_job
     );
-    let m = register_worker!(
+    register_worker!(
         m,
         queue,
         "riven-content",
         content_storage,
         1,
         handle_content_service_job
-    );
-    m
+    )
 }
