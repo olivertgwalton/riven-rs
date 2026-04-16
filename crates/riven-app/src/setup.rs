@@ -24,9 +24,11 @@ pub async fn register_plugins(
             plugin_settings.merge_db_override(&db_val);
         }
 
-        let enabled = riven_db::repo::get_plugin_enabled(&db_pool, name)
+        let enabled = riven_db::repo::get_plugin_enabled_setting(&db_pool, name)
             .await
-            .unwrap_or(true);
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| plugin_settings.has_effective_values());
 
         registry
             .register(

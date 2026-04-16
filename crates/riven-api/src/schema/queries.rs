@@ -405,17 +405,24 @@ impl CoreQuery {
             .get_plugin_settings_json(&plugin)
             .await
             .unwrap_or(serde_json::Value::Object(Default::default()));
-        let enabled = repo::get_plugin_enabled(pool, &plugin).await?;
+        let enabled = registry
+            .is_plugin_enabled(&plugin)
+            .await
+            .unwrap_or(repo::get_plugin_enabled(pool, &plugin).await?);
         if let Some(obj) = settings.as_object_mut() {
             obj.insert("enabled".to_string(), serde_json::Value::Bool(enabled));
         }
         Ok(settings)
     }
 
-    /// Return whether a plugin is explicitly enabled.
+    /// Return whether a plugin is effectively enabled.
     async fn plugin_enabled(&self, ctx: &Context<'_>, plugin: String) -> Result<bool> {
+        let registry = ctx.data::<Arc<PluginRegistry>>()?;
         let pool = ctx.data::<sqlx::PgPool>()?;
-        Ok(repo::get_plugin_enabled(pool, &plugin).await?)
+        Ok(registry
+            .is_plugin_enabled(&plugin)
+            .await
+            .unwrap_or(repo::get_plugin_enabled(pool, &plugin).await?))
     }
 
     /// Return the SettingField schema for the general (non-plugin) settings.

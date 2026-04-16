@@ -194,10 +194,16 @@ pub async fn set_setting(pool: &PgPool, key: &str, value: serde_json::Value) -> 
 }
 
 pub async fn get_plugin_enabled(pool: &PgPool, name: &str) -> Result<bool> {
+    Ok(get_plugin_enabled_setting(pool, name)
+        .await?
+        .unwrap_or(false))
+}
+
+pub async fn get_plugin_enabled_setting(pool: &PgPool, name: &str) -> Result<Option<bool>> {
     let key = format!("plugin_enabled.{name}");
     Ok(match get_setting(pool, &key).await? {
-        Some(serde_json::Value::Bool(enabled)) => enabled,
-        _ => true,
+        Some(serde_json::Value::Bool(enabled)) => Some(enabled),
+        _ => None,
     })
 }
 

@@ -272,4 +272,12 @@ fn plugin_settings_reports_empty_only_when_no_values_exist() {
     assert!(empty.is_empty());
     assert!(!whitespace_only.has("blank"));
     assert!(!whitespace_only.is_empty());
+    assert!(!whitespace_only.has_effective_values());
+}
+
+#[test]
+fn plugin_settings_reports_effective_values_when_any_value_is_usable() {
+    let settings = plugin_settings(&[("blank", "   "), ("api_key", " secret ")]);
+
+    assert!(settings.has_effective_values());
 }

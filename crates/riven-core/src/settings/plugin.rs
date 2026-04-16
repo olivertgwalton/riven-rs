@@ -76,6 +76,10 @@ impl PluginSettings {
         self.values.is_empty()
     }
 
+    pub fn has_effective_values(&self) -> bool {
+        self.values.keys().any(|key| self.get(key).is_some())
+    }
+
     /// Merge DB-stored settings (JSON object of string values) on top of env vars.
     /// DB values win for any key they provide.
     pub fn merge_db_override(&mut self, db_value: &serde_json::Value) {

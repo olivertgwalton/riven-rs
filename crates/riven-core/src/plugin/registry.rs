@@ -203,6 +203,15 @@ impl PluginRegistry {
             .map(|p| p.context.settings.to_json())
     }
 
+    pub async fn is_plugin_enabled(&self, name: &str) -> Option<bool> {
+        self.plugins
+            .read()
+            .await
+            .iter()
+            .find(|p| p.plugin.name() == name)
+            .map(|p| p.enabled)
+    }
+
     /// Validate a plugin against its current settings without mutating state.
     pub async fn validate_plugin_current(&self, name: &str) -> bool {
         let plugins = self.plugins.read().await;
