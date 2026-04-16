@@ -8,6 +8,7 @@ use std::sync::Arc;
 use tokio::sync::broadcast;
 
 use super::queries::CoreQuery;
+use super::typed_items::Show;
 use super::types::MediaItemStateTree;
 
 // ── Notification shape ────────────────────────────────────────────────────────
@@ -303,7 +304,7 @@ impl SubscriptionRoot {
     async fn show_indexed(
         &self,
         ctx: &Context<'_>,
-    ) -> async_graphql::Result<impl Stream<Item = async_graphql::Result<MediaItem>>> {
+    ) -> async_graphql::Result<impl Stream<Item = async_graphql::Result<Show>>> {
         let pool = ctx.data::<sqlx::PgPool>()?.clone();
         let queue = Arc::clone(ctx.data::<Arc<riven_queue::JobQueue>>()?);
         Ok(
@@ -319,7 +320,7 @@ impl SubscriptionRoot {
                     }
 
                     match repo::get_media_item(&pool, id).await {
-                        Ok(Some(item)) => Some(Ok(item)),
+                        Ok(Some(item)) => Some(Ok(Show { item })),
                         Ok(None) => None,
                         Err(error) => Some(Err(error.into())),
                     }

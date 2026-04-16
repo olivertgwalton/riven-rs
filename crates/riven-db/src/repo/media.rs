@@ -70,6 +70,19 @@ pub async fn get_media_item(pool: &PgPool, id: i64) -> Result<Option<MediaItem>>
     )
 }
 
+pub async fn list_media_items_by_ids(pool: &PgPool, ids: &[i64]) -> Result<Vec<MediaItem>> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    Ok(
+        sqlx::query_as::<_, MediaItem>("SELECT * FROM media_items WHERE id = ANY($1)")
+            .bind(ids)
+            .fetch_all(pool)
+            .await?,
+    )
+}
+
 pub async fn get_media_item_by_imdb(pool: &PgPool, id: &str) -> Result<Option<MediaItem>> {
     Ok(
         sqlx::query_as::<_, MediaItem>("SELECT * FROM media_items WHERE imdb_id = $1")
@@ -373,6 +386,15 @@ pub async fn update_media_item_state(pool: &PgPool, id: i64, state: MediaItemSta
     )
     .execute(pool)
     .await?;
+    Ok(())
+}
+
+pub async fn set_active_stream(pool: &PgPool, id: i64, stream_id: i64) -> Result<()> {
+    sqlx::query("UPDATE media_items SET active_stream_id = $2, updated_at = NOW() WHERE id = $1")
+        .bind(id)
+        .bind(stream_id)
+        .execute(pool)
+        .await?;
     Ok(())
 }
 

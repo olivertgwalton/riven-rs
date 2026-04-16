@@ -9,17 +9,156 @@ use riven_core::types::*;
 use riven_db::entities::{MediaItem, Stream};
 use riven_db::repo;
 use riven_rank::RankSettings;
+use serde::Deserialize;
 
 use crate::context::{DownloadHierarchyContext, load_download_hierarchy_context};
 use crate::flows::download_item::helpers::load_item_or_err;
+use crate::flows::download_item::persist::{finalize_download_success, persist_supplied_download};
 use crate::flows::load_active_profiles;
-use crate::orchestrator::LibraryOrchestrator;
 use crate::{DownloadJob, JobQueue};
 
 use self::candidates::{
     CachedCandidate, build_cached_candidates, find_preferred_candidate, pick_best_for_profile,
 };
 use self::execute::{DownloadAttemptOutcome, attempt_download};
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ManualDownloadFileInput {
+    pub name: String,
+    pub size: u64,
+    #[serde(default)]
+    pub link: Option<String>,
+    #[serde(default)]
+    pub matched_media_item_id: Option<i64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ManualDownloadTorrentInput {
+    pub info_hash: String,
+    pub files: Vec<ManualDownloadFileInput>,
+    #[serde(default)]
+    pub provider: Option<String>,
+    #[serde(default)]
+    pub torrent_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ManualDownloadErrorKind {
+    IncorrectState,
+    DownloadError,
+}
+
+#[derive(Debug, Clone)]
+pub struct ManualDownloadError {
+    pub kind: ManualDownloadErrorKind,
+    pub item: Option<MediaItem>,
+    pub message: String,
+}
+
+impl ManualDownloadError {
+    fn incorrect_state(item: MediaItem) -> Self {
+        Self {
+            kind: ManualDownloadErrorKind::IncorrectState,
+            item: Some(item),
+            message: "media item is not in a downloadable state".to_string(),
+        }
+    }
+
+    fn download_error(item: Option<MediaItem>, message: impl Into<String>) -> Self {
+        Self {
+            kind: ManualDownloadErrorKind::DownloadError,
+            item,
+            message: message.into(),
+        }
+    }
+}
+
+pub async fn persist_manual_download(
+    id: i64,
+    torrent: ManualDownloadTorrentInput,
+    processed_by: &str,
+    queue: &JobQueue,
+) -> Result<MediaItem, ManualDownloadError> {
+    let _ = &torrent.torrent_id;
+
+    let Some(item) = load_item_or_err(id, queue, "media item not found for download").await else {
+        return Err(ManualDownloadError::download_error(
+            None,
+            "media item not found for download",
+        ));
+    };
+
+    if !matches!(
+        item.state,
+        MediaItemState::Scraped | MediaItemState::Ongoing | MediaItemState::PartiallyCompleted
+    ) {
+        queue
+            .notify(RivenEvent::MediaItemDownloadErrorIncorrectState { id })
+            .await;
+        return Err(ManualDownloadError::incorrect_state(item));
+    }
+
+    let streams = repo::get_streams_for_item(&queue.db_pool, id)
+        .await
+        .map_err(|error| {
+            ManualDownloadError::download_error(Some(item.clone()), error.to_string())
+        })?;
+    let Some(stream) = streams
+        .into_iter()
+        .find(|stream| stream.info_hash.eq_ignore_ascii_case(&torrent.info_hash))
+    else {
+        return Err(ManualDownloadError::download_error(
+            Some(item),
+            format!("no linked stream found for info hash {}", torrent.info_hash),
+        ));
+    };
+
+    if let Err(error) = repo::set_active_stream(&queue.db_pool, id, stream.id).await {
+        return Err(ManualDownloadError::download_error(
+            Some(item),
+            error.to_string(),
+        ));
+    }
+
+    let start_time = Instant::now();
+    let download = DownloadResult {
+        info_hash: torrent.info_hash.clone(),
+        files: torrent
+            .files
+            .iter()
+            .map(|file| DownloadFile {
+                filename: file.name.clone(),
+                file_size: file.size,
+                download_url: file.link.clone(),
+                stream_url: file
+                    .matched_media_item_id
+                    .map(|episode_id| format!("matched:{episode_id}")),
+            })
+            .collect(),
+        provider: torrent.provider.clone(),
+        plugin_name: processed_by.to_string(),
+    };
+
+    match persist_supplied_download(&item, &stream, download, queue, start_time).await {
+        Ok(()) => repo::get_media_item(&queue.db_pool, id)
+            .await
+            .map_err(|error| {
+                ManualDownloadError::download_error(Some(item.clone()), error.to_string())
+            })?
+            .ok_or_else(|| {
+                ManualDownloadError::download_error(
+                    Some(item),
+                    "media item disappeared after download persist",
+                )
+            }),
+        Err(error) => Err(ManualDownloadError::download_error(
+            Some(item),
+            error.to_string(),
+        )),
+    }
+}
 
 pub async fn run(id: i64, job: &DownloadJob, queue: &JobQueue) {
     let start_time = Instant::now();
@@ -204,7 +343,7 @@ async fn run_preferred_stream(
         DownloadAttemptOutcome::Succeeded => {}
     }
 
-    finalize_download_success(id, item, queue, start_time, None).await;
+    finalize_download_success(id, item, queue, start_time, None, None).await;
     true
 }
 
@@ -308,7 +447,7 @@ async fn run_multi_version(
             .await;
     }
 
-    finalize_download_success(id, item, queue, start_time, None).await;
+    finalize_download_success(id, item, queue, start_time, None, None).await;
     true
 }
 
@@ -348,7 +487,7 @@ async fn run_single_version(
             DownloadAttemptOutcome::Failed => continue,
             DownloadAttemptOutcome::TerminalHandled => return true,
             DownloadAttemptOutcome::Succeeded => {
-                finalize_download_success(id, item, queue, start_time, None).await;
+                finalize_download_success(id, item, queue, start_time, None, None).await;
                 return true;
             }
         }
@@ -363,43 +502,6 @@ async fn run_single_version(
         })
         .await;
     false
-}
-
-async fn finalize_download_success(
-    id: i64,
-    item: &MediaItem,
-    queue: &JobQueue,
-    start_time: Instant,
-    provider: Option<String>,
-) {
-    if let Err(error) = repo::refresh_state_cascade(&queue.db_pool, item).await {
-        tracing::error!(error = %error, "failed to refresh state after download");
-    }
-    LibraryOrchestrator::new(queue)
-        .sync_item_request_state(item)
-        .await;
-
-    let duration = start_time.elapsed();
-    queue
-        .notify(RivenEvent::MediaItemDownloadSuccess {
-            id,
-            title: item.title.clone(),
-            full_title: item.full_title.clone(),
-            item_type: item.item_type,
-            year: item.year,
-            imdb_id: item.imdb_id.clone(),
-            tmdb_id: item.tmdb_id.clone(),
-            poster_path: item.poster_path.clone(),
-            plugin_name: String::new(),
-            provider,
-            duration_seconds: duration.as_secs_f64(),
-        })
-        .await;
-    tracing::debug!(
-        id,
-        duration_secs = duration.as_secs_f64(),
-        "download flow completed"
-    );
 }
 
 async fn fetch_done_profiles(queue: &JobQueue, id: i64, item_type: MediaItemType) -> Vec<String> {

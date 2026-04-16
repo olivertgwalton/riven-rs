@@ -99,12 +99,6 @@ impl CoreQuery {
         Ok(items.into_iter().map(MediaItemUnion::from).collect())
     }
 
-    /// Get a media item by ID.
-    async fn media_item(&self, ctx: &Context<'_>, id: i64) -> Result<Option<MediaItem>> {
-        let pool = ctx.data::<sqlx::PgPool>()?;
-        Ok(repo::get_media_item(pool, id).await?)
-    }
-
     /// Look up media item by IMDB ID.
     async fn media_item_by_imdb(
         &self,
@@ -239,12 +233,6 @@ impl CoreQuery {
     ) -> Result<Vec<FileSystemEntry>> {
         let pool = ctx.data::<sqlx::PgPool>()?;
         Ok(repo::get_filesystem_entries(pool, media_item_id).await?)
-    }
-
-    /// Get streams for a media item.
-    async fn streams(&self, ctx: &Context<'_>, media_item_id: i64) -> Result<Vec<Stream>> {
-        let pool = ctx.data::<sqlx::PgPool>()?;
-        Ok(repo::get_streams_for_item(pool, media_item_id).await?)
     }
 
     /// Get items by state and type.

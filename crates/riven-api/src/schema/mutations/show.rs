@@ -3,10 +3,11 @@ use riven_core::events::RivenEvent;
 use riven_core::types::{
     ContentRating, IndexedEpisode, IndexedMediaItem, IndexedSeason, ShowStatus,
 };
-use riven_db::entities::MediaItem;
 use riven_db::repo;
 use riven_queue::JobQueue;
 use std::sync::Arc;
+
+use crate::schema::typed_items::Show;
 
 use super::MutationStatusText;
 use super::movie::{parse_aliases, parse_naive_date};
@@ -60,7 +61,7 @@ pub(super) struct IndexShowMutationResponse {
     success: bool,
     message: String,
     status_text: MutationStatusText,
-    item: Option<MediaItem>,
+    show: Option<Show>,
 }
 
 // ── Resolver ──
@@ -141,7 +142,7 @@ impl ShowMutations {
                 success: false,
                 message: e.to_string(),
                 status_text: MutationStatusText::InternalServerError,
-                item: None,
+                show: None,
             });
         }
 
@@ -159,7 +160,7 @@ impl ShowMutations {
             success: true,
             message: "Show indexed successfully.".to_string(),
             status_text: MutationStatusText::Ok,
-            item: Some(fresh),
+            show: Some(Show { item: fresh }),
         })
     }
 }

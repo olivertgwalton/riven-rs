@@ -1,6 +1,7 @@
 mod item_request;
 mod library;
 mod media_entry;
+mod media_item;
 mod movie;
 mod settings;
 mod show;
@@ -24,6 +25,7 @@ pub struct MutationRoot(
     item_request::ItemRequestMutations,
     movie::MovieMutations,
     show::ShowMutations,
+    media_item::MediaItemMutations,
     media_entry::MediaEntryMutations,
     settings::SettingsMutations,
     library::LibraryMutations,

@@ -3,7 +3,7 @@ use std::time::Instant;
 use riven_core::events::RivenEvent;
 use riven_core::settings::{FilesystemContentType, FilesystemItemMetadata};
 use riven_core::types::*;
-use riven_db::entities::MediaItem;
+use riven_db::entities::{MediaItem, Stream};
 use riven_db::repo;
 
 use super::helpers::{
@@ -11,6 +11,7 @@ use super::helpers::{
     matches_episode_lookup, parse_file_path, select_episode_files,
 };
 use crate::JobQueue;
+use crate::context::{DownloadHierarchyContext, load_download_hierarchy_context};
 use crate::orchestrator::LibraryOrchestrator;
 pub enum SeasonPersistOutcome {
     Failed,
@@ -18,9 +19,7 @@ pub enum SeasonPersistOutcome {
     Complete,
 }
 
-fn metadata_from_show_context(
-    ctx: &crate::context::DownloadHierarchyContext,
-) -> FilesystemItemMetadata {
+pub(crate) fn metadata_from_show_context(ctx: &DownloadHierarchyContext) -> FilesystemItemMetadata {
     let genres = ctx
         .show_genres
         .as_ref()
@@ -46,10 +45,7 @@ fn metadata_from_show_context(
     }
 }
 
-fn pretty_show_name(
-    ctx: &crate::context::DownloadHierarchyContext,
-    fallback_title: &str,
-) -> String {
+pub(crate) fn pretty_show_name(ctx: &DownloadHierarchyContext, fallback_title: &str) -> String {
     let title = ctx.show_title.as_deref().unwrap_or(fallback_title);
     let year_str = ctx.show_year.map(|y| format!(" ({y})")).unwrap_or_default();
     let id_str = ctx
@@ -58,6 +54,17 @@ fn pretty_show_name(
         .map(|id| format!(" {{tvdb-{id}}}"))
         .unwrap_or_default();
     format!("{title}{year_str}{id_str}")
+}
+
+pub(crate) fn selected_stream_resolution(stream: &Stream) -> Option<&str> {
+    Some(
+        stream
+            .parsed_data
+            .as_ref()
+            .and_then(|parsed| parsed.get("resolution"))
+            .and_then(|value| value.as_str())
+            .unwrap_or("unknown"),
+    )
 }
 
 /// Persist a movie download result. Returns `true` on success.
@@ -455,4 +462,272 @@ pub async fn persist_season(
         "season download flow completed"
     );
     SeasonPersistOutcome::Complete
+}
+
+pub async fn persist_supplied_download(
+    item: &MediaItem,
+    stream: &Stream,
+    download: DownloadResult,
+    queue: &JobQueue,
+    start_time: Instant,
+) -> anyhow::Result<()> {
+    let info_hash = download.info_hash.clone();
+    match item.item_type {
+        MediaItemType::Movie => {
+            if !persist_movie(
+                item,
+                &download,
+                &info_hash,
+                queue,
+                Some(stream.id),
+                selected_stream_resolution(stream),
+                None,
+                None,
+            )
+            .await
+            {
+                anyhow::bail!("failed to persist movie download");
+            }
+
+            finalize_download_success(
+                item.id,
+                item,
+                queue,
+                start_time,
+                download.provider.clone(),
+                Some(download.plugin_name.clone()),
+            )
+            .await;
+        }
+        MediaItemType::Episode => {
+            let hierarchy = load_download_hierarchy_context(&queue.db_pool, item).await;
+            if !persist_episode(
+                item,
+                &download,
+                &info_hash,
+                queue,
+                &hierarchy,
+                Some(stream.id),
+                selected_stream_resolution(stream),
+                None,
+                None,
+            )
+            .await
+            {
+                anyhow::bail!("failed to persist episode download");
+            }
+
+            finalize_download_success(
+                item.id,
+                item,
+                queue,
+                start_time,
+                download.provider.clone(),
+                Some(download.plugin_name.clone()),
+            )
+            .await;
+        }
+        MediaItemType::Season => {
+            let hierarchy = load_download_hierarchy_context(&queue.db_pool, item).await;
+            match persist_season(
+                item,
+                download,
+                &info_hash,
+                queue,
+                &hierarchy,
+                start_time,
+                Some(stream.id),
+                None,
+                None,
+            )
+            .await
+            {
+                SeasonPersistOutcome::Complete | SeasonPersistOutcome::Partial => {}
+                SeasonPersistOutcome::Failed => anyhow::bail!("failed to persist season download"),
+            }
+        }
+        MediaItemType::Show => {
+            persist_supplied_show_download(item, stream, &download, queue, start_time).await?;
+        }
+    }
+    Ok(())
+}
+
+async fn persist_supplied_show_download(
+    item: &MediaItem,
+    stream: &Stream,
+    download: &DownloadResult,
+    queue: &JobQueue,
+    start_time: Instant,
+) -> anyhow::Result<()> {
+    let matched_files: Vec<_> = download
+        .files
+        .iter()
+        .filter_map(|file| {
+            file.stream_url
+                .as_deref()
+                .and_then(|value| value.strip_prefix("matched:"))
+                .and_then(|value| value.parse::<i64>().ok())
+                .map(|episode_id| (file, episode_id))
+        })
+        .collect();
+
+    if matched_files.is_empty() {
+        queue
+            .notify(RivenEvent::MediaItemDownloadPartialSuccess { id: item.id })
+            .await;
+        anyhow::bail!("show downloads require matched media item ids");
+    }
+
+    let episode_ids: Vec<i64> = matched_files
+        .iter()
+        .map(|(_, episode_id)| *episode_id)
+        .collect();
+    let episodes = repo::list_media_items_by_ids(&queue.db_pool, &episode_ids).await?;
+    let episode_map: std::collections::HashMap<i64, MediaItem> = episodes
+        .into_iter()
+        .map(|episode| (episode.id, episode))
+        .collect();
+
+    let mut completed_episode_ids: Vec<i64> = Vec::new();
+    let mut season_ids: Vec<i64> = Vec::new();
+
+    for (file, episode_id) in matched_files {
+        let Some(episode) = episode_map.get(&episode_id) else {
+            anyhow::bail!("matched episode {episode_id} not found");
+        };
+        if episode.item_type != MediaItemType::Episode {
+            anyhow::bail!("matched item {episode_id} is not an episode");
+        }
+        if !matches!(
+            episode.state,
+            MediaItemState::Indexed
+                | MediaItemState::Scraped
+                | MediaItemState::Ongoing
+                | MediaItemState::PartiallyCompleted
+                | MediaItemState::Unreleased
+        ) {
+            continue;
+        }
+
+        let hierarchy = load_download_hierarchy_context(&queue.db_pool, episode).await;
+        let season_number = hierarchy
+            .season_number
+            .unwrap_or_else(|| episode.season_number.unwrap_or(1));
+        let episode_number = episode.episode_number.unwrap_or(1);
+        let show_name = pretty_show_name(&hierarchy, &episode.title);
+        let metadata = metadata_from_show_context(&hierarchy);
+        let filesystem_settings = queue.filesystem_settings.read().await;
+        let library_profiles = filesystem_settings
+            .matching_profile_keys(&metadata, FilesystemContentType::Show)
+            .into_json();
+        drop(filesystem_settings);
+
+        let parsed = parse_file_path(&file.filename);
+        let path = episode_vfs_path(&show_name, season_number, episode_number, parsed.part, None);
+        repo::create_media_entry(
+            &queue.db_pool,
+            episode.id,
+            &path,
+            file.file_size as i64,
+            &file.filename,
+            file.download_url.as_deref(),
+            file.stream_url
+                .as_deref()
+                .filter(|value| !value.starts_with("matched:")),
+            &download.plugin_name,
+            download.provider.as_deref(),
+            Some(stream.id),
+            None,
+            None,
+            Some(&library_profiles),
+        )
+        .await?;
+
+        completed_episode_ids.push(episode.id);
+        if let Some(season_id) = episode.parent_id {
+            season_ids.push(season_id);
+        }
+    }
+
+    if completed_episode_ids.is_empty() {
+        queue
+            .notify(RivenEvent::MediaItemDownloadPartialSuccess { id: item.id })
+            .await;
+        anyhow::bail!("no episode files were persisted from the torrent");
+    }
+
+    repo::batch_set_completed(&queue.db_pool, &completed_episode_ids).await?;
+    season_ids.sort_unstable();
+    season_ids.dedup();
+    for season_id in season_ids {
+        if let Some(season) = repo::get_media_item(&queue.db_pool, season_id).await? {
+            let _ = repo::refresh_state(&queue.db_pool, &season).await;
+        }
+    }
+    let _ = repo::refresh_state(&queue.db_pool, item).await;
+    LibraryOrchestrator::new(queue)
+        .sync_item_request_state(item)
+        .await;
+
+    let completed = matches!(
+        repo::compute_state(&queue.db_pool, item).await,
+        Ok(MediaItemState::Completed)
+    );
+
+    if completed {
+        finalize_download_success(
+            item.id,
+            item,
+            queue,
+            start_time,
+            download.provider.clone(),
+            Some(download.plugin_name.clone()),
+        )
+        .await;
+    } else {
+        queue
+            .notify(RivenEvent::MediaItemDownloadPartialSuccess { id: item.id })
+            .await;
+    }
+
+    Ok(())
+}
+
+pub async fn finalize_download_success(
+    id: i64,
+    item: &MediaItem,
+    queue: &JobQueue,
+    start_time: Instant,
+    provider: Option<String>,
+    plugin_name: Option<String>,
+) {
+    if let Err(error) = repo::refresh_state_cascade(&queue.db_pool, item).await {
+        tracing::error!(error = %error, "failed to refresh state after download");
+    }
+    LibraryOrchestrator::new(queue)
+        .sync_item_request_state(item)
+        .await;
+
+    let duration = start_time.elapsed();
+    queue
+        .notify(RivenEvent::MediaItemDownloadSuccess {
+            id,
+            title: item.title.clone(),
+            full_title: item.full_title.clone(),
+            item_type: item.item_type,
+            year: item.year,
+            imdb_id: item.imdb_id.clone(),
+            tmdb_id: item.tmdb_id.clone(),
+            poster_path: item.poster_path.clone(),
+            plugin_name: plugin_name.unwrap_or_default(),
+            provider,
+            duration_seconds: duration.as_secs_f64(),
+        })
+        .await;
+    tracing::debug!(
+        id,
+        duration_secs = duration.as_secs_f64(),
+        "download flow completed"
+    );
 }

@@ -45,7 +45,7 @@ impl StreamsMutations {
         .await
     }
 
-    /// Create or update the real item only after the user picks a specific discovered stream.
+    /// Create or prepare the real target item only after the user picks a specific stream.
     async fn download_discovered_stream(
         &self,
         ctx: &Context<'_>,
@@ -86,33 +86,6 @@ impl StreamsMutations {
                 id: target.id,
                 info_hash: info_hash.clone(),
                 magnet,
-                preferred_info_hash: Some(info_hash),
-            })
-            .await;
-
-        Ok("Download queued".to_string())
-    }
-
-    /// Download a specific stream already linked to a media item.
-    async fn download_selected_stream(
-        &self,
-        ctx: &Context<'_>,
-        item_id: i64,
-        stream_id: i64,
-    ) -> Result<String> {
-        let pool = ctx.data::<PgPool>()?;
-        let job_queue = ctx.data::<Arc<JobQueue>>()?;
-
-        let stream = repo::get_stream_for_item(pool, item_id, stream_id)
-            .await?
-            .ok_or_else(|| Error::new("Stream not found for item"))?;
-
-        let info_hash = stream.info_hash.clone();
-        job_queue
-            .push_download(DownloadJob {
-                id: item_id,
-                info_hash: info_hash.clone(),
-                magnet: stream.magnet,
                 preferred_info_hash: Some(info_hash),
             })
             .await;

@@ -2,11 +2,12 @@ use async_graphql::*;
 use chrono::Datelike;
 use riven_core::events::RivenEvent;
 use riven_core::types::{ContentRating, IndexedMediaItem};
-use riven_db::entities::MediaItem;
 use riven_db::repo;
 use riven_queue::JobQueue;
 use std::collections::HashMap;
 use std::sync::Arc;
+
+use crate::schema::typed_items::Movie;
 
 use super::MutationStatusText;
 
@@ -40,7 +41,7 @@ pub(super) struct IndexMovieMutationResponse {
     success: bool,
     message: String,
     status_text: MutationStatusText,
-    item: Option<MediaItem>,
+    movie: Option<Movie>,
 }
 
 // ── Resolver ──
@@ -91,7 +92,7 @@ impl MovieMutations {
                 success: false,
                 message: e.to_string(),
                 status_text: MutationStatusText::InternalServerError,
-                item: None,
+                movie: None,
             });
         }
 
@@ -109,7 +110,7 @@ impl MovieMutations {
             success: true,
             message: "Movie indexed successfully.".to_string(),
             status_text: MutationStatusText::Ok,
-            item: Some(fresh),
+            movie: Some(Movie { item: fresh }),
         })
     }
 }

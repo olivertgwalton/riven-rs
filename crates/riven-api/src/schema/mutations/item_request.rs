@@ -8,6 +8,12 @@ use std::sync::Arc;
 
 use super::MutationStatusText;
 
+#[derive(Enum, Copy, Clone, PartialEq, Eq)]
+pub(super) enum RequestItemMutationResponseErrorCode {
+    Conflict,
+    UnexpectedError,
+}
+
 // ── Input types ──
 
 /// Input for requesting a movie to be tracked.
@@ -46,6 +52,7 @@ pub(super) struct RequestItemMutationResponse {
     success: bool,
     message: String,
     status_text: MutationStatusText,
+    error_code: Option<RequestItemMutationResponseErrorCode>,
     /// The item request that was created or updated; `null` on conflict.
     item: Option<ItemRequest>,
 }
@@ -81,7 +88,7 @@ impl ItemRequestMutations {
         let job_queue = ctx.data::<Arc<JobQueue>>()?;
         let orchestrator = LibraryOrchestrator::new(job_queue.as_ref());
 
-        let outcome = orchestrator
+        let outcome = match orchestrator
             .upsert_requested_movie(
                 &input.title,
                 input.imdb_id.as_deref(),
@@ -90,13 +97,25 @@ impl ItemRequestMutations {
                 input.external_request_id.as_deref(),
             )
             .await
-            .map_err(Error::from)?;
+        {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                return Ok(RequestItemMutationResponse {
+                    success: false,
+                    message: error.to_string(),
+                    status_text: MutationStatusText::BadRequest,
+                    error_code: Some(RequestItemMutationResponseErrorCode::UnexpectedError),
+                    item: None,
+                });
+            }
+        };
 
         if outcome.action == ItemRequestUpsertAction::Unchanged {
             return Ok(RequestItemMutationResponse {
                 success: false,
                 message: "A request for this movie already exists.".to_string(),
                 status_text: MutationStatusText::Conflict,
+                error_code: Some(RequestItemMutationResponseErrorCode::Conflict),
                 item: None,
             });
         }
@@ -109,6 +128,7 @@ impl ItemRequestMutations {
             success: true,
             message: "Movie request created successfully.".to_string(),
             status_text: MutationStatusText::Created,
+            error_code: None,
             item: Some(outcome.request),
         })
     }
@@ -126,7 +146,7 @@ impl ItemRequestMutations {
         let job_queue = ctx.data::<Arc<JobQueue>>()?;
         let orchestrator = LibraryOrchestrator::new(job_queue.as_ref());
 
-        let outcome = orchestrator
+        let outcome = match orchestrator
             .upsert_requested_show(
                 &input.title,
                 input.imdb_id.as_deref(),
@@ -136,7 +156,18 @@ impl ItemRequestMutations {
                 input.seasons.as_deref(),
             )
             .await
-            .map_err(Error::from)?;
+        {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                return Ok(RequestItemMutationResponse {
+                    success: false,
+                    message: error.to_string(),
+                    status_text: MutationStatusText::BadRequest,
+                    error_code: Some(RequestItemMutationResponseErrorCode::UnexpectedError),
+                    item: None,
+                });
+            }
+        };
 
         let (success, message, status_text) = match outcome.action {
             ItemRequestUpsertAction::Created => (
@@ -154,6 +185,7 @@ impl ItemRequestMutations {
                     success: false,
                     message: "A request for this show already exists.".to_string(),
                     status_text: MutationStatusText::Conflict,
+                    error_code: Some(RequestItemMutationResponseErrorCode::Conflict),
                     item: None,
                 });
             }
@@ -167,6 +199,7 @@ impl ItemRequestMutations {
             success,
             message,
             status_text,
+            error_code: None,
             item: Some(outcome.request),
         })
     }
