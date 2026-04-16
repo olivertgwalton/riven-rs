@@ -1,9 +1,7 @@
-use std::collections::HashMap;
-
 use reqwest::StatusCode;
 use riven_core::events::ScrapeRequest;
 use riven_core::http::{HttpClient, profiles};
-use riven_core::types::MediaItemType;
+use riven_core::types::{MediaItemType, ScrapeResponse};
 
 use crate::models::AioStreamsResponse;
 
@@ -45,13 +43,13 @@ pub async fn scrape(
     uuid: &str,
     password: &str,
     request: &ScrapeRequest<'_>,
-) -> anyhow::Result<HashMap<String, String>> {
+) -> anyhow::Result<ScrapeResponse> {
     let Some(id) = request_identifier(request) else {
         tracing::debug!(
             title = request.title,
             "aiostreams scrape skipped: missing identifier"
         );
-        return Ok(HashMap::new());
+        return Ok(ScrapeResponse::new());
     };
 
     let url = format!("{base_url}/api/v1/search");
@@ -100,7 +98,7 @@ pub async fn scrape(
         anyhow::bail!("aiostreams search failed: {message}");
     }
 
-    let mut results = HashMap::new();
+    let mut results = ScrapeResponse::new();
     let mut raw_result_count = 0usize;
     let mut missing_info_hash_count = 0usize;
     let mut missing_title_count = 0usize;
@@ -125,7 +123,7 @@ pub async fn scrape(
                 continue;
             }
 
-            results.insert(info_hash.to_lowercase(), title);
+            results.insert(info_hash.to_lowercase(), title.into());
         }
     }
 

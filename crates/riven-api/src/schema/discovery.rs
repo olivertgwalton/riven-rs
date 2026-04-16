@@ -237,21 +237,25 @@ pub async fn discover_streams(
         .await
         .map_err(|_| Error::new("Failed to rank discovered streams"))?;
 
-        discovered.extend(ranked.into_iter().map(|candidate| DiscoveredStream {
-            key: format!(
-                "{}:{}",
-                target.season_number.unwrap_or(0),
-                candidate.info_hash.to_lowercase()
-            ),
-            title: candidate.title,
-            magnet: build_magnet_uri(&candidate.info_hash),
-            info_hash: candidate.info_hash,
-            parsed_data: candidate.parsed_data,
-            rank: candidate.rank,
-            file_size_bytes: None,
-            is_cached: false,
-            item_type: target.item_type,
-            season_number: target.season_number,
+        discovered.extend(ranked.into_iter().map(|candidate| {
+            DiscoveredStream {
+                key: format!(
+                    "{}:{}",
+                    target.season_number.unwrap_or(0),
+                    candidate.info_hash.to_lowercase()
+                ),
+                title: candidate.title,
+                magnet: candidate
+                    .magnet
+                    .unwrap_or_else(|| build_magnet_uri(&candidate.info_hash)),
+                info_hash: candidate.info_hash,
+                parsed_data: candidate.parsed_data,
+                rank: candidate.rank,
+                file_size_bytes: None,
+                is_cached: false,
+                item_type: target.item_type,
+                season_number: target.season_number,
+            }
         }));
     }
 

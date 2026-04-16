@@ -24,10 +24,14 @@ pub fn build_cached_candidates<'a>(
         .iter()
         .filter_map(|stream| {
             let files = cached_info.get(&stream.info_hash.to_lowercase())?;
-            let total_size: u64 = files.iter().filter_map(|file| file.size).sum();
+            let total_size = files
+                .iter()
+                .try_fold(0u64, |acc, file| file.size.map(|size| acc + size));
             tracing::debug!(id, info_hash = %stream.info_hash, total_size, "stream is cached");
 
-            if max_size_bytes.is_some_and(|max| total_size > max) {
+            if let Some(total_size) = total_size
+                && max_size_bytes.is_some_and(|max| total_size > max)
+            {
                 tracing::debug!(
                     id,
                     info_hash = %stream.info_hash,
@@ -36,7 +40,9 @@ pub fn build_cached_candidates<'a>(
                 );
                 return None;
             }
-            if min_size_bytes.is_some_and(|min| total_size < min) {
+            if let Some(total_size) = total_size
+                && min_size_bytes.is_some_and(|min| total_size < min)
+            {
                 tracing::debug!(
                     id,
                     info_hash = %stream.info_hash,

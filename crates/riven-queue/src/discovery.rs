@@ -30,6 +30,7 @@ pub struct ParseContext {
 pub struct RankedStreamCandidate {
     pub info_hash: String,
     pub title: String,
+    pub magnet: Option<String>,
     pub parsed_data: Option<serde_json::Value>,
     pub rank: Option<i64>,
 }
@@ -207,16 +208,14 @@ fn validate(ctx: &ParseContext, parsed: &riven_rank::ParsedData) -> Option<Strin
     None
 }
 
-pub fn rank_streams(
-    ctx: ParseContext,
-    streams: HashMap<String, String>,
-) -> Vec<RankedStreamCandidate> {
-    let mut ordered_streams: Vec<(&String, &String)> = streams.iter().collect();
+pub fn rank_streams(ctx: ParseContext, streams: ScrapeResponse) -> Vec<RankedStreamCandidate> {
+    let mut ordered_streams: Vec<(&String, &ScrapeStream)> = streams.iter().collect();
     ordered_streams.sort_by(|(info_hash_a, _), (info_hash_b, _)| info_hash_a.cmp(info_hash_b));
 
     ordered_streams
         .into_iter()
-        .filter_map(|(info_hash, title)| {
+        .filter_map(|(info_hash, stream)| {
+            let title = stream.title();
             let parsed = riven_rank::parse(title);
 
             if let Some(reason) = validate(&ctx, &parsed) {
@@ -287,7 +286,8 @@ pub fn rank_streams(
 
             Some(RankedStreamCandidate {
                 info_hash: info_hash.clone(),
-                title: title.clone(),
+                title: title.to_string(),
+                magnet: stream.magnet().map(ToOwned::to_owned),
                 parsed_data: parsed_value,
                 rank,
             })

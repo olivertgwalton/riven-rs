@@ -20,6 +20,7 @@ plugin-comet = { path = "../plugin-comet" }
 plugin-torrentio = { path = "../plugin-torrentio" }
 plugin-aiostreams = { path = "../plugin-aiostreams" }
 plugin-stremthru = { path = "../plugin-stremthru" }
+plugin-usenet = { path = "../plugin-usenet" }
 plugin-plex = { path = "../plugin-plex" }
 plugin-seerr = { path = "../plugin-seerr" }
 plugin-listrr = { path = "../plugin-listrr" }

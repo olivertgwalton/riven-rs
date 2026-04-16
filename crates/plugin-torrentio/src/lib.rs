@@ -132,14 +132,14 @@ fn scrape_type(item_type: MediaItemType) -> &'static str {
     }
 }
 
-fn scrape_results_from_response(resp: TorrentioResponse) -> HashMap<String, String> {
+fn scrape_results_from_response(resp: TorrentioResponse) -> riven_core::types::ScrapeResponse {
     let mut results = HashMap::new();
     for stream in resp.streams {
         if let Some(info_hash) = stream.info_hash {
             let title = stream_title(stream.title.as_deref());
 
             if !title.is_empty() {
-                results.insert(info_hash.to_lowercase(), title);
+                results.insert(info_hash.to_lowercase(), title.into());
             }
         }
     }

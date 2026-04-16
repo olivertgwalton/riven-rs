@@ -114,6 +114,7 @@ pub enum RivenEvent {
         magnet: String,
         info_hash: String,
         provider: Option<String>,
+        stream_base_url: Option<String>,
     },
     #[serde(rename = "riven.media-item.deleted")]
     MediaItemsDeleted {

@@ -121,6 +121,8 @@ async fn main() -> Result<()> {
         None
     };
 
+    let gql_port = settings.gql_port;
+
     tokio::spawn({
         let link_registry = registry.clone();
         async move {
@@ -129,6 +131,9 @@ async fn main() -> Result<()> {
                     magnet: req.download_url,
                     info_hash: String::new(),
                     provider: req.provider,
+                    stream_base_url: req
+                        .stream_base_url
+                        .or_else(|| Some(format!("http://127.0.0.1:{gql_port}"))),
                 };
                 let results = link_registry.dispatch(&event).await;
                 let link = results.into_iter().find_map(|(_, r)| {
@@ -142,7 +147,6 @@ async fn main() -> Result<()> {
         }
     });
 
-    let gql_port = settings.gql_port;
     let gql_handle = tokio::spawn({
         let pool = db_pool.clone();
         let jq = job_queue.clone();

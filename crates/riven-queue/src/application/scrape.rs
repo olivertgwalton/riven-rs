@@ -245,10 +245,13 @@ pub async fn parse_results(id: i64, _job: &ParseScrapeResultsJob, queue: &JobQue
         .map(|candidate| {
             let pool = queue.db_pool.clone();
             async move {
+                let magnet = candidate
+                    .magnet
+                    .unwrap_or_else(|| build_magnet_uri(&candidate.info_hash));
                 let stream = match repo::upsert_stream(
                     &pool,
                     &candidate.info_hash,
-                    &build_magnet_uri(&candidate.info_hash),
+                    &magnet,
                     candidate.parsed_data,
                     candidate.rank,
                 )

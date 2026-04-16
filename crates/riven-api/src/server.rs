@@ -2,6 +2,7 @@ mod auth;
 mod board;
 mod graphql;
 mod media;
+mod usenet;
 mod webhooks;
 
 use std::sync::Arc;
@@ -109,6 +110,10 @@ pub async fn start_server(
         .route(
             "/media/{entry_id}",
             get(media::media_bridge_handler).head(media::media_bridge_handler),
+        )
+        .route(
+            "/stream/usenet/{hash}/{filename}",
+            get(usenet::usenet_stream_handler).head(usenet::usenet_stream_handler),
         )
         .route("/webhook/seerr", post(webhooks::seerr_webhook))
         .nest("/board", board_ui.with_state(()))

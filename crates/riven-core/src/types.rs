@@ -9,7 +9,10 @@ mod stream;
 
 pub use cache::{CacheCheckFile, CacheCheckResult, TorrentStatus};
 pub use content::{ContentServiceResponse, ExternalIds};
-pub use download::{DownloadFile, DownloadResult, ScrapeResponse, build_magnet_uri};
+pub use download::{
+    DownloadFile, DownloadResult, ScrapeResponse, ScrapeStream, ScrapeStreamDetails,
+    build_magnet_uri,
+};
 pub use enums::{
     ContentRating, FileSystemEntryType, ItemRequestState, ItemRequestType, MediaItemState,
     MediaItemType, ShowStatus,

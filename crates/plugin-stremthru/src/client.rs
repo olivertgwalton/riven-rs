@@ -5,7 +5,8 @@ use redis::AsyncCommands;
 use riven_core::events::ScrapeRequest;
 use riven_core::http::{HttpClient, profiles};
 use riven_core::types::{
-    CacheCheckFile, CacheCheckResult, DownloadFile, DownloadResult, MediaItemType, build_magnet_uri,
+    CacheCheckFile, CacheCheckResult, DownloadFile, DownloadResult, MediaItemType, ScrapeResponse,
+    build_magnet_uri,
 };
 
 use crate::models::{
@@ -276,7 +277,7 @@ pub async fn scrape_torznab(
     http: &HttpClient,
     base_url: &str,
     req: &ScrapeRequest<'_>,
-) -> anyhow::Result<HashMap<String, String>> {
+) -> anyhow::Result<ScrapeResponse> {
     let url = format!("{base_url}v0/torznab/api");
 
     let mut params: Vec<(&str, String)> = vec![("o", "json".to_string())];
@@ -346,7 +347,7 @@ pub async fn scrape_torznab(
             continue;
         };
         if !info_hash.is_empty() && !item.title.is_empty() {
-            results.insert(info_hash, item.title);
+            results.insert(info_hash, item.title.into());
         }
     }
 

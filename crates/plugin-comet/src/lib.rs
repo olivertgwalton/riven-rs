@@ -136,7 +136,7 @@ struct CometBehaviorHints {
     filename: Option<String>,
 }
 
-fn scrape_results_from_response(resp: CometResponse) -> HashMap<String, String> {
+fn scrape_results_from_response(resp: CometResponse) -> riven_core::types::ScrapeResponse {
     let mut results = HashMap::new();
     for stream in resp.streams {
         let Some(info_hash) = stream.info_hash.clone() else {
@@ -147,7 +147,7 @@ fn scrape_results_from_response(resp: CometResponse) -> HashMap<String, String> 
         };
 
         if !title.is_empty() {
-            results.insert(info_hash.to_lowercase(), title);
+            results.insert(info_hash.to_lowercase(), title.into());
         }
     }
     results

@@ -26,3 +26,7 @@ sqlx = { workspace = true }
 futures = { workspace = true }
 chrono = { workspace = true }
 reqwest = { workspace = true }
+percent-encoding = "2"
+tokio-rustls = "0.26"
+url = "2"
+webpki-roots = "1"

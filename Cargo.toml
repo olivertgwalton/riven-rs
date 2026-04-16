@@ -14,6 +14,7 @@ members = [
     "crates/plugin-torrentio",
     "crates/plugin-aiostreams",
     "crates/plugin-stremthru",
+    "crates/plugin-usenet",
     "crates/plugin-plex",
     "crates/plugin-seerr",
     "crates/plugin-listrr",

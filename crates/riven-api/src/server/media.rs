@@ -13,7 +13,7 @@ use axum::{
     },
     response::{IntoResponse, Response},
 };
-use riven_core::stream_link::request_stream_url;
+use riven_core::stream_link::request_stream_url_with_base;
 
 use super::ApiState;
 use super::auth::check_api_key;
@@ -182,10 +182,12 @@ fn build_media_request(
 async fn resolve_media_stream_url(
     state: &ApiState,
     entry: &riven_db::entities::FileSystemEntry,
+    stream_base_url: Option<&str>,
 ) -> Option<String> {
-    let url = request_stream_url(
+    let url = request_stream_url_with_base(
         entry.download_url.as_deref(),
         entry.provider.as_deref(),
+        stream_base_url,
         &state.link_request_tx,
         &state.runtime,
     )?;
@@ -217,7 +219,7 @@ async fn prewarm_playback_target(
     }
 
     let started = Instant::now();
-    match resolve_media_stream_url(&state, &entry).await {
+    match resolve_media_stream_url(&state, &entry, None).await {
         Some(_) => tracing::debug!(
             entry_id = entry.id,
             reason,
@@ -254,6 +256,15 @@ fn maybe_spawn_next_prewarm(
             }
         }
     });
+}
+
+fn stream_base_url_from_headers(headers: &HeaderMap) -> Option<String> {
+    let host = headers.get("host")?.to_str().ok()?;
+    let proto = headers
+        .get("x-forwarded-proto")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("http");
+    Some(format!("{proto}://{host}"))
 }
 
 async fn fetch_media_response(
@@ -310,7 +321,12 @@ pub(super) async fn media_bridge_handler(
     let mut stream_url = entry.stream_url.clone();
     if stream_url.is_none() {
         refreshed_stream_url = true;
-        stream_url = resolve_media_stream_url(&state, &entry).await;
+        stream_url = resolve_media_stream_url(
+            &state,
+            &entry,
+            stream_base_url_from_headers(&headers).as_deref(),
+        )
+        .await;
     }
 
     let Some(initial_stream_url) = stream_url.take() else {
@@ -322,7 +338,13 @@ pub(super) async fn media_bridge_handler(
             Ok(response) => response,
             Err(error) => {
                 tracing::warn!(entry_id, error = %error, "initial media request failed");
-                let Some(refreshed) = resolve_media_stream_url(&state, &entry).await else {
+                let Some(refreshed) = resolve_media_stream_url(
+                    &state,
+                    &entry,
+                    stream_base_url_from_headers(&headers).as_deref(),
+                )
+                .await
+                else {
                     return StatusCode::BAD_GATEWAY.into_response();
                 };
                 refreshed_stream_url = true;
@@ -341,7 +363,13 @@ pub(super) async fn media_bridge_handler(
         validate_upstream_range_response(requested_range, upstream.status()).err();
 
     if is_expired_stream_status(upstream.status()) || upstream_range_error.is_some() {
-        let Some(refreshed) = resolve_media_stream_url(&state, &entry).await else {
+        let Some(refreshed) = resolve_media_stream_url(
+            &state,
+            &entry,
+            stream_base_url_from_headers(&headers).as_deref(),
+        )
+        .await
+        else {
             return StatusCode::BAD_GATEWAY.into_response();
         };
         refreshed_stream_url = true;
