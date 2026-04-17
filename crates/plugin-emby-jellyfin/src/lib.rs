@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use reqwest::Method;
 use riven_core::events::{EventType, HookResponse, RivenEvent};
 use riven_core::http::profiles;
 use riven_core::plugin::{Plugin, PluginContext, SettingField};
@@ -18,6 +19,8 @@ pub struct JellyfinPlugin;
 register_plugin!(EmbyPlugin);
 register_plugin!(JellyfinPlugin);
 
+const MEDIA_SERVER_TOKEN_HEADER: &str = "X-Emby-Token";
+
 #[derive(Serialize)]
 struct LibraryUpdate<'a> {
     #[serde(rename = "Updates")]
@@ -30,6 +33,17 @@ struct PathUpdate<'a> {
     path: &'a str,
     #[serde(rename = "UpdateType")]
     update_type: &'a str,
+}
+
+fn media_server_request(
+    client: &reqwest::Client,
+    method: Method,
+    url: &str,
+    api_key: &str,
+) -> reqwest::RequestBuilder {
+    client
+        .request(method, url)
+        .header(MEDIA_SERVER_TOKEN_HEADER, api_key)
 }
 
 /// Notify a Jellyfin/Emby server that the given VFS paths were created.
@@ -55,7 +69,7 @@ pub(crate) async fn notify_paths(
     let body = LibraryUpdate { updates };
     let resp = http
         .send(profiles::media_server(plugin), |client| {
-            client.post(&url).query(&[("api_key", api_key)]).json(&body)
+            media_server_request(client, Method::POST, &url, api_key).json(&body)
         })
         .await?;
 
@@ -77,7 +91,7 @@ async fn refresh_library(
     tracing::debug!(plugin, target_url = %url, "requesting media server library refresh");
     let resp = http
         .send(profiles::media_server(plugin), |client| {
-            client.post(&url).query(&[("api_key", api_key)])
+            media_server_request(client, Method::POST, &url, api_key)
         })
         .await?;
 
@@ -220,7 +234,7 @@ async fn get_active_sessions(
     tracing::debug!(server, target_url = %url, "fetching active playback sessions from media server");
     let resp: Vec<MediaServerSession> = http
         .get_json(profiles::media_server(server), url.clone(), |client| {
-            client.get(&url).query(&[("api_key", api_key)])
+            media_server_request(client, Method::GET, &url, api_key)
         })
         .await?;
 
