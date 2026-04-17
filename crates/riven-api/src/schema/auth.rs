@@ -7,26 +7,15 @@ pub enum UserRole {
     Admin,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum AuthSource {
-    TrustedApiKey,
-    Frontend,
-}
-
 #[derive(Clone, Debug)]
-#[allow(dead_code)]
 pub struct RequestAuth {
-    pub source: AuthSource,
     pub role: UserRole,
-    pub user_id: Option<String>,
 }
 
 impl RequestAuth {
     pub fn trusted_api_key() -> Self {
         Self {
-            source: AuthSource::TrustedApiKey,
             role: UserRole::Admin,
-            user_id: None,
         }
     }
 }

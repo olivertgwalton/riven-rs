@@ -3,7 +3,7 @@ use chrono::Utc;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 
-use crate::schema::auth::{AuthSource, RequestAuth, UserRole};
+use crate::schema::auth::{RequestAuth, UserRole};
 
 use super::ApiState;
 
@@ -107,9 +107,5 @@ pub(super) fn authorize_request(
         _ => return Err(AuthError::Forbidden),
     };
 
-    Ok(RequestAuth {
-        source: AuthSource::Frontend,
-        role,
-        user_id: Some(user_id.to_owned()),
-    })
+    Ok(RequestAuth { role })
 }
