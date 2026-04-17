@@ -13,8 +13,10 @@ pub async fn apply_indexed_media_item(
     repo::update_media_item_index(db_pool, item.id, indexed).await?;
 
     if item.item_type == MediaItemType::Movie {
-        if let Some(fresh) = repo::get_media_item(db_pool, item.id).await? {
-            let _ = repo::refresh_state(db_pool, &fresh).await;
+        if let Some(fresh) = repo::get_media_item(db_pool, item.id).await?
+            && let Err(err) = repo::refresh_state(db_pool, &fresh).await
+        {
+            tracing::warn!(id = item.id, %err, "failed to refresh state after movie index");
         }
         return Ok(());
     }
@@ -63,12 +65,16 @@ pub async fn apply_indexed_media_item(
                     .await?;
                 }
 
-                let _ = repo::refresh_state(db_pool, &season).await;
+                if let Err(err) = repo::refresh_state(db_pool, &season).await {
+                    tracing::warn!(season_id = season.id, %err, "failed to refresh season state");
+                }
             }
         }
 
-        if let Some(show_item) = repo::get_media_item(db_pool, item.id).await? {
-            let _ = repo::refresh_state(db_pool, &show_item).await;
+        if let Some(show_item) = repo::get_media_item(db_pool, item.id).await?
+            && let Err(err) = repo::refresh_state(db_pool, &show_item).await
+        {
+            tracing::warn!(id = item.id, %err, "failed to refresh show state after index");
         }
     }
 

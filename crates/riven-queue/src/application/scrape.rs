@@ -47,7 +47,9 @@ pub async fn start(id: i64, job: &ScrapeJob, queue: &JobQueue) {
         return;
     }
 
-    let _ = repo::clear_blacklisted_streams(&queue.db_pool, id).await;
+    if let Err(err) = repo::clear_blacklisted_streams(&queue.db_pool, id).await {
+        tracing::warn!(id, %err, "failed to clear blacklisted streams");
+    }
 
     if start_plugin_flow(
         queue,
@@ -178,7 +180,9 @@ pub async fn finalize(job: &ScrapeJob, queue: &JobQueue) {
         } else {
             item.title.clone()
         };
-        let _ = repo::increment_failed_attempts(&queue.db_pool, id).await;
+        if let Err(err) = repo::increment_failed_attempts(&queue.db_pool, id).await {
+            tracing::warn!(id, %err, "failed to increment failed_attempts");
+        }
         queue
             .notify(RivenEvent::MediaItemScrapeErrorNoNewStreams {
                 id,
@@ -285,7 +289,9 @@ pub async fn parse_results(id: i64, _job: &ParseScrapeResultsJob, queue: &JobQue
     tracing::info!(id, stream_count, "parse-scrape-results completed");
 
     if stream_count == 0 {
-        let _ = repo::increment_failed_attempts(&queue.db_pool, id).await;
+        if let Err(err) = repo::increment_failed_attempts(&queue.db_pool, id).await {
+            tracing::warn!(id, %err, "failed to increment failed_attempts");
+        }
         queue
             .notify(RivenEvent::MediaItemScrapeErrorNoNewStreams {
                 id,
@@ -294,7 +300,9 @@ pub async fn parse_results(id: i64, _job: &ParseScrapeResultsJob, queue: &JobQue
             })
             .await;
     } else {
-        let _ = repo::reset_failed_attempts(&queue.db_pool, id).await;
+        if let Err(err) = repo::reset_failed_attempts(&queue.db_pool, id).await {
+            tracing::warn!(id, %err, "failed to reset failed_attempts");
+        }
         queue
             .notify(RivenEvent::MediaItemScrapeSuccess {
                 id,

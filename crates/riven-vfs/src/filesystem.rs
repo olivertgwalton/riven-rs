@@ -261,11 +261,13 @@ impl RivenFs {
         provider: Option<&str>,
     ) -> Option<String> {
         let url = request_stream_url(download_url, provider, &self.link_request_tx, &self.runtime)?;
-        let _ = self.runtime.block_on(riven_db::repo::update_stream_url(
+        if let Err(err) = self.runtime.block_on(riven_db::repo::update_stream_url(
             &self.db_pool,
             entry_id,
             &url,
-        ));
+        )) {
+            tracing::warn!(entry_id, %err, "failed to persist refreshed stream url");
+        }
         self.entry_cache.remove(path);
         Some(url)
     }

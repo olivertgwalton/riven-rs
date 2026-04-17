@@ -81,8 +81,6 @@ pub async fn persist_manual_download(
     processed_by: &str,
     queue: &JobQueue,
 ) -> Result<MediaItem, ManualDownloadError> {
-    let _ = &torrent.torrent_id;
-
     let Some(item) = load_item_or_err(id, queue, "media item not found for download").await else {
         return Err(ManualDownloadError::download_error(
             None,

@@ -293,13 +293,15 @@ impl<'a> LibraryOrchestrator<'a> {
                 self.queue.push_scrape(job).await;
             }
             MediaItemType::Show => {
-                if let Some(seasons) = season_numbers {
-                    let _ = repo::mark_seasons_requested_and_get_episodes(
+                if let Some(seasons) = season_numbers
+                    && let Err(err) = repo::mark_seasons_requested_and_get_episodes(
                         &self.queue.db_pool,
                         item.id,
                         seasons,
                     )
-                    .await;
+                    .await
+                {
+                    tracing::warn!(show_id = item.id, %err, "failed to mark seasons requested");
                 }
 
                 match repo::get_requested_seasons_for_show(&self.queue.db_pool, item.id).await {
@@ -353,8 +355,11 @@ impl<'a> LibraryOrchestrator<'a> {
     pub async fn queue_download_for_item(&self, item: &MediaItem) {
         match item.item_type {
             MediaItemType::Movie | MediaItemType::Episode => {
-                if !self.queue.push_download_from_best_stream(item.id).await {
-                    let _ = repo::refresh_state_cascade(&self.queue.db_pool, item).await;
+                if !self.queue.push_download_from_best_stream(item.id).await
+                    && let Err(err) =
+                        repo::refresh_state_cascade(&self.queue.db_pool, item).await
+                {
+                    tracing::warn!(id = item.id, %err, "failed to refresh state after download skip");
                 }
             }
             MediaItemType::Season => {

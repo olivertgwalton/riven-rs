@@ -45,7 +45,9 @@ pub async fn start(job: &IndexJob, queue: &JobQueue) {
         == 0
     {
         tracing::warn!(id = job.id, "no indexer subscribers found");
-        let _ = repo::increment_failed_attempts(&queue.db_pool, job.id).await;
+        if let Err(err) = repo::increment_failed_attempts(&queue.db_pool, job.id).await {
+            tracing::warn!(id = job.id, %err, "failed to increment failed_attempts");
+        }
         queue
             .notify(RivenEvent::MediaItemIndexError {
                 id: job.id,
@@ -107,7 +109,9 @@ pub async fn finalize(id: i64, queue: &JobQueue) {
 
     if responses.is_empty() {
         tracing::warn!(id, "no indexer plugin responded");
-        let _ = repo::increment_failed_attempts(&queue.db_pool, id).await;
+        if let Err(err) = repo::increment_failed_attempts(&queue.db_pool, id).await {
+            tracing::warn!(id, %err, "failed to increment failed_attempts");
+        }
         queue
             .notify(RivenEvent::MediaItemIndexError {
                 id,
@@ -127,7 +131,9 @@ pub async fn finalize(id: i64, queue: &JobQueue) {
         apply_indexed_media_item(&queue.db_pool, &item, &merged, requested_seasons.as_deref()).await
     {
         tracing::error!(id, error = %e, "failed to persist indexed data");
-        let _ = repo::increment_failed_attempts(&queue.db_pool, id).await;
+        if let Err(err) = repo::increment_failed_attempts(&queue.db_pool, id).await {
+            tracing::warn!(id, %err, "failed to increment failed_attempts");
+        }
         queue
             .notify(RivenEvent::MediaItemIndexError {
                 id,

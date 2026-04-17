@@ -108,8 +108,10 @@ pub async fn persist_movie(
         largest
     } else {
         tracing::warn!(id, info_hash = %info_hash, "torrent has no files — blacklisting stream");
-        if !info_hash.is_empty() {
-            let _ = repo::blacklist_stream_by_hash(&queue.db_pool, id, info_hash).await;
+        if !info_hash.is_empty()
+            && let Err(err) = repo::blacklist_stream_by_hash(&queue.db_pool, id, info_hash).await
+        {
+            tracing::warn!(id, info_hash, %err, "failed to blacklist stream");
         }
         queue
             .notify(RivenEvent::MediaItemDownloadPartialSuccess { id })
@@ -223,8 +225,10 @@ pub async fn persist_episode(
             info_hash = %info_hash,
             "no torrent file matched episode — blacklisting stream"
         );
-        if !info_hash.is_empty() {
-            let _ = repo::blacklist_stream_by_hash(&queue.db_pool, id, info_hash).await;
+        if !info_hash.is_empty()
+            && let Err(err) = repo::blacklist_stream_by_hash(&queue.db_pool, id, info_hash).await
+        {
+            tracing::warn!(id, info_hash, %err, "failed to blacklist stream");
         }
         queue
             .notify(RivenEvent::MediaItemDownloadPartialSuccess { id })
@@ -405,8 +409,10 @@ pub async fn persist_season(
             id, season = season_number, info_hash = %info_hash,
             "no episodes matched in season download — blacklisting stream"
         );
-        if !info_hash.is_empty() {
-            let _ = repo::blacklist_stream_by_hash(&queue.db_pool, id, info_hash).await;
+        if !info_hash.is_empty()
+            && let Err(err) = repo::blacklist_stream_by_hash(&queue.db_pool, id, info_hash).await
+        {
+            tracing::warn!(id, info_hash, %err, "failed to blacklist stream");
         }
         return SeasonPersistOutcome::Failed;
     }
@@ -661,11 +667,15 @@ async fn persist_supplied_show_download(
     season_ids.sort_unstable();
     season_ids.dedup();
     for season_id in season_ids {
-        if let Some(season) = repo::get_media_item(&queue.db_pool, season_id).await? {
-            let _ = repo::refresh_state(&queue.db_pool, &season).await;
+        if let Some(season) = repo::get_media_item(&queue.db_pool, season_id).await?
+            && let Err(err) = repo::refresh_state(&queue.db_pool, &season).await
+        {
+            tracing::warn!(season_id, %err, "failed to refresh season state");
         }
     }
-    let _ = repo::refresh_state(&queue.db_pool, item).await;
+    if let Err(err) = repo::refresh_state(&queue.db_pool, item).await {
+        tracing::warn!(id = item.id, %err, "failed to refresh item state");
+    }
     LibraryOrchestrator::new(queue)
         .sync_item_request_state(item)
         .await;

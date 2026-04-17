@@ -25,8 +25,13 @@ pub async fn handle_bitrate_failure(
         "{context} failed bitrate check — blacklisting stream"
     );
     if !info_hash.is_empty() {
-        let _ = repo::blacklist_stream_by_hash(&queue.db_pool, id, info_hash).await;
-        let _ = repo::update_stream_file_size(&queue.db_pool, info_hash, file_size).await;
+        if let Err(err) = repo::blacklist_stream_by_hash(&queue.db_pool, id, info_hash).await {
+            tracing::warn!(id, info_hash, %err, "failed to blacklist stream");
+        }
+        if let Err(err) = repo::update_stream_file_size(&queue.db_pool, info_hash, file_size).await
+        {
+            tracing::warn!(info_hash, %err, "failed to update stream file size");
+        }
     }
     queue
         .notify(RivenEvent::MediaItemDownloadPartialSuccess { id })

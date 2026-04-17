@@ -140,7 +140,9 @@ impl MediaItemMutations {
 
         let parse_ctx = build_parse_item_context(pool, fresh.clone()).await;
         if new_streams_count == 0 {
-            let _ = repo::increment_failed_attempts(pool, input.id).await;
+            if let Err(err) = repo::increment_failed_attempts(pool, input.id).await {
+                tracing::warn!(id = input.id, %err, "failed to increment failed_attempts");
+            }
             job_queue
                 .notify(RivenEvent::MediaItemScrapeErrorNoNewStreams {
                     id: input.id,
@@ -159,7 +161,9 @@ impl MediaItemMutations {
             });
         }
 
-        let _ = repo::reset_failed_attempts(pool, input.id).await;
+        if let Err(err) = repo::reset_failed_attempts(pool, input.id).await {
+            tracing::warn!(id = input.id, %err, "failed to reset failed_attempts");
+        }
         job_queue
             .notify(RivenEvent::MediaItemScrapeSuccess {
                 id: input.id,
