@@ -9,10 +9,10 @@ use riven_core::events::{EventType, HookResponse, RivenEvent};
 use riven_core::http::profiles;
 use riven_core::plugin::{Plugin, PluginContext};
 use riven_core::register_plugin;
+use riven_core::settings::PluginSettings;
 use riven_core::types::*;
 
 const TVDB_BASE_URL: &str = "https://api4.thetvdb.com/v4/";
-const DEFAULT_API_KEY: &str = "6be85335-5c4f-4d8d-b945-d3ed0eb8cdce";
 const TOKEN_EXPIRY: Duration = Duration::from_secs(25 * 24 * 3600);
 
 #[derive(Default)]
@@ -64,9 +64,17 @@ impl Plugin for TvdbPlugin {
         &[EventType::MediaItemIndexRequested]
     }
 
+    async fn validate(
+        &self,
+        settings: &PluginSettings,
+        _http: &riven_core::http::HttpClient,
+    ) -> anyhow::Result<bool> {
+        Ok(settings.has("apikey"))
+    }
+
     fn settings_schema(&self) -> Vec<riven_core::plugin::SettingField> {
         use riven_core::plugin::SettingField;
-        vec![SettingField::new("apikey", "API Key", "password")]
+        vec![SettingField::new("apikey", "API Key", "password").required()]
     }
 
     async fn handle_event(
@@ -84,7 +92,7 @@ impl Plugin for TvdbPlugin {
             return Ok(HookResponse::Empty);
         };
 
-        let api_key = ctx.settings.get_or("apikey", DEFAULT_API_KEY);
+        let api_key = ctx.require_setting("apikey")?;
         let token = self.get_token(&ctx.http, &api_key).await?;
 
         let indexed = fetch_series(&ctx.http, &token, tvdb_id).await?;
