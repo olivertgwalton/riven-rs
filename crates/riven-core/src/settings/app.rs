@@ -45,6 +45,10 @@ pub struct RivenSettings {
 
     /// VFS in-memory chunk cache capacity in MB. 0 = use default (1 024 MB).
     pub vfs_cache_max_size_mb: u64,
+
+    /// Comma-separated list of allowed CORS origins for the API.
+    /// Empty = fall back to permissive CORS (logs a warning on startup).
+    pub cors_allowed_origins: String,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -83,6 +87,7 @@ impl Default for RivenSettings {
             api_key: String::new(),
             frontend_auth_signing_secret: String::new(),
             vfs_cache_max_size_mb: 0,
+            cors_allowed_origins: String::new(),
         }
     }
 }

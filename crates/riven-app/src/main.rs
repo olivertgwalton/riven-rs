@@ -143,6 +143,16 @@ async fn main() -> Result<()> {
     });
 
     let gql_port = settings.gql_port;
+    if settings.api_key.is_empty() {
+        tracing::warn!(
+            "RIVEN_SETTING__API_KEY is empty — GraphQL API auth is DISABLED (dev only)"
+        );
+    }
+    if settings.frontend_auth_signing_secret.is_empty() {
+        tracing::warn!(
+            "RIVEN_SETTING__FRONTEND_AUTH_SIGNING_SECRET is empty — frontend RBAC is DISABLED"
+        );
+    }
     let gql_handle = tokio::spawn({
         let pool = db_pool.clone();
         let jq = job_queue.clone();
@@ -152,6 +162,20 @@ async fn main() -> Result<()> {
             (!settings.frontend_auth_signing_secret.is_empty())
                 .then(|| settings.frontend_auth_signing_secret.clone());
         let log_dir = settings.log_directory.clone();
+        let mut cors_allowed_origins: Vec<String> = settings
+            .cors_allowed_origins
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect();
+        if cors_allowed_origins.is_empty()
+            && let Ok(origin) = std::env::var("ORIGIN")
+            && !origin.trim().is_empty()
+        {
+            tracing::info!(origin, "CORS allowlist falling back to ORIGIN");
+            cors_allowed_origins.push(origin);
+        }
         let log_tx = log_tx.clone();
         let notif_tx = notification_tx.clone();
         let log_control = log_control.clone();
@@ -170,6 +194,7 @@ async fn main() -> Result<()> {
                 log_control,
                 stream_http_client.clone(),
                 link_tx.clone(),
+                cors_allowed_origins,
             )
             .await
             {

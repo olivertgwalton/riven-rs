@@ -13,7 +13,7 @@ use riven_core::plugin::PluginRegistry;
 use riven_core::stream_link::LinkRequest;
 use riven_queue::JobQueue;
 use tokio::sync::broadcast;
-use tower_http::cors::CorsLayer;
+use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::services::{ServeDir, ServeFile};
 
 use apalis_board_api::framework::{ApiBuilder, RegisterRoute};
@@ -61,6 +61,7 @@ pub async fn start_server(
     log_control: Arc<LogControl>,
     stream_client: reqwest::Client,
     link_request_tx: tokio::sync::mpsc::Sender<LinkRequest>,
+    cors_allowed_origins: Vec<String>,
 ) -> Result<()> {
     let schema = build_schema(
         db_pool.clone(),
@@ -117,7 +118,7 @@ pub async fn start_server(
         .nest("/board", board_ui.with_state(()))
         .fallback_service(serve_frontend)
         .layer(axum::middleware::from_fn(board::board_assets_middleware))
-        .layer(CorsLayer::permissive())
+        .layer(build_cors_layer(cors_allowed_origins))
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}")).await?;
@@ -126,4 +127,21 @@ pub async fn start_server(
     axum::serve(listener, app).await?;
 
     Ok(())
+}
+
+fn build_cors_layer(allowed: Vec<String>) -> CorsLayer {
+    if allowed.is_empty() {
+        tracing::warn!(
+            "CORS is permissive — set RIVEN_SETTING__CORS_ALLOWED_ORIGINS for production"
+        );
+        return CorsLayer::permissive();
+    }
+    let origins: Vec<axum::http::HeaderValue> = allowed
+        .iter()
+        .filter_map(|o| o.parse().ok())
+        .collect();
+    CorsLayer::new()
+        .allow_origin(AllowOrigin::list(origins))
+        .allow_headers(tower_http::cors::Any)
+        .allow_methods(tower_http::cors::Any)
 }

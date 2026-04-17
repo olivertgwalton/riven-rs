@@ -93,7 +93,7 @@ impl Plugin for TvdbPlugin {
         };
 
         let api_key = ctx.require_setting("apikey")?;
-        let token = self.get_token(&ctx.http, &api_key).await?;
+        let token = self.get_token(&ctx.http, api_key).await?;
 
         let indexed = fetch_series(&ctx.http, &token, tvdb_id).await?;
         Ok(HookResponse::Index(Box::new(indexed)))

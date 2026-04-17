@@ -58,10 +58,7 @@ pub(super) fn authorize_request(
         .get(FRONTEND_ROLE_HEADER)
         .and_then(|value| value.to_str().ok())
     {
-        Some("admin") | Some("manager") | Some("user") => headers
-            .get(FRONTEND_ROLE_HEADER)
-            .and_then(|value| value.to_str().ok())
-            .unwrap_or_default(),
+        Some(role @ ("admin" | "manager" | "user")) => role,
         _ => return Err(AuthError::Forbidden),
     };
 
