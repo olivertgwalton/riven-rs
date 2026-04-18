@@ -98,6 +98,28 @@ fn parse_trakt_rate_limit_pause(headers: &HeaderMap) -> Option<Duration> {
     None
 }
 
+fn parse_header_u64(headers: &HeaderMap, name: &str) -> Option<u64> {
+    headers.get(name)?.to_str().ok()?.trim().parse().ok()
+}
+
+fn parse_header_f64(headers: &HeaderMap, name: &str) -> Option<f64> {
+    headers.get(name)?.to_str().ok()?.trim().parse().ok()
+}
+
+fn parse_discord_rate_limit_pause(headers: &HeaderMap) -> Option<Duration> {
+    let remaining = parse_header_u64(headers, "X-RateLimit-Remaining")?;
+    if remaining > 0 {
+        return None;
+    }
+
+    let reset_after = parse_header_f64(headers, "X-RateLimit-Reset-After")?;
+    if reset_after <= 0.0 {
+        return None;
+    }
+
+    Some(Duration::from_secs_f64(reset_after))
+}
+
 pub(super) fn parse_rate_limit_pause(
     profile: HttpServiceProfile,
     status: StatusCode,
@@ -111,6 +133,8 @@ pub(super) fn parse_rate_limit_pause(
 
     let service_specific = if profile.name == TRAKT.name {
         parse_trakt_rate_limit_pause(headers)
+    } else if profile.name == super::profiles::DISCORD_WEBHOOK.name {
+        parse_discord_rate_limit_pause(headers)
     } else {
         None
     };
@@ -197,5 +221,22 @@ mod tests {
             .expect("pause should be parsed");
 
         assert!(pause >= Duration::from_secs(80));
+    }
+
+    #[test]
+    fn parses_discord_bucket_reset_after_when_remaining_is_zero() {
+        let mut headers = HeaderMap::new();
+        headers.insert("X-RateLimit-Remaining", "0".parse().unwrap());
+        headers.insert("X-RateLimit-Reset-After", "1.25".parse().unwrap());
+
+        let pause = parse_rate_limit_pause(
+            super::super::profiles::DISCORD_WEBHOOK,
+            StatusCode::OK,
+            &headers,
+        )
+        .expect("pause should be parsed");
+
+        assert!(pause >= Duration::from_millis(1200));
+        assert!(pause <= Duration::from_millis(1300));
     }
 }

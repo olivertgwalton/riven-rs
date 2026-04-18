@@ -40,7 +40,15 @@ impl HttpClient {
         F: Fn(&reqwest::Client) -> reqwest::RequestBuilder,
     {
         let state = self.service_state(profile);
-        execute_with_retry(&self.inner, Some(&state), profile.attempts, make_request).await
+        let response =
+            execute_with_retry(&self.inner, Some(&state), profile.attempts, make_request).await?;
+
+        if let Some(delay) = parse_rate_limit_pause(profile, response.status(), response.headers())
+        {
+            state.register_retry_after(delay);
+        }
+
+        Ok(response)
     }
 
     pub async fn send_data<F>(
@@ -96,19 +104,13 @@ impl HttpClient {
         T: DeserializeOwned,
         F: Fn(&reqwest::Client) -> reqwest::RequestBuilder,
     {
-        let service_state = self.service_state(profile);
         let response = self
             .send_data(profile, Some(dedupe_key), make_request)
             .await?;
-        let rate_limit_pause =
-            parse_rate_limit_pause(profile, response.status(), response.headers());
-
-        if let Some(delay) = rate_limit_pause {
-            service_state.register_retry_after(delay);
-        }
 
         if response.status() == StatusCode::TOO_MANY_REQUESTS {
-            let delay = rate_limit_pause.unwrap_or_else(|| Duration::from_secs(BACKOFF_BASE_SECS));
+            let delay = parse_rate_limit_pause(profile, response.status(), response.headers())
+                .unwrap_or_else(|| Duration::from_secs(BACKOFF_BASE_SECS));
             tracing::warn!(
                 service = profile.name,
                 delay_secs = delay.as_secs(),
