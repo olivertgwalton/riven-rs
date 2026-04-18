@@ -1,9 +1,11 @@
-use async_graphql::{Json, *};
+use async_graphql::{Context, Error, Json, Object, Result};
+use riven_core::http::HttpClient;
+use riven_core::http::profiles::TMDB;
 use riven_core::plugin::PluginRegistry;
 use std::sync::Arc;
 
 use crate::schema::metadata::{
-    get_tmdb_api_key, transform_item, TmdbLogoAndCert, TmdbPage, TMDB_API_BASE, TMDB_IMAGE_BASE,
+    TMDB_API_BASE, TMDB_IMAGE_BASE, TmdbLogoAndCert, TmdbPage, get_tmdb_api_key, transform_item,
 };
 
 #[derive(Default)]
@@ -11,6 +13,71 @@ pub struct CoreTmdbQuery;
 
 #[Object]
 impl CoreTmdbQuery {
+    async fn tmdb_details(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(name = "type")] media_type: String,
+        id: i64,
+        append_to_response: Option<String>,
+    ) -> Result<Json<serde_json::Value>> {
+        let endpoint = match media_type.as_str() {
+            "movie" => format!("/3/movie/{id}"),
+            "tv" => format!("/3/tv/{id}"),
+            "person" => format!("/3/person/{id}"),
+            "company" => format!("/3/company/{id}"),
+            _ => return Err(Error::new(format!("Invalid media type: {media_type}"))),
+        };
+
+        let append = append_to_response
+            .as_deref()
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned);
+
+        let data = tmdb_json(ctx, format!("details:{media_type}:{id}:{append:?}"), move |request| {
+            if let Some(append) = append.as_deref() {
+                request.query(&[("append_to_response", append)])
+            } else {
+                request
+            }
+        }, &endpoint)
+        .await?;
+
+        Ok(Json(data))
+    }
+
+    async fn tmdb_collection(&self, ctx: &Context<'_>, id: i64) -> Result<Json<serde_json::Value>> {
+        let data = tmdb_json(ctx, format!("collection:{id}"), |request| request, &format!("/3/collection/{id}")).await?;
+        Ok(Json(data))
+    }
+
+    async fn tmdb_category(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(name = "type")] media_type: String,
+        category: String,
+        page: Option<i64>,
+    ) -> Result<TmdbPage> {
+        if !matches!(media_type.as_str(), "movie" | "tv") {
+            return Err(Error::new(format!("Invalid media type: {media_type}")));
+        }
+        if !matches!(category.as_str(), "popular" | "top_rated") {
+            return Err(Error::new(format!("Invalid TMDB category: {category}")));
+        }
+
+        let page = page.unwrap_or(1);
+        let data = tmdb_json(
+            ctx,
+            format!("category:{media_type}:{category}:{page}"),
+            move |request| {
+                request.query(&[("page", page.to_string()), ("language", "en-US".to_string())])
+            },
+            &format!("/3/{media_type}/{category}"),
+        )
+        .await?;
+
+        Ok(map_tmdb_page(data, &media_type))
+    }
+
     async fn search_tmdb(
         &self,
         ctx: &Context<'_>,
@@ -18,9 +85,6 @@ impl CoreTmdbQuery {
         params: Option<Json<serde_json::Value>>,
         search_mode: Option<String>,
     ) -> Result<TmdbPage> {
-        let registry = ctx.data::<Arc<PluginRegistry>>()?;
-        let api_key = get_tmdb_api_key(registry).await?;
-
         let is_search = matches!(search_mode.as_deref(), Some("search") | Some("hybrid"));
         let endpoint = match (media_type.as_str(), is_search) {
             ("movie", true) => "/3/search/movie",
@@ -60,35 +124,15 @@ impl CoreTmdbQuery {
             }
         }
 
-        let resp = reqwest::Client::new()
-            .get(format!("{TMDB_API_BASE}{endpoint}"))
-            .bearer_auth(&api_key)
-            .query(&query_params)
-            .send()
-            .await
-            .map_err(|e| Error::new(format!("TMDB request failed: {e}")))?;
+        let data = tmdb_json(
+            ctx,
+            format!("search:{media_type}:{endpoint}:{query_params:?}"),
+            move |request| request.query(&query_params),
+            endpoint,
+        )
+        .await?;
 
-        if !resp.status().is_success() {
-            return Err(Error::new(format!("TMDB API error: {}", resp.status())));
-        }
-
-        let data: serde_json::Value = resp
-            .json()
-            .await
-            .map_err(|e| Error::new(format!("TMDB response parse error: {e}")))?;
-
-        let results = data
-            .get("results")
-            .and_then(|v| v.as_array())
-            .map(|items| items.iter().map(|item| transform_item(item, &media_type)).collect())
-            .unwrap_or_default();
-
-        Ok(TmdbPage {
-            results,
-            page: data.get("page").and_then(|v| v.as_i64()).unwrap_or(1),
-            total_pages: data.get("total_pages").and_then(|v| v.as_i64()).unwrap_or(1),
-            total_results: data.get("total_results").and_then(|v| v.as_i64()).unwrap_or(0),
-        })
+        Ok(map_tmdb_page(data, &media_type))
     }
 
     async fn tmdb_logo_and_cert(
@@ -97,31 +141,28 @@ impl CoreTmdbQuery {
         #[graphql(name = "type")] media_type: String,
         id: i64,
     ) -> Result<TmdbLogoAndCert> {
-        let registry = ctx.data::<Arc<PluginRegistry>>()?;
-        let api_key = get_tmdb_api_key(registry).await?;
-
         let (endpoint, append) = match media_type.as_str() {
             "movie" => (format!("/3/movie/{id}"), "images,release_dates"),
             "tv" => (format!("/3/tv/{id}"), "images,content_ratings"),
             _ => return Err(Error::new(format!("Invalid media type: {media_type}"))),
         };
 
-        let resp = reqwest::Client::new()
-            .get(format!("{TMDB_API_BASE}{endpoint}"))
-            .bearer_auth(&api_key)
-            .query(&[("append_to_response", append)])
-            .send()
-            .await
-            .map_err(|e| Error::new(format!("TMDB request failed: {e}")))?;
-
-        if !resp.status().is_success() {
-            return Ok(TmdbLogoAndCert { logo: None, certification: None });
-        }
-
-        let data: serde_json::Value = resp
-            .json()
-            .await
-            .map_err(|_| Error::new("TMDB response parse error"))?;
+        let data = match tmdb_json(
+            ctx,
+            format!("logo_cert:{media_type}:{id}"),
+            move |request| request.query(&[("append_to_response", append)]),
+            &endpoint,
+        )
+        .await
+        {
+            Ok(data) => data,
+            Err(_) => {
+                return Ok(TmdbLogoAndCert {
+                    logo: None,
+                    certification: None,
+                });
+            }
+        };
 
         let logos = data
             .get("images")
@@ -169,7 +210,10 @@ impl CoreTmdbQuery {
                 })
         };
 
-        Ok(TmdbLogoAndCert { logo, certification })
+        Ok(TmdbLogoAndCert {
+            logo,
+            certification,
+        })
     }
 
     async fn trending_tmdb(
@@ -179,9 +223,6 @@ impl CoreTmdbQuery {
         time_window: String,
         page: Option<i64>,
     ) -> Result<TmdbPage> {
-        let registry = ctx.data::<Arc<PluginRegistry>>()?;
-        let api_key = get_tmdb_api_key(registry).await?;
-
         if !matches!(media_type.as_str(), "movie" | "tv" | "all") {
             return Err(Error::new(format!("Invalid media type: {media_type}")));
         }
@@ -190,34 +231,52 @@ impl CoreTmdbQuery {
         }
 
         let page = page.unwrap_or(1);
-        let resp = reqwest::Client::new()
-            .get(format!("{TMDB_API_BASE}/3/trending/{media_type}/{time_window}"))
-            .bearer_auth(&api_key)
-            .query(&[("page", page.to_string())])
-            .send()
-            .await
-            .map_err(|e| Error::new(format!("TMDB request failed: {e}")))?;
+        let data = tmdb_json(
+            ctx,
+            format!("trending:{media_type}:{time_window}:{page}"),
+            move |request| request.query(&[("page", page.to_string())]),
+            &format!("/3/trending/{media_type}/{time_window}"),
+        )
+        .await?;
 
-        if !resp.status().is_success() {
-            return Err(Error::new(format!("TMDB API error: {}", resp.status())));
-        }
+        Ok(map_tmdb_page(data, &media_type))
+    }
+}
 
-        let data: serde_json::Value = resp
-            .json()
-            .await
-            .map_err(|e| Error::new(format!("TMDB response parse error: {e}")))?;
+async fn tmdb_json<F>(
+    ctx: &Context<'_>,
+    dedupe_key: String,
+    build_request: F,
+    endpoint: &str,
+) -> Result<serde_json::Value>
+where
+    F: Fn(reqwest::RequestBuilder) -> reqwest::RequestBuilder,
+{
+    let registry = ctx.data::<Arc<PluginRegistry>>()?;
+    let http = ctx.data::<HttpClient>()?;
+    let api_key = get_tmdb_api_key(registry).await?;
 
-        let results = data
-            .get("results")
-            .and_then(|v| v.as_array())
-            .map(|items| items.iter().map(|item| transform_item(item, &media_type)).collect())
-            .unwrap_or_default();
+    http.get_json(TMDB, format!("tmdb:{dedupe_key}"), |client| {
+        let request = client
+            .get(format!("{TMDB_API_BASE}{endpoint}"))
+            .bearer_auth(&api_key);
+        build_request(request)
+    })
+    .await
+    .map_err(|e| Error::new(format!("TMDB request failed: {e}")))
+}
 
-        Ok(TmdbPage {
-            results,
-            page: data.get("page").and_then(|v| v.as_i64()).unwrap_or(1),
-            total_pages: data.get("total_pages").and_then(|v| v.as_i64()).unwrap_or(1),
-            total_results: data.get("total_results").and_then(|v| v.as_i64()).unwrap_or(0),
-        })
+fn map_tmdb_page(data: serde_json::Value, media_type: &str) -> TmdbPage {
+    let results = data
+        .get("results")
+        .and_then(|v| v.as_array())
+        .map(|items| items.iter().map(|item| transform_item(item, media_type)).collect())
+        .unwrap_or_default();
+
+    TmdbPage {
+        results,
+        page: data.get("page").and_then(|v| v.as_i64()).unwrap_or(1),
+        total_pages: data.get("total_pages").and_then(|v| v.as_i64()).unwrap_or(1),
+        total_results: data.get("total_results").and_then(|v| v.as_i64()).unwrap_or(0),
     }
 }

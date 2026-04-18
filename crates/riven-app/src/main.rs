@@ -182,6 +182,7 @@ async fn main() -> Result<()> {
                 pool,
                 reg,
                 jq.clone(),
+                http_client.clone(),
                 api_key,
                 frontend_auth_signing_secret,
                 log_dir,

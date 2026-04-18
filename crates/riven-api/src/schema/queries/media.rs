@@ -15,7 +15,9 @@ pub struct MediaQuery;
 impl MediaQuery {
     async fn media_item_by_id(&self, ctx: &Context<'_>, id: i64) -> Result<Option<MediaItemUnion>> {
         let pool = ctx.data::<sqlx::PgPool>()?;
-        Ok(repo::get_media_item(pool, id).await?.map(MediaItemUnion::from))
+        Ok(repo::get_media_item(pool, id)
+            .await?
+            .map(MediaItemUnion::from))
     }
 
     async fn media_items(&self, ctx: &Context<'_>) -> Result<Vec<MediaItemUnion>> {
@@ -184,7 +186,13 @@ impl MediaQuery {
         .await?;
         let total_items = repo::count_items_filtered(pool, types, search, states).await?;
         let total_pages = ((total_items + limit - 1) / limit).max(1);
-        Ok(ItemsPage { items, page, limit, total_items, total_pages })
+        Ok(ItemsPage {
+            items,
+            page,
+            limit,
+            total_items,
+            total_pages,
+        })
     }
 
     async fn episode_by_tvdb(
@@ -406,13 +414,21 @@ impl MediaQuery {
                         filesystem_entries: ep_media,
                     });
                 }
-                season_fulls.push(SeasonFull { item: season, episodes: episode_fulls });
+                season_fulls.push(SeasonFull {
+                    item: season,
+                    episodes: episode_fulls,
+                });
             }
             season_fulls
         } else {
             vec![]
         };
 
-        Ok(MediaItemFull { item, filesystem_entry, filesystem_entries, seasons })
+        Ok(MediaItemFull {
+            item,
+            filesystem_entry,
+            filesystem_entries,
+            seasons,
+        })
     }
 }

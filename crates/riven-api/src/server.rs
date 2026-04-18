@@ -9,6 +9,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use axum::{Router, routing::get, routing::post};
 use plugin_logs::LogControl;
+use riven_core::http::HttpClient;
 use riven_core::plugin::PluginRegistry;
 use riven_core::stream_link::LinkRequest;
 use riven_queue::JobQueue;
@@ -52,6 +53,7 @@ pub async fn start_server(
     db_pool: sqlx::PgPool,
     registry: Arc<PluginRegistry>,
     job_queue: Arc<JobQueue>,
+    http_client: HttpClient,
     api_key: Option<String>,
     frontend_auth_signing_secret: Option<String>,
     log_directory: String,
@@ -67,6 +69,7 @@ pub async fn start_server(
         db_pool.clone(),
         registry,
         job_queue.clone(),
+        http_client,
         log_directory,
         downloader_config,
         log_control,

@@ -33,6 +33,10 @@ impl HttpServiceProfile {
 
 pub const AIOSTREAMS: HttpServiceProfile =
     HttpServiceProfile::new("aiostreams").with_rate_limit(120, Duration::from_secs(60));
+pub const ANILIST: HttpServiceProfile =
+    HttpServiceProfile::new("anilist").with_rate_limit(2, Duration::from_secs(1));
+pub const ANIZIP: HttpServiceProfile =
+    HttpServiceProfile::new("anizip").with_rate_limit(2, Duration::from_secs(1));
 pub const COMET: HttpServiceProfile =
     HttpServiceProfile::new("comet").with_rate_limit(150, Duration::from_secs(60));
 pub const DISCORD_WEBHOOK: HttpServiceProfile = HttpServiceProfile::new("discord_webhook");
@@ -50,7 +54,8 @@ pub const TMDB: HttpServiceProfile =
     HttpServiceProfile::new("tmdb").with_rate_limit(40, Duration::from_secs(1));
 pub const TORRENTIO: HttpServiceProfile =
     HttpServiceProfile::new("torrentio").with_rate_limit(150, Duration::from_secs(60));
-pub const TRAKT: HttpServiceProfile = HttpServiceProfile::new("trakt");
+pub const TRAKT: HttpServiceProfile =
+    HttpServiceProfile::new("trakt").with_rate_limit(2, Duration::from_secs(1));
 pub const TVDB: HttpServiceProfile =
     HttpServiceProfile::new("tvdb").with_rate_limit(25, Duration::from_secs(1));
 pub const TVMAZE: HttpServiceProfile =

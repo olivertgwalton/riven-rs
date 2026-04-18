@@ -3,6 +3,7 @@ use plugin_calendar::CalendarQuery;
 use plugin_dashboard::{DashboardQuery, PlaybackSessionsCache};
 use plugin_logs::{LogControl, LogDirectory, LogsQuery};
 use riven_core::downloader::DownloaderConfig;
+use riven_core::http::HttpClient;
 use riven_core::plugin::PluginRegistry;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -44,6 +45,7 @@ pub fn build_schema(
     db_pool: sqlx::PgPool,
     registry: Arc<PluginRegistry>,
     job_queue: Arc<riven_queue::JobQueue>,
+    http_client: HttpClient,
     log_directory: String,
     downloader_config: Arc<RwLock<DownloaderConfig>>,
     log_control: Arc<LogControl>,
@@ -57,6 +59,7 @@ pub fn build_schema(
     .data(db_pool)
     .data(registry)
     .data(job_queue)
+    .data(http_client)
     .data(LogDirectory(log_directory))
     .data(Arc::new(PlaybackSessionsCache::default()))
     .data(downloader_config)

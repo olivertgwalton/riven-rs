@@ -57,8 +57,14 @@ pub fn transform_item(item: &serde_json::Value, default_type: &str) -> TmdbListI
         .unwrap_or_default()
         .to_owned();
 
-    let release_date = item.get("release_date").and_then(|v| v.as_str()).map(str::to_owned);
-    let first_air_date = item.get("first_air_date").and_then(|v| v.as_str()).map(str::to_owned);
+    let release_date = item
+        .get("release_date")
+        .and_then(|v| v.as_str())
+        .map(str::to_owned);
+    let first_air_date = item
+        .get("first_air_date")
+        .and_then(|v| v.as_str())
+        .map(str::to_owned);
 
     let year = if media_type == "movie" {
         release_date.as_deref()
@@ -96,7 +102,10 @@ pub fn transform_item(item: &serde_json::Value, default_type: &str) -> TmdbListI
         vote_average: item.get("vote_average").and_then(|v| v.as_f64()),
         vote_count: item.get("vote_count").and_then(|v| v.as_i64()),
         popularity: item.get("popularity").and_then(|v| v.as_f64()),
-        overview: item.get("overview").and_then(|v| v.as_str()).map(str::to_owned),
+        overview: item
+            .get("overview")
+            .and_then(|v| v.as_str())
+            .map(str::to_owned),
         backdrop_path,
         genre_ids,
         release_date,
@@ -106,7 +115,10 @@ pub fn transform_item(item: &serde_json::Value, default_type: &str) -> TmdbListI
             .or_else(|| item.get("original_name"))
             .and_then(|v| v.as_str())
             .map(str::to_owned),
-        original_language: item.get("original_language").and_then(|v| v.as_str()).map(str::to_owned),
+        original_language: item
+            .get("original_language")
+            .and_then(|v| v.as_str())
+            .map(str::to_owned),
         indexer: "tmdb".to_owned(),
     }
 }
@@ -121,4 +133,16 @@ pub async fn get_tmdb_api_key(registry: &PluginRegistry) -> Result<String> {
         .and_then(|v| v.as_str())
         .map(str::to_owned)
         .ok_or_else(|| Error::new("TMDB API key is not configured"))
+}
+
+pub async fn get_tvdb_api_key(registry: &PluginRegistry) -> Result<String> {
+    let settings = registry
+        .get_plugin_settings_json("tvdb")
+        .await
+        .ok_or_else(|| Error::new("TVDB plugin is not configured"))?;
+    settings
+        .get("apikey")
+        .and_then(|v| v.as_str())
+        .map(str::to_owned)
+        .ok_or_else(|| Error::new("TVDB API key is not configured"))
 }
