@@ -138,11 +138,6 @@ pub fn pick_best_for_profile<'a>(
 
 fn build_download_candidate_profile(profile: &RankSettings) -> RankSettings {
     let mut download_profile = profile.clone();
-    download_profile.resolutions.high_definition.r2160p = true;
-    download_profile.resolutions.high_definition.r1080p = true;
-    download_profile.resolutions.high_definition.r720p = true;
-    download_profile.resolutions.standard_definition.r480p = true;
-    download_profile.resolutions.unknown = true;
 
     download_profile.custom_ranks.quality.av1.fetch = true;
     download_profile.custom_ranks.quality.remux.fetch = true;
@@ -184,6 +179,93 @@ fn build_download_candidate_profile(profile: &RankSettings) -> RankSettings {
     }
 
     download_profile
+}
+
+#[cfg(test)]
+mod tests {
+    use super::pick_best_for_profile;
+    use crate::application::download::candidates::CachedCandidate;
+    use riven_core::types::MediaItemType;
+    use riven_db::entities::{MediaItem, Stream};
+    use riven_rank::RankSettings;
+
+    fn media_item() -> MediaItem {
+        MediaItem {
+            id: 1,
+            title: "Shrek 2".to_string(),
+            full_title: None,
+            imdb_id: None,
+            tvdb_id: None,
+            tmdb_id: None,
+            poster_path: None,
+            created_at: chrono::Utc::now(),
+            updated_at: Some(chrono::Utc::now()),
+            indexed_at: None,
+            scraped_at: None,
+            scraped_times: 0,
+            aliases: None,
+            network: None,
+            country: None,
+            language: None,
+            is_anime: false,
+            aired_at: None,
+            year: Some(2004),
+            genres: None,
+            rating: None,
+            content_rating: None,
+            state: riven_core::types::MediaItemState::Scraped,
+            failed_attempts: 0,
+            item_type: MediaItemType::Movie,
+            is_requested: false,
+            show_status: None,
+            season_number: None,
+            is_special: None,
+            parent_id: None,
+            episode_number: None,
+            absolute_number: None,
+            runtime: None,
+            item_request_id: None,
+            active_stream_id: None,
+        }
+    }
+
+    fn stream(id: i64, info_hash: &str, title: &str) -> Stream {
+        Stream {
+            id,
+            info_hash: info_hash.to_string(),
+            magnet: format!("magnet:?xt=urn:btih:{info_hash}"),
+            created_at: chrono::Utc::now(),
+            updated_at: Some(chrono::Utc::now()),
+            parsed_data: Some(serde_json::to_value(riven_rank::parse(title)).expect("parse")),
+            rank: Some(10),
+            file_size_bytes: None,
+        }
+    }
+
+    #[test]
+    fn pick_best_for_profile_respects_profile_resolution_filters() {
+        let mut profile = RankSettings::default();
+        profile.resolutions.high_definition.r2160p = false;
+        profile.resolutions.high_definition.r1080p = true;
+        profile.resolution_ranks.r2160p = 0;
+        profile.resolution_ranks.r1080p = 5;
+
+        let stream_2160p = stream(1, "hash2160", "Shrek.2.2160p.BluRay");
+        let stream_1080p = stream(2, "hash1080", "Shrek.2.1080p.BluRay");
+        let candidates = vec![
+            CachedCandidate {
+                stream: &stream_2160p,
+            },
+            CachedCandidate {
+                stream: &stream_1080p,
+            },
+        ];
+
+        let best = pick_best_for_profile(&candidates, &media_item(), &profile)
+            .expect("1080p stream should remain eligible");
+
+        assert_eq!(best.info_hash, "hash1080");
+    }
 }
 
 fn pack_preference(item: &MediaItem, parsed: &ParsedData) -> i64 {
