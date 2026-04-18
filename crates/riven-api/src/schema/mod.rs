@@ -11,6 +11,7 @@ pub(crate) mod auth;
 pub mod discovery;
 mod event_controller;
 mod helpers;
+mod metadata;
 mod mutations;
 pub mod plugins;
 mod queries;

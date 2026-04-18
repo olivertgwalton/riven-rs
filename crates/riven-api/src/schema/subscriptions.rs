@@ -7,7 +7,7 @@ use riven_db::repo;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 
-use super::queries::CoreQuery;
+use super::queries::MediaQuery;
 use super::typed_items::Show;
 use super::types::MediaItemStateTree;
 
@@ -106,7 +106,7 @@ async fn load_item_state_by_tmdb(
         return Ok(None);
     };
 
-    CoreQuery
+    MediaQuery
         .media_item_state_tree_inner(pool, item)
         .await
         .map(Some)
@@ -120,7 +120,7 @@ async fn load_item_state_by_tvdb(
         return Ok(None);
     };
 
-    CoreQuery
+    MediaQuery
         .media_item_state_tree_inner(pool, item)
         .await
         .map(Some)
