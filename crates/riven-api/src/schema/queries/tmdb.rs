@@ -7,10 +7,10 @@ use crate::schema::metadata::{
 };
 
 #[derive(Default)]
-pub struct TmdbQuery;
+pub struct CoreTmdbQuery;
 
 #[Object]
-impl TmdbQuery {
+impl CoreTmdbQuery {
     async fn search_tmdb(
         &self,
         ctx: &Context<'_>,
@@ -170,5 +170,54 @@ impl TmdbQuery {
         };
 
         Ok(TmdbLogoAndCert { logo, certification })
+    }
+
+    async fn trending_tmdb(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(name = "type")] media_type: String,
+        time_window: String,
+        page: Option<i64>,
+    ) -> Result<TmdbPage> {
+        let registry = ctx.data::<Arc<PluginRegistry>>()?;
+        let api_key = get_tmdb_api_key(registry).await?;
+
+        if !matches!(media_type.as_str(), "movie" | "tv" | "all") {
+            return Err(Error::new(format!("Invalid media type: {media_type}")));
+        }
+        if !matches!(time_window.as_str(), "day" | "week") {
+            return Err(Error::new(format!("Invalid time window: {time_window}")));
+        }
+
+        let page = page.unwrap_or(1);
+        let resp = reqwest::Client::new()
+            .get(format!("{TMDB_API_BASE}/3/trending/{media_type}/{time_window}"))
+            .bearer_auth(&api_key)
+            .query(&[("page", page.to_string())])
+            .send()
+            .await
+            .map_err(|e| Error::new(format!("TMDB request failed: {e}")))?;
+
+        if !resp.status().is_success() {
+            return Err(Error::new(format!("TMDB API error: {}", resp.status())));
+        }
+
+        let data: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| Error::new(format!("TMDB response parse error: {e}")))?;
+
+        let results = data
+            .get("results")
+            .and_then(|v| v.as_array())
+            .map(|items| items.iter().map(|item| transform_item(item, &media_type)).collect())
+            .unwrap_or_default();
+
+        Ok(TmdbPage {
+            results,
+            page: data.get("page").and_then(|v| v.as_i64()).unwrap_or(1),
+            total_pages: data.get("total_pages").and_then(|v| v.as_i64()).unwrap_or(1),
+            total_results: data.get("total_results").and_then(|v| v.as_i64()).unwrap_or(0),
+        })
     }
 }

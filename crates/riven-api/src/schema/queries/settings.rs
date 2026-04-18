@@ -1,7 +1,6 @@
 use async_graphql::*;
 use riven_core::plugin::{PluginRegistry, SettingField};
 use riven_core::settings::RivenSettings;
-use riven_core::types::*;
 use riven_db::repo;
 use std::sync::Arc;
 
@@ -9,10 +8,10 @@ use crate::schema::auth::require_settings_access;
 use crate::schema::types::{InstanceStatus, PluginInfo};
 
 #[derive(Default)]
-pub struct SettingsQuery;
+pub struct CoreSettingsQuery;
 
 #[Object]
-impl SettingsQuery {
+impl CoreSettingsQuery {
     /// Get the current rank settings. Returns defaults if not yet configured.
     /// Each `custom_ranks` entry is annotated with a `"default"` field carrying
     /// the built-in score so the UI can display the effective value without a

@@ -5,8 +5,8 @@ mod tmdb;
 use async_graphql::MergedObject;
 
 pub use media::MediaQuery;
-pub use settings::SettingsQuery;
-pub use tmdb::TmdbQuery;
+pub use settings::CoreSettingsQuery;
+pub use tmdb::CoreTmdbQuery;
 
 #[derive(MergedObject, Default)]
-pub struct CoreQuery(MediaQuery, SettingsQuery, TmdbQuery);
+pub struct CoreQuery(MediaQuery, CoreSettingsQuery, CoreTmdbQuery);

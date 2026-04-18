@@ -3,7 +3,6 @@ use riven_core::types::*;
 use riven_db::entities::*;
 use riven_db::repo;
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use crate::schema::helpers::derive_media_metadata;
 use crate::schema::typed_items::MediaItemUnion;
@@ -237,7 +236,7 @@ impl MediaQuery {
 // ── Non-GraphQL helpers ───────────────────────────────────────────────────────
 
 impl MediaQuery {
-    pub(super) async fn media_item_state_tree_inner(
+    pub(crate) async fn media_item_state_tree_inner(
         &self,
         pool: &sqlx::PgPool,
         item: MediaItem,
