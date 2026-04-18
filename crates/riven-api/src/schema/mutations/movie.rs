@@ -7,8 +7,8 @@ use riven_queue::JobQueue;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::schema::typed_items::Movie;
 use crate::schema::auth::require_settings_access;
+use crate::schema::typed_items::Movie;
 
 use super::MutationStatusText;
 

@@ -187,8 +187,8 @@ async fn resolve_media_stream_url(
         entry.download_url.as_deref(),
         entry.provider.as_deref(),
         &state.link_request_tx,
-        &state.runtime,
-    )?;
+    )
+    .await?;
     if let Err(error) = riven_db::repo::update_stream_url(&state.db_pool, entry.id, &url).await {
         tracing::warn!(
             entry_id = entry.id,

@@ -7,8 +7,8 @@ use riven_db::repo;
 use riven_queue::JobQueue;
 use std::sync::Arc;
 
-use crate::schema::typed_items::Show;
 use crate::schema::auth::require_settings_access;
+use crate::schema::typed_items::Show;
 
 use super::MutationStatusText;
 use super::movie::{parse_aliases, parse_naive_date};

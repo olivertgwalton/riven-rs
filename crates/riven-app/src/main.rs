@@ -144,9 +144,7 @@ async fn main() -> Result<()> {
 
     let gql_port = settings.gql_port;
     if settings.api_key.is_empty() {
-        tracing::warn!(
-            "RIVEN_SETTING__API_KEY is empty — GraphQL API auth is DISABLED (dev only)"
-        );
+        tracing::warn!("RIVEN_SETTING__API_KEY is empty — GraphQL API auth is DISABLED (dev only)");
     }
     if settings.frontend_auth_signing_secret.is_empty() {
         tracing::warn!(
@@ -158,9 +156,8 @@ async fn main() -> Result<()> {
         let jq = job_queue.clone();
         let reg = registry.clone();
         let api_key = (!settings.api_key.is_empty()).then(|| settings.api_key.clone());
-        let frontend_auth_signing_secret =
-            (!settings.frontend_auth_signing_secret.is_empty())
-                .then(|| settings.frontend_auth_signing_secret.clone());
+        let frontend_auth_signing_secret = (!settings.frontend_auth_signing_secret.is_empty())
+            .then(|| settings.frontend_auth_signing_secret.clone());
         let log_dir = settings.log_directory.clone();
         let mut cors_allowed_origins: Vec<String> = settings
             .cors_allowed_origins

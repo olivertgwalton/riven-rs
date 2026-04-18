@@ -136,10 +136,8 @@ fn build_cors_layer(allowed: Vec<String>) -> CorsLayer {
         );
         return CorsLayer::permissive();
     }
-    let origins: Vec<axum::http::HeaderValue> = allowed
-        .iter()
-        .filter_map(|o| o.parse().ok())
-        .collect();
+    let origins: Vec<axum::http::HeaderValue> =
+        allowed.iter().filter_map(|o| o.parse().ok()).collect();
     CorsLayer::new()
         .allow_origin(AllowOrigin::list(origins))
         .allow_headers(tower_http::cors::Any)

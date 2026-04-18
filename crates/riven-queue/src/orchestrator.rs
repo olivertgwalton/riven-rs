@@ -356,8 +356,7 @@ impl<'a> LibraryOrchestrator<'a> {
         match item.item_type {
             MediaItemType::Movie | MediaItemType::Episode => {
                 if !self.queue.push_download_from_best_stream(item.id).await
-                    && let Err(err) =
-                        repo::refresh_state_cascade(&self.queue.db_pool, item).await
+                    && let Err(err) = repo::refresh_state_cascade(&self.queue.db_pool, item).await
                 {
                     tracing::warn!(id = item.id, %err, "failed to refresh state after download skip");
                 }

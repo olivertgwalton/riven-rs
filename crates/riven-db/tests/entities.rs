@@ -120,7 +120,10 @@ fn base_directory_picks_movies_or_shows() {
         sample_entry("/shows/s01e01.mkv", None).base_directory(),
         "shows"
     );
-    assert_eq!(sample_entry("/anything/else", None).base_directory(), "shows");
+    assert_eq!(
+        sample_entry("/anything/else", None).base_directory(),
+        "shows"
+    );
 }
 
 #[test]

@@ -14,7 +14,7 @@ use tokio::sync::mpsc;
 
 use riven_core::config::vfs::*;
 use riven_core::settings::LibraryProfileMembership;
-use riven_core::stream_link::request_stream_url;
+use riven_core::stream_link::request_stream_url_blocking;
 use riven_core::vfs_layout::VfsLibraryLayout;
 use riven_db::entities::FileSystemEntry;
 use riven_db::repo;
@@ -260,7 +260,12 @@ impl RivenFs {
         download_url: Option<&str>,
         provider: Option<&str>,
     ) -> Option<String> {
-        let url = request_stream_url(download_url, provider, &self.link_request_tx, &self.runtime)?;
+        let url = request_stream_url_blocking(
+            download_url,
+            provider,
+            &self.link_request_tx,
+            &self.runtime,
+        )?;
         if let Err(err) = self.runtime.block_on(riven_db::repo::update_stream_url(
             &self.db_pool,
             entry_id,

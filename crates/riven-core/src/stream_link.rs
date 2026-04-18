@@ -1,3 +1,7 @@
+use std::time::Duration;
+
+const STREAM_LINK_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Request to resolve a stream link for a file.
 #[derive(Debug)]
 pub struct LinkRequest {
@@ -9,24 +13,38 @@ pub struct LinkRequest {
 }
 
 /// Fetch a fresh stream URL from the debrid service.
-pub fn request_stream_url(
+pub async fn request_stream_url(
+    download_url: Option<&str>,
+    provider: Option<&str>,
+    link_request_tx: &tokio::sync::mpsc::Sender<LinkRequest>,
+) -> Option<String> {
+    let dl_url = download_url?;
+    let (tx, rx) = tokio::sync::oneshot::channel();
+
+    let request = LinkRequest {
+        download_url: dl_url.to_string(),
+        provider: provider.map(str::to_owned),
+        response_tx: tx,
+    };
+
+    tokio::time::timeout(STREAM_LINK_REQUEST_TIMEOUT, link_request_tx.send(request))
+        .await
+        .ok()?
+        .ok()?;
+
+    tokio::time::timeout(STREAM_LINK_REQUEST_TIMEOUT, rx)
+        .await
+        .ok()?
+        .ok()
+        .flatten()
+}
+
+/// Fetch a fresh stream URL from the debrid service from a synchronous caller.
+pub fn request_stream_url_blocking(
     download_url: Option<&str>,
     provider: Option<&str>,
     link_request_tx: &tokio::sync::mpsc::Sender<LinkRequest>,
     runtime: &tokio::runtime::Handle,
 ) -> Option<String> {
-    let dl_url = download_url?;
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    if link_request_tx
-        .blocking_send(LinkRequest {
-            download_url: dl_url.to_string(),
-            provider: provider.map(str::to_owned),
-            response_tx: tx,
-        })
-        .is_err()
-    {
-        return None;
-    }
-
-    runtime.block_on(rx).ok().flatten()
+    runtime.block_on(request_stream_url(download_url, provider, link_request_tx))
 }
