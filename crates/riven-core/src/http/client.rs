@@ -8,9 +8,7 @@ use serde::de::DeserializeOwned;
 use super::inflight::InFlightRequest;
 use super::rate_limit::ServiceState;
 use super::response::HttpResponseData;
-use super::retry::{
-    BACKOFF_BASE_SECS, MAX_RETRY_AFTER_SECS, execute_with_retry, parse_retry_after,
-};
+use super::retry::{BACKOFF_BASE_SECS, execute_with_retry, parse_rate_limit_pause};
 use super::{HttpServiceProfile, RateLimitedError};
 
 #[derive(Clone)]
@@ -98,15 +96,19 @@ impl HttpClient {
         T: DeserializeOwned,
         F: Fn(&reqwest::Client) -> reqwest::RequestBuilder,
     {
+        let service_state = self.service_state(profile);
         let response = self
             .send_data(profile, Some(dedupe_key), make_request)
             .await?;
+        let rate_limit_pause =
+            parse_rate_limit_pause(profile, response.status(), response.headers());
+
+        if let Some(delay) = rate_limit_pause {
+            service_state.register_retry_after(delay);
+        }
 
         if response.status() == StatusCode::TOO_MANY_REQUESTS {
-            let delay = parse_retry_after(response.headers())
-                .unwrap_or_else(|| Duration::from_secs(BACKOFF_BASE_SECS))
-                .min(Duration::from_secs(MAX_RETRY_AFTER_SECS));
-            self.service_state(profile).register_retry_after(delay);
+            let delay = rate_limit_pause.unwrap_or_else(|| Duration::from_secs(BACKOFF_BASE_SECS));
             tracing::warn!(
                 service = profile.name,
                 delay_secs = delay.as_secs(),

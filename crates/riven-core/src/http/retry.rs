@@ -1,8 +1,12 @@
 use std::time::Duration;
 
+use reqwest::StatusCode;
 use reqwest::header::HeaderMap;
+use serde::Deserialize;
 use tokio::time::sleep;
 
+use super::HttpServiceProfile;
+use super::profiles::TRAKT;
 use super::rate_limit::ServiceState;
 
 pub(super) const BACKOFF_BASE_SECS: u64 = 5;
@@ -70,6 +74,54 @@ pub(super) fn parse_retry_after(headers: &HeaderMap) -> Option<Duration> {
     None
 }
 
+#[derive(Deserialize)]
+struct TraktRateLimitHeader {
+    remaining: Option<u64>,
+    until: Option<String>,
+}
+
+fn parse_trakt_rate_limit_pause(headers: &HeaderMap) -> Option<Duration> {
+    let value = headers.get("X-Ratelimit")?.to_str().ok()?.trim();
+    let header: TraktRateLimitHeader = serde_json::from_str(value).ok()?;
+
+    if header.remaining.unwrap_or(1) > 0 {
+        return None;
+    }
+
+    let until = header.until?;
+    let dt = chrono::DateTime::parse_from_rfc3339(&until).ok()?;
+    let wait = dt.with_timezone(&chrono::Utc) - chrono::Utc::now();
+    if wait > chrono::TimeDelta::zero() {
+        return Some(Duration::from_millis(wait.num_milliseconds() as u64));
+    }
+
+    None
+}
+
+pub(super) fn parse_rate_limit_pause(
+    profile: HttpServiceProfile,
+    status: StatusCode,
+    headers: &HeaderMap,
+) -> Option<Duration> {
+    let retry_after = if status == StatusCode::TOO_MANY_REQUESTS {
+        parse_retry_after(headers).map(|delay| delay.min(Duration::from_secs(MAX_RETRY_AFTER_SECS)))
+    } else {
+        None
+    };
+
+    let service_specific = if profile.name == TRAKT.name {
+        parse_trakt_rate_limit_pause(headers)
+    } else {
+        None
+    };
+
+    match (retry_after, service_specific) {
+        (Some(a), Some(b)) => Some(a.max(b)),
+        (Some(delay), None) | (None, Some(delay)) => Some(delay),
+        (None, None) => None,
+    }
+}
+
 pub(super) async fn execute_with_retry<F>(
     client: &reqwest::Client,
     service: Option<&ServiceState>,
@@ -105,5 +157,45 @@ where
             }
             Err(e) => return Err(e),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_trakt_rate_limit_pause_when_remaining_is_zero() {
+        let mut headers = HeaderMap::new();
+        let until = (chrono::Utc::now() + chrono::TimeDelta::milliseconds(1500)).to_rfc3339();
+        headers.insert(
+            "X-Ratelimit",
+            format!(r#"{{"remaining":0,"until":"{until}"}}"#)
+                .parse()
+                .expect("header should parse"),
+        );
+
+        let pause = parse_trakt_rate_limit_pause(&headers).expect("pause should be parsed");
+
+        assert!(pause >= Duration::from_millis(1000));
+        assert!(pause <= Duration::from_secs(2));
+    }
+
+    #[test]
+    fn prefers_longer_trakt_reset_over_retry_after() {
+        let mut headers = HeaderMap::new();
+        let until = (chrono::Utc::now() + chrono::TimeDelta::seconds(90)).to_rfc3339();
+        headers.insert(reqwest::header::RETRY_AFTER, "10".parse().unwrap());
+        headers.insert(
+            "X-Ratelimit",
+            format!(r#"{{"remaining":0,"until":"{until}"}}"#)
+                .parse()
+                .expect("header should parse"),
+        );
+
+        let pause = parse_rate_limit_pause(TRAKT, StatusCode::TOO_MANY_REQUESTS, &headers)
+            .expect("pause should be parsed");
+
+        assert!(pause >= Duration::from_secs(80));
     }
 }

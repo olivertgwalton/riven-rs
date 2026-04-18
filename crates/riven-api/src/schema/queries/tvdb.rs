@@ -18,11 +18,7 @@ pub struct CoreTvdbQuery;
 
 #[Object]
 impl CoreTvdbQuery {
-    async fn tvdb_series(
-        &self,
-        ctx: &Context<'_>,
-        id: i64,
-    ) -> Result<Json<serde_json::Value>> {
+    async fn tvdb_series(&self, ctx: &Context<'_>, id: i64) -> Result<Json<serde_json::Value>> {
         let token = get_tvdb_token(ctx).await?;
         tvdb_get_json(ctx, &token, &format!("/series/{id}"), None).await
     }
@@ -35,7 +31,13 @@ impl CoreTvdbQuery {
     ) -> Result<Json<serde_json::Value>> {
         let token = get_tvdb_token(ctx).await?;
         let query = meta.map(|value| HashMap::from([("meta".to_string(), value)]));
-        tvdb_get_json(ctx, &token, &format!("/series/{id}/extended"), query.as_ref()).await
+        tvdb_get_json(
+            ctx,
+            &token,
+            &format!("/series/{id}/extended"),
+            query.as_ref(),
+        )
+        .await
     }
 
     async fn tvdb_search_remote_id(
@@ -92,8 +94,7 @@ impl CoreTvdbQuery {
             return Ok(Some(series_id));
         }
 
-        let direct_series =
-            tvdb_get_value(ctx, &token, &format!("/series/{tmdb_id}"), None).await;
+        let direct_series = tvdb_get_value(ctx, &token, &format!("/series/{tmdb_id}"), None).await;
         match direct_series {
             Ok(value) => Ok(value
                 .get("data")
@@ -175,7 +176,9 @@ async fn tvdb_get_value(
     let dedupe_key = format!("tvdb:{path}:{query:?}");
 
     http.get_json(TVDB, dedupe_key, |client| {
-        let mut request = client.get(format!("{TVDB_API_BASE}{path}")).bearer_auth(token);
+        let mut request = client
+            .get(format!("{TVDB_API_BASE}{path}"))
+            .bearer_auth(token);
 
         if let Some(query) = query {
             request = request.query(query);

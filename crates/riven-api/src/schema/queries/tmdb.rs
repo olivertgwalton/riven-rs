@@ -33,20 +33,31 @@ impl CoreTmdbQuery {
             .filter(|value| !value.is_empty())
             .map(str::to_owned);
 
-        let data = tmdb_json(ctx, format!("details:{media_type}:{id}:{append:?}"), move |request| {
-            if let Some(append) = append.as_deref() {
-                request.query(&[("append_to_response", append)])
-            } else {
-                request
-            }
-        }, &endpoint)
+        let data = tmdb_json(
+            ctx,
+            format!("details:{media_type}:{id}:{append:?}"),
+            move |request| {
+                if let Some(append) = append.as_deref() {
+                    request.query(&[("append_to_response", append)])
+                } else {
+                    request
+                }
+            },
+            &endpoint,
+        )
         .await?;
 
         Ok(Json(data))
     }
 
     async fn tmdb_collection(&self, ctx: &Context<'_>, id: i64) -> Result<Json<serde_json::Value>> {
-        let data = tmdb_json(ctx, format!("collection:{id}"), |request| request, &format!("/3/collection/{id}")).await?;
+        let data = tmdb_json(
+            ctx,
+            format!("collection:{id}"),
+            |request| request,
+            &format!("/3/collection/{id}"),
+        )
+        .await?;
         Ok(Json(data))
     }
 
@@ -69,7 +80,10 @@ impl CoreTmdbQuery {
             ctx,
             format!("category:{media_type}:{category}:{page}"),
             move |request| {
-                request.query(&[("page", page.to_string()), ("language", "en-US".to_string())])
+                request.query(&[
+                    ("page", page.to_string()),
+                    ("language", "en-US".to_string()),
+                ])
             },
             &format!("/3/{media_type}/{category}"),
         )
@@ -270,13 +284,24 @@ fn map_tmdb_page(data: serde_json::Value, media_type: &str) -> TmdbPage {
     let results = data
         .get("results")
         .and_then(|v| v.as_array())
-        .map(|items| items.iter().map(|item| transform_item(item, media_type)).collect())
+        .map(|items| {
+            items
+                .iter()
+                .map(|item| transform_item(item, media_type))
+                .collect()
+        })
         .unwrap_or_default();
 
     TmdbPage {
         results,
         page: data.get("page").and_then(|v| v.as_i64()).unwrap_or(1),
-        total_pages: data.get("total_pages").and_then(|v| v.as_i64()).unwrap_or(1),
-        total_results: data.get("total_results").and_then(|v| v.as_i64()).unwrap_or(0),
+        total_pages: data
+            .get("total_pages")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(1),
+        total_results: data
+            .get("total_results")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0),
     }
 }

@@ -329,6 +329,76 @@ impl SubscriptionRoot {
         )
     }
 
+    /// Fires when a media item transitions to the scraped state.
+    async fn item_scraped(
+        &self,
+        ctx: &Context<'_>,
+    ) -> async_graphql::Result<impl Stream<Item = async_graphql::Result<i64>>> {
+        let queue = Arc::clone(ctx.data::<Arc<riven_queue::JobQueue>>()?);
+        Ok(
+            broadcast_stream(queue.event_tx.subscribe()).filter_map(|event| async move {
+                if let RivenEvent::MediaItemScrapeSuccess { id, .. } = event {
+                    Some(Ok(id))
+                } else {
+                    None
+                }
+            }),
+        )
+    }
+
+    /// Fires when a media item transitions to the completed state.
+    async fn item_downloaded(
+        &self,
+        ctx: &Context<'_>,
+    ) -> async_graphql::Result<impl Stream<Item = async_graphql::Result<i64>>> {
+        let queue = Arc::clone(ctx.data::<Arc<riven_queue::JobQueue>>()?);
+        Ok(
+            broadcast_stream(queue.event_tx.subscribe()).filter_map(|event| async move {
+                if let RivenEvent::MediaItemDownloadSuccess { id, .. } = event {
+                    Some(Ok(id))
+                } else {
+                    None
+                }
+            }),
+        )
+    }
+
+    /// Fires when a media item transitions to the failed state (scrape or download error).
+    async fn item_failed(
+        &self,
+        ctx: &Context<'_>,
+    ) -> async_graphql::Result<impl Stream<Item = async_graphql::Result<i64>>> {
+        let queue = Arc::clone(ctx.data::<Arc<riven_queue::JobQueue>>()?);
+        Ok(
+            broadcast_stream(queue.event_tx.subscribe()).filter_map(|event| async move {
+                match event {
+                    RivenEvent::MediaItemScrapeError { id, .. }
+                    | RivenEvent::MediaItemScrapeErrorNoNewStreams { id, .. }
+                    | RivenEvent::MediaItemDownloadError { id, .. }
+                    | RivenEvent::MediaItemDownloadPartialSuccess { id } => Some(Ok(id)),
+                    _ => None,
+                }
+            }),
+        )
+    }
+
+    /// Fires when one or more media items are deleted.
+    async fn items_deleted(
+        &self,
+        ctx: &Context<'_>,
+    ) -> async_graphql::Result<impl Stream<Item = async_graphql::Result<Vec<i64>>>> {
+        let queue = Arc::clone(ctx.data::<Arc<riven_queue::JobQueue>>()?);
+        Ok(
+            broadcast_stream(queue.event_tx.subscribe()).filter_map(|event| async move {
+                if let RivenEvent::MediaItemsDeleted { item_ids, .. } = event {
+                    Some(Ok(item_ids))
+                } else {
+                    None
+                }
+            }),
+        )
+    }
+
     async fn media_item_state_updates_by_tmdb(
         &self,
         ctx: &Context<'_>,

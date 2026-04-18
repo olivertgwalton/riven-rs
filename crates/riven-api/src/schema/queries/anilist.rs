@@ -166,12 +166,24 @@ impl CoreAnilistQuery {
                 .themoviedb_id
                 .as_ref()
                 .and_then(parse_mapping_id)
-                .or_else(|| response.mappings.themoviedb_id.as_ref().and_then(parse_mapping_id)),
+                .or_else(|| {
+                    response
+                        .mappings
+                        .themoviedb_id
+                        .as_ref()
+                        .and_then(parse_mapping_id)
+                }),
             tvdb_id: response
                 .thetvdb_id
                 .as_ref()
                 .and_then(parse_mapping_id)
-                .or_else(|| response.mappings.thetvdb_id.as_ref().and_then(parse_mapping_id)),
+                .or_else(|| {
+                    response
+                        .mappings
+                        .thetvdb_id
+                        .as_ref()
+                        .and_then(parse_mapping_id)
+                }),
         })
     }
 }
