@@ -55,7 +55,7 @@ pub const TMDB: HttpServiceProfile =
 pub const TORRENTIO: HttpServiceProfile =
     HttpServiceProfile::new("torrentio").with_rate_limit(150, Duration::from_secs(60));
 pub const TRAKT: HttpServiceProfile =
-    HttpServiceProfile::new("trakt").with_rate_limit(2, Duration::from_secs(1));
+    HttpServiceProfile::new("trakt").with_rate_limit(1000, Duration::from_secs(300));
 pub const TVDB: HttpServiceProfile =
     HttpServiceProfile::new("tvdb").with_rate_limit(25, Duration::from_secs(1));
 pub const TVMAZE: HttpServiceProfile =
