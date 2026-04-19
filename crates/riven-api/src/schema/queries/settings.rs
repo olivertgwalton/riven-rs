@@ -32,13 +32,39 @@ impl CoreSettingsQuery {
 
     /// Return all quality profiles as an ordered array of
     /// `{ id, label, description, settings }` objects.
+    /// The `settings` field reflects the *effective* settings (base preset merged
+    /// with any user overrides stored in the database), so the UI always shows
+    /// the values that will actually be used at runtime.
     async fn quality_profiles(&self, ctx: &Context<'_>) -> Result<serde_json::Value> {
         require_settings_access(ctx)?;
+        let pool = ctx.data::<sqlx::PgPool>()?;
+
+        // Load all DB profile rows so we can look up stored overrides by name.
+        let db_profiles = repo::list_ranking_profiles(pool).await.unwrap_or_default();
+
         let profiles: serde_json::Value = riven_rank::QualityProfile::ALL
             .iter()
             .map(|&p| {
-                let mut settings =
-                    serde_json::to_value(p.base_settings()).unwrap_or(serde_json::Value::Null);
+                // Find the matching DB row (if any) for this built-in profile.
+                let db_row = db_profiles.iter().find(|r| r.name == p.id());
+
+                let effective_settings = db_row
+                    .and_then(|row| {
+                        // Only merge if the DB actually has non-empty settings.
+                        let is_empty = matches!(&row.settings, serde_json::Value::Object(m) if m.is_empty())
+                            || matches!(&row.settings, serde_json::Value::Null);
+                        if is_empty {
+                            return None;
+                        }
+                        riven_queue::flows::merge_builtin_profile_settings(p, &row.settings)
+                            .ok()
+                            .and_then(|s| serde_json::to_value(&s).ok())
+                    })
+                    .unwrap_or_else(|| {
+                        serde_json::to_value(p.base_settings()).unwrap_or(serde_json::Value::Null)
+                    });
+
+                let mut settings = effective_settings;
                 inject_rank_defaults(&mut settings);
                 serde_json::json!({
                     "id":          p.id(),

@@ -1,5 +1,7 @@
 use async_trait::async_trait;
+use reqwest::StatusCode;
 use riven_core::events::{EventType, HookResponse, RivenEvent};
+use riven_core::http::RetryLaterError;
 use riven_core::http::profiles;
 use riven_core::plugin::{Plugin, PluginContext};
 use riven_core::register_plugin;
@@ -75,6 +77,15 @@ impl Plugin for TorrentioPlugin {
         let status = http_resp.status();
         if !status.is_success() {
             let body = http_resp.text().unwrap_or_default();
+            if is_deferred_status(status) {
+                tracing::warn!(
+                    status = %status,
+                    imdb_id,
+                    title = request.title,
+                    "torrentio temporarily unavailable; deferring scrape"
+                );
+                return Err(RetryLaterError.into());
+            }
             anyhow::bail!(
                 "torrentio returned HTTP {status}: {}",
                 body.chars().take(200).collect::<String>()
@@ -113,7 +124,12 @@ fn scrape_url(
 ) -> String {
     let (scrape_type, identifier) = match item_type {
         MediaItemType::Movie => (scrape_type(item_type), String::new()),
-        _ => {
+        MediaItemType::Show => (scrape_type(item_type), String::new()),
+        MediaItemType::Season => {
+            let s = season.unwrap_or(1);
+            (scrape_type(item_type), format!(":{s}"))
+        }
+        MediaItemType::Episode => {
             let s = season.unwrap_or(1);
             let e = episode.unwrap_or(1);
             (scrape_type(item_type), format!(":{s}:{e}"))
@@ -128,6 +144,16 @@ fn scrape_type(item_type: MediaItemType) -> &'static str {
         MediaItemType::Movie => "movie",
         MediaItemType::Show | MediaItemType::Season | MediaItemType::Episode => "series",
     }
+}
+
+fn is_deferred_status(status: StatusCode) -> bool {
+    matches!(
+        status,
+        StatusCode::TOO_MANY_REQUESTS
+            | StatusCode::BAD_GATEWAY
+            | StatusCode::SERVICE_UNAVAILABLE
+            | StatusCode::GATEWAY_TIMEOUT
+    )
 }
 
 fn scrape_results_from_response(resp: TorrentioResponse) -> ScrapeResponse {

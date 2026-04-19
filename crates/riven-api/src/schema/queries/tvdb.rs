@@ -49,6 +49,20 @@ impl CoreTvdbQuery {
         tvdb_get_json(ctx, &token, &format!("/search/remoteid/{remote_id}"), None).await
     }
 
+    async fn tvdb_person_extended(
+        &self,
+        ctx: &Context<'_>,
+        id: i64,
+        meta: Option<String>,
+    ) -> Result<Json<serde_json::Value>> {
+        let token = get_tvdb_token(ctx).await?;
+        let mut query = HashMap::from([("short".to_string(), "false".to_string())]);
+        if let Some(meta) = meta {
+            query.insert("meta".to_string(), meta);
+        }
+        tvdb_get_json(ctx, &token, &format!("/people/{id}/extended"), Some(&query)).await
+    }
+
     async fn tvdb_episodes(
         &self,
         ctx: &Context<'_>,

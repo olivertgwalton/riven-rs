@@ -1,10 +1,28 @@
 use super::*;
-use std::collections::HashMap;
-
 #[test]
-fn scrape_url_defaults_series_season_and_episode() {
+fn scrape_url_uses_stremio_identifiers_for_each_media_type() {
     assert_eq!(
-        scrape_url("sort=quality", MediaItemType::Episode, "tt123", None, None),
+        scrape_url("sort=quality", MediaItemType::Show, "tt123", None, None),
+        "http://torrentio.strem.fun/sort=quality/stream/series/tt123.json"
+    );
+    assert_eq!(
+        scrape_url(
+            "sort=quality",
+            MediaItemType::Season,
+            "tt123",
+            Some(2),
+            None
+        ),
+        "http://torrentio.strem.fun/sort=quality/stream/series/tt123:2.json"
+    );
+    assert_eq!(
+        scrape_url(
+            "sort=quality",
+            MediaItemType::Episode,
+            "tt123",
+            Some(1),
+            None
+        ),
         "http://torrentio.strem.fun/sort=quality/stream/series/tt123:1:1.json"
     );
     assert_eq!(
@@ -17,6 +35,15 @@ fn scrape_url_defaults_series_season_and_episode() {
         ),
         "http://torrentio.strem.fun/sort=quality/stream/movie/tt123.json"
     );
+}
+
+#[test]
+fn deferred_statuses_cover_torrentio_overload_responses() {
+    assert!(is_deferred_status(StatusCode::TOO_MANY_REQUESTS));
+    assert!(is_deferred_status(StatusCode::BAD_GATEWAY));
+    assert!(is_deferred_status(StatusCode::SERVICE_UNAVAILABLE));
+    assert!(is_deferred_status(StatusCode::GATEWAY_TIMEOUT));
+    assert!(!is_deferred_status(StatusCode::NOT_FOUND));
 }
 
 #[test]
@@ -40,8 +67,10 @@ fn response_mapping_uses_first_title_line_before_peer_count() {
 
     let results = scrape_results_from_response(resp);
 
-    assert_eq!(
-        results,
-        HashMap::from([("abcdef".to_string(), "Movie.File.2024.1080p".to_string())])
-    );
+    assert_eq!(results.len(), 1);
+    let entry = results
+        .get("abcdef")
+        .expect("lowercased info hash should be present");
+    assert_eq!(entry.title, "Movie.File.2024.1080p");
+    assert_eq!(entry.file_size_bytes, None);
 }
