@@ -16,6 +16,7 @@ fn matching_profiles_allow_any_positive_token_and_respect_exclusions() {
             name: "Kids".to_string(),
             library_path: "/kids".to_string(),
             enabled: true,
+            exclusive: false,
             filter_rules: FilesystemFilterRules {
                 content_types: vec![FilesystemContentType::Movie],
                 genres: vec![
@@ -66,6 +67,7 @@ fn matching_profiles_reject_when_no_positive_token_matches() {
                 name: "Non-kids".to_string(),
                 library_path: "/nonkids".to_string(),
                 enabled: true,
+                exclusive: false,
                 filter_rules: FilesystemFilterRules {
                     content_types: vec![FilesystemContentType::Movie, FilesystemContentType::Show],
                     genres: vec!["family".to_string(), "children".to_string()],
@@ -110,6 +112,7 @@ fn matching_profiles_support_language_country_year_and_rating_filters() {
                 name: "Curated".to_string(),
                 library_path: "/curated".to_string(),
                 enabled: true,
+                exclusive: false,
                 filter_rules: FilesystemFilterRules {
                     content_types: vec![FilesystemContentType::Movie],
                     genres: vec![],

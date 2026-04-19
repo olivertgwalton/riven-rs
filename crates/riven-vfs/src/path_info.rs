@@ -91,6 +91,7 @@ mod tests {
                 name: "Kids".to_string(),
                 library_path: "/kids".to_string(),
                 enabled: true,
+                exclusive: false,
                 filter_rules: Default::default(),
             },
         );
@@ -120,6 +121,7 @@ mod tests {
                 name: "Kids".to_string(),
                 library_path: "/library/kids".to_string(),
                 enabled: true,
+                exclusive: false,
                 filter_rules: Default::default(),
             },
         );
@@ -129,6 +131,7 @@ mod tests {
                 name: "Anime".to_string(),
                 library_path: "/library/anime".to_string(),
                 enabled: true,
+                exclusive: false,
                 filter_rules: Default::default(),
             },
         );
@@ -157,6 +160,7 @@ mod tests {
                 name: "Kids".to_string(),
                 library_path: "/library/kids".to_string(),
                 enabled: true,
+                exclusive: false,
                 filter_rules: Default::default(),
             },
         );
