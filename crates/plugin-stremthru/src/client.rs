@@ -119,6 +119,10 @@ pub async fn add_torrent(
     hash: &str,
 ) -> anyhow::Result<Option<StremthruTorz>> {
     let hash = hash.to_lowercase();
+    if hash.is_empty() {
+        tracing::warn!(store, "skipping add_torrent: empty info_hash");
+        return Ok(None);
+    }
     let magnet = build_magnet_uri(&hash);
     let url = format!("{base_url}v0/store/torz");
     tracing::debug!(store, url = %url, "adding torrent via stremthru torz endpoint");
