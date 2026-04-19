@@ -12,6 +12,7 @@ use std::sync::atomic::Ordering;
 use tokio::sync::RwLock;
 
 use crate::schema::auth::require_settings_access;
+use crate::vfs_mount::VfsMountManager;
 
 // ── Helpers ──
 
@@ -342,6 +343,11 @@ impl SettingsMutations {
             queue
                 .filesystem_settings_revision
                 .fetch_add(1, Ordering::SeqCst);
+            if previous_filesystem.mount_path != filesystem.mount_path {
+                ctx.data::<Arc<VfsMountManager>>()?
+                    .set_mount_path(&filesystem.mount_path)
+                    .await?;
+            }
             tracing::info!(
                 rematch_count,
                 "updated filesystem settings and rematched library profiles"

@@ -33,6 +33,9 @@ pub struct FilesystemLibraryProfile {
     pub name: String,
     pub library_path: String,
     pub enabled: bool,
+    /// When true, items matched by this profile are hidden from the default
+    /// `/movies` and `/shows` paths and only appear under this profile's path.
+    pub exclusive: bool,
     pub filter_rules: FilesystemFilterRules,
 }
 
@@ -42,6 +45,7 @@ impl Default for FilesystemLibraryProfile {
             name: String::new(),
             library_path: String::new(),
             enabled: true,
+            exclusive: false,
             filter_rules: FilesystemFilterRules::default(),
         }
     }

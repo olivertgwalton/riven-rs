@@ -5,7 +5,8 @@ use riven_core::plugin::PluginRegistry;
 use std::sync::Arc;
 
 use crate::schema::metadata::{
-    TMDB_API_BASE, TMDB_IMAGE_BASE, TmdbLogoAndCert, TmdbPage, get_tmdb_api_key, transform_item,
+    TMDB_API_BASE, TMDB_IMAGE_BASE, TmdbCollectionDetails, TmdbLogoAndCert, TmdbPage,
+    get_tmdb_api_key, transform_collection, transform_item,
 };
 
 #[derive(Default)]
@@ -59,6 +60,21 @@ impl CoreTmdbQuery {
         )
         .await?;
         Ok(Json(data))
+    }
+
+    async fn tmdb_collection_details(
+        &self,
+        ctx: &Context<'_>,
+        id: i64,
+    ) -> Result<TmdbCollectionDetails> {
+        let data = tmdb_json(
+            ctx,
+            format!("collection:{id}"),
+            |request| request,
+            &format!("/3/collection/{id}"),
+        )
+        .await?;
+        Ok(transform_collection(&data))
     }
 
     async fn tmdb_category(

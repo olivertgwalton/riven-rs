@@ -1,3 +1,4 @@
+use crate::vfs_mount::VfsMountManager;
 use async_graphql::{MergedObject, Schema};
 use plugin_calendar::CalendarQuery;
 use plugin_dashboard::{DashboardQuery, PlaybackSessionsCache};
@@ -50,6 +51,7 @@ pub fn build_schema(
     downloader_config: Arc<RwLock<DownloaderConfig>>,
     log_control: Arc<LogControl>,
     log_tx: tokio::sync::broadcast::Sender<String>,
+    vfs_mount_manager: Arc<VfsMountManager>,
 ) -> AppSchema {
     Schema::build(
         QueryRoot::default(),
@@ -65,5 +67,6 @@ pub fn build_schema(
     .data(downloader_config)
     .data(log_control)
     .data(log_tx)
+    .data(vfs_mount_manager)
     .finish()
 }

@@ -27,6 +27,7 @@ pub async fn check_cache(
     store: &str,
     api_key: &str,
     hashes: &[String],
+    bypass_cache: &[String],
 ) -> anyhow::Result<Vec<CacheCheckResult>> {
     if hashes.is_empty() {
         return Ok(Vec::new());
@@ -41,6 +42,11 @@ pub async fn check_cache(
     let mut missing_hashes = Vec::new();
 
     for hash in &normalized_hashes {
+        if bypass_cache.iter().any(|h| h.eq_ignore_ascii_case(hash)) {
+            tracing::debug!(store, hash, "bypassing Redis cache for hash");
+            missing_hashes.push(hash.clone());
+            continue;
+        }
         let cache_key = cache_check_key(store, hash);
         let cached: Option<String> = AsyncCommands::get(&mut conn, &cache_key).await.ok();
         match cached {

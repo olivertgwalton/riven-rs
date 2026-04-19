@@ -73,35 +73,39 @@ impl CoreTvdbQuery {
         ctx: &Context<'_>,
         tmdb_id: String,
     ) -> Result<Option<i64>> {
-        if let Some(tvdb_id) = fetch_tmdb_external_tvdb_id(ctx, &tmdb_id).await? {
-            return Ok(Some(tvdb_id));
-        }
+        resolve_tmdb_to_tvdb_id(ctx, &tmdb_id).await
+    }
+}
 
-        let token = get_tvdb_token(ctx).await?;
-        let remote_lookup =
-            tvdb_get_value(ctx, &token, &format!("/search/remoteid/{tmdb_id}"), None).await?;
-        if let Some(series_id) = remote_lookup
-            .get("data")
-            .and_then(|value| value.as_array())
-            .and_then(|items| {
-                items.iter().find_map(|item| {
-                    item.get("series")
-                        .and_then(|series| series.get("id"))
-                        .and_then(|id| id.as_i64())
-                })
+pub async fn resolve_tmdb_to_tvdb_id(ctx: &Context<'_>, tmdb_id: &str) -> Result<Option<i64>> {
+    if let Some(tvdb_id) = fetch_tmdb_external_tvdb_id(ctx, tmdb_id).await? {
+        return Ok(Some(tvdb_id));
+    }
+
+    let token = get_tvdb_token(ctx).await?;
+    let remote_lookup =
+        tvdb_get_value(ctx, &token, &format!("/search/remoteid/{tmdb_id}"), None).await?;
+    if let Some(series_id) = remote_lookup
+        .get("data")
+        .and_then(|value| value.as_array())
+        .and_then(|items| {
+            items.iter().find_map(|item| {
+                item.get("series")
+                    .and_then(|series| series.get("id"))
+                    .and_then(|id| id.as_i64())
             })
-        {
-            return Ok(Some(series_id));
-        }
+        })
+    {
+        return Ok(Some(series_id));
+    }
 
-        let direct_series = tvdb_get_value(ctx, &token, &format!("/series/{tmdb_id}"), None).await;
-        match direct_series {
-            Ok(value) => Ok(value
-                .get("data")
-                .and_then(|item| item.get("id"))
-                .and_then(|id| id.as_i64())),
-            Err(_) => Ok(None),
-        }
+    let direct_series = tvdb_get_value(ctx, &token, &format!("/series/{tmdb_id}"), None).await;
+    match direct_series {
+        Ok(value) => Ok(value
+            .get("data")
+            .and_then(|item| item.get("id"))
+            .and_then(|id| id.as_i64())),
+        Err(_) => Ok(None),
     }
 }
 

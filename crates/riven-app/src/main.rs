@@ -104,22 +104,16 @@ async fn main() -> Result<()> {
     let (link_tx, mut link_rx) = tokio::sync::mpsc::channel(64);
 
     let vfs_mount_path = settings.effective_vfs_mount_path().to_string();
-    let vfs_handle = if !vfs_mount_path.is_empty() {
-        let vfs_session = riven_vfs::mount(
-            &vfs_mount_path,
-            job_queue.vfs_layout.clone(),
-            job_queue.filesystem_settings_revision.clone(),
-            db_pool.clone(),
-            stream_http_client.clone(),
-            link_tx.clone(),
-            log_settings.vfs_debug_logging,
-            settings.vfs_cache_max_size_mb,
-        )?;
-        Some(vfs_session)
-    } else {
-        tracing::info!("VFS mount path not configured, skipping VFS");
-        None
-    };
+    let vfs_mount_manager = Arc::new(riven_api::vfs_mount::VfsMountManager::new(
+        &vfs_mount_path,
+        job_queue.vfs_layout.clone(),
+        job_queue.filesystem_settings_revision.clone(),
+        db_pool.clone(),
+        stream_http_client.clone(),
+        link_tx.clone(),
+        log_settings.vfs_debug_logging,
+        settings.vfs_cache_max_size_mb,
+    )?);
 
     tokio::spawn({
         let link_registry = registry.clone();
@@ -176,6 +170,7 @@ async fn main() -> Result<()> {
         let log_tx = log_tx.clone();
         let notif_tx = notification_tx.clone();
         let log_control = log_control.clone();
+        let vfs_mount_manager = vfs_mount_manager.clone();
         async move {
             if let Err(e) = riven_api::start_server(
                 gql_port,
@@ -193,6 +188,7 @@ async fn main() -> Result<()> {
                 stream_http_client.clone(),
                 link_tx.clone(),
                 cors_allowed_origins,
+                vfs_mount_manager,
             )
             .await
             {
@@ -268,10 +264,7 @@ async fn main() -> Result<()> {
     monitor_task.abort();
     scheduler_task.abort();
 
-    if let Some(vfs) = vfs_handle {
-        tracing::info!("unmounting VFS");
-        drop(vfs);
-    }
+    vfs_mount_manager.unmount().await;
 
     tracing::info!("riven shutdown complete");
     Ok(())

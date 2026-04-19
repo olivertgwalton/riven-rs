@@ -113,79 +113,87 @@ impl CoreAnilistQuery {
     }
 
     async fn anilist_rating(&self, ctx: &Context<'_>, id: i32) -> Result<AnilistRating> {
-        let payload = serde_json::json!({
-            "query": r#"
-                query ($id: Int) {
-                  Media(id: $id, type: ANIME) {
-                    id
-                    averageScore
-                    meanScore
-                  }
-                }
-            "#,
-            "variables": {
-                "id": id
-            }
-        });
-
-        let response: AniListGraphqlResponse<AniListRatingData> =
-            anilist_post(ctx, &payload, "rating").await?;
-
-        if let Some(errors) = response.errors {
-            return Err(Error::new(join_graphql_errors(&errors)));
-        }
-
-        let media = response.data.and_then(|data| data.media);
-        let score = media
-            .as_ref()
-            .and_then(|item| item.average_score.or(item.mean_score))
-            .map(|raw| raw / 10.0);
-
-        Ok(AnilistRating {
-            id: i64::from(id),
-            score,
-        })
+        fetch_anilist_rating(ctx, id).await
     }
 
     async fn anilist_mappings(&self, ctx: &Context<'_>, id: i32) -> Result<AnilistMappings> {
-        let http = ctx.data::<HttpClient>()?;
-        let dedupe_key = format!("anizip:mappings:{id}");
-        let response: AniZipMappingsResponse = http
-            .get_json(ANIZIP, dedupe_key, |client| {
-                client
-                    .get(ANIZIP_MAPPINGS_URL)
-                    .query(&[("anilist_id", id)])
-                    .header("Accept", "application/json")
-            })
-            .await
-            .map_err(|e| Error::new(format!("AniZip mappings request failed: {e}")))?;
-
-        Ok(AnilistMappings {
-            anilist_id: i64::from(id),
-            tmdb_id: response
-                .themoviedb_id
-                .as_ref()
-                .and_then(parse_mapping_id)
-                .or_else(|| {
-                    response
-                        .mappings
-                        .themoviedb_id
-                        .as_ref()
-                        .and_then(parse_mapping_id)
-                }),
-            tvdb_id: response
-                .thetvdb_id
-                .as_ref()
-                .and_then(parse_mapping_id)
-                .or_else(|| {
-                    response
-                        .mappings
-                        .thetvdb_id
-                        .as_ref()
-                        .and_then(parse_mapping_id)
-                }),
-        })
+        fetch_anilist_mappings(ctx, id).await
     }
+}
+
+pub async fn fetch_anilist_rating(ctx: &Context<'_>, id: i32) -> Result<AnilistRating> {
+    let payload = serde_json::json!({
+        "query": r#"
+            query ($id: Int) {
+              Media(id: $id, type: ANIME) {
+                id
+                averageScore
+                meanScore
+              }
+            }
+        "#,
+        "variables": {
+            "id": id
+        }
+    });
+
+    let response: AniListGraphqlResponse<AniListRatingData> =
+        anilist_post(ctx, &payload, "rating").await?;
+
+    if let Some(errors) = response.errors {
+        return Err(Error::new(join_graphql_errors(&errors)));
+    }
+
+    let media = response.data.and_then(|data| data.media);
+    let score = media
+        .as_ref()
+        .and_then(|item| item.average_score.or(item.mean_score))
+        .map(|raw| raw / 10.0);
+
+    Ok(AnilistRating {
+        id: i64::from(id),
+        score,
+    })
+}
+
+pub async fn fetch_anilist_mappings(ctx: &Context<'_>, id: i32) -> Result<AnilistMappings> {
+    let http = ctx.data::<HttpClient>()?;
+    let dedupe_key = format!("anizip:mappings:{id}");
+    let response: AniZipMappingsResponse = http
+        .get_json(ANIZIP, dedupe_key, |client| {
+            client
+                .get(ANIZIP_MAPPINGS_URL)
+                .query(&[("anilist_id", id)])
+                .header("Accept", "application/json")
+        })
+        .await
+        .map_err(|e| Error::new(format!("AniZip mappings request failed: {e}")))?;
+
+    Ok(AnilistMappings {
+        anilist_id: i64::from(id),
+        tmdb_id: response
+            .themoviedb_id
+            .as_ref()
+            .and_then(parse_mapping_id)
+            .or_else(|| {
+                response
+                    .mappings
+                    .themoviedb_id
+                    .as_ref()
+                    .and_then(parse_mapping_id)
+            }),
+        tvdb_id: response
+            .thetvdb_id
+            .as_ref()
+            .and_then(parse_mapping_id)
+            .or_else(|| {
+                response
+                    .mappings
+                    .thetvdb_id
+                    .as_ref()
+                    .and_then(parse_mapping_id)
+            }),
+    })
 }
 
 #[derive(Deserialize)]

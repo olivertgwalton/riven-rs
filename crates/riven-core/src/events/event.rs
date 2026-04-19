@@ -82,7 +82,13 @@ pub enum RivenEvent {
         magnet: String,
     },
     #[serde(rename = "riven.media-item.download.cache-check-requested")]
-    MediaItemDownloadCacheCheckRequested { hashes: Vec<String> },
+    MediaItemDownloadCacheCheckRequested {
+        hashes: Vec<String>,
+        /// Hashes that must bypass the Redis cache and be re-checked against the debrid API.
+        /// Used when the caller knows a specific hash should be cached (e.g. manual magnet submission).
+        #[serde(default)]
+        bypass_cache: Vec<String>,
+    },
     #[serde(rename = "riven.media-item.download.error")]
     MediaItemDownloadError {
         id: i64,

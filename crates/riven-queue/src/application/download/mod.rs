@@ -209,7 +209,7 @@ pub async fn run(id: i64, job: &DownloadJob, queue: &JobQueue) {
         return;
     }
 
-    let cached_info = collect_cached_info(queue, &all_streams).await;
+    let cached_info = collect_cached_info(queue, &all_streams, job.preferred_info_hash.as_deref()).await;
     let (max_size_bytes, min_size_bytes) = load_bitrate_limits(queue, &item).await;
     let candidates = build_cached_candidates(
         id,
@@ -259,10 +259,14 @@ pub async fn run(id: i64, job: &DownloadJob, queue: &JobQueue) {
 async fn collect_cached_info(
     queue: &JobQueue,
     streams: &[Stream],
+    preferred_info_hash: Option<&str>,
 ) -> HashMap<String, Vec<CacheCheckFile>> {
     // Streams for a given item have unique info_hashes — no dedup needed.
     let hashes: Vec<String> = streams.iter().map(|s| s.info_hash.clone()).collect();
-    let cache_event = RivenEvent::MediaItemDownloadCacheCheckRequested { hashes };
+    let bypass_cache = preferred_info_hash
+        .map(|h| vec![h.to_lowercase()])
+        .unwrap_or_default();
+    let cache_event = RivenEvent::MediaItemDownloadCacheCheckRequested { hashes, bypass_cache };
     let cache_results = queue.registry.dispatch(&cache_event).await;
 
     let mut cached_info: HashMap<String, Vec<CacheCheckFile>> = HashMap::new();

@@ -45,7 +45,7 @@ hyper = { version = "1", default-features = false }
 sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "postgres", "chrono", "json", "migrate"] }
 
 # GraphQL
-async-graphql = { version = "7", features = ["chrono"] }
+async-graphql = { version = "7", features = ["chrono", "boxed-trait"] }
 async-graphql-axum = "7"
 
 # Web framework

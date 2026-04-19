@@ -43,70 +43,82 @@ pub fn populate_entries(
         PathTarget::Canonical {
             profile_key,
             path: canonical,
-        } => match canonical {
-            CanonicalPath::AllMovies => {
-                push_item_dirs(
-                    pool,
-                    runtime,
-                    entries,
-                    get_ino,
-                    path,
-                    "/movies/%/%",
-                    1,
-                    profile_key.as_deref(),
-                );
+        } => {
+            let exclusive_keys = if profile_key.is_none() {
+                layout.exclusive_profile_keys()
+            } else {
+                vec![]
+            };
+            match canonical {
+                CanonicalPath::AllMovies => {
+                    push_item_dirs(
+                        pool,
+                        runtime,
+                        entries,
+                        get_ino,
+                        path,
+                        "/movies/%/%",
+                        1,
+                        profile_key.as_deref(),
+                        &exclusive_keys,
+                    );
+                }
+                CanonicalPath::AllShows => {
+                    push_item_dirs(
+                        pool,
+                        runtime,
+                        entries,
+                        get_ino,
+                        path,
+                        "/shows/%/%/%",
+                        1,
+                        profile_key.as_deref(),
+                        &exclusive_keys,
+                    );
+                }
+                CanonicalPath::MovieDir { actual_dir } => {
+                    push_file_entries(
+                        pool,
+                        runtime,
+                        entries,
+                        get_ino,
+                        path,
+                        &actual_dir,
+                        profile_key.as_deref(),
+                        &exclusive_keys,
+                    );
+                }
+                CanonicalPath::ShowDir { actual_dir } => {
+                    push_item_dirs(
+                        pool,
+                        runtime,
+                        entries,
+                        get_ino,
+                        path,
+                        &format!("{actual_dir}/%/%"),
+                        2,
+                        profile_key.as_deref(),
+                        &exclusive_keys,
+                    );
+                }
+                CanonicalPath::SeasonDir { actual_dir } => {
+                    push_file_entries(
+                        pool,
+                        runtime,
+                        entries,
+                        get_ino,
+                        path,
+                        &actual_dir,
+                        profile_key.as_deref(),
+                        &exclusive_keys,
+                    );
+                }
+                CanonicalPath::Root
+                | CanonicalPath::MovieFile { .. }
+                | CanonicalPath::EpisodeFile { .. }
+                | CanonicalPath::Invalid => {}
             }
-            CanonicalPath::AllShows => {
-                push_item_dirs(
-                    pool,
-                    runtime,
-                    entries,
-                    get_ino,
-                    path,
-                    "/shows/%/%/%",
-                    1,
-                    profile_key.as_deref(),
-                );
-            }
-            CanonicalPath::MovieDir { actual_dir } => {
-                push_file_entries(
-                    pool,
-                    runtime,
-                    entries,
-                    get_ino,
-                    path,
-                    &actual_dir,
-                    profile_key.as_deref(),
-                );
-            }
-            CanonicalPath::ShowDir { actual_dir } => {
-                push_item_dirs(
-                    pool,
-                    runtime,
-                    entries,
-                    get_ino,
-                    path,
-                    &format!("{actual_dir}/%/%"),
-                    2,
-                    profile_key.as_deref(),
-                );
-            }
-            CanonicalPath::SeasonDir { actual_dir } => {
-                push_file_entries(
-                    pool,
-                    runtime,
-                    entries,
-                    get_ino,
-                    path,
-                    &actual_dir,
-                    profile_key.as_deref(),
-                );
-            }
-            CanonicalPath::Root
-            | CanonicalPath::MovieFile { .. }
-            | CanonicalPath::EpisodeFile { .. }
-            | CanonicalPath::Invalid => {}
-        },
+        }
         PathTarget::Invalid => {}
     }
 }
@@ -120,6 +132,7 @@ fn push_item_dirs(
     pattern: &str,
     dir_index: usize,
     profile_key: Option<&str>,
+    exclusive_keys: &[&str],
 ) {
     let Ok(paths) = runtime.block_on(repo::list_vfs_dir_names(
         pool,
@@ -130,7 +143,7 @@ fn push_item_dirs(
     };
     let mut seen = HashSet::new();
     for entry in paths {
-        if !matches_dir_profile(&entry, profile_key) {
+        if !matches_dir_profile(&entry, profile_key, exclusive_keys) {
             continue;
         }
         let Some(name) = entry.name.as_deref() else {
@@ -150,12 +163,13 @@ fn push_file_entries(
     virtual_parent: &str,
     actual_dir: &str,
     profile_key: Option<&str>,
+    exclusive_keys: &[&str],
 ) {
     let Ok(paths) = runtime.block_on(repo::list_vfs_file_names(pool, actual_dir)) else {
         return;
     };
     for entry in paths {
-        if !matches_file_profile(&entry, profile_key) {
+        if !matches_file_profile(&entry, profile_key, exclusive_keys) {
             continue;
         }
         let Some(name) = entry.name.as_deref() else {
@@ -165,18 +179,28 @@ fn push_file_entries(
     }
 }
 
-fn matches_dir_profile(entry: &VfsDirName, profile_key: Option<&str>) -> bool {
-    let Some(profile_key) = profile_key else {
-        return true;
-    };
-    LibraryProfileMembership::from_json(entry.library_profiles.as_ref()).contains(profile_key)
+fn matches_dir_profile(
+    entry: &VfsDirName,
+    profile_key: Option<&str>,
+    exclusive_keys: &[&str],
+) -> bool {
+    let membership = LibraryProfileMembership::from_json(entry.library_profiles.as_ref());
+    match profile_key {
+        Some(key) => membership.contains(key),
+        None => !exclusive_keys.iter().any(|k| membership.contains(k)),
+    }
 }
 
-fn matches_file_profile(entry: &VfsFileName, profile_key: Option<&str>) -> bool {
-    let Some(profile_key) = profile_key else {
-        return true;
-    };
-    LibraryProfileMembership::from_json(entry.library_profiles.as_ref()).contains(profile_key)
+fn matches_file_profile(
+    entry: &VfsFileName,
+    profile_key: Option<&str>,
+    exclusive_keys: &[&str],
+) -> bool {
+    let membership = LibraryProfileMembership::from_json(entry.library_profiles.as_ref());
+    match profile_key {
+        Some(key) => membership.contains(key),
+        None => !exclusive_keys.iter().any(|k| membership.contains(k)),
+    }
 }
 
 fn push_dir_entry(

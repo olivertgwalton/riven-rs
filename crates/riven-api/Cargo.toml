@@ -8,6 +8,7 @@ riven-core = { path = "../riven-core" }
 riven-db = { path = "../riven-db" }
 riven-rank = { path = "../riven-rank" }
 riven-queue = { path = "../riven-queue" }
+riven-vfs = { path = "../riven-vfs" }
 apalis-board-api = { workspace = true }
 plugin-dashboard = { path = "../plugin-dashboard" }
 plugin-logs = { path = "../plugin-logs" }

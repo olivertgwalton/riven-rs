@@ -75,6 +75,11 @@ pub fn mount(
                     .stderr(std::process::Stdio::null())
                     .status();
             }
+        } else if mount_path.read_dir()?.next().is_some() {
+            anyhow::bail!(
+                "refusing to mount VFS over non-empty directory {}; choose an empty mount directory such as /mnt/riven",
+                mount_path.display()
+            );
         }
     }
 

@@ -10,7 +10,6 @@ path = "src/main.rs"
 [dependencies]
 riven-core = { path = "../riven-core" }
 riven-db = { path = "../riven-db" }
-riven-vfs = { path = "../riven-vfs" }
 riven-api = { path = "../riven-api" }
 riven-queue = { path = "../riven-queue" }
 riven-rank = { path = "../riven-rank" }

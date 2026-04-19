@@ -21,6 +21,7 @@ use apalis_board_api::framework::{ApiBuilder, RegisterRoute};
 use apalis_board_api::ui::ServeUI;
 
 use crate::schema::{build_schema, start_event_controller};
+use crate::vfs_mount::VfsMountManager;
 
 pub use state::ApiState;
 
@@ -64,6 +65,7 @@ pub async fn start_server(
     stream_client: reqwest::Client,
     link_request_tx: tokio::sync::mpsc::Sender<LinkRequest>,
     cors_allowed_origins: Vec<String>,
+    vfs_mount_manager: Arc<VfsMountManager>,
 ) -> Result<()> {
     let schema = build_schema(
         db_pool.clone(),
@@ -74,6 +76,7 @@ pub async fn start_server(
         downloader_config,
         log_control,
         log_tx.clone(),
+        vfs_mount_manager,
     );
 
     start_event_controller(job_queue.clone());

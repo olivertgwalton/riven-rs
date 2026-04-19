@@ -197,6 +197,8 @@ impl CoreSettingsQuery {
                                 .with_description("Virtual path prefix to expose for this profile."),
                             SettingField::new("enabled", "Enabled", "boolean")
                                 .with_description("Disable a profile without deleting its rules."),
+                            SettingField::new("exclusive", "Exclusive", "boolean")
+                                .with_description("Hide matched items from the default /movies and /shows paths so they only appear under this profile's path."),
                             SettingField::new("filter_rules", "Filter rules", "object")
                                 .with_description("Only items matching all configured rules will appear in this profile. Positive values inside token lists use OR matching; prefix a value with ! to exclude it.")
                                 .with_fields(vec![

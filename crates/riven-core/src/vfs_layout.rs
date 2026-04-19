@@ -7,6 +7,7 @@ pub struct ActiveLibraryProfile {
     pub key: String,
     pub library_path: String,
     pub segments: Vec<String>,
+    pub exclusive: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -26,6 +27,7 @@ impl VfsLibraryLayout {
                 let normalized = normalize_library_path(&profile.library_path)?;
                 Some(ActiveLibraryProfile {
                     key,
+                    exclusive: profile.exclusive,
                     segments: normalized
                         .trim_start_matches('/')
                         .split('/')
@@ -65,6 +67,15 @@ impl VfsLibraryLayout {
             })
             .collect::<BTreeSet<_>>()
             .into_iter()
+            .collect()
+    }
+
+    /// Returns the keys of all enabled exclusive profiles.
+    pub fn exclusive_profile_keys(&self) -> Vec<&str> {
+        self.profiles
+            .iter()
+            .filter(|p| p.exclusive)
+            .map(|p| p.key.as_str())
             .collect()
     }
 

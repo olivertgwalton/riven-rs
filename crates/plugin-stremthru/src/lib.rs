@@ -114,6 +114,9 @@ impl Plugin for StremthruPlugin {
             SettingField::new("stremthruurl", "StremThru URL", "url")
                 .with_default(DEFAULT_URL)
                 .with_placeholder(DEFAULT_URL),
+            SettingField::new("scrapenabled", "Enable Torznab Scraper", "boolean")
+                .with_default("true")
+                .with_description("Scrape torrent results via the StremThru Torznab endpoint. Disable to use StremThru only for downloading and cache checks."),
             SettingField::new("realdebridapikey", "Real-Debrid API Key", "password"),
             SettingField::new("alldebridapikey", "AllDebrid API Key", "password"),
             SettingField::new("debriderapikey", "Debrider API Key", "password"),
@@ -136,6 +139,10 @@ impl Plugin for StremthruPlugin {
 
         match event {
             RivenEvent::MediaItemScrapeRequested { .. } => {
+                let scrape_enabled = ctx.settings.get_or("scrapenabled", "true") != "false";
+                if !scrape_enabled {
+                    return Ok(HookResponse::Empty);
+                }
                 let Some(req) = event.scrape_request() else {
                     return Ok(HookResponse::Empty);
                 };
@@ -149,7 +156,7 @@ impl Plugin for StremthruPlugin {
                 let cache_checks =
                     futures::future::join_all(stores.iter().map(|(store, api_key)| async {
                         let result =
-                            check_cache(&ctx.http, &ctx.redis, &base_url, store, api_key, &hashes)
+                            check_cache(&ctx.http, &ctx.redis, &base_url, store, api_key, &hashes, &[])
                                 .await;
                         (*store, api_key.as_str(), result)
                     }))
@@ -238,11 +245,11 @@ impl Plugin for StremthruPlugin {
                 }
                 Ok(HookResponse::DownloadStreamUnavailable)
             }
-            RivenEvent::MediaItemDownloadCacheCheckRequested { hashes } => {
+            RivenEvent::MediaItemDownloadCacheCheckRequested { hashes, bypass_cache } => {
                 let mut futures = Vec::new();
                 for (store, api_key) in &stores {
                     futures.push(check_cache(
-                        &ctx.http, &ctx.redis, &base_url, store, api_key, hashes,
+                        &ctx.http, &ctx.redis, &base_url, store, api_key, hashes, bypass_cache,
                     ));
                 }
 
