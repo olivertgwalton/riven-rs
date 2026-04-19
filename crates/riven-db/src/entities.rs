@@ -277,7 +277,7 @@ pub struct Stream {
     pub magnet: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: Option<DateTime<Utc>>,
-    #[sqlx(json)]
+    #[sqlx(json(nullable))]
     pub parsed_data: Option<serde_json::Value>,
     pub rank: Option<i64>,
     /// Actual file size in bytes, recorded after the first download attempt.
