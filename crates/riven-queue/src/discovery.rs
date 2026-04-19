@@ -144,9 +144,6 @@ fn validate(ctx: &ParseContext, parsed: &riven_rank::ParsedData) -> Option<Strin
             }
         }
         MediaItemType::Season => {
-            if !has_episodes && !has_seasons {
-                return Some("no seasons or episodes for season item".into());
-            }
             if !has_seasons {
                 if has_episodes {
                     let abs_eps: HashSet<i32> = ctx
@@ -157,7 +154,7 @@ fn validate(ctx: &ParseContext, parsed: &riven_rank::ParsedData) -> Option<Strin
                     if !abs_eps.is_empty() {
                         let torrent_eps: HashSet<i32> = parsed.episodes.iter().copied().collect();
                         let intersection = abs_eps.intersection(&torrent_eps).count();
-                        if intersection != abs_eps.len() {
+                        if intersection == 0 {
                             return Some("incorrect absolute episode range for season item".into());
                         }
                     }

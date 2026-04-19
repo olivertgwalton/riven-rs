@@ -15,7 +15,7 @@ use crate::flows::{run_plugin_hook, start_plugin_flow};
 use crate::{JobQueue, ParseScrapeResultsJob, ScrapeJob, ScrapePluginJob};
 
 /// How many times we will re-push a `ScrapeJob` whose entire scraper pool was
-/// rate-limited before giving up and letting the retry scheduler handle it.
+/// temporarily deferred before giving up and letting the retry scheduler handle it.
 const MAX_RATE_LIMIT_REPUSH: u32 = 3;
 
 fn scrape_event(job: &ScrapeJob) -> RivenEvent {
@@ -153,8 +153,8 @@ pub async fn finalize(job: &ScrapeJob, queue: &JobQueue) {
     if result_count == 0 {
         queue.clear_flow_results("scrape", id).await;
 
-        // If every plugin that ran was rate-limited (none returned a genuine
-        // "no streams" verdict) and we haven't exhausted our re-push budget,
+        // If every plugin that ran deferred (none returned a genuine "no
+        // streams" verdict) and we haven't exhausted our re-push budget,
         // re-queue this scrape job immediately rather than leaving the item
         // stuck in Indexed until the retry scheduler fires.
         if rate_limited_count > 0 && job.rate_limit_retries < MAX_RATE_LIMIT_REPUSH {
@@ -163,7 +163,7 @@ pub async fn finalize(job: &ScrapeJob, queue: &JobQueue) {
                 rate_limited_count,
                 retry = job.rate_limit_retries + 1,
                 max = MAX_RATE_LIMIT_REPUSH,
-                "all scrapers rate-limited; re-pushing scrape job"
+                "all scrapers deferred; re-pushing scrape job"
             );
             queue
                 .push_scrape(ScrapeJob {

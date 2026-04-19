@@ -359,10 +359,108 @@ static ANIME_GROUPS: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
         "Scryous-Raws",
         "Seicher-Raws",
         "Shiniori-Raws",
+        "Shinitori-Raws",
+        "Saikou",
+        "Kyou",
+        "Zero-Raws",
+        "DJATOM-Raws",
+        "Cait-Sidhe",
+        "Kirion",
+        "FLA",
+        "UraharaShop",
+        "SS",
+        "reseed",
+        "DTW",
+        "Raws-4U",
+        "Cervez",
+        "Kuroi-raws",
+        "TVRip",
+        "A-L",
+        "AC",
+        "ANE",
+        "AP",
+        "aro",
+        "ASC",
+        "Brrrrrrr",
+        "CBT",
+        "CH",
+        "Chotab",
+        "D4C",
+        "Drag",
+        "DragsterPS",
+        "E-D",
+        "E-N-D",
+        "EDGE",
+        "EJF",
+        "GHOST",
+        "GS",
+        "GSK-kun",
+        "GST",
+        "Hark0N",
+        "hydes",
+        "iAHD",
+        "IK",
+        "inid4c",
+        "Kaizoku",
+        "KAN3D2M",
+        "KH",
+        "KiyoshiStar",
+        "km",
+        "KS",
+        "kuchikirukia",
+        "LCE",
+        "Lia",
+        "MC",
+        "MCR",
+        "MK",
+        "Nep-Blanc",
+        "Not-Vodes",
+        "NPC",
+        "NSDAB",
+        "orz",
+        "PAS",
+        "Pn8",
+        "pog42",
+        "Prof",
+        "Reza",
+        "RH",
+        "sam",
+        "SCP-2223",
+        "SEV",
+        "SHiN-gx",
+        "Shirσ",
+        "Soldado",
+        "SRLS",
+        "torenter69",
+        "Tsundere",
+        "WaLMaRT",
+        "WSE",
+        "ZR",
     ]
 });
 
 /// Detect if this is an anime release based on groups and patterns.
+pub(crate) fn is_anime_group(group: &str) -> bool {
+    let lower = group.to_lowercase();
+    ANIME_GROUPS.iter().any(|anime_group| {
+        let anime_lower = anime_group.to_lowercase();
+        lower == anime_lower || lower.contains(&anime_lower)
+    })
+}
+
+fn raw_has_anime_group(raw: &str) -> bool {
+    let lower = raw.to_lowercase();
+    ANIME_GROUPS.iter().any(|anime_group| {
+        let anime_lower = anime_group.to_lowercase();
+        lower.contains(&format!("[{anime_lower}]"))
+            || lower.contains(&format!("-{anime_lower}"))
+            || lower.contains(&format!("_{anime_lower}_"))
+            || (anime_lower.contains("raws")
+                && lower.contains(&anime_lower.replace('-', " "))
+                && lower.contains("raws"))
+    })
+}
+
 pub(crate) fn detect_anime(raw: &str, data: &ParsedData) -> bool {
     // Check for anime episode code (CRC32)
     if data.episode_code.is_some() {
@@ -371,12 +469,12 @@ pub(crate) fn detect_anime(raw: &str, data: &ParsedData) -> bool {
 
     // Check for known anime groups
     if let Some(group) = &data.group {
-        let lower = group.to_lowercase();
-        for anime_group in ANIME_GROUPS.iter() {
-            if lower == anime_group.to_lowercase() || lower.contains(&anime_group.to_lowercase()) {
-                return true;
-            }
+        if is_anime_group(group) {
+            return true;
         }
+    }
+    if raw_has_anime_group(raw) {
+        return true;
     }
 
     // Check for anime extras

@@ -45,6 +45,9 @@ pub static RE_RES_DIGITS: LazyLock<Regex> =
 /// Typo correction: "4800p" → 480p, "10800p" → 1080p, "21600p" → 2160p
 pub static RE_RES_TYPO: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)(480|720|1080|2160)0[pi]").unwrap());
+/// Generic WxH dimension (e.g. "704x400", "1280X720") — height used to classify
+pub static RE_RES_WXH: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)\b\d{3,4}[x×]\s*(\d{3,4})\b").unwrap());
 
 // =============================================================================
 // Season
@@ -117,6 +120,21 @@ pub static RE_EPISODE_RANGE_BARE: LazyLock<Regex> = LazyLock::new(|| {
 /// Parenthesized bare range: "(01 - 12)"
 pub static RE_EPISODE_RANGE_PAREN: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)\((\d{1,3})\s*-\s*(\d{1,3})\)").unwrap());
+/// Broad PTT-style bare range: "(001-220)", "[Episodes 001-209 Movies...]"
+pub static RE_EPISODE_RANGE_BARE_HYPHEN: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?i)(?:^|[\s\[(])(?:episodes?[\s._:-]*)?(\d{1,4})\s*-\s*(\d{1,4})(?:$|[\s\])(+]|-\D)",
+    )
+    .unwrap()
+});
+
+/// Anime-style bare single episode near metadata: "01v2 [CRC]", "004v2.-."
+pub static RE_EPISODE_ANIME_BARE_SINGLE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?i)(?:^|[\s._-])(\d{1,4})(?:v0?[1-4])?(?:[\s._-]*(?:[\[(]|$|\.mkv\b|\.mp4\b|\.avi\b))",
+    )
+    .unwrap()
+});
 
 /// Consecutive multi-episode without separator: S01E01E02E03
 pub static RE_EPISODE_CONSECUTIVE: LazyLock<Regex> =
@@ -364,15 +382,42 @@ pub static RE_COMPLETE_COLLECTION: LazyLock<Regex> = LazyLock::new(|| {
 
 /// YYYY-MM-DD / YYYY.MM.DD / YYYY/MM/DD
 pub static RE_DATE_YMD: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?:^|\W)((?:19[6-9]|20[012])\d)[.\-/\\](0[1-9]|1[012])[.\-/\\](0[1-9]|[12]\d|3[01])(?:\W|$)").unwrap()
+    Regex::new(r"(?:^|\W)((?:19[6-9]|20[012])\d)([.\-/\\ ])(0[1-9]|1[012])([.\-/\\ ])(0[1-9]|[12]\d|3[01])(?:\W|$)").unwrap()
 });
 /// DD-MM-YYYY
 pub static RE_DATE_DMY: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?:^|\W)(0[1-9]|[12]\d|3[01])[.\-/\\](0[1-9]|1[012])[.\-/\\]((?:19[6-9]|20[012])\d)(?:\W|$)").unwrap()
+    Regex::new(r"(?:^|\W)(0[1-9]|[12]\d|3[01])([.\-/\\ ])(0[1-9]|1[012])([.\-/\\ ])((?:19[6-9]|20[012])\d)(?:\W|$)").unwrap()
 });
 /// YYYYMMDD (compact)
 pub static RE_DATE_COMPACT: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?:^|\W)(20[012]\d)(0[1-9]|1[012])(0[1-9]|[12]\d|3[01])(?:\W|$)").unwrap()
+});
+/// MM-DD-YY / MM.DD.YY; PTT only treats this as a date when it is not at the title start.
+pub static RE_DATE_MDY_SHORT: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"\W(0[1-9]|1[012])([.\-/\\])(0[1-9]|[12]\d|3[01])([.\-/\\])([0][1-9]|[0126789]\d)(?:\W|$)",
+    )
+    .unwrap()
+});
+/// YY-MM-DD / YY.MM.DD; PTT only treats this as a date when it is not at the title start.
+pub static RE_DATE_YMD_SHORT: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\W([0][1-9]|[12]\d|3\d)([.\-/\\])(0[1-9]|1[012])([.\-/\\])(0[1-9]|[12]\d)(?:\W|$)")
+        .unwrap()
+});
+/// DD-MM-YY / DD.MM.YY; PTT only treats this as a date when it is not at the title start.
+pub static RE_DATE_DMY_SHORT: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"\W(0[1-9]|[12]\d|3[01])([.\-/\\])(0[1-9]|1[012])([.\-/\\])([0][1-9]|[0126789]\d)(?:\W|$)",
+    )
+    .unwrap()
+});
+/// 13 Feb 2016 / 9th Dec 2019 / 16-Feb-2017
+pub static RE_DATE_DMY_MONTH: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)(?:^|\W)(0?[1-9]|[12]\d|3[01])(?:[. ]?(?:st|nd|rd|th))?[. \-/\\](jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sept?(?:ember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)[. \-/\\]((?:19[7-9]|20[012])\d)(?:\W|$)").unwrap()
+});
+/// 13 Feb 16
+pub static RE_DATE_DMY_MONTH_SHORT: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)(?:^|\W)(0?[1-9]|[12]\d|3[01])(?:[. ]?(?:st|nd|rd|th))?[. \-/\\](jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sept?(?:ember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)[. \-/\\](0[1-9]|[0126789]\d)(?:\W|$)").unwrap()
 });
 
 pub static RE_BITRATE: LazyLock<Regex> =
@@ -405,7 +450,7 @@ pub static RE_VOLUME: LazyLock<Regex> = LazyLock::new(|| {
     .unwrap()
 });
 pub static RE_EDITION: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)\b(\d{2,3}(?:th)?[\.\s\-+_/(),]*Anniversary[\.\s\-+_/(),]*(?:Edition|Ed)?|Ultimate[\.\s\-+_/(),]*Edition|Extended[\.\s\-+_/(),]*Director'?s|(?:custom\s*\.?\s*)?Extended|Director'?s[\s.\-]*Cut|Collector'?s(?:\s*Edition)?|Theatrical|Uncut|IMAX(?:\s*Edition)?|\.?Diamond\.\s*|Remaster(?:ed)?|Criterion[\.\s\-+_/(),]*(?:Collection|Edition)|Final\s*Cut|Limited\s*Edition|Deluxe\s*Edition|Special\s*Edition)\b").unwrap()
+    Regex::new(r"(?i)\b(\d{2,3}(?:th)?[\.\s\-+_/(),]*Anniversary[\.\s\-+_/(),]*(?:Edition|Ed)?|Ultimate[\.\s\-+_/(),]*Edition|Extended[\.\s\-+_/(),]*Director'?s|(?:custom\s*\.?\s*)?Extended(?:\s*Editions?)?|Director'?s[\s.\-]*Cut|Collector'?s(?:\s*Edition)?|Theatrical|Uncut|IMAX(?:\s*Edition)?|\.?Diamond\.\s*|Remaster(?:ed)?|Criterion[\.\s\-+_/(),]*(?:Collection|Edition)|Final\s*Cut|Limited\s*Edition|Deluxe\s*Edition|Special\s*Edition)\b").unwrap()
 });
 pub static RE_COUNTRY: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"\b(US|UK|AU|NZ|CA|IE|FR|DE|ES|IT|NL|BE|AT|CH|SE|NO|DK|FI|JP|KR|CN|TW|HK|IN|BR|MX|AR|CL|CO|RU|PL|CZ|HU|RO|BG|HR|RS|SK|SI|UA|GR|TR|TH|PH|MY|SG|ID|VN)\b").unwrap()

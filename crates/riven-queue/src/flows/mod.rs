@@ -8,7 +8,7 @@ use std::future::Future;
 
 use futures::future;
 use riven_core::events::{EventType, HookResponse, RivenEvent};
-use riven_core::http::RateLimitedError;
+use riven_core::http::{RateLimitedError, RetryLaterError};
 use riven_db::repo;
 use riven_rank::{QualityProfile, RankSettings};
 use serde::Serialize;
@@ -64,14 +64,14 @@ where
                     .await;
             }
         }
-        Some(Err(ref error)) if error.is::<RateLimitedError>() => {
-            // Record that this child was rate-limited so `finalize` can
-            // distinguish a pure rate-limit failure from a genuine no-results.
+        Some(Err(ref error)) if error.is::<RateLimitedError>() || error.is::<RetryLaterError>() => {
+            // Record that this child was deferred so `finalize` can distinguish
+            // a temporary upstream failure from a genuine no-results verdict.
             queue.flow_increment_rate_limited(prefix, id).await;
             tracing::warn!(
                 plugin = plugin_name,
                 id,
-                "{hook_label} rate-limited (429); worker slot freed"
+                "{hook_label} deferred; worker slot freed"
             );
         }
         Some(Err(error)) => {
@@ -152,7 +152,7 @@ pub(crate) async fn load_active_profiles(db_pool: &sqlx::PgPool) -> Vec<(String,
         .collect()
 }
 
-pub(crate) fn merge_builtin_profile_settings(
+pub fn merge_builtin_profile_settings(
     profile: QualityProfile,
     override_settings: &Value,
 ) -> serde_json::Result<RankSettings> {

@@ -13,7 +13,9 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::sync::LazyLock;
 
-use detect::{detect_anime, detect_network, detect_scene, detect_trash, is_false_group};
+use detect::{
+    detect_anime, detect_network, detect_scene, detect_trash, is_anime_group, is_false_group,
+};
 use languages::{LANG_PATTERNS, translate_langs};
 use patterns::{
     RE_3D, RE_ADULT, RE_AUDIO_AAC, RE_AUDIO_ATMOS, RE_AUDIO_DD, RE_AUDIO_DD_PLUS,
@@ -23,26 +25,28 @@ use patterns::{
     RE_CHAN_STEREO, RE_CODEC_264_BARE, RE_CODEC_265_BARE, RE_CODEC_AV1, RE_CODEC_AVC,
     RE_CODEC_HEVC, RE_CODEC_MPEG, RE_CODEC_XVID, RE_COMMENTARY, RE_COMPLETE,
     RE_COMPLETE_COLLECTION, RE_CONTAINER, RE_CONVERTED, RE_COUNTRY, RE_DATE_COMPACT, RE_DATE_DMY,
-    RE_DATE_YMD, RE_DOCUMENTARY, RE_DUBBED, RE_DVB, RE_EDITION, RE_EP_NUM_BARE,
-    RE_EPISODE_CODE_HEX, RE_EPISODE_CODE_NUM, RE_EPISODE_CONSECUTIVE, RE_EPISODE_CROSSREF,
-    RE_EPISODE_CROSSREF_RANGE, RE_EPISODE_FULL, RE_EPISODE_OF, RE_EPISODE_RANGE,
-    RE_EPISODE_RANGE_BARE, RE_EPISODE_RANGE_PAREN, RE_EPISODE_RUSSIAN, RE_EPISODE_RUSSIAN_OF,
-    RE_EPISODE_SE, RE_EPISODE_STANDALONE, RE_EPISODE_TR, RE_EXTENDED, RE_EXTENSION, RE_EXTRAS,
-    RE_EXTRAS_ED, RE_EXTRAS_NC, RE_EXTRAS_NCED, RE_EXTRAS_NCOP, RE_EXTRAS_OP, RE_EXTRAS_OVA,
-    RE_GROUP_BRACKET, RE_GROUP_DASH, RE_GROUP_PAREN, RE_HARDCODED, RE_HDR_DV, RE_HDR_HDR,
-    RE_HDR_HDR10PLUS, RE_HDR_SDR, RE_PART, RE_PPV, RE_PPV_FIGHT, RE_PROPER, RE_Q_BDRIP,
-    RE_Q_BLURAY, RE_Q_BLURAY_REMUX1, RE_Q_BLURAY_REMUX2, RE_Q_BLURAY_REMUX3, RE_Q_BRRIP, RE_Q_CAM,
-    RE_Q_CAM_FALSE, RE_Q_DVD, RE_Q_DVDRIP, RE_Q_HDRIP, RE_Q_HDTV, RE_Q_HDTVRIP, RE_Q_PDTV,
-    RE_Q_PPVRIP, RE_Q_PRE_DVD, RE_Q_R5, RE_Q_REMUX, RE_Q_SATRIP, RE_Q_SCR, RE_Q_TELECINE,
-    RE_Q_TELESYNC, RE_Q_TVRIP, RE_Q_UHDRIP, RE_Q_VHS, RE_Q_VHSRIP, RE_Q_WEB, RE_Q_WEBDL,
-    RE_Q_WEBDLRIP, RE_Q_WEBMUX, RE_Q_WEBRIP, RE_REGION, RE_REGION_DISC, RE_REMASTERED, RE_REPACK,
-    RE_RES_1280, RE_RES_1920, RE_RES_3840, RE_RES_DIGITS, RE_RES_FHD, RE_RES_GENERIC,
-    RE_RES_PREFIXED_480, RE_RES_PREFIXED_720, RE_RES_PREFIXED_1080, RE_RES_PREFIXED_2160,
-    RE_RES_QHD, RE_RES_TYPO, RE_RETAIL, RE_SEASON_EP_COMPACT, RE_SEASON_FULL, RE_SEASON_MULTI,
-    RE_SEASON_ORDINAL, RE_SEASON_PT, RE_SEASON_RANGE, RE_SEASON_RUSSIAN, RE_SEASON_RUSSIAN2,
-    RE_SEASON_SE, RE_SEASON_TR, RE_SEASON_TV, RE_SITE, RE_SITE_BRACKET, RE_SITE_DOMAIN,
-    RE_SITE_KNOWN, RE_SIZE, RE_SPRINT, RE_SUBBED, RE_UNCENSORED, RE_UNRATED, RE_UPSCALED,
-    RE_UPSCALED_AI, RE_UPSCALED_SPECIFIC, RE_VOLUME, RE_YEAR, RE_YEAR_RANGE, RE_YEAR_RANGE_SHORT,
+    RE_DATE_DMY_MONTH, RE_DATE_DMY_MONTH_SHORT, RE_DATE_DMY_SHORT, RE_DATE_MDY_SHORT, RE_DATE_YMD,
+    RE_DATE_YMD_SHORT, RE_DOCUMENTARY, RE_DUBBED, RE_DVB, RE_EDITION, RE_EP_NUM_BARE,
+    RE_EPISODE_ANIME_BARE_SINGLE, RE_EPISODE_CODE_HEX, RE_EPISODE_CODE_NUM, RE_EPISODE_CONSECUTIVE,
+    RE_EPISODE_CROSSREF, RE_EPISODE_CROSSREF_RANGE, RE_EPISODE_FULL, RE_EPISODE_OF,
+    RE_EPISODE_RANGE, RE_EPISODE_RANGE_BARE, RE_EPISODE_RANGE_BARE_HYPHEN, RE_EPISODE_RANGE_PAREN,
+    RE_EPISODE_RUSSIAN, RE_EPISODE_RUSSIAN_OF, RE_EPISODE_SE, RE_EPISODE_STANDALONE, RE_EPISODE_TR,
+    RE_EXTENDED, RE_EXTENSION, RE_EXTRAS, RE_EXTRAS_ED, RE_EXTRAS_NC, RE_EXTRAS_NCED,
+    RE_EXTRAS_NCOP, RE_EXTRAS_OP, RE_EXTRAS_OVA, RE_GROUP_BRACKET, RE_GROUP_DASH, RE_GROUP_PAREN,
+    RE_HARDCODED, RE_HDR_DV, RE_HDR_HDR, RE_HDR_HDR10PLUS, RE_HDR_SDR, RE_PART, RE_PPV,
+    RE_PPV_FIGHT, RE_PROPER, RE_Q_BDRIP, RE_Q_BLURAY, RE_Q_BLURAY_REMUX1, RE_Q_BLURAY_REMUX2,
+    RE_Q_BLURAY_REMUX3, RE_Q_BRRIP, RE_Q_CAM, RE_Q_CAM_FALSE, RE_Q_DVD, RE_Q_DVDRIP, RE_Q_HDRIP,
+    RE_Q_HDTV, RE_Q_HDTVRIP, RE_Q_PDTV, RE_Q_PPVRIP, RE_Q_PRE_DVD, RE_Q_R5, RE_Q_REMUX,
+    RE_Q_SATRIP, RE_Q_SCR, RE_Q_TELECINE, RE_Q_TELESYNC, RE_Q_TVRIP, RE_Q_UHDRIP, RE_Q_VHS,
+    RE_Q_VHSRIP, RE_Q_WEB, RE_Q_WEBDL, RE_Q_WEBDLRIP, RE_Q_WEBMUX, RE_Q_WEBRIP, RE_REGION,
+    RE_REGION_DISC, RE_REMASTERED, RE_REPACK, RE_RES_1280, RE_RES_1920, RE_RES_3840, RE_RES_DIGITS,
+    RE_RES_FHD, RE_RES_GENERIC, RE_RES_PREFIXED_480, RE_RES_PREFIXED_720, RE_RES_PREFIXED_1080,
+    RE_RES_PREFIXED_2160, RE_RES_QHD, RE_RES_TYPO, RE_RES_WXH, RE_RETAIL, RE_SEASON_EP_COMPACT, RE_SEASON_FULL,
+    RE_SEASON_MULTI, RE_SEASON_ORDINAL, RE_SEASON_PT, RE_SEASON_RANGE, RE_SEASON_RUSSIAN,
+    RE_SEASON_RUSSIAN2, RE_SEASON_SE, RE_SEASON_TR, RE_SEASON_TV, RE_SITE, RE_SITE_BRACKET,
+    RE_SITE_DOMAIN, RE_SITE_KNOWN, RE_SIZE, RE_SPRINT, RE_SUBBED, RE_UNCENSORED, RE_UNRATED,
+    RE_UPSCALED, RE_UPSCALED_AI, RE_UPSCALED_SPECIFIC, RE_VOLUME, RE_YEAR, RE_YEAR_RANGE,
+    RE_YEAR_RANGE_SHORT,
 };
 pub(crate) use title::normalize_title;
 use title::{extract_title, normalize_edition};
@@ -201,6 +205,37 @@ fn extract_numbers(re: &Regex, raw: &str, target: &mut Vec<i32>) {
     }
 }
 
+fn push_episode_range(start: i32, end: i32, target: &mut Vec<i32>) {
+    if start > end || start == 0 || end - start > 2000 {
+        return;
+    }
+    if (1900..=2099).contains(&start) && (1900..=2099).contains(&end) {
+        return;
+    }
+    for n in start..=end {
+        target.push(n);
+    }
+}
+
+fn extract_episode_ranges(re: &Regex, raw: &str, target: &mut Vec<i32>) {
+    for cap in re.captures_iter(raw) {
+        if let (Ok(start), Ok(end)) = (cap[1].parse::<i32>(), cap[2].parse::<i32>()) {
+            push_episode_range(start, end, target);
+        }
+    }
+}
+
+fn has_anime_context(data: &ParsedData, raw: &str) -> bool {
+    static RE_LONG_RUNNING_ANIME: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"(?i)\b(?:naruto|one[ ._-]*piece|bleach|dragon[ ._-]*ball|detective[ ._-]*conan|hunter[ ._-]*x[ ._-]*hunter)\b")
+            .unwrap()
+    });
+
+    data.episode_code.is_some()
+        || data.group.as_deref().is_some_and(is_anime_group)
+        || RE_LONG_RUNNING_ANIME.is_match(raw)
+}
+
 fn maybe_has_season_markers(raw: &str) -> bool {
     raw.contains(['S', 's', 'X', 'x'])
         || raw.contains("Season")
@@ -279,6 +314,21 @@ fn detect_resolution(raw: &str) -> String {
             "360" => "360p",
             "240" => "240p",
             num => return format!("{num}{scan}"),
+        }
+        .to_string();
+    }
+
+    // WxH fallback: classify by height (e.g. "704x400" → "480p", "852x480" → "480p")
+    if let Some(cap) = RE_RES_WXH.captures(raw)
+        && let Ok(height) = cap[1].parse::<u32>()
+    {
+        return match height {
+            h if h >= 2160 => "2160p",
+            h if h >= 1080 => "1080p",
+            h if h >= 720 => "720p",
+            h if h >= 480 => "480p",
+            h if h >= 360 => "360p",
+            _ => "240p",
         }
         .to_string();
     }
@@ -467,19 +517,85 @@ fn detect_bit_depth(raw: &str) -> Option<String> {
     }
 }
 
+fn two_digit_year_to_full(yy: &str) -> Option<i32> {
+    let yy = yy.parse::<i32>().ok()?;
+    Some(if yy <= 68 { 2000 + yy } else { 1900 + yy })
+}
+
+fn month_number(month: &str) -> Option<&'static str> {
+    let lower = month.to_ascii_lowercase();
+    match lower.as_str() {
+        m if m.starts_with("jan") => Some("01"),
+        m if m.starts_with("feb") => Some("02"),
+        m if m.starts_with("mar") => Some("03"),
+        m if m.starts_with("apr") => Some("04"),
+        "may" => Some("05"),
+        m if m.starts_with("jun") => Some("06"),
+        m if m.starts_with("jul") => Some("07"),
+        m if m.starts_with("aug") => Some("08"),
+        m if m.starts_with("sep") => Some("09"),
+        m if m.starts_with("oct") => Some("10"),
+        m if m.starts_with("nov") => Some("11"),
+        m if m.starts_with("dec") => Some("12"),
+        _ => None,
+    }
+}
+
+fn followed_by_four_digit_year(raw: &str, index: usize) -> bool {
+    let tail = &raw[index..];
+    tail.len() >= 4 && tail.chars().take(4).all(|ch| ch.is_ascii_digit())
+}
+
 /// Detect date from raw title string, trying multiple formats.
 fn detect_date(raw: &str) -> Option<String> {
     // YYYY-MM-DD / YYYY.MM.DD
     if let Some(cap) = RE_DATE_YMD.captures(raw) {
-        return Some(format!("{}-{}-{}", &cap[1], &cap[2], &cap[3]));
+        if cap[2] == cap[4] {
+            return Some(format!("{}-{}-{}", &cap[1], &cap[3], &cap[5]));
+        }
     }
     // DD-MM-YYYY
     if let Some(cap) = RE_DATE_DMY.captures(raw) {
-        return Some(format!("{}-{}-{}", &cap[3], &cap[2], &cap[1]));
+        if cap[2] == cap[4] {
+            return Some(format!("{}-{}-{}", &cap[5], &cap[3], &cap[1]));
+        }
     }
     // YYYYMMDD (compact)
     if let Some(cap) = RE_DATE_COMPACT.captures(raw) {
         return Some(format!("{}-{}-{}", &cap[1], &cap[2], &cap[3]));
+    }
+    // 13 Feb 2016 / 9th Dec 2019 / 16-Feb-2017
+    if let Some(cap) = RE_DATE_DMY_MONTH.captures(raw)
+        && let Some(month) = month_number(&cap[2])
+    {
+        return Some(format!("{}-{}-{:0>2}", &cap[3], month, &cap[1]));
+    }
+    if let Some(cap) = RE_DATE_DMY_MONTH_SHORT.captures(raw)
+        && let (Some(month), Some(year)) = (month_number(&cap[2]), two_digit_year_to_full(&cap[3]))
+    {
+        return Some(format!("{year}-{}-{:0>2}", month, &cap[1]));
+    }
+    // 2-digit date forms follow PTT order and are only matched away from the title start.
+    if let Some(cap) = RE_DATE_MDY_SHORT.captures(raw)
+        && cap[2] == cap[4]
+        && !followed_by_four_digit_year(raw, cap.get(0).map_or(0, |m| m.end()))
+        && let Some(year) = two_digit_year_to_full(&cap[5])
+    {
+        return Some(format!("{year}-{}-{}", &cap[1], &cap[3]));
+    }
+    if let Some(cap) = RE_DATE_YMD_SHORT.captures(raw)
+        && cap[2] == cap[4]
+        && !followed_by_four_digit_year(raw, cap.get(0).map_or(0, |m| m.end()))
+        && let Some(year) = two_digit_year_to_full(&cap[1])
+    {
+        return Some(format!("{year}-{}-{}", &cap[3], &cap[5]));
+    }
+    if let Some(cap) = RE_DATE_DMY_SHORT.captures(raw)
+        && cap[2] == cap[4]
+        && !followed_by_four_digit_year(raw, cap.get(0).map_or(0, |m| m.end()))
+        && let Some(year) = two_digit_year_to_full(&cap[5])
+    {
+        return Some(format!("{year}-{}-{}", &cap[3], &cap[1]));
     }
     None
 }
@@ -514,6 +630,49 @@ fn detect_anime_extras(raw: &str, extras: &mut Vec<String>) {
     }
     if RE_EXTRAS_OP.is_match(raw) {
         push_unique(extras, "OP");
+    }
+}
+
+fn canonical_extra(extra: &str) -> String {
+    match extra.to_ascii_lowercase().as_str() {
+        "featurette" | "featurettes" => "Featurette".to_string(),
+        "sample" => "Sample".to_string(),
+        "trailer" | "trailers" => "Trailer".to_string(),
+        "deleted scene" | "deleted scenes" => "Deleted Scene".to_string(),
+        other => {
+            if other.contains("featurette") {
+                "Featurette".to_string()
+            } else if other.contains("deleted") {
+                "Deleted Scene".to_string()
+            } else {
+                extra.to_string()
+            }
+        }
+    }
+}
+
+fn detect_standard_extras(raw: &str, extras: &mut Vec<String>) {
+    let year_pos = RE_YEAR.find(raw).map(|m| m.start());
+
+    for cap in RE_EXTRAS.captures_iter(raw) {
+        let Some(m) = cap.get(1) else {
+            continue;
+        };
+        let extra = canonical_extra(m.as_str());
+
+        let should_keep = match extra.as_str() {
+            "Featurette" | "Sample" => year_pos.is_none_or(|pos| m.start() > pos),
+            "Trailer" => {
+                year_pos.is_none_or(|pos| m.start() > pos)
+                    && !raw[m.end()..].to_ascii_lowercase().contains("park")
+                    && !raw[m.end()..].to_ascii_lowercase().contains("and")
+            }
+            _ => true,
+        };
+
+        if should_keep {
+            push_unique(extras, &extra);
+        }
     }
 }
 
@@ -757,6 +916,29 @@ pub fn parse_with_options(raw_title: &str, options: ParseOptions) -> ParsedData 
             }
         }
     }
+    if data.episodes.is_empty()
+        && (has_anime_context(&data, raw)
+            || raw.contains("Complete")
+            || raw.contains("complete")
+            || raw.contains("Episodes")
+            || raw.contains("episodes"))
+    {
+        extract_episode_ranges(&RE_EPISODE_RANGE_BARE_HYPHEN, raw, &mut data.episodes);
+    }
+    if data.episodes.is_empty()
+        && let Some(cap) = RE_EPISODE_ANIME_BARE_SINGLE.captures_iter(raw).last()
+    {
+        let versioned = cap
+            .get(0)
+            .is_some_and(|m| m.as_str().to_ascii_lowercase().contains('v'));
+        if (data.episode_code.is_some() || versioned || has_anime_context(&data, raw))
+            && let Ok(n) = cap[1].parse::<i32>()
+            && !(1900..=2099).contains(&n)
+            && !matches!(n, 480 | 720 | 1080 | 2160)
+        {
+            data.episodes.push(n);
+        }
+    }
     data.episodes.sort_unstable();
     data.episodes.dedup();
 
@@ -785,7 +967,22 @@ pub fn parse_with_options(raw_title: &str, options: ParseOptions) -> ParsedData 
     data.volumes.dedup();
 
     // Edition
-    data.edition = RE_EDITION.captures(raw).map(|c| normalize_edition(&c[1]));
+    data.edition = RE_EDITION.captures(raw).and_then(|c| {
+        let matched = c.get(1)?.as_str();
+        let after = &raw[c.get(1)?.end()..];
+        if matched.eq_ignore_ascii_case("uncut")
+            && after
+                .trim_start_matches(|ch: char| {
+                    ch == '.' || ch == '_' || ch == '-' || ch.is_whitespace()
+                })
+                .to_ascii_lowercase()
+                .starts_with("gems")
+        {
+            None
+        } else {
+            Some(normalize_edition(matched))
+        }
+    });
 
     // Region (R1-R9, PAL, NTSC, SECAM)
     data.region = RE_REGION_DISC
@@ -810,9 +1007,7 @@ pub fn parse_with_options(raw_title: &str, options: ParseOptions) -> ParsedData 
     detect_anime_extras(raw, &mut data.extras);
 
     // Standard extras
-    for cap in RE_EXTRAS.captures_iter(raw) {
-        push_unique(&mut data.extras, &cap[1]);
-    }
+    detect_standard_extras(raw, &mut data.extras);
 
     // Group detection — try multiple patterns
     data.group = RE_GROUP_DASH

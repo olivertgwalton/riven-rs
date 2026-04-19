@@ -37,3 +37,31 @@ fn test_extras_sample() {
             .any(|e| e.to_lowercase().contains("sample"))
     );
 }
+
+#[test]
+fn test_ptt_extras_corpus_sample_direct() {
+    let cases: [(&str, &[&str]); 4] = [
+        (
+            "Madame Web 2024 1080p WEBRip 1400MB DD 5.1 x264 Sample-GalaxyRG[TGx]",
+            &["Sample"],
+        ),
+        (
+            "Madame Web Sample 2024 1080p WEBRip 1400MB DD 5.1 x264-GalaxyRG[TGx]",
+            &[],
+        ),
+        (
+            "Madame Web Sample 1080p WEBRip 1400MB DD 5.1 x264-GalaxyRG[TGx]",
+            &["Sample"],
+        ),
+        (
+            "AVATAR.Featurette.Creating.the.World.of.Pandora.1080p.H264.ITA.AC3.ENGAAC.PappaMux.mkv",
+            &["Featurette"],
+        ),
+    ];
+
+    for (input, expected) in cases {
+        let data = parse(input);
+        let expected = expected.iter().map(ToString::to_string).collect::<Vec<_>>();
+        assert_eq!(data.extras, expected, "{input}");
+    }
+}

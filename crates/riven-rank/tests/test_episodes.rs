@@ -61,6 +61,37 @@ fn test_episode_code_none() {
 }
 
 #[test]
+fn test_anime_bare_single_episode_with_version_before_crc_metadata() {
+    let data = parse("[今日のSUBS] Kemono no Souja Erin 01v2 [1280X720 H264][24DD2B3A]");
+    assert_eq!(data.episodes, vec![1]);
+    assert_eq!(data.episode_code, Some("24DD2B3A".into()));
+    assert!(data.anime);
+}
+
+#[test]
+fn test_ptt_parity_anime_bare_single_episode_with_version() {
+    let data = parse("[F-D] Fairy.Tail.-.004v2.-. [480P][Dual-Audio].mkv");
+    assert_eq!(data.episodes, vec![4]);
+}
+
+#[test]
+fn test_ptt_parity_long_running_anime_episode_ranges() {
+    let data = parse("Naruto HD [1080p] (001-220) [Complete Series + Movies]");
+    assert_eq!(data.episodes, (1..=220).collect::<Vec<_>>());
+
+    let data = parse(
+        "[Anime Time] One Piece (0001-1071+Movies+Specials) [BD+CR] [Dual Audio] [1080p][HEVC 10bit x265][AAC][Multi Sub]",
+    );
+    assert_eq!(data.episodes, (1..=1071).collect::<Vec<_>>());
+}
+
+#[test]
+fn test_ptt_parity_anime_bare_single_episode_without_crc_for_known_group() {
+    let data = parse("[SSA] Detective Conan - 1001 [720p].mkv");
+    assert_eq!(data.episodes, vec![1001]);
+}
+
+#[test]
 fn test_episode_standalone_e01() {
     let data = parse("The Boys S04E01 E02 E03 4k to 1080p AMZN WEBrip x265 DDP5 1 D0c");
     assert_eq!(data.seasons, vec![4]);

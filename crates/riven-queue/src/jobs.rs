@@ -42,7 +42,7 @@ pub struct ScrapeJob {
     #[serde(default = "default_true")]
     pub auto_download: bool,
     /// Number of times this job has been re-pushed because every scraper
-    /// plugin was rate-limited. Incremented in `finalize` before re-pushing;
+    /// plugin was temporarily deferred. Incremented in `finalize` before re-pushing;
     /// existing jobs in Redis deserialise to 0 via the `default`.
     #[serde(default)]
     pub rate_limit_retries: u32,
