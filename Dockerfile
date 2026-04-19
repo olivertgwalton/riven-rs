@@ -16,6 +16,6 @@ COPY --from=builder /app/target/release/riven /usr/local/bin/riven
 RUN mkdir -p /mnt/strm /logs && \
     echo "user_allow_other" >> /etc/fuse.conf
 
-ENVSQLX_OFFLINE=true
+ENV SQLX_OFFLINE=true
 
 ENTRYPOINT ["riven"]
