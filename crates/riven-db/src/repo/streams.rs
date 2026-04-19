@@ -17,14 +17,16 @@ pub async fn upsert_stream(
     magnet: &str,
     parsed_data: Option<serde_json::Value>,
     rank: Option<i64>,
+    file_size_bytes: Option<u64>,
 ) -> Result<Stream> {
     let stream = sqlx::query_as::<_, Stream>(
-        "INSERT INTO streams (info_hash, magnet, parsed_data, rank) \
-         VALUES ($1, $2, $3, $4) \
+        "INSERT INTO streams (info_hash, magnet, parsed_data, rank, file_size_bytes) \
+         VALUES ($1, $2, $3, $4, $5) \
          ON CONFLICT (info_hash) DO UPDATE SET \
              magnet = CASE WHEN $2 <> '' THEN $2 ELSE streams.magnet END, \
              parsed_data = COALESCE($3, streams.parsed_data), \
              rank = COALESCE($4, streams.rank), \
+             file_size_bytes = COALESCE($5, streams.file_size_bytes), \
              updated_at = NOW() \
          RETURNING *",
     )
@@ -32,6 +34,7 @@ pub async fn upsert_stream(
     .bind(magnet)
     .bind(parsed_data)
     .bind(rank)
+    .bind(file_size_bytes.map(|s| s as i64))
     .fetch_one(pool)
     .await?;
     Ok(stream)

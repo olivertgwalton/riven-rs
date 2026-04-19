@@ -1,6 +1,5 @@
 use async_trait::async_trait;
 use serde::Deserialize;
-use std::collections::HashMap;
 
 use riven_core::events::{EventType, HookResponse, RivenEvent};
 use riven_core::http::profiles;
@@ -93,14 +92,14 @@ impl Plugin for CometPlugin {
             Ok(resp) => resp,
             Err(e) => {
                 tracing::warn!(error = %e, imdb_id, title = request.title, "comet request failed");
-                return Ok(HookResponse::Scrape(HashMap::new()));
+                return Ok(HookResponse::Scrape(ScrapeResponse::new()));
             }
         };
         let resp: CometResponse = match resp_data.json() {
             Ok(r) => r,
             Err(e) => {
                 tracing::warn!(error = %e, imdb_id, title = request.title, "comet response parse failed");
-                return Ok(HookResponse::Scrape(HashMap::new()));
+                return Ok(HookResponse::Scrape(ScrapeResponse::new()));
             }
         };
 
@@ -136,8 +135,8 @@ struct CometBehaviorHints {
     filename: Option<String>,
 }
 
-fn scrape_results_from_response(resp: CometResponse) -> HashMap<String, String> {
-    let mut results = HashMap::new();
+fn scrape_results_from_response(resp: CometResponse) -> ScrapeResponse {
+    let mut results = ScrapeResponse::new();
     for stream in resp.streams {
         let Some(info_hash) = stream.info_hash.clone() else {
             continue;
@@ -147,7 +146,7 @@ fn scrape_results_from_response(resp: CometResponse) -> HashMap<String, String> 
         };
 
         if !title.is_empty() {
-            results.insert(info_hash.to_lowercase(), title);
+            results.insert(info_hash.to_lowercase(), ScrapeEntry::new(title));
         }
     }
     results

@@ -1,14 +1,20 @@
 use std::collections::BTreeMap;
 
-use riven_core::events::RivenEvent;
-use riven_core::types::{CacheCheckFile, DownloadFile, MediaItemType};
+use riven_core::types::{DownloadFile, MediaItemType};
 use riven_db::entities::MediaItem;
 use riven_db::repo;
 
 use crate::JobQueue;
-use crate::context::DownloadHierarchyContext;
 use crate::context::load_media_item_or_download_error;
-/// Log a bitrate failure, blacklist the stream, and send a PartialSuccess event.
+
+/// Load a media item by id, or send a `MediaItemDownloadError` event and return `None`.
+pub async fn load_item_or_err(id: i64, queue: &JobQueue, error_msg: &str) -> Option<MediaItem> {
+    load_media_item_or_download_error(queue, id, error_msg).await
+}
+
+/// Log a bitrate failure and store the file size so the next download attempt can
+/// pre-filter this stream before touching the debrid service. Does not blacklist
+/// and does not emit any events — the caller's loop continues to the next stream.
 pub async fn handle_bitrate_failure(
     id: i64,
     info_hash: &str,
@@ -22,25 +28,39 @@ pub async fn handle_bitrate_failure(
         file_size,
         runtime = ?runtime,
         info_hash = %info_hash,
-        "{context} failed bitrate check — blacklisting stream"
+        "{context} failed bitrate check — skipping stream"
     );
     if !info_hash.is_empty() {
-        if let Err(err) = repo::blacklist_stream_by_hash(&queue.db_pool, id, info_hash).await {
-            tracing::warn!(id, info_hash, %err, "failed to blacklist stream");
-        }
         if let Err(err) = repo::update_stream_file_size(&queue.db_pool, info_hash, file_size).await
         {
             tracing::warn!(info_hash, %err, "failed to update stream file size");
         }
     }
-    queue
-        .notify(RivenEvent::MediaItemDownloadPartialSuccess { id })
-        .await;
 }
 
-/// Load a media item by id, or send a `MediaItemDownloadError` event and return `None`.
-pub async fn load_item_or_err(id: i64, queue: &JobQueue, error_msg: &str) -> Option<MediaItem> {
-    load_media_item_or_download_error(queue, id, error_msg).await
+/// Returns `(max_size_bytes, min_size_bytes)` derived from the configured bitrate
+/// limits and the item's runtime. Both are `None` when the limit is not configured
+/// or when the item has no runtime.
+pub async fn load_bitrate_limits(queue: &JobQueue, item: &MediaItem) -> (Option<u64>, Option<u64>) {
+    let config = queue.downloader_config.read().await;
+    let bitrate_threshold = |movies: Option<u32>, episodes: Option<u32>| {
+        let mbps = match item.item_type {
+            MediaItemType::Movie => movies,
+            MediaItemType::Episode => episodes,
+            _ => None,
+        };
+        mbps.zip(item.runtime)
+            .map(|(m, rt)| riven_core::downloader::DownloaderConfig::threshold_bytes(m, rt))
+    };
+    let max_size_bytes = bitrate_threshold(
+        config.maximum_average_bitrate_movies,
+        config.maximum_average_bitrate_episodes,
+    );
+    let min_size_bytes = bitrate_threshold(
+        config.minimum_average_bitrate_movies,
+        config.minimum_average_bitrate_episodes,
+    );
+    (max_size_bytes, min_size_bytes)
 }
 
 const VALID_VIDEO_EXTENSIONS: &[&str] = &["mp4", "mkv", "avi", "mov", "wmv", "flv", "webm"];
@@ -53,85 +73,6 @@ pub fn is_video_file(filename: &str) -> bool {
         .unwrap_or("")
         .to_ascii_lowercase();
     VALID_VIDEO_EXTENSIONS.contains(&ext.as_str())
-}
-
-/// Returns true if the cached file list contains at least one file that matches
-/// the media item. Used to skip add_torrent when the torrent clearly won't
-/// satisfy the item.
-pub fn has_matching_file(
-    files: &[CacheCheckFile],
-    item: &MediaItem,
-    hierarchy: Option<&DownloadHierarchyContext>,
-) -> bool {
-    match item.item_type {
-        MediaItemType::Movie => files.iter().any(|f| {
-            is_video_file(&f.name)
-                && parse_file_path(preferred_file_path(f)).media_type() == "movie"
-        }),
-        MediaItemType::Episode => {
-            let season = item.season_number.unwrap_or(1);
-            let ep = item.episode_number.unwrap_or(1);
-            files.iter().any(|f| {
-                is_video_file(&f.name)
-                    && matches_episode_lookup(
-                        &parse_file_path(preferred_file_path(f)),
-                        season,
-                        ep,
-                        item.absolute_number,
-                    )
-            })
-        }
-        MediaItemType::Season => {
-            let Some((ctx, season_number)) = hierarchy
-                .and_then(|ctx| ctx.season_number.map(|season_number| (ctx, season_number)))
-            else {
-                return files.iter().any(|f| is_video_file(&f.name));
-            };
-
-            files.iter().any(|f| {
-                is_video_file(&f.name)
-                    && season_file_matches(
-                        &parse_file_path(preferred_file_path(f)),
-                        season_number,
-                        ctx,
-                    )
-            })
-        }
-        _ => files.iter().any(|f| is_video_file(&f.name)),
-    }
-}
-
-fn preferred_file_path(file: &CacheCheckFile) -> &str {
-    if file.path.is_empty() {
-        &file.name
-    } else {
-        &file.path
-    }
-}
-
-fn season_file_matches(
-    parsed: &riven_rank::ParsedData,
-    season_number: i32,
-    hierarchy: &DownloadHierarchyContext,
-) -> bool {
-    if hierarchy.season_episodes.is_empty() {
-        return true;
-    }
-
-    if parsed.complete && parsed.seasons.contains(&season_number) {
-        return true;
-    }
-
-    if !parsed.seasons.is_empty() && !parsed.seasons.contains(&season_number) {
-        return false;
-    }
-
-    hierarchy
-        .season_episodes
-        .iter()
-        .any(|(episode_number, absolute_number)| {
-            matches_episode_lookup(parsed, season_number, *episode_number, *absolute_number)
-        })
 }
 
 pub fn episode_lookup_keys(season: i32, ep: i32, abs: Option<i32>) -> Vec<String> {

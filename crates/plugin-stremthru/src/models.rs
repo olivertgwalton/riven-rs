@@ -87,6 +87,9 @@ pub struct StremthruTorznabChannel {
 #[derive(Deserialize)]
 pub struct StremthruTorznabItem {
     pub title: String,
+    /// Total torrent size in bytes as reported by the torznab feed.
+    #[serde(default)]
+    pub size: Option<u64>,
     #[serde(default)]
     pub attr: Vec<StremthruTorznabAttr>,
 }

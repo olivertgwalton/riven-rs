@@ -121,6 +121,7 @@ pub async fn persist_movie(
 
     let config = queue.downloader_config.read().await;
     if !config.movie_passes(file.file_size, item.runtime) {
+        drop(config);
         handle_bitrate_failure(id, info_hash, file.file_size, item.runtime, "movie", queue).await;
         return false;
     }
@@ -240,15 +241,8 @@ pub async fn persist_episode(
     let config = queue.downloader_config.read().await;
     if !config.episode_passes(largest.file_size, item.runtime) {
         drop(config);
-        handle_bitrate_failure(
-            id,
-            info_hash,
-            largest.file_size,
-            item.runtime,
-            "episode",
-            queue,
-        )
-        .await;
+        handle_bitrate_failure(id, info_hash, largest.file_size, item.runtime, "episode", queue)
+            .await;
         return false;
     }
     drop(config);

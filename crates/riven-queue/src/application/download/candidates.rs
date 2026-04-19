@@ -1,88 +1,24 @@
-use std::collections::HashMap;
-
-use riven_core::types::CacheCheckFile;
 use riven_db::entities::{MediaItem, Stream};
 use riven_rank::{ParsedData, RankSettings};
 
-use crate::context::DownloadHierarchyContext;
-use crate::flows::download_item::helpers::has_matching_file;
-
-pub struct CachedCandidate<'a> {
-    pub stream: &'a Stream,
-}
-
-pub fn build_cached_candidates<'a>(
-    id: i64,
-    item: &MediaItem,
-    hierarchy: Option<&DownloadHierarchyContext>,
-    streams: &'a [Stream],
-    cached_info: &HashMap<String, Vec<CacheCheckFile>>,
-    max_size_bytes: Option<u64>,
-    min_size_bytes: Option<u64>,
-) -> Vec<CachedCandidate<'a>> {
-    streams
-        .iter()
-        .filter_map(|stream| {
-            let files = cached_info.get(&stream.info_hash.to_lowercase())?;
-            let total_size: u64 = files.iter().filter_map(|file| file.size).sum();
-            tracing::debug!(id, info_hash = %stream.info_hash, total_size, "stream is cached");
-
-            if max_size_bytes.is_some_and(|max| total_size > max) {
-                tracing::debug!(
-                    id,
-                    info_hash = %stream.info_hash,
-                    total_size,
-                    "stream filtered: exceeds max bitrate"
-                );
-                return None;
-            }
-            if min_size_bytes.is_some_and(|min| total_size < min) {
-                tracing::debug!(
-                    id,
-                    info_hash = %stream.info_hash,
-                    total_size,
-                    "stream filtered: below min bitrate"
-                );
-                return None;
-            }
-            if !has_matching_file(files, item, hierarchy) {
-                return None;
-            }
-
-            Some(CachedCandidate { stream })
-        })
-        .collect()
-}
-
-pub fn find_preferred_candidate<'a>(
-    candidates: &'a [CachedCandidate<'a>],
-    preferred_info_hash: &str,
-) -> Option<&'a CachedCandidate<'a>> {
-    candidates.iter().find(|candidate| {
-        candidate
-            .stream
-            .info_hash
-            .eq_ignore_ascii_case(preferred_info_hash)
-    })
-}
-
 pub fn pick_best_for_profile<'a>(
-    candidates: &'a [CachedCandidate<'a>],
+    streams: &[&'a Stream],
     item: &MediaItem,
     profile: &RankSettings,
 ) -> Option<&'a Stream> {
     let download_profile = build_download_candidate_profile(profile);
     let model = riven_rank::RankingModel::default();
 
-    let mut scored: Vec<(&Stream, i64, i64)> = candidates
+    let mut scored: Vec<(&Stream, i64, i64)> = streams
         .iter()
-        .filter_map(|candidate| {
-            let Some(parsed_data) = candidate.stream.parsed_data.as_ref() else {
+        .copied()
+        .filter_map(|stream| {
+            let Some(parsed_data) = stream.parsed_data.as_ref() else {
                 tracing::debug!(
                     item_id = item.id,
                     title = %item.title,
-                    info_hash = %candidate.stream.info_hash,
-                    "cached stream rejected: missing parsed_data"
+                    info_hash = %stream.info_hash,
+                    "stream rejected: missing parsed_data"
                 );
                 return None;
             };
@@ -91,8 +27,8 @@ pub fn pick_best_for_profile<'a>(
                 tracing::debug!(
                     item_id = item.id,
                     title = %item.title,
-                    info_hash = %candidate.stream.info_hash,
-                    "cached stream rejected: invalid parsed_data"
+                    info_hash = %stream.info_hash,
+                    "stream rejected: invalid parsed_data"
                 );
                 return None;
             };
@@ -102,7 +38,7 @@ pub fn pick_best_for_profile<'a>(
                 tracing::debug!(
                     item_id = item.id,
                     title = %item.title,
-                    info_hash = %candidate.stream.info_hash,
+                    info_hash = %stream.info_hash,
                     raw_title = %parsed.raw_title,
                     resolution = parsed.resolution,
                     quality = ?parsed.quality,
@@ -110,14 +46,14 @@ pub fn pick_best_for_profile<'a>(
                     audio = ?parsed.audio,
                     hdr = ?parsed.hdr,
                     checks = ?failed_checks,
-                    "cached stream does not match download preference checks"
+                    "stream does not match download preference checks"
                 );
                 return None;
             }
 
             let score =
                 riven_rank::rank::scores::get_rank_total(&parsed, &download_profile, &model);
-            Some((candidate.stream, score, pack_preference(item, &parsed)))
+            Some((stream, score, pack_preference(item, &parsed)))
         })
         .collect();
 
@@ -184,7 +120,6 @@ fn build_download_candidate_profile(profile: &RankSettings) -> RankSettings {
 #[cfg(test)]
 mod tests {
     use super::pick_best_for_profile;
-    use crate::application::download::candidates::CachedCandidate;
     use riven_core::types::MediaItemType;
     use riven_db::entities::{MediaItem, Stream};
     use riven_rank::RankSettings;
@@ -252,16 +187,9 @@ mod tests {
 
         let stream_2160p = stream(1, "hash2160", "Shrek.2.2160p.BluRay");
         let stream_1080p = stream(2, "hash1080", "Shrek.2.1080p.BluRay");
-        let candidates = vec![
-            CachedCandidate {
-                stream: &stream_2160p,
-            },
-            CachedCandidate {
-                stream: &stream_1080p,
-            },
-        ];
+        let streams = vec![&stream_2160p, &stream_1080p];
 
-        let best = pick_best_for_profile(&candidates, &media_item(), &profile)
+        let best = pick_best_for_profile(&streams, &media_item(), &profile)
             .expect("1080p stream should remain eligible");
 
         assert_eq!(best.info_hash, "hash1080");

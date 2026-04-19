@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use redis::AsyncCommands;
 
 use riven_core::events::ScrapeRequest;
@@ -282,7 +280,7 @@ pub async fn scrape_torznab(
     http: &HttpClient,
     base_url: &str,
     req: &ScrapeRequest<'_>,
-) -> anyhow::Result<HashMap<String, String>> {
+) -> anyhow::Result<riven_core::types::ScrapeResponse> {
     let url = format!("{base_url}v0/torznab/api");
 
     let mut params: Vec<(&str, String)> = vec![("o", "json".to_string())];
@@ -340,7 +338,7 @@ pub async fn scrape_torznab(
     let resp: StremthruTorznabResponse = serde_json::from_str(&text)
         .map_err(|e| anyhow::anyhow!("invalid torznab response: {e}; body={text}"))?;
 
-    let mut results = HashMap::new();
+    let mut results = riven_core::types::ScrapeResponse::new();
     for item in resp.channel.items {
         let Some(info_hash) = item.attr.iter().find_map(|a| {
             if a.attributes.name == "infohash" {
@@ -351,9 +349,24 @@ pub async fn scrape_torznab(
         }) else {
             continue;
         };
-        if !info_hash.is_empty() && !item.title.is_empty() {
-            results.insert(info_hash, item.title);
+        if info_hash.is_empty() || item.title.is_empty() {
+            continue;
         }
+        // Size from the top-level field; fall back to a torznab attr named "size".
+        let file_size_bytes = item.size.or_else(|| {
+            item.attr.iter().find_map(|a| {
+                if a.attributes.name == "size" {
+                    a.attributes.value.parse::<u64>().ok()
+                } else {
+                    None
+                }
+            })
+        });
+        let entry = match file_size_bytes {
+            Some(size) => riven_core::types::ScrapeEntry::with_size(item.title, size),
+            None => riven_core::types::ScrapeEntry::new(item.title),
+        };
+        results.insert(info_hash, entry);
     }
 
     tracing::info!(

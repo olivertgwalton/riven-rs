@@ -123,6 +123,7 @@ impl MediaItemMutations {
                 &build_magnet_uri(&info_hash),
                 Some(parsed_data),
                 None,
+                None,
             )
             .await?;
             repo::link_stream_to_item(pool, input.id, stream.id).await?;

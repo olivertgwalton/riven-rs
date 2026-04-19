@@ -1,4 +1,5 @@
 use super::*;
+use std::collections::HashMap;
 
 #[test]
 fn scrape_url_defaults_series_season_and_episode() {

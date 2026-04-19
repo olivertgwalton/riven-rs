@@ -1,10 +1,10 @@
 mod candidates;
 mod execute;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::time::Instant;
 
-use riven_core::events::{HookResponse, RivenEvent};
+use riven_core::events::RivenEvent;
 use riven_core::types::*;
 use riven_db::entities::{MediaItem, Stream};
 use riven_db::repo;
@@ -12,14 +12,12 @@ use riven_rank::RankSettings;
 use serde::Deserialize;
 
 use crate::context::{DownloadHierarchyContext, load_download_hierarchy_context};
-use crate::flows::download_item::helpers::load_item_or_err;
+use crate::flows::download_item::helpers::{load_item_or_err, load_bitrate_limits};
 use crate::flows::download_item::persist::{finalize_download_success, persist_supplied_download};
 use crate::flows::load_active_profiles;
 use crate::{DownloadJob, JobQueue};
 
-use self::candidates::{
-    CachedCandidate, build_cached_candidates, find_preferred_candidate, pick_best_for_profile,
-};
+use self::candidates::pick_best_for_profile;
 use self::execute::{DownloadAttemptOutcome, attempt_download};
 
 #[derive(Debug, Clone, Deserialize)]
@@ -209,18 +207,31 @@ pub async fn run(id: i64, job: &DownloadJob, queue: &JobQueue) {
         return;
     }
 
-    let cached_info = collect_cached_info(queue, &all_streams, job.preferred_info_hash.as_deref()).await;
+    // Pre-filter streams whose size is already known and fails the configured
+    // bitrate limits. This avoids touching the debrid service for streams we
+    // will reject anyway. Streams with no stored size pass through; they are
+    // checked after add-torrent returns the file list, and their size is stored
+    // at that point so they are caught here on all future attempts.
     let (max_size_bytes, min_size_bytes) = load_bitrate_limits(queue, &item).await;
-    let candidates = build_cached_candidates(
-        id,
-        &item,
-        hierarchy.as_ref(),
-        &all_streams,
-        &cached_info,
-        max_size_bytes,
-        min_size_bytes,
-    );
+    let streams_to_try: Vec<&Stream> = all_streams
+        .iter()
+        .filter(|s| {
+            let Some(size) = s.file_size_bytes else { return true };
+            let size = size as u64;
+            if max_size_bytes.is_some_and(|max| size > max) {
+                tracing::debug!(id, info_hash = %s.info_hash, size, "skipping stream: known size exceeds max bitrate limit");
+                return false;
+            }
+            if min_size_bytes.is_some_and(|min| size < min) {
+                tracing::debug!(id, info_hash = %s.info_hash, size, "skipping stream: known size below min bitrate limit");
+                return false;
+            }
+            true
+        })
+        .collect();
 
+    // Streams are tried sequentially via add-torrent requests. The debrid
+    // provider's response determines availability — no batch cache pre-check.
     if let Some(preferred_info_hash) = job.preferred_info_hash.as_ref() {
         let _ = run_preferred_stream(
             id,
@@ -228,7 +239,7 @@ pub async fn run(id: i64, job: &DownloadJob, queue: &JobQueue) {
             queue,
             start_time,
             preferred_info_hash,
-            &candidates,
+            &all_streams,
             hierarchy.as_ref(),
         )
         .await;
@@ -239,7 +250,7 @@ pub async fn run(id: i64, job: &DownloadJob, queue: &JobQueue) {
             queue,
             start_time,
             &active_profiles,
-            &candidates,
+            &streams_to_try,
             hierarchy.as_ref(),
         )
         .await;
@@ -249,63 +260,11 @@ pub async fn run(id: i64, job: &DownloadJob, queue: &JobQueue) {
             &item,
             queue,
             start_time,
-            &candidates,
+            &streams_to_try,
             hierarchy.as_ref(),
         )
         .await;
     }
-}
-
-async fn collect_cached_info(
-    queue: &JobQueue,
-    streams: &[Stream],
-    preferred_info_hash: Option<&str>,
-) -> HashMap<String, Vec<CacheCheckFile>> {
-    // Streams for a given item have unique info_hashes — no dedup needed.
-    let hashes: Vec<String> = streams.iter().map(|s| s.info_hash.clone()).collect();
-    let bypass_cache = preferred_info_hash
-        .map(|h| vec![h.to_lowercase()])
-        .unwrap_or_default();
-    let cache_event = RivenEvent::MediaItemDownloadCacheCheckRequested { hashes, bypass_cache };
-    let cache_results = queue.registry.dispatch(&cache_event).await;
-
-    let mut cached_info: HashMap<String, Vec<CacheCheckFile>> = HashMap::new();
-    for (_, result) in cache_results {
-        if let Ok(HookResponse::CacheCheck(results)) = result {
-            for result in results {
-                if matches!(
-                    result.status,
-                    TorrentStatus::Cached | TorrentStatus::Downloaded
-                ) {
-                    cached_info.insert(result.hash.to_lowercase(), result.files);
-                }
-            }
-        }
-    }
-    cached_info
-}
-
-async fn load_bitrate_limits(queue: &JobQueue, item: &MediaItem) -> (Option<u64>, Option<u64>) {
-    let config = queue.downloader_config.read().await;
-    let bitrate_threshold = |movies: Option<u32>, episodes: Option<u32>| {
-        let mbps = match item.item_type {
-            MediaItemType::Movie => movies,
-            MediaItemType::Episode => episodes,
-            _ => None,
-        };
-        mbps.zip(item.runtime)
-            .map(|(m, rt)| riven_core::downloader::DownloaderConfig::threshold_bytes(m, rt))
-    };
-
-    let max_size_bytes = bitrate_threshold(
-        config.maximum_average_bitrate_movies,
-        config.maximum_average_bitrate_episodes,
-    );
-    let min_size_bytes = bitrate_threshold(
-        config.minimum_average_bitrate_movies,
-        config.minimum_average_bitrate_episodes,
-    );
-    (max_size_bytes, min_size_bytes)
 }
 
 async fn run_preferred_stream(
@@ -314,15 +273,18 @@ async fn run_preferred_stream(
     queue: &JobQueue,
     start_time: Instant,
     preferred_info_hash: &str,
-    candidates: &[CachedCandidate<'_>],
+    streams: &[Stream],
     hierarchy: Option<&DownloadHierarchyContext>,
 ) -> bool {
-    let Some(candidate) = find_preferred_candidate(candidates, preferred_info_hash) else {
+    let Some(stream) = streams
+        .iter()
+        .find(|s| s.info_hash.eq_ignore_ascii_case(preferred_info_hash))
+    else {
         queue
             .notify(RivenEvent::MediaItemDownloadError {
                 id,
                 title: item.title.clone(),
-                error: "selected stream is not cached, valid, or linked to this item".into(),
+                error: "selected stream is not linked to this item".into(),
             })
             .await;
         return false;
@@ -332,7 +294,7 @@ async fn run_preferred_stream(
         id,
         item,
         queue,
-        candidate.stream,
+        stream,
         None,
         None,
         start_time,
@@ -355,7 +317,7 @@ async fn run_multi_version(
     queue: &JobQueue,
     start_time: Instant,
     active_profiles: &[(String, RankSettings)],
-    candidates: &[CachedCandidate<'_>],
+    streams: &[&Stream],
     hierarchy: Option<&DownloadHierarchyContext>,
 ) -> bool {
     // Seed with profiles already downloaded before this job ran; augmented
@@ -377,11 +339,11 @@ async fn run_multi_version(
             continue;
         }
 
-        let Some(stream) = pick_best_for_profile(candidates, item, profile_settings) else {
+        let Some(stream) = pick_best_for_profile(streams, item, profile_settings) else {
             tracing::debug!(
                 id,
                 profile = profile_name,
-                "no cached stream found for profile"
+                "no valid stream found for profile"
             );
             continue;
         };
@@ -425,12 +387,12 @@ async fn run_multi_version(
     }
 
     if !any_success {
-        tracing::debug!(id, title = %item.title, "no valid torrent found after trying cached candidates");
+        tracing::debug!(id, title = %item.title, "no valid torrent found after trying ranked streams");
         queue
             .notify(RivenEvent::MediaItemDownloadError {
                 id,
                 title: item.title.clone(),
-                error: "no valid torrent found after trying cached candidates".into(),
+                error: "no valid torrent found after trying ranked streams".into(),
             })
             .await;
         return false;
@@ -458,27 +420,15 @@ async fn run_single_version(
     item: &MediaItem,
     queue: &JobQueue,
     start_time: Instant,
-    candidates: &[CachedCandidate<'_>],
+    streams: &[&Stream],
     hierarchy: Option<&DownloadHierarchyContext>,
 ) -> bool {
-    if candidates.is_empty() {
-        tracing::debug!(id, "no cached+valid streams found in this pass");
-        queue
-            .notify(RivenEvent::MediaItemDownloadError {
-                id,
-                title: item.title.clone(),
-                error: "no cached and valid streams found in this pass".into(),
-            })
-            .await;
-        return false;
-    }
-
-    for candidate in candidates {
+    for &stream in streams {
         match attempt_download(
             id,
             item,
             queue,
-            candidate.stream,
+            stream,
             None,
             None,
             start_time,
@@ -495,12 +445,12 @@ async fn run_single_version(
         }
     }
 
-    tracing::debug!(id, title = %item.title, "no valid torrent found after trying cached candidates");
+    tracing::debug!(id, title = %item.title, "no valid torrent found after trying ranked streams");
     queue
         .notify(RivenEvent::MediaItemDownloadError {
             id,
             title: item.title.clone(),
-            error: "no valid torrent found after trying cached candidates".into(),
+            error: "no valid torrent found after trying ranked streams".into(),
         })
         .await;
     false

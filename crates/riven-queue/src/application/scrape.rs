@@ -255,6 +255,7 @@ pub async fn parse_results(id: i64, _job: &ParseScrapeResultsJob, queue: &JobQue
                     &build_magnet_uri(&candidate.info_hash),
                     candidate.parsed_data,
                     candidate.rank,
+                    candidate.file_size_bytes,
                 )
                 .await
                 {

@@ -1,12 +1,10 @@
 use async_trait::async_trait;
-use serde::Deserialize;
-use std::collections::HashMap;
-
 use riven_core::events::{EventType, HookResponse, RivenEvent};
 use riven_core::http::profiles;
 use riven_core::plugin::{Plugin, PluginContext};
 use riven_core::register_plugin;
-use riven_core::types::MediaItemType;
+use riven_core::types::{MediaItemType, ScrapeEntry, ScrapeResponse};
+use serde::Deserialize;
 
 const TORRENTIO_BASE_URL: &str = "http://torrentio.strem.fun/";
 const DEFAULT_FILTER: &str = "sort=qualitysize%7Cqualityfilter=threed,480p,scr,cam";
@@ -132,14 +130,13 @@ fn scrape_type(item_type: MediaItemType) -> &'static str {
     }
 }
 
-fn scrape_results_from_response(resp: TorrentioResponse) -> HashMap<String, String> {
-    let mut results = HashMap::new();
+fn scrape_results_from_response(resp: TorrentioResponse) -> ScrapeResponse {
+    let mut results = ScrapeResponse::new();
     for stream in resp.streams {
         if let Some(info_hash) = stream.info_hash {
             let title = stream_title(stream.title.as_deref());
-
             if !title.is_empty() {
-                results.insert(info_hash.to_lowercase(), title);
+                results.insert(info_hash.to_lowercase(), ScrapeEntry::new(title));
             }
         }
     }
