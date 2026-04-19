@@ -44,11 +44,17 @@ pub async fn load_log_settings(pool: &sqlx::PgPool) -> anyhow::Result<LogSetting
         settings.merge_db_override(&db_value);
     }
 
+    let plugin_enabled = riven_db::repo::get_plugin_enabled_setting(pool, "logs")
+        .await
+        .unwrap_or(None)
+        .unwrap_or(true);
+
     Ok(LogSettings {
-        enabled: settings
-            .get("logging_enabled")
-            .map(is_truthy)
-            .unwrap_or(true),
+        enabled: plugin_enabled
+            && settings
+                .get("logging_enabled")
+                .map(is_truthy)
+                .unwrap_or(true),
         level: settings.get_or("log_level", "info"),
         rotation: settings.get_or("log_rotation", "hourly"),
         max_files: settings
