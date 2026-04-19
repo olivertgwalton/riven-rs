@@ -1,92 +1,92 @@
 services:
-  riven-frontend:
-    image: docker.io/library/riven-frontend
-    container_name: riven-frontend
-    restart: unless-stopped
-    env_file: .env
-    ports:
-      - "3000:3000"
-    depends_on:
-      riven:
-        condition: service_healthy
-    volumes:
-      - riven-frontend-data:/riven/data
+    riven-frontend:
+        image: docker.io/library/riven-frontend
+        container_name: riven-frontend
+        restart: unless-stopped
+        env_file: .env
+        ports:
+            - "3000:3000"
+        depends_on:
+            riven:
+                condition: service_healthy
+        volumes:
+            - riven-frontend-data:/riven/data
 
-  postgres:
-    image: postgres:18-alpine
-    env_file: .env
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-riven}"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
+    postgres:
+        image: postgres:18-alpine
+        env_file: .env
+        volumes:
+            - postgres_data:/var/lib/postgresql
+        healthcheck:
+            test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-riven}"]
+            interval: 5s
+            timeout: 5s
+            retries: 5
 
-  redis:
-    image: redis:8-alpine
-    volumes:
-      - redis_data:/data
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
+    redis:
+        image: redis:8-alpine
+        volumes:
+            - redis_data:/data
+        healthcheck:
+            test: ["CMD", "redis-cli", "ping"]
+            interval: 5s
+            timeout: 5s
+            retries: 5
 
-  jellyfin:
-    image: jellyfin/jellyfin:latest
-    env_file: .env
-    depends_on:
-      riven:
-        condition: service_healthy
-    ports:
-      - "8096:8096"
-    volumes:
-      - jellyfin_data:/config
-      - jellyfin_cache:/cache
-      - type: bind
-        source: ${RIVEN_STORAGE_PATH}
-        target: /mnt/riven
-        read_only: true
-        bind:
-          propagation: slave
+    jellyfin:
+        image: jellyfin/jellyfin:latest
+        env_file: .env
+        depends_on:
+            riven:
+                condition: service_healthy
+        ports:
+            - "8096:8096"
+        volumes:
+            - jellyfin_data:/config
+            - jellyfin_cache:/cache
+            - type: bind
+              source: ${RIVEN_STORAGE_PATH}
+              target: /mnt/riven
+              read_only: true
+              bind:
+                  propagation: slave
 
-  riven:
-    build: .
-    env_file: .env
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    ports:
-      - "8080:8080"
-    volumes:
-      - type: bind
-        source: ${RIVEN_STORAGE_PATH}
-        target: /mnt/riven
-        bind:
-          propagation: shared
-      - riven_logs:/logs
-    devices:
-      - /dev/fuse
-    cap_add:
-      - SYS_ADMIN
-    security_opt:
-      - apparmor:unconfined
-    healthcheck:
-      test: ["CMD", "true"]
-      interval: 2s
+    riven:
+        build: .
+        env_file: .env
+        depends_on:
+            postgres:
+                condition: service_healthy
+            redis:
+                condition: service_healthy
+        ports:
+            - "8080:8080"
+        volumes:
+            - type: bind
+              source: ${RIVEN_STORAGE_PATH}
+              target: /mnt/riven
+              bind:
+                  propagation: shared
+            - riven_logs:/app/logs
+        devices:
+            - /dev/fuse
+        cap_add:
+            - SYS_ADMIN
+        security_opt:
+            - apparmor:unconfined
+        healthcheck:
+            test: ["CMD", "true"]
+            interval: 2s
 
 volumes:
-  postgres_data:
-  redis_data:
-  seerr_data:
-  jellyfin_data:
-  jellyfin_cache:
-  riven_logs:
-  riven-frontend-data:
+    postgres_data:
+    redis_data:
+    seerr_data:
+    jellyfin_data:
+    jellyfin_cache:
+    riven_logs:
+    riven-frontend-data:
 
 networks:
-  default:
-    enable_ipv6: true
+    default:
+        enable_ipv6: true
