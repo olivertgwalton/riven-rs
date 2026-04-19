@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use riven_core::types::{DownloadFile, MediaItemType};
+use riven_core::types::DownloadFile;
 use riven_db::entities::MediaItem;
 use riven_db::repo;
 
@@ -38,30 +38,6 @@ pub async fn handle_bitrate_failure(
     }
 }
 
-/// Returns `(max_size_bytes, min_size_bytes)` derived from the configured bitrate
-/// limits and the item's runtime. Both are `None` when the limit is not configured
-/// or when the item has no runtime.
-pub async fn load_bitrate_limits(queue: &JobQueue, item: &MediaItem) -> (Option<u64>, Option<u64>) {
-    let config = queue.downloader_config.read().await;
-    let bitrate_threshold = |movies: Option<u32>, episodes: Option<u32>| {
-        let mbps = match item.item_type {
-            MediaItemType::Movie => movies,
-            MediaItemType::Episode => episodes,
-            _ => None,
-        };
-        mbps.zip(item.runtime)
-            .map(|(m, rt)| riven_core::downloader::DownloaderConfig::threshold_bytes(m, rt))
-    };
-    let max_size_bytes = bitrate_threshold(
-        config.maximum_average_bitrate_movies,
-        config.maximum_average_bitrate_episodes,
-    );
-    let min_size_bytes = bitrate_threshold(
-        config.minimum_average_bitrate_movies,
-        config.minimum_average_bitrate_episodes,
-    );
-    (max_size_bytes, min_size_bytes)
-}
 
 const VALID_VIDEO_EXTENSIONS: &[&str] = &["mp4", "mkv", "avi", "mov", "wmv", "flv", "webm"];
 

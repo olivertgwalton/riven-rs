@@ -11,8 +11,8 @@ use riven_core::types::*;
 use std::collections::HashMap;
 
 use crate::client::{
-    add_torrent, check_cache, download_result_from_torz, fetch_user_info, generate_link,
-    scrape_torznab,
+    add_torrent, check_cache, download_result_from_cache, download_result_from_torz, fetch_user_info,
+    generate_link, scrape_torznab,
 };
 use riven_core::types::TorrentStatus;
 const DEFAULT_URL: &str = "https://stremthru.13377001.xyz/";
@@ -118,9 +118,9 @@ impl Plugin for StremthruPlugin {
             SettingField::new("scrapenabled", "Enable Torznab Scraper", "boolean")
                 .with_default("true")
                 .with_description("Scrape torrent results via the StremThru Torznab endpoint. Disable to use StremThru only for downloading and cache checks."),
-            SettingField::new("checkcachebeforedownload", "Check Cache Before Downloading", "boolean")
+            SettingField::new("checkdebridcache", "Check Debrid Cache", "boolean")
                 .with_default("true")
-                .with_description("When enabled, queries each debrid's cache before attempting to add a torrent — only tries stores that report the torrent as cached. When disabled (recommended), attempts to add the torrent directly to each store without a cache pre-check, avoiding false negatives."),
+                .with_description("When enabled, attempts to add the torrent directly to each debrid service — if successful, it is treated as cached. When disabled, queries /store/torz/check in batches of up to 500 hashes per store and uses the result as the source of truth before attempting any add."),
             SettingField::new("realdebridapikey", "Real-Debrid API Key", "password"),
             SettingField::new("alldebridapikey", "AllDebrid API Key", "password"),
             SettingField::new("debriderapikey", "Debrider API Key", "password"),
@@ -154,20 +154,28 @@ impl Plugin for StremthruPlugin {
                 Ok(HookResponse::Scrape(results))
             }
             RivenEvent::MediaItemDownloadRequested { info_hash, .. } => {
-                let check_cache_first =
-                    ctx.settings.get_or("checkcachebeforedownload", "true") == "true";
+                // "Check Debrid Cache" enabled = direct add_torrent (implicit availability check).
+                // disabled = /store/torz/check batch first, only add confirmed cached hashes.
+                let direct_mode =
+                    ctx.settings.get_or("checkdebridcache", "true") == "true";
 
                 let score_map = get_store_scores(&ctx.redis, &stores).await;
 
-                if check_cache_first {
+                if !direct_mode {
                     // ── Check-first mode ──────────────────────────────────────────────
-                    // Query each store's cache in parallel, then only try add_torrent
-                    // for stores that report the torrent as cached.
-                    let hash_list = vec![info_hash.to_lowercase()];
+                    // Query each store's cache in parallel. Bypass Redis so we get live
+                    // file links in the response. For `Downloaded` status (torrent
+                    // already in account), use the links directly — no add_torrent call.
+                    // For `Cached` status (instant availability), call add_torrent to
+                    // obtain usable links.
+                    let hash_lc = info_hash.to_lowercase();
+                    let hash_list = vec![hash_lc.clone()];
+                    let bypass = vec![hash_lc];
                     let cache_futures: Vec<_> = stores
                         .iter()
                         .map(|(store, api_key)| {
                             let hash_list = hash_list.clone();
+                            let bypass = bypass.clone();
                             let base_url = base_url.clone();
                             async move {
                                 let result = check_cache(
@@ -177,7 +185,7 @@ impl Plugin for StremthruPlugin {
                                     store,
                                     api_key,
                                     &hash_list,
-                                    &[],
+                                    &bypass,
                                 )
                                 .await;
                                 (*store, api_key.as_str(), result)
@@ -186,46 +194,90 @@ impl Plugin for StremthruPlugin {
                         .collect();
                     let cache_results = futures::future::join_all(cache_futures).await;
 
-                    // Build a list of (store, api_key, file_count) for cached stores,
-                    // sorted by score desc, then file_count desc, then store name asc.
-                    let mut cached_stores: Vec<(&str, &str, usize)> = cache_results
-                        .iter()
-                        .filter_map(|(store, api_key, result)| match result {
-                            Ok(results) => results.iter().find_map(|r| {
-                                if r.hash.eq_ignore_ascii_case(info_hash)
-                                    && matches!(
-                                        r.status,
-                                        TorrentStatus::Cached | TorrentStatus::Downloaded
-                                    )
+                    let mut downloaded_stores: Vec<(&str, &str, riven_core::types::CacheCheckResult)> =
+                        Vec::new();
+                    let mut cached_stores: Vec<(&str, &str, usize)> = Vec::new();
+
+                    for (store, api_key, result) in &cache_results {
+                        match result {
+                            Ok(results) => {
+                                if let Some(r) =
+                                    results.iter().find(|r| r.hash.eq_ignore_ascii_case(info_hash))
                                 {
-                                    Some((*store, *api_key, r.files.len()))
-                                } else {
-                                    None
+                                    match r.status {
+                                        TorrentStatus::Downloaded => {
+                                            downloaded_stores.push((*store, *api_key, r.clone()));
+                                        }
+                                        TorrentStatus::Cached => {
+                                            cached_stores.push((*store, *api_key, r.files.len()));
+                                        }
+                                        _ => {}
+                                    }
                                 }
-                            }),
+                            }
                             Err(error) => {
                                 tracing::warn!(store, error = %error, "cache check failed");
-                                None
                             }
-                        })
-                        .collect();
+                        }
+                    }
 
-                    cached_stores.sort_by(|(store_a, _, files_a), (store_b, _, files_b)| {
-                        let score_a = score_map.get(*store_a).copied().unwrap_or_default();
-                        let score_b = score_map.get(*store_b).copied().unwrap_or_default();
-                        score_b
-                            .cmp(&score_a)
-                            .then_with(|| files_b.cmp(files_a))
-                            .then_with(|| store_a.cmp(store_b))
+                    let score_for = |store: &str| score_map.get(store).copied().unwrap_or_default();
+                    downloaded_stores.sort_by(|(a, _, ra), (b, _, rb)| {
+                        score_for(b).cmp(&score_for(a))
+                            .then_with(|| rb.files.len().cmp(&ra.files.len()))
+                            .then_with(|| a.cmp(b))
+                    });
+                    cached_stores.sort_by(|(a, _, fa), (b, _, fb)| {
+                        score_for(b).cmp(&score_for(a))
+                            .then_with(|| fb.cmp(fa))
+                            .then_with(|| a.cmp(b))
                     });
 
                     tracing::debug!(
                         info_hash,
-                        cached_store_count = cached_stores.len(),
-                        "check_first mode: trying cached stores"
+                        downloaded = downloaded_stores.len(),
+                        cached = cached_stores.len(),
+                        "check_first mode: stores with torrent available"
                     );
 
                     let mut any_network_error = false;
+
+                    // Use links from the cache check response directly for Downloaded torrents.
+                    for (store, api_key, cache_result) in downloaded_stores {
+                        if cache_result.files.iter().any(|f| f.link.is_some()) {
+                            adjust_store_score(&ctx.redis, store, 5).await;
+                            tracing::debug!(
+                                store,
+                                info_hash,
+                                files = cache_result.files.len(),
+                                "torrent already in account; using cache-check links directly"
+                            );
+                            let download = download_result_from_cache(store, info_hash, cache_result);
+                            return Ok(HookResponse::Download(Box::new(download)));
+                        }
+                        // Links absent — fall back to add_torrent for this store.
+                        tracing::debug!(store, info_hash, "Downloaded but no links; falling back to add_torrent");
+                        match add_torrent(&ctx.http, &base_url, store, api_key, info_hash).await {
+                            Ok(Some(torz)) => {
+                                adjust_store_score(&ctx.redis, store, 5).await;
+                                let download = download_result_from_torz(store, info_hash, torz);
+                                return Ok(HookResponse::Download(Box::new(download)));
+                            }
+                            Ok(None) => { adjust_store_score(&ctx.redis, store, -2).await; }
+                            Err(error) => {
+                                adjust_store_score(&ctx.redis, store, -1).await;
+                                if error.downcast_ref::<reqwest::Error>()
+                                    .map(|e| e.is_connect() || e.is_timeout() || e.is_request())
+                                    .unwrap_or(false)
+                                {
+                                    any_network_error = true;
+                                }
+                                tracing::warn!(store, error = %error, "add_torrent fallback failed (check_first)");
+                            }
+                        }
+                    }
+
+                    // For Cached torrents, add_torrent is needed to get usable links.
                     for (store, api_key, _) in cached_stores {
                         match add_torrent(&ctx.http, &base_url, store, api_key, info_hash).await {
                             Ok(Some(torz)) => {
@@ -234,33 +286,25 @@ impl Plugin for StremthruPlugin {
                                     store,
                                     info_hash,
                                     files = torz.files.len(),
-                                    "torrent added (check_first); building download result"
+                                    "cached torrent added (check_first)"
                                 );
                                 let download = download_result_from_torz(store, info_hash, torz);
                                 return Ok(HookResponse::Download(Box::new(download)));
                             }
                             Ok(None) => {
                                 adjust_store_score(&ctx.redis, store, -2).await;
-                                tracing::debug!(
-                                    store,
-                                    info_hash,
-                                    "add torrent returned unavailable (check_first)"
-                                );
+                                tracing::debug!(store, info_hash, "add_torrent returned unavailable (check_first)");
                             }
                             Err(error) => {
                                 adjust_store_score(&ctx.redis, store, -1).await;
-                                let is_network = error
+                                if error
                                     .downcast_ref::<reqwest::Error>()
                                     .map(|e| e.is_connect() || e.is_timeout() || e.is_request())
-                                    .unwrap_or(false);
-                                if is_network {
+                                    .unwrap_or(false)
+                                {
                                     any_network_error = true;
                                 }
-                                tracing::warn!(
-                                    store,
-                                    error = %error,
-                                    "stremthru add torrent failed (check_first)"
-                                );
+                                tracing::warn!(store, error = %error, "stremthru add_torrent failed (check_first)");
                             }
                         }
                     }
@@ -270,9 +314,10 @@ impl Plugin for StremthruPlugin {
                     }
                     Ok(HookResponse::DownloadStreamUnavailable)
                 } else {
-                    // ── Direct mode (default) ─────────────────────────────────────────
+                    // ── Direct mode (Check Debrid Cache enabled) ──────────────────────
                     // Attempt add_torrent on each store sequentially, ordered by score.
-                    // Avoids false negatives from cache pre-checks.
+                    // StremThru only returns success when status is "downloaded", so
+                    // this implicitly checks instant availability without a separate call.
                     let mut ordered_stores: Vec<(&str, &str)> = stores
                         .iter()
                         .map(|(store, api_key)| (*store, api_key.as_str()))

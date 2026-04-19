@@ -386,6 +386,32 @@ fn cache_check_key(store: &str, hash: &str) -> String {
     format!("plugin:stremthru:cache-check:{store}:{hash}")
 }
 
+pub fn download_result_from_cache(
+    store: &str,
+    info_hash: &str,
+    cache: riven_core::types::CacheCheckResult,
+) -> DownloadResult {
+    let files = cache
+        .files
+        .into_iter()
+        .filter_map(|f| {
+            f.link.map(|link| DownloadFile {
+                filename: if f.path.is_empty() { f.name } else { f.path },
+                file_size: f.size.unwrap_or(0),
+                download_url: Some(link),
+                stream_url: None,
+            })
+        })
+        .collect();
+
+    DownloadResult {
+        info_hash: info_hash.to_string(),
+        files,
+        provider: Some(store.to_string()),
+        plugin_name: "stremthru".to_string(),
+    }
+}
+
 pub fn download_result_from_torz(
     store: &str,
     info_hash: &str,

@@ -12,7 +12,7 @@ use riven_rank::RankSettings;
 use serde::Deserialize;
 
 use crate::context::{DownloadHierarchyContext, load_download_hierarchy_context};
-use crate::flows::download_item::helpers::{load_item_or_err, load_bitrate_limits};
+use crate::flows::download_item::helpers::load_item_or_err;
 use crate::flows::download_item::persist::{finalize_download_success, persist_supplied_download};
 use crate::flows::load_active_profiles;
 use crate::{DownloadJob, JobQueue};
@@ -207,28 +207,7 @@ pub async fn run(id: i64, job: &DownloadJob, queue: &JobQueue) {
         return;
     }
 
-    // Pre-filter streams whose size is already known and fails the configured
-    // bitrate limits. This avoids touching the debrid service for streams we
-    // will reject anyway. Streams with no stored size pass through; they are
-    // checked after add-torrent returns the file list, and their size is stored
-    // at that point so they are caught here on all future attempts.
-    let (max_size_bytes, min_size_bytes) = load_bitrate_limits(queue, &item).await;
-    let streams_to_try: Vec<&Stream> = all_streams
-        .iter()
-        .filter(|s| {
-            let Some(size) = s.file_size_bytes else { return true };
-            let size = size as u64;
-            if max_size_bytes.is_some_and(|max| size > max) {
-                tracing::debug!(id, info_hash = %s.info_hash, size, "skipping stream: known size exceeds max bitrate limit");
-                return false;
-            }
-            if min_size_bytes.is_some_and(|min| size < min) {
-                tracing::debug!(id, info_hash = %s.info_hash, size, "skipping stream: known size below min bitrate limit");
-                return false;
-            }
-            true
-        })
-        .collect();
+    let streams_to_try: Vec<&Stream> = all_streams.iter().collect();
 
     // Streams are tried sequentially via add-torrent requests. The debrid
     // provider's response determines availability — no batch cache pre-check.
