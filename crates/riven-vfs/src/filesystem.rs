@@ -129,7 +129,6 @@ pub struct RivenFs {
     db_pool: sqlx::PgPool,
     stream_client: reqwest::Client,
     link_request_tx: mpsc::Sender<riven_core::stream_link::LinkRequest>,
-    debug_logging: bool,
     runtime: tokio::runtime::Handle,
 
     next_fd: AtomicU64,
@@ -151,7 +150,6 @@ impl RivenFs {
         db_pool: sqlx::PgPool,
         stream_client: reqwest::Client,
         link_request_tx: mpsc::Sender<riven_core::stream_link::LinkRequest>,
-        debug_logging: bool,
         cache_max_size_mb: u64,
     ) -> Self {
         // Convert MB budget to entry count, assuming ~CHUNK_SIZE bytes per cached range.
@@ -176,7 +174,6 @@ impl RivenFs {
             db_pool,
             stream_client,
             link_request_tx,
-            debug_logging,
             runtime: tokio::runtime::Handle::current(),
             next_fd: AtomicU64::new(1),
             file_handles: DashMap::new(),
@@ -322,7 +319,6 @@ impl RivenFs {
             &self.range_cache,
             &self.stream_client,
             &self.runtime,
-            self.debug_logging,
         )
     }
 }
@@ -347,9 +343,7 @@ impl Filesystem for RivenFs {
             return;
         }
         let path = self.resolve_path(parent, &name);
-        if self.debug_logging {
-            tracing::debug!(path = %path, "lookup");
-        }
+        tracing::debug!(target: "streaming", path = %path, "lookup");
         self.refresh_caches_if_needed();
         let layout = self.current_layout();
         match parse_path(&layout, &path) {
@@ -483,9 +477,7 @@ impl Filesystem for RivenFs {
             reply.error(libc::ENOENT);
             return;
         };
-        if self.debug_logging {
-            tracing::debug!(path = %path, "open");
-        }
+        tracing::debug!(target: "streaming", path = %path, "open");
         let Some(entry) = self.get_entry_cached(&path) else {
             reply.error(libc::ENOENT);
             return;
@@ -538,9 +530,7 @@ impl Filesystem for RivenFs {
         }
         let end = (start + size as u64 - 1).min(handle.stream_session.file_size() - 1);
 
-        if self.debug_logging {
-            tracing::debug!(path = %handle.path, offset = start, size, "read");
-        }
+        tracing::debug!(target: "streaming", path = %handle.path, offset = start, size, "read");
 
         let stream_url = Arc::clone(&handle.stream_url);
         let outcome = match self.read_handle(&mut handle, start, end, &stream_url) {
@@ -591,9 +581,7 @@ impl Filesystem for RivenFs {
         _flush: bool,
         reply: fuser::ReplyEmpty,
     ) {
-        if self.debug_logging {
-            tracing::debug!(fh, "release");
-        }
+        tracing::debug!(target: "streaming", fh, "release");
         self.file_handles.remove(&fh);
         reply.ok();
     }

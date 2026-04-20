@@ -2,8 +2,9 @@ use std::time::Instant;
 
 use anyhow::Result;
 use riven_core::events::{HookResponse, RivenEvent};
-use riven_core::types::{DownloadResult, MediaItemType};
+use riven_core::types::{CachedStoreEntry, DownloadResult, MediaItemType};
 use riven_db::entities::{MediaItem, Stream};
+use riven_db::repo;
 
 use crate::JobQueue;
 use crate::context::DownloadHierarchyContext;
@@ -19,9 +20,10 @@ pub enum DownloadAttemptOutcome {
 
 pub async fn attempt_download(
     id: i64,
-    item: &MediaItem,
+    _item: &MediaItem,
     queue: &JobQueue,
     stream: &Stream,
+    stores: Vec<CachedStoreEntry>,
     path_tag: Option<&str>,
     profile_name: Option<&str>,
     start_time: Instant,
@@ -44,59 +46,95 @@ pub async fn attempt_download(
         resolution,
         profile = profile_name,
         raw_title,
-        "attempting cached stream download"
+        "attempting stream download"
     );
 
     let event = RivenEvent::MediaItemDownloadRequested {
         id,
         info_hash: info_hash.clone(),
         magnet: stream.magnet.clone(),
+        cached_stores: stores.clone(),
     };
 
-    let results = queue.registry.dispatch(&event).await;
-    let mut download_result: Option<Box<DownloadResult>> = None;
-    let mut saw_unavailable = false;
+    async fn dispatch_once(
+        queue: &JobQueue,
+        event: &RivenEvent,
+        info_hash: &str,
+    ) -> (Option<Box<DownloadResult>>, bool) {
+        let results = queue.registry.dispatch(event).await;
+        let mut download_result: Option<Box<DownloadResult>> = None;
+        let mut saw_unavailable = false;
+        for (plugin_name, result) in results {
+            match result {
+                Ok(HookResponse::Download(download)) => {
+                    tracing::debug!(
+                        plugin = plugin_name,
+                        info_hash,
+                        files = download.files.len(),
+                        "download responded"
+                    );
+                    download_result = Some(download);
+                    break;
+                }
+                Ok(HookResponse::DownloadStreamUnavailable) => {
+                    saw_unavailable = true;
+                    tracing::debug!(
+                        plugin = plugin_name,
+                        info_hash,
+                        "stream unexpectedly not cached"
+                    );
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::error!(
+                        plugin = plugin_name,
+                        info_hash,
+                        error = %error,
+                        "download hook failed (transient)"
+                    );
+                }
+            }
+        }
+        (download_result, saw_unavailable)
+    }
 
-    for (plugin_name, result) in results {
-        match result {
-            Ok(HookResponse::Download(download)) => {
-                tracing::debug!(
-                    plugin = plugin_name,
-                    info_hash,
-                    files = download.files.len(),
-                    "download responded"
-                );
-                download_result = Some(download);
-                break;
-            }
-            Ok(HookResponse::DownloadStreamUnavailable) => {
-                saw_unavailable = true;
-                tracing::debug!(
-                    plugin = plugin_name,
-                    info_hash,
-                    "stream unexpectedly not cached"
-                );
-            }
-            Ok(_) => {}
-            Err(error) => {
-                tracing::error!(
-                    plugin = plugin_name,
-                    info_hash,
-                    error = %error,
-                    "download hook failed (transient)"
-                );
-                return DownloadAttemptOutcome::Failed;
-            }
+    let (mut download_result, mut saw_unavailable) =
+        dispatch_once(queue, &event, info_hash).await;
+
+    // Retry once after clearing stale cache-check keys. A parallel item can get a stale
+    // "cached" hit, call add_torrent, find it's not actually available, and return
+    // `DownloadStreamUnavailable`. Clearing + re-dispatching forces a fresh cache check,
+    // which usually reveals the torrent IS cached and add_torrent succeeds.
+    if download_result.is_none() && saw_unavailable {
+        if let Err(error) = clear_stremthru_cache_check_keys(queue, info_hash).await {
+            tracing::error!(
+                id,
+                info_hash,
+                error = %error,
+                "failed to clear stale stremthru cache-check keys before retry"
+            );
+        } else {
+            tracing::debug!(id, info_hash, "retrying download after clearing stale cache-check");
+            // Empty `cached_stores` forces the plugin to run an on-demand cache check rather
+            // than reusing the stale pre-checked entries from the original dispatch (which
+            // are what sent us down the `add_torrent → unavailable` path in the first place).
+            let retry_event = RivenEvent::MediaItemDownloadRequested {
+                id,
+                info_hash: info_hash.clone(),
+                magnet: stream.magnet.clone(),
+                cached_stores: Vec::new(),
+            };
+            let (retry_result, retry_unavailable) =
+                dispatch_once(queue, &retry_event, info_hash).await;
+            download_result = retry_result;
+            saw_unavailable = retry_unavailable;
         }
     }
 
     let Some(download) = download_result else {
         if saw_unavailable {
-            // Clear stale cache-check keys so the next download attempt does a fresh
-            // API check rather than relying on a potentially outdated Redis entry.
-            // We intentionally do NOT blacklist here: the stream may become available
-            // again (transient debrid error), and a fresh cache check will correctly
-            // filter it out if it really isn't cached.
+            // Still unavailable after retry — clear keys one more time and give up on this
+            // candidate. Do not blacklist; stream may become available later.
             if let Err(error) = clear_stremthru_cache_check_keys(queue, info_hash).await {
                 tracing::error!(
                     id,
@@ -110,6 +148,23 @@ pub async fn attempt_download(
         return DownloadAttemptOutcome::Failed;
     };
     let download = *download;
+
+    // Reload the item before persisting — matches riven-ts `download-item`
+    // parent step, which re-runs `findOneOrFail` after `find-valid-torrent`
+    // hands off a valid download result. If the user cancelled the request in
+    // the window between plugin dispatch and here, bail silently.
+    let fresh_item = match repo::get_media_item(&queue.db_pool, id).await {
+        Ok(Some(fresh)) => fresh,
+        Ok(None) => {
+            tracing::debug!(id, info_hash, "media item disappeared before persist; skipping");
+            return DownloadAttemptOutcome::Failed;
+        }
+        Err(error) => {
+            tracing::error!(id, info_hash, %error, "failed to reload item before persist");
+            return DownloadAttemptOutcome::Failed;
+        }
+    };
+    let item = &fresh_item;
 
     match item.item_type {
         MediaItemType::Movie => {

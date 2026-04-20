@@ -130,14 +130,14 @@ async fn notify_media_server(
 
     match event {
         RivenEvent::MediaItemDownloadSuccess { id, title, .. } => {
-            let entries = repo::get_media_entries(&ctx.db_pool, *id).await?;
-            if entries.is_empty() {
+            let raw_paths = repo::get_media_entry_paths_for_items(&ctx.db_pool, &[*id]).await?;
+            if raw_paths.is_empty() {
                 tracing::warn!(id, title, "{plugin}: no filesystem entries");
                 return Ok(HookResponse::Empty);
             }
-            let paths: Vec<String> = entries
+            let paths: Vec<String> = raw_paths
                 .into_iter()
-                .map(|entry| rewrite_media_path(&library_path, &entry.path))
+                .map(|path| rewrite_media_path(&library_path, &path))
                 .collect();
             if plugin == "jellyfin" {
                 refresh_library(&ctx.http, &url, api_key, plugin).await?;

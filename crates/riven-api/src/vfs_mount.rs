@@ -17,7 +17,6 @@ struct VfsMountConfig {
     db_pool: sqlx::PgPool,
     stream_client: reqwest::Client,
     link_request_tx: mpsc::Sender<LinkRequest>,
-    debug_logging: bool,
     cache_max_size_mb: u64,
 }
 
@@ -35,7 +34,6 @@ impl VfsMountManager {
         db_pool: sqlx::PgPool,
         stream_client: reqwest::Client,
         link_request_tx: mpsc::Sender<LinkRequest>,
-        debug_logging: bool,
         cache_max_size_mb: u64,
     ) -> Result<Self> {
         let config = VfsMountConfig {
@@ -44,7 +42,6 @@ impl VfsMountManager {
             db_pool,
             stream_client,
             link_request_tx,
-            debug_logging,
             cache_max_size_mb,
         };
         let mounted = mount_with_config(initial_path, &config)?;
@@ -95,7 +92,6 @@ fn mount_with_config(mount_path: &str, config: &VfsMountConfig) -> Result<Option
         config.db_pool.clone(),
         config.stream_client.clone(),
         config.link_request_tx.clone(),
-        config.debug_logging,
         config.cache_max_size_mb,
     )?;
     Ok(Some(MountedVfs {

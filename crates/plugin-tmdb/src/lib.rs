@@ -36,7 +36,7 @@ impl Plugin for TmdbPlugin {
 
     fn settings_schema(&self) -> Vec<riven_core::plugin::SettingField> {
         use riven_core::plugin::SettingField;
-        vec![SettingField::new("apikey", "API Key", "password").required()]
+        vec![SettingField::new("apikey", "API Read Access Token", "password").required()]
     }
 
     async fn handle_event(

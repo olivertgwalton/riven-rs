@@ -6,7 +6,7 @@ use apalis::prelude::*;
 use crate::dedup::DedupGuard;
 use crate::{
     ContentServiceJob, DownloadJob, IndexJob, IndexPluginJob, JobQueue, ParseScrapeResultsJob,
-    ScrapeJob, ScrapePluginJob,
+    RankStreamsJob, ScrapeJob, ScrapePluginJob,
 };
 
 // ── Job handlers ──────────────────────────────────────────────────────────────
@@ -51,6 +51,15 @@ async fn handle_parse_scrape_results_job(
 async fn handle_download_job(job: DownloadJob, q: Data<Arc<JobQueue>>) -> Result<(), BoxDynError> {
     let _guard = DedupGuard::new("download", job.id, q.redis.clone());
     crate::flows::download_item::run(job.id, &job, &q).await;
+    Ok(())
+}
+
+async fn handle_rank_streams_job(
+    job: RankStreamsJob,
+    q: Data<Arc<JobQueue>>,
+) -> Result<(), BoxDynError> {
+    let _guard = DedupGuard::new("rank-streams", job.id, q.redis.clone());
+    crate::flows::rank_streams::run(job.id, &job, &q).await;
     Ok(())
 }
 
@@ -144,6 +153,14 @@ pub fn start_workers(queue: Arc<JobQueue>) -> Monitor {
         download_storage,
         download_n,
         handle_download_job
+    );
+    let m = register_worker!(
+        m,
+        queue,
+        "riven-rank-streams",
+        rank_streams_storage,
+        download_n,
+        handle_rank_streams_job
     );
     register_worker!(
         m,

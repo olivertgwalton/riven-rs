@@ -33,10 +33,13 @@ use riven_rank::ResolutionRanks;
 
 pub use dedup::DedupGuard;
 pub use jobs::{
-    ContentServiceJob, DownloadJob, IndexJob, IndexPluginJob, ParseScrapeResultsJob, ScrapeJob,
-    ScrapePluginJob,
+    ContentServiceJob, DownloadJob, IndexJob, IndexPluginJob, ParseScrapeResultsJob,
+    RankStreamsJob, ScrapeJob, ScrapePluginJob,
 };
-pub use maintenance::{clear_worker_registrations, prune_queue_history, recover_stale_workers};
+pub use maintenance::{
+    clear_worker_registrations, prune_queue_history, purge_orphaned_active_jobs,
+    recover_stale_workers,
+};
 pub use workers::start_workers;
 
 // ── JobQueue ──────────────────────────────────────────────────────────────────
@@ -48,6 +51,7 @@ pub struct JobQueue {
     pub scrape_plugin_storage: RedisStorage<ScrapePluginJob>,
     pub parse_storage: RedisStorage<ParseScrapeResultsJob>,
     pub download_storage: RedisStorage<DownloadJob>,
+    pub rank_streams_storage: RedisStorage<RankStreamsJob>,
     pub content_storage: RedisStorage<ContentServiceJob>,
     pub redis: redis::aio::ConnectionManager,
     pub registry: Arc<PluginRegistry>,
@@ -93,6 +97,10 @@ impl JobQueue {
             RedisStorage::new_with_config(apalis_conn.clone(), RedisConfig::new("riven:parse"));
         let download_storage =
             RedisStorage::new_with_config(apalis_conn.clone(), RedisConfig::new("riven:download"));
+        let rank_streams_storage = RedisStorage::new_with_config(
+            apalis_conn.clone(),
+            RedisConfig::new("riven:rank-streams"),
+        );
         let content_storage =
             RedisStorage::new_with_config(apalis_conn, RedisConfig::new("riven:content"));
 
@@ -109,6 +117,7 @@ impl JobQueue {
             scrape_plugin_storage,
             parse_storage,
             download_storage,
+            rank_streams_storage,
             content_storage,
             redis,
             registry,
@@ -154,6 +163,17 @@ impl JobQueue {
         .await;
     }
 
+    /// Entry point for the download flow. Pushes a `RankStreamsJob` which loads
+    /// streams, runs the cache check, builds ranked candidates, hands off to
+    /// `DownloadJob` (find-valid-torrent + persist). Mirrors riven-ts
+    /// `enqueueDownloadItem` → rank-streams → find-valid-torrent → download-item.
+    pub async fn push_rank_streams(&self, job: RankStreamsJob) {
+        self.push_deduped("rank-streams", job.id, "RankStreamsJob", || async {
+            self.rank_streams_storage.clone().push(job).await
+        })
+        .await;
+    }
+
     pub async fn push_index_plugin(&self, job: IndexPluginJob) {
         if let Err(e) = self.index_plugin_storage.clone().push(job).await {
             tracing::error!(error = %e, "failed to push IndexPluginJob");
@@ -170,21 +190,20 @@ impl JobQueue {
         }
     }
 
-    /// Fetch the best non-blacklisted stream and push a DownloadJob.
-    /// Returns `true` if a stream was found and enqueued, `false` if none remain.
+    /// Enqueue the download flow starting at rank-streams, if at least one
+    /// non-blacklisted stream exists. Returns `true` when enqueued.
     pub async fn push_download_from_best_stream(&self, id: i64) -> bool {
         let ranks = self.resolution_ranks.read().await.clone();
-        let Some(stream) = riven_db::repo::get_best_stream(&self.db_pool, id, &ranks)
+        let has_any = riven_db::repo::get_best_stream(&self.db_pool, id, &ranks)
             .await
             .ok()
             .flatten()
-        else {
+            .is_some();
+        if !has_any {
             return false;
-        };
-        self.push_download(DownloadJob {
+        }
+        self.push_rank_streams(RankStreamsJob {
             id,
-            magnet: stream.magnet,
-            info_hash: stream.info_hash,
             preferred_info_hash: None,
         })
         .await;
@@ -439,6 +458,162 @@ impl JobQueue {
             .unwrap_or(0)
     }
 
+    // ── Queue cancellation ────────────────────────────────────────────────────
+
+    /// Returns true if `cancel_items` was called for this id recently. In-flight
+    /// download handlers poll this between candidates so deleting an item
+    /// stops debrid churn immediately, not only after the whole candidate list
+    /// has been walked.
+    pub async fn is_cancelled(&self, id: i64) -> bool {
+        let mut conn = self.redis.clone();
+        redis::cmd("SISMEMBER")
+            .arg(CANCELLED_ITEMS_SET)
+            .arg(id)
+            .query_async::<bool>(&mut conn)
+            .await
+            .unwrap_or(false)
+    }
+
+
+    /// Purge any queued or scheduled apalis jobs whose payload references one
+    /// of the given media item ids. Also clears dedup keys, flow state, and
+    /// the download rank-result hand-off so the deleted item leaves no debris.
+    ///
+    /// Called from the `remove_items` mutation so deleting a request from the
+    /// UI immediately stops its jobs from churning the debrid service.
+    pub async fn cancel_items(&self, ids: &[i64]) {
+        if ids.is_empty() {
+            return;
+        }
+        let id_set: std::collections::HashSet<i64> = ids.iter().copied().collect();
+
+        // Tombstone set so in-flight handlers can bail at their next checkpoint.
+        // Queue purge below handles jobs that haven't been dequeued; the set
+        // catches the ones already executing.
+        let mut conn = self.redis.clone();
+        let mut pipe = redis::pipe();
+        for id in ids {
+            pipe.cmd("SADD").arg(CANCELLED_ITEMS_SET).arg(*id).ignore();
+        }
+        pipe.cmd("EXPIRE").arg(CANCELLED_ITEMS_SET).arg(600i64).ignore();
+        let _: Result<(), _> = pipe.query_async(&mut conn).await;
+
+        // Every queue that carries a `{ "id": <media_item_id>, ... }` payload.
+        let configs: [apalis_redis::RedisConfig; 7] = [
+            self.index_storage.get_config().clone(),
+            self.index_plugin_storage.get_config().clone(),
+            self.scrape_storage.get_config().clone(),
+            self.scrape_plugin_storage.get_config().clone(),
+            self.parse_storage.get_config().clone(),
+            self.download_storage.get_config().clone(),
+            self.rank_streams_storage.get_config().clone(),
+        ];
+
+        for config in &configs {
+            if let Err(error) = self.purge_queue_for_ids(config, &id_set).await {
+                tracing::warn!(error = %error, queue = %config.job_data_hash(), "failed to purge queue");
+            }
+        }
+
+        // Dedup keys and flow state live outside apalis-managed keys.
+        let mut conn = self.redis.clone();
+        for id in ids {
+            for prefix in ["index", "scrape", "parse", "download", "rank-streams"] {
+                let _: Result<(), _> = redis::cmd("DEL")
+                    .arg(dedup_key(prefix, *id))
+                    .query_async(&mut conn)
+                    .await;
+            }
+            for prefix in ["scrape", "parse", "index"] {
+                let _: Result<(), _> = redis::pipe()
+                    .cmd("DEL").arg(flow_pending_key(prefix, *id))
+                    .cmd("DEL").arg(flow_results_key(prefix, *id))
+                    .cmd("DEL").arg(flow_rate_limited_key(prefix, *id))
+                    .query_async(&mut conn)
+                    .await;
+            }
+            let _: Result<(), _> = redis::cmd("DEL")
+                .arg(format!("riven:download:rank-result:{id}"))
+                .query_async(&mut conn)
+                .await;
+        }
+    }
+
+    async fn purge_queue_for_ids(
+        &self,
+        config: &apalis_redis::RedisConfig,
+        ids: &std::collections::HashSet<i64>,
+    ) -> redis::RedisResult<()> {
+        let mut conn = self.redis.clone();
+        let data_hash = config.job_data_hash();
+        let active_list = config.active_jobs_list();
+        let scheduled_set = config.scheduled_jobs_set();
+        let inflight_set = config.inflight_jobs_set();
+        let done_set = config.done_jobs_set();
+        let dead_set = config.dead_jobs_set();
+        let failed_set = config.failed_jobs_set();
+        let meta_hash_prefix = config.job_meta_hash();
+
+        let mut cursor: u64 = 0;
+        let mut matching_task_ids: Vec<String> = Vec::new();
+
+        loop {
+            let (next, batch): (u64, Vec<String>) = redis::cmd("HSCAN")
+                .arg(&data_hash)
+                .arg(cursor)
+                .arg("COUNT")
+                .arg(200u32)
+                .query_async(&mut conn)
+                .await?;
+
+            // HSCAN returns flat [field, value, field, value, ...].
+            let mut iter = batch.into_iter();
+            while let (Some(task_id), Some(payload)) = (iter.next(), iter.next()) {
+                let Ok(value) = serde_json::from_str::<serde_json::Value>(&payload) else {
+                    continue;
+                };
+                let Some(id) = value.get("id").and_then(|v| v.as_i64()) else {
+                    continue;
+                };
+                if ids.contains(&id) {
+                    matching_task_ids.push(task_id);
+                }
+            }
+
+            cursor = next;
+            if cursor == 0 {
+                break;
+            }
+        }
+
+        if matching_task_ids.is_empty() {
+            return Ok(());
+        }
+
+        tracing::info!(
+            queue = %data_hash,
+            count = matching_task_ids.len(),
+            "purging queued jobs for cancelled items"
+        );
+
+        let mut pipe = redis::pipe();
+        pipe.atomic();
+        for task_id in &matching_task_ids {
+            pipe.cmd("HDEL").arg(&data_hash).arg(task_id).ignore();
+            pipe.cmd("LREM").arg(&active_list).arg(0).arg(task_id).ignore();
+            pipe.cmd("ZREM").arg(&scheduled_set).arg(task_id).ignore();
+            pipe.cmd("ZREM").arg(&inflight_set).arg(task_id).ignore();
+            pipe.cmd("ZREM").arg(&done_set).arg(task_id).ignore();
+            pipe.cmd("ZREM").arg(&dead_set).arg(task_id).ignore();
+            pipe.cmd("ZREM").arg(&failed_set).arg(task_id).ignore();
+            pipe.cmd("DEL")
+                .arg(format!("{meta_hash_prefix}:{task_id}"))
+                .ignore();
+        }
+        let _: () = pipe.query_async(&mut conn).await?;
+        Ok(())
+    }
+
     // ── Domain events ─────────────────────────────────────────────────────────
 
     /// Publish a domain event to the in-process event bus, enabled plugins,
@@ -486,6 +661,8 @@ fn flow_results_key(prefix: &str, id: i64) -> String {
 fn flow_rate_limited_key(prefix: &str, id: i64) -> String {
     format!("riven:flow:{prefix}:{id}:rate_limited")
 }
+
+const CANCELLED_ITEMS_SET: &str = "riven:cancelled-items";
 
 #[inline]
 fn dedup_key(prefix: &str, id: i64) -> String {

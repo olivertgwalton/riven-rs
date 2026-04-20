@@ -111,7 +111,6 @@ async fn main() -> Result<()> {
         db_pool.clone(),
         stream_http_client.clone(),
         link_tx.clone(),
-        log_settings.vfs_debug_logging,
         settings.vfs_cache_max_size_mb,
     )?);
 
@@ -205,6 +204,7 @@ async fn main() -> Result<()> {
             let mut redis_conn = jq.redis.clone();
             loop {
                 riven_queue::clear_worker_registrations(&mut redis_conn).await;
+                riven_queue::purge_orphaned_active_jobs(&mut redis_conn).await;
                 let result = tokio::spawn(riven_queue::start_workers(jq.clone()).run()).await;
                 match result {
                     Ok(Ok(())) => tracing::warn!("apalis monitor exited, restarting"),

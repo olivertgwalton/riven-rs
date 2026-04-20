@@ -36,7 +36,6 @@ pub fn mount(
     db_pool: sqlx::PgPool,
     stream_client: reqwest::Client,
     link_request_tx: mpsc::Sender<riven_core::stream_link::LinkRequest>,
-    debug_logging: bool,
     cache_max_size_mb: u64,
 ) -> Result<FuseSession> {
     let mount_path = Path::new(mount_path);
@@ -89,7 +88,6 @@ pub fn mount(
         db_pool,
         stream_client,
         link_request_tx,
-        debug_logging,
         cache_max_size_mb,
     );
 

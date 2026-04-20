@@ -17,7 +17,18 @@ pub enum TorrentStatus {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CacheCheckResult {
     pub hash: String,
+    /// Which debrid store this result came from. Set by the plugin after reading
+    /// from Redis or the live API; not persisted to Redis itself.
+    #[serde(default)]
+    pub store: String,
     pub status: TorrentStatus,
+    pub files: Vec<CacheCheckFile>,
+}
+
+/// Pre-checked availability for one store, ready to pass directly to add_torrent.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CachedStoreEntry {
+    pub store: String,
     pub files: Vec<CacheCheckFile>,
 }
 

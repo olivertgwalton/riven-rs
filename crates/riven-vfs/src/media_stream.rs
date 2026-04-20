@@ -28,7 +28,6 @@ struct ReadContext<'a> {
     cache: &'a RangeCache,
     client: &'a reqwest::Client,
     runtime: &'a tokio::runtime::Handle,
-    debug_logging: bool,
 }
 
 type HttpByteStream = BoxStream<'static, Result<Bytes, io::Error>>;
@@ -132,7 +131,6 @@ impl MediaStream {
         cache: &RangeCache,
         client: &reqwest::Client,
         runtime: &tokio::runtime::Handle,
-        debug_logging: bool,
     ) -> ReadOutcome {
         let chunks = self.layout.request_chunks(start, end);
         let ctx = ReadContext {
@@ -140,7 +138,6 @@ impl MediaStream {
             cache,
             client,
             runtime,
-            debug_logging,
         };
         let read_type = detect_read_type(
             self.ino,
@@ -153,16 +150,15 @@ impl MediaStream {
             ctx.cache,
         );
 
-        if ctx.debug_logging {
-            tracing::debug!(
-                ino = self.ino,
-                offset = start,
-                size = end - start + 1,
-                read_type = ?read_type,
-                chunks = chunks.len(),
-                "media stream read"
-            );
-        }
+        tracing::debug!(
+            target: "streaming",
+            ino = self.ino,
+            offset = start,
+            size = end - start + 1,
+            read_type = ?read_type,
+            chunks = chunks.len(),
+            "media stream read"
+        );
 
         let outcome = match read_type {
             ReadType::HeaderScan => self.read_scan_range(start, end, chunks[0], true, &ctx),
@@ -345,13 +341,7 @@ impl MediaStream {
             .is_none_or(|reader| !reader.can_resume_from(start));
 
         if need_restart {
-            if ctx.debug_logging {
-                tracing::debug!(
-                    ino = self.ino,
-                    position = start,
-                    "starting sequential reader"
-                );
-            }
+            tracing::debug!(target: "streaming", ino = self.ino, position = start, "starting sequential reader");
             self.sequential = SequentialReader::open(
                 ctx.client.clone(),
                 ctx.stream_url.to_string(),

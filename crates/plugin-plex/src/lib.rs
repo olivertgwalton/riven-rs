@@ -1,6 +1,9 @@
 use async_trait::async_trait;
 use serde::Deserialize;
 use std::collections::HashSet;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+use tokio::sync::RwLock;
 
 use riven_core::events::{EventType, HookResponse, RivenEvent};
 use riven_core::http::profiles;
@@ -10,8 +13,19 @@ use riven_core::settings::PluginSettings;
 use riven_core::types::{ActivePlaybackSession, PlaybackMethod, PlaybackState};
 use riven_db::repo;
 
-#[derive(Default)]
-pub struct PlexPlugin;
+const SECTIONS_CACHE_TTL: Duration = Duration::from_secs(300);
+
+pub struct PlexPlugin {
+    sections_cache: Arc<RwLock<Option<(Instant, Vec<PlexSection>)>>>,
+}
+
+impl Default for PlexPlugin {
+    fn default() -> Self {
+        Self {
+            sections_cache: Arc::new(RwLock::new(None)),
+        }
+    }
+}
 
 register_plugin!(PlexPlugin);
 
@@ -67,8 +81,11 @@ impl Plugin for PlexPlugin {
                     anyhow::bail!("no filesystem entries found for media item {id}");
                 }
 
-                let sections = get_library_sections(&ctx.http, plex_url, plex_token).await?;
+                let sections = self
+                    .cached_library_sections(&ctx.http, plex_url, plex_token)
+                    .await?;
 
+                let mut refresh_tasks = Vec::new();
                 for entry in &entries {
                     let dir_path = entry
                         .path
@@ -81,21 +98,39 @@ impl Plugin for PlexPlugin {
                     for section in &sections {
                         for location in &section.locations {
                             if full_path.starts_with(&location.path) {
-                                refresh_section(
-                                    &ctx.http,
-                                    plex_url,
-                                    plex_token,
-                                    &section.key,
-                                    &full_path,
-                                )
-                                .await?;
-                                tracing::info!(
-                                    section = section.key,
-                                    path = full_path,
-                                    "plex library section refreshed"
-                                );
+                                refresh_tasks.push((section.key.clone(), full_path.clone()));
                             }
                         }
+                    }
+                }
+
+                let results = futures::future::join_all(refresh_tasks.into_iter().map(
+                    |(section_key, path)| {
+                        let http = ctx.http.clone();
+                        let token = plex_token.to_string();
+                        let url = plex_url.to_string();
+                        async move {
+                            let result =
+                                refresh_section(&http, &url, &token, &section_key, &path).await;
+                            (section_key, path, result)
+                        }
+                    },
+                ))
+                .await;
+
+                for (section_key, path, result) in results {
+                    match result {
+                        Ok(()) => tracing::info!(
+                            section = section_key,
+                            path,
+                            "plex library section refreshed"
+                        ),
+                        Err(e) => tracing::warn!(
+                            section = section_key,
+                            path,
+                            error = %e,
+                            "plex library section refresh failed"
+                        ),
                     }
                 }
 
@@ -109,7 +144,9 @@ impl Plugin for PlexPlugin {
                 let plex_token = ctx.require_setting("plextoken")?;
                 let plex_url = ctx.require_setting("plexserverurl")?.trim_end_matches('/');
                 let library_path = ctx.settings.get_or("plexlibrarypath", "/mount");
-                let sections = get_library_sections(&ctx.http, plex_url, plex_token).await?;
+                let sections = self
+                    .cached_library_sections(&ctx.http, plex_url, plex_token)
+                    .await?;
 
                 let dirs: HashSet<String> = deleted_paths
                     .iter()
@@ -121,26 +158,45 @@ impl Plugin for PlexPlugin {
                     })
                     .collect();
 
+                let mut refresh_tasks = Vec::new();
                 for dir_path in dirs {
                     let full_path = format!("{library_path}{dir_path}");
                     for section in &sections {
                         for location in &section.locations {
                             if full_path.starts_with(&location.path) {
-                                refresh_section(
-                                    &ctx.http,
-                                    plex_url,
-                                    plex_token,
-                                    &section.key,
-                                    &full_path,
-                                )
-                                .await?;
-                                tracing::info!(
-                                    section = section.key,
-                                    path = full_path,
-                                    "plex library section refreshed after delete"
-                                );
+                                refresh_tasks.push((section.key.clone(), full_path.clone()));
                             }
                         }
+                    }
+                }
+
+                let results = futures::future::join_all(refresh_tasks.into_iter().map(
+                    |(section_key, path)| {
+                        let http = ctx.http.clone();
+                        let token = plex_token.to_string();
+                        let url = plex_url.to_string();
+                        async move {
+                            let result =
+                                refresh_section(&http, &url, &token, &section_key, &path).await;
+                            (section_key, path, result)
+                        }
+                    },
+                ))
+                .await;
+
+                for (section_key, path, result) in results {
+                    match result {
+                        Ok(()) => tracing::info!(
+                            section = section_key,
+                            path,
+                            "plex library section refreshed after delete"
+                        ),
+                        Err(e) => tracing::warn!(
+                            section = section_key,
+                            path,
+                            error = %e,
+                            "plex library section refresh failed after delete"
+                        ),
                     }
                 }
 
@@ -154,6 +210,29 @@ impl Plugin for PlexPlugin {
             }
             _ => Ok(HookResponse::Empty),
         }
+    }
+}
+
+impl PlexPlugin {
+    async fn cached_library_sections(
+        &self,
+        http: &riven_core::http::HttpClient,
+        plex_url: &str,
+        token: &str,
+    ) -> anyhow::Result<Vec<PlexSection>> {
+        {
+            let cache = self.sections_cache.read().await;
+            if let Some((fetched_at, ref sections)) = *cache {
+                if fetched_at.elapsed() < SECTIONS_CACHE_TTL {
+                    tracing::debug!("using cached plex library sections");
+                    return Ok(sections.clone());
+                }
+            }
+        }
+
+        let sections = get_library_sections(http, plex_url, token).await?;
+        *self.sections_cache.write().await = Some((Instant::now(), sections.clone()));
+        Ok(sections)
     }
 }
 
@@ -294,14 +373,14 @@ struct PlexMediaContainer {
     directory: Vec<PlexSection>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 struct PlexSection {
     key: String,
     #[serde(rename = "Location", default)]
     locations: Vec<PlexLocation>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 struct PlexLocation {
     path: String,
 }

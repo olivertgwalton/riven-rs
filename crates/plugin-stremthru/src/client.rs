@@ -25,7 +25,6 @@ pub async fn check_cache(
     store: &str,
     api_key: &str,
     hashes: &[String],
-    bypass_cache: &[String],
 ) -> anyhow::Result<Vec<CacheCheckResult>> {
     if hashes.is_empty() {
         return Ok(Vec::new());
@@ -40,11 +39,6 @@ pub async fn check_cache(
     let mut missing_hashes = Vec::new();
 
     for hash in &normalized_hashes {
-        if bypass_cache.iter().any(|h| h.eq_ignore_ascii_case(hash)) {
-            tracing::debug!(store, hash, "bypassing Redis cache for hash");
-            missing_hashes.push(hash.clone());
-            continue;
-        }
         let cache_key = cache_check_key(store, hash);
         let cached: Option<String> = AsyncCommands::get(&mut conn, &cache_key).await.ok();
         match cached {
@@ -86,6 +80,17 @@ pub async fn check_cache(
     }
 
     for result in &fetched_results {
+        // Only cache positive results. Negative/unknown-not-available statuses are ephemeral —
+        // a torrent not cached now may become cached minutes later, so we never write those to
+        // Redis. Positive results (cached/downloaded/unknown) are stable enough for the 24h TTL.
+        if !matches!(
+            result.status,
+            riven_core::types::TorrentStatus::Cached
+                | riven_core::types::TorrentStatus::Downloaded
+                | riven_core::types::TorrentStatus::Unknown
+        ) {
+            continue;
+        }
         match serde_json::to_string(result) {
             Ok(payload) => {
                 let cache_key = cache_check_key(store, &result.hash.to_lowercase());
@@ -105,6 +110,9 @@ pub async fn check_cache(
     }
 
     cached_results.extend(fetched_results);
+    for r in &mut cached_results {
+        r.store = store.to_string();
+    }
     Ok(cached_results)
 }
 
@@ -244,6 +252,7 @@ async fn fetch_cache_check(
                 .collect();
             CacheCheckResult {
                 hash: item.hash,
+                store: String::new(), // set by check_cache after fetch
                 status,
                 files,
             }
@@ -384,32 +393,6 @@ pub async fn scrape_torznab(
 
 fn cache_check_key(store: &str, hash: &str) -> String {
     format!("plugin:stremthru:cache-check:{store}:{hash}")
-}
-
-pub fn download_result_from_cache(
-    store: &str,
-    info_hash: &str,
-    cache: riven_core::types::CacheCheckResult,
-) -> DownloadResult {
-    let files = cache
-        .files
-        .into_iter()
-        .filter_map(|f| {
-            f.link.map(|link| DownloadFile {
-                filename: if f.path.is_empty() { f.name } else { f.path },
-                file_size: f.size.unwrap_or(0),
-                download_url: Some(link),
-                stream_url: None,
-            })
-        })
-        .collect();
-
-    DownloadResult {
-        info_hash: info_hash.to_string(),
-        files,
-        provider: Some(store.to_string()),
-        plugin_name: "stremthru".to_string(),
-    }
 }
 
 pub fn download_result_from_torz(

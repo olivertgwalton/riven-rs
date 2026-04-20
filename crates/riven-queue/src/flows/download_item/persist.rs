@@ -6,9 +6,20 @@ use riven_core::types::*;
 use riven_db::entities::{MediaItem, Stream};
 use riven_db::repo;
 
+/// Returns true when the error is a FK violation caused by the media item being
+/// deleted while a background persist task was still running.
+fn is_item_deleted_fk_error(err: &anyhow::Error) -> bool {
+    err.downcast_ref::<sqlx::Error>()
+        .and_then(|e| match e {
+            sqlx::Error::Database(db) => db.constraint(),
+            _ => None,
+        })
+        == Some("filesystem_entries_media_item_id_fkey")
+}
+
 use super::helpers::{
-    episode_vfs_path, handle_bitrate_failure, is_video_file, load_item_or_err,
-    matches_episode_lookup, parse_file_path, select_episode_files,
+    episode_vfs_path, handle_bitrate_failure, is_video_file, matches_episode_lookup,
+    parse_file_path, select_episode_files,
 };
 use crate::JobQueue;
 use crate::context::{DownloadHierarchyContext, load_download_hierarchy_context};
@@ -156,6 +167,10 @@ pub async fn persist_movie(
     )
     .await
     {
+        if is_item_deleted_fk_error(&e) {
+            tracing::info!(id, "movie was deleted mid-persist, skipping");
+            return false;
+        }
         tracing::error!(error = %e, "failed to create media entry");
         queue
             .notify(RivenEvent::MediaItemDownloadError {
@@ -267,6 +282,10 @@ pub async fn persist_episode(
         )
         .await
         {
+            if is_item_deleted_fk_error(&e) {
+                tracing::info!(id, "episode was deleted mid-persist, skipping");
+                return false;
+            }
             tracing::error!(error = %e, "failed to create media entry");
             queue
                 .notify(RivenEvent::MediaItemDownloadError {
@@ -313,9 +332,31 @@ pub async fn persist_season(
         }
     };
 
-    let show = match load_item_or_err(show_id, queue, "could not load parent show").await {
-        Some(s) => s,
-        None => return SeasonPersistOutcome::Failed,
+    let show = match repo::get_media_item(&queue.db_pool, show_id).await {
+        Ok(Some(s)) => s,
+        Ok(None) => {
+            // Parent show was deleted while this download was in flight (cascade also
+            // removed the season). Skip silently — there's no surviving item to attach
+            // an error to, and emitting MediaItemDownloadError would produce a UI toast
+            // for an item the user has already removed.
+            tracing::debug!(
+                id,
+                show_id,
+                "parent show disappeared mid-flight; aborting season persist"
+            );
+            return SeasonPersistOutcome::Failed;
+        }
+        Err(error) => {
+            tracing::error!(id, show_id, %error, "failed to load parent show");
+            queue
+                .notify(RivenEvent::MediaItemDownloadError {
+                    id,
+                    title: item.title.clone(),
+                    error: format!("failed to load parent show: {error}"),
+                })
+                .await;
+            return SeasonPersistOutcome::Failed;
+        }
     };
 
     let episodes = match repo::list_episodes(&queue.db_pool, id).await {
@@ -342,8 +383,6 @@ pub async fn persist_season(
         filesystem_settings.matching_profile_keys(&metadata, FilesystemContentType::Show);
     let library_profiles_json = library_profiles.into_json();
     drop(filesystem_settings);
-    let mut any_matched = false;
-    let mut completed_episode_ids: Vec<i64> = Vec::new();
 
     // Pre-parse all video files once — reused across every episode filter below.
     let parsed_video_files: Vec<(&DownloadFile, riven_rank::ParsedData)> = dl
@@ -353,9 +392,14 @@ pub async fn persist_season(
         .map(|f| (f, parse_file_path(&f.filename)))
         .collect();
 
+    // Per-episode bitrate check is intentionally omitted here: riven-ts's validation only
+    // applies bitrate to standalone Episode items, not to files inside a Season/Show pack
+    // (see validate-torrent-files.ts: the bitrate assert lives inside the `item.__typename
+    // === "Episode"` branch).
+    let mut episode_matches: Vec<(&MediaItem, Vec<(&DownloadFile, riven_rank::ParsedData)>)> =
+        Vec::with_capacity(episodes.len());
     for ep in &episodes {
         let episode_number = ep.episode_number.unwrap_or(1);
-
         let matched: Vec<(&DownloadFile, riven_rank::ParsedData)> = parsed_video_files
             .iter()
             .filter(|(_, p)| {
@@ -363,12 +407,14 @@ pub async fn persist_season(
             })
             .map(|(f, p)| (*f, p.clone()))
             .collect();
+        episode_matches.push((ep, matched));
+    }
 
-        if matched.is_empty() {
-            continue;
-        }
+    let mut completed_episode_ids: Vec<i64> = Vec::new();
 
-        for (file, part) in select_episode_files(&matched) {
+    for (ep, matched) in &episode_matches {
+        let episode_number = ep.episode_number.unwrap_or(1);
+        for (file, part) in select_episode_files(matched) {
             let path = episode_vfs_path(&show_name, season_number, episode_number, part, path_tag);
             match repo::create_media_entry(
                 &queue.db_pool,
@@ -389,19 +435,22 @@ pub async fn persist_season(
             {
                 Ok(_) => {
                     completed_episode_ids.push(ep.id);
-                    any_matched = true;
                 }
                 Err(e) => {
-                    tracing::error!(error = %e, ep_id = ep.id, "failed to create media entry for episode");
+                    if is_item_deleted_fk_error(&e) {
+                        tracing::info!(ep_id = ep.id, "episode was deleted mid-persist, skipping");
+                    } else {
+                        tracing::error!(error = %e, ep_id = ep.id, "failed to create media entry for episode");
+                    }
                 }
             }
         }
     }
 
-    if !any_matched {
+    if completed_episode_ids.is_empty() {
         tracing::info!(
             id, season = season_number, info_hash = %info_hash,
-            "no episodes matched in season download — blacklisting stream"
+            "season pack matched episodes but no entries were persisted — blacklisting stream"
         );
         if !info_hash.is_empty()
             && let Err(err) = repo::blacklist_stream_by_hash(&queue.db_pool, id, info_hash).await
@@ -625,7 +674,7 @@ async fn persist_supplied_show_download(
 
         let parsed = parse_file_path(&file.filename);
         let path = episode_vfs_path(&show_name, season_number, episode_number, parsed.part, None);
-        repo::create_media_entry(
+        match repo::create_media_entry(
             &queue.db_pool,
             episode.id,
             &path,
@@ -642,7 +691,15 @@ async fn persist_supplied_show_download(
             None,
             Some(&library_profiles),
         )
-        .await?;
+        .await
+        {
+            Ok(_) => {}
+            Err(e) if is_item_deleted_fk_error(&e) => {
+                tracing::info!(ep_id = episode.id, "episode was deleted mid-persist, skipping");
+                continue;
+            }
+            Err(e) => return Err(e),
+        }
 
         completed_episode_ids.push(episode.id);
         if let Some(season_id) = episode.parent_id {

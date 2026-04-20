@@ -2,7 +2,7 @@ use async_graphql::*;
 use riven_core::plugin::PluginRegistry;
 use riven_core::types::MediaItemType;
 use riven_db::repo;
-use riven_queue::{DownloadJob, JobQueue};
+use riven_queue::{JobQueue, RankStreamsJob};
 use sqlx::PgPool;
 use std::sync::Arc;
 
@@ -85,10 +85,8 @@ impl StreamsMutations {
         repo::refresh_state_cascade(pool, &target).await?;
 
         job_queue
-            .push_download(DownloadJob {
+            .push_rank_streams(RankStreamsJob {
                 id: target.id,
-                info_hash: info_hash.clone(),
-                magnet,
                 preferred_info_hash: Some(info_hash),
             })
             .await;

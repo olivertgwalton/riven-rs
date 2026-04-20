@@ -2,6 +2,8 @@ use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use log::LevelFilter;
+
 use chrono::Local;
 use riven_core::settings::PluginSettings;
 use tokio::sync::broadcast;
@@ -78,7 +80,9 @@ impl LogControl {
         self.enabled.store(settings.enabled, Ordering::Relaxed);
         self.handle
             .reload(build_level_filter(settings)?)
-            .map_err(|error| anyhow::anyhow!("failed to reload log filter: {error}"))
+            .map_err(|error| anyhow::anyhow!("failed to reload log filter: {error}"))?;
+        log::set_max_level(log_max_level(settings));
+        Ok(())
     }
 }
 
@@ -114,6 +118,8 @@ pub fn init_logging(
         .with(broadcast_layer)
         .init();
 
+    log::set_max_level(log_max_level(settings));
+
     Ok(Arc::new(LogControl {
         handle,
         enabled,
@@ -121,11 +127,43 @@ pub fn init_logging(
     }))
 }
 
+fn log_max_level(settings: &LogSettings) -> LevelFilter {
+    if !settings.enabled {
+        return LevelFilter::Off;
+    }
+    let configured = match settings.level.as_str() {
+        "trace" => LevelFilter::Trace,
+        "debug" => LevelFilter::Debug,
+        "warn" => LevelFilter::Warn,
+        "error" => LevelFilter::Error,
+        _ => LevelFilter::Info,
+    };
+    // When VFS debug logging is off, cap at Info so fuser's log::debug!() calls
+    // are stopped at the log-crate level before any record is created.
+    if settings.vfs_debug_logging {
+        configured
+    } else {
+        configured.min(LevelFilter::Info)
+    }
+}
+
 fn build_level_filter(settings: &LogSettings) -> anyhow::Result<EnvFilter> {
-    EnvFilter::try_from_default_env()
+    let filter = EnvFilter::try_from_default_env()
         .or_else(|_| EnvFilter::try_new(&settings.level))
         .map(|filter| filter.add_directive("apalis_core=info".parse().unwrap()))
-        .map_err(|error| anyhow::anyhow!("invalid log level '{}': {error}", settings.level))
+        .map_err(|error| anyhow::anyhow!("invalid log level '{}': {error}", settings.level))?;
+
+    // "streaming" target: riven VFS/media-stream debug logs.
+    // "log" target: tracing-log 0.2 bridges all log-crate records (including
+    // fuser FUSE kernel traces) under this fixed target.
+    // Both are suppressed together when VFS debug logging is off.
+    if !settings.vfs_debug_logging {
+        Ok(filter
+            .add_directive("streaming=off".parse().unwrap())
+            .add_directive("log=info".parse().unwrap()))
+    } else {
+        Ok(filter)
+    }
 }
 
 fn build_file_appender(

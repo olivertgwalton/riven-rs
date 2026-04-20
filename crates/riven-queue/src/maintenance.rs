@@ -11,6 +11,7 @@ pub(crate) const QUEUE_NAMES: &[&str] = &[
     "riven:scrape-plugin",
     "riven:parse",
     "riven:download",
+    "riven:rank-streams",
     "riven:content",
 ];
 
@@ -69,15 +70,37 @@ async fn rescue_workers(redis: &mut redis::aio::ConnectionManager, max_score: Op
         };
 
         // Collect rescued jobs and pipeline all DEL commands together.
-        let mut rescued: Vec<String> = Vec::new();
+        let mut candidates: Vec<String> = Vec::new();
         let mut del_pipe = redis::pipe();
         for (key, jobs) in members.iter().zip(all_job_sets) {
-            rescued.extend(jobs);
+            candidates.extend(jobs);
             del_pipe
                 .del(format!("{APALIS_WORKERS_METADATA_PREFIX}{key}"))
                 .del(key);
         }
         let _: Result<(), _> = del_pipe.query_async(redis).await;
+
+        // Only re-enqueue jobs whose data still exists. Jobs whose data was
+        // pruned by `prune_queue_history` would cause the worker to emit a
+        // StreamError on its first poll, stopping it immediately.
+        let rescued: Vec<String> = if candidates.is_empty() {
+            Vec::new()
+        } else {
+            let exists: Vec<bool> = {
+                let mut pipe = redis::pipe();
+                for id in &candidates {
+                    pipe.cmd("HEXISTS").arg(config.job_data_hash()).arg(id);
+                }
+                pipe.query_async(redis)
+                    .await
+                    .unwrap_or_else(|_| vec![false; candidates.len()])
+            };
+            candidates
+                .into_iter()
+                .zip(exists)
+                .filter_map(|(id, ok)| if ok { Some(id) } else { None })
+                .collect()
+        };
 
         if !rescued.is_empty() {
             let _: Result<(), _> = redis::pipe()
@@ -111,6 +134,63 @@ async fn rescue_workers(redis: &mut redis::aio::ConnectionManager, max_score: Op
             queue = queue_name,
             count = members.len(),
             "cleared stale worker registrations"
+        );
+    }
+}
+
+/// Remove job IDs from each queue's active list that have no corresponding
+/// entry in the job-data hash. These orphans (no data + no meta) are harmless
+/// when idle but cause the worker's poll stream to emit a StreamError the
+/// first time it dequeues them, which kills the worker immediately.
+pub async fn purge_orphaned_active_jobs(redis: &mut redis::aio::ConnectionManager) {
+    for &queue_name in QUEUE_NAMES {
+        let config = RedisConfig::new(queue_name);
+        let active_key = config.active_jobs_list();
+        let data_key = config.job_data_hash();
+
+        let ids: Vec<String> = redis::cmd("LRANGE")
+            .arg(&active_key)
+            .arg(0i64)
+            .arg(-1i64)
+            .query_async(redis)
+            .await
+            .unwrap_or_default();
+
+        if ids.is_empty() {
+            continue;
+        }
+
+        let exists: Vec<bool> = {
+            let mut pipe = redis::pipe();
+            for id in &ids {
+                pipe.cmd("HEXISTS").arg(&data_key).arg(id);
+            }
+            pipe.query_async(redis)
+                .await
+                .unwrap_or_else(|_| vec![true; ids.len()])
+        };
+
+        let orphans: Vec<&str> = ids
+            .iter()
+            .zip(exists.iter())
+            .filter_map(|(id, &ok)| if !ok { Some(id.as_str()) } else { None })
+            .collect();
+
+        if orphans.is_empty() {
+            continue;
+        }
+
+        // LREM 0 removes ALL occurrences of the value.
+        let mut pipe = redis::pipe();
+        for id in &orphans {
+            pipe.cmd("LREM").arg(&active_key).arg(0i64).arg(id);
+        }
+        let _: Result<(), _> = pipe.query_async(redis).await;
+
+        tracing::info!(
+            queue = queue_name,
+            count = orphans.len(),
+            "purged orphaned job IDs from active list (no data)"
         );
     }
 }

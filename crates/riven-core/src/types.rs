@@ -7,7 +7,7 @@ mod playback;
 mod provider;
 mod stream;
 
-pub use cache::{CacheCheckFile, CacheCheckResult, TorrentStatus};
+pub use cache::{CacheCheckFile, CacheCheckResult, CachedStoreEntry, TorrentStatus};
 pub use content::{ContentServiceResponse, ExternalIds};
 pub use download::{DownloadFile, DownloadResult, ScrapeEntry, ScrapeResponse, build_magnet_uri};
 pub use enums::{

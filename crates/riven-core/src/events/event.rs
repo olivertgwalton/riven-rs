@@ -3,19 +3,6 @@ use serde::{Deserialize, Serialize};
 use super::{EventType, IndexRequest, ScrapeRequest};
 use crate::types::{ItemRequestType, MediaItemType};
 
-/// Why the caller is asking for cache-check results.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum CacheCheckPurpose {
-    /// Populating UI state (e.g. the "cached" badge on discovery results).
-    /// Plugins should always respond so the UI stays informative.
-    #[default]
-    UiDisplay,
-    /// Pre-flight check inside the download flow. Plugins whose user has opted
-    /// out of separate `/check` calls (e.g. direct mode) should return `Empty`.
-    DownloadFlow,
-}
-
 /// A concrete event with its payload.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -93,20 +80,15 @@ pub enum RivenEvent {
         id: i64,
         info_hash: String,
         magnet: String,
+        /// Per-store availability pre-populated from the bulk cache check.
+        /// Non-empty in check-cache mode; empty in direct mode.
+        /// When non-empty the plugin should use these stores directly and skip
+        /// any further cache API call.
+        #[serde(default)]
+        cached_stores: Vec<crate::types::CachedStoreEntry>,
     },
     #[serde(rename = "riven.media-item.download.cache-check-requested")]
-    MediaItemDownloadCacheCheckRequested {
-        hashes: Vec<String>,
-        /// Hashes that must bypass the Redis cache and be re-checked against the debrid API.
-        /// Used when the caller knows a specific hash should be cached (e.g. manual magnet submission).
-        #[serde(default)]
-        bypass_cache: Vec<String>,
-        /// Why the caller wants cache status. Plugins whose user has opted out of
-        /// separate cache-check calls (direct mode) should ignore `DownloadFlow`
-        /// requests and still answer `UiDisplay` ones so cached badges keep working.
-        #[serde(default)]
-        purpose: CacheCheckPurpose,
-    },
+    MediaItemDownloadCacheCheckRequested { hashes: Vec<String> },
     #[serde(rename = "riven.media-item.download.error")]
     MediaItemDownloadError {
         id: i64,
