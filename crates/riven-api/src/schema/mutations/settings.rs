@@ -192,10 +192,11 @@ impl SettingsMutations {
         if plugin == "logs" {
             let log_control = ctx.data::<Arc<LogControl>>()?;
             let log_settings = LogSettings {
-                enabled: settings
-                    .get("logging_enabled")
-                    .and_then(coerce_json_bool)
-                    .unwrap_or(true),
+                enabled: enabled
+                    && settings
+                        .get("logging_enabled")
+                        .and_then(coerce_json_bool)
+                        .unwrap_or(true),
                 level: settings
                     .get("log_level")
                     .and_then(|value| value.as_str())

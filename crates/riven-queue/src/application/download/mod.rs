@@ -1,10 +1,10 @@
 mod candidates;
 mod execute;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
-use riven_core::events::RivenEvent;
+use riven_core::events::{CacheCheckPurpose, HookResponse, RivenEvent};
 use riven_core::types::*;
 use riven_db::entities::{MediaItem, Stream};
 use riven_db::repo;
@@ -17,7 +17,7 @@ use crate::flows::download_item::persist::{finalize_download_success, persist_su
 use crate::flows::load_active_profiles;
 use crate::{DownloadJob, JobQueue};
 
-use self::candidates::pick_best_for_profile;
+use self::candidates::{filter_by_bitrate, rank_streams_for_profile};
 use self::execute::{DownloadAttemptOutcome, attempt_download};
 
 #[derive(Debug, Clone, Deserialize)]
@@ -187,7 +187,7 @@ pub async fn run(id: i64, job: &DownloadJob, queue: &JobQueue) {
     let profile_mode = !active_profiles.is_empty();
 
     let ranks = queue.resolution_ranks.read().await.clone();
-    let all_streams = match repo::get_non_blacklisted_streams(&queue.db_pool, id, &ranks).await {
+    let mut all_streams = match repo::get_non_blacklisted_streams(&queue.db_pool, id, &ranks).await {
         Ok(streams) => streams,
         Err(error) => {
             tracing::error!(id, error = %error, "failed to fetch streams for download");
@@ -207,10 +207,30 @@ pub async fn run(id: i64, job: &DownloadJob, queue: &JobQueue) {
         return;
     }
 
-    let streams_to_try: Vec<&Stream> = all_streams.iter().collect();
+    // Batch /torz/check up front: warms Redis so per-stream add requests skip
+    // the per-hash API call, and returns availability so we can drop hashes no
+    // store reports as cached before burning a debrid round trip.
+    let cache_status = warm_and_collect_cache(queue, &all_streams).await;
+    enrich_stream_sizes(&mut all_streams, item.item_type, &cache_status);
 
-    // Streams are tried sequentially via add-torrent requests. The debrid
-    // provider's response determines availability — no batch cache pre-check.
+    let config = queue.downloader_config.read().await.clone();
+    let mut streams_to_try: Vec<&Stream> =
+        filter_by_bitrate(all_streams.iter().collect(), &item, &config);
+
+    streams_to_try = filter_by_cache_status(streams_to_try, &cache_status, id);
+
+    if streams_to_try.is_empty() && job.preferred_info_hash.is_none() {
+        tracing::debug!(id, "no streams survived prefilter");
+        queue
+            .notify(RivenEvent::MediaItemDownloadError {
+                id,
+                title: item.title.clone(),
+                error: "no valid streams after prefilter".into(),
+            })
+            .await;
+        return;
+    }
+
     if let Some(preferred_info_hash) = job.preferred_info_hash.as_ref() {
         let _ = run_preferred_stream(
             id,
@@ -318,50 +338,45 @@ async fn run_multi_version(
             continue;
         }
 
-        let Some(stream) = pick_best_for_profile(streams, item, profile_settings) else {
-            tracing::debug!(
-                id,
-                profile = profile_name,
-                "no valid stream found for profile"
-            );
-            continue;
-        };
-
-        if attempted_hashes.contains(&stream.info_hash) {
-            tracing::debug!(
-                id,
-                profile = profile_name,
-                info_hash = %stream.info_hash,
-                "skipping already-attempted stream for this profile"
-            );
+        let ranked = rank_streams_for_profile(streams, item, profile_settings);
+        if ranked.is_empty() {
+            tracing::debug!(id, profile = profile_name, "no streams match profile filters");
             continue;
         }
 
-        match attempt_download(
-            id,
-            item,
-            queue,
-            stream,
-            Some(profile_name.as_str()),
-            Some(profile_name.as_str()),
-            start_time,
-            hierarchy,
-        )
-        .await
-        {
-            DownloadAttemptOutcome::Failed => {
-                attempted_hashes.insert(stream.info_hash.clone());
+        let mut profile_succeeded = false;
+        for stream in ranked {
+            if attempted_hashes.contains(&stream.info_hash) {
+                continue;
             }
-            DownloadAttemptOutcome::TerminalHandled => return true,
-            DownloadAttemptOutcome::Succeeded => {
-                done_profiles.insert(profile_name.clone());
-                any_success = true;
-                tracing::debug!(
-                    id,
-                    profile = profile_name,
-                    "downloaded stream for active profile"
-                );
+            match attempt_download(
+                id,
+                item,
+                queue,
+                stream,
+                Some(profile_name.as_str()),
+                Some(profile_name.as_str()),
+                start_time,
+                hierarchy,
+            )
+            .await
+            {
+                DownloadAttemptOutcome::Failed => {
+                    attempted_hashes.insert(stream.info_hash.clone());
+                }
+                DownloadAttemptOutcome::TerminalHandled => return true,
+                DownloadAttemptOutcome::Succeeded => {
+                    done_profiles.insert(profile_name.clone());
+                    any_success = true;
+                    profile_succeeded = true;
+                    tracing::debug!(id, profile = profile_name, "downloaded stream for active profile");
+                    break;
+                }
             }
+        }
+
+        if !profile_succeeded {
+            tracing::debug!(id, profile = profile_name, "no available stream found for profile");
         }
     }
 
@@ -433,6 +448,147 @@ async fn run_single_version(
         })
         .await;
     false
+}
+
+#[derive(Default)]
+struct CacheStatusMap {
+    /// Keyed by lowercased info_hash. Absent = no plugin responded with data
+    /// for this hash (treat as unknown — don't filter it out).
+    entries: HashMap<String, CacheStatusEntry>,
+    any_response: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Availability {
+    /// At least one store reported the hash as cached/downloaded.
+    Available,
+    /// All responding stores reported a definite negative status (Failed,
+    /// Invalid, Queued, Downloading, Processing, Uploading). Safe to drop.
+    Unavailable,
+    /// A store responded with `Unknown` (e.g. direct-mode masking) — we have
+    /// size info but must not gate download on the availability claim.
+    Unknown,
+}
+
+struct CacheStatusEntry {
+    availability: Availability,
+    total_size: Option<u64>,
+}
+
+async fn warm_and_collect_cache(queue: &JobQueue, streams: &[Stream]) -> CacheStatusMap {
+    let hashes: Vec<String> = streams
+        .iter()
+        .map(|s| s.info_hash.to_lowercase())
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+    if hashes.is_empty() {
+        return CacheStatusMap::default();
+    }
+
+    let results = queue
+        .registry
+        .dispatch(&RivenEvent::MediaItemDownloadCacheCheckRequested {
+            hashes,
+            bypass_cache: vec![],
+            purpose: CacheCheckPurpose::DownloadFlow,
+        })
+        .await;
+
+    let mut map = CacheStatusMap::default();
+    for (_, result) in results {
+        let Ok(HookResponse::CacheCheck(items)) = result else {
+            continue;
+        };
+        map.any_response = true;
+        for item in items {
+            let hash = item.hash.to_lowercase();
+            let availability = match item.status {
+                TorrentStatus::Cached | TorrentStatus::Downloaded => Availability::Available,
+                TorrentStatus::Unknown => Availability::Unknown,
+                _ => Availability::Unavailable,
+            };
+            let total: u64 = item.files.iter().filter_map(|f| f.size).sum();
+            let total_size = (total > 0).then_some(total);
+            map.entries
+                .entry(hash)
+                .and_modify(|e| {
+                    // Best signal wins: Available > Unknown > Unavailable.
+                    if availability == Availability::Available
+                        || (availability == Availability::Unknown
+                            && e.availability == Availability::Unavailable)
+                    {
+                        e.availability = availability;
+                    }
+                    if total_size.is_some()
+                        && (e.total_size.is_none() || total_size > e.total_size)
+                    {
+                        e.total_size = total_size;
+                    }
+                })
+                .or_insert(CacheStatusEntry {
+                    availability,
+                    total_size,
+                });
+        }
+    }
+    map
+}
+
+fn enrich_stream_sizes(
+    streams: &mut [Stream],
+    item_type: MediaItemType,
+    cache_status: &CacheStatusMap,
+) {
+    // Only safe for movies: total torrent size ≈ movie file size. For
+    // episode/season packs the cache-check total is the whole pack, not a
+    // single episode file, so it would mislead the bitrate filter.
+    if item_type != MediaItemType::Movie {
+        return;
+    }
+    for stream in streams.iter_mut() {
+        if stream.file_size_bytes.is_some() {
+            continue;
+        }
+        let Some(entry) = cache_status.entries.get(&stream.info_hash.to_lowercase()) else {
+            continue;
+        };
+        if let Some(size) = entry.total_size {
+            stream.file_size_bytes = Some(size as i64);
+        }
+    }
+}
+
+fn filter_by_cache_status<'a>(
+    streams: Vec<&'a Stream>,
+    cache_status: &CacheStatusMap,
+    id: i64,
+) -> Vec<&'a Stream> {
+    // No plugin returned cache data (e.g. all debrid plugins are in direct
+    // mode). Fall back to the full list — availability will be decided
+    // per-stream via add_torrent.
+    if !cache_status.any_response {
+        return streams;
+    }
+    streams
+        .into_iter()
+        .filter(|stream| {
+            match cache_status.entries.get(&stream.info_hash.to_lowercase()) {
+                Some(entry) if entry.availability == Availability::Unavailable => {
+                    tracing::debug!(
+                        id,
+                        info_hash = %stream.info_hash,
+                        "stream prefiltered: not cached on any store"
+                    );
+                    false
+                }
+                // Available, Unknown, or absent — keep. Unknown means a plugin
+                // (e.g. direct-mode debrid) surfaced size info but won't
+                // commit to an availability claim; add_torrent decides.
+                _ => true,
+            }
+        })
+        .collect()
 }
 
 async fn fetch_done_profiles(queue: &JobQueue, id: i64, item_type: MediaItemType) -> Vec<String> {

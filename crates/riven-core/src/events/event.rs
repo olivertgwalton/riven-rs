@@ -3,6 +3,19 @@ use serde::{Deserialize, Serialize};
 use super::{EventType, IndexRequest, ScrapeRequest};
 use crate::types::{ItemRequestType, MediaItemType};
 
+/// Why the caller is asking for cache-check results.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CacheCheckPurpose {
+    /// Populating UI state (e.g. the "cached" badge on discovery results).
+    /// Plugins should always respond so the UI stays informative.
+    #[default]
+    UiDisplay,
+    /// Pre-flight check inside the download flow. Plugins whose user has opted
+    /// out of separate `/check` calls (e.g. direct mode) should return `Empty`.
+    DownloadFlow,
+}
+
 /// A concrete event with its payload.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -88,6 +101,11 @@ pub enum RivenEvent {
         /// Used when the caller knows a specific hash should be cached (e.g. manual magnet submission).
         #[serde(default)]
         bypass_cache: Vec<String>,
+        /// Why the caller wants cache status. Plugins whose user has opted out of
+        /// separate cache-check calls (direct mode) should ignore `DownloadFlow`
+        /// requests and still answer `UiDisplay` ones so cached badges keep working.
+        #[serde(default)]
+        purpose: CacheCheckPurpose,
     },
     #[serde(rename = "riven.media-item.download.error")]
     MediaItemDownloadError {

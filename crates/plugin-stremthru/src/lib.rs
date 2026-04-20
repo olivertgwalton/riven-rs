@@ -377,7 +377,19 @@ impl Plugin for StremthruPlugin {
             RivenEvent::MediaItemDownloadCacheCheckRequested {
                 hashes,
                 bypass_cache,
+                purpose,
             } => {
+                // Direct mode mirrors python-riven: no pre-flight cache API
+                // calls — add_torrent is the source of truth. We still answer
+                // `UiDisplay` requests so the "cached" badge keeps working.
+                let direct_mode =
+                    ctx.settings.get_or("checkdebridcache", "true") == "true";
+                if direct_mode
+                    && *purpose == riven_core::events::CacheCheckPurpose::DownloadFlow
+                {
+                    return Ok(HookResponse::Empty);
+                }
+
                 let mut futures = Vec::new();
                 for (store, api_key) in &stores {
                     futures.push(check_cache(

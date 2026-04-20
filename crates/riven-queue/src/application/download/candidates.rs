@@ -1,11 +1,59 @@
+use riven_core::downloader::DownloaderConfig;
+use riven_core::types::MediaItemType;
 use riven_db::entities::{MediaItem, Stream};
 use riven_rank::{ParsedData, RankSettings};
 
-pub fn pick_best_for_profile<'a>(
+/// Drops streams whose known `file_size_bytes` fails the item's bitrate threshold,
+/// so we never burn a debrid round trip on a file we'd reject at persist time.
+/// Streams with unknown size (never tried) pass through and are decided later.
+pub fn filter_by_bitrate<'a>(
+    streams: Vec<&'a Stream>,
+    item: &MediaItem,
+    config: &DownloaderConfig,
+) -> Vec<&'a Stream> {
+    let check = match item.item_type {
+        MediaItemType::Movie => {
+            |cfg: &DownloaderConfig, size: u64, runtime: Option<i32>| cfg.movie_passes(size, runtime)
+        }
+        MediaItemType::Episode => {
+            |cfg: &DownloaderConfig, size: u64, runtime: Option<i32>| cfg.episode_passes(size, runtime)
+        }
+        // Seasons/Shows have per-file bitrate checks during persist; the top-level
+        // stream size isn't comparable to a single episode's size.
+        _ => return streams,
+    };
+
+    streams
+        .into_iter()
+        .filter(|stream| {
+            let Some(size) = stream.file_size_bytes else {
+                return true;
+            };
+            if size <= 0 {
+                return true;
+            }
+            let pass = check(config, size as u64, item.runtime);
+            if !pass {
+                tracing::debug!(
+                    item_id = item.id,
+                    info_hash = %stream.info_hash,
+                    file_size = size,
+                    runtime = ?item.runtime,
+                    "stream prefiltered: fails bitrate threshold"
+                );
+            }
+            pass
+        })
+        .collect()
+}
+
+/// Returns all streams that pass the profile's fetch checks, sorted best-first.
+/// Callers should iterate and try each in order until one succeeds.
+pub fn rank_streams_for_profile<'a>(
     streams: &[&'a Stream],
     item: &MediaItem,
     profile: &RankSettings,
-) -> Option<&'a Stream> {
+) -> Vec<&'a Stream> {
     let download_profile = build_download_candidate_profile(profile);
     let model = riven_rank::RankingModel::default();
 
@@ -69,7 +117,7 @@ pub fn pick_best_for_profile<'a>(
         })
     });
 
-    scored.into_iter().next().map(|(stream, _, _)| stream)
+    scored.into_iter().map(|(stream, _, _)| stream).collect()
 }
 
 fn build_download_candidate_profile(profile: &RankSettings) -> RankSettings {
@@ -119,7 +167,7 @@ fn build_download_candidate_profile(profile: &RankSettings) -> RankSettings {
 
 #[cfg(test)]
 mod tests {
-    use super::pick_best_for_profile;
+    use super::rank_streams_for_profile;
     use riven_core::types::MediaItemType;
     use riven_db::entities::{MediaItem, Stream};
     use riven_rank::RankSettings;
@@ -189,9 +237,8 @@ mod tests {
         let stream_1080p = stream(2, "hash1080", "Shrek.2.1080p.BluRay");
         let streams = vec![&stream_2160p, &stream_1080p];
 
-        let best = pick_best_for_profile(&streams, &media_item(), &profile)
-            .expect("1080p stream should remain eligible");
-
+        let ranked = rank_streams_for_profile(&streams, &media_item(), &profile);
+        let best = ranked.first().expect("1080p stream should remain eligible");
         assert_eq!(best.info_hash, "hash1080");
     }
 }

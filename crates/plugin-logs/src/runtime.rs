@@ -1,5 +1,6 @@
 use std::fmt;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use chrono::Local;
 use riven_core::settings::PluginSettings;
@@ -10,6 +11,7 @@ use tracing_appender::non_blocking::WorkerGuard;
 use tracing_appender::rolling::{RollingFileAppender, Rotation};
 use tracing_subscriber::{
     EnvFilter, Layer, Registry,
+    filter::filter_fn,
     fmt::{FmtContext, FormatEvent, FormatFields, format::Writer},
     layer::SubscriberExt,
     registry::LookupSpan,
@@ -50,11 +52,7 @@ pub async fn load_log_settings(pool: &sqlx::PgPool) -> anyhow::Result<LogSetting
         .unwrap_or(true);
 
     Ok(LogSettings {
-        enabled: plugin_enabled
-            && settings
-                .get("logging_enabled")
-                .map(is_truthy)
-                .unwrap_or(true),
+        enabled: plugin_enabled && settings.get("logging_enabled").map(is_truthy).unwrap_or(true),
         level: settings.get_or("log_level", "info"),
         rotation: settings.get_or("log_rotation", "hourly"),
         max_files: settings
@@ -71,13 +69,15 @@ pub async fn load_log_settings(pool: &sqlx::PgPool) -> anyhow::Result<LogSetting
 
 pub struct LogControl {
     handle: reload::Handle<EnvFilter, Registry>,
+    enabled: Arc<AtomicBool>,
     _file_guard: WorkerGuard,
 }
 
 impl LogControl {
     pub fn apply(&self, settings: &LogSettings) -> anyhow::Result<()> {
+        self.enabled.store(settings.enabled, Ordering::Relaxed);
         self.handle
-            .reload(build_filter(settings)?)
+            .reload(build_level_filter(settings)?)
             .map_err(|error| anyhow::anyhow!("failed to reload log filter: {error}"))
     }
 }
@@ -87,17 +87,26 @@ pub fn init_logging(
     log_directory: &str,
     log_tx: broadcast::Sender<String>,
 ) -> anyhow::Result<Arc<LogControl>> {
-    let (filter_layer, handle) = reload::Layer::new(build_filter(settings)?);
+    let enabled = Arc::new(AtomicBool::new(settings.enabled));
+    let (filter_layer, handle) = reload::Layer::new(build_level_filter(settings)?);
+
+    let gate = |enabled: &Arc<AtomicBool>| {
+        let flag = enabled.clone();
+        filter_fn(move |_| flag.load(Ordering::Relaxed))
+    };
 
     let registry = tracing_subscriber::registry().with(filter_layer);
-    let console_layer = tracing_subscriber::fmt::layer().event_format(RivenFormatter);
+    let console_layer = tracing_subscriber::fmt::layer()
+        .event_format(RivenFormatter)
+        .with_filter(gate(&enabled));
     let file_appender = build_file_appender(settings, log_directory)?;
     let (file_writer, file_guard) = tracing_appender::non_blocking(file_appender);
     let file_layer = tracing_subscriber::fmt::layer()
         .with_writer(file_writer)
         .with_ansi(false)
-        .json();
-    let broadcast_layer = BroadcastLogLayer { tx: log_tx };
+        .json()
+        .with_filter(gate(&enabled));
+    let broadcast_layer = BroadcastLogLayer { tx: log_tx }.with_filter(gate(&enabled));
 
     registry
         .with(console_layer)
@@ -107,15 +116,12 @@ pub fn init_logging(
 
     Ok(Arc::new(LogControl {
         handle,
+        enabled,
         _file_guard: file_guard,
     }))
 }
 
-fn build_filter(settings: &LogSettings) -> anyhow::Result<EnvFilter> {
-    if !settings.enabled {
-        return Ok(EnvFilter::new("off"));
-    }
-
+fn build_level_filter(settings: &LogSettings) -> anyhow::Result<EnvFilter> {
     EnvFilter::try_from_default_env()
         .or_else(|_| EnvFilter::try_new(&settings.level))
         .map(|filter| filter.add_directive("apalis_core=info".parse().unwrap()))
