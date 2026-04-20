@@ -9,7 +9,7 @@ use fuser::{
     FileAttr, FileType, Filesystem, ReplyAttr, ReplyData, ReplyDirectory, ReplyEntry, ReplyOpen,
     Request, consts::FOPEN_KEEP_CACHE,
 };
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, Semaphore};
 use tokio::sync::mpsc;
 
 use riven_core::config::vfs::*;
@@ -143,6 +143,7 @@ pub struct RivenFs {
     range_cache: Arc<RangeCache>,
     readdir_cache: DashMap<u64, (Vec<DirEntry>, Instant)>,
     entry_cache: DashMap<String, (Option<Arc<CachedEntry>>, Instant)>,
+    prewarm_semaphore: Arc<Semaphore>,
 }
 
 impl RivenFs {
@@ -185,6 +186,7 @@ impl RivenFs {
             range_cache: Arc::new(RangeCache::new(entries)),
             readdir_cache: DashMap::new(),
             entry_cache: DashMap::new(),
+            prewarm_semaphore: Arc::new(Semaphore::new(8)),
         }
     }
 
@@ -335,10 +337,15 @@ impl RivenFs {
 async fn prewarm_header_footer(
     cache: Arc<RangeCache>,
     client: reqwest::Client,
+    semaphore: Arc<Semaphore>,
     ino: u64,
     stream_url: String,
     file_size: u64,
 ) {
+    let Ok(_permit) = semaphore.acquire_owned().await else {
+        return;
+    };
+
     let layout = FileLayout::new(file_size);
     let header = layout.header_chunk();
     let footer = layout.footer_chunk();
@@ -540,6 +547,7 @@ impl Filesystem for RivenFs {
         self.runtime.spawn(prewarm_header_footer(
             Arc::clone(&self.range_cache),
             self.stream_client.clone(),
+            Arc::clone(&self.prewarm_semaphore),
             ino,
             stream_url.clone(),
             file_size,
