@@ -20,9 +20,11 @@ use riven_db::entities::FileSystemEntry;
 use riven_db::repo;
 
 use crate::cache::RangeCache;
+use crate::chunks::FileLayout;
 use crate::media_stream::{MediaStream, ReadOutcome};
 use crate::path_info::{CanonicalPath, PathTarget, parse_path};
 use crate::readdir::{DirEntry, populate_entries};
+use crate::stream::fetch_range;
 
 const TTL: Duration = Duration::from_secs(300);
 const READDIR_CACHE_TTL: Duration = Duration::from_secs(30);
@@ -138,7 +140,7 @@ pub struct RivenFs {
     ino_to_path: DashMap<u64, Arc<str>>,
     next_ino: AtomicU64,
 
-    range_cache: RangeCache,
+    range_cache: Arc<RangeCache>,
     readdir_cache: DashMap<u64, (Vec<DirEntry>, Instant)>,
     entry_cache: DashMap<String, (Option<Arc<CachedEntry>>, Instant)>,
 }
@@ -180,7 +182,7 @@ impl RivenFs {
             path_to_ino,
             ino_to_path,
             next_ino: AtomicU64::new(FIRST_DYNAMIC_INO),
-            range_cache: RangeCache::new(entries),
+            range_cache: Arc::new(RangeCache::new(entries)),
             readdir_cache: DashMap::new(),
             entry_cache: DashMap::new(),
         }
@@ -321,6 +323,45 @@ impl RivenFs {
             &self.runtime,
         )
     }
+}
+
+/// Fetches header and footer byte ranges into the shared cache so that a
+/// media-server scan (Plex, Jellyfin, etc.) finds them already cached.
+///
+/// Header and footer are fetched concurrently: the footer fetch races the
+/// synchronous header read that the FUSE layer issues right after open,
+/// so by the time the first CDN round-trip completes the footer is usually
+/// already in cache and the second read returns instantly.
+async fn prewarm_header_footer(
+    cache: Arc<RangeCache>,
+    client: reqwest::Client,
+    ino: u64,
+    stream_url: String,
+    file_size: u64,
+) {
+    let layout = FileLayout::new(file_size);
+    let header = layout.header_chunk();
+    let footer = layout.footer_chunk();
+
+    let fetch_header = async {
+        if cache.get((ino, header.start, header.end)).is_none() {
+            match fetch_range(&client, &stream_url, header.start, header.end).await {
+                Ok(data) => cache.put((ino, header.start, header.end), data),
+                Err(e) => tracing::debug!(target: "streaming", ino, error = %e, "pre-warm header failed"),
+            }
+        }
+    };
+
+    let fetch_footer = async {
+        if footer != header && cache.get((ino, footer.start, footer.end)).is_none() {
+            match fetch_range(&client, &stream_url, footer.start, footer.end).await {
+                Ok(data) => cache.put((ino, footer.start, footer.end), data),
+                Err(e) => tracing::debug!(target: "streaming", ino, error = %e, "pre-warm footer failed"),
+            }
+        }
+    };
+
+    tokio::join!(fetch_header, fetch_footer);
 }
 
 impl Filesystem for RivenFs {
@@ -493,6 +534,17 @@ impl Filesystem for RivenFs {
 
         let fd = self.next_fd.fetch_add(1, Ordering::SeqCst);
         let file_size = entry.file_size;
+
+        // Kick off a background task that fetches header and footer bytes
+        // concurrently so media-server scans hit the cache instead of the CDN.
+        self.runtime.spawn(prewarm_header_footer(
+            Arc::clone(&self.range_cache),
+            self.stream_client.clone(),
+            ino,
+            stream_url.clone(),
+            file_size,
+        ));
+
         self.file_handles.insert(
             fd,
             FileHandle {

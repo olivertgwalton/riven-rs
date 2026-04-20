@@ -53,7 +53,7 @@ impl SequentialReader {
             .ok()?;
         let stream = response.bytes_stream().map_err(io::Error::other).boxed();
         let reader = BufReader::with_capacity(
-            riven_core::config::vfs::CHUNK_SIZE as usize,
+            riven_core::config::vfs::CHUNK_SIZE as usize * 2,
             StreamReader::new(stream),
         );
 

@@ -97,10 +97,10 @@ pub fn mount(
         fuser::MountOption::AllowOther,
         fuser::MountOption::AutoUnmount,
         fuser::MountOption::DefaultPermissions,
-        // Allow the kernel to issue up to 1 MB reads per FUSE call instead of
+        // Allow the kernel to issue up to 4 MB reads per FUSE call instead of
         // the default 128 KB. Combined with the large readahead set in init(),
-        // this reduces block_on() call frequency ~8x for sequential playback.
-        fuser::MountOption::CUSTOM("max_read=1048576".to_string()),
+        // this reduces block_on() call frequency ~32x for sequential playback.
+        fuser::MountOption::CUSTOM("max_read=4194304".to_string()),
     ];
 
     let session = fuser::spawn_mount2(fs, mount_path, &options)?;
