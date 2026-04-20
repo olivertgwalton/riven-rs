@@ -72,16 +72,6 @@ pub fn find_preferred_candidate<'a>(
     })
 }
 
-pub fn pick_best_for_profile<'a>(
-    candidates: &'a [CachedCandidate<'a>],
-    item: &MediaItem,
-    profile: &RankSettings,
-) -> Option<&'a CachedCandidate<'a>> {
-    rank_candidates_for_profile(candidates, item, profile)
-        .into_iter()
-        .next()
-}
-
 /// Returns all candidates that pass the profile's fetch checks, sorted best-first.
 /// Matches riven-ts: iterate every ranked stream until one succeeds, rather than
 /// giving up after the top pick fails.
@@ -202,8 +192,7 @@ fn build_download_candidate_profile(profile: &RankSettings) -> RankSettings {
 
 #[cfg(test)]
 mod tests {
-    use super::pick_best_for_profile;
-    use crate::application::download::candidates::CachedCandidate;
+    use super::{rank_candidates_for_profile, CachedCandidate};
     use riven_core::types::MediaItemType;
     use riven_db::entities::{MediaItem, Stream};
     use riven_rank::RankSettings;
@@ -276,7 +265,9 @@ mod tests {
             CachedCandidate { stream: &stream_1080p, stores: vec![] },
         ];
 
-        let best = pick_best_for_profile(&candidates, &media_item(), &profile)
+        let best = rank_candidates_for_profile(&candidates, &media_item(), &profile)
+            .into_iter()
+            .next()
             .expect("1080p stream should remain eligible");
 
         assert_eq!(best.stream.info_hash, "hash1080");
