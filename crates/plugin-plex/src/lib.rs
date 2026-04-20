@@ -9,7 +9,7 @@ use riven_core::events::{EventType, HookResponse, RivenEvent};
 use riven_core::http::profiles;
 use riven_core::plugin::{Plugin, PluginContext};
 use riven_core::register_plugin;
-use riven_core::settings::PluginSettings;
+use riven_core::settings::{FilesystemSettings, LibraryProfileMembership, PluginSettings};
 use riven_core::types::{ActivePlaybackSession, PlaybackMethod, PlaybackState};
 use riven_db::repo;
 
@@ -81,6 +81,8 @@ impl Plugin for PlexPlugin {
                     anyhow::bail!("no filesystem entries found for media item {id}");
                 }
 
+                let fs_settings = load_filesystem_settings(&ctx.db_pool).await;
+
                 let sections = self
                     .cached_library_sections(&ctx.http, plex_url, plex_token)
                     .await?;
@@ -93,12 +95,21 @@ impl Plugin for PlexPlugin {
                         .map(|(dir, _)| dir)
                         .unwrap_or(&entry.path);
 
-                    let full_path = format!("{library_path}{dir_path}");
+                    let profile_keys =
+                        LibraryProfileMembership::from_json(entry.library_profiles.as_ref());
+                    let vfs_dirs = entry_vfs_dirs(
+                        dir_path,
+                        &library_path,
+                        &profile_keys,
+                        fs_settings.as_ref(),
+                    );
 
-                    for section in &sections {
-                        for location in &section.locations {
-                            if full_path.starts_with(&location.path) {
-                                refresh_tasks.push((section.key.clone(), full_path.clone()));
+                    for full_path in vfs_dirs {
+                        for section in &sections {
+                            for location in &section.locations {
+                                if full_path.starts_with(&location.path) {
+                                    refresh_tasks.push((section.key.clone(), full_path.clone()));
+                                }
                             }
                         }
                     }
@@ -144,11 +155,14 @@ impl Plugin for PlexPlugin {
                 let plex_token = ctx.require_setting("plextoken")?;
                 let plex_url = ctx.require_setting("plexserverurl")?.trim_end_matches('/');
                 let library_path = ctx.settings.get_or("plexlibrarypath", "/mount");
+
+                let fs_settings = load_filesystem_settings(&ctx.db_pool).await;
+
                 let sections = self
                     .cached_library_sections(&ctx.http, plex_url, plex_token)
                     .await?;
 
-                let dirs: HashSet<String> = deleted_paths
+                let canonical_dirs: HashSet<String> = deleted_paths
                     .iter()
                     .map(|path| {
                         path.rsplit_once('/')
@@ -159,12 +173,16 @@ impl Plugin for PlexPlugin {
                     .collect();
 
                 let mut refresh_tasks = Vec::new();
-                for dir_path in dirs {
-                    let full_path = format!("{library_path}{dir_path}");
-                    for section in &sections {
-                        for location in &section.locations {
-                            if full_path.starts_with(&location.path) {
-                                refresh_tasks.push((section.key.clone(), full_path.clone()));
+                for dir_path in canonical_dirs {
+                    // For deleted entries we don't have profile info, so expand across all enabled profiles.
+                    let vfs_dirs =
+                        deleted_entry_vfs_dirs(&dir_path, &library_path, fs_settings.as_ref());
+                    for full_path in vfs_dirs {
+                        for section in &sections {
+                            for location in &section.locations {
+                                if full_path.starts_with(&location.path) {
+                                    refresh_tasks.push((section.key.clone(), full_path.clone()));
+                                }
                             }
                         }
                     }
@@ -211,6 +229,69 @@ impl Plugin for PlexPlugin {
             _ => Ok(HookResponse::Empty),
         }
     }
+}
+
+async fn load_filesystem_settings(pool: &sqlx::PgPool) -> Option<FilesystemSettings> {
+    riven_db::repo::get_setting(pool, "filesystem")
+        .await
+        .ok()
+        .flatten()
+        .and_then(|v| serde_json::from_value(v).ok())
+}
+
+/// Returns all VFS directory paths an entry appears at, given its canonical dir path and profile keys.
+fn entry_vfs_dirs(
+    canonical_dir: &str,
+    plex_library_path: &str,
+    profile_keys: &LibraryProfileMembership,
+    fs_settings: Option<&FilesystemSettings>,
+) -> Vec<String> {
+    let mut paths = Vec::new();
+    let mut any_exclusive = false;
+
+    if let Some(settings) = fs_settings {
+        for key in &profile_keys.0 {
+            if let Some(profile) = settings.library_profiles.get(key) {
+                if profile.enabled {
+                    paths.push(format!(
+                        "{plex_library_path}{}{canonical_dir}",
+                        profile.library_path
+                    ));
+                    if profile.exclusive {
+                        any_exclusive = true;
+                    }
+                }
+            }
+        }
+    }
+
+    if !any_exclusive {
+        paths.push(format!("{plex_library_path}{canonical_dir}"));
+    }
+
+    paths
+}
+
+/// For deleted entries (no profile info), returns all possible VFS dirs: default + all enabled profiles.
+fn deleted_entry_vfs_dirs(
+    canonical_dir: &str,
+    plex_library_path: &str,
+    fs_settings: Option<&FilesystemSettings>,
+) -> Vec<String> {
+    let mut paths = vec![format!("{plex_library_path}{canonical_dir}")];
+
+    if let Some(settings) = fs_settings {
+        for profile in settings.library_profiles.values() {
+            if profile.enabled {
+                paths.push(format!(
+                    "{plex_library_path}{}{canonical_dir}",
+                    profile.library_path
+                ));
+            }
+        }
+    }
+
+    paths
 }
 
 impl PlexPlugin {
