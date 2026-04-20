@@ -458,7 +458,7 @@ async fn collect_cached_info(
                 for result in results {
                     if matches!(
                         result.status,
-                        TorrentStatus::Cached | TorrentStatus::Downloaded | TorrentStatus::Unknown
+                        TorrentStatus::Cached | TorrentStatus::Downloaded
                     ) {
                         cached_info
                             .entry(result.hash.to_lowercase())

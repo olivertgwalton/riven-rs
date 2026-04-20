@@ -212,7 +212,7 @@ impl SettingsMutations {
                     .and_then(|value| value.as_u64())
                     .map(|value| value as usize)
                     .filter(|value| *value > 0)
-                    .unwrap_or(72),
+                    .unwrap_or(5),
                 vfs_debug_logging: settings
                     .get("vfs_debug_logging")
                     .and_then(coerce_json_bool)
@@ -277,7 +277,7 @@ impl SettingsMutations {
                     .and_then(|value| value.as_u64())
                     .map(|value| value as usize)
                     .filter(|value| *value > 0)
-                    .unwrap_or(72),
+                    .unwrap_or(5),
                 vfs_debug_logging: settings
                     .get("vfs_debug_logging")
                     .and_then(coerce_json_bool)

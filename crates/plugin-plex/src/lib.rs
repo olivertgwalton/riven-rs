@@ -72,22 +72,31 @@ impl Plugin for PlexPlugin {
     ) -> anyhow::Result<HookResponse> {
         match event {
             RivenEvent::MediaItemDownloadSuccess { id, .. } => {
+                tracing::info!(id, "plex: handling download success event");
                 let plex_token = ctx.require_setting("plextoken")?;
                 let plex_url = ctx.require_setting("plexserverurl")?.trim_end_matches('/');
-                let library_path = ctx.settings.get_or("plexlibrarypath", "/mount");
 
-                let entries = repo::get_media_entries(&ctx.db_pool, *id).await?;
+                let entries = repo::get_media_entries_recursive(&ctx.db_pool, *id).await?;
                 if entries.is_empty() {
                     anyhow::bail!("no filesystem entries found for media item {id}");
                 }
+                tracing::debug!(id, count = entries.len(), "plex: found filesystem entries");
 
                 let fs_settings = load_filesystem_settings(&ctx.db_pool).await;
+                let library_path = effective_library_path(&ctx.settings, fs_settings.as_ref());
 
                 let sections = self
                     .cached_library_sections(&ctx.http, plex_url, plex_token)
                     .await?;
+                tracing::debug!(count = sections.len(), "plex: fetched library sections");
+
+                let section_locations: Vec<String> = sections
+                    .iter()
+                    .flat_map(|s| s.locations.iter().map(|l| l.path.clone()))
+                    .collect();
 
                 let mut refresh_tasks = Vec::new();
+                let mut all_vfs_dirs: Vec<String> = Vec::new();
                 for entry in &entries {
                     let dir_path = entry
                         .path
@@ -104,7 +113,7 @@ impl Plugin for PlexPlugin {
                         fs_settings.as_ref(),
                     );
 
-                    for full_path in vfs_dirs {
+                    for full_path in &vfs_dirs {
                         for section in &sections {
                             for location in &section.locations {
                                 if full_path.starts_with(&location.path) {
@@ -112,7 +121,18 @@ impl Plugin for PlexPlugin {
                                 }
                             }
                         }
+                        all_vfs_dirs.push(full_path.clone());
                     }
+                }
+
+                if refresh_tasks.is_empty() {
+                    tracing::warn!(
+                        id,
+                        tried_paths = ?all_vfs_dirs,
+                        plex_section_locations = ?section_locations,
+                        "plex: no library sections matched any entry paths — set plexlibrarypath to the path prefix Plex uses to see the VFS mount"
+                    );
+                    return Ok(HookResponse::Empty);
                 }
 
                 let results = futures::future::join_all(refresh_tasks.into_iter().map(
@@ -154,9 +174,9 @@ impl Plugin for PlexPlugin {
 
                 let plex_token = ctx.require_setting("plextoken")?;
                 let plex_url = ctx.require_setting("plexserverurl")?.trim_end_matches('/');
-                let library_path = ctx.settings.get_or("plexlibrarypath", "/mount");
 
                 let fs_settings = load_filesystem_settings(&ctx.db_pool).await;
+                let library_path = effective_library_path(&ctx.settings, fs_settings.as_ref());
 
                 let sections = self
                     .cached_library_sections(&ctx.http, plex_url, plex_token)
@@ -188,33 +208,33 @@ impl Plugin for PlexPlugin {
                     }
                 }
 
-                let results = futures::future::join_all(refresh_tasks.into_iter().map(
-                    |(section_key, path)| {
-                        let http = ctx.http.clone();
-                        let token = plex_token.to_string();
-                        let url = plex_url.to_string();
-                        async move {
-                            let result =
-                                refresh_section(&http, &url, &token, &section_key, &path).await;
-                            (section_key, path, result)
-                        }
-                    },
-                ))
-                .await;
+                if refresh_tasks.is_empty() {
+                    tracing::warn!(
+                        "plex: no library sections matched any deleted paths — check plexlibrarypath setting"
+                    );
+                    return Ok(HookResponse::Empty);
+                }
 
-                for (section_key, path, result) in results {
-                    match result {
-                        Ok(()) => tracing::info!(
-                            section = section_key,
-                            path,
-                            "plex library section refreshed after delete"
-                        ),
-                        Err(e) => tracing::warn!(
-                            section = section_key,
-                            path,
-                            error = %e,
-                            "plex library section refresh failed after delete"
-                        ),
+                // Collect unique section keys for emptyTrash.
+                let affected_sections: Vec<String> = {
+                    let mut seen = HashSet::new();
+                    refresh_tasks
+                        .iter()
+                        .filter_map(|(key, _)| seen.insert(key.clone()).then(|| key.clone()))
+                        .collect()
+                };
+
+                for (section_key, path) in &refresh_tasks {
+                    match refresh_section(&ctx.http, plex_url, plex_token, section_key, path).await {
+                        Ok(()) => tracing::info!(section = section_key, path, "plex section rescanned after delete"),
+                        Err(e) => tracing::warn!(section = section_key, path, error = %e, "plex section rescan failed after delete"),
+                    }
+                }
+
+                for section_key in &affected_sections {
+                    match empty_trash(&ctx.http, plex_url, plex_token, section_key).await {
+                        Ok(()) => tracing::info!(section = section_key, "plex section trash emptied"),
+                        Err(e) => tracing::warn!(section = section_key, error = %e, "plex section emptyTrash failed"),
                     }
                 }
 
@@ -239,6 +259,21 @@ async fn load_filesystem_settings(pool: &sqlx::PgPool) -> Option<FilesystemSetti
         .and_then(|v| serde_json::from_value(v).ok())
 }
 
+/// Returns the effective Plex library path: the explicit plugin setting if configured,
+/// otherwise the VFS mount path from filesystem settings, otherwise "/mount".
+fn effective_library_path(
+    settings: &riven_core::settings::PluginSettings,
+    fs_settings: Option<&FilesystemSettings>,
+) -> String {
+    if let Some(explicit) = settings.get("plexlibrarypath") {
+        return explicit.trim_end_matches('/').to_string();
+    }
+    fs_settings
+        .map(|s| s.mount_path.trim_end_matches('/').to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "/mount".to_string())
+}
+
 /// Returns all VFS directory paths an entry appears at, given its canonical dir path and profile keys.
 fn entry_vfs_dirs(
     canonical_dir: &str,
@@ -246,6 +281,7 @@ fn entry_vfs_dirs(
     profile_keys: &LibraryProfileMembership,
     fs_settings: Option<&FilesystemSettings>,
 ) -> Vec<String> {
+    let base = plex_library_path.trim_end_matches('/');
     let mut paths = Vec::new();
     let mut any_exclusive = false;
 
@@ -254,7 +290,7 @@ fn entry_vfs_dirs(
             if let Some(profile) = settings.library_profiles.get(key) {
                 if profile.enabled {
                     paths.push(format!(
-                        "{plex_library_path}{}{canonical_dir}",
+                        "{base}{}{canonical_dir}",
                         profile.library_path
                     ));
                     if profile.exclusive {
@@ -266,7 +302,7 @@ fn entry_vfs_dirs(
     }
 
     if !any_exclusive {
-        paths.push(format!("{plex_library_path}{canonical_dir}"));
+        paths.push(format!("{base}{canonical_dir}"));
     }
 
     paths
@@ -278,13 +314,14 @@ fn deleted_entry_vfs_dirs(
     plex_library_path: &str,
     fs_settings: Option<&FilesystemSettings>,
 ) -> Vec<String> {
-    let mut paths = vec![format!("{plex_library_path}{canonical_dir}")];
+    let base = plex_library_path.trim_end_matches('/');
+    let mut paths = vec![format!("{base}{canonical_dir}")];
 
     if let Some(settings) = fs_settings {
         for profile in settings.library_profiles.values() {
             if profile.enabled {
                 paths.push(format!(
-                    "{plex_library_path}{}{canonical_dir}",
+                    "{base}{}{canonical_dir}",
                     profile.library_path
                 ));
             }
@@ -346,13 +383,35 @@ async fn refresh_section(
     let encoded_path = urlencoding::encode(path);
     let url = format!("{plex_url}/library/sections/{section_key}/refresh?path={encoded_path}");
     tracing::debug!(target_url = %url, section_key, path, "refreshing plex library section");
-    http.send(profiles::PLEX, |client| {
-        client
-            .post(&url)
-            .header("x-plex-token", token)
-            .header("accept", "application/json")
-    })
-    .await?;
+    let response = http
+        .send(profiles::PLEX, |client| {
+            client
+                .post(&url)
+                .header("x-plex-token", token)
+                .header("accept", "application/json")
+        })
+        .await?;
+    response.error_for_status()?;
+    Ok(())
+}
+
+async fn empty_trash(
+    http: &riven_core::http::HttpClient,
+    plex_url: &str,
+    token: &str,
+    section_key: &str,
+) -> anyhow::Result<()> {
+    let url = format!("{plex_url}/library/sections/{section_key}/emptyTrash");
+    tracing::debug!(target_url = %url, section_key, "emptying plex section trash");
+    let response = http
+        .send(profiles::PLEX, |client| {
+            client
+                .put(&url)
+                .header("x-plex-token", token)
+                .header("accept", "application/json")
+        })
+        .await?;
+    response.error_for_status()?;
     Ok(())
 }
 

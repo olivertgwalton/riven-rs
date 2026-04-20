@@ -192,6 +192,30 @@ pub async fn get_media_entries(pool: &PgPool, media_item_id: i64) -> Result<Vec<
     .await?)
 }
 
+/// Like `get_media_entries` but walks the full media tree rooted at `root_id`.
+/// Needed for season-level IDs where entries are stored on child episodes.
+pub async fn get_media_entries_recursive(
+    pool: &PgPool,
+    root_id: i64,
+) -> Result<Vec<FileSystemEntry>> {
+    Ok(sqlx::query_as::<_, FileSystemEntry>(
+        "WITH RECURSIVE media_tree AS (
+             SELECT id FROM media_items WHERE id = $1
+             UNION
+             SELECT child.id
+             FROM media_items child
+             INNER JOIN media_tree parent ON child.parent_id = parent.id
+         )
+         SELECT fe.*
+         FROM filesystem_entries fe
+         INNER JOIN media_tree mt ON fe.media_item_id = mt.id
+         WHERE fe.entry_type = 'media'",
+    )
+    .bind(root_id)
+    .fetch_all(pool)
+    .await?)
+}
+
 pub async fn get_media_entry_paths_for_items(
     pool: &PgPool,
     root_ids: &[i64],

@@ -36,7 +36,7 @@ impl Default for LogSettings {
             enabled: true,
             level: "info".to_string(),
             rotation: "hourly".to_string(),
-            max_files: 72,
+            max_files: 5,
             vfs_debug_logging: false,
         }
     }
@@ -54,14 +54,18 @@ pub async fn load_log_settings(pool: &sqlx::PgPool) -> anyhow::Result<LogSetting
         .unwrap_or(true);
 
     Ok(LogSettings {
-        enabled: plugin_enabled && settings.get("logging_enabled").map(is_truthy).unwrap_or(true),
+        enabled: plugin_enabled
+            && settings
+                .get("logging_enabled")
+                .map(is_truthy)
+                .unwrap_or(true),
         level: settings.get_or("log_level", "info"),
         rotation: settings.get_or("log_rotation", "hourly"),
         max_files: settings
             .get("log_max_files")
             .and_then(|value| value.parse::<usize>().ok())
             .filter(|value| *value > 0)
-            .unwrap_or(72),
+            .unwrap_or(5),
         vfs_debug_logging: settings
             .get("vfs_debug_logging")
             .map(is_truthy)

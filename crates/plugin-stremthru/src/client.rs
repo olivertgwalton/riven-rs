@@ -80,9 +80,9 @@ pub async fn check_cache(
     }
 
     for result in &fetched_results {
-        // Only cache positive results. Negative/unknown-not-available statuses are ephemeral —
-        // a torrent not cached now may become cached minutes later, so we never write those to
-        // Redis. Positive results (cached/downloaded/unknown) are stable enough for the 24h TTL.
+        // Only cache stable results. Ephemeral statuses (downloading, queued, etc.) are skipped
+        // so they're re-checked next scrape pass. Unknown covers unrecognised status strings —
+        // cached to avoid hammering the API, but not treated as a positive cache hit for dispatch.
         if !matches!(
             result.status,
             riven_core::types::TorrentStatus::Cached

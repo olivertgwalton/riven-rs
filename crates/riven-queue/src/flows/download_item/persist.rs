@@ -1,3 +1,4 @@
+use std::sync::atomic::Ordering;
 use std::time::Instant;
 
 use riven_core::events::RivenEvent;
@@ -488,6 +489,10 @@ pub async fn persist_season(
         return SeasonPersistOutcome::Partial;
     }
 
+    queue
+        .filesystem_settings_revision
+        .fetch_add(1, Ordering::SeqCst);
+
     let duration = start_time.elapsed();
     let display_title = format!("{} - {}", show.title, item.title);
     queue
@@ -769,6 +774,12 @@ pub async fn finalize_download_success(
     LibraryOrchestrator::new(queue)
         .sync_item_request_state(item)
         .await;
+
+    // Invalidate VFS readdir/entry caches so media servers that scan immediately
+    // after this event see the new file rather than a stale 30-second cache.
+    queue
+        .filesystem_settings_revision
+        .fetch_add(1, Ordering::SeqCst);
 
     let duration = start_time.elapsed();
     queue
