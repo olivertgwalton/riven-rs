@@ -7,7 +7,6 @@ use log::LevelFilter;
 use chrono::Local;
 use riven_core::settings::PluginSettings;
 use tokio::sync::broadcast;
-use tracing::field::{Field, Visit};
 use tracing::{Event, Subscriber};
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_appender::rolling::{RollingFileAppender, Rotation};
@@ -114,7 +113,11 @@ pub fn init_logging(
         .with_ansi(false)
         .json()
         .with_filter(gate(&enabled));
-    let broadcast_layer = BroadcastLogLayer { tx: log_tx }.with_filter(gate(&enabled));
+    let broadcast_layer = tracing_subscriber::fmt::layer()
+        .event_format(RivenFormatter)
+        .with_ansi(false)
+        .with_writer(BroadcastMakeWriter { tx: log_tx })
+        .with_filter(gate(&enabled));
 
     registry
         .with(console_layer)
@@ -253,57 +256,46 @@ where
     }
 }
 
-pub struct BroadcastLogLayer {
-    pub tx: broadcast::Sender<String>,
+/// A `MakeWriter` that buffers each log event and sends the completed line to a broadcast channel.
+#[derive(Clone)]
+struct BroadcastMakeWriter {
+    tx: broadcast::Sender<String>,
 }
 
-impl<S: tracing::Subscriber> Layer<S> for BroadcastLogLayer {
-    fn on_event(
-        &self,
-        event: &tracing::Event<'_>,
-        _ctx: tracing_subscriber::layer::Context<'_, S>,
-    ) {
-        let meta = event.metadata();
-        let raw_target = meta.target();
+struct BroadcastWriter {
+    tx: broadcast::Sender<String>,
+    buf: Vec<u8>,
+}
 
-        let mut visitor = MessageVisitor::default();
-        event.record(&mut visitor);
+impl std::io::Write for BroadcastWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.buf.extend_from_slice(buf);
+        Ok(buf.len())
+    }
 
-        let entry = serde_json::json!({
-            "timestamp": chrono::Utc::now().to_rfc3339(),
-            "level": meta.level().to_string().to_lowercase(),
-            "message": visitor.message,
-            "target": raw_target,
-        });
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
 
-        if let Ok(json) = serde_json::to_string(&entry) {
-            let _ = self.tx.send(json);
+impl Drop for BroadcastWriter {
+    fn drop(&mut self) {
+        if let Ok(s) = String::from_utf8(std::mem::take(&mut self.buf)) {
+            let line = s.trim_end_matches('\n').trim_end_matches('\r').to_string();
+            if !line.is_empty() {
+                let _ = self.tx.send(line);
+            }
         }
     }
 }
 
-#[derive(Default)]
-struct MessageVisitor {
-    message: String,
-}
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for BroadcastMakeWriter {
+    type Writer = BroadcastWriter;
 
-impl Visit for MessageVisitor {
-    fn record_str(&mut self, field: &Field, value: &str) {
-        if field.name() == "message" {
-            self.message = value.to_string();
-        }
-    }
-
-    fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
-        if field.name() == "message" {
-            let s = format!("{value:?}");
-            self.message = if s.starts_with('"') && s.ends_with('"') && s.len() >= 2 {
-                s[1..s.len() - 1]
-                    .replace("\\\"", "\"")
-                    .replace("\\\\", "\\")
-            } else {
-                s
-            };
+    fn make_writer(&'a self) -> Self::Writer {
+        BroadcastWriter {
+            tx: self.tx.clone(),
+            buf: Vec::new(),
         }
     }
 }
