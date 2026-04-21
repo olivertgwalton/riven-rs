@@ -27,7 +27,7 @@ impl ServiceState {
 
     pub(super) async fn acquire_slot(&self) {
         loop {
-            let wait = self.limiter.lock().next_wait(self.profile);
+            let wait = self.limiter.lock().next_wait(&self.profile);
             match wait {
                 Some(d) => sleep(d).await,
                 None => return,
@@ -48,7 +48,7 @@ struct LimiterState {
 }
 
 impl LimiterState {
-    fn next_wait(&mut self, profile: HttpServiceProfile) -> Option<Duration> {
+    fn next_wait(&mut self, profile: &HttpServiceProfile) -> Option<Duration> {
         let now = Instant::now();
 
         if let Some(paused_until) = self.paused_until {

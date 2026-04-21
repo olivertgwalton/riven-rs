@@ -45,6 +45,10 @@ pub async fn validate_api_key(
             crate::http::HttpServiceProfile::new("plugin_validation"),
             |client| client.get(url).header(header, api_key),
         )
-        .await;
-    Ok(resp.is_ok())
+        .await?;
+    let status = resp.status();
+    if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+        return Ok(false);
+    }
+    Ok(true)
 }

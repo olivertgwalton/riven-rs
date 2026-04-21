@@ -28,11 +28,7 @@ impl VfsLibraryLayout {
                 Some(ActiveLibraryProfile {
                     key,
                     exclusive: profile.exclusive,
-                    segments: normalized
-                        .trim_start_matches('/')
-                        .split('/')
-                        .map(ToString::to_string)
-                        .collect(),
+                    segments: split_path(&normalized),
                     library_path: normalized,
                 })
             })

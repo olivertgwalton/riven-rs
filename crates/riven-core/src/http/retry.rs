@@ -29,7 +29,7 @@ fn is_transient(e: &reqwest::Error) -> bool {
             }
             src = err.source();
         }
-        return true;
+        return false;
     }
     false
 }
@@ -121,7 +121,7 @@ fn parse_discord_rate_limit_pause(headers: &HeaderMap) -> Option<Duration> {
 }
 
 pub(super) fn parse_rate_limit_pause(
-    profile: HttpServiceProfile,
+    profile: &HttpServiceProfile,
     status: StatusCode,
     headers: &HeaderMap,
 ) -> Option<Duration> {
@@ -170,7 +170,7 @@ where
             Err(e) if !is_last && is_transient(&e) => {
                 let delay = with_jitter(Duration::from_secs(BACKOFF_BASE_SECS * (1 << attempt)));
                 tracing::debug!(
-                    service = service.map(|s| s.profile.name),
+                    service = service.map(|s| s.profile.name.as_ref()),
                     attempt = attempt + 1,
                     delay_secs = delay.as_secs(),
                     error = %e,
@@ -217,7 +217,7 @@ mod tests {
                 .expect("header should parse"),
         );
 
-        let pause = parse_rate_limit_pause(TRAKT, StatusCode::TOO_MANY_REQUESTS, &headers)
+        let pause = parse_rate_limit_pause(&TRAKT, StatusCode::TOO_MANY_REQUESTS, &headers)
             .expect("pause should be parsed");
 
         assert!(pause >= Duration::from_secs(80));
@@ -230,7 +230,7 @@ mod tests {
         headers.insert("X-RateLimit-Reset-After", "1.25".parse().unwrap());
 
         let pause = parse_rate_limit_pause(
-            super::super::profiles::DISCORD_WEBHOOK,
+            &super::super::profiles::DISCORD_WEBHOOK,
             StatusCode::OK,
             &headers,
         )

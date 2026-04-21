@@ -19,7 +19,7 @@ pub struct CacheCheckResult {
     pub hash: String,
     /// Which debrid store this result came from. Set by the plugin after reading
     /// from Redis or the live API; not persisted to Redis itself.
-    #[serde(default)]
+    #[serde(skip_serializing, default)]
     pub store: String,
     pub status: TorrentStatus,
     pub files: Vec<CacheCheckFile>,

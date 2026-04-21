@@ -65,7 +65,14 @@ impl PluginRegistry {
         redis: redis::aio::ConnectionManager,
     ) {
         let plugin: Arc<dyn Plugin> = Arc::from(plugin);
-        let valid = enabled && plugin.validate(&settings, &http).await.unwrap_or(false);
+        let valid = enabled
+            && match plugin.validate(&settings, &http).await {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::error!(plugin = plugin.name(), error = %e, "plugin validation error");
+                    false
+                }
+            };
 
         log_plugin_state(
             plugin.name(),
@@ -90,34 +97,38 @@ impl PluginRegistry {
         enabled: bool,
         db_override: &serde_json::Value,
     ) -> bool {
+        let extracted = {
+            let mut plugins = self.plugins.write().await;
+            let Some(active) = plugins.iter_mut().find(|p| p.plugin.name() == name) else {
+                return false;
+            };
+            let mut new_settings = active.context.settings.clone();
+            new_settings.merge_db_override(db_override);
+            let plugin = Arc::clone(&active.plugin);
+            let http = active.context.http.clone();
+            let db_pool = active.context.db_pool.clone();
+            let redis = active.context.redis.clone();
+            (plugin, new_settings, http, db_pool, redis)
+        };
+
+        let (plugin, new_settings, http, db_pool, redis) = extracted;
+        let valid = enabled
+            && match plugin.validate(&new_settings, &http).await {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::error!(plugin = name, error = %e, "plugin revalidation error");
+                    false
+                }
+            };
+
         let mut plugins = self.plugins.write().await;
         let Some(active) = plugins.iter_mut().find(|p| p.plugin.name() == name) else {
             return false;
         };
-
-        let mut new_settings = active.context.settings.clone();
-        new_settings.merge_db_override(db_override);
-        let valid = enabled
-            && active
-                .plugin
-                .validate(&new_settings, &active.context.http)
-                .await
-                .unwrap_or(false);
-        active.context = Arc::new(PluginContext::new(
-            new_settings,
-            active.context.http.clone(),
-            active.context.db_pool.clone(),
-            active.context.redis.clone(),
-        ));
+        active.context = Arc::new(PluginContext::new(new_settings, http, db_pool, redis));
         active.enabled = enabled;
         active.valid = valid;
-        log_plugin_state(
-            name,
-            enabled,
-            valid,
-            "revalidated successfully",
-            "revalidation failed",
-        );
+        log_plugin_state(name, enabled, valid, "revalidated successfully", "revalidation failed");
         valid
     }
 
@@ -214,16 +225,21 @@ impl PluginRegistry {
 
     /// Validate a plugin against its current settings without mutating state.
     pub async fn validate_plugin_current(&self, name: &str) -> bool {
-        let plugins = self.plugins.read().await;
-        if let Some(active) = plugins.iter().find(|p| p.plugin.name() == name) {
-            active
-                .plugin
-                .validate(&active.context.settings, &active.context.http)
-                .await
-                .unwrap_or(false)
-        } else {
-            false
-        }
+        let target = self
+            .plugins
+            .read()
+            .await
+            .iter()
+            .find(|p| p.plugin.name() == name)
+            .map(|active| (Arc::clone(&active.plugin), Arc::clone(&active.context)));
+
+        let Some((plugin, context)) = target else {
+            return false;
+        };
+        plugin
+            .validate(&context.settings, &context.http)
+            .await
+            .unwrap_or(false)
     }
 
     /// Call a plugin's `query_content` with the given query type and args.
@@ -233,15 +249,16 @@ impl PluginRegistry {
         query: &str,
         args: &serde_json::Value,
     ) -> anyhow::Result<ContentServiceResponse> {
-        let plugins = self.plugins.read().await;
-        let active = plugins
+        let target = self
+            .plugins
+            .read()
+            .await
             .iter()
             .find(|p| p.plugin.name() == name)
+            .map(|active| (Arc::clone(&active.plugin), Arc::clone(&active.context)))
             .ok_or_else(|| anyhow::anyhow!("plugin '{name}' not found"))?;
-        active
-            .plugin
-            .query_content(query, args, &active.context)
-            .await
+        let (plugin, context) = target;
+        plugin.query_content(query, args, &context).await
     }
 
     pub async fn valid_plugin_names(&self) -> Vec<String> {

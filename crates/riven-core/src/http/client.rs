@@ -14,7 +14,7 @@ use super::{HttpServiceProfile, RateLimitedError};
 #[derive(Clone)]
 pub struct HttpClient {
     inner: reqwest::Client,
-    services: Arc<DashMap<&'static str, Arc<ServiceState>>>,
+    services: Arc<DashMap<String, Arc<ServiceState>>>,
     inflight: Arc<DashMap<String, Arc<InFlightRequest>>>,
 }
 
@@ -39,11 +39,11 @@ impl HttpClient {
     where
         F: Fn(&reqwest::Client) -> reqwest::RequestBuilder,
     {
-        let state = self.service_state(profile);
+        let state = self.service_state(&profile);
         let response =
             execute_with_retry(&self.inner, Some(&state), profile.attempts, make_request).await?;
 
-        if let Some(delay) = parse_rate_limit_pause(profile, response.status(), response.headers())
+        if let Some(delay) = parse_rate_limit_pause(&profile, response.status(), response.headers())
         {
             state.register_retry_after(delay);
         }
@@ -105,14 +105,14 @@ impl HttpClient {
         F: Fn(&reqwest::Client) -> reqwest::RequestBuilder,
     {
         let response = self
-            .send_data(profile, Some(dedupe_key), make_request)
+            .send_data(profile.clone(), Some(dedupe_key), make_request)
             .await?;
 
         if response.status() == StatusCode::TOO_MANY_REQUESTS {
-            let delay = parse_rate_limit_pause(profile, response.status(), response.headers())
+            let delay = parse_rate_limit_pause(&profile, response.status(), response.headers())
                 .unwrap_or_else(|| Duration::from_secs(BACKOFF_BASE_SECS));
             tracing::warn!(
-                service = profile.name,
+                service = profile.name.as_ref(),
                 delay_secs = delay.as_secs(),
                 "rate limited (429); freeing worker slot and deferring to job-level retry"
             );

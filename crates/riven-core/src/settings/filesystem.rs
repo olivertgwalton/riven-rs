@@ -123,8 +123,14 @@ impl FilesystemFilterRules {
         metadata: &FilesystemItemMetadata,
         content_type: FilesystemContentType,
     ) -> bool {
+        let genres_lower: Vec<String> = metadata
+            .genres
+            .iter()
+            .map(|g| g.trim().to_ascii_lowercase())
+            .filter(|g| !g.is_empty())
+            .collect();
         self.allows_content_type(content_type)
-            && matches_token_filter(&metadata.genres, &self.genres)
+            && matches_token_filter(&genres_lower, &self.genres)
             && matches_text_filter(metadata.network.as_deref(), &self.networks)
             && matches_text_filter(metadata.language.as_deref(), &self.languages)
             && matches_text_filter(metadata.country.as_deref(), &self.countries)

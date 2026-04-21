@@ -268,8 +268,8 @@ async fn get_active_sessions(
                     .map(map_media_server_playback_state)
                     .unwrap_or(PlaybackState::Unknown),
                 playback_method,
-                position_seconds: position.map(|value| value / 10_000_000),
-                duration_seconds: duration.map(|value| value / 10_000_000),
+                position_seconds: position.and_then(|v| u64::try_from(v / 10_000_000).ok()),
+                duration_seconds: duration.and_then(|v| u64::try_from(v / 10_000_000).ok()),
                 device_name: session.device_name,
                 client_name: session.client,
                 image_url: item_id

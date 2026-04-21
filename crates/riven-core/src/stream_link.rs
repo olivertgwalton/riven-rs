@@ -46,5 +46,5 @@ pub fn request_stream_url_blocking(
     link_request_tx: &tokio::sync::mpsc::Sender<LinkRequest>,
     runtime: &tokio::runtime::Handle,
 ) -> Option<String> {
-    runtime.block_on(request_stream_url(download_url, provider, link_request_tx))
+    tokio::task::block_in_place(|| runtime.block_on(request_stream_url(download_url, provider, link_request_tx)))
 }

@@ -471,8 +471,8 @@ async fn get_active_sessions(
                 episode_number: index,
                 playback_state,
                 playback_method,
-                position_seconds: view_offset.map(|value| value / 1000),
-                duration_seconds: duration.map(|value| value / 1000),
+                position_seconds: view_offset.and_then(|v| u64::try_from(v / 1000).ok()),
+                duration_seconds: duration.and_then(|v| u64::try_from(v / 1000).ok()),
                 device_name,
                 client_name,
                 image_url: thumb

@@ -1,20 +1,36 @@
+use std::borrow::Cow;
 use std::time::Duration;
 
 use super::RateLimit;
 
 pub const DEFAULT_ATTEMPTS: u32 = 3;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// `name` is `Cow<'static, str>` so that well-known services can use zero-cost
+/// `&'static str` literals while unknown runtime stores (e.g. from config) can
+/// supply an owned `String` without leaking memory or losing identity in logs.
+/// The type does not implement `Copy` because `Cow::Owned` contains a `String`.
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct HttpServiceProfile {
-    pub name: &'static str,
+    pub name: Cow<'static, str>,
     pub attempts: u32,
     pub rate_limit: Option<RateLimit>,
 }
 
 impl HttpServiceProfile {
+    /// Create a profile with a `'static` name (zero-cost borrow).
     pub const fn new(name: &'static str) -> Self {
         Self {
-            name,
+            name: Cow::Borrowed(name),
+            attempts: DEFAULT_ATTEMPTS,
+            rate_limit: None,
+        }
+    }
+
+    /// Create a profile with a runtime-owned name for stores not covered by a
+    /// named constant.
+    pub fn new_owned(name: String) -> Self {
+        Self {
+            name: Cow::Owned(name),
             attempts: DEFAULT_ATTEMPTS,
             rate_limit: None,
         }
@@ -83,6 +99,6 @@ pub fn debrid_service(store: &str) -> HttpServiceProfile {
         "alldebrid" => ALLDEBRID,
         "debridlink" => DEBRIDLINK,
         "premiumize" => PREMIUMIZE,
-        _ => HttpServiceProfile::new("debrid"),
+        _ => HttpServiceProfile::new_owned(store.to_owned()),
     }
 }
