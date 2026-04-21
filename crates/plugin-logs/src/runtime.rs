@@ -265,9 +265,6 @@ impl<S: tracing::Subscriber> Layer<S> for BroadcastLogLayer {
     ) {
         let meta = event.metadata();
         let raw_target = meta.target();
-        if !raw_target.starts_with("riven") && !raw_target.starts_with("plugin_") {
-            return;
-        }
 
         let mut visitor = MessageVisitor::default();
         event.record(&mut visitor);
@@ -276,7 +273,7 @@ impl<S: tracing::Subscriber> Layer<S> for BroadcastLogLayer {
             "timestamp": chrono::Utc::now().to_rfc3339(),
             "level": meta.level().to_string().to_lowercase(),
             "message": visitor.message,
-            "target": target_display(raw_target),
+            "target": raw_target,
         });
 
         if let Ok(json) = serde_json::to_string(&entry) {
