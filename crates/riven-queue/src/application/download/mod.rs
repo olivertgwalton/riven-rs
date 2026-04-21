@@ -313,7 +313,7 @@ pub async fn run(id: i64, job: &DownloadJob, queue: &JobQueue) {
     };
 
     let (max_size_bytes, min_size_bytes) = load_bitrate_limits(queue, &item).await;
-    let candidates: Vec<CachedCandidate<'_>> = if ranked.cache_checked {
+    let mut candidates: Vec<CachedCandidate<'_>> = if ranked.cache_checked {
         build_cached_candidates(
             id,
             &item,
@@ -333,6 +333,35 @@ pub async fn run(id: i64, job: &DownloadJob, queue: &JobQueue) {
             })
             .collect()
     };
+
+    // For manually chosen streams, ensure the preferred hash is always in candidates even
+    // if the download-job cache check didn't confirm it (e.g. Redis miss, transient API
+    // variance). The user explicitly selected this stream from the scrape UI where it was
+    // already verified as cached; we trust that choice and let attempt_download do the
+    // final check. Empty stores triggers an on-demand cache check in the plugin.
+    if let Some(preferred) = job.preferred_info_hash.as_deref() {
+        if !candidates
+            .iter()
+            .any(|c| c.stream.info_hash.eq_ignore_ascii_case(preferred))
+        {
+            if let Some(stream) = all_streams
+                .iter()
+                .find(|s| s.info_hash.eq_ignore_ascii_case(preferred))
+            {
+                let stores = ranked
+                    .cached_info
+                    .get(&stream.info_hash.to_lowercase())
+                    .cloned()
+                    .unwrap_or_default();
+                tracing::debug!(
+                    id,
+                    info_hash = %stream.info_hash,
+                    "preferred stream not in cache-checked candidates; including for direct attempt"
+                );
+                candidates.push(CachedCandidate { stream, stores });
+            }
+        }
+    }
 
     if let Some(preferred_info_hash) = job.preferred_info_hash.as_ref() {
         let _ = run_preferred_stream(
