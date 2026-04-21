@@ -254,6 +254,76 @@ impl JobQueue {
         }
     }
 
+    // ── Scheduled scrape ──────────────────────────────────────────────────────
+
+    pub async fn schedule_scrape_at(&self, job: ScrapeJob, run_at: DateTime<Utc>) {
+        let now = Utc::now();
+        if run_at <= now {
+            self.clear_scheduled_scrape(job.id).await;
+            self.push_scrape(job).await;
+            return;
+        }
+
+        let config = self.scrape_storage.get_config().clone();
+        let task_id = scheduled_scrape_task_id(job.id).to_string();
+        let meta_key = format!("{}:{}", config.job_meta_hash(), task_id);
+        let payload = match serde_json::to_vec(&job) {
+            Ok(p) => p,
+            Err(error) => {
+                tracing::error!(id = job.id, error = %error, "failed to serialize scheduled scrape job");
+                return;
+            }
+        };
+
+        let mut conn = self.redis.clone();
+        let result: redis::RedisResult<()> = redis::pipe()
+            .atomic()
+            .hset(config.job_data_hash(), &task_id, payload)
+            .del(&meta_key)
+            .hset_multiple(
+                &meta_key,
+                &[
+                    ("attempts", "0"),
+                    ("max_attempts", "5"),
+                    ("status", "Pending"),
+                ],
+            )
+            .zrem(config.scheduled_jobs_set(), &task_id)
+            .zrem(config.done_jobs_set(), &task_id)
+            .zrem(config.dead_jobs_set(), &task_id)
+            .zrem(config.failed_jobs_set(), &task_id)
+            .lrem(config.active_jobs_list(), 0, &task_id)
+            .zadd(config.scheduled_jobs_set(), &task_id, run_at.timestamp())
+            .query_async(&mut conn)
+            .await;
+
+        match result {
+            Ok(()) => tracing::info!(id = job.id, run_at = %run_at, "scheduled delayed scrape job"),
+            Err(error) => {
+                tracing::error!(id = job.id, error = %error, "failed to schedule delayed scrape job")
+            }
+        }
+    }
+
+    pub async fn clear_scheduled_scrape(&self, id: i64) {
+        let config = self.scrape_storage.get_config().clone();
+        let task_id = scheduled_scrape_task_id(id).to_string();
+        let meta_key = format!("{}:{}", config.job_meta_hash(), task_id);
+        let mut conn = self.redis.clone();
+
+        let result: redis::RedisResult<()> = redis::pipe()
+            .atomic()
+            .zrem(config.scheduled_jobs_set(), &task_id)
+            .hdel(config.job_data_hash(), &task_id)
+            .del(&meta_key)
+            .query_async(&mut conn)
+            .await;
+
+        if let Err(error) = result {
+            tracing::error!(id, error = %error, "failed to clear scheduled scrape job");
+        }
+    }
+
     // ── Scheduled index ───────────────────────────────────────────────────────
 
     pub async fn schedule_index_at(&self, job: IndexJob, run_at: DateTime<Utc>) {
@@ -677,10 +747,17 @@ fn dedup_key(prefix: &str, id: i64) -> String {
     format!("riven:dedup:{prefix}:{id}")
 }
 
-// ── Scheduled index task ID ───────────────────────────────────────────────────
+// ── Scheduled task IDs ────────────────────────────────────────────────────────
 
+// "RIVENIND" in ASCII
 const SCHEDULED_INDEX_TASK_NAMESPACE: u128 = 0x524956454e494e44_0000000000000000;
+// "RIVENSCR" in ASCII
+const SCHEDULED_SCRAPE_TASK_NAMESPACE: u128 = 0x524956454e534352_0000000000000000;
 
 fn scheduled_index_task_id(id: i64) -> Ulid {
     Ulid::from(SCHEDULED_INDEX_TASK_NAMESPACE | id as u64 as u128)
+}
+
+fn scheduled_scrape_task_id(id: i64) -> Ulid {
+    Ulid::from(SCHEDULED_SCRAPE_TASK_NAMESPACE | id as u64 as u128)
 }

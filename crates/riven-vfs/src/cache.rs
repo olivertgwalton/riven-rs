@@ -8,7 +8,7 @@ pub type CacheKey = (u64, u64, u64);
 
 /// Shared byte-range cache keyed by `(ino, start_byte, end_byte)`.
 ///
-/// This intentionally mirrors the TypeScript VFS shape: one shared LRU for
+/// One shared LRU for
 /// fetched chunks, without extra in-flight dedupe or sharding layers.
 pub struct RangeCache {
     inner: Mutex<LruCache<CacheKey, Bytes>>,

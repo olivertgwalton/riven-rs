@@ -1,4 +1,3 @@
-/// VFS configuration constants matching the TypeScript implementation.
 pub mod vfs {
     /// Kernel block size — the byte length the OS reads/writes at a time.
     pub const BLOCK_SIZE: u64 = 131_072; // 128 KB

@@ -405,6 +405,7 @@ impl<'a> LibraryOrchestrator<'a> {
     }
 
     async fn fan_out_download_failure_for_item(&self, item: &MediaItem) {
+        let retry_at = Utc::now() + Duration::minutes(30);
         match item.item_type {
             MediaItemType::Show => {
                 // Fan-out is intentionally aggressive here — includes all requested seasons
@@ -418,7 +419,7 @@ impl<'a> LibraryOrchestrator<'a> {
                                 item.imdb_id.clone(),
                             );
                             job.auto_download = true;
-                            self.queue.push_scrape(job)
+                            self.queue.schedule_scrape_at(job, retry_at)
                         });
                         future::join_all(jobs).await;
                     }
@@ -436,11 +437,14 @@ impl<'a> LibraryOrchestrator<'a> {
                 match repo::get_incomplete_episodes_for_season(&self.queue.db_pool, item.id).await {
                     Ok(episodes) => {
                         let jobs = episodes.iter().map(|episode| {
-                            self.queue.push_scrape(ScrapeJob::for_episode(
-                                episode,
-                                show_title.clone(),
-                                show_imdb_id.clone(),
-                            ))
+                            self.queue.schedule_scrape_at(
+                                ScrapeJob::for_episode(
+                                    episode,
+                                    show_title.clone(),
+                                    show_imdb_id.clone(),
+                                ),
+                                retry_at,
+                            )
                         });
                         future::join_all(jobs).await;
                     }

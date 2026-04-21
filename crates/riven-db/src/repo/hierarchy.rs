@@ -76,8 +76,7 @@ pub async fn count_episodes_in_season(pool: &PgPool, season_id: i64) -> Result<i
 /// Count the total expected downloadable episode files for a show.
 ///
 /// Only processable seasons (not unreleased/ongoing, not specials, is_requested) are counted.
-/// For continuing shows the last season is excluded (still airing). Mirrors the TypeScript
-/// `expectedFileCount` field resolver on `Show`.
+/// For continuing shows the last season is excluded (still airing).
 ///
 /// Executes as a single SQL query.
 pub async fn count_expected_files_for_show(pool: &PgPool, show_id: i64) -> Result<i64> {
