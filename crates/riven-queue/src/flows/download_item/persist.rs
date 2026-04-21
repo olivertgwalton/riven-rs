@@ -10,12 +10,10 @@ use riven_db::repo;
 /// Returns true when the error is a FK violation caused by the media item being
 /// deleted while a background persist task was still running.
 fn is_item_deleted_fk_error(err: &anyhow::Error) -> bool {
-    err.downcast_ref::<sqlx::Error>()
-        .and_then(|e| match e {
-            sqlx::Error::Database(db) => db.constraint(),
-            _ => None,
-        })
-        == Some("filesystem_entries_media_item_id_fkey")
+    err.downcast_ref::<sqlx::Error>().and_then(|e| match e {
+        sqlx::Error::Database(db) => db.constraint(),
+        _ => None,
+    }) == Some("filesystem_entries_media_item_id_fkey")
 }
 
 use super::helpers::{
@@ -94,6 +92,7 @@ pub async fn persist_movie(
     resolution: Option<&str>,
     path_tag: Option<&str>,
     profile_name: Option<&str>,
+    skip_bitrate_check: bool,
 ) -> bool {
     let id = item.id;
 
@@ -132,7 +131,7 @@ pub async fn persist_movie(
     };
 
     let config = queue.downloader_config.read().await;
-    if !config.movie_passes(file.file_size, item.runtime) {
+    if !skip_bitrate_check && !config.movie_passes(file.file_size, item.runtime) {
         drop(config);
         handle_bitrate_failure(id, info_hash, file.file_size, item.runtime, "movie", queue).await;
         return false;
@@ -197,6 +196,7 @@ pub async fn persist_episode(
     resolution: Option<&str>,
     path_tag: Option<&str>,
     profile_name: Option<&str>,
+    skip_bitrate_check: bool,
 ) -> bool {
     let id = item.id;
 
@@ -255,10 +255,17 @@ pub async fn persist_episode(
 
     let largest = matched.iter().max_by_key(|(f, _)| f.file_size).unwrap().0;
     let config = queue.downloader_config.read().await;
-    if !config.episode_passes(largest.file_size, item.runtime) {
+    if !skip_bitrate_check && !config.episode_passes(largest.file_size, item.runtime) {
         drop(config);
-        handle_bitrate_failure(id, info_hash, largest.file_size, item.runtime, "episode", queue)
-            .await;
+        handle_bitrate_failure(
+            id,
+            info_hash,
+            largest.file_size,
+            item.runtime,
+            "episode",
+            queue,
+        )
+        .await;
         return false;
     }
     drop(config);
@@ -393,10 +400,6 @@ pub async fn persist_season(
         .map(|f| (f, parse_file_path(&f.filename)))
         .collect();
 
-    // Per-episode bitrate check is intentionally omitted here: riven-ts's validation only
-    // applies bitrate to standalone Episode items, not to files inside a Season/Show pack
-    // (see validate-torrent-files.ts: the bitrate assert lives inside the `item.__typename
-    // === "Episode"` branch).
     let mut episode_matches: Vec<(&MediaItem, Vec<(&DownloadFile, riven_rank::ParsedData)>)> =
         Vec::with_capacity(episodes.len());
     for ep in &episodes {
@@ -537,6 +540,7 @@ pub async fn persist_supplied_download(
                 selected_stream_resolution(stream),
                 None,
                 None,
+                true,
             )
             .await
             {
@@ -565,6 +569,7 @@ pub async fn persist_supplied_download(
                 selected_stream_resolution(stream),
                 None,
                 None,
+                true,
             )
             .await
             {
@@ -700,7 +705,10 @@ async fn persist_supplied_show_download(
         {
             Ok(_) => {}
             Err(e) if is_item_deleted_fk_error(&e) => {
-                tracing::info!(ep_id = episode.id, "episode was deleted mid-persist, skipping");
+                tracing::info!(
+                    ep_id = episode.id,
+                    "episode was deleted mid-persist, skipping"
+                );
                 continue;
             }
             Err(e) => return Err(e),

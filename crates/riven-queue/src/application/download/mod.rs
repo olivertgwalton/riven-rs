@@ -8,7 +8,7 @@ use riven_core::events::{HookResponse, RivenEvent};
 use riven_core::types::{self, *};
 use riven_db::entities::{MediaItem, Stream};
 use riven_db::repo;
-use riven_rank::RankSettings;
+use riven_rank::{QualityProfile, RankSettings};
 use serde::Deserialize;
 
 use crate::context::{DownloadHierarchyContext, load_download_hierarchy_context};
@@ -213,9 +213,6 @@ pub async fn run_rank_streams(id: i64, job: &RankStreamsJob, queue: &JobQueue) {
         })
         .map(|stream| stream.magnet.clone());
 
-    // Persist the ranked result for DownloadJob to consume. DownloadJob will
-    // reload the item and streams independently (riven-ts `findOneOrFail`
-    // parity), so we only hand off the expensive bits — cache-check results.
     store_rank_result(
         queue,
         id,
@@ -244,7 +241,7 @@ pub async fn run_rank_streams(id: i64, job: &RankStreamsJob, queue: &JobQueue) {
     queue.push_download(download_job).await;
 }
 
-/// Step 2 of the download flow — riven-ts `find-valid-torrent` + `download-item`
+/// find-valid-torrent` + `download-item`
 /// fused. Reloads the item (matches `findOneOrFail` semantics at the step
 /// boundary), loads the ranked result produced by `run_rank_streams`, and
 /// walks cached candidates until one downloads + persists successfully.
@@ -274,8 +271,14 @@ pub async fn run(id: i64, job: &DownloadJob, queue: &JobQueue) {
         _ => None,
     };
 
-    let active_profiles: Vec<(String, RankSettings)> = load_active_profiles(&queue.db_pool).await;
-    let profile_mode = !active_profiles.is_empty();
+    let mut active_profiles: Vec<(String, RankSettings)> =
+        load_active_profiles(&queue.db_pool).await;
+    if active_profiles.is_empty() {
+        active_profiles.push((
+            "ultra_hd".to_string(),
+            QualityProfile::UltraHd.base_settings().prepare(),
+        ));
+    }
 
     let ranks = queue.resolution_ranks.read().await.clone();
     let all_streams = match repo::get_non_blacklisted_streams(&queue.db_pool, id, &ranks).await {
@@ -312,7 +315,12 @@ pub async fn run(id: i64, job: &DownloadJob, queue: &JobQueue) {
         }
     };
 
-    let (max_size_bytes, min_size_bytes) = load_bitrate_limits(queue, &item).await;
+    let is_manual = job.preferred_info_hash.is_some();
+    let (max_size_bytes, min_size_bytes) = if is_manual {
+        (None, None)
+    } else {
+        load_bitrate_limits(queue, &item).await
+    };
     let mut candidates: Vec<CachedCandidate<'_>> = if ranked.cache_checked {
         build_cached_candidates(
             id,
@@ -374,23 +382,13 @@ pub async fn run(id: i64, job: &DownloadJob, queue: &JobQueue) {
             hierarchy.as_ref(),
         )
         .await;
-    } else if profile_mode {
-        let _ = run_multi_version(
+    } else {
+        let _ = run_downloads(
             id,
             &item,
             queue,
             start_time,
             &active_profiles,
-            &candidates,
-            hierarchy.as_ref(),
-        )
-        .await;
-    } else {
-        let _ = run_single_version(
-            id,
-            &item,
-            queue,
-            start_time,
             &candidates,
             hierarchy.as_ref(),
         )
@@ -401,8 +399,7 @@ pub async fn run(id: i64, job: &DownloadJob, queue: &JobQueue) {
 }
 
 /// Load the media item; return `None` (without emitting a user-visible event)
-/// when it's gone. Matches riven-ts's `findOneOrFail` → `NotFoundError` behavior,
-/// which fails the job without firing a download error to the UI.
+/// when it's gone
 async fn load_item_silently(queue: &JobQueue, id: i64, phase: &str) -> Option<MediaItem> {
     match repo::get_media_item(&queue.db_pool, id).await {
         Ok(Some(item)) => Some(item),
@@ -562,6 +559,7 @@ async fn run_preferred_stream(
         None,
         start_time,
         hierarchy,
+        true,
     )
     .await
     {
@@ -574,12 +572,12 @@ async fn run_preferred_stream(
     true
 }
 
-async fn run_multi_version(
+async fn run_downloads(
     id: i64,
     item: &MediaItem,
     queue: &JobQueue,
     start_time: Instant,
-    active_profiles: &[(String, RankSettings)],
+    profiles: &[(String, RankSettings)],
     candidates: &[CachedCandidate<'_>],
     hierarchy: Option<&DownloadHierarchyContext>,
 ) -> bool {
@@ -590,12 +588,12 @@ async fn run_multi_version(
     let mut any_success = false;
     let mut attempted_hashes: HashSet<String> = HashSet::new();
 
-    for (profile_name, profile_settings) in active_profiles {
+    for (profile_name, profile_settings) in profiles {
         if done_profiles.contains(profile_name.as_str()) {
             tracing::debug!(
                 id,
                 profile = profile_name,
-                "download already exists for active profile, skipping"
+                "profile already downloaded, skipping"
             );
             continue;
         }
@@ -610,19 +608,12 @@ async fn run_multi_version(
             continue;
         }
 
-        let mut terminal = false;
         for candidate in ranked {
             if queue.is_cancelled(id).await {
                 tracing::debug!(id, "item cancelled; aborting candidate loop");
                 return false;
             }
             if attempted_hashes.contains(&candidate.stream.info_hash) {
-                tracing::debug!(
-                    id,
-                    profile = profile_name,
-                    info_hash = %candidate.stream.info_hash,
-                    "skipping already-attempted stream for this profile"
-                );
                 continue;
             }
 
@@ -636,32 +627,20 @@ async fn run_multi_version(
                 Some(profile_name.as_str()),
                 start_time,
                 hierarchy,
+                false,
             )
             .await
             {
                 DownloadAttemptOutcome::Failed => {
                     attempted_hashes.insert(candidate.stream.info_hash.clone());
-                    continue;
                 }
-                DownloadAttemptOutcome::TerminalHandled => {
-                    terminal = true;
-                    break;
-                }
+                DownloadAttemptOutcome::TerminalHandled => return true,
                 DownloadAttemptOutcome::Succeeded => {
                     done_profiles.insert(profile_name.clone());
                     any_success = true;
-                    tracing::debug!(
-                        id,
-                        profile = profile_name,
-                        "downloaded stream for active profile"
-                    );
                     break;
                 }
             }
-        }
-
-        if terminal {
-            return true;
         }
     }
 
@@ -677,14 +656,11 @@ async fn run_multi_version(
         return false;
     }
 
-    if !active_profiles
+    if !profiles
         .iter()
         .all(|(name, _)| done_profiles.contains(name.as_str()))
     {
-        tracing::debug!(
-            id,
-            "downloads for some active profiles are still missing; re-queuing"
-        );
+        tracing::debug!(id, "some profiles still missing a download; re-queuing");
         queue
             .notify(RivenEvent::MediaItemDownloadPartialSuccess { id })
             .await;
@@ -692,64 +668,6 @@ async fn run_multi_version(
 
     finalize_download_success(id, item, queue, start_time, None, None).await;
     true
-}
-
-async fn run_single_version(
-    id: i64,
-    item: &MediaItem,
-    queue: &JobQueue,
-    start_time: Instant,
-    candidates: &[CachedCandidate<'_>],
-    hierarchy: Option<&DownloadHierarchyContext>,
-) -> bool {
-    if candidates.is_empty() {
-        tracing::debug!(id, "no cached+valid streams found in this pass");
-        queue
-            .notify(RivenEvent::MediaItemDownloadError {
-                id,
-                title: item.title.clone(),
-                error: "no cached and valid streams found in this pass".into(),
-            })
-            .await;
-        return false;
-    }
-
-    for candidate in candidates {
-        if queue.is_cancelled(id).await {
-            tracing::debug!(id, "item cancelled; aborting candidate loop");
-            return false;
-        }
-        match attempt_download(
-            id,
-            item,
-            queue,
-            candidate.stream,
-            candidate.stores.clone(),
-            None,
-            None,
-            start_time,
-            hierarchy,
-        )
-        .await
-        {
-            DownloadAttemptOutcome::Failed => continue,
-            DownloadAttemptOutcome::TerminalHandled => return true,
-            DownloadAttemptOutcome::Succeeded => {
-                finalize_download_success(id, item, queue, start_time, None, None).await;
-                return true;
-            }
-        }
-    }
-
-    tracing::debug!(id, title = %item.title, "no valid torrent found after trying cached candidates");
-    queue
-        .notify(RivenEvent::MediaItemDownloadError {
-            id,
-            title: item.title.clone(),
-            error: "no valid torrent found after trying cached candidates".into(),
-        })
-        .await;
-    false
 }
 
 async fn fetch_done_profiles(queue: &JobQueue, id: i64, item_type: MediaItemType) -> Vec<String> {

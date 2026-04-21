@@ -229,9 +229,6 @@ mod tests {
 
     #[test]
     fn test_lev_ratio_toy_story() {
-        // Matches the TS formula: (len_a + len_b - dist) / (len_a + len_b)
-        // a="toy story" (9), b="toy story 1995" (14), dist=5
-        // (9 + 14 - 5) / (9 + 14) = 18 / 23 ≈ 0.7826
         let ratio = lev_ratio("toy story", "toy story 1995");
         assert!(ratio > 0.78 && ratio < 0.79);
 

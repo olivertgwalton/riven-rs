@@ -55,7 +55,10 @@ pub fn build_cached_candidates<'a>(
                 return None;
             }
 
-            Some(CachedCandidate { stream, stores: entries.clone() })
+            Some(CachedCandidate {
+                stream,
+                stores: entries.clone(),
+            })
         })
         .collect()
 }
@@ -73,7 +76,7 @@ pub fn find_preferred_candidate<'a>(
 }
 
 /// Returns all candidates that pass the profile's fetch checks, sorted best-first.
-/// Matches riven-ts: iterate every ranked stream until one succeeds, rather than
+/// Iterate every ranked stream until one succeeds, rather than
 /// giving up after the top pick fails.
 pub fn rank_candidates_for_profile<'a>(
     candidates: &'a [CachedCandidate<'a>],
@@ -192,7 +195,7 @@ fn build_download_candidate_profile(profile: &RankSettings) -> RankSettings {
 
 #[cfg(test)]
 mod tests {
-    use super::{rank_candidates_for_profile, CachedCandidate};
+    use super::{CachedCandidate, rank_candidates_for_profile};
     use riven_core::types::MediaItemType;
     use riven_db::entities::{MediaItem, Stream};
     use riven_rank::RankSettings;
@@ -261,8 +264,14 @@ mod tests {
         let stream_2160p = stream(1, "hash2160", "Shrek.2.2160p.BluRay");
         let stream_1080p = stream(2, "hash1080", "Shrek.2.1080p.BluRay");
         let candidates = vec![
-            CachedCandidate { stream: &stream_2160p, stores: vec![] },
-            CachedCandidate { stream: &stream_1080p, stores: vec![] },
+            CachedCandidate {
+                stream: &stream_2160p,
+                stores: vec![],
+            },
+            CachedCandidate {
+                stream: &stream_1080p,
+                stores: vec![],
+            },
         ];
 
         let best = rank_candidates_for_profile(&candidates, &media_item(), &profile)

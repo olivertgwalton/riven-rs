@@ -9,8 +9,7 @@ use riven_db::entities::MediaItem;
 use riven_db::repo;
 use riven_queue::JobQueue;
 use riven_queue::discovery::{
-    ParseContext, load_active_profiles, load_dubbed_anime_only, load_fallback_rank_settings,
-    rank_streams,
+    ParseContext, load_active_profiles, load_dubbed_anime_only, rank_streams,
 };
 use riven_queue::indexing::apply_indexed_media_item;
 use riven_queue::orchestrator::LibraryOrchestrator;
@@ -97,7 +96,6 @@ pub fn build_discovery_targets(
     indexed: &IndexedMediaItem,
     seasons: Option<&[i32]>,
     profiles: Vec<(String, riven_rank::RankSettings)>,
-    fallback_settings: Option<riven_rank::RankSettings>,
     dubbed_anime_only: bool,
 ) -> Result<Vec<DiscoveryTarget>> {
     let correct_title = indexed
@@ -125,7 +123,6 @@ pub fn build_discovery_targets(
                 correct_title,
                 aliases,
                 profiles,
-                fallback_settings,
                 dubbed_anime_only,
             },
         }]),
@@ -176,7 +173,6 @@ pub fn build_discovery_targets(
                         correct_title: correct_title.clone(),
                         aliases: aliases.clone(),
                         profiles: profiles.clone(),
-                        fallback_settings: fallback_settings.clone(),
                         dubbed_anime_only,
                     },
                 });
@@ -203,11 +199,6 @@ pub async fn discover_streams(
 
     let (profiles, dubbed_anime_only) =
         tokio::join!(load_active_profiles(pool), load_dubbed_anime_only(pool),);
-    let fallback_settings = if profiles.is_empty() {
-        Some(load_fallback_rank_settings(pool).await)
-    } else {
-        None
-    };
 
     let targets = build_discovery_targets(
         item_type,
@@ -215,7 +206,6 @@ pub async fn discover_streams(
         &indexed,
         seasons,
         profiles,
-        fallback_settings,
         dubbed_anime_only,
     )?;
 

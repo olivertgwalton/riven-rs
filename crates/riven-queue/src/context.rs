@@ -6,9 +6,7 @@ use riven_db::entities::{MediaItem, MediaItemHierarchy};
 use riven_db::repo;
 
 use crate::JobQueue;
-use crate::discovery::{
-    ParseContext, load_active_profiles, load_dubbed_anime_only, load_fallback_rank_settings,
-};
+use crate::discovery::{ParseContext, load_active_profiles, load_dubbed_anime_only};
 
 pub struct ShowContext {
     pub title: String,
@@ -154,12 +152,6 @@ pub async fn build_parse_item_context_with_hierarchy(
         load_dubbed_anime_only(db_pool),
     );
 
-    let fallback_settings = if profiles.is_empty() {
-        Some(load_fallback_rank_settings(db_pool).await)
-    } else {
-        None
-    };
-
     let item_title = match (item.item_type, show_title_for_format.as_deref()) {
         (MediaItemType::Season, Some(show_t)) => format!("{show_t} - {}", item.title),
         _ => item.title.clone(),
@@ -180,7 +172,6 @@ pub async fn build_parse_item_context_with_hierarchy(
         correct_title,
         aliases,
         profiles,
-        fallback_settings,
         dubbed_anime_only,
     };
 

@@ -114,7 +114,6 @@ pub async fn compute_state(pool: &PgPool, item: &MediaItem) -> Result<MediaItemS
     }
 }
 
-/// Aggregate child states using the same precedence as the TS subscriber.
 fn aggregate_states(item: &MediaItem, states: &[MediaItemState]) -> Option<MediaItemState> {
     if states.is_empty() {
         return None;

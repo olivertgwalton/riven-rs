@@ -28,6 +28,7 @@ pub async fn attempt_download(
     profile_name: Option<&str>,
     start_time: Instant,
     hierarchy: Option<&DownloadHierarchyContext>,
+    skip_bitrate_check: bool,
 ) -> DownloadAttemptOutcome {
     let info_hash = &stream.info_hash;
     let stream_id = Some(stream.id);
@@ -98,8 +99,7 @@ pub async fn attempt_download(
         (download_result, saw_unavailable)
     }
 
-    let (mut download_result, mut saw_unavailable) =
-        dispatch_once(queue, &event, info_hash).await;
+    let (mut download_result, mut saw_unavailable) = dispatch_once(queue, &event, info_hash).await;
 
     // Retry once after clearing stale cache-check keys. A parallel item can get a stale
     // "cached" hit, call add_torrent, find it's not actually available, and return
@@ -114,7 +114,11 @@ pub async fn attempt_download(
                 "failed to clear stale stremthru cache-check keys before retry"
             );
         } else {
-            tracing::debug!(id, info_hash, "retrying download after clearing stale cache-check");
+            tracing::debug!(
+                id,
+                info_hash,
+                "retrying download after clearing stale cache-check"
+            );
             // Empty `cached_stores` forces the plugin to run an on-demand cache check rather
             // than reusing the stale pre-checked entries from the original dispatch (which
             // are what sent us down the `add_torrent → unavailable` path in the first place).
@@ -149,14 +153,14 @@ pub async fn attempt_download(
     };
     let download = *download;
 
-    // Reload the item before persisting — matches riven-ts `download-item`
-    // parent step, which re-runs `findOneOrFail` after `find-valid-torrent`
-    // hands off a valid download result. If the user cancelled the request in
-    // the window between plugin dispatch and here, bail silently.
     let fresh_item = match repo::get_media_item(&queue.db_pool, id).await {
         Ok(Some(fresh)) => fresh,
         Ok(None) => {
-            tracing::debug!(id, info_hash, "media item disappeared before persist; skipping");
+            tracing::debug!(
+                id,
+                info_hash,
+                "media item disappeared before persist; skipping"
+            );
             return DownloadAttemptOutcome::Failed;
         }
         Err(error) => {
@@ -177,6 +181,7 @@ pub async fn attempt_download(
                 resolution_ref,
                 path_tag,
                 profile_name,
+                skip_bitrate_check,
             )
             .await
             {
@@ -198,6 +203,7 @@ pub async fn attempt_download(
                 resolution_ref,
                 path_tag,
                 profile_name,
+                skip_bitrate_check,
             )
             .await
             {

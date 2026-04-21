@@ -165,8 +165,7 @@ impl JobQueue {
 
     /// Entry point for the download flow. Pushes a `RankStreamsJob` which loads
     /// streams, runs the cache check, builds ranked candidates, hands off to
-    /// `DownloadJob` (find-valid-torrent + persist). Mirrors riven-ts
-    /// `enqueueDownloadItem` → rank-streams → find-valid-torrent → download-item.
+    /// `DownloadJob` (find-valid-torrent + persist).
     pub async fn push_rank_streams(&self, job: RankStreamsJob) {
         self.push_deduped("rank-streams", job.id, "RankStreamsJob", || async {
             self.rank_streams_storage.clone().push(job).await
@@ -474,7 +473,6 @@ impl JobQueue {
             .unwrap_or(false)
     }
 
-
     /// Purge any queued or scheduled apalis jobs whose payload references one
     /// of the given media item ids. Also clears dedup keys, flow state, and
     /// the download rank-result hand-off so the deleted item leaves no debris.
@@ -495,7 +493,10 @@ impl JobQueue {
         for id in ids {
             pipe.cmd("SADD").arg(CANCELLED_ITEMS_SET).arg(*id).ignore();
         }
-        pipe.cmd("EXPIRE").arg(CANCELLED_ITEMS_SET).arg(600i64).ignore();
+        pipe.cmd("EXPIRE")
+            .arg(CANCELLED_ITEMS_SET)
+            .arg(600i64)
+            .ignore();
         let _: Result<(), _> = pipe.query_async(&mut conn).await;
 
         // Every queue that carries a `{ "id": <media_item_id>, ... }` payload.
@@ -526,9 +527,12 @@ impl JobQueue {
             }
             for prefix in ["scrape", "parse", "index"] {
                 let _: Result<(), _> = redis::pipe()
-                    .cmd("DEL").arg(flow_pending_key(prefix, *id))
-                    .cmd("DEL").arg(flow_results_key(prefix, *id))
-                    .cmd("DEL").arg(flow_rate_limited_key(prefix, *id))
+                    .cmd("DEL")
+                    .arg(flow_pending_key(prefix, *id))
+                    .cmd("DEL")
+                    .arg(flow_results_key(prefix, *id))
+                    .cmd("DEL")
+                    .arg(flow_rate_limited_key(prefix, *id))
                     .query_async(&mut conn)
                     .await;
             }
@@ -600,7 +604,11 @@ impl JobQueue {
         pipe.atomic();
         for task_id in &matching_task_ids {
             pipe.cmd("HDEL").arg(&data_hash).arg(task_id).ignore();
-            pipe.cmd("LREM").arg(&active_list).arg(0).arg(task_id).ignore();
+            pipe.cmd("LREM")
+                .arg(&active_list)
+                .arg(0)
+                .arg(task_id)
+                .ignore();
             pipe.cmd("ZREM").arg(&scheduled_set).arg(task_id).ignore();
             pipe.cmd("ZREM").arg(&inflight_set).arg(task_id).ignore();
             pipe.cmd("ZREM").arg(&done_set).arg(task_id).ignore();

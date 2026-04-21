@@ -22,7 +22,6 @@ pub struct ParseContext {
     pub correct_title: String,
     pub aliases: HashMap<String, Vec<String>>,
     pub profiles: Vec<(String, RankSettings)>,
-    pub fallback_settings: Option<RankSettings>,
     pub dubbed_anime_only: bool,
 }
 
@@ -224,45 +223,29 @@ pub fn rank_streams(
                 return None;
             }
 
-            let best = if let Some(ref settings) = ctx.fallback_settings {
-                match riven_rank::rank_torrent_fast(
-                    title,
-                    info_hash,
-                    &ctx.correct_title,
-                    &ctx.aliases,
-                    settings,
-                ) {
-                    Ok(ranked) => Some(ranked),
-                    Err(error) => {
-                        log_rank_rejection(info_hash, title, None, &error);
-                        None
-                    }
-                }
-            } else {
-                ctx.profiles
-                    .iter()
-                    .filter_map(|(profile_name, settings)| {
-                        match riven_rank::rank_torrent_fast(
-                            title,
-                            info_hash,
-                            &ctx.correct_title,
-                            &ctx.aliases,
-                            settings,
-                        ) {
-                            Ok(ranked) => Some(ranked),
-                            Err(error) => {
-                                log_rank_rejection(
-                                    info_hash,
-                                    title,
-                                    Some(profile_name.as_str()),
-                                    &error,
-                                );
-                                None
-                            }
+            let best = ctx.profiles
+                .iter()
+                .filter_map(|(profile_name, settings)| {
+                    match riven_rank::rank_torrent_fast(
+                        title,
+                        info_hash,
+                        &ctx.correct_title,
+                        &ctx.aliases,
+                        settings,
+                    ) {
+                        Ok(ranked) => Some(ranked),
+                        Err(error) => {
+                            log_rank_rejection(
+                                info_hash,
+                                title,
+                                Some(profile_name.as_str()),
+                                &error,
+                            );
+                            None
                         }
-                    })
-                    .max_by_key(|r| r.rank)
-            };
+                    }
+                })
+                .max_by_key(|r| r.rank);
 
             let (parsed_value, rank) = match best {
                 Some(ranked) => {
@@ -301,11 +284,11 @@ pub async fn load_active_profiles(db_pool: &sqlx::PgPool) -> Vec<(String, RankSe
         Ok(p) => p,
         Err(e) => {
             tracing::error!(error = %e, "failed to load enabled ranking profiles");
-            return Vec::new();
+            return vec![("ultra_hd".to_string(), QualityProfile::UltraHd.base_settings().prepare())];
         }
     };
 
-    profiles
+    let mut result: Vec<(String, RankSettings)> = profiles
         .into_iter()
         .filter_map(|p| {
             let settings = if p.is_builtin {
@@ -333,14 +316,12 @@ pub async fn load_active_profiles(db_pool: &sqlx::PgPool) -> Vec<(String, RankSe
             };
             settings.map(|s| (p.name, s))
         })
-        .collect()
-}
+        .collect();
 
-pub async fn load_fallback_rank_settings(db_pool: &sqlx::PgPool) -> RankSettings {
-    match repo::get_setting(db_pool, "rank_settings").await {
-        Ok(Some(value)) => serde_json::from_value(value).unwrap_or_default(),
-        _ => RankSettings::default(),
+    if result.is_empty() {
+        result.push(("ultra_hd".to_string(), QualityProfile::UltraHd.base_settings().prepare()));
     }
+    result
 }
 
 pub async fn load_dubbed_anime_only(db_pool: &sqlx::PgPool) -> bool {

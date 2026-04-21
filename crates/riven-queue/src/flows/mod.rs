@@ -98,9 +98,7 @@ where
 /// overrides from the DB `settings` column on top. Custom profiles use the
 /// `settings` JSON stored in the DB directly.
 ///
-/// Returns `(profile_name, RankSettings)` pairs. An empty result means
-/// single-version mode — the caller should fall back to the active
-/// `rank_settings` DB key.
+/// Returns `(profile_name, RankSettings)` pairs.
 pub(crate) async fn load_active_profiles(db_pool: &sqlx::PgPool) -> Vec<(String, RankSettings)> {
     let profiles = match repo::get_enabled_profiles(db_pool).await {
         Ok(p) => p,

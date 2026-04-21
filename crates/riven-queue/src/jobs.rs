@@ -102,9 +102,6 @@ pub struct DownloadJob {
     pub preferred_info_hash: Option<String>,
 }
 
-/// First step of the download flow — the riven-ts `rank-streams` grandchild job.
-/// Loads streams, runs the cache check, builds cached candidates, and hands the
-/// ranked result to `DownloadJob` via Redis state.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RankStreamsJob {
     pub id: i64,

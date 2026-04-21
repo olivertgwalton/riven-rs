@@ -51,6 +51,22 @@ services:
               bind:
                   propagation: slave
 
+    plex:
+        image: plexinc/pms-docker:latest
+        env_file: .env
+        environment:
+            - PLEX_CLAIM=claim-RoH1nU1Egxh9Xt9pzyi5
+        network_mode: host
+        volumes:
+            - plex_config:/config
+            - plex_transcode:/transcode
+            - type: bind
+              source: ${RIVEN_STORAGE_PATH}
+              target: /mnt/riven
+              read_only: true
+              bind:
+                  propagation: slave
+
     riven:
         build: .
         env_file: .env
@@ -81,6 +97,8 @@ services:
 volumes:
     postgres_data:
     redis_data:
+    plex_config:
+    plex_transcode:
     seerr_data:
     jellyfin_data:
     jellyfin_cache:
