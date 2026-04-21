@@ -142,9 +142,13 @@ pub(crate) async fn load_active_profiles(db_pool: &sqlx::PgPool) -> Vec<(String,
                         }
                     })
             } else {
-                serde_json::from_value::<RankSettings>(p.settings)
-                    .ok()
-                    .map(RankSettings::prepare)
+                match serde_json::from_value::<RankSettings>(p.settings) {
+                    Ok(s) => Some(RankSettings::prepare(s)),
+                    Err(e) => {
+                        tracing::warn!(profile = p.name, error = %e, "failed to parse custom profile settings, skipping");
+                        None
+                    }
+                }
             };
             settings.map(|s| (p.name, s))
         })

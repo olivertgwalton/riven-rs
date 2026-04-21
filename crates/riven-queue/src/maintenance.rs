@@ -93,7 +93,10 @@ async fn rescue_workers(redis: &mut redis::aio::ConnectionManager, max_score: Op
                 }
                 pipe.query_async(redis)
                     .await
-                    .unwrap_or_else(|_| vec![false; candidates.len()])
+                    .unwrap_or_else(|e| {
+                        tracing::error!(error = %e, "rescue_workers: failed to check job data existence; assuming all jobs present to avoid data loss");
+                        vec![true; candidates.len()]
+                    })
             };
             candidates
                 .into_iter()

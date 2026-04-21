@@ -11,6 +11,10 @@ use crate::{
 
 // ── Job handlers ──────────────────────────────────────────────────────────────
 
+// All flow `run` functions return `()` — they handle errors internally (log + emit events)
+// and are intentionally infallible. Handlers always return Ok(()) so Apalis does not retry;
+// retries are driven by the flows themselves re-enqueuing jobs as needed.
+
 async fn handle_index_job(job: IndexJob, q: Data<Arc<JobQueue>>) -> Result<(), BoxDynError> {
     let _guard = DedupGuard::new("index", job.id, q.redis.clone());
     crate::flows::index_item::run(&job, &q).await;

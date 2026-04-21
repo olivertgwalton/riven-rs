@@ -123,10 +123,10 @@ impl HttpClient {
         response.json()
     }
 
-    fn service_state(&self, profile: HttpServiceProfile) -> Arc<ServiceState> {
+    fn service_state(&self, profile: &HttpServiceProfile) -> Arc<ServiceState> {
         self.services
-            .entry(profile.name)
-            .or_insert_with(|| Arc::new(ServiceState::new(profile)))
+            .entry(profile.name.as_ref().to_owned())
+            .or_insert_with(|| Arc::new(ServiceState::new(profile.clone())))
             .clone()
     }
 }

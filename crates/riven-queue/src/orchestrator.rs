@@ -37,8 +37,6 @@ impl RequestedItemOutcome {
     }
 }
 
-/// Maximum number of episode jobs pushed per fan-out call.
-///
 pub struct LibraryOrchestrator<'a> {
     queue: &'a JobQueue,
 }

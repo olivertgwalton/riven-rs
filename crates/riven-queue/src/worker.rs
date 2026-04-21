@@ -25,6 +25,7 @@ impl Scheduler {
         let mut cleanup_tick = tokio::time::interval(Duration::from_secs(60 * 60));
         // Check for stale workers every 60s (2× the apalis default keep-alive of 30s).
         // Rescued jobs will release their own dedup keys on completion, mirroring
+        // the normal job lifecycle so dedup state stays consistent after recovery.
         let mut worker_recovery_tick = tokio::time::interval(Duration::from_secs(60));
         let retry_wait =
             Self::retry_wait_duration(self.job_queue.retry_interval_secs.load(Ordering::SeqCst));

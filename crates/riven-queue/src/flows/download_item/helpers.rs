@@ -108,8 +108,11 @@ pub fn parse_file_path(path: &str) -> riven_rank::ParsedData {
 
 /// Build the VFS path for an episode file.
 /// Appends `.ptN` before the extension when `part` is `Some`.
-/// When active ranking profiles are enabled, `path_tag` (e.g. `Some("ultra_hd")`) is prepended as
-/// a top-level directory so each profile has its own directory tree.
+/// When active ranking profiles are enabled, `path_tag` (e.g. `Some("ultra_hd")`) is appended as
+/// a bracketed suffix in the filename (e.g. `Show - s01e01 [ultra_hd].mkv`).
+///
+/// `show` is sanitized: path separators and leading dots are replaced with `_` to prevent
+/// directory traversal or embedded path components.
 pub fn episode_vfs_path(
     show: &str,
     season: i32,
@@ -117,10 +120,15 @@ pub fn episode_vfs_path(
     part: Option<i32>,
     path_tag: Option<&str>,
 ) -> String {
+    let safe_show: String = show
+        .chars()
+        .map(|c| if c == '/' || c == '\\' || c == '\0' { '_' } else { c })
+        .collect();
+    let safe_show = safe_show.trim_start_matches('.');
     let part_suffix = part.map(|n| format!(".pt{n}")).unwrap_or_default();
     let tag_suffix = path_tag.map(|t| format!(" [{t}]")).unwrap_or_default();
     format!(
-        "/shows/{show}/Season {season:02}/{show} - s{season:02}e{ep:02}{part_suffix}{tag_suffix}.mkv"
+        "/shows/{safe_show}/Season {season:02}/{safe_show} - s{season:02}e{ep:02}{part_suffix}{tag_suffix}.mkv"
     )
 }
 

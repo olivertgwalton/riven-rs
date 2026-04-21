@@ -99,6 +99,7 @@ pub async fn handle_plugin(job: &IndexPluginJob, queue: &JobQueue) {
 pub async fn finalize(id: i64, queue: &JobQueue) {
     let Some(item) = load_media_item_or_log(&queue.db_pool, id, "index finalize").await else {
         queue.clear_flow("index", id).await;
+        queue.clear_flow_results("index", id).await;
         return;
     };
 

@@ -138,7 +138,12 @@ pub async fn persist_movie(
     }
     drop(config);
 
-    let ext = file.filename.rsplit('.').next().unwrap_or("mkv");
+    let ext = file
+        .filename
+        .rfind('.')
+        .filter(|&i| i > 0)
+        .map(|i| &file.filename[i + 1..])
+        .unwrap_or("mkv");
     let tag_suffix = path_tag.map(|t| format!(" [{t}]")).unwrap_or_default();
     let base_name = item.pretty_name();
     let vfs_name = format!("{base_name}{tag_suffix}.{ext}");
