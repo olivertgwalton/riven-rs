@@ -23,6 +23,8 @@ fn sample_movie(title: &str, year: Option<i32>, tmdb_id: Option<&str>) -> MediaI
         language: None,
         is_anime: false,
         aired_at: None,
+        aired_at_utc: None,
+        network_timezone: None,
         year,
         genres: None,
         rating: None,

@@ -232,6 +232,7 @@ pub async fn create_episode(
     title: Option<&str>,
     tvdb_id: Option<&str>,
     aired_at: Option<chrono::NaiveDate>,
+    aired_at_utc: Option<chrono::DateTime<Utc>>,
     runtime: Option<i32>,
     absolute_number: Option<i32>,
     item_request_id: Option<i64>,
@@ -241,27 +242,28 @@ pub async fn create_episode(
     let now = Utc::now();
     let default_title = format!("Episode {number:02}");
     let title_str = title.unwrap_or(&default_title);
-    let state = match aired_at {
-        Some(date) if date > Utc::now().date_naive() => MediaItemState::Unreleased,
+    let state = match aired_at_utc.or_else(|| aired_at.map(|d| d.and_hms_opt(0, 0, 0).expect("midnight is valid").and_utc())) {
+        Some(dt) if dt > now => MediaItemState::Unreleased,
         _ => MediaItemState::Indexed,
     };
     let item = sqlx::query_as::<_, MediaItem>(
-        r#"INSERT INTO media_items (title, tvdb_id, item_type, state, episode_number, absolute_number, runtime, parent_id, aired_at, is_requested, season_number, created_at, item_request_id)
-           VALUES ($1, $2, 'episode', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+        r#"INSERT INTO media_items (title, tvdb_id, item_type, state, episode_number, absolute_number, runtime, parent_id, aired_at, aired_at_utc, is_requested, season_number, created_at, item_request_id)
+           VALUES ($1, $2, 'episode', $3, $4, $5, $6, $7, $8, $13, $9, $10, $11, $12)
            ON CONFLICT (parent_id, episode_number) WHERE item_type = 'episode'
            DO UPDATE SET
                title           = EXCLUDED.title,
                tvdb_id         = COALESCE(EXCLUDED.tvdb_id, media_items.tvdb_id),
                aired_at        = COALESCE(EXCLUDED.aired_at, media_items.aired_at),
+               aired_at_utc    = COALESCE(EXCLUDED.aired_at_utc, media_items.aired_at_utc),
                runtime         = COALESCE(EXCLUDED.runtime, media_items.runtime),
                absolute_number = COALESCE(EXCLUDED.absolute_number, media_items.absolute_number),
                season_number   = COALESCE(EXCLUDED.season_number, media_items.season_number),
                is_requested    = EXCLUDED.is_requested OR media_items.is_requested,
-               -- Transition unreleased episodes that have since aired
+               -- Transition unreleased episodes that have since aired, preferring precise UTC time
                state = CASE
                    WHEN media_items.state = 'unreleased'
-                    AND EXCLUDED.aired_at IS NOT NULL
-                    AND EXCLUDED.aired_at <= CURRENT_DATE
+                    AND COALESCE(EXCLUDED.aired_at_utc, EXCLUDED.aired_at::timestamptz) IS NOT NULL
+                    AND COALESCE(EXCLUDED.aired_at_utc, EXCLUDED.aired_at::timestamptz) <= NOW()
                    THEN 'indexed'::media_item_state
                    ELSE media_items.state
                END,
@@ -280,6 +282,7 @@ pub async fn create_episode(
     .bind(season_number)
     .bind(now)
     .bind(item_request_id)
+    .bind(aired_at_utc)
     .fetch_one(pool)
     .await?;
     Ok(item)
@@ -360,11 +363,12 @@ pub async fn get_episodes_ready_for_scraping(pool: &PgPool, limit: i64) -> Resul
                COALESCE(e.imdb_id, show_item.imdb_id) AS imdb_id,
                e.tvdb_id, e.tmdb_id, e.poster_path,
                e.created_at, e.updated_at, e.indexed_at, e.scraped_at, e.scraped_times,
-               e.aliases, e.network, e.country, e.language, e.is_anime, e.aired_at, e.year, e.genres,
+               e.aliases, e.network, e.country, e.language, e.is_anime, e.aired_at, e.aired_at_utc, e.year, e.genres,
                e.rating, e.content_rating AS "content_rating: _", e.state AS "state: _",
                e.failed_attempts, e.item_type AS "item_type: _",
                e.is_requested, e.show_status AS "show_status: _", e.season_number, e.is_special, e.parent_id,
-               e.episode_number, e.absolute_number, e.runtime, e.item_request_id, e.active_stream_id
+               e.episode_number, e.absolute_number, e.runtime, e.item_request_id, e.active_stream_id,
+               e.network_timezone
            FROM media_items e
            LEFT JOIN media_items season_item ON e.parent_id = season_item.id AND season_item.item_type = 'season'
            LEFT JOIN media_items show_item ON season_item.parent_id = show_item.id AND show_item.item_type = 'show'

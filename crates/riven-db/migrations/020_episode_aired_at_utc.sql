@@ -1,0 +1,1 @@
+ALTER TABLE media_items ADD COLUMN IF NOT EXISTS aired_at_utc TIMESTAMPTZ;

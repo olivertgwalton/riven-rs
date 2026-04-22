@@ -220,6 +220,8 @@ mod tests {
             language: None,
             is_anime: false,
             aired_at: None,
+            aired_at_utc: None,
+            network_timezone: None,
             year: Some(2004),
             genres: None,
             rating: None,

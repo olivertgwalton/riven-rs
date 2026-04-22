@@ -16,6 +16,7 @@ fn extract_english_name_prefers_english_translation() {
         aliases: None,
         remote_ids: None,
         content_ratings: None,
+        airs_time: None,
         translations: Some(TvdbTranslations {
             name_translations: Some(vec![
                 TvdbTranslation {

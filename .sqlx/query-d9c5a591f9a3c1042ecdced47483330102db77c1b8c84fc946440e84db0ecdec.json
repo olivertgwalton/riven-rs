@@ -1,0 +1,63 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE media_items SET\n            title          = COALESCE($2,  title),\n            full_title     = COALESCE($3,  full_title),\n            imdb_id        = COALESCE($4,  imdb_id),\n            tvdb_id        = COALESCE($5,  tvdb_id),\n            tmdb_id        = COALESCE($6,  tmdb_id),\n            poster_path    = COALESCE($7,  poster_path),\n            year           = COALESCE($8,  year),\n            genres         = COALESCE($9,  genres),\n            country        = COALESCE($10, country),\n            language       = COALESCE($11, language),\n            network        = COALESCE($12, network),\n            content_rating = COALESCE($13, content_rating),\n            is_anime       = $14,\n            runtime        = COALESCE($15, runtime),\n            aliases        = COALESCE($16, aliases),\n            aired_at       = COALESCE($17, aired_at),\n            show_status        = COALESCE($19, show_status),\n            rating             = COALESCE($20, rating),\n            network_timezone   = COALESCE($21, network_timezone),\n            indexed_at = $18, updated_at = $18,\n            failed_attempts = 0\n           WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Int4",
+        "Jsonb",
+        "Text",
+        "Text",
+        "Text",
+        {
+          "Custom": {
+            "name": "content_rating",
+            "kind": {
+              "Enum": [
+                "G",
+                "PG",
+                "PG-13",
+                "R",
+                "NC-17",
+                "TV-Y",
+                "TV-Y7",
+                "TV-G",
+                "TV-PG",
+                "TV-14",
+                "TV-MA"
+              ]
+            }
+          }
+        },
+        "Bool",
+        "Int4",
+        "Jsonb",
+        "Date",
+        "Timestamptz",
+        {
+          "Custom": {
+            "name": "show_status",
+            "kind": {
+              "Enum": [
+                "continuing",
+                "ended"
+              ]
+            }
+          }
+        },
+        "Float8",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "d9c5a591f9a3c1042ecdced47483330102db77c1b8c84fc946440e84db0ecdec"
+}

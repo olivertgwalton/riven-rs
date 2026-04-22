@@ -56,6 +56,7 @@ pub async fn apply_indexed_media_item(
                         ep_data.title.as_deref(),
                         ep_data.tvdb_id.as_deref(),
                         ep_data.aired_at,
+                        ep_data.aired_at_utc,
                         ep_data.runtime,
                         ep_data.absolute_number,
                         item.item_request_id,

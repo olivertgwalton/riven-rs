@@ -15,5 +15,6 @@ anyhow = { workspace = true }
 tracing = { workspace = true }
 inventory = { workspace = true }
 chrono = { workspace = true }
+chrono-tz = { workspace = true }
 parking_lot = { workspace = true }
 tokio = { workspace = true }

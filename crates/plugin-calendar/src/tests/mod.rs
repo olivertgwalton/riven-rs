@@ -22,6 +22,8 @@ fn media_item(item_type: MediaItemType, title: &str) -> MediaItem {
         language: None,
         is_anime: false,
         aired_at: None,
+        aired_at_utc: None,
+        network_timezone: None,
         year: None,
         genres: None,
         rating: None,

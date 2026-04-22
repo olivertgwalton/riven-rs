@@ -25,6 +25,7 @@ pub struct IndexedMediaItem {
     pub aired_at: Option<chrono::NaiveDate>,
     pub status: Option<ShowStatus>,
     pub seasons: Option<Vec<IndexedSeason>>,
+    pub network_timezone: Option<String>,
 }
 
 impl IndexedMediaItem {
@@ -51,6 +52,7 @@ impl IndexedMediaItem {
             aired_at: other.aired_at.or(self.aired_at),
             status: other.status.or(self.status),
             seasons: other.seasons.or(self.seasons),
+            network_timezone: other.network_timezone.or(self.network_timezone),
         }
     }
 
@@ -94,6 +96,7 @@ pub struct IndexedEpisode {
     pub title: Option<String>,
     pub tvdb_id: Option<String>,
     pub aired_at: Option<chrono::NaiveDate>,
+    pub aired_at_utc: Option<chrono::DateTime<chrono::Utc>>,
     pub runtime: Option<i32>,
     pub poster_path: Option<String>,
     pub content_rating: Option<ContentRating>,

@@ -1,8 +1,10 @@
 use async_trait::async_trait;
-use chrono::NaiveDate;
+use chrono::{NaiveDate, NaiveTime, TimeZone};
+use chrono_tz::Tz;
 use parking_lot::Mutex;
 use serde::{Deserialize, Deserializer};
 use std::collections::HashMap;
+use std::str::FromStr;
 use std::time::{Duration, Instant};
 
 use riven_core::events::{EventType, HookResponse, RivenEvent};
@@ -13,6 +15,7 @@ use riven_core::settings::PluginSettings;
 use riven_core::types::*;
 
 const TVDB_BASE_URL: &str = "https://api4.thetvdb.com/v4/";
+const TVMAZE_BASE_URL: &str = "https://api.tvmaze.com/";
 const TOKEN_EXPIRY: Duration = Duration::from_secs(25 * 24 * 3600);
 
 #[derive(Default)]
@@ -95,15 +98,28 @@ impl Plugin for TvdbPlugin {
         let api_key = ctx.require_setting("apikey")?;
         let token = self.get_token(&ctx.http, api_key).await?;
 
-        let indexed = fetch_series(&ctx.http, &token, tvdb_id).await?;
+        let timezone = fetch_tvmaze_timezone(&ctx.http, tvdb_id).await.ok().flatten();
+        let indexed = fetch_series(&ctx.http, &token, tvdb_id, timezone).await?;
         Ok(HookResponse::Index(Box::new(indexed)))
     }
+}
+
+async fn fetch_tvmaze_timezone(
+    http: &riven_core::http::HttpClient,
+    tvdb_id: &str,
+) -> anyhow::Result<Option<String>> {
+    let url = format!("{TVMAZE_BASE_URL}lookup/shows?thetvdb={tvdb_id}");
+    let resp: TvMazeLookupResponse = http
+        .get_json(profiles::TVMAZE, url.clone(), |client| client.get(&url))
+        .await?;
+    Ok(resp.network.and_then(|n| n.country).and_then(|c| c.timezone))
 }
 
 async fn fetch_series(
     http: &riven_core::http::HttpClient,
     token: &str,
     tvdb_id: &str,
+    network_timezone: Option<String>,
 ) -> anyhow::Result<IndexedMediaItem> {
     let url = format!("{TVDB_BASE_URL}series/{tvdb_id}/extended?short=true&meta=translations");
     tracing::debug!(url = %url, tvdb_id, "requesting tvdb series details");
@@ -162,6 +178,15 @@ async fn fetch_series(
             .and_then(|r| parse_content_rating(r.name.as_deref().unwrap_or("")))
     });
 
+    let tz: Option<Tz> = network_timezone
+        .as_deref()
+        .and_then(|s| Tz::from_str(s).ok());
+    let airs_time = series
+        .airs_time
+        .as_deref()
+        .and_then(|t| NaiveTime::parse_from_str(t, "%H:%M").ok())
+        .unwrap_or_else(|| NaiveTime::from_hms_opt(0, 0, 0).expect("midnight is valid"));
+
     let mut season_map: HashMap<i32, Vec<IndexedEpisode>> = HashMap::new();
     for ep in &episodes {
         let season_num = ep.season_number.unwrap_or(0);
@@ -172,12 +197,22 @@ async fn fetch_series(
             .as_ref()
             .and_then(|d| NaiveDate::parse_from_str(d, "%Y-%m-%d").ok());
 
+        let aired_at_utc = aired.and_then(|date| {
+            let naive_dt = date.and_time(airs_time);
+            tz.and_then(|tz| {
+                tz.from_local_datetime(&naive_dt)
+                    .earliest()
+                    .map(|dt| dt.to_utc())
+            })
+        });
+
         let indexed_ep = IndexedEpisode {
             number: ep_num,
             absolute_number: ep.absolute_number,
             title: ep.name.clone(),
             tvdb_id: ep.id.map(|id| id.to_string()),
             aired_at: aired,
+            aired_at_utc,
             runtime: ep.runtime,
             poster_path: ep.image.clone(),
             content_rating: None,
@@ -249,6 +284,7 @@ async fn fetch_series(
         aliases,
         aired_at,
         seasons: Some(seasons),
+        network_timezone,
         ..Default::default()
     })
 }
@@ -345,6 +381,8 @@ struct TvdbSeries {
     #[serde(rename = "contentRatings")]
     content_ratings: Option<Vec<TvdbContentRating>>,
     translations: Option<TvdbTranslations>,
+    #[serde(rename = "airsTime")]
+    airs_time: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -416,6 +454,21 @@ where
         serde_json::Value::Number(n) => n.as_f64().map(|f| f as i32),
         _ => None,
     }))
+}
+
+#[derive(Deserialize)]
+struct TvMazeLookupResponse {
+    network: Option<TvMazeNetwork>,
+}
+
+#[derive(Deserialize)]
+struct TvMazeNetwork {
+    country: Option<TvMazeCountry>,
+}
+
+#[derive(Deserialize)]
+struct TvMazeCountry {
+    timezone: Option<String>,
 }
 
 #[cfg(test)]

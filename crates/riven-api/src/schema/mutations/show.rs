@@ -108,6 +108,7 @@ impl ShowMutations {
                         title: Some(e.title),
                         tvdb_id: None,
                         aired_at: parse_naive_date(e.aired_at.as_deref()),
+                        aired_at_utc: None,
                         runtime: e.runtime,
                         poster_path: e.poster_path,
                         content_rating: e.content_rating,

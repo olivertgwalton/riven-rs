@@ -26,6 +26,7 @@ pub struct MediaItem {
     pub language: Option<String>,
     pub is_anime: bool,
     pub aired_at: Option<NaiveDate>,
+    pub aired_at_utc: Option<DateTime<Utc>>,
     pub year: Option<i32>,
     pub genres: Option<serde_json::Value>,
     pub rating: Option<f64>,
@@ -34,6 +35,7 @@ pub struct MediaItem {
     pub failed_attempts: i32,
     pub item_type: MediaItemType,
     pub is_requested: bool,
+    pub network_timezone: Option<String>,
     // Show-specific
     pub show_status: Option<ShowStatus>,
     // Season-specific
