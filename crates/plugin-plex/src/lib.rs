@@ -83,7 +83,7 @@ impl Plugin for PlexPlugin {
                 tracing::debug!(id, count = entries.len(), "plex: found filesystem entries");
 
                 let fs_settings = load_filesystem_settings(&ctx.db_pool).await;
-                let library_path = effective_library_path(&ctx.settings, fs_settings.as_ref());
+                let library_path = effective_library_path(&ctx.settings, fs_settings.as_ref(), &ctx.vfs_mount_path);
 
                 let sections = self
                     .cached_library_sections(&ctx.http, plex_url, plex_token)
@@ -176,7 +176,7 @@ impl Plugin for PlexPlugin {
                 let plex_url = ctx.require_setting("plexserverurl")?.trim_end_matches('/');
 
                 let fs_settings = load_filesystem_settings(&ctx.db_pool).await;
-                let library_path = effective_library_path(&ctx.settings, fs_settings.as_ref());
+                let library_path = effective_library_path(&ctx.settings, fs_settings.as_ref(), &ctx.vfs_mount_path);
 
                 let sections = self
                     .cached_library_sections(&ctx.http, plex_url, plex_token)
@@ -260,18 +260,26 @@ async fn load_filesystem_settings(pool: &sqlx::PgPool) -> Option<FilesystemSetti
 }
 
 /// Returns the effective Plex library path: the explicit plugin setting if configured,
-/// otherwise the VFS mount path from filesystem settings, otherwise "/mount".
+/// otherwise the VFS mount path from filesystem settings, otherwise the app-level VFS mount path.
 fn effective_library_path(
     settings: &riven_core::settings::PluginSettings,
     fs_settings: Option<&FilesystemSettings>,
+    app_vfs_mount_path: &str,
 ) -> String {
     if let Some(explicit) = settings.get("plexlibrarypath") {
         return explicit.trim_end_matches('/').to_string();
     }
-    fs_settings
+    let from_fs = fs_settings
         .map(|s| s.mount_path.trim_end_matches('/').to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "/mount".to_string())
+        .filter(|s| !s.is_empty());
+    if let Some(path) = from_fs {
+        return path;
+    }
+    let app_path = app_vfs_mount_path.trim_end_matches('/');
+    if !app_path.is_empty() {
+        return app_path.to_string();
+    }
+    "/mount".to_string()
 }
 
 /// Returns all VFS directory paths an entry appears at, given its canonical dir path and profile keys.

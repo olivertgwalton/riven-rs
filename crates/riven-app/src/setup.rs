@@ -7,6 +7,7 @@ pub async fn register_plugins(
     http: riven_core::http::HttpClient,
     db_pool: sqlx::PgPool,
     redis_conn: redis::aio::ConnectionManager,
+    vfs_mount_path: String,
 ) -> Arc<PluginRegistry> {
     let registry = PluginRegistry::new();
     let plugins = collect_plugins();
@@ -38,6 +39,7 @@ pub async fn register_plugins(
                 http.clone(),
                 db_pool.clone(),
                 redis_conn.clone(),
+                vfs_mount_path.clone(),
             )
             .await;
     }

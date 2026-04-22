@@ -80,7 +80,13 @@ async fn main() -> Result<()> {
     let http_client = riven_core::http::HttpClient::new(build_http_client()?);
     let stream_http_client = build_streaming_http_client()?;
 
-    let registry = setup::register_plugins(http_client.clone(), db_pool.clone(), redis_conn).await;
+    let registry = setup::register_plugins(
+        http_client.clone(),
+        db_pool.clone(),
+        redis_conn,
+        settings.effective_vfs_mount_path().to_string(),
+    )
+    .await;
     let (notification_tx, _) = broadcast::channel::<String>(512);
 
     let job_queue = Arc::new(
