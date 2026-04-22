@@ -11,6 +11,15 @@ pub struct RateLimit {
     pub per: Duration,
 }
 
+impl RateLimit {
+    /// Minimum gap between consecutive requests: `per / max`.
+    /// Jobs are spread evenly over the
+    /// window rather than bursting to the cap and then stalling.
+    fn min_interval(self) -> Duration {
+        self.per / self.max
+    }
+}
+
 #[derive(Debug)]
 pub(super) struct ServiceState {
     pub(super) profile: HttpServiceProfile,
@@ -42,8 +51,9 @@ impl ServiceState {
 
 #[derive(Debug, Default)]
 struct LimiterState {
-    window_started: Option<Instant>,
-    used_in_window: u32,
+    /// When the last request was allowed through.
+    last_sent: Option<Instant>,
+    /// Hard pause set by a `Retry-After` response header.
     paused_until: Option<Instant>,
 }
 
@@ -51,6 +61,7 @@ impl LimiterState {
     fn next_wait(&mut self, profile: &HttpServiceProfile) -> Option<Duration> {
         let now = Instant::now();
 
+        // Honour any explicit Retry-After pause first.
         if let Some(paused_until) = self.paused_until {
             if paused_until > now {
                 return Some(paused_until - now);
@@ -59,23 +70,19 @@ impl LimiterState {
         }
 
         let rate_limit = profile.rate_limit?;
+        let min_interval = rate_limit.min_interval();
 
-        let window_started = self.window_started.get_or_insert(now);
-        if now.duration_since(*window_started) >= rate_limit.per {
-            *window_started = now;
-            self.used_in_window = 0;
+        let elapsed = self
+            .last_sent
+            .map(|t| now.duration_since(t))
+            .unwrap_or(min_interval); // first request: always allowed immediately
+
+        if elapsed >= min_interval {
+            self.last_sent = Some(now);
+            None
+        } else {
+            Some(min_interval - elapsed)
         }
-
-        if self.used_in_window < rate_limit.max {
-            self.used_in_window += 1;
-            return None;
-        }
-
-        Some(
-            rate_limit
-                .per
-                .saturating_sub(now.duration_since(*window_started)),
-        )
     }
 
     fn pause_for(&mut self, delay: Duration) {
