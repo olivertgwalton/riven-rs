@@ -163,12 +163,11 @@ pub async fn get_items_ready_for_processing(
 
 /// Escalating cooldown applied to items with `failed_attempts > 0` so a
 /// repeatedly-failing item doesn't get re-enqueued every retry cycle and
-/// starve fresh content. Mirrors the riven-ts `scrapeCooldownHours` behaviour
-/// (30m / 2h / 6h / 24h).
+/// starve fresh content.
 pub(crate) const FAILED_ATTEMPTS_COOLDOWN_SQL: &str = "(
     failed_attempts = 0
-    OR updated_at IS NULL
-    OR updated_at < NOW() - (CASE
+    OR last_scrape_attempt_at IS NULL
+    OR last_scrape_attempt_at < NOW() - (CASE
         WHEN failed_attempts >= 10 THEN INTERVAL '24 hours'
         WHEN failed_attempts >= 5  THEN INTERVAL '6 hours'
         WHEN failed_attempts >= 2  THEN INTERVAL '2 hours'
@@ -187,7 +186,7 @@ pub async fn get_pending_items_for_retry(
            AND item_type = $1
            AND is_requested = true
            AND {FAILED_ATTEMPTS_COOLDOWN_SQL}
-         ORDER BY failed_attempts ASC, updated_at ASC NULLS FIRST, created_at ASC",
+         ORDER BY failed_attempts ASC, last_scrape_attempt_at ASC NULLS FIRST, created_at ASC",
     );
     Ok(sqlx::query_as::<_, MediaItem>(&sql)
         .bind(item_type)
@@ -460,7 +459,23 @@ pub async fn blacklist_stream_by_hash(
 
 pub async fn increment_failed_attempts(pool: &PgPool, id: i64) -> Result<()> {
     sqlx::query!(
-        "UPDATE media_items SET failed_attempts = failed_attempts + 1, updated_at = NOW() WHERE id = $1",
+        "UPDATE media_items
+         SET failed_attempts = failed_attempts + 1,
+             last_scrape_attempt_at = NOW(),
+             updated_at = NOW()
+         WHERE id = $1",
+        id
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Mark an item as permanently `Failed` so the retry scheduler stops picking
+/// it up. Used when `failed_attempts` exceeds the configured ceiling.
+pub async fn mark_item_failed(pool: &PgPool, id: i64) -> Result<()> {
+    sqlx::query!(
+        "UPDATE media_items SET state = 'failed', updated_at = NOW() WHERE id = $1",
         id
     )
     .execute(pool)

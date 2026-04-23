@@ -187,6 +187,9 @@ impl CoreSettingsQuery {
             SettingField::new("retry_interval_secs", "Retry interval (seconds)", "number")
                 .with_default("600")
                 .with_description("How often to retry stuck items. 0 = disabled. Default: 600 (10 m)."),
+            SettingField::new("maximum_scrape_attempts", "Max scrape attempts", "number")
+                .with_default("0")
+                .with_description("After this many consecutive scrape failures an item is marked Failed and excluded from further retries. 0 = unlimited."),
             SettingField::new("schedule_offset_minutes", "Re-index offset (minutes)", "number")
                 .with_default("30")
                 .with_description("How long after a known release/air date to wait before re-indexing an unreleased or ongoing item."),
@@ -273,6 +276,7 @@ impl CoreSettingsQuery {
             "maximum_average_bitrate_movies": defaults.maximum_average_bitrate_movies,
             "maximum_average_bitrate_episodes": defaults.maximum_average_bitrate_episodes,
             "retry_interval_secs": defaults.retry_interval_secs,
+            "maximum_scrape_attempts": defaults.maximum_scrape_attempts,
             "schedule_offset_minutes": defaults.schedule_offset_minutes,
             "unknown_air_date_offset_days": defaults.unknown_air_date_offset_days,
             "filesystem": defaults.filesystem,

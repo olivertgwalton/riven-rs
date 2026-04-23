@@ -33,6 +33,7 @@ pub struct MediaItem {
     pub content_rating: Option<ContentRating>,
     pub state: MediaItemState,
     pub failed_attempts: i32,
+    pub last_scrape_attempt_at: Option<DateTime<Utc>>,
     pub item_type: MediaItemType,
     pub is_requested: bool,
     pub network_timezone: Option<String>,

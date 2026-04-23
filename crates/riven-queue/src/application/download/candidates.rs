@@ -228,6 +228,7 @@ mod tests {
             content_rating: None,
             state: riven_core::types::MediaItemState::Scraped,
             failed_attempts: 0,
+            last_scrape_attempt_at: None,
             item_type: MediaItemType::Movie,
             is_requested: false,
             show_status: None,

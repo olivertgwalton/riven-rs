@@ -333,6 +333,14 @@ impl SettingsMutations {
                 .unwrap_or(queue.retry_interval_secs.load(Ordering::SeqCst)),
             Ordering::SeqCst,
         );
+        queue.maximum_scrape_attempts.store(
+            settings
+                .get("maximum_scrape_attempts")
+                .and_then(|v| v.as_u64())
+                .map(|v| v as u32)
+                .unwrap_or(queue.maximum_scrape_attempts.load(Ordering::SeqCst)),
+            Ordering::SeqCst,
+        );
 
         let previous_filesystem = queue.filesystem_settings.read().await.clone();
         let filesystem = settings

@@ -12,7 +12,7 @@ pub mod workers;
 
 use std::future::Future;
 use std::sync::Arc;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicU32, AtomicU64};
 
 use anyhow::Result;
 use apalis::prelude::TaskSink;
@@ -64,6 +64,9 @@ pub struct JobQueue {
     pub vfs_layout: Arc<RwLock<VfsLibraryLayout>>,
     pub filesystem_settings_revision: Arc<AtomicU64>,
     pub retry_interval_secs: Arc<AtomicU64>,
+    /// Hard ceiling on consecutive scrape failures before an item is marked
+    /// `Failed`. `0` disables the ceiling.
+    pub maximum_scrape_attempts: Arc<AtomicU32>,
     /// Cached resolution ranks — loaded once at startup and reloaded on settings save.
     pub resolution_ranks: Arc<RwLock<ResolutionRanks>>,
 }
@@ -78,6 +81,7 @@ impl JobQueue {
         reindex_config: ReindexConfig,
         filesystem_settings: FilesystemSettings,
         retry_interval_secs: u64,
+        maximum_scrape_attempts: u32,
     ) -> Result<Self> {
         let apalis_conn = apalis_redis::connect(redis_url).await?;
 
@@ -132,6 +136,7 @@ impl JobQueue {
             filesystem_settings: Arc::new(RwLock::new(filesystem_settings)),
             filesystem_settings_revision: Arc::new(AtomicU64::new(0)),
             retry_interval_secs: Arc::new(AtomicU64::new(retry_interval_secs)),
+            maximum_scrape_attempts: Arc::new(AtomicU32::new(maximum_scrape_attempts)),
             resolution_ranks: Arc::new(RwLock::new(resolution_ranks)),
         })
     }

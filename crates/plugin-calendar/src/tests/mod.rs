@@ -30,6 +30,7 @@ fn media_item(item_type: MediaItemType, title: &str) -> MediaItem {
         content_rating: None,
         state: MediaItemState::Unreleased,
         failed_attempts: 0,
+        last_scrape_attempt_at: None,
         item_type,
         is_requested: false,
         show_status: None::<ShowStatus>,

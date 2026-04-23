@@ -35,6 +35,11 @@ pub struct RivenSettings {
     /// Retry items that have been stuck (failed_attempts > 0) for longer than
     /// this many seconds. 0 = disabled. Default: 600 (10 m).
     pub retry_interval_secs: u64,
+    /// Hard ceiling on consecutive scrape/index failures before an item is
+    /// transitioned to `Failed` and excluded from further retry cycles. `0`
+    /// disables the cap (retry forever, subject only to the cooldown
+    /// back-off).
+    pub maximum_scrape_attempts: u32,
     /// Minutes to wait after a known release/air date before re-indexing.
     pub schedule_offset_minutes: u64,
     /// Fallback delay when an unreleased/ongoing item has no known future air date.
@@ -65,6 +70,7 @@ struct GeneralSettingsOverride {
     maximum_average_bitrate_movies: Option<u32>,
     maximum_average_bitrate_episodes: Option<u32>,
     retry_interval_secs: Option<u64>,
+    maximum_scrape_attempts: Option<u32>,
     schedule_offset_minutes: Option<u64>,
     unknown_air_date_offset_days: Option<u64>,
 }
@@ -87,6 +93,7 @@ impl Default for RivenSettings {
             maximum_average_bitrate_movies: None,
             maximum_average_bitrate_episodes: None,
             retry_interval_secs: 60 * 10, // 10 minutes
+            maximum_scrape_attempts: 0,
             schedule_offset_minutes: 30,
             unknown_air_date_offset_days: 7,
             api_key: String::new(),
@@ -154,6 +161,10 @@ impl RivenSettings {
         set_if_some(
             &mut self.retry_interval_secs,
             override_settings.retry_interval_secs,
+        );
+        set_if_some(
+            &mut self.maximum_scrape_attempts,
+            override_settings.maximum_scrape_attempts,
         );
         set_if_some(
             &mut self.schedule_offset_minutes,

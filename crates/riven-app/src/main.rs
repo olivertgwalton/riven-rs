@@ -99,6 +99,7 @@ async fn main() -> Result<()> {
             ReindexConfig::from(&settings),
             settings.filesystem.clone(),
             settings.retry_interval_secs,
+            settings.maximum_scrape_attempts,
         )
         .await?,
     );

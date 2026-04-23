@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE media_items\n         SET failed_attempts = failed_attempts + 1,\n             last_scrape_attempt_at = NOW(),\n             updated_at = NOW()\n         WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "e5ef901c8622933f0203edbcc6ed50fbdc6bcaa7e63f0bc7ce02075f0b2b7065"
+}

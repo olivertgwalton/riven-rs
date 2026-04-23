@@ -365,7 +365,7 @@ pub async fn get_episodes_ready_for_scraping(pool: &PgPool, limit: i64) -> Resul
                e.created_at, e.updated_at, e.indexed_at, e.scraped_at, e.scraped_times,
                e.aliases, e.network, e.country, e.language, e.is_anime, e.aired_at, e.aired_at_utc, e.year, e.genres,
                e.rating, e.content_rating AS "content_rating: _", e.state AS "state: _",
-               e.failed_attempts, e.item_type AS "item_type: _",
+               e.failed_attempts, e.last_scrape_attempt_at, e.item_type AS "item_type: _",
                e.is_requested, e.show_status AS "show_status: _", e.season_number, e.is_special, e.parent_id,
                e.episode_number, e.absolute_number, e.runtime, e.item_request_id, e.active_stream_id,
                e.network_timezone
@@ -377,8 +377,8 @@ pub async fn get_episodes_ready_for_scraping(pool: &PgPool, limit: i64) -> Resul
              AND e.is_requested = true
              AND (
                e.failed_attempts = 0
-               OR e.updated_at IS NULL
-               OR e.updated_at < NOW() - (CASE
+               OR e.last_scrape_attempt_at IS NULL
+               OR e.last_scrape_attempt_at < NOW() - (CASE
                    WHEN e.failed_attempts >= 10 THEN INTERVAL '24 hours'
                    WHEN e.failed_attempts >= 5  THEN INTERVAL '6 hours'
                    WHEN e.failed_attempts >= 2  THEN INTERVAL '2 hours'

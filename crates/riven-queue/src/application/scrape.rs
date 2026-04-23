@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::atomic::Ordering;
 
 use futures::stream::{self, StreamExt};
 
@@ -17,6 +18,41 @@ use crate::{JobQueue, ParseScrapeResultsJob, ScrapeJob, ScrapePluginJob};
 /// How many times we will re-push a `ScrapeJob` whose entire scraper pool was
 /// temporarily deferred before giving up and letting the retry scheduler handle it.
 const MAX_RATE_LIMIT_REPUSH: u32 = 3;
+
+/// Bump `failed_attempts`, then — if the item has now blown through the
+/// configured ceiling — flip its state to `Failed` and cascade so the retry
+/// scheduler stops picking it up forever.
+async fn record_scrape_failure(queue: &JobQueue, item: &riven_db::entities::MediaItem) {
+    let id = item.id;
+    if let Err(err) = repo::increment_failed_attempts(&queue.db_pool, id).await {
+        tracing::warn!(id, %err, "failed to increment failed_attempts");
+        return;
+    }
+
+    let max = queue.maximum_scrape_attempts.load(Ordering::Relaxed);
+    if max == 0 {
+        return;
+    }
+    // `item.failed_attempts` was read before the increment above.
+    let projected = item.failed_attempts.saturating_add(1) as u32;
+    if projected < max {
+        return;
+    }
+
+    tracing::warn!(
+        id,
+        failed_attempts = projected,
+        max,
+        "item exceeded maximum_scrape_attempts; marking Failed"
+    );
+    if let Err(err) = repo::mark_item_failed(&queue.db_pool, id).await {
+        tracing::warn!(id, %err, "failed to mark item as Failed");
+        return;
+    }
+    if let Err(err) = repo::cascade_state_update(&queue.db_pool, item).await {
+        tracing::warn!(id, %err, "failed to cascade Failed state to parents");
+    }
+}
 
 fn scrape_event(job: &ScrapeJob) -> RivenEvent {
     RivenEvent::MediaItemScrapeRequested {
@@ -180,9 +216,7 @@ pub async fn finalize(job: &ScrapeJob, queue: &JobQueue) {
         } else {
             item.title.clone()
         };
-        if let Err(err) = repo::increment_failed_attempts(&queue.db_pool, id).await {
-            tracing::warn!(id, %err, "failed to increment failed_attempts");
-        }
+        record_scrape_failure(queue, &item).await;
         queue
             .notify(RivenEvent::MediaItemScrapeErrorNoNewStreams {
                 id,
@@ -290,9 +324,7 @@ pub async fn parse_results(id: i64, _job: &ParseScrapeResultsJob, queue: &JobQue
     tracing::info!(id, stream_count, "parse-scrape-results completed");
 
     if stream_count == 0 {
-        if let Err(err) = repo::increment_failed_attempts(&queue.db_pool, id).await {
-            tracing::warn!(id, %err, "failed to increment failed_attempts");
-        }
+        record_scrape_failure(queue, &item).await;
         queue
             .notify(RivenEvent::MediaItemScrapeErrorNoNewStreams {
                 id,
