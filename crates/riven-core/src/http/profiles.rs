@@ -65,7 +65,8 @@ pub const MDBLIST: HttpServiceProfile =
 pub const PLEX: HttpServiceProfile = HttpServiceProfile::new("plex");
 pub const SEERR: HttpServiceProfile =
     HttpServiceProfile::new("seerr").with_rate_limit(20, Duration::from_secs(1));
-pub const STREMTHRU: HttpServiceProfile = HttpServiceProfile::new("stremthru");
+pub const STREMTHRU: HttpServiceProfile =
+    HttpServiceProfile::new("stremthru").with_rate_limit(1, Duration::from_secs(1));
 pub const TMDB: HttpServiceProfile =
     HttpServiceProfile::new("tmdb").with_rate_limit(40, Duration::from_secs(1));
 pub const TORRENTIO: HttpServiceProfile =

@@ -162,14 +162,21 @@ pub async fn add_torrent(
         return Ok(None);
     };
 
-    if data.status != "downloaded" {
+    // "downloaded" = files present and ready (all stores).
+    // "cached"     = in store's instant-download pool; TorBox items whose
+    //                DownloadFinished/DownloadPresent flags aren't set on the
+    //                initial ADD response come back with this status even
+    //                though the files are accessible.
+    // Any other status (queued, downloading, processing, empty) means the
+    // torrent isn't ready — clean it up and signal unavailability.
+    if !matches!(data.status.as_str(), "downloaded" | "cached") {
         let torrent_id = data.id;
         tracing::debug!(
             store,
             hash,
             torrent_id,
             status = %data.status,
-            "torrent not in downloaded state; deleting torz item"
+            "torrent not in ready state; deleting torz item"
         );
         if let Err(error) = delete_torrent(http, base_url, store, api_key, &torrent_id).await {
             tracing::warn!(store, hash, torrent_id, error = %error, "failed to delete torz item");
@@ -558,7 +565,7 @@ async fn fetch_debrid_extra(
         return Ok(DebridExtra {
             premium_until: data["premium_expires_at"].as_str().map(str::to_owned),
             cooldown_until: data["cooldown_until"].as_str().map(str::to_owned),
-            total_downloaded_bytes: data["total_bytes_downloaded"].as_i64(),
+            total_downloaded_bytes: data["total_downloaded"].as_i64(),
             ..Default::default()
         });
     }

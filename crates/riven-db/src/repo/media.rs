@@ -161,21 +161,38 @@ pub async fn get_items_ready_for_processing(
     .await?)
 }
 
+/// Escalating cooldown applied to items with `failed_attempts > 0` so a
+/// repeatedly-failing item doesn't get re-enqueued every retry cycle and
+/// starve fresh content. Mirrors the riven-ts `scrapeCooldownHours` behaviour
+/// (30m / 2h / 6h / 24h).
+pub(crate) const FAILED_ATTEMPTS_COOLDOWN_SQL: &str = "(
+    failed_attempts = 0
+    OR updated_at IS NULL
+    OR updated_at < NOW() - (CASE
+        WHEN failed_attempts >= 10 THEN INTERVAL '24 hours'
+        WHEN failed_attempts >= 5  THEN INTERVAL '6 hours'
+        WHEN failed_attempts >= 2  THEN INTERVAL '2 hours'
+        ELSE INTERVAL '30 minutes'
+    END)
+)";
+
 /// Fetch all pending top-level items needing a retry: Indexed, Scraped, or PartiallyCompleted.
 pub async fn get_pending_items_for_retry(
     pool: &PgPool,
     item_type: MediaItemType,
 ) -> Result<Vec<MediaItem>> {
-    Ok(sqlx::query_as::<_, MediaItem>(
+    let sql = format!(
         "SELECT * FROM media_items
          WHERE state = ANY(ARRAY['indexed'::media_item_state, 'scraped'::media_item_state, 'partially_completed'::media_item_state])
            AND item_type = $1
            AND is_requested = true
-         ORDER BY updated_at ASC NULLS FIRST, created_at ASC",
-    )
-    .bind(item_type)
-    .fetch_all(pool)
-    .await?)
+           AND {FAILED_ATTEMPTS_COOLDOWN_SQL}
+         ORDER BY failed_attempts ASC, updated_at ASC NULLS FIRST, created_at ASC",
+    );
+    Ok(sqlx::query_as::<_, MediaItem>(&sql)
+        .bind(item_type)
+        .fetch_all(pool)
+        .await?)
 }
 
 /// Fetch items stuck in Ongoing that haven't been updated in at least `min_age_minutes`.

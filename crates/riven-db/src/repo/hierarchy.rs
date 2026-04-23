@@ -375,7 +375,16 @@ pub async fn get_episodes_ready_for_scraping(pool: &PgPool, limit: i64) -> Resul
            WHERE e.state = 'indexed'
              AND e.item_type = 'episode'
              AND e.is_requested = true
-             AND (e.failed_attempts = 0 OR e.updated_at IS NULL OR e.updated_at < NOW() - INTERVAL '1 hour')
+             AND (
+               e.failed_attempts = 0
+               OR e.updated_at IS NULL
+               OR e.updated_at < NOW() - (CASE
+                   WHEN e.failed_attempts >= 10 THEN INTERVAL '24 hours'
+                   WHEN e.failed_attempts >= 5  THEN INTERVAL '6 hours'
+                   WHEN e.failed_attempts >= 2  THEN INTERVAL '2 hours'
+                   ELSE INTERVAL '30 minutes'
+               END)
+             )
            ORDER BY e.failed_attempts ASC, e.created_at ASC
            LIMIT $1"#,
         limit

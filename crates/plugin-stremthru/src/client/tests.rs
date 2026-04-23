@@ -56,3 +56,27 @@ fn cache_check_key_includes_store_and_hash() {
         "plugin:stremthru:cache-check:torbox:abcdef"
     );
 }
+
+#[test]
+fn add_torrent_accepts_cached_status_for_torbox_instant_downloads() {
+    // TorBox items in the seeded pool may return "cached" on the initial ADD
+    // response even though files are accessible (DownloadFinished/DownloadPresent
+    // flags aren't set until the background fetch completes).
+    let torz_cached = StremthruTorz {
+        id: "torz-2".to_string(),
+        status: "cached".to_string(),
+        files: vec![StremthruTorzFile {
+            name: "movie.mkv".to_string(),
+            path: String::new(),
+            size: 2048,
+            link: "https://cdn.torbox.app/movie.mkv".to_string(),
+        }],
+    };
+    let result = download_result_from_torz("torbox", "ABCDEF", torz_cached);
+    assert_eq!(result.provider, Some("torbox".to_string()));
+    assert_eq!(result.files[0].file_size, 2048);
+    assert_eq!(
+        result.files[0].download_url,
+        Some("https://cdn.torbox.app/movie.mkv".to_string())
+    );
+}

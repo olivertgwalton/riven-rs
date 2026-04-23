@@ -1,6 +1,5 @@
 use async_trait::async_trait;
 use serde::Deserialize;
-use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
@@ -38,7 +37,6 @@ impl Plugin for PlexPlugin {
     fn subscribed_events(&self) -> &[EventType] {
         &[
             EventType::MediaItemDownloadSuccess,
-            EventType::MediaItemsDeleted,
             EventType::ActivePlaybackSessionsRequested,
         ]
     }
@@ -167,79 +165,6 @@ impl Plugin for PlexPlugin {
 
                 Ok(HookResponse::Empty)
             }
-            RivenEvent::MediaItemsDeleted { deleted_paths, .. } => {
-                if deleted_paths.is_empty() {
-                    return Ok(HookResponse::Empty);
-                }
-
-                let plex_token = ctx.require_setting("plextoken")?;
-                let plex_url = ctx.require_setting("plexserverurl")?.trim_end_matches('/');
-
-                let fs_settings = load_filesystem_settings(&ctx.db_pool).await;
-                let library_path = effective_library_path(&ctx.settings, fs_settings.as_ref(), &ctx.vfs_mount_path);
-
-                let sections = self
-                    .cached_library_sections(&ctx.http, plex_url, plex_token)
-                    .await?;
-
-                let canonical_dirs: HashSet<String> = deleted_paths
-                    .iter()
-                    .map(|path| {
-                        path.rsplit_once('/')
-                            .map(|(dir, _)| dir)
-                            .unwrap_or(path.as_str())
-                            .to_string()
-                    })
-                    .collect();
-
-                let mut refresh_tasks = Vec::new();
-                for dir_path in canonical_dirs {
-                    // For deleted entries we don't have profile info, so expand across all enabled profiles.
-                    let vfs_dirs =
-                        deleted_entry_vfs_dirs(&dir_path, &library_path, fs_settings.as_ref());
-                    for full_path in vfs_dirs {
-                        for section in &sections {
-                            for location in &section.locations {
-                                if full_path.starts_with(&location.path) {
-                                    refresh_tasks.push((section.key.clone(), full_path.clone()));
-                                }
-                            }
-                        }
-                    }
-                }
-
-                if refresh_tasks.is_empty() {
-                    tracing::warn!(
-                        "plex: no library sections matched any deleted paths — check plexlibrarypath setting"
-                    );
-                    return Ok(HookResponse::Empty);
-                }
-
-                // Collect unique section keys for emptyTrash.
-                let affected_sections: Vec<String> = {
-                    let mut seen = HashSet::new();
-                    refresh_tasks
-                        .iter()
-                        .filter_map(|(key, _)| seen.insert(key.clone()).then(|| key.clone()))
-                        .collect()
-                };
-
-                for (section_key, path) in &refresh_tasks {
-                    match refresh_section(&ctx.http, plex_url, plex_token, section_key, path).await {
-                        Ok(()) => tracing::info!(section = section_key, path, "plex section rescanned after delete"),
-                        Err(e) => tracing::warn!(section = section_key, path, error = %e, "plex section rescan failed after delete"),
-                    }
-                }
-
-                for section_key in &affected_sections {
-                    match empty_trash(&ctx.http, plex_url, plex_token, section_key).await {
-                        Ok(()) => tracing::info!(section = section_key, "plex section trash emptied"),
-                        Err(e) => tracing::warn!(section = section_key, error = %e, "plex section emptyTrash failed"),
-                    }
-                }
-
-                Ok(HookResponse::Empty)
-            }
             RivenEvent::ActivePlaybackSessionsRequested => {
                 let plex_token = ctx.require_setting("plextoken")?;
                 let plex_url = ctx.require_setting("plexserverurl")?.trim_end_matches('/');
@@ -316,29 +241,6 @@ fn entry_vfs_dirs(
     paths
 }
 
-/// For deleted entries (no profile info), returns all possible VFS dirs: default + all enabled profiles.
-fn deleted_entry_vfs_dirs(
-    canonical_dir: &str,
-    plex_library_path: &str,
-    fs_settings: Option<&FilesystemSettings>,
-) -> Vec<String> {
-    let base = plex_library_path.trim_end_matches('/');
-    let mut paths = vec![format!("{base}{canonical_dir}")];
-
-    if let Some(settings) = fs_settings {
-        for profile in settings.library_profiles.values() {
-            if profile.enabled {
-                paths.push(format!(
-                    "{base}{}{canonical_dir}",
-                    profile.library_path
-                ));
-            }
-        }
-    }
-
-    paths
-}
-
 impl PlexPlugin {
     async fn cached_library_sections(
         &self,
@@ -395,26 +297,6 @@ async fn refresh_section(
         .send(profiles::PLEX, |client| {
             client
                 .post(&url)
-                .header("x-plex-token", token)
-                .header("accept", "application/json")
-        })
-        .await?;
-    response.error_for_status()?;
-    Ok(())
-}
-
-async fn empty_trash(
-    http: &riven_core::http::HttpClient,
-    plex_url: &str,
-    token: &str,
-    section_key: &str,
-) -> anyhow::Result<()> {
-    let url = format!("{plex_url}/library/sections/{section_key}/emptyTrash");
-    tracing::debug!(target_url = %url, section_key, "emptying plex section trash");
-    let response = http
-        .send(profiles::PLEX, |client| {
-            client
-                .put(&url)
                 .header("x-plex-token", token)
                 .header("accept", "application/json")
         })
