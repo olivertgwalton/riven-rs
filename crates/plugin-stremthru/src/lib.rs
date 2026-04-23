@@ -202,7 +202,7 @@ impl Plugin for StremthruPlugin {
                             Ok(results) => {
                                 if let Some(r) = results.into_iter().find(|r| {
                                     r.hash.eq_ignore_ascii_case(info_hash)
-                                        && matches!(r.status, TorrentStatus::Cached | TorrentStatus::Downloaded)
+                                        && matches!(r.status, TorrentStatus::Cached | TorrentStatus::Downloaded | TorrentStatus::Unknown)
                                 }) {
                                     v.push(StoreAttempt { store, api_key, file_count: r.files.len() });
                                 } else {
