@@ -56,7 +56,7 @@ pub fn build_schema(
     Schema::build(
         QueryRoot::default(),
         MutationRoot::default(),
-        SubscriptionRoot,
+        SubscriptionRoot::default(),
     )
     .data(db_pool)
     .data(registry)
