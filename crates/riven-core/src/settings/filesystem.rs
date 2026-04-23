@@ -123,14 +123,17 @@ impl FilesystemFilterRules {
         metadata: &FilesystemItemMetadata,
         content_type: FilesystemContentType,
     ) -> bool {
-        let genres_lower: Vec<String> = metadata
+        // Borrow trimmed genre slices instead of allocating a lowered String
+        // per genre. Filter matching is ASCII-case insensitive (see
+        // `matches_token_filter`), so no lowering is needed.
+        let genres: Vec<&str> = metadata
             .genres
             .iter()
-            .map(|g| g.trim().to_ascii_lowercase())
+            .map(|g| g.trim())
             .filter(|g| !g.is_empty())
             .collect();
         self.allows_content_type(content_type)
-            && matches_token_filter(&genres_lower, &self.genres)
+            && matches_token_filter(&genres, &self.genres)
             && matches_text_filter(metadata.network.as_deref(), &self.networks)
             && matches_text_filter(metadata.language.as_deref(), &self.languages)
             && matches_text_filter(metadata.country.as_deref(), &self.countries)
@@ -148,44 +151,42 @@ impl FilesystemFilterRules {
 }
 
 fn matches_text_filter(value: Option<&str>, filters: &[String]) -> bool {
-    let values = value
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(|value| vec![value.to_ascii_lowercase()])
-        .unwrap_or_default();
-    matches_token_filter(&values, filters)
+    match value.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(v) => matches_token_filter(&[v], filters),
+        None => matches_token_filter(&[], filters),
+    }
 }
 
 fn matches_content_rating_filter(rating: Option<ContentRating>, filters: &[String]) -> bool {
-    let values = rating
-        .map(content_rating_key)
-        .map(|value| vec![value.to_string()])
-        .unwrap_or_default();
-    matches_token_filter(&values, filters)
+    match rating.map(content_rating_key) {
+        Some(v) => matches_token_filter(&[v], filters),
+        None => matches_token_filter(&[], filters),
+    }
 }
 
-fn matches_token_filter(values: &[String], filters: &[String]) -> bool {
-    let mut inclusions = Vec::new();
-    for filter in filters
-        .iter()
-        .map(|filter| filter.trim().to_ascii_lowercase())
-    {
+fn matches_token_filter(values: &[&str], filters: &[String]) -> bool {
+    let mut any_inclusion = false;
+    let mut inclusion_hit = false;
+    for filter in filters.iter() {
+        let filter = filter.trim();
         if filter.is_empty() {
             continue;
         }
         if let Some(exclusion) = filter.strip_prefix('!') {
-            if values.iter().any(|value| value == exclusion) {
+            if values.iter().any(|value| value.eq_ignore_ascii_case(exclusion)) {
                 return false;
             }
         } else {
-            inclusions.push(filter);
+            any_inclusion = true;
+            if !inclusion_hit
+                && values.iter().any(|value| value.eq_ignore_ascii_case(filter))
+            {
+                inclusion_hit = true;
+            }
         }
     }
 
-    inclusions.is_empty()
-        || inclusions
-            .iter()
-            .any(|filter| values.iter().any(|value| value == filter))
+    !any_inclusion || inclusion_hit
 }
 
 fn within_bounds<T>(value: Option<T>, min: Option<T>, max: Option<T>) -> bool

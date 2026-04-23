@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::BTreeSet;
 
 use crate::settings::FilesystemSettings;
@@ -25,10 +26,11 @@ impl VfsLibraryLayout {
                     return None;
                 }
                 let normalized = normalize_library_path(&profile.library_path)?;
+                let segments = split_path(&normalized).into_iter().map(String::from).collect();
                 Some(ActiveLibraryProfile {
                     key,
                     exclusive: profile.exclusive,
-                    segments: split_path(&normalized),
+                    segments,
                     library_path: normalized,
                 })
             })
@@ -42,28 +44,35 @@ impl VfsLibraryLayout {
     }
 
     pub fn root_entries(&self) -> Vec<String> {
-        self.profiles
+        let mut entries: BTreeSet<Cow<'static, str>> = self
+            .profiles
             .iter()
-            .filter_map(|profile| profile.segments.first().cloned())
-            .chain(["movies".to_string(), "shows".to_string()])
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect()
+            .filter_map(|profile| profile.segments.first())
+            .map(|s| Cow::Owned(s.clone()))
+            .collect();
+        entries.insert(Cow::Borrowed("movies"));
+        entries.insert(Cow::Borrowed("shows"));
+        entries.into_iter().map(Cow::into_owned).collect()
     }
 
     pub fn profile_prefix_children(&self, path: &str) -> Vec<String> {
         let current = split_path(path);
-
-        self.profiles
-            .iter()
-            .filter(|profile| is_prefix(&current, &profile.segments))
-            .flat_map(|profile| match profile.segments.get(current.len()) {
-                Some(next) => vec![next.clone()],
-                None => vec!["movies".to_string(), "shows".to_string()],
-            })
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect()
+        let mut entries: BTreeSet<Cow<'static, str>> = BTreeSet::new();
+        for profile in &self.profiles {
+            if !is_prefix(&current, &profile.segments) {
+                continue;
+            }
+            match profile.segments.get(current.len()) {
+                Some(next) => {
+                    entries.insert(Cow::Owned(next.clone()));
+                }
+                None => {
+                    entries.insert(Cow::Borrowed("movies"));
+                    entries.insert(Cow::Borrowed("shows"));
+                }
+            }
+        }
+        entries.into_iter().map(Cow::into_owned).collect()
     }
 
     /// Returns the keys of all enabled exclusive profiles.
@@ -91,16 +100,23 @@ impl VfsLibraryLayout {
     }
 }
 
-pub fn split_path(path: &str) -> Vec<String> {
+pub fn split_path(path: &str) -> Vec<&str> {
     path.trim_matches('/')
         .split('/')
         .filter(|segment| !segment.is_empty())
-        .map(ToString::to_string)
         .collect()
 }
 
-pub fn is_prefix(prefix: &[String], full: &[String]) -> bool {
-    prefix.len() <= full.len() && prefix.iter().zip(full).all(|(a, b)| a == b)
+pub fn is_prefix<A, B>(prefix: &[A], full: &[B]) -> bool
+where
+    A: AsRef<str>,
+    B: AsRef<str>,
+{
+    prefix.len() <= full.len()
+        && prefix
+            .iter()
+            .zip(full)
+            .all(|(a, b)| a.as_ref() == b.as_ref())
 }
 
 fn normalize_library_path(path: &str) -> Option<String> {

@@ -52,24 +52,24 @@ pub fn parse_path(layout: &VfsLibraryLayout, path: &str) -> PathTarget {
     }
 }
 
-fn parse_canonical_segments(segments: &[String]) -> CanonicalPath {
+fn parse_canonical_segments(segments: &[&str]) -> CanonicalPath {
     match segments {
         [] => CanonicalPath::Root,
-        [first] if first == "movies" => CanonicalPath::AllMovies,
-        [first, dir] if first == "movies" => CanonicalPath::MovieDir {
+        [first] if *first == "movies" => CanonicalPath::AllMovies,
+        [first, dir] if *first == "movies" => CanonicalPath::MovieDir {
             actual_dir: format!("/movies/{dir}"),
         },
-        [first, dir, file] if first == "movies" => CanonicalPath::MovieFile {
+        [first, dir, file] if *first == "movies" => CanonicalPath::MovieFile {
             actual_path: format!("/movies/{dir}/{file}"),
         },
-        [first] if first == "shows" => CanonicalPath::AllShows,
-        [first, dir] if first == "shows" => CanonicalPath::ShowDir {
+        [first] if *first == "shows" => CanonicalPath::AllShows,
+        [first, dir] if *first == "shows" => CanonicalPath::ShowDir {
             actual_dir: format!("/shows/{dir}"),
         },
-        [first, dir, season] if first == "shows" => CanonicalPath::SeasonDir {
+        [first, dir, season] if *first == "shows" => CanonicalPath::SeasonDir {
             actual_dir: format!("/shows/{dir}/{season}"),
         },
-        [first, dir, season, file] if first == "shows" => CanonicalPath::EpisodeFile {
+        [first, dir, season, file] if *first == "shows" => CanonicalPath::EpisodeFile {
             actual_path: format!("/shows/{dir}/{season}/{file}"),
         },
         _ => CanonicalPath::Invalid,

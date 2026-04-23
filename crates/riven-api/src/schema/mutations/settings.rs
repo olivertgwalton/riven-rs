@@ -312,6 +312,9 @@ impl SettingsMutations {
         cfg.minimum_average_bitrate_episodes = mbps("minimum_average_bitrate_episodes");
         cfg.maximum_average_bitrate_movies = mbps("maximum_average_bitrate_movies");
         cfg.maximum_average_bitrate_episodes = mbps("maximum_average_bitrate_episodes");
+        if let Some(v) = settings.get("attempt_unknown_downloads").and_then(|v| v.as_bool()) {
+            cfg.attempt_unknown_downloads = v;
+        }
 
         let queue = ctx.data::<Arc<JobQueue>>()?;
         let mut reindex_cfg = queue.reindex_config.write().await;

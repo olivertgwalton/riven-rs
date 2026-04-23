@@ -20,6 +20,9 @@ pub struct RivenSettings {
     pub log_directory: String,
     pub gql_port: u16,
     pub dubbed_anime_only: bool,
+    /// When true, torrents with unknown cache status are included as download candidates.
+    /// Defaults to false because attempting unknown torrents degrades performance.
+    pub attempt_unknown_downloads: bool,
     /// Minimum average bitrate for movies (Mbps). `None` = disabled.
     pub minimum_average_bitrate_movies: Option<u32>,
     /// Minimum average bitrate for episodes (Mbps). `None` = disabled.
@@ -56,6 +59,7 @@ pub struct RivenSettings {
 struct GeneralSettingsOverride {
     filesystem: Option<FilesystemSettings>,
     dubbed_anime_only: Option<bool>,
+    attempt_unknown_downloads: Option<bool>,
     minimum_average_bitrate_movies: Option<u32>,
     minimum_average_bitrate_episodes: Option<u32>,
     maximum_average_bitrate_movies: Option<u32>,
@@ -77,6 +81,7 @@ impl Default for RivenSettings {
             log_directory: "./logs".into(),
             gql_port: 8080,
             dubbed_anime_only: false,
+            attempt_unknown_downloads: false,
             minimum_average_bitrate_movies: None,
             minimum_average_bitrate_episodes: None,
             maximum_average_bitrate_movies: None,
@@ -125,6 +130,10 @@ impl RivenSettings {
         set_if_some(
             &mut self.dubbed_anime_only,
             override_settings.dubbed_anime_only,
+        );
+        set_if_some(
+            &mut self.attempt_unknown_downloads,
+            override_settings.attempt_unknown_downloads,
         );
         set_option_if_some(
             &mut self.minimum_average_bitrate_movies,

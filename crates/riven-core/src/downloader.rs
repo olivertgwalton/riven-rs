@@ -1,10 +1,11 @@
-/// Runtime-configurable bitrate filter for downloaded files.
+/// Runtime-configurable downloader settings.
 #[derive(Clone, Default)]
 pub struct DownloaderConfig {
     pub minimum_average_bitrate_movies: Option<u32>,
     pub minimum_average_bitrate_episodes: Option<u32>,
     pub maximum_average_bitrate_movies: Option<u32>,
     pub maximum_average_bitrate_episodes: Option<u32>,
+    pub attempt_unknown_downloads: bool,
 }
 
 impl From<&crate::settings::RivenSettings> for DownloaderConfig {
@@ -14,6 +15,7 @@ impl From<&crate::settings::RivenSettings> for DownloaderConfig {
             minimum_average_bitrate_episodes: s.minimum_average_bitrate_episodes,
             maximum_average_bitrate_movies: s.maximum_average_bitrate_movies,
             maximum_average_bitrate_episodes: s.maximum_average_bitrate_episodes,
+            attempt_unknown_downloads: s.attempt_unknown_downloads,
         }
     }
 }

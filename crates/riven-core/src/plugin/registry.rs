@@ -137,7 +137,7 @@ impl PluginRegistry {
     pub async fn dispatch(
         &self,
         event: &RivenEvent,
-    ) -> Vec<(String, anyhow::Result<HookResponse>)> {
+    ) -> Vec<(&'static str, anyhow::Result<HookResponse>)> {
         let event_type = event.event_type();
         let targets: Vec<_> = self
             .plugins
@@ -147,7 +147,7 @@ impl PluginRegistry {
             .filter(|a| a.valid && a.plugin.subscribed_events().contains(&event_type))
             .map(|active| {
                 (
-                    active.plugin.name().to_string(),
+                    active.plugin.name(),
                     Arc::clone(&active.plugin),
                     Arc::clone(&active.context),
                 )

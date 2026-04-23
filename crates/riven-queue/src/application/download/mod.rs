@@ -201,7 +201,8 @@ pub async fn run_rank_streams(id: i64, job: &RankStreamsJob, queue: &JobQueue) {
         return;
     }
 
-    let (cached_info, cache_checked) = collect_cached_info(queue, &all_streams).await;
+    let attempt_unknown = queue.downloader_config.read().await.attempt_unknown_downloads;
+    let (cached_info, cache_checked) = collect_cached_info(queue, &all_streams, attempt_unknown).await;
 
     let preferred = job.preferred_info_hash.clone();
     let magnet_for_preferred = preferred
@@ -307,7 +308,9 @@ pub async fn run(id: i64, job: &DownloadJob, queue: &JobQueue) {
         Some(result) => result,
         None => {
             tracing::debug!(id, "rank-streams result missing; recomputing inline");
-            let (cached_info, cache_checked) = collect_cached_info(queue, &all_streams).await;
+            let attempt_unknown = queue.downloader_config.read().await.attempt_unknown_downloads;
+            let (cached_info, cache_checked) =
+                collect_cached_info(queue, &all_streams, attempt_unknown).await;
             RankStreamsResult {
                 cached_info,
                 cache_checked,
@@ -470,6 +473,7 @@ async fn clear_rank_result(queue: &JobQueue, id: i64) {
 async fn collect_cached_info(
     queue: &JobQueue,
     streams: &[Stream],
+    attempt_unknown_downloads: bool,
 ) -> (HashMap<String, Vec<CachedStoreEntry>>, bool) {
     let hashes: Vec<String> = streams.iter().map(|s| s.info_hash.clone()).collect();
     let cache_event = RivenEvent::MediaItemDownloadCacheCheckRequested { hashes };
@@ -482,10 +486,12 @@ async fn collect_cached_info(
             Ok(HookResponse::CacheCheck(results)) => {
                 any_responded = true;
                 for result in results {
-                    if matches!(
+                    let is_candidate = matches!(
                         result.status,
-                        TorrentStatus::Cached | TorrentStatus::Downloaded | TorrentStatus::Unknown
-                    ) {
+                        TorrentStatus::Cached | TorrentStatus::Downloaded
+                    ) || (attempt_unknown_downloads
+                        && result.status == TorrentStatus::Unknown);
+                    if is_candidate {
                         cached_info
                             .entry(result.hash.to_lowercase())
                             .or_default()

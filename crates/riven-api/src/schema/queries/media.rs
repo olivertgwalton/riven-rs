@@ -2,11 +2,29 @@ use async_graphql::*;
 use riven_core::types::*;
 use riven_db::entities::*;
 use riven_db::repo;
-use std::collections::HashMap;
 
 use crate::schema::helpers::derive_media_metadata;
 use crate::schema::typed_items::MediaItemUnion;
 use crate::schema::types::*;
+
+/// Group items that are pre-sorted by their group key into consecutive runs.
+/// Returns `Vec<(key, Vec<T>)>` — callers look up by key via linear scan,
+/// which beats a HashMap for the small N typical of show/season queries.
+fn group_sorted_by_key<T, K, F>(items: impl IntoIterator<Item = T>, key: F) -> Vec<(K, Vec<T>)>
+where
+    K: Eq,
+    F: Fn(&T) -> K,
+{
+    let mut groups: Vec<(K, Vec<T>)> = Vec::new();
+    for item in items {
+        let k = key(&item);
+        match groups.last_mut() {
+            Some((last, bucket)) if *last == k => bucket.push(item),
+            _ => groups.push((k, vec![item])),
+        }
+    }
+    groups
+}
 
 #[derive(Default)]
 pub struct MediaQuery;
@@ -265,13 +283,10 @@ impl MediaQuery {
                 .await?
             };
 
-            let mut episodes_by_season: HashMap<i64, Vec<MediaItem>> = HashMap::new();
-            for episode in episodes {
-                episodes_by_season
-                    .entry(episode.parent_id.unwrap_or_default())
-                    .or_default()
-                    .push(episode);
-            }
+            // Episodes arrive sorted by parent_id (see ORDER BY above), so
+            // a linear group-by produces contiguous buckets without a HashMap.
+            let mut episodes_by_season =
+                group_sorted_by_key(episodes, |e| e.parent_id.unwrap_or_default());
 
             let show_expected: i64 = {
                 let qualifying: Vec<&MediaItem> = seasons
@@ -291,23 +306,32 @@ impl MediaQuery {
                 };
                 qualifying[..cap.min(n)]
                     .iter()
-                    .map(|s| episodes_by_season.get(&s.id).map_or(0, |eps| eps.len()) as i64)
+                    .map(|s| {
+                        episodes_by_season
+                            .iter()
+                            .find(|(pid, _)| *pid == s.id)
+                            .map_or(0, |(_, eps)| eps.len() as i64)
+                    })
                     .sum()
             };
 
             let seasons: Vec<SeasonState> = seasons
                 .into_iter()
                 .map(|season| {
-                    let eps: Vec<EpisodeState> = episodes_by_season
-                        .remove(&season.id)
-                        .unwrap_or_default()
-                        .into_iter()
-                        .map(|episode| EpisodeState {
-                            id: episode.id,
-                            episode_number: episode.episode_number,
-                            state: episode.state,
-                        })
-                        .collect();
+                    let eps: Vec<EpisodeState> = match episodes_by_season
+                        .iter()
+                        .position(|(pid, _)| *pid == season.id)
+                    {
+                        Some(idx) => episodes_by_season.swap_remove(idx).1,
+                        None => Vec::new(),
+                    }
+                    .into_iter()
+                    .map(|episode| EpisodeState {
+                        id: episode.id,
+                        episode_number: episode.episode_number,
+                        state: episode.state,
+                    })
+                    .collect();
                     let expected_file_count = eps.len() as i64;
                     SeasonState {
                         id: season.id,
@@ -375,7 +399,7 @@ impl MediaQuery {
                 .await?
             };
             let episode_ids: Vec<i64> = episodes.iter().map(|e| e.id).collect();
-            let episode_entries = if episode_ids.is_empty() {
+            let mut episode_entries = if episode_ids.is_empty() {
                 Vec::new()
             } else {
                 sqlx::query_as::<_, FileSystemEntry>(
@@ -387,26 +411,34 @@ impl MediaQuery {
                 .await?
             };
 
-            let mut episodes_by_season: HashMap<i64, Vec<MediaItem>> = HashMap::new();
-            for episode in episodes {
-                episodes_by_season
-                    .entry(episode.parent_id.unwrap_or_default())
-                    .or_default()
-                    .push(episode);
-            }
-            let mut entries_by_episode: HashMap<i64, Vec<FileSystemEntry>> = HashMap::new();
-            for entry in episode_entries {
-                entries_by_episode
-                    .entry(entry.media_item_id)
-                    .or_default()
-                    .push(with_metadata(entry));
-            }
+            // Episodes come sorted by parent_id; sort entries by media_item_id
+            // so both can be grouped with a single linear pass.
+            episode_entries.sort_by_key(|e| e.media_item_id);
+            let mut episodes_by_season =
+                group_sorted_by_key(episodes, |e| e.parent_id.unwrap_or_default());
+            let mut entries_by_episode = group_sorted_by_key(
+                episode_entries.into_iter().map(with_metadata),
+                |e| e.media_item_id,
+            );
 
             let mut season_fulls = Vec::with_capacity(seasons.len());
             for season in seasons {
-                let mut episode_fulls = Vec::new();
-                for episode in episodes_by_season.remove(&season.id).unwrap_or_default() {
-                    let ep_media = entries_by_episode.remove(&episode.id).unwrap_or_default();
+                let season_episodes = match episodes_by_season
+                    .iter()
+                    .position(|(pid, _)| *pid == season.id)
+                {
+                    Some(idx) => episodes_by_season.swap_remove(idx).1,
+                    None => Vec::new(),
+                };
+                let mut episode_fulls = Vec::with_capacity(season_episodes.len());
+                for episode in season_episodes {
+                    let ep_media = match entries_by_episode
+                        .iter()
+                        .position(|(mid, _)| *mid == episode.id)
+                    {
+                        Some(idx) => entries_by_episode.swap_remove(idx).1,
+                        None => Vec::new(),
+                    };
                     let ep_fs = ep_media.first().cloned();
                     episode_fulls.push(EpisodeFull {
                         item: episode,

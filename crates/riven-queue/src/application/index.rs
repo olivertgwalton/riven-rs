@@ -1,3 +1,4 @@
+use chrono::{Duration, Utc};
 use riven_core::events::{EventType, HookResponse, RivenEvent};
 use riven_core::types::*;
 
@@ -109,7 +110,7 @@ pub async fn finalize(id: i64, queue: &JobQueue) {
     queue.clear_flow("index", id).await;
 
     if responses.is_empty() {
-        tracing::warn!(id, "no indexer plugin responded");
+        tracing::warn!(id, "no indexer plugin responded; retrying in 24h");
         if let Err(err) = repo::increment_failed_attempts(&queue.db_pool, id).await {
             tracing::warn!(id, %err, "failed to increment failed_attempts");
         }
@@ -118,6 +119,9 @@ pub async fn finalize(id: i64, queue: &JobQueue) {
                 id,
                 error: "no indexer plugin responded".into(),
             })
+            .await;
+        queue
+            .schedule_index_at(IndexJob::from_item(&item), Utc::now() + Duration::hours(24))
             .await;
         return;
     }

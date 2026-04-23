@@ -182,6 +182,8 @@ impl CoreSettingsQuery {
         let schema: Vec<SettingField> = vec![
             SettingField::new("dubbed_anime_only", "Dubbed anime only", "boolean")
                 .with_description("Only fetch dubbed versions of anime titles."),
+            SettingField::new("attempt_unknown_downloads", "Attempt unknown downloads", "boolean")
+                .with_description("Attempt to download torrents whose cache status cannot be verified. Enabling this degrades performance but may help if plugins cannot confirm cache status for your items."),
             SettingField::new("retry_interval_secs", "Retry interval (seconds)", "number")
                 .with_default("600")
                 .with_description("How often to retry stuck items. 0 = disabled. Default: 600 (10 m)."),
@@ -265,6 +267,7 @@ impl CoreSettingsQuery {
         let defaults = RivenSettings::default();
         let mut result = serde_json::json!({
             "dubbed_anime_only": defaults.dubbed_anime_only,
+            "attempt_unknown_downloads": defaults.attempt_unknown_downloads,
             "minimum_average_bitrate_movies": defaults.minimum_average_bitrate_movies,
             "minimum_average_bitrate_episodes": defaults.minimum_average_bitrate_episodes,
             "maximum_average_bitrate_movies": defaults.maximum_average_bitrate_movies,

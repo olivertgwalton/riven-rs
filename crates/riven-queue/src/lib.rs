@@ -267,7 +267,7 @@ impl JobQueue {
         let config = self.scrape_storage.get_config().clone();
         let task_id = scheduled_scrape_task_id(job.id).to_string();
         let meta_key = format!("{}:{}", config.job_meta_hash(), task_id);
-        let payload = match serde_json::to_vec(&job) {
+        let payload = match serialize_job_payload(&job) {
             Ok(p) => p,
             Err(error) => {
                 tracing::error!(id = job.id, error = %error, "failed to serialize scheduled scrape job");
@@ -337,7 +337,7 @@ impl JobQueue {
         let config = self.index_storage.get_config().clone();
         let task_id = scheduled_index_task_id(job.id).to_string();
         let meta_key = format!("{}:{}", config.job_meta_hash(), task_id);
-        let payload = match serde_json::to_vec(&job) {
+        let payload = match serialize_job_payload(&job) {
             Ok(p) => p,
             Err(error) => {
                 tracing::error!(id = job.id, error = %error, "failed to serialize scheduled index job");
@@ -721,6 +721,17 @@ impl JobQueue {
         let ranks = riven_db::repo::load_resolution_ranks(&self.db_pool).await;
         *self.resolution_ranks.write().await = ranks;
     }
+}
+
+/// Serialize a job payload into a single pre-sized heap allocation.
+///
+/// `serde_json::to_vec` starts with an empty `Vec` and grows as bytes are
+/// written (multiple reallocations for typical ~256-byte job payloads).
+/// Preallocating once avoids the growth doubling pattern.
+fn serialize_job_payload<T: Serialize>(job: &T) -> serde_json::Result<Vec<u8>> {
+    let mut buf = Vec::with_capacity(256);
+    serde_json::to_writer(&mut buf, job)?;
+    Ok(buf)
 }
 
 // ── Redis key helpers ─────────────────────────────────────────────────────────

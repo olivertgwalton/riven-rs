@@ -45,11 +45,12 @@ impl HttpResponseData {
         if self.is_success() {
             return Ok(());
         }
-        let body = self.text().unwrap_or_default();
+        let preview_len = self.body.len().min(200);
+        let preview = String::from_utf8_lossy(&self.body[..preview_len]);
         anyhow::bail!(
             "http request failed with status {}: {}",
             self.status,
-            body.chars().take(200).collect::<String>()
+            preview
         )
     }
 }
