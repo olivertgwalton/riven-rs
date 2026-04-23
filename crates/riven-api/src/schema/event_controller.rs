@@ -13,7 +13,10 @@ pub fn start(job_queue: Arc<JobQueue>) {
         loop {
             let event = match rx.recv().await {
                 Ok(event) => event,
-                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Lagged(n)) => {
+                    tracing::warn!(dropped = n, "event controller lagged; {} events dropped — items may be stuck until the next retry cycle", n);
+                    continue;
+                }
                 Err(broadcast::error::RecvError::Closed) => break,
             };
 

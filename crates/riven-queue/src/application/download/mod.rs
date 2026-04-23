@@ -569,7 +569,16 @@ async fn run_preferred_stream(
     )
     .await
     {
-        DownloadAttemptOutcome::Failed => return false,
+        DownloadAttemptOutcome::Failed => {
+            queue
+                .notify(RivenEvent::MediaItemDownloadError {
+                    id,
+                    title: item.title.clone(),
+                    error: "selected stream could not be downloaded from any provider".into(),
+                })
+                .await;
+            return false;
+        }
         DownloadAttemptOutcome::TerminalHandled => return true,
         DownloadAttemptOutcome::Succeeded => {}
     }

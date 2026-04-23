@@ -108,7 +108,7 @@ impl JobQueue {
         let redis = redis::aio::ConnectionManager::new(redis_client).await?;
 
         let resolution_ranks = riven_db::repo::load_resolution_ranks(&db_pool).await;
-        let (event_tx, _) = broadcast::channel(256);
+        let (event_tx, _) = broadcast::channel(4096);
 
         Ok(Self {
             index_storage,
