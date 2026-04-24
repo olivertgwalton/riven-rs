@@ -180,6 +180,17 @@ pub async fn finalize(job: &ScrapeJob, queue: &JobQueue) {
         return;
     };
 
+    // Skip items in terminal/non-processable states — stale plugin jobs can
+    // still drain after an item is marked Failed; without this guard they
+    // would fire spurious "no streams" notifications indefinitely.
+    if matches!(item.state, MediaItemState::Failed | MediaItemState::Paused) {
+        tracing::debug!(id, state = ?item.state, "skipping finalize for non-processable state");
+        queue.clear_flow_results("scrape", id).await;
+        queue.clear_flow("scrape", id).await;
+        queue.clear_flow_rate_limited("scrape", id).await;
+        return;
+    }
+
     queue.clear_flow("scrape", id).await;
 
     let result_count = queue.flow_result_count("scrape", id).await;
@@ -317,10 +328,6 @@ pub async fn parse_results(id: i64, _job: &ParseScrapeResultsJob, queue: &JobQue
         tracing::error!(error = %e, "failed to update scraped timestamp");
     }
 
-    if let Err(e) = repo::refresh_state_cascade(&queue.db_pool, &item).await {
-        tracing::error!(error = %e, "failed to refresh state after scrape");
-    }
-
     tracing::info!(id, stream_count, "parse-scrape-results completed");
 
     if stream_count == 0 {
@@ -333,6 +340,9 @@ pub async fn parse_results(id: i64, _job: &ParseScrapeResultsJob, queue: &JobQue
             })
             .await;
     } else {
+        if let Err(e) = repo::refresh_state_cascade(&queue.db_pool, &item).await {
+            tracing::error!(error = %e, "failed to refresh state after scrape");
+        }
         if let Err(err) = repo::reset_failed_attempts(&queue.db_pool, id).await {
             tracing::warn!(id, %err, "failed to reset failed_attempts");
         }
