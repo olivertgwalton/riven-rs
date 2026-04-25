@@ -15,29 +15,42 @@ pub use streams::*;
 use anyhow::Result;
 use sqlx::PgPool;
 
-// ── Bulk state mutations ──
+use media::cascade_to_parents;
 
-async fn bulk_update(pool: &PgPool, ids: &[i64], set_clause: &'static str) -> Result<u64> {
-    let sql = format!("UPDATE media_items SET {set_clause}, updated_at = NOW() WHERE id = ANY($1)");
-    let result = sqlx::query(&sql).bind(ids).execute(pool).await?;
+// ── Bulk state mutations ──
+//
+// Two patterns here:
+// - When the bulk write reflects intent the caller already knows is correct
+//   (e.g. `pause_items_by_ids` sets `paused`, which is a sticky state), we
+//   bulk-UPDATE and cascade only to parents.
+// - When the bulk write changes *intent* (clear pause, reset failure counter)
+//   the leaf state needs to be recomputed from the underlying data — an
+//   unpaused item with existing streams should land in `Scraped`, not the
+//   `Indexed` placeholder the bulk UPDATE wrote. `recompute_states` handles
+//   this and auto-cascades parents through `refresh_state`.
+
+pub async fn reset_items_by_ids(pool: &PgPool, ids: Vec<i64>) -> Result<u64> {
+    if ids.is_empty() {
+        return Ok(0);
+    }
+    let result = sqlx::query!(
+        "UPDATE media_items SET state = 'indexed', failed_attempts = 0, updated_at = NOW() \
+         WHERE id = ANY($1)",
+        &ids[..]
+    )
+    .execute(pool)
+    .await?;
+    media::recompute_states(pool, &ids).await;
     Ok(result.rows_affected())
 }
 
-pub async fn reset_items_by_ids(pool: &PgPool, ids: Vec<i64>) -> Result<u64> {
-    bulk_update(pool, &ids, "state = 'indexed', failed_attempts = 0").await
-}
-
 pub async fn retry_items_by_ids(pool: &PgPool, ids: Vec<i64>) -> Result<u64> {
-    bulk_update(pool, &ids, "failed_attempts = 0").await
-}
-
-pub async fn pause_items_by_ids(pool: &PgPool, ids: Vec<i64>) -> Result<u64> {
-    bulk_update(pool, &ids, "state = 'paused'").await
-}
-
-pub async fn unpause_items_by_ids(pool: &PgPool, ids: Vec<i64>) -> Result<u64> {
+    if ids.is_empty() {
+        return Ok(0);
+    }
+    // Doesn't touch `state`, so no cascade needed.
     let result = sqlx::query!(
-        "UPDATE media_items SET state = 'indexed', updated_at = NOW() WHERE id = ANY($1) AND state = 'paused'",
+        "UPDATE media_items SET failed_attempts = 0, updated_at = NOW() WHERE id = ANY($1)",
         &ids[..]
     )
     .execute(pool)
@@ -45,7 +58,52 @@ pub async fn unpause_items_by_ids(pool: &PgPool, ids: Vec<i64>) -> Result<u64> {
     Ok(result.rows_affected())
 }
 
+pub async fn pause_items_by_ids(pool: &PgPool, ids: Vec<i64>) -> Result<u64> {
+    if ids.is_empty() {
+        return Ok(0);
+    }
+    let result = sqlx::query!(
+        "UPDATE media_items SET state = 'paused', updated_at = NOW() WHERE id = ANY($1)",
+        &ids[..]
+    )
+    .execute(pool)
+    .await?;
+    // `paused` is a sticky state — no leaf recompute needed, but parents must
+    // re-aggregate (a season with all-paused episodes becomes paused itself).
+    media::cascade_to_parents_of(pool, &ids).await;
+    Ok(result.rows_affected())
+}
+
+pub async fn unpause_items_by_ids(pool: &PgPool, ids: Vec<i64>) -> Result<u64> {
+    if ids.is_empty() {
+        return Ok(0);
+    }
+    let result = sqlx::query!(
+        "UPDATE media_items SET state = 'indexed', updated_at = NOW() \
+         WHERE id = ANY($1) AND state = 'paused'",
+        &ids[..]
+    )
+    .execute(pool)
+    .await?;
+    // After clearing the sticky pause, recompute each item's true state from
+    // the underlying data. Items with existing streams snap to `Scraped`, etc.
+    media::recompute_states(pool, &ids).await;
+    Ok(result.rows_affected())
+}
+
 pub async fn delete_items_by_ids(pool: &PgPool, ids: Vec<i64>) -> Result<u64> {
+    if ids.is_empty() {
+        return Ok(0);
+    }
+    // Capture parents before the DELETE — we lose the rows after.
+    let parent_ids: Vec<i64> = sqlx::query_scalar(
+        "SELECT DISTINCT parent_id FROM media_items WHERE id = ANY($1) AND parent_id IS NOT NULL",
+    )
+    .bind(&ids)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+
     let result = sqlx::query!("DELETE FROM media_items WHERE id = ANY($1)", &ids[..])
         .execute(pool)
         .await?;
@@ -63,6 +121,8 @@ pub async fn delete_items_by_ids(pool: &PgPool, ids: Vec<i64>) -> Result<u64> {
     )
     .execute(pool)
     .await;
+
+    cascade_to_parents(pool, &parent_ids).await;
 
     Ok(result.rows_affected())
 }

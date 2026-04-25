@@ -180,41 +180,32 @@ pub async fn refresh_state(pool: &PgPool, item: &MediaItem) -> Result<MediaItemS
     Ok(state)
 }
 
-/// Compute and persist state, then cascade up through parents.
+/// Alias for `refresh_state` — kept for callers that previously needed both
+/// computation and cascade as separate steps. Cascade is now automatic.
 pub async fn refresh_state_cascade(pool: &PgPool, item: &MediaItem) -> Result<()> {
     refresh_state(pool, item).await?;
-    cascade_state_update(pool, item).await?;
     Ok(())
 }
 
-/// Cascade state updates from an item up through its parents.
+/// Cascade state changes from a child item up to its parent. The parent's
+/// `refresh_state` itself cascades further (via the auto-cascade in
+/// `update_media_item_state`), so this only walks one level here.
 pub async fn cascade_state_update(pool: &PgPool, item: &MediaItem) -> Result<()> {
-    if item.item_type == MediaItemType::Episode {
-        if let Some(season_id) = item.parent_id
-            && let Some(season) = get_media_item(pool, season_id).await?
-        {
-            refresh_state(pool, &season).await?;
-            if let Some(show_id) = season.parent_id
-                && let Some(show) = get_media_item(pool, show_id).await?
-            {
-                refresh_state(pool, &show).await?;
-            }
-        }
-    } else if item.item_type == MediaItemType::Season
-        && let Some(show_id) = item.parent_id
-        && let Some(show) = get_media_item(pool, show_id).await?
-    {
-        refresh_state(pool, &show).await?;
+    let Some(parent_id) = item.parent_id else {
+        return Ok(());
+    };
+    if let Some(parent) = get_media_item(pool, parent_id).await? {
+        refresh_state(pool, &parent).await?;
     }
     Ok(())
 }
 
-/// Batch-set a list of items directly to `Completed` in one UPDATE.
-///
-/// Used by `persist_season` after successfully writing media entries for
-/// multiple episodes — avoids N individual `refresh_state` calls (each of
-/// which would SELECT + UPDATE) by computing state inline (we know the
-/// episodes are completed because we just created their entries).
+/// Batch-set a list of items directly to `Completed` in one UPDATE, then
+/// cascade state to their parents. Used by `persist_season` after writing
+/// media entries for multiple episodes — avoids N per-row updates by setting
+/// state inline (we know the episodes are completed because we just created
+/// their entries) but still triggers the parent recomputation that
+/// `update_media_item_state` would have done per row.
 pub async fn batch_set_completed(pool: &PgPool, ids: &[i64]) -> Result<()> {
     if ids.is_empty() {
         return Ok(());
@@ -225,5 +216,6 @@ pub async fn batch_set_completed(pool: &PgPool, ids: &[i64]) -> Result<()> {
     .bind(ids)
     .execute(pool)
     .await?;
+    super::media::cascade_to_parents_of(pool, ids).await;
     Ok(())
 }

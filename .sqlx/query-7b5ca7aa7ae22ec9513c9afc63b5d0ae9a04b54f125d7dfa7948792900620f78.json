@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE media_items SET state = 'indexed', failed_attempts = 0, updated_at = NOW() WHERE id = ANY($1)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8Array"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "7b5ca7aa7ae22ec9513c9afc63b5d0ae9a04b54f125d7dfa7948792900620f78"
+}

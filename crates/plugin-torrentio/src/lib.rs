@@ -5,7 +5,8 @@ use riven_core::http::RetryLaterError;
 use riven_core::http::profiles;
 use riven_core::plugin::{Plugin, PluginContext};
 use riven_core::register_plugin;
-use riven_core::types::{MediaItemType, ScrapeEntry, ScrapeResponse};
+use riven_core::stremio::StremioScrapeConfig;
+use riven_core::types::{ScrapeEntry, ScrapeResponse};
 use serde::Deserialize;
 
 const TORRENTIO_BASE_URL: &str = "http://torrentio.strem.fun/";
@@ -42,25 +43,22 @@ impl Plugin for TorrentioPlugin {
         request: &ScrapeRequest<'_>,
         ctx: &PluginContext,
     ) -> anyhow::Result<HookResponse> {
-        let Some(imdb_id) = request.imdb_id else {
+        let Some(stremio) = StremioScrapeConfig::from_request(request) else {
             return Ok(HookResponse::Empty);
         };
 
         let filter = ctx.settings.get_or("filter", DEFAULT_FILTER);
-
-        let scrape_type = scrape_type(request.item_type);
-        let url = scrape_url(
-            &filter,
-            request.item_type,
-            imdb_id,
-            request.season,
-            request.episode,
+        let url = format!(
+            "{TORRENTIO_BASE_URL}{filter}/stream/{kind}/{imdb_id}{suffix}.json",
+            kind = stremio.kind.as_str(),
+            imdb_id = stremio.imdb_id,
+            suffix = stremio.id_suffix(),
         );
 
         tracing::debug!(
             url = %url,
-            imdb_id,
-            scrape_type,
+            imdb_id = stremio.imdb_id,
+            scrape_type = stremio.kind.as_str(),
             season = request.season,
             episode = request.episode,
             "requesting torrentio streams"
@@ -77,7 +75,7 @@ impl Plugin for TorrentioPlugin {
             if is_deferred_status(status) {
                 tracing::warn!(
                     status = %status,
-                    imdb_id,
+                    imdb_id = stremio.imdb_id,
                     title = request.title,
                     "torrentio temporarily unavailable; deferring scrape"
                 );
@@ -94,7 +92,11 @@ impl Plugin for TorrentioPlugin {
 
         let results = scrape_results_from_response(resp);
 
-        tracing::info!(count = results.len(), imdb_id, "torrentio scrape complete");
+        tracing::info!(
+            count = results.len(),
+            imdb_id = stremio.imdb_id,
+            "torrentio scrape complete"
+        );
         Ok(HookResponse::Scrape(results))
     }
 }
@@ -112,36 +114,6 @@ struct TorrentioStream {
     info_hash: Option<String>,
 }
 
-fn scrape_url(
-    filter: &str,
-    item_type: MediaItemType,
-    imdb_id: &str,
-    season: Option<i32>,
-    episode: Option<i32>,
-) -> String {
-    let (scrape_type, identifier) = match item_type {
-        MediaItemType::Movie => (scrape_type(item_type), String::new()),
-        MediaItemType::Show => (scrape_type(item_type), String::new()),
-        MediaItemType::Season => {
-            let s = season.unwrap_or(1);
-            (scrape_type(item_type), format!(":{s}"))
-        }
-        MediaItemType::Episode => {
-            let s = season.unwrap_or(1);
-            let e = episode.unwrap_or(1);
-            (scrape_type(item_type), format!(":{s}:{e}"))
-        }
-    };
-
-    format!("{TORRENTIO_BASE_URL}{filter}/stream/{scrape_type}/{imdb_id}{identifier}.json")
-}
-
-fn scrape_type(item_type: MediaItemType) -> &'static str {
-    match item_type {
-        MediaItemType::Movie => "movie",
-        MediaItemType::Show | MediaItemType::Season | MediaItemType::Episode => "series",
-    }
-}
 
 fn is_deferred_status(status: StatusCode) -> bool {
     matches!(
