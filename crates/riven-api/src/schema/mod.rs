@@ -1,11 +1,11 @@
 use crate::vfs_mount::VfsMountManager;
 use async_graphql::{MergedObject, Schema};
 use plugin_calendar::CalendarQuery;
-use plugin_dashboard::{DashboardQuery, PlaybackSessionsCache};
-use plugin_logs::{LogDirectory, LogsQuery};
+use plugin_dashboard::DashboardQuery;
+use plugin_logs::LogsQuery;
 use riven_core::downloader::DownloaderConfig;
-use riven_core::logging::LogControl;
 use riven_core::http::HttpClient;
+use riven_core::logging::LogControl;
 use riven_core::plugin::PluginRegistry;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -54,7 +54,7 @@ pub fn build_schema(
     log_tx: tokio::sync::broadcast::Sender<String>,
     vfs_mount_manager: Arc<VfsMountManager>,
 ) -> AppSchema {
-    Schema::build(
+    let builder = Schema::build(
         QueryRoot::default(),
         MutationRoot::default(),
         SubscriptionRoot::default(),
@@ -63,11 +63,11 @@ pub fn build_schema(
     .data(registry)
     .data(job_queue)
     .data(http_client)
-    .data(LogDirectory(log_directory))
-    .data(Arc::new(PlaybackSessionsCache::default()))
     .data(downloader_config)
     .data(log_control)
     .data(log_tx)
-    .data(vfs_mount_manager)
-    .finish()
+    .data(vfs_mount_manager);
+    let builder = plugin_logs::register_with_schema(builder, log_directory);
+    let builder = plugin_dashboard::register_with_schema(builder);
+    builder.finish()
 }

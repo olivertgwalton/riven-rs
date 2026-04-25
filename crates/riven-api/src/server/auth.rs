@@ -1,6 +1,6 @@
 use axum::http::HeaderMap;
 use chrono::Utc;
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
 
 use crate::schema::auth::{RequestAuth, UserRole};

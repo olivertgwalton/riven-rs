@@ -24,7 +24,7 @@ pub struct FuseSession {
 
 impl FuseSession {
     pub fn join(self) {
-        self.session.join();
+        let _ = self.session.join();
     }
 }
 
@@ -91,10 +91,12 @@ pub fn mount(
         cache_max_size_mb,
     );
 
-    let options = vec![
+    let mut config = fuser::Config::default();
+    // SessionACL::All ↔ the old `allow_other`. AutoUnmount requires non-Owner ACL.
+    config.acl = fuser::SessionACL::All;
+    config.mount_options = vec![
         fuser::MountOption::RO,
         fuser::MountOption::FSName("riven".to_string()),
-        fuser::MountOption::AllowOther,
         fuser::MountOption::AutoUnmount,
         fuser::MountOption::DefaultPermissions,
         // Allow the kernel to issue up to 4 MB reads per FUSE call instead of
@@ -103,7 +105,7 @@ pub fn mount(
         fuser::MountOption::CUSTOM("max_read=4194304".to_string()),
     ];
 
-    let session = fuser::spawn_mount2(fs, mount_path, &options)?;
+    let session = fuser::spawn_mount2(fs, mount_path, &config)?;
     tracing::info!(path = %mount_path.display(), "VFS mounted");
 
     Ok(FuseSession { session })

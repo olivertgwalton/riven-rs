@@ -4,6 +4,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use chrono::Local;
 use log::LevelFilter;
+use opentelemetry::KeyValue;
+use opentelemetry::trace::TracerProvider as _;
+use opentelemetry_otlp::WithExportConfig;
+use opentelemetry_sdk::Resource;
+use opentelemetry_sdk::trace::SdkTracerProvider;
+use sentry::ClientInitGuard;
 use tokio::sync::broadcast;
 use tracing::{Event, Subscriber};
 use tracing_appender::non_blocking::WorkerGuard;
@@ -118,11 +124,37 @@ impl LogControl {
     }
 }
 
+/// Held for the lifetime of the process. Dropping the Sentry guard flushes
+/// pending events; calling `shutdown` on the OTEL provider flushes spans.
+pub struct ObservabilityHandles {
+    pub log_control: Arc<LogControl>,
+    pub sentry: Option<ClientInitGuard>,
+    pub otel_provider: Option<SdkTracerProvider>,
+}
+
+impl ObservabilityHandles {
+    pub fn shutdown(&self) {
+        if let Some(provider) = &self.otel_provider
+            && let Err(e) = provider.shutdown()
+        {
+            tracing::warn!(error = %e, "OTEL provider shutdown error");
+        }
+    }
+}
+
+/// Initialize Sentry, OTEL, and the tracing subscriber.
+///
+/// Sentry activates when `SENTRY_DSN` is set; OTEL activates when
+/// `OTEL_EXPORTER_OTLP_ENDPOINT` is set. Service name comes from
+/// `OTEL_SERVICE_NAME`, defaulting to `riven`.
 pub fn init_logging(
     settings: &LogSettings,
     log_directory: &str,
     log_tx: broadcast::Sender<String>,
-) -> anyhow::Result<Arc<LogControl>> {
+) -> anyhow::Result<ObservabilityHandles> {
+    let sentry_guard = init_sentry();
+    let otel_provider = init_otel()?;
+
     let enabled = Arc::new(AtomicBool::new(settings.enabled));
     let (filter_layer, handle) = reload::Layer::new(build_level_filter(settings)?);
 
@@ -131,7 +163,6 @@ pub fn init_logging(
         filter_fn(move |_| flag.load(Ordering::Relaxed))
     };
 
-    let registry = tracing_subscriber::registry().with(filter_layer);
     let console_layer = tracing_subscriber::fmt::layer()
         .event_format(RivenFormatter)
         .with_filter(gate(&enabled));
@@ -148,7 +179,17 @@ pub fn init_logging(
         .with_writer(BroadcastMakeWriter { tx: log_tx })
         .with_filter(gate(&enabled));
 
-    registry
+    let sentry_layer = sentry_guard
+        .as_ref()
+        .map(|_| sentry::integrations::tracing::layer());
+    let otel_layer = otel_provider.as_ref().map(|provider| {
+        tracing_opentelemetry::layer().with_tracer(provider.tracer("riven"))
+    });
+
+    tracing_subscriber::registry()
+        .with(filter_layer)
+        .with(sentry_layer)
+        .with(otel_layer)
         .with(console_layer)
         .with(file_layer)
         .with(broadcast_layer)
@@ -156,11 +197,54 @@ pub fn init_logging(
 
     log::set_max_level(log_max_level(settings));
 
-    Ok(Arc::new(LogControl {
-        handle,
-        enabled,
-        _file_guard: file_guard,
-    }))
+    Ok(ObservabilityHandles {
+        log_control: Arc::new(LogControl {
+            handle,
+            enabled,
+            _file_guard: file_guard,
+        }),
+        sentry: sentry_guard,
+        otel_provider,
+    })
+}
+
+fn init_sentry() -> Option<ClientInitGuard> {
+    let dsn = std::env::var("SENTRY_DSN").ok().filter(|v| !v.trim().is_empty())?;
+    let environment = std::env::var("SENTRY_ENVIRONMENT").ok().map(Into::into);
+    let guard = sentry::init((
+        dsn,
+        sentry::ClientOptions {
+            release: sentry::release_name!(),
+            environment,
+            attach_stacktrace: true,
+            ..Default::default()
+        },
+    ));
+    Some(guard)
+}
+
+fn init_otel() -> anyhow::Result<Option<SdkTracerProvider>> {
+    let endpoint = match std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT") {
+        Ok(v) if !v.trim().is_empty() => v,
+        _ => return Ok(None),
+    };
+    let service_name = std::env::var("OTEL_SERVICE_NAME").unwrap_or_else(|_| "riven".into());
+
+    let exporter = opentelemetry_otlp::SpanExporter::builder()
+        .with_tonic()
+        .with_endpoint(endpoint)
+        .build()?;
+
+    let resource = Resource::builder()
+        .with_attribute(KeyValue::new("service.name", service_name))
+        .build();
+
+    let provider = SdkTracerProvider::builder()
+        .with_batch_exporter(exporter)
+        .with_resource(resource)
+        .build();
+
+    Ok(Some(provider))
 }
 
 fn log_max_level(settings: &LogSettings) -> LevelFilter {

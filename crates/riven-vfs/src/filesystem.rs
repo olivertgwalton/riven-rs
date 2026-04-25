@@ -6,9 +6,11 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use dashmap::DashMap;
 use fuser::{
-    FileAttr, FileType, Filesystem, ReplyAttr, ReplyData, ReplyDirectory, ReplyEntry, ReplyOpen,
-    Request, consts::FOPEN_KEEP_CACHE,
+    Errno, FileAttr, FileHandle as FuseFh, FileType, Filesystem, FopenFlags, Generation, INodeNo,
+    KernelConfig, LockOwner, OpenFlags, ReplyAttr, ReplyData, ReplyDirectory, ReplyEmpty,
+    ReplyEntry, ReplyOpen, Request,
 };
+use parking_lot::Mutex;
 use tokio::sync::{RwLock, Semaphore};
 use tokio::sync::mpsc;
 
@@ -48,7 +50,7 @@ fn is_ignored_name(name: &str) -> bool {
 fn make_attr(ino: u64, kind: FileType, size: u64, mtime: SystemTime) -> FileAttr {
     let is_dir = kind == FileType::Directory;
     FileAttr {
-        ino,
+        ino: INodeNo(ino),
         size,
         blocks: if is_dir { 0 } else { size.div_ceil(BLOCK_SIZE) },
         atime: mtime,
@@ -83,7 +85,7 @@ fn entry_mtime(entry: &FileSystemEntry) -> SystemTime {
     UNIX_EPOCH + Duration::from_secs(ts.timestamp().max(0) as u64)
 }
 
-struct FileHandle {
+struct OpenedFile {
     entry_id: i64,
     path: Arc<str>,
     stream_url: Arc<str>,
@@ -134,7 +136,11 @@ pub struct RivenFs {
     runtime: tokio::runtime::Handle,
 
     next_fd: AtomicU64,
-    file_handles: DashMap<u64, FileHandle>,
+    // Mutex wrap satisfies fuser 0.17's `Filesystem: Sync` bound — `MediaStream`
+    // holds a `BoxStream<Send>` which isn't Sync. The Mutex is uncontended in
+    // practice (DashMap already serializes per-key access), but it lets the type
+    // system see `OpenedFile` as Sync.
+    file_handles: DashMap<u64, Mutex<OpenedFile>>,
 
     path_to_ino: DashMap<Arc<str>, u64>,
     ino_to_path: DashMap<u64, Arc<str>>,
@@ -311,7 +317,7 @@ impl RivenFs {
 
     fn read_handle(
         &self,
-        handle: &mut FileHandle,
+        handle: &mut OpenedFile,
         start: u64,
         end: u64,
         stream_url: &str,
@@ -372,22 +378,18 @@ async fn prewarm_header_footer(
 }
 
 impl Filesystem for RivenFs {
-    fn init(
-        &mut self,
-        _req: &Request,
-        config: &mut fuser::KernelConfig,
-    ) -> Result<(), libc::c_int> {
-        // Request the maximum readahead the kernel allows. This lets the kernel
-        // pipeline read-ahead requests aggressively, reducing latency stalls
-        // between successive FUSE reads during sequential playback.
+    fn init(&mut self, _req: &Request, config: &mut KernelConfig) -> std::io::Result<()> {
+        // Maximum readahead lets the kernel pipeline reads aggressively, reducing
+        // latency stalls between successive FUSE reads during sequential playback.
         let _ = config.set_max_readahead(128 * 1024 * 1024);
         Ok(())
     }
 
-    fn lookup(&mut self, _req: &Request, parent: u64, name: &OsStr, reply: ReplyEntry) {
+    fn lookup(&self, _req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEntry) {
+        let parent = parent.0;
         let name = name.to_string_lossy();
         if is_ignored_name(&name) {
-            reply.error(libc::ENOENT);
+            reply.error(Errno::ENOENT);
             return;
         }
         let path = self.resolve_path(parent, &name);
@@ -395,22 +397,22 @@ impl Filesystem for RivenFs {
         self.refresh_caches_if_needed();
         let layout = self.current_layout();
         match parse_path(&layout, &path) {
-            PathTarget::Root => reply.entry(&TTL, &dir_attr(ROOT_INO), 0),
+            PathTarget::Root => reply.entry(&TTL, &dir_attr(ROOT_INO), Generation(0)),
             PathTarget::ProfilePrefixDir => {
-                reply.entry(&TTL, &dir_attr(self.get_or_create_ino(&path)), 0)
+                reply.entry(&TTL, &dir_attr(self.get_or_create_ino(&path)), Generation(0))
             }
             PathTarget::Canonical {
                 profile_key,
                 path: canonical,
             } => match canonical {
-                CanonicalPath::Root => reply.entry(&TTL, &dir_attr(ROOT_INO), 0),
+                CanonicalPath::Root => reply.entry(&TTL, &dir_attr(ROOT_INO), Generation(0)),
                 CanonicalPath::AllMovies => {
                     let ino = if profile_key.is_some() {
                         self.get_or_create_ino(&path)
                     } else {
                         MOVIES_INO
                     };
-                    reply.entry(&TTL, &dir_attr(ino), 0);
+                    reply.entry(&TTL, &dir_attr(ino), Generation(0));
                 }
                 CanonicalPath::AllShows => {
                     let ino = if profile_key.is_some() {
@@ -418,36 +420,45 @@ impl Filesystem for RivenFs {
                     } else {
                         SHOWS_INO
                     };
-                    reply.entry(&TTL, &dir_attr(ino), 0);
+                    reply.entry(&TTL, &dir_attr(ino), Generation(0));
                 }
                 CanonicalPath::MovieDir { .. }
                 | CanonicalPath::ShowDir { .. }
                 | CanonicalPath::SeasonDir { .. } => {
-                    reply.entry(&TTL, &dir_attr(self.get_or_create_ino(&path)), 0);
+                    reply.entry(
+                        &TTL,
+                        &dir_attr(self.get_or_create_ino(&path)),
+                        Generation(0),
+                    );
                 }
                 CanonicalPath::MovieFile { .. } | CanonicalPath::EpisodeFile { .. } => {
                     match self.get_entry_cached(&path) {
                         Some(entry) => {
                             let ino = self.get_or_create_ino(&path);
-                            reply.entry(&TTL, &file_attr(ino, entry.file_size, entry.mtime), 0);
+                            reply.entry(
+                                &TTL,
+                                &file_attr(ino, entry.file_size, entry.mtime),
+                                Generation(0),
+                            );
                         }
-                        None => reply.error(libc::ENOENT),
+                        None => reply.error(Errno::ENOENT),
                     }
                 }
-                CanonicalPath::Invalid => reply.error(libc::ENOENT),
+                CanonicalPath::Invalid => reply.error(Errno::ENOENT),
             },
-            PathTarget::Invalid => reply.error(libc::ENOENT),
+            PathTarget::Invalid => reply.error(Errno::ENOENT),
         }
     }
 
-    fn getattr(&mut self, _req: &Request, ino: u64, _fh: Option<u64>, reply: ReplyAttr) {
+    fn getattr(&self, _req: &Request, ino: INodeNo, _fh: Option<FuseFh>, reply: ReplyAttr) {
+        let ino = ino.0;
         match ino {
             ROOT_INO => reply.attr(&TTL, &dir_attr(ROOT_INO)),
             MOVIES_INO => reply.attr(&TTL, &dir_attr(MOVIES_INO)),
             SHOWS_INO => reply.attr(&TTL, &dir_attr(SHOWS_INO)),
             _ => {
                 let Some(path) = self.ino_to_path.get(&ino) else {
-                    reply.error(libc::ENOENT);
+                    reply.error(Errno::ENOENT);
                     return;
                 };
                 self.refresh_caches_if_needed();
@@ -460,7 +471,7 @@ impl Filesystem for RivenFs {
                         Some(entry) => {
                             reply.attr(&TTL, &file_attr(ino, entry.file_size, entry.mtime))
                         }
-                        None => reply.error(libc::ENOENT),
+                        None => reply.error(Errno::ENOENT),
                     },
                     _ => reply.attr(&TTL, &dir_attr(ino)),
                 }
@@ -469,13 +480,14 @@ impl Filesystem for RivenFs {
     }
 
     fn readdir(
-        &mut self,
+        &self,
         _req: &Request,
-        ino: u64,
-        _fh: u64,
-        offset: i64,
+        ino: INodeNo,
+        _fh: FuseFh,
+        offset: u64,
         mut reply: ReplyDirectory,
     ) {
+        let ino = ino.0;
         self.refresh_caches_if_needed();
         let cached = self
             .readdir_cache
@@ -513,28 +525,29 @@ impl Filesystem for RivenFs {
         };
 
         for (i, (entry_ino, kind, name)) in entries.iter().enumerate().skip(offset as usize) {
-            if reply.add(*entry_ino, (i + 1) as i64, *kind, name) {
+            if reply.add(INodeNo(*entry_ino), (i + 1) as u64, *kind, name) {
                 break;
             }
         }
         reply.ok();
     }
 
-    fn open(&mut self, _req: &Request, ino: u64, _flags: i32, reply: ReplyOpen) {
+    fn open(&self, _req: &Request, ino: INodeNo, _flags: OpenFlags, reply: ReplyOpen) {
+        let ino = ino.0;
         let Some(path) = self.ino_to_path.get(&ino).map(|r| Arc::clone(&r)) else {
-            reply.error(libc::ENOENT);
+            reply.error(Errno::ENOENT);
             return;
         };
         tracing::debug!(target: "streaming", path = %path, "open");
         let Some(entry) = self.get_entry_cached(&path) else {
-            reply.error(libc::ENOENT);
+            reply.error(Errno::ENOENT);
             return;
         };
         let Some(stream_url) = self.resolve_stream_url(&path, &entry) else {
             reply.error(if entry.download_url.is_some() {
-                libc::EIO
+                Errno::EIO
             } else {
-                libc::ENOENT
+                Errno::ENOENT
             });
             return;
         };
@@ -542,8 +555,8 @@ impl Filesystem for RivenFs {
         let fd = self.next_fd.fetch_add(1, Ordering::SeqCst);
         let file_size = entry.file_size;
 
-        // Kick off a background task that fetches header and footer bytes
-        // concurrently so media-server scans hit the cache instead of the CDN.
+        // Pre-warm header and footer bytes so media-server scans hit the cache,
+        // not the CDN.
         self.runtime.spawn(prewarm_header_footer(
             Arc::clone(&self.range_cache),
             self.stream_client.clone(),
@@ -555,35 +568,37 @@ impl Filesystem for RivenFs {
 
         self.file_handles.insert(
             fd,
-            FileHandle {
+            Mutex::new(OpenedFile {
                 entry_id: entry.id,
                 path,
                 stream_url: Arc::from(stream_url),
                 download_url: entry.download_url.clone(),
                 provider: entry.provider.clone(),
                 stream_session: MediaStream::new(ino, file_size),
-            },
+            }),
         );
-        reply.opened(fd, FOPEN_KEEP_CACHE);
+        reply.opened(FuseFh(fd), FopenFlags::FOPEN_KEEP_CACHE);
     }
 
     fn read(
-        &mut self,
+        &self,
         _req: &Request,
-        _ino: u64,
-        fh: u64,
-        offset: i64,
+        _ino: INodeNo,
+        fh: FuseFh,
+        offset: u64,
         size: u32,
-        _flags: i32,
-        _lock_owner: Option<u64>,
+        _flags: OpenFlags,
+        _lock_owner: Option<LockOwner>,
         reply: ReplyData,
     ) {
-        let Some(mut handle) = self.file_handles.get_mut(&fh) else {
-            reply.error(libc::EBADF);
+        let fh = fh.0;
+        let Some(entry) = self.file_handles.get(&fh) else {
+            reply.error(Errno::EBADF);
             return;
         };
+        let mut handle = entry.lock();
 
-        let start = offset as u64;
+        let start = offset;
         if start >= handle.stream_session.file_size() {
             reply.data(&[]);
             return;
@@ -597,7 +612,7 @@ impl Filesystem for RivenFs {
             ReadOutcome::Data(buf) => ReadOutcome::Data(buf),
             ReadOutcome::Error(code) => {
                 let Some(download_url) = handle.download_url.as_ref().map(Arc::clone) else {
-                    return reply.error(code);
+                    return reply.error(Errno::from_i32(code));
                 };
                 let path = Arc::clone(&handle.path);
                 let entry_id = handle.entry_id;
@@ -617,7 +632,7 @@ impl Filesystem for RivenFs {
                     Some(download_url.as_ref()),
                     provider.as_deref(),
                 ) else {
-                    return reply.error(code);
+                    return reply.error(Errno::from_i32(code));
                 };
                 handle.stream_url = Arc::from(url);
                 let refreshed = Arc::clone(&handle.stream_url);
@@ -627,20 +642,21 @@ impl Filesystem for RivenFs {
 
         match outcome {
             ReadOutcome::Data(buf) => reply.data(&buf),
-            ReadOutcome::Error(code) => reply.error(code),
+            ReadOutcome::Error(code) => reply.error(Errno::from_i32(code)),
         }
     }
 
     fn release(
-        &mut self,
+        &self,
         _req: &Request,
-        _ino: u64,
-        fh: u64,
-        _flags: i32,
-        _lock_owner: Option<u64>,
+        _ino: INodeNo,
+        fh: FuseFh,
+        _flags: OpenFlags,
+        _lock_owner: Option<LockOwner>,
         _flush: bool,
-        reply: fuser::ReplyEmpty,
+        reply: ReplyEmpty,
     ) {
+        let fh = fh.0;
         tracing::debug!(target: "streaming", fh, "release");
         self.file_handles.remove(&fh);
         reply.ok();

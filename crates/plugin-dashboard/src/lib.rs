@@ -1,4 +1,4 @@
-use async_graphql::{Context, Object, Result as GqlResult, SimpleObject};
+use async_graphql::{Context, Object, Result as GqlResult, SchemaBuilder, SimpleObject};
 use async_trait::async_trait;
 use riven_core::events::{HookResponse, RivenEvent};
 use riven_core::plugin::{Plugin, PluginRegistry};
@@ -49,6 +49,15 @@ pub struct YearRelease {
 
 #[derive(Default)]
 pub struct DashboardQuery;
+
+pub fn register_with_schema<Q, M, S>(builder: SchemaBuilder<Q, M, S>) -> SchemaBuilder<Q, M, S>
+where
+    Q: async_graphql::ObjectType + 'static,
+    M: async_graphql::ObjectType + 'static,
+    S: async_graphql::SubscriptionType + 'static,
+{
+    builder.data(Arc::new(PlaybackSessionsCache::default()))
+}
 
 const ACTIVE_PLAYBACK_CACHE_TTL: Duration = Duration::from_secs(10);
 

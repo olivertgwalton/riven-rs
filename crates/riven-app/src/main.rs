@@ -58,8 +58,9 @@ async fn main() -> Result<()> {
 
     let log_settings = riven_core::logging::load_log_settings(&db_pool, &settings).await?;
     let (log_tx, _) = broadcast::channel::<String>(1024);
-    let log_control =
+    let observability =
         riven_core::logging::init_logging(&log_settings, &settings.log_directory, log_tx.clone())?;
+    let log_control = observability.log_control.clone();
     tracing::info!("riven starting up");
 
     if settings.unsafe_wipe_database_on_startup {
@@ -307,6 +308,7 @@ async fn main() -> Result<()> {
     }
 
     vfs_mount_manager.unmount().await;
+    observability.shutdown();
 
     tracing::info!("riven shutdown complete");
     Ok(())

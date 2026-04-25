@@ -15,6 +15,7 @@ anyhow = { workspace = true }
 tracing = { workspace = true }
 lru = { workspace = true }
 dashmap = { workspace = true }
+parking_lot = { workspace = true }
 libc = { workspace = true }
 chrono = { workspace = true }
 futures = { workspace = true }
