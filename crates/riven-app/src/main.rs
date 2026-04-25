@@ -299,9 +299,6 @@ async fn main() -> Result<()> {
     job_queue.notify(RivenEvent::CoreShutdown).await;
     cancel.cancel();
 
-    // Drain with a hard 30s ceiling. Workers in flight finish their current job
-    // (apalis honors the shutdown signal); axum stops accepting new connections
-    // and lets in-flight requests complete; scheduler exits its select.
     let drain = async {
         let _ = tokio::join!(gql_handle, monitor_task, scheduler_task);
     };

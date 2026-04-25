@@ -210,8 +210,7 @@ pub async fn finalize(job: &ScrapeJob, queue: &JobQueue) {
                 max = MAX_RATE_LIMIT_REPUSH,
                 "all scrapers deferred; re-pushing scrape job"
             );
-            // DedupGuard::Drop is async-spawned and races with this re-push;
-            // release synchronously so set_nx in push_scrape can't no-op.
+            // DedupGuard::Drop releases async — synchronously clear so push_scrape can re-acquire.
             queue.release_dedup("scrape", id).await;
             queue
                 .push_scrape(ScrapeJob {

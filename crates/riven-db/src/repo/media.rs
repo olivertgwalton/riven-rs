@@ -396,16 +396,7 @@ pub async fn update_media_item_index(
     Ok(())
 }
 
-/// Set a single item's state and propagate the change to its parents.
-///
-/// This is the only direct state setter exposed from this module; combined with
-/// the bulk helpers below (which all cascade after their UPDATE), it means every
-/// `media_items.state` write in the repo automatically refreshes ancestor states.
-/// Callers no longer need to invoke `cascade_state_update` themselves.
-///
-/// Cascade failures are logged but never propagate — the primary write has
-/// already succeeded, and a partially-cascaded tree is still recoverable on the
-/// next state change to that subtree.
+/// Sets state and cascades to parents. Cascade failures are logged, never propagated.
 pub async fn update_media_item_state(pool: &PgPool, id: i64, state: MediaItemState) -> Result<()> {
     sqlx::query!(
         "UPDATE media_items SET state = $2, updated_at = NOW() WHERE id = $1",
@@ -417,10 +408,7 @@ pub async fn update_media_item_state(pool: &PgPool, id: i64, state: MediaItemSta
 
     match get_media_item(pool, id).await {
         Ok(Some(item)) => {
-            // Box::pin breaks the type cycle: update_media_item_state →
-            // cascade_state_update → refresh_state → update_media_item_state.
-            // The future is heap-allocated and the recursion terminates when
-            // an item with `parent_id = None` is reached.
+            // Box::pin breaks the recursive-async-fn type cycle.
             if let Err(e) = Box::pin(super::state::cascade_state_update(pool, &item)).await {
                 tracing::warn!(id, error = %e, "cascade after state update failed");
             }
@@ -464,15 +452,10 @@ pub async fn transition_unreleased_aired(pool: &PgPool) -> Result<u64> {
     .await?;
 
     let count = ids.len() as u64;
-    // Recompute leaves so an item that already has streams ends up `Scraped`
-    // (or `Completed` if it has filesystem entries) rather than `Indexed`.
-    // Auto-cascade in `update_media_item_state` handles parent propagation.
     recompute_states(pool, &ids).await;
     Ok(count)
 }
 
-/// Refresh state for each given parent id; each refresh cascades up via
-/// `update_media_item_state`. Used by bulk state writers across the repo.
 pub(crate) async fn cascade_to_parents(pool: &PgPool, parent_ids: &[i64]) {
     for parent_id in parent_ids {
         match get_media_item(pool, *parent_id).await {
@@ -489,9 +472,6 @@ pub(crate) async fn cascade_to_parents(pool: &PgPool, parent_ids: &[i64]) {
     }
 }
 
-/// Look up the unique parent ids for a set of media items and cascade state to
-/// each. Used by bulk writers that mutate leaves directly via SQL — they capture
-/// the affected ids, then call this to propagate the change up the tree.
 pub(crate) async fn cascade_to_parents_of(pool: &PgPool, item_ids: &[i64]) {
     if item_ids.is_empty() {
         return;
@@ -507,14 +487,10 @@ pub(crate) async fn cascade_to_parents_of(pool: &PgPool, item_ids: &[i64]) {
     cascade_to_parents(pool, &parent_ids).await;
 }
 
-/// Recompute and persist `state` for each given item from its underlying data
-/// (filesystem entries, streams, child states), cascading to parents. Used by
-/// bulk writers that change *intent* (clear `paused`, reset `failed_attempts`,
-/// transition `unreleased`→ aired) so the stored state ends up matching what
-/// the data dictates rather than the placeholder the bulk UPDATE wrote.
-///
-/// The leaf write inside `refresh_state` triggers the auto-cascade in
-/// `update_media_item_state`, so parent rows are also brought in sync.
+/// Recompute leaf state from data (filesystem entries, streams, child states)
+/// for each id. Used after bulk writes that change *intent* (clear pause,
+/// reset attempts, transition aired) so an item with existing streams lands
+/// in `Scraped` rather than the placeholder state the bulk UPDATE wrote.
 pub(crate) async fn recompute_states(pool: &PgPool, item_ids: &[i64]) {
     for id in item_ids {
         match get_media_item(pool, *id).await {
@@ -565,9 +541,7 @@ pub async fn increment_failed_attempts(pool: &PgPool, id: i64) -> Result<()> {
     Ok(())
 }
 
-/// Mark an item as permanently `Failed` so the retry scheduler stops picking
-/// it up. Used when `failed_attempts` exceeds the configured ceiling. Cascades
-/// to parents via `update_media_item_state`.
+/// Mark an item as permanently `Failed` so the retry scheduler stops picking it up.
 pub async fn mark_item_failed(pool: &PgPool, id: i64) -> Result<()> {
     update_media_item_state(pool, id, MediaItemState::Failed).await
 }

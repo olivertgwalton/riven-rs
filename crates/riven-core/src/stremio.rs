@@ -1,13 +1,6 @@
-//! Helpers for plugins that talk to Stremio-style addons (Comet, Torrentio, AIOStreams,
-//! StremThru, ...).
-//!
-//! Stremio identifies content via `tt<imdb>:<season>:<episode>` for series streams and
-//! plain `tt<imdb>` for movies. Series streams are addressed at the episode level —
-//! Show / Season requests use sentinel values (`:1:1` / `:N:1`) because most Stremio
-//! addons don't expose Show- or Season-level endpoints.
-//!
-//! Plugins with a different upstream convention (e.g. Comet's `:N` season-only
-//! identifier) should not use this helper — they have their own format.
+//! Stremio addon identifier helpers. Series requests are episode-addressed —
+//! Show falls back to `:1:1`, Season to `:N:1`, since most addons don't expose
+//! Show- or Season-level endpoints.
 
 use crate::events::ScrapeRequest;
 use crate::types::MediaItemType;
@@ -27,19 +20,14 @@ impl StremioKind {
     }
 }
 
-/// Stremio scrape config derived from a `ScrapeRequest`.
 #[derive(Debug, Clone)]
 pub struct StremioScrapeConfig<'a> {
     pub imdb_id: &'a str,
     pub kind: StremioKind,
-    /// `(season, episode)` for series; `None` for movies.
-    /// Defaults Show → `(1, 1)` and Season → `(season, 1)` so Stremio addons that
-    /// only expose episode-level endpoints still receive a valid identifier.
     pub episode_id: Option<(i32, i32)>,
 }
 
 impl<'a> StremioScrapeConfig<'a> {
-    /// Build from a `ScrapeRequest`. Returns `None` if the request has no IMDB id.
     pub fn from_request(req: &ScrapeRequest<'a>) -> Option<Self> {
         let imdb_id = req.imdb_id?;
         let (kind, episode_id) = match req.item_type {
@@ -58,8 +46,7 @@ impl<'a> StremioScrapeConfig<'a> {
         })
     }
 
-    /// `:S:E` suffix for series, empty string for movies. Used in URL path-style
-    /// addons: `/stream/{kind}/{imdb_id}{suffix}.json`.
+    /// `:S:E` for series, empty for movies — appended to the imdb id in URL paths.
     pub fn id_suffix(&self) -> String {
         match self.episode_id {
             Some((s, e)) => format!(":{s}:{e}"),
@@ -67,8 +54,7 @@ impl<'a> StremioScrapeConfig<'a> {
         }
     }
 
-    /// Full identifier — `imdb_id` for movies, `imdb_id:S:E` for series. Used in
-    /// addons that take the identifier as a single colon-joined value.
+    /// `imdb_id` for movies, `imdb_id:S:E` for series — colon-joined single token.
     pub fn full_id(&self) -> String {
         match self.episode_id {
             Some((s, e)) => format!("{}:{s}:{e}", self.imdb_id),

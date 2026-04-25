@@ -174,10 +174,8 @@ impl PluginRegistry {
             .collect()
     }
 
-    /// Flat list of every `(plugin_name, event_type)` pair declared via `subscribed_events()`.
-    /// Used at startup to provision a per-pair hook queue + worker. Includes pairs from
-    /// disabled/invalid plugins so the workers exist when a plugin is later enabled —
-    /// `dispatch_to_plugin` filters at job-execution time.
+    /// Includes pairs from disabled/invalid plugins so hook workers stay registered
+    /// across enable/disable cycles; `dispatch_to_plugin` filters at execution time.
     pub async fn subscribed_event_pairs(&self) -> Vec<(String, EventType)> {
         self.plugins
             .read()

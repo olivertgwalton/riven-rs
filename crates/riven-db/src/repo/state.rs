@@ -173,23 +173,20 @@ fn aggregate_states(item: &MediaItem, states: &[MediaItemState]) -> Option<Media
     None
 }
 
-/// Compute and persist state without cascading to parents.
 pub async fn refresh_state(pool: &PgPool, item: &MediaItem) -> Result<MediaItemState> {
     let state = compute_state(pool, item).await?;
     update_media_item_state(pool, item.id, state).await?;
     Ok(state)
 }
 
-/// Alias for `refresh_state` — kept for callers that previously needed both
-/// computation and cascade as separate steps. Cascade is now automatic.
+/// Alias retained for callers; cascade is automatic in `refresh_state`.
 pub async fn refresh_state_cascade(pool: &PgPool, item: &MediaItem) -> Result<()> {
     refresh_state(pool, item).await?;
     Ok(())
 }
 
-/// Cascade state changes from a child item up to its parent. The parent's
-/// `refresh_state` itself cascades further (via the auto-cascade in
-/// `update_media_item_state`), so this only walks one level here.
+/// Walks one level to the parent; further propagation comes from `refresh_state`'s
+/// own auto-cascade in `update_media_item_state`.
 pub async fn cascade_state_update(pool: &PgPool, item: &MediaItem) -> Result<()> {
     let Some(parent_id) = item.parent_id else {
         return Ok(());
@@ -200,12 +197,9 @@ pub async fn cascade_state_update(pool: &PgPool, item: &MediaItem) -> Result<()>
     Ok(())
 }
 
-/// Batch-set a list of items directly to `Completed` in one UPDATE, then
-/// cascade state to their parents. Used by `persist_season` after writing
-/// media entries for multiple episodes — avoids N per-row updates by setting
-/// state inline (we know the episodes are completed because we just created
-/// their entries) but still triggers the parent recomputation that
-/// `update_media_item_state` would have done per row.
+/// Bulk-set the given ids to `Completed` and cascade to their parents. Caller
+/// has already written the data that drives that state, so this skips the
+/// per-row recompute `update_media_item_state` would do.
 pub async fn batch_set_completed(pool: &PgPool, ids: &[i64]) -> Result<()> {
     if ids.is_empty() {
         return Ok(());

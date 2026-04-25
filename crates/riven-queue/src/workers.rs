@@ -76,14 +76,6 @@ async fn handle_content_service_job(
     Ok(())
 }
 
-/// Handler for per-(plugin, event) hook fan-out jobs enqueued by `JobQueue::notify`.
-/// One worker is registered per (plugin, event) pair declared via `subscribed_events()`
-/// — this handler runs for *all* of them, dispatching to the named plugin via the
-/// in-process registry (which still owns the typed `on_*` hook surface).
-///
-/// Failures are propagated upward as `Err` so the apalis tracing layer logs them,
-/// the apalis board surfaces the failed job, and a retry layer (if added per-worker
-/// later) can act on them.
 async fn handle_plugin_hook_job(
     job: PluginHookJob,
     q: Data<Arc<JobQueue>>,
@@ -100,13 +92,6 @@ async fn handle_plugin_hook_job(
 
 // ── Monitor factory ───────────────────────────────────────────────────────────
 
-/// Standard tower-style layers applied to every worker:
-/// - `enable_tracing`: span per job (id, queue, duration, success/failure)
-/// - `catch_panic`: a `.unwrap()` deep in handler code becomes a job error rather
-///   than killing the worker task. Without this, one panicking plugin or flow
-///   would silently stop processing for that queue until restart.
-/// - `timeout`: hard ceiling on a single job's runtime. Hung external HTTP calls
-///   or DB queries can no longer wedge a worker slot indefinitely.
 macro_rules! register_worker {
     ($monitor:expr, $queue:expr, $name:literal, $storage:ident, $n:expr, $handler:ident, $timeout_secs:expr) => {{
         let q = Arc::clone(&$queue);
@@ -142,10 +127,6 @@ pub fn start_workers(queue: Arc<JobQueue>) -> Monitor {
     // Higher values risk overwhelming the client with simultaneous requests.
     let download_n = cpu_n.max(10);
 
-    // Per-worker timeouts (seconds): orchestrators are quick fan-out → 60s.
-    // Plugin workers do external HTTP → 180s. Parse/rank do CPU + DB → 300s.
-    // Download workers wait on debrid APIs that can be slow → 600s.
-    // Content fan-out hits multiple plugins serially → 600s.
     let m = Monitor::new();
     let m = register_worker!(
         m, queue, "riven-index", index_storage, orchestrator_n, handle_index_job, 60
@@ -172,12 +153,6 @@ pub fn start_workers(queue: Arc<JobQueue>) -> Monitor {
         m, queue, "riven-content", content_storage, 1, handle_content_service_job, 600
     );
 
-    // Register one worker per (plugin, event) hook storage. Each worker pulls only
-    // from its own queue, so a slow or failing plugin can't block others. The same
-    // tracing / catch-panic / timeout layers documented on `register_worker!` apply
-    // here — 120 s is generous for the network I/O most hooks do (webhook delivery,
-    // media-server library refresh) and short enough that a hung request surfaces
-    // promptly via the apalis board.
     let mut m = m;
     for ((plugin_name, event_type), storage) in &queue.plugin_hook_storages {
         let q = Arc::clone(&queue);

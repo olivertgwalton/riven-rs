@@ -1,9 +1,3 @@
-//! Application logging runtime.
-//!
-//! Logging is a core utility (not a plugin): the runtime is initialized once at startup
-//! and exposes `LogControl` for live re-configuration. The `plugin-logs` crate is a thin
-//! GraphQL/settings surface on top of these primitives.
-
 use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -47,13 +41,7 @@ impl Default for LogSettings {
     }
 }
 
-/// Resolve effective log settings.
-///
-/// Precedence (highest first): plugin DB override > plugin env vars
-/// (`RIVEN_SETTING_LOGS_*`) > top-level core settings (`RIVEN_SETTING__loggingEnabled`
-/// etc.). The plugin namespace exists for knobs without a top-level equivalent
-/// (`log_rotation`, `log_max_files`); the top-level values are the source of
-/// truth for everything else.
+/// Precedence: plugin DB override > `RIVEN_SETTING_LOGS_*` env > top-level `RivenSettings`.
 pub async fn load_log_settings(
     pool: &sqlx::PgPool,
     core: &RivenSettings,
@@ -88,8 +76,8 @@ pub async fn load_log_settings(
     })
 }
 
-// Trampolines so this module doesn't need a direct dep on riven-db (which depends on
-// riven-core). Implemented inline using sqlx, mirroring repo::get_setting / get_plugin_enabled_setting.
+// Inline sqlx mirrors of `riven_db::repo::get_setting` and `get_plugin_enabled_setting`
+// — riven-db depends on riven-core, so we can't depend back.
 async fn riven_db_get_setting(
     pool: &sqlx::PgPool,
     key: &str,

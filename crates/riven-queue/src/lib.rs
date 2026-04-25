@@ -54,9 +54,6 @@ pub struct JobQueue {
     pub download_storage: RedisStorage<DownloadJob>,
     pub rank_streams_storage: RedisStorage<RankStreamsJob>,
     pub content_storage: RedisStorage<ContentServiceJob>,
-    /// Per-(plugin, event) hook fan-out storages. Built at startup from each plugin's
-    /// `subscribed_events()`; each pair gets its own apalis queue so hooks are durable
-    /// and isolated, and a stalled plugin affects only its own queue.
     pub plugin_hook_storages: HashMap<(String, EventType), RedisStorage<PluginHookJob>>,
     pub redis: redis::aio::ConnectionManager,
     pub registry: Arc<PluginRegistry>,
@@ -113,8 +110,6 @@ impl JobQueue {
         let content_storage =
             RedisStorage::new_with_config(apalis_conn.clone(), RedisConfig::new("riven:content"));
 
-        // Build per-(plugin, event) hook storages from each plugin's subscribed_events().
-        // Each pair gets a dedicated namespace so jobs route to the right worker on consume.
         let mut plugin_hook_storages: HashMap<(String, EventType), RedisStorage<PluginHookJob>> =
             HashMap::new();
         for (plugin_name, event_type) in registry.subscribed_event_pairs().await {
@@ -740,9 +735,6 @@ impl JobQueue {
 
     // ── Domain events ─────────────────────────────────────────────────────────
 
-    /// Publish a domain event to the in-process event bus, enabled plugins
-    /// (via per-(plugin, event) durable hook queues), and the UI notification
-    /// stream when the event is user-visible.
     pub async fn notify(&self, event: RivenEvent) {
         let _ = self.event_tx.send(event.clone());
 
@@ -753,9 +745,6 @@ impl JobQueue {
             let _ = self.notification_tx.send(json);
         }
 
-        // Fan out to each subscribed plugin via its dedicated apalis queue.
-        // This makes hook execution durable and visible — failed hooks survive
-        // process restarts and appear on the apalis board with their last error.
         let subscribers = self.registry.subscriber_names(event_type).await;
         for plugin_name in subscribers {
             let key = (plugin_name.clone(), event_type);
