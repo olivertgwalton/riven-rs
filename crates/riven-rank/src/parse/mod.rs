@@ -549,16 +549,16 @@ fn followed_by_four_digit_year(raw: &str, index: usize) -> bool {
 /// Detect date from raw title string, trying multiple formats.
 fn detect_date(raw: &str) -> Option<String> {
     // YYYY-MM-DD / YYYY.MM.DD
-    if let Some(cap) = RE_DATE_YMD.captures(raw) {
-        if cap[2] == cap[4] {
-            return Some(format!("{}-{}-{}", &cap[1], &cap[3], &cap[5]));
-        }
+    if let Some(cap) = RE_DATE_YMD.captures(raw)
+        && cap[2] == cap[4]
+    {
+        return Some(format!("{}-{}-{}", &cap[1], &cap[3], &cap[5]));
     }
     // DD-MM-YYYY
-    if let Some(cap) = RE_DATE_DMY.captures(raw) {
-        if cap[2] == cap[4] {
-            return Some(format!("{}-{}-{}", &cap[5], &cap[3], &cap[1]));
-        }
+    if let Some(cap) = RE_DATE_DMY.captures(raw)
+        && cap[2] == cap[4]
+    {
+        return Some(format!("{}-{}-{}", &cap[5], &cap[3], &cap[1]));
     }
     // YYYYMMDD (compact)
     if let Some(cap) = RE_DATE_COMPACT.captures(raw) {

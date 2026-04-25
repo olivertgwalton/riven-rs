@@ -3,4 +3,4 @@ pub mod vfs_mount;
 
 mod server;
 
-pub use server::{ApiState, start_server};
+pub use server::{ApiState, StartServerConfig, start_server};

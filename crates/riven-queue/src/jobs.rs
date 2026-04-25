@@ -1,7 +1,18 @@
 use serde::{Deserialize, Serialize};
 
+use riven_core::events::RivenEvent;
 use riven_core::types::MediaItemType;
 use riven_db::entities::MediaItem;
+
+/// A plugin hook fan-out job. Each subscribed `(plugin, event)` pair has its own
+/// apalis queue; `notify()` enqueues one of these per subscriber so plugin hooks
+/// run durably and in isolation: a failing or slow plugin only affects its own
+/// queue, and jobs survive process restart.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PluginHookJob {
+    pub plugin_name: String,
+    pub event: RivenEvent,
+}
 
 const fn default_true() -> bool {
     true

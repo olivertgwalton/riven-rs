@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use reqwest::StatusCode;
-use riven_core::events::{EventType, HookResponse, RivenEvent};
+use riven_core::events::{EventType, HookResponse, ScrapeRequest};
 use riven_core::http::RetryLaterError;
 use riven_core::http::profiles;
 use riven_core::plugin::{Plugin, PluginContext};
@@ -37,14 +37,11 @@ impl Plugin for TorrentioPlugin {
         ]
     }
 
-    async fn handle_event(
+    async fn on_scrape_requested(
         &self,
-        event: &RivenEvent,
+        request: &ScrapeRequest<'_>,
         ctx: &PluginContext,
     ) -> anyhow::Result<HookResponse> {
-        let Some(request) = event.scrape_request() else {
-            return Ok(HookResponse::Empty);
-        };
         let Some(imdb_id) = request.imdb_id else {
             return Ok(HookResponse::Empty);
         };

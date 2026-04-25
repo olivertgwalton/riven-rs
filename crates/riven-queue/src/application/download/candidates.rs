@@ -193,6 +193,37 @@ fn build_download_candidate_profile(profile: &RankSettings) -> RankSettings {
     download_profile
 }
 
+fn pack_preference(item: &MediaItem, parsed: &ParsedData) -> i64 {
+    if item.item_type != riven_core::types::MediaItemType::Season {
+        return 0;
+    }
+
+    let has_one_season = parsed.seasons.len() == 1;
+    let has_no_episodes = parsed.episodes.is_empty();
+    let has_many_episodes = parsed.episodes.len() > 2;
+
+    match (
+        parsed.complete,
+        has_one_season,
+        has_no_episodes,
+        has_many_episodes,
+    ) {
+        (true, true, true, _) => 3,
+        (_, true, true, _) => 2,
+        (_, true, _, true) => 1,
+        _ => 0,
+    }
+}
+
+fn stream_resolution(stream: &Stream) -> &str {
+    stream
+        .parsed_data
+        .as_ref()
+        .and_then(|parsed| parsed.get("resolution"))
+        .and_then(|value| value.as_str())
+        .unwrap_or("unknown")
+}
+
 #[cfg(test)]
 mod tests {
     use super::{CachedCandidate, rank_candidates_for_profile};
@@ -284,35 +315,4 @@ mod tests {
 
         assert_eq!(best.stream.info_hash, "hash1080");
     }
-}
-
-fn pack_preference(item: &MediaItem, parsed: &ParsedData) -> i64 {
-    if item.item_type != riven_core::types::MediaItemType::Season {
-        return 0;
-    }
-
-    let has_one_season = parsed.seasons.len() == 1;
-    let has_no_episodes = parsed.episodes.is_empty();
-    let has_many_episodes = parsed.episodes.len() > 2;
-
-    match (
-        parsed.complete,
-        has_one_season,
-        has_no_episodes,
-        has_many_episodes,
-    ) {
-        (true, true, true, _) => 3,
-        (_, true, true, _) => 2,
-        (_, true, _, true) => 1,
-        _ => 0,
-    }
-}
-
-fn stream_resolution(stream: &Stream) -> &str {
-    stream
-        .parsed_data
-        .as_ref()
-        .and_then(|parsed| parsed.get("resolution"))
-        .and_then(|value| value.as_str())
-        .unwrap_or("unknown")
 }

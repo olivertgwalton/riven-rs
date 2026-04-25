@@ -20,7 +20,7 @@ fn index_event(job: &IndexJob) -> RivenEvent {
 }
 
 pub async fn start(job: &IndexJob, queue: &JobQueue) {
-    let Some(_item) = load_media_item_or_log(&queue.db_pool, job.id, "indexing").await else {
+    let Some(item) = load_media_item_or_log(&queue.db_pool, job.id, "indexing").await else {
         return;
     };
 
@@ -45,7 +45,7 @@ pub async fn start(job: &IndexJob, queue: &JobQueue) {
     .await
         == 0
     {
-        tracing::warn!(id = job.id, "no indexer subscribers found");
+        tracing::warn!(id = job.id, "no indexer subscribers found; retrying in 24h");
         if let Err(err) = repo::increment_failed_attempts(&queue.db_pool, job.id).await {
             tracing::warn!(id = job.id, %err, "failed to increment failed_attempts");
         }
@@ -54,6 +54,9 @@ pub async fn start(job: &IndexJob, queue: &JobQueue) {
                 id: job.id,
                 error: "no indexer plugin responded".into(),
             })
+            .await;
+        queue
+            .schedule_index_at(IndexJob::from_item(&item), Utc::now() + Duration::hours(24))
             .await;
     }
 }
@@ -65,8 +68,7 @@ pub async fn handle_plugin(job: &IndexPluginJob, queue: &JobQueue) {
         .is_none()
     {
         if queue.flow_complete_child("index", job.id).await {
-            queue.clear_flow("index", job.id).await;
-            queue.clear_flow_results("index", job.id).await;
+            queue.clear_flow_all("index", job.id).await;
         }
         return;
     }
@@ -99,14 +101,12 @@ pub async fn handle_plugin(job: &IndexPluginJob, queue: &JobQueue) {
 
 pub async fn finalize(id: i64, queue: &JobQueue) {
     let Some(item) = load_media_item_or_log(&queue.db_pool, id, "index finalize").await else {
-        queue.clear_flow("index", id).await;
-        queue.clear_flow_results("index", id).await;
+        queue.clear_flow_all("index", id).await;
         return;
     };
 
     let requested_seasons = load_requested_seasons(&queue.db_pool, &item).await;
-    let responses: Vec<IndexedMediaItem> = queue.flow_load_results("index", id).await;
-    queue.clear_flow_results("index", id).await;
+    let responses: Vec<IndexedMediaItem> = queue.drain_flow_results("index", id).await;
     queue.clear_flow("index", id).await;
 
     if responses.is_empty() {

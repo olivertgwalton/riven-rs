@@ -14,9 +14,17 @@ pub struct RivenSettings {
     pub database_url: String,
     pub redis_url: String,
     pub vfs_mount_path: String,
+    /// Enable debug logging for the virtual file system.
+    pub vfs_debug_logging: bool,
     pub filesystem: FilesystemSettings,
-    pub unsafe_clear_queues_on_startup: bool,
-    pub unsafe_refresh_database_on_startup: bool,
+    /// **UNSAFE.** If true, all Redis data is removed on application startup.
+    pub unsafe_wipe_redis_on_startup: bool,
+    /// **UNSAFE.** If true, the database is wiped on application startup.
+    pub unsafe_wipe_database_on_startup: bool,
+    /// Master switch for application logging.
+    pub logging_enabled: bool,
+    /// Logging level (off, error, warn, info, debug, trace).
+    pub log_level: String,
     pub log_directory: String,
     pub gql_port: u16,
     pub dubbed_anime_only: bool,
@@ -33,7 +41,8 @@ pub struct RivenSettings {
     pub maximum_average_bitrate_episodes: Option<u32>,
 
     /// Retry items that have been stuck (failed_attempts > 0) for longer than
-    /// this many seconds. 0 = disabled. Default: 600 (10 m).
+    /// this many seconds. 0 = disabled. Default: 600 (10 m). Controls the
+    /// global retry-library scan cadence.
     pub retry_interval_secs: u64,
     /// Hard ceiling on consecutive scrape/index failures before an item is
     /// transitioned to `Failed` and excluded from further retry cycles. `0`
@@ -81,9 +90,12 @@ impl Default for RivenSettings {
             database_url: "postgresql://localhost/riven".into(),
             redis_url: "redis://localhost:6379".into(),
             vfs_mount_path: String::new(),
+            vfs_debug_logging: false,
             filesystem: FilesystemSettings::default(),
-            unsafe_clear_queues_on_startup: false,
-            unsafe_refresh_database_on_startup: false,
+            unsafe_wipe_redis_on_startup: false,
+            unsafe_wipe_database_on_startup: false,
+            logging_enabled: true,
+            log_level: "info".into(),
             log_directory: "./logs".into(),
             gql_port: 8080,
             dubbed_anime_only: false,

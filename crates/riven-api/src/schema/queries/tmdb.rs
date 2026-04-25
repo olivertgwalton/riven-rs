@@ -127,21 +127,21 @@ impl CoreTmdbQuery {
         };
 
         let mut query_params: Vec<(String, String)> = Vec::new();
-        if let Some(Json(obj)) = params {
-            if let Some(map) = obj.as_object() {
-                for (k, v) in map {
-                    if k == "searchMode" {
-                        continue;
-                    }
-                    let val = match v {
-                        serde_json::Value::String(s) => s.clone(),
-                        serde_json::Value::Number(n) => n.to_string(),
-                        serde_json::Value::Bool(b) => b.to_string(),
-                        _ => continue,
-                    };
-                    if !val.is_empty() {
-                        query_params.push((k.clone(), val));
-                    }
+        if let Some(Json(obj)) = params
+            && let Some(map) = obj.as_object()
+        {
+            for (k, v) in map {
+                if k == "searchMode" {
+                    continue;
+                }
+                let val = match v {
+                    serde_json::Value::String(s) => s.clone(),
+                    serde_json::Value::Number(n) => n.to_string(),
+                    serde_json::Value::Bool(b) => b.to_string(),
+                    _ => continue,
+                };
+                if !val.is_empty() {
+                    query_params.push((k.clone(), val));
                 }
             }
         }

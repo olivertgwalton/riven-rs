@@ -30,6 +30,7 @@ plugin-trakt = { path = "../plugin-trakt" }
 plugin-dashboard = { path = "../plugin-dashboard" }
 plugin-logs = { path = "../plugin-logs" }
 tokio = { workspace = true }
+tokio-util = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 tracing-appender = { workspace = true }

@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use riven_core::events::{EventType, HookResponse, RivenEvent};
+use riven_core::events::{EventType, HookResponse};
 use riven_core::http::profiles;
 use riven_core::plugin::{ContentCollection, Plugin, PluginContext};
 use riven_core::register_plugin;
@@ -69,22 +69,14 @@ impl Plugin for MdblistPlugin {
         Ok(content.into_response())
     }
 
-    async fn handle_event(
+    async fn on_content_service_requested(
         &self,
-        event: &RivenEvent,
         ctx: &PluginContext,
     ) -> anyhow::Result<HookResponse> {
-        match event {
-            RivenEvent::ContentServiceRequested => {
-                let api_key = ctx.require_setting("apikey")?;
-
-                let lists = ctx.settings.get_list("lists");
-
-                let content = fetch_and_build_content(&ctx.http, api_key, &lists).await?;
-                Ok(content.into_hook_response())
-            }
-            _ => Ok(HookResponse::Empty),
-        }
+        let api_key = ctx.require_setting("apikey")?;
+        let lists = ctx.settings.get_list("lists");
+        let content = fetch_and_build_content(&ctx.http, api_key, &lists).await?;
+        Ok(content.into_hook_response())
     }
 }
 

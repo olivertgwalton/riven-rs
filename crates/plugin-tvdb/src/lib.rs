@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::str::FromStr;
 use std::time::{Duration, Instant};
 
-use riven_core::events::{EventType, HookResponse, RivenEvent};
+use riven_core::events::{EventType, HookResponse, IndexRequest};
 use riven_core::http::profiles;
 use riven_core::plugin::{Plugin, PluginContext};
 use riven_core::register_plugin;
@@ -80,14 +80,11 @@ impl Plugin for TvdbPlugin {
         vec![SettingField::new("apikey", "API Key", "password").required()]
     }
 
-    async fn handle_event(
+    async fn on_index_requested(
         &self,
-        event: &RivenEvent,
+        request: &IndexRequest<'_>,
         ctx: &PluginContext,
     ) -> anyhow::Result<HookResponse> {
-        let Some(request) = event.index_request() else {
-            return Ok(HookResponse::Empty);
-        };
         if request.item_type != MediaItemType::Show {
             return Ok(HookResponse::Empty);
         }

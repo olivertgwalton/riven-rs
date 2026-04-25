@@ -10,6 +10,7 @@ pub mod orchestrator;
 pub mod worker;
 pub mod workers;
 
+use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64};
@@ -24,7 +25,7 @@ use tokio::sync::{RwLock, broadcast};
 use ulid::Ulid;
 
 pub use riven_core::downloader::DownloaderConfig;
-use riven_core::events::RivenEvent;
+use riven_core::events::{EventType, RivenEvent};
 use riven_core::plugin::PluginRegistry;
 use riven_core::reindex::ReindexConfig;
 use riven_core::settings::FilesystemSettings;
@@ -34,7 +35,7 @@ use riven_rank::ResolutionRanks;
 pub use dedup::DedupGuard;
 pub use jobs::{
     ContentServiceJob, DownloadJob, IndexJob, IndexPluginJob, ParseScrapeResultsJob,
-    RankStreamsJob, ScrapeJob, ScrapePluginJob,
+    PluginHookJob, RankStreamsJob, ScrapeJob, ScrapePluginJob,
 };
 pub use maintenance::{
     clear_worker_registrations, prune_queue_history, purge_orphaned_active_jobs,
@@ -53,6 +54,10 @@ pub struct JobQueue {
     pub download_storage: RedisStorage<DownloadJob>,
     pub rank_streams_storage: RedisStorage<RankStreamsJob>,
     pub content_storage: RedisStorage<ContentServiceJob>,
+    /// Per-(plugin, event) hook fan-out storages. Built at startup from each plugin's
+    /// `subscribed_events()`; each pair gets its own apalis queue so hooks are durable
+    /// and isolated, and a stalled plugin affects only its own queue.
+    pub plugin_hook_storages: HashMap<(String, EventType), RedisStorage<PluginHookJob>>,
     pub redis: redis::aio::ConnectionManager,
     pub registry: Arc<PluginRegistry>,
     pub event_tx: broadcast::Sender<RivenEvent>,
@@ -106,7 +111,20 @@ impl JobQueue {
             RedisConfig::new("riven:rank-streams"),
         );
         let content_storage =
-            RedisStorage::new_with_config(apalis_conn, RedisConfig::new("riven:content"));
+            RedisStorage::new_with_config(apalis_conn.clone(), RedisConfig::new("riven:content"));
+
+        // Build per-(plugin, event) hook storages from each plugin's subscribed_events().
+        // Each pair gets a dedicated namespace so jobs route to the right worker on consume.
+        let mut plugin_hook_storages: HashMap<(String, EventType), RedisStorage<PluginHookJob>> =
+            HashMap::new();
+        for (plugin_name, event_type) in registry.subscribed_event_pairs().await {
+            let namespace = format!("riven:plugin-hook:{}:{plugin_name}", event_type.slug());
+            let storage = RedisStorage::new_with_config(
+                apalis_conn.clone(),
+                RedisConfig::new(&namespace),
+            );
+            plugin_hook_storages.insert((plugin_name, event_type), storage);
+        }
 
         let redis_client = redis::Client::open(redis_url)?;
         let redis = redis::aio::ConnectionManager::new(redis_client).await?;
@@ -123,6 +141,7 @@ impl JobQueue {
             download_storage,
             rank_streams_storage,
             content_storage,
+            plugin_hook_storages,
             redis,
             registry,
             event_tx,
@@ -459,15 +478,24 @@ impl JobQueue {
             .query_async(&mut conn)
             .await
             .unwrap_or_default();
-        raw.into_iter()
-            .filter_map(|s| match serde_json::from_str(&s) {
-                Ok(v) => Some(v),
-                Err(e) => {
-                    tracing::error!(prefix, id, error = %e, "failed to deserialize flow result");
-                    None
-                }
-            })
-            .collect()
+        deserialize_flow_results(prefix, id, raw)
+    }
+
+    /// Atomically read and clear the flow results hash. Use this when the
+    /// caller is the sole consumer of the results and should not leave the
+    /// key behind on bail-out paths.
+    pub async fn drain_flow_results<T: DeserializeOwned>(&self, prefix: &str, id: i64) -> Vec<T> {
+        let key = flow_results_key(prefix, id);
+        let mut conn = self.redis.clone();
+        let (raw, _): (Vec<String>, i64) = redis::pipe()
+            .cmd("HVALS")
+            .arg(&key)
+            .cmd("DEL")
+            .arg(&key)
+            .query_async(&mut conn)
+            .await
+            .unwrap_or_default();
+        deserialize_flow_results(prefix, id, raw)
     }
 
     pub async fn clear_flow(&self, prefix: &str, id: i64) {
@@ -482,6 +510,19 @@ impl JobQueue {
         let mut conn = self.redis.clone();
         let _: Result<(), _> = redis::cmd("DEL")
             .arg(flow_results_key(prefix, id))
+            .query_async(&mut conn)
+            .await;
+    }
+
+    /// Drop every Redis key associated with a flow in a single round-trip.
+    /// The DEL is a no-op for keys that don't exist, so this is safe to call
+    /// from any bail-out path regardless of which keys have been written.
+    pub async fn clear_flow_all(&self, prefix: &str, id: i64) {
+        let mut conn = self.redis.clone();
+        let _: Result<(), _> = redis::cmd("DEL")
+            .arg(flow_pending_key(prefix, id))
+            .arg(flow_results_key(prefix, id))
+            .arg(flow_rate_limited_key(prefix, id))
             .query_async(&mut conn)
             .await;
     }
@@ -699,26 +740,46 @@ impl JobQueue {
 
     // ── Domain events ─────────────────────────────────────────────────────────
 
-    /// Publish a domain event to the in-process event bus, enabled plugins,
-    /// and the UI notification stream when the event is user-visible.
+    /// Publish a domain event to the in-process event bus, enabled plugins
+    /// (via per-(plugin, event) durable hook queues), and the UI notification
+    /// stream when the event is user-visible.
     pub async fn notify(&self, event: RivenEvent) {
         let _ = self.event_tx.send(event.clone());
 
-        if event.event_type().is_ui_streamed()
+        let event_type = event.event_type();
+        if event_type.is_ui_streamed()
             && let Ok(json) = serde_json::to_string(&event)
         {
             let _ = self.notification_tx.send(json);
         }
 
-        let registry = Arc::clone(&self.registry);
-        tokio::spawn(async move {
-            let results = registry.dispatch(&event).await;
-            for (plugin_name, result) in results {
-                if let Err(error) = result {
-                    tracing::error!(plugin = plugin_name, error = %error, "plugin hook failed");
-                }
+        // Fan out to each subscribed plugin via its dedicated apalis queue.
+        // This makes hook execution durable and visible — failed hooks survive
+        // process restarts and appear on the apalis board with their last error.
+        let subscribers = self.registry.subscriber_names(event_type).await;
+        for plugin_name in subscribers {
+            let key = (plugin_name.clone(), event_type);
+            let Some(storage) = self.plugin_hook_storages.get(&key) else {
+                tracing::warn!(
+                    plugin = %plugin_name,
+                    event = ?event_type,
+                    "no hook storage registered for (plugin, event); skipping fan-out"
+                );
+                continue;
+            };
+            let job = PluginHookJob {
+                plugin_name: plugin_name.clone(),
+                event: event.clone(),
+            };
+            if let Err(error) = storage.clone().push(job).await {
+                tracing::error!(
+                    plugin = %plugin_name,
+                    event = ?event_type,
+                    %error,
+                    "failed to enqueue plugin hook job"
+                );
             }
-        });
+        }
     }
 
     /// Reload the resolution ranks cache from the DB (call after settings are saved).
@@ -754,6 +815,18 @@ fn flow_results_key(prefix: &str, id: i64) -> String {
 #[inline]
 fn flow_rate_limited_key(prefix: &str, id: i64) -> String {
     format!("riven:flow:{prefix}:{id}:rate_limited")
+}
+
+fn deserialize_flow_results<T: DeserializeOwned>(prefix: &str, id: i64, raw: Vec<String>) -> Vec<T> {
+    raw.into_iter()
+        .filter_map(|s| match serde_json::from_str(&s) {
+            Ok(v) => Some(v),
+            Err(e) => {
+                tracing::error!(prefix, id, error = %e, "failed to deserialize flow result");
+                None
+            }
+        })
+        .collect()
 }
 
 const CANCELLED_ITEMS_SET: &str = "riven:cancelled-items";

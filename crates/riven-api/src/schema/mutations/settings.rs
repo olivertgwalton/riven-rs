@@ -1,6 +1,6 @@
 use async_graphql::*;
-use plugin_logs::{LogControl, LogSettings};
 use riven_core::downloader::DownloaderConfig;
+use riven_core::logging::{LogControl, LogSettings};
 use riven_core::plugin::PluginRegistry;
 use riven_core::settings::{FilesystemSettings, LibraryProfileMembership};
 use riven_core::vfs_layout::VfsLibraryLayout;

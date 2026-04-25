@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use riven_core::events::{EventType, HookResponse, RivenEvent};
+use riven_core::events::{DownloadSuccessInfo, EventType, HookResponse};
 use riven_core::http::profiles;
 use riven_core::plugin::{ContentCollection, Plugin, PluginContext, validate_api_key};
 use riven_core::register_plugin;
@@ -89,67 +89,73 @@ impl Plugin for SeerrPlugin {
         })
     }
 
-    async fn handle_event(
+    async fn on_content_service_requested(
         &self,
-        event: &RivenEvent,
+        ctx: &PluginContext,
+    ) -> anyhow::Result<HookResponse> {
+        let api_key = ctx.require_setting("apikey")?;
+        let url = ctx.settings.get_or("url", DEFAULT_URL);
+        let base_url = url.trim_end_matches('/');
+        fetch_content(ctx, api_key, base_url).await
+    }
+
+    async fn on_download_success(
+        &self,
+        info: &DownloadSuccessInfo<'_>,
         ctx: &PluginContext,
     ) -> anyhow::Result<HookResponse> {
         let api_key = ctx.require_setting("apikey")?;
         let url = ctx.settings.get_or("url", DEFAULT_URL);
         let base_url = url.trim_end_matches('/');
 
-        match event {
-            RivenEvent::ContentServiceRequested => fetch_content(ctx, api_key, base_url).await,
-
-            RivenEvent::MediaItemDownloadSuccess {
-                id, item_type: _, ..
-            } => {
-                // Look up the external_request_id for this item (or its parent show).
-                let request_id = get_seerr_request_id(&ctx.db_pool, *id).await;
-                if let Some(rid) = request_id {
-                    let mark_url = format!("{base_url}/api/v1/request/{rid}/available");
-                    tracing::debug!(request_id = rid, target_url = %mark_url, "marking seerr request as available");
-                    if let Err(e) = ctx
-                        .http
-                        .send(profiles::SEERR, |client| {
-                            client.post(&mark_url).header("x-api-key", api_key)
-                        })
-                        .await
-                        .and_then(|r| r.error_for_status())
-                    {
-                        tracing::warn!(error = %e, request_id = rid, "failed to mark seerr request as available");
-                    } else {
-                        tracing::info!(request_id = rid, "marked seerr request as available");
-                    }
-                }
-                Ok(HookResponse::Empty)
+        let request_id = get_seerr_request_id(&ctx.db_pool, info.id).await;
+        if let Some(rid) = request_id {
+            let mark_url = format!("{base_url}/api/v1/request/{rid}/available");
+            tracing::debug!(request_id = rid, target_url = %mark_url, "marking seerr request as available");
+            if let Err(e) = ctx
+                .http
+                .send(profiles::SEERR, |client| {
+                    client.post(&mark_url).header("x-api-key", api_key)
+                })
+                .await
+                .and_then(|r| r.error_for_status())
+            {
+                tracing::warn!(error = %e, request_id = rid, "failed to mark seerr request as available");
+            } else {
+                tracing::info!(request_id = rid, "marked seerr request as available");
             }
-
-            RivenEvent::MediaItemsDeleted {
-                external_request_ids,
-                ..
-            } => {
-                for rid in external_request_ids {
-                    let del_url = format!("{base_url}/api/v1/request/{rid}");
-                    tracing::debug!(request_id = rid, target_url = %del_url, "deleting seerr request");
-                    if let Err(e) = ctx
-                        .http
-                        .send(profiles::SEERR, |client| {
-                            client.delete(&del_url).header("x-api-key", api_key)
-                        })
-                        .await
-                        .and_then(|r| r.error_for_status())
-                    {
-                        tracing::warn!(error = %e, request_id = rid, "failed to delete seerr request");
-                    } else {
-                        tracing::info!(request_id = rid, "deleted seerr request");
-                    }
-                }
-                Ok(HookResponse::Empty)
-            }
-
-            _ => Ok(HookResponse::Empty),
         }
+        Ok(HookResponse::Empty)
+    }
+
+    async fn on_items_deleted(
+        &self,
+        _item_ids: &[i64],
+        external_request_ids: &[String],
+        _deleted_paths: &[String],
+        ctx: &PluginContext,
+    ) -> anyhow::Result<HookResponse> {
+        let api_key = ctx.require_setting("apikey")?;
+        let url = ctx.settings.get_or("url", DEFAULT_URL);
+        let base_url = url.trim_end_matches('/');
+
+        for rid in external_request_ids {
+            let del_url = format!("{base_url}/api/v1/request/{rid}");
+            tracing::debug!(request_id = rid, target_url = %del_url, "deleting seerr request");
+            if let Err(e) = ctx
+                .http
+                .send(profiles::SEERR, |client| {
+                    client.delete(&del_url).header("x-api-key", api_key)
+                })
+                .await
+                .and_then(|r| r.error_for_status())
+            {
+                tracing::warn!(error = %e, request_id = rid, "failed to delete seerr request");
+            } else {
+                tracing::info!(request_id = rid, "deleted seerr request");
+            }
+        }
+        Ok(HookResponse::Empty)
     }
 }
 

@@ -5,6 +5,7 @@ use std::time::Duration;
 use futures::stream::{self, StreamExt};
 use riven_core::types::*;
 use riven_db::repo;
+use tokio_util::sync::CancellationToken;
 
 use crate::JobQueue;
 use crate::orchestrator::LibraryOrchestrator;
@@ -13,11 +14,16 @@ use crate::orchestrator::LibraryOrchestrator;
 pub struct Scheduler {
     db_pool: sqlx::PgPool,
     job_queue: Arc<JobQueue>,
+    cancel: CancellationToken,
 }
 
 impl Scheduler {
-    pub fn new(db_pool: sqlx::PgPool, job_queue: Arc<JobQueue>) -> Self {
-        Self { db_pool, job_queue }
+    pub fn new(db_pool: sqlx::PgPool, job_queue: Arc<JobQueue>, cancel: CancellationToken) -> Self {
+        Self {
+            db_pool,
+            job_queue,
+            cancel,
+        }
     }
 
     pub async fn run(self) {
@@ -35,6 +41,10 @@ impl Scheduler {
 
         loop {
             tokio::select! {
+                _ = self.cancel.cancelled() => {
+                    tracing::info!("scheduler shutting down");
+                    return;
+                }
                 _ = content_tick.tick()        => self.job_queue.push_content_service().await,
                 _ = &mut retry_sleep           => {
                     self.retry_library().await;

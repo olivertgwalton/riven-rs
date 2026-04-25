@@ -2264,20 +2264,12 @@ dependencies = [
 name = "plugin-logs"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "async-graphql",
  "async-trait",
- "chrono",
  "inventory",
- "log",
  "riven-core",
- "riven-db",
  "serde_json",
- "sqlx",
  "tokio",
- "tracing",
- "tracing-appender",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -2856,6 +2848,7 @@ dependencies = [
  "sha2",
  "sqlx",
  "tokio",
+ "tokio-util",
  "tower-http",
  "tracing",
 ]
@@ -2893,6 +2886,7 @@ dependencies = [
  "serde_json",
  "sqlx",
  "tokio",
+ "tokio-util",
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
@@ -2913,6 +2907,7 @@ dependencies = [
  "futures",
  "hyper",
  "inventory",
+ "log",
  "parking_lot",
  "redis 0.27.6",
  "reqwest",
@@ -2921,6 +2916,8 @@ dependencies = [
  "sqlx",
  "tokio",
  "tracing",
+ "tracing-appender",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -2958,6 +2955,7 @@ dependencies = [
  "serde_json",
  "sqlx",
  "tokio",
+ "tokio-util",
  "tracing",
  "ulid",
 ]

@@ -1,2 +1,27 @@
+# Build artifacts
 target/
+
+# Secrets / local env
 .env
+.env.*
+
+# VCS / IDE / OS
+.git/
+.gitignore
+.github/
+.vscode/
+.idea/
+.DS_Store
+
+# Docs (not needed in the build context)
+*.md
+LICENSE*
+
+# Frontend assets — built separately, served via RIVEN_STATIC_DIR
+frontend/
+
+# Benchmarks (not part of the binary build)
+benchmarks/
+
+# Node tooling that may sneak in
+node_modules/

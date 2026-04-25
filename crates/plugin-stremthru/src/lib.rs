@@ -3,7 +3,7 @@ mod models;
 
 use async_trait::async_trait;
 use redis::AsyncCommands;
-use riven_core::events::{EventType, HookResponse, RivenEvent};
+use riven_core::events::{EventType, HookResponse, ScrapeRequest};
 use riven_core::plugin::{Plugin, PluginContext};
 use riven_core::register_plugin;
 use riven_core::settings::PluginSettings;
@@ -132,28 +132,31 @@ impl Plugin for StremthruPlugin {
         ]
     }
 
-    async fn handle_event(
+    async fn on_scrape_requested(
         &self,
-        event: &RivenEvent,
+        req: &ScrapeRequest<'_>,
+        ctx: &PluginContext,
+    ) -> anyhow::Result<HookResponse> {
+        if ctx.settings.get_or("scrapenabled", "true") == "false" {
+            return Ok(HookResponse::Empty);
+        }
+        let base_url = ctx.settings.get_or("stremthruurl", DEFAULT_URL);
+        let results = scrape_torznab(&ctx.http, &base_url, req).await?;
+        Ok(HookResponse::Scrape(results))
+    }
+
+    async fn on_download_requested(
+        &self,
+        _id: i64,
+        info_hash: &str,
+        _magnet: &str,
+        cached_stores: &[riven_core::types::CachedStoreEntry],
         ctx: &PluginContext,
     ) -> anyhow::Result<HookResponse> {
         let base_url = ctx.settings.get_or("stremthruurl", DEFAULT_URL);
         let stores = get_configured_stores(&ctx.settings);
-
-        match event {
-            RivenEvent::MediaItemScrapeRequested { .. } => {
-                if ctx.settings.get_or("scrapenabled", "true") == "false" {
-                    return Ok(HookResponse::Empty);
-                }
-                let Some(req) = event.scrape_request() else {
-                    return Ok(HookResponse::Empty);
-                };
-                let results = scrape_torznab(&ctx.http, &base_url, &req).await?;
-                Ok(HookResponse::Scrape(results))
-            }
-            RivenEvent::MediaItemDownloadRequested { info_hash, cached_stores, .. } => {
-                let score_map = get_store_scores(&ctx.redis, &stores).await;
-                let mut any_network_error = false;
+        let score_map = get_store_scores(&ctx.redis, &stores).await;
+        let mut any_network_error = false;
 
                 // Build the ordered list of (store, api_key, file_count) to try.
                 // Priority: pre-checked stores from the bulk cache check > on-demand
@@ -273,95 +276,116 @@ impl Plugin for StremthruPlugin {
                     }
                 }
 
-                if any_network_error {
-                    anyhow::bail!("network error contacting store");
-                }
-                Ok(HookResponse::DownloadStreamUnavailable)
-            }
-            RivenEvent::MediaItemDownloadCacheCheckRequested { hashes } => {
-                let check_cache_enabled =
-                    ctx.settings.get_or("checkdebridcache", "true") != "false";
-                if !check_cache_enabled {
-                    return Ok(HookResponse::Empty);
-                }
-
-                let mut futures = Vec::new();
-                for (store, api_key) in &stores {
-                    futures.push(check_cache(
-                        &ctx.http, &ctx.redis, &base_url, store, api_key, hashes,
-                    ));
-                }
-
-                let results = futures::future::join_all(futures).await;
-                let mut all_results = Vec::new();
-                for result in results {
-                    match result {
-                        Ok(items) => all_results.extend(items),
-                        Err(error) => {
-                            tracing::warn!(error = %error, "cache check failed for a store")
-                        }
-                    }
-                }
-                Ok(HookResponse::CacheCheck(all_results))
-            }
-            RivenEvent::MediaItemDownloadProviderListRequested => {
-                let providers = stores
-                    .iter()
-                    .map(|(store, _)| ProviderInfo {
-                        name: store.to_string(),
-                        store: store.to_string(),
-                    })
-                    .collect();
-                Ok(HookResponse::ProviderList(providers))
-            }
-            RivenEvent::MediaItemStreamLinkRequested {
-                magnet, provider, ..
-            } => {
-                let score_map = get_store_scores(&ctx.redis, &stores).await;
-                let mut ordered_stores: Vec<(&str, &str)> = stores
-                    .iter()
-                    .map(|(store, api_key)| (*store, api_key.as_str()))
-                    .collect();
-                ordered_stores.sort_by(|(store_a, _), (store_b, _)| {
-                    let score_a = score_map.get(*store_a).copied().unwrap_or_default();
-                    let score_b = score_map.get(*store_b).copied().unwrap_or_default();
-                    score_b.cmp(&score_a).then_with(|| store_a.cmp(store_b))
-                });
-
-                for (store, api_key) in ordered_stores {
-                    if let Some(p) = provider.as_deref()
-                        && store != p
-                    {
-                        continue;
-                    }
-                    let result = generate_link(&ctx.http, &base_url, store, api_key, magnet).await;
-                    match result {
-                        Ok(link) => {
-                            adjust_store_score(&ctx.redis, store, 1).await;
-                            return Ok(HookResponse::StreamLink(StreamLinkResponse { link }));
-                        }
-                        Err(error) => {
-                            adjust_store_score(&ctx.redis, store, -1).await;
-                            tracing::warn!(store, error = %error, "generate link failed");
-                        }
-                    }
-                }
-                anyhow::bail!("no store could generate a stream link")
-            }
-            RivenEvent::DebridUserInfoRequested => {
-                let mut infos = Vec::new();
-                for (store, api_key) in &stores {
-                    match fetch_user_info(&ctx.http, &base_url, store, api_key).await {
-                        Ok(info) => infos.push(info),
-                        Err(error) => {
-                            tracing::warn!(store, error = %error, "failed to fetch debrid user info");
-                        }
-                    }
-                }
-                Ok(HookResponse::UserInfo(infos))
-            }
-            _ => Ok(HookResponse::Empty),
+        if any_network_error {
+            anyhow::bail!("network error contacting store");
         }
+        Ok(HookResponse::DownloadStreamUnavailable)
+    }
+
+    async fn on_download_cache_check_requested(
+        &self,
+        hashes: &[String],
+        ctx: &PluginContext,
+    ) -> anyhow::Result<HookResponse> {
+        let check_cache_enabled = ctx.settings.get_or("checkdebridcache", "true") != "false";
+        if !check_cache_enabled {
+            return Ok(HookResponse::Empty);
+        }
+        let base_url = ctx.settings.get_or("stremthruurl", DEFAULT_URL);
+        let stores = get_configured_stores(&ctx.settings);
+
+        let mut futures = Vec::new();
+        for (store, api_key) in &stores {
+            futures.push(check_cache(
+                &ctx.http, &ctx.redis, &base_url, store, api_key, hashes,
+            ));
+        }
+
+        let results = futures::future::join_all(futures).await;
+        let mut all_results = Vec::new();
+        for result in results {
+            match result {
+                Ok(items) => all_results.extend(items),
+                Err(error) => {
+                    tracing::warn!(error = %error, "cache check failed for a store")
+                }
+            }
+        }
+        Ok(HookResponse::CacheCheck(all_results))
+    }
+
+    async fn on_download_provider_list_requested(
+        &self,
+        ctx: &PluginContext,
+    ) -> anyhow::Result<HookResponse> {
+        let stores = get_configured_stores(&ctx.settings);
+        let providers = stores
+            .iter()
+            .map(|(store, _)| ProviderInfo {
+                name: store.to_string(),
+                store: store.to_string(),
+            })
+            .collect();
+        Ok(HookResponse::ProviderList(providers))
+    }
+
+    async fn on_stream_link_requested(
+        &self,
+        magnet: &str,
+        _info_hash: &str,
+        provider: Option<&str>,
+        ctx: &PluginContext,
+    ) -> anyhow::Result<HookResponse> {
+        let base_url = ctx.settings.get_or("stremthruurl", DEFAULT_URL);
+        let stores = get_configured_stores(&ctx.settings);
+        let score_map = get_store_scores(&ctx.redis, &stores).await;
+        let mut ordered_stores: Vec<(&str, &str)> = stores
+            .iter()
+            .map(|(store, api_key)| (*store, api_key.as_str()))
+            .collect();
+        ordered_stores.sort_by(|(store_a, _), (store_b, _)| {
+            let score_a = score_map.get(*store_a).copied().unwrap_or_default();
+            let score_b = score_map.get(*store_b).copied().unwrap_or_default();
+            score_b.cmp(&score_a).then_with(|| store_a.cmp(store_b))
+        });
+
+        for (store, api_key) in ordered_stores {
+            if let Some(p) = provider
+                && store != p
+            {
+                continue;
+            }
+            let result = generate_link(&ctx.http, &base_url, store, api_key, magnet).await;
+            match result {
+                Ok(link) => {
+                    adjust_store_score(&ctx.redis, store, 1).await;
+                    return Ok(HookResponse::StreamLink(StreamLinkResponse { link }));
+                }
+                Err(error) => {
+                    adjust_store_score(&ctx.redis, store, -1).await;
+                    tracing::warn!(store, error = %error, "generate link failed");
+                }
+            }
+        }
+        anyhow::bail!("no store could generate a stream link")
+    }
+
+    async fn on_debrid_user_info_requested(
+        &self,
+        ctx: &PluginContext,
+    ) -> anyhow::Result<HookResponse> {
+        let base_url = ctx.settings.get_or("stremthruurl", DEFAULT_URL);
+        let stores = get_configured_stores(&ctx.settings);
+        let mut infos = Vec::new();
+        for (store, api_key) in &stores {
+            match fetch_user_info(&ctx.http, &base_url, store, api_key).await {
+                Ok(info) => infos.push(info),
+                Err(error) => {
+                    tracing::warn!(store, error = %error, "failed to fetch debrid user info");
+                }
+            }
+        }
+        Ok(HookResponse::UserInfo(infos))
     }
 }
 

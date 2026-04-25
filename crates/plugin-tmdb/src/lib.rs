@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use chrono::NaiveDate;
 use serde::Deserialize;
 
-use riven_core::events::{EventType, HookResponse, RivenEvent};
+use riven_core::events::{EventType, HookResponse, IndexRequest};
 use riven_core::http::profiles;
 use riven_core::plugin::{Plugin, PluginContext};
 use riven_core::register_plugin;
@@ -39,14 +39,11 @@ impl Plugin for TmdbPlugin {
         vec![SettingField::new("apikey", "API Read Access Token", "password").required()]
     }
 
-    async fn handle_event(
+    async fn on_index_requested(
         &self,
-        event: &RivenEvent,
+        request: &IndexRequest<'_>,
         ctx: &PluginContext,
     ) -> anyhow::Result<HookResponse> {
-        let Some(request) = event.index_request() else {
-            return Ok(HookResponse::Empty);
-        };
         if request.item_type != MediaItemType::Movie {
             return Ok(HookResponse::Empty);
         }

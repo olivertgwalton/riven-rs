@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use riven_core::events::{EventType, HookResponse, RivenEvent};
+use riven_core::events::{EventType, HookResponse};
 use riven_core::http::profiles;
 use riven_core::plugin::{ContentCollection, Plugin, PluginContext, validate_api_key};
 use riven_core::register_plugin;
@@ -52,22 +52,16 @@ impl Plugin for ListrrPlugin {
         ]
     }
 
-    async fn handle_event(
+    async fn on_content_service_requested(
         &self,
-        event: &RivenEvent,
         ctx: &PluginContext,
     ) -> anyhow::Result<HookResponse> {
-        match event {
-            RivenEvent::ContentServiceRequested => {
-                let api_key = ctx.require_setting("apikey")?;
-                let movie_lists = ctx.settings.get_list("movielists");
-                let show_lists = ctx.settings.get_list("showlists");
-                let content =
-                    fetch_configured_content(&ctx.http, api_key, &movie_lists, &show_lists).await?;
-                Ok(content.into_hook_response())
-            }
-            _ => Ok(HookResponse::Empty),
-        }
+        let api_key = ctx.require_setting("apikey")?;
+        let movie_lists = ctx.settings.get_list("movielists");
+        let show_lists = ctx.settings.get_list("showlists");
+        let content =
+            fetch_configured_content(&ctx.http, api_key, &movie_lists, &show_lists).await?;
+        Ok(content.into_hook_response())
     }
 
     async fn query_content(

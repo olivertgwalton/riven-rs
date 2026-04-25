@@ -468,10 +468,10 @@ pub(crate) fn detect_anime(raw: &str, data: &ParsedData) -> bool {
     }
 
     // Check for known anime groups
-    if let Some(group) = &data.group {
-        if is_anime_group(group) {
-            return true;
-        }
+    if let Some(group) = &data.group
+        && is_anime_group(group)
+    {
+        return true;
     }
     if raw_has_anime_group(raw) {
         return true;

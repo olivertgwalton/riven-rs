@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use serde::Deserialize;
 
-use riven_core::events::{EventType, HookResponse, RivenEvent};
+use riven_core::events::{EventType, HookResponse};
 use riven_core::http::profiles;
 use riven_core::plugin::{ContentCollection, Plugin, PluginContext};
 use riven_core::register_plugin;
@@ -59,16 +59,13 @@ impl Plugin for TraktPlugin {
         ]
     }
 
-    async fn handle_event(
+    async fn on_content_service_requested(
         &self,
-        event: &RivenEvent,
         ctx: &PluginContext,
     ) -> anyhow::Result<HookResponse> {
-        match event {
-            RivenEvent::ContentServiceRequested => {
-                let client_id = ctx.require_setting("clientid")?;
-                let access_token = ctx.settings.get("accesstoken");
-                let mut content = ContentCollection::default();
+        let client_id = ctx.require_setting("clientid")?;
+        let access_token = ctx.settings.get("accesstoken");
+        let mut content = ContentCollection::default();
                 let trending_count = ctx.settings.get_parsed_or("trendingcount", 10usize);
                 let popular_count = ctx.settings.get_parsed_or("popularcount", 10usize);
                 let watched_count = ctx.settings.get_parsed_or("watchedcount", 10usize);
@@ -173,10 +170,7 @@ impl Plugin for TraktPlugin {
                     "trakt content service completed"
                 );
 
-                Ok(content.into_hook_response())
-            }
-            _ => Ok(HookResponse::Empty),
-        }
+        Ok(content.into_hook_response())
     }
 }
 

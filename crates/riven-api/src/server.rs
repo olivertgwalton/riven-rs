@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use axum::{Router, routing::get, routing::post};
-use plugin_logs::LogControl;
+use riven_core::logging::LogControl;
 use riven_core::http::HttpClient;
 use riven_core::plugin::PluginRegistry;
 use riven_core::stream_link::LinkRequest;
@@ -24,6 +24,26 @@ use crate::schema::{build_schema, start_event_controller};
 use crate::vfs_mount::VfsMountManager;
 
 pub use state::ApiState;
+
+pub struct StartServerConfig {
+    pub port: u16,
+    pub db_pool: sqlx::PgPool,
+    pub registry: Arc<PluginRegistry>,
+    pub job_queue: Arc<JobQueue>,
+    pub http_client: HttpClient,
+    pub api_key: Option<String>,
+    pub frontend_auth_signing_secret: Option<String>,
+    pub log_directory: String,
+    pub log_tx: broadcast::Sender<String>,
+    pub notification_tx: broadcast::Sender<String>,
+    pub downloader_config: Arc<tokio::sync::RwLock<riven_core::downloader::DownloaderConfig>>,
+    pub log_control: Arc<LogControl>,
+    pub stream_client: reqwest::Client,
+    pub link_request_tx: tokio::sync::mpsc::Sender<LinkRequest>,
+    pub cors_allowed_origins: Vec<String>,
+    pub vfs_mount_manager: Arc<VfsMountManager>,
+    pub cancel: tokio_util::sync::CancellationToken,
+}
 
 mod state {
     use std::sync::Arc;
@@ -49,24 +69,27 @@ mod state {
     }
 }
 
-pub async fn start_server(
-    port: u16,
-    db_pool: sqlx::PgPool,
-    registry: Arc<PluginRegistry>,
-    job_queue: Arc<JobQueue>,
-    http_client: HttpClient,
-    api_key: Option<String>,
-    frontend_auth_signing_secret: Option<String>,
-    log_directory: String,
-    log_tx: broadcast::Sender<String>,
-    notification_tx: broadcast::Sender<String>,
-    downloader_config: Arc<tokio::sync::RwLock<riven_core::downloader::DownloaderConfig>>,
-    log_control: Arc<LogControl>,
-    stream_client: reqwest::Client,
-    link_request_tx: tokio::sync::mpsc::Sender<LinkRequest>,
-    cors_allowed_origins: Vec<String>,
-    vfs_mount_manager: Arc<VfsMountManager>,
-) -> Result<()> {
+pub async fn start_server(config: StartServerConfig) -> Result<()> {
+    let StartServerConfig {
+        port,
+        db_pool,
+        registry,
+        job_queue,
+        http_client,
+        api_key,
+        frontend_auth_signing_secret,
+        log_directory,
+        log_tx,
+        notification_tx,
+        downloader_config,
+        log_control,
+        stream_client,
+        link_request_tx,
+        cors_allowed_origins,
+        vfs_mount_manager,
+        cancel,
+    } = config;
+
     let schema = build_schema(
         db_pool.clone(),
         registry,
@@ -81,15 +104,18 @@ pub async fn start_server(
 
     start_event_controller(job_queue.clone());
 
-    let board_api = ApiBuilder::new(Router::new())
+    let mut board_builder = ApiBuilder::new(Router::new())
         .register(job_queue.index_storage.clone())
         .register(job_queue.index_plugin_storage.clone())
         .register(job_queue.scrape_storage.clone())
         .register(job_queue.scrape_plugin_storage.clone())
         .register(job_queue.parse_storage.clone())
         .register(job_queue.download_storage.clone())
-        .register(job_queue.content_storage.clone())
-        .build();
+        .register(job_queue.content_storage.clone());
+    for storage in job_queue.plugin_hook_storages.values() {
+        board_builder = board_builder.register(storage.clone());
+    }
+    let board_api = board_builder.build();
     let board_ui = Router::new().fallback_service(ServeUI::new());
 
     let static_dir =
@@ -130,7 +156,9 @@ pub async fn start_server(
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}")).await?;
     tracing::info!(port = port, "GraphQL server listening");
 
-    axum::serve(listener, app).await?;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(async move { cancel.cancelled().await })
+        .await?;
 
     Ok(())
 }

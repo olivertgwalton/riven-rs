@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use reqwest::Method;
-use riven_core::events::{EventType, HookResponse, RivenEvent};
+use riven_core::events::{DownloadSuccessInfo, EventType, HookResponse};
 use riven_core::http::profiles;
 use riven_core::plugin::{Plugin, PluginContext, SettingField};
 use riven_core::register_plugin;
@@ -116,9 +116,9 @@ fn media_server_settings_schema() -> Vec<SettingField> {
     ]
 }
 
-async fn notify_media_server(
+async fn notify_download_success(
     plugin: &'static str,
-    event: &RivenEvent,
+    info: &DownloadSuccessInfo<'_>,
     ctx: &PluginContext,
 ) -> anyhow::Result<HookResponse> {
     let url = ctx
@@ -128,40 +128,47 @@ async fn notify_media_server(
     let api_key = ctx.require_setting("apikey")?;
     let library_path = ctx.settings.get_or("librarypath", "/mount");
 
-    match event {
-        RivenEvent::MediaItemDownloadSuccess { id, title, .. } => {
-            let raw_paths = repo::get_media_entry_paths_for_items(&ctx.db_pool, &[*id]).await?;
-            if raw_paths.is_empty() {
-                tracing::warn!(id, title, "{plugin}: no filesystem entries");
-                return Ok(HookResponse::Empty);
-            }
-            let paths: Vec<String> = raw_paths
-                .into_iter()
-                .map(|path| rewrite_media_path(&library_path, &path))
-                .collect();
-            if plugin == "jellyfin" {
-                refresh_library(&ctx.http, &url, api_key, plugin).await?;
-            } else {
-                notify_paths(&ctx.http, &url, api_key, &paths, "Created", plugin).await?;
-            }
-        }
-        RivenEvent::MediaItemsDeleted { deleted_paths, .. } => {
-            if deleted_paths.is_empty() {
-                return Ok(HookResponse::Empty);
-            }
-            if plugin == "jellyfin" {
-                refresh_library(&ctx.http, &url, api_key, plugin).await?;
-            } else {
-                let paths: Vec<String> = deleted_paths
-                    .iter()
-                    .map(|path| rewrite_media_path(&library_path, path))
-                    .collect();
-                notify_paths(&ctx.http, &url, api_key, &paths, "Deleted", plugin).await?;
-            }
-        }
-        _ => {}
+    let raw_paths = repo::get_media_entry_paths_for_items(&ctx.db_pool, &[info.id]).await?;
+    if raw_paths.is_empty() {
+        tracing::warn!(id = info.id, title = info.title, "{plugin}: no filesystem entries");
+        return Ok(HookResponse::Empty);
     }
+    let paths: Vec<String> = raw_paths
+        .into_iter()
+        .map(|path| rewrite_media_path(&library_path, &path))
+        .collect();
+    if plugin == "jellyfin" {
+        refresh_library(&ctx.http, &url, api_key, plugin).await?;
+    } else {
+        notify_paths(&ctx.http, &url, api_key, &paths, "Created", plugin).await?;
+    }
+    Ok(HookResponse::Empty)
+}
 
+async fn notify_items_deleted(
+    plugin: &'static str,
+    deleted_paths: &[String],
+    ctx: &PluginContext,
+) -> anyhow::Result<HookResponse> {
+    if deleted_paths.is_empty() {
+        return Ok(HookResponse::Empty);
+    }
+    let url = ctx
+        .require_setting("url")?
+        .trim_end_matches('/')
+        .to_string();
+    let api_key = ctx.require_setting("apikey")?;
+    let library_path = ctx.settings.get_or("librarypath", "/mount");
+
+    if plugin == "jellyfin" {
+        refresh_library(&ctx.http, &url, api_key, plugin).await?;
+    } else {
+        let paths: Vec<String> = deleted_paths
+            .iter()
+            .map(|path| rewrite_media_path(&library_path, path))
+            .collect();
+        notify_paths(&ctx.http, &url, api_key, &paths, "Deleted", plugin).await?;
+    }
     Ok(HookResponse::Empty)
 }
 
@@ -199,23 +206,35 @@ macro_rules! impl_media_server_plugin {
                 media_server_settings_schema()
             }
 
-            async fn handle_event(
+            async fn on_active_playback_sessions_requested(
                 &self,
-                event: &RivenEvent,
                 ctx: &PluginContext,
             ) -> anyhow::Result<HookResponse> {
-                match event {
-                    RivenEvent::ActivePlaybackSessionsRequested => {
-                        let url = ctx
-                            .require_setting("url")?
-                            .trim_end_matches('/')
-                            .to_string();
-                        let api_key = ctx.require_setting("apikey")?;
-                        let sessions = get_active_sessions(&ctx.http, &url, api_key, $name).await?;
-                        Ok(HookResponse::ActivePlaybackSessions(sessions))
-                    }
-                    _ => notify_media_server($name, event, ctx).await,
-                }
+                let url = ctx
+                    .require_setting("url")?
+                    .trim_end_matches('/')
+                    .to_string();
+                let api_key = ctx.require_setting("apikey")?;
+                let sessions = get_active_sessions(&ctx.http, &url, api_key, $name).await?;
+                Ok(HookResponse::ActivePlaybackSessions(sessions))
+            }
+
+            async fn on_download_success(
+                &self,
+                info: &DownloadSuccessInfo<'_>,
+                ctx: &PluginContext,
+            ) -> anyhow::Result<HookResponse> {
+                notify_download_success($name, info, ctx).await
+            }
+
+            async fn on_items_deleted(
+                &self,
+                _item_ids: &[i64],
+                _external_request_ids: &[String],
+                deleted_paths: &[String],
+                ctx: &PluginContext,
+            ) -> anyhow::Result<HookResponse> {
+                notify_items_deleted($name, deleted_paths, ctx).await
             }
         }
     };

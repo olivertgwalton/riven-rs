@@ -15,6 +15,9 @@ async-graphql = { workspace = true }
 chrono = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+tracing-appender = { workspace = true }
+log = "0.4"
 figment = { workspace = true }
 inventory = { workspace = true }
 parking_lot = { workspace = true }

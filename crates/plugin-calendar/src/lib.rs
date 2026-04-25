@@ -2,7 +2,7 @@ use async_graphql::{Context, Object, Result as GqlResult, SimpleObject};
 use async_trait::async_trait;
 use redis::AsyncCommands;
 
-use riven_core::events::{EventType, HookResponse, RivenEvent};
+use riven_core::events::{EventType, HookResponse};
 use riven_core::plugin::{Plugin, PluginContext};
 use riven_core::register_plugin;
 use riven_core::types::{MediaItemState, MediaItemType};
@@ -39,17 +39,19 @@ impl Plugin for CalendarPlugin {
         &[EventType::CoreStarted, EventType::MediaItemIndexSuccess]
     }
 
-    async fn handle_event(
+    async fn on_core_started(&self, ctx: &PluginContext) -> anyhow::Result<HookResponse> {
+        regenerate_feed(ctx).await?;
+        Ok(HookResponse::Empty)
+    }
+
+    async fn on_index_success(
         &self,
-        event: &RivenEvent,
+        _id: i64,
+        _title: &str,
+        _item_type: MediaItemType,
         ctx: &PluginContext,
     ) -> anyhow::Result<HookResponse> {
-        match event {
-            RivenEvent::CoreStarted | RivenEvent::MediaItemIndexSuccess { .. } => {
-                regenerate_feed(ctx).await?;
-            }
-            _ => {}
-        }
+        regenerate_feed(ctx).await?;
         Ok(HookResponse::Empty)
     }
 }

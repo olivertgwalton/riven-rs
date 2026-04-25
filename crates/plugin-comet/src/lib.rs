@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use serde::Deserialize;
 
-use riven_core::events::{EventType, HookResponse, RivenEvent};
+use riven_core::events::{EventType, HookResponse, ScrapeRequest};
 use riven_core::http::profiles;
 use riven_core::plugin::{Plugin, PluginContext, SettingField};
 use riven_core::register_plugin;
@@ -49,14 +49,11 @@ impl Plugin for CometPlugin {
         ]
     }
 
-    async fn handle_event(
+    async fn on_scrape_requested(
         &self,
-        event: &RivenEvent,
+        request: &ScrapeRequest<'_>,
         ctx: &PluginContext,
     ) -> anyhow::Result<HookResponse> {
-        let Some(request) = event.scrape_request() else {
-            return Ok(HookResponse::Empty);
-        };
         let Some(imdb_id) = request.imdb_id else {
             return Ok(HookResponse::Empty);
         };

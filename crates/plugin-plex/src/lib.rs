@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 
-use riven_core::events::{EventType, HookResponse, RivenEvent};
+use riven_core::events::{DownloadSuccessInfo, EventType, HookResponse};
 use riven_core::http::profiles;
 use riven_core::plugin::{Plugin, PluginContext};
 use riven_core::register_plugin;
@@ -63,116 +63,116 @@ impl Plugin for PlexPlugin {
         ]
     }
 
-    async fn handle_event(
+    async fn on_download_success(
         &self,
-        event: &RivenEvent,
+        info: &DownloadSuccessInfo<'_>,
         ctx: &PluginContext,
     ) -> anyhow::Result<HookResponse> {
-        match event {
-            RivenEvent::MediaItemDownloadSuccess { id, .. } => {
-                tracing::info!(id, "plex: handling download success event");
-                let plex_token = ctx.require_setting("plextoken")?;
-                let plex_url = ctx.require_setting("plexserverurl")?.trim_end_matches('/');
+        let id = info.id;
+        tracing::info!(id, "plex: handling download success event");
+        let plex_token = ctx.require_setting("plextoken")?;
+        let plex_url = ctx.require_setting("plexserverurl")?.trim_end_matches('/');
 
-                let entries = repo::get_media_entries_recursive(&ctx.db_pool, *id).await?;
-                if entries.is_empty() {
-                    anyhow::bail!("no filesystem entries found for media item {id}");
-                }
-                tracing::debug!(id, count = entries.len(), "plex: found filesystem entries");
-
-                let fs_settings = load_filesystem_settings(&ctx.db_pool).await;
-                let library_path = effective_library_path(&ctx.settings, fs_settings.as_ref(), &ctx.vfs_mount_path);
-
-                let sections = self
-                    .cached_library_sections(&ctx.http, plex_url, plex_token)
-                    .await?;
-                tracing::debug!(count = sections.len(), "plex: fetched library sections");
-
-                let section_locations: Vec<String> = sections
-                    .iter()
-                    .flat_map(|s| s.locations.iter().map(|l| l.path.clone()))
-                    .collect();
-
-                let mut refresh_tasks = Vec::new();
-                let mut all_vfs_dirs: Vec<String> = Vec::new();
-                for entry in &entries {
-                    let dir_path = entry
-                        .path
-                        .rsplit_once('/')
-                        .map(|(dir, _)| dir)
-                        .unwrap_or(&entry.path);
-
-                    let profile_keys =
-                        LibraryProfileMembership::from_json(entry.library_profiles.as_ref());
-                    let vfs_dirs = entry_vfs_dirs(
-                        dir_path,
-                        &library_path,
-                        &profile_keys,
-                        fs_settings.as_ref(),
-                    );
-
-                    for full_path in &vfs_dirs {
-                        for section in &sections {
-                            for location in &section.locations {
-                                if full_path.starts_with(&location.path) {
-                                    refresh_tasks.push((section.key.clone(), full_path.clone()));
-                                }
-                            }
-                        }
-                        all_vfs_dirs.push(full_path.clone());
-                    }
-                }
-
-                if refresh_tasks.is_empty() {
-                    tracing::warn!(
-                        id,
-                        tried_paths = ?all_vfs_dirs,
-                        plex_section_locations = ?section_locations,
-                        "plex: no library sections matched any entry paths — set plexlibrarypath to the path prefix Plex uses to see the VFS mount"
-                    );
-                    return Ok(HookResponse::Empty);
-                }
-
-                let results = futures::future::join_all(refresh_tasks.into_iter().map(
-                    |(section_key, path)| {
-                        let http = ctx.http.clone();
-                        let token = plex_token.to_string();
-                        let url = plex_url.to_string();
-                        async move {
-                            let result =
-                                refresh_section(&http, &url, &token, &section_key, &path).await;
-                            (section_key, path, result)
-                        }
-                    },
-                ))
-                .await;
-
-                for (section_key, path, result) in results {
-                    match result {
-                        Ok(()) => tracing::info!(
-                            section = section_key,
-                            path,
-                            "plex library section refreshed"
-                        ),
-                        Err(e) => tracing::warn!(
-                            section = section_key,
-                            path,
-                            error = %e,
-                            "plex library section refresh failed"
-                        ),
-                    }
-                }
-
-                Ok(HookResponse::Empty)
-            }
-            RivenEvent::ActivePlaybackSessionsRequested => {
-                let plex_token = ctx.require_setting("plextoken")?;
-                let plex_url = ctx.require_setting("plexserverurl")?.trim_end_matches('/');
-                let sessions = get_active_sessions(&ctx.http, plex_url, plex_token).await?;
-                Ok(HookResponse::ActivePlaybackSessions(sessions))
-            }
-            _ => Ok(HookResponse::Empty),
+        let entries = repo::get_media_entries_recursive(&ctx.db_pool, id).await?;
+        if entries.is_empty() {
+            anyhow::bail!("no filesystem entries found for media item {id}");
         }
+        tracing::debug!(id, count = entries.len(), "plex: found filesystem entries");
+
+        let fs_settings = load_filesystem_settings(&ctx.db_pool).await;
+        let library_path =
+            effective_library_path(&ctx.settings, fs_settings.as_ref(), &ctx.vfs_mount_path);
+
+        let sections = self
+            .cached_library_sections(&ctx.http, plex_url, plex_token)
+            .await?;
+        tracing::debug!(count = sections.len(), "plex: fetched library sections");
+
+        let section_locations: Vec<String> = sections
+            .iter()
+            .flat_map(|s| s.locations.iter().map(|l| l.path.clone()))
+            .collect();
+
+        let mut refresh_tasks = Vec::new();
+        let mut all_vfs_dirs: Vec<String> = Vec::new();
+        for entry in &entries {
+            let dir_path = entry
+                .path
+                .rsplit_once('/')
+                .map(|(dir, _)| dir)
+                .unwrap_or(&entry.path);
+
+            let profile_keys =
+                LibraryProfileMembership::from_json(entry.library_profiles.as_ref());
+            let vfs_dirs = entry_vfs_dirs(
+                dir_path,
+                &library_path,
+                &profile_keys,
+                fs_settings.as_ref(),
+            );
+
+            for full_path in &vfs_dirs {
+                for section in &sections {
+                    for location in &section.locations {
+                        if full_path.starts_with(&location.path) {
+                            refresh_tasks.push((section.key.clone(), full_path.clone()));
+                        }
+                    }
+                }
+                all_vfs_dirs.push(full_path.clone());
+            }
+        }
+
+        if refresh_tasks.is_empty() {
+            tracing::warn!(
+                id,
+                tried_paths = ?all_vfs_dirs,
+                plex_section_locations = ?section_locations,
+                "plex: no library sections matched any entry paths — set plexlibrarypath to the path prefix Plex uses to see the VFS mount"
+            );
+            return Ok(HookResponse::Empty);
+        }
+
+        let results = futures::future::join_all(refresh_tasks.into_iter().map(
+            |(section_key, path)| {
+                let http = ctx.http.clone();
+                let token = plex_token.to_string();
+                let url = plex_url.to_string();
+                async move {
+                    let result = refresh_section(&http, &url, &token, &section_key, &path).await;
+                    (section_key, path, result)
+                }
+            },
+        ))
+        .await;
+
+        for (section_key, path, result) in results {
+            match result {
+                Ok(()) => tracing::info!(
+                    section = section_key,
+                    path,
+                    "plex library section refreshed"
+                ),
+                Err(e) => tracing::warn!(
+                    section = section_key,
+                    path,
+                    error = %e,
+                    "plex library section refresh failed"
+                ),
+            }
+        }
+
+        Ok(HookResponse::Empty)
+    }
+
+    async fn on_active_playback_sessions_requested(
+        &self,
+        ctx: &PluginContext,
+    ) -> anyhow::Result<HookResponse> {
+        let plex_token = ctx.require_setting("plextoken")?;
+        let plex_url = ctx.require_setting("plexserverurl")?.trim_end_matches('/');
+        let sessions = get_active_sessions(&ctx.http, plex_url, plex_token).await?;
+        Ok(HookResponse::ActivePlaybackSessions(sessions))
     }
 }
 
@@ -220,15 +220,15 @@ fn entry_vfs_dirs(
 
     if let Some(settings) = fs_settings {
         for key in &profile_keys.0 {
-            if let Some(profile) = settings.library_profiles.get(key) {
-                if profile.enabled {
-                    paths.push(format!(
-                        "{base}{}{canonical_dir}",
-                        profile.library_path
-                    ));
-                    if profile.exclusive {
-                        any_exclusive = true;
-                    }
+            if let Some(profile) = settings.library_profiles.get(key)
+                && profile.enabled
+            {
+                paths.push(format!(
+                    "{base}{}{canonical_dir}",
+                    profile.library_path
+                ));
+                if profile.exclusive {
+                    any_exclusive = true;
                 }
             }
         }
@@ -250,11 +250,11 @@ impl PlexPlugin {
     ) -> anyhow::Result<Vec<PlexSection>> {
         {
             let cache = self.sections_cache.read().await;
-            if let Some((fetched_at, ref sections)) = *cache {
-                if fetched_at.elapsed() < SECTIONS_CACHE_TTL {
-                    tracing::debug!("using cached plex library sections");
-                    return Ok(sections.clone());
-                }
+            if let Some((fetched_at, ref sections)) = *cache
+                && fetched_at.elapsed() < SECTIONS_CACHE_TTL
+            {
+                tracing::debug!("using cached plex library sections");
+                return Ok(sections.clone());
             }
         }
 

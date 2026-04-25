@@ -210,7 +210,7 @@ pub fn rank_streams(
 ) -> Vec<RankedStreamCandidate> {
     let mut ordered_streams: Vec<(&String, &riven_core::types::ScrapeEntry)> =
         streams.iter().collect();
-    ordered_streams.sort_by(|(a, _), (b, _)| a.cmp(b));
+    ordered_streams.sort_by_key(|(a, _)| *a);
 
     ordered_streams
         .into_iter()

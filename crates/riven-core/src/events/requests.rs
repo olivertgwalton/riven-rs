@@ -26,3 +26,17 @@ pub struct IndexRequest<'a> {
     pub tvdb_id: Option<&'a str>,
     pub tmdb_id: Option<&'a str>,
 }
+
+pub struct DownloadSuccessInfo<'a> {
+    pub id: i64,
+    pub title: &'a str,
+    pub full_title: Option<&'a str>,
+    pub item_type: MediaItemType,
+    pub year: Option<i32>,
+    pub imdb_id: Option<&'a str>,
+    pub tmdb_id: Option<&'a str>,
+    pub poster_path: Option<&'a str>,
+    pub plugin_name: &'a str,
+    pub provider: Option<&'a str>,
+    pub duration_seconds: f64,
+}

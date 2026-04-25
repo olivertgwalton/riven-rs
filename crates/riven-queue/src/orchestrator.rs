@@ -135,11 +135,10 @@ impl<'a> LibraryOrchestrator<'a> {
         requested_seasons: Option<&[i32]>,
     ) {
         match item.item_type {
-            MediaItemType::Movie => {
-                if action == ItemRequestUpsertAction::Created {
-                    self.queue.push_index(IndexJob::from_item(item)).await;
-                }
+            MediaItemType::Movie if action == ItemRequestUpsertAction::Created => {
+                self.queue.push_index(IndexJob::from_item(item)).await;
             }
+            MediaItemType::Movie => {}
             MediaItemType::Show => match action {
                 ItemRequestUpsertAction::Created => {
                     self.queue.push_index(IndexJob::from_item(item)).await;
@@ -455,7 +454,17 @@ impl<'a> LibraryOrchestrator<'a> {
                     }
                 }
             }
-            _ => {}
+            MediaItemType::Movie => {
+                let mut job = ScrapeJob::for_movie(item);
+                job.auto_download = true;
+                self.queue.schedule_scrape_at(job, retry_at).await;
+            }
+            MediaItemType::Episode => {
+                let (show_title, show_imdb_id) = self.show_context(item).await;
+                let mut job = ScrapeJob::for_episode(item, show_title, show_imdb_id);
+                job.auto_download = true;
+                self.queue.schedule_scrape_at(job, retry_at).await;
+            }
         }
     }
 

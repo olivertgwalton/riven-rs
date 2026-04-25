@@ -5,16 +5,8 @@ edition = "2024"
 
 [dependencies]
 riven-core = { path = "../riven-core" }
-riven-db = { path = "../riven-db" }
 async-trait = { workspace = true }
 async-graphql = { workspace = true }
-anyhow = { workspace = true }
-tracing = { workspace = true }
-log = "0.4"
-tracing-subscriber = { workspace = true }
-tracing-appender = { workspace = true }
 inventory = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
-sqlx = { workspace = true }
-chrono = { workspace = true }

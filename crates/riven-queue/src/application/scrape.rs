@@ -125,8 +125,7 @@ pub async fn handle_plugin(job: &ScrapePluginJob, queue: &JobQueue) {
     {
         // Last plugin to drain also clears the flow keys so they don't linger until TTL.
         if queue.flow_complete_child("scrape", job.id).await {
-            queue.clear_flow("scrape", job.id).await;
-            queue.clear_flow_results("scrape", job.id).await;
+            queue.clear_flow_all("scrape", job.id).await;
         }
         return;
     }
@@ -173,10 +172,17 @@ pub async fn handle_plugin(job: &ScrapePluginJob, queue: &JobQueue) {
 
 pub async fn finalize(job: &ScrapeJob, queue: &JobQueue) {
     let id = job.id;
+
+    // Snapshot the counters and tear down everything except `flow_results`.
+    // `flow_results` is owned by the next stage (parse_results) on the success
+    // path; bail-out paths below clear it explicitly via `clear_flow_all`.
+    let result_count = queue.flow_result_count("scrape", id).await;
+    let rate_limited_count = queue.flow_rate_limited_count("scrape", id).await;
+    queue.clear_flow("scrape", id).await;
+    queue.clear_flow_rate_limited("scrape", id).await;
+
     let Some(item) = load_media_item_or_log(&queue.db_pool, id, "scrape finalize").await else {
-        queue.clear_flow_results("scrape", id).await;
-        queue.clear_flow("scrape", id).await;
-        queue.clear_flow_rate_limited("scrape", id).await;
+        queue.clear_flow_all("scrape", id).await;
         return;
     };
 
@@ -185,20 +191,12 @@ pub async fn finalize(job: &ScrapeJob, queue: &JobQueue) {
     // would fire spurious "no streams" notifications indefinitely.
     if matches!(item.state, MediaItemState::Failed | MediaItemState::Paused) {
         tracing::debug!(id, state = ?item.state, "skipping finalize for non-processable state");
-        queue.clear_flow_results("scrape", id).await;
-        queue.clear_flow("scrape", id).await;
-        queue.clear_flow_rate_limited("scrape", id).await;
+        queue.clear_flow_all("scrape", id).await;
         return;
     }
 
-    queue.clear_flow("scrape", id).await;
-
-    let result_count = queue.flow_result_count("scrape", id).await;
-    let rate_limited_count = queue.flow_rate_limited_count("scrape", id).await;
-    queue.clear_flow_rate_limited("scrape", id).await;
-
     if result_count == 0 {
-        queue.clear_flow_results("scrape", id).await;
+        queue.clear_flow_all("scrape", id).await;
 
         // If every plugin that ran deferred (none returned a genuine "no
         // streams" verdict) and we haven't exhausted our re-push budget,
@@ -212,6 +210,9 @@ pub async fn finalize(job: &ScrapeJob, queue: &JobQueue) {
                 max = MAX_RATE_LIMIT_REPUSH,
                 "all scrapers deferred; re-pushing scrape job"
             );
+            // DedupGuard::Drop is async-spawned and races with this re-push;
+            // release synchronously so set_nx in push_scrape can't no-op.
+            queue.release_dedup("scrape", id).await;
             queue
                 .push_scrape(ScrapeJob {
                     rate_limit_retries: job.rate_limit_retries + 1,
@@ -250,6 +251,11 @@ pub async fn finalize(job: &ScrapeJob, queue: &JobQueue) {
 pub async fn parse_results(id: i64, _job: &ParseScrapeResultsJob, queue: &JobQueue) {
     tracing::debug!(id, "running parse-scrape-results flow");
 
+    // Drain results unconditionally up front: this stage is the sole consumer,
+    // so reading and clearing in one round-trip means every downstream bail-out
+    // path can return without juggling Redis cleanup.
+    let responses: Vec<ScrapeResponse> = queue.drain_flow_results("scrape", id).await;
+
     let Some(item) = load_media_item_or_log(&queue.db_pool, id, "parse-scrape-results").await
     else {
         return;
@@ -275,9 +281,6 @@ pub async fn parse_results(id: i64, _job: &ParseScrapeResultsJob, queue: &JobQue
     let item = parse_context.item;
     let item_title = parse_context.item_title;
     let item_type = parse_context.item_type;
-
-    let responses: Vec<ScrapeResponse> = queue.flow_load_results("scrape", id).await;
-    queue.clear_flow_results("scrape", id).await;
 
     let streams = responses
         .into_iter()

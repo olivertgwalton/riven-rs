@@ -1,11 +1,7 @@
-mod runtime;
-
 use async_graphql::{Context, Error, Object, Result as GqlResult, SimpleObject};
 use async_trait::async_trait;
 use riven_core::plugin::{Plugin, SettingField};
 use riven_core::register_plugin;
-
-pub use runtime::{LogControl, LogSettings, init_logging, load_log_settings};
 
 #[derive(Default)]
 pub struct LogsPlugin;

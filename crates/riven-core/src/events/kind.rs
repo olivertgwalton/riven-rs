@@ -56,6 +56,46 @@ pub enum EventType {
 }
 
 impl EventType {
+    /// Stable kebab-case identifier used for queue names and similar plumbing.
+    /// Matches the `serde(rename = ...)` value (e.g. "riven.media-item.scrape.requested").
+    pub const fn slug(self) -> &'static str {
+        match self {
+            Self::CoreStarted => "riven.core.started",
+            Self::CoreShutdown => "riven.core.shutdown",
+            Self::ContentServiceRequested => "riven.content-service.requested",
+            Self::ItemRequestCreated => "riven.item-request.created",
+            Self::ItemRequestUpdated => "riven.item-request.updated",
+            Self::MediaItemIndexRequested => "riven.media-item.index.requested",
+            Self::MediaItemIndexSuccess => "riven.media-item.index.success",
+            Self::MediaItemIndexError => "riven.media-item.index.error",
+            Self::MediaItemIndexErrorIncorrectState => "riven.media-item.index.error.incorrect-state",
+            Self::MediaItemScrapeRequested => "riven.media-item.scrape.requested",
+            Self::MediaItemScrapeSuccess => "riven.media-item.scrape.success",
+            Self::MediaItemScrapeError => "riven.media-item.scrape.error",
+            Self::MediaItemScrapeErrorIncorrectState => {
+                "riven.media-item.scrape.error.incorrect-state"
+            }
+            Self::MediaItemScrapeErrorNoNewStreams => "riven.media-item.scrape.error.no-new-streams",
+            Self::MediaItemDownloadRequested => "riven.media-item.download.requested",
+            Self::MediaItemDownloadCacheCheckRequested => {
+                "riven.media-item.download.cache-check-requested"
+            }
+            Self::MediaItemDownloadError => "riven.media-item.download.error",
+            Self::MediaItemDownloadErrorIncorrectState => {
+                "riven.media-item.download.error.incorrect-state"
+            }
+            Self::MediaItemDownloadPartialSuccess => "riven.media-item.download.partial-success",
+            Self::MediaItemDownloadProviderListRequested => {
+                "riven.media-item.download.provider-list-requested"
+            }
+            Self::MediaItemDownloadSuccess => "riven.media-item.download.success",
+            Self::MediaItemStreamLinkRequested => "riven.media-item.stream-link.requested",
+            Self::MediaItemsDeleted => "riven.media-item.deleted",
+            Self::DebridUserInfoRequested => "riven.debrid.user-info.requested",
+            Self::ActivePlaybackSessionsRequested => "riven.media-server.active-sessions.requested",
+        }
+    }
+
     pub const fn is_notable(self) -> bool {
         matches!(
             self,

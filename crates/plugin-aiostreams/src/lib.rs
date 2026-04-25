@@ -3,7 +3,7 @@ mod models;
 
 use async_trait::async_trait;
 
-use riven_core::events::{EventType, HookResponse, RivenEvent};
+use riven_core::events::{EventType, HookResponse, ScrapeRequest};
 use riven_core::plugin::{Plugin, PluginContext, SettingField};
 use riven_core::register_plugin;
 use riven_core::settings::PluginSettings;
@@ -62,21 +62,17 @@ impl Plugin for AioStreamsPlugin {
         ]
     }
 
-    async fn handle_event(
+    async fn on_scrape_requested(
         &self,
-        event: &RivenEvent,
+        request: &ScrapeRequest<'_>,
         ctx: &PluginContext,
     ) -> anyhow::Result<HookResponse> {
-        let Some(request) = event.scrape_request() else {
-            return Ok(HookResponse::Empty);
-        };
-
         let uuid = ctx.require_setting("uuid")?;
         let password = ctx.require_setting("password")?;
         let base_url = ctx.settings.get_or("url", DEFAULT_URL);
         let base_url = base_url.trim_end_matches('/');
 
-        scrape(&ctx.http, base_url, uuid, password, &request)
+        scrape(&ctx.http, base_url, uuid, password, request)
             .await
             .map(HookResponse::Scrape)
     }

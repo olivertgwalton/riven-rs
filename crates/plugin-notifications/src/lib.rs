@@ -3,7 +3,7 @@ use chrono::Utc;
 use riven_db::repo;
 use serde::{Deserialize, Serialize};
 
-use riven_core::events::{EventType, HookResponse, RivenEvent};
+use riven_core::events::{DownloadSuccessInfo, EventType, HookResponse};
 use riven_core::http::profiles;
 use riven_core::plugin::{Plugin, PluginContext};
 use riven_core::register_plugin;
@@ -56,67 +56,53 @@ impl Plugin for NotificationsPlugin {
         ]
     }
 
-    async fn handle_event(
+    async fn on_download_success(
         &self,
-        event: &RivenEvent,
+        info: &DownloadSuccessInfo<'_>,
         ctx: &PluginContext,
     ) -> anyhow::Result<HookResponse> {
-        match event {
-            RivenEvent::MediaItemDownloadSuccess {
-                id,
-                title,
-                full_title,
-                item_type,
-                year,
-                imdb_id,
-                tmdb_id,
-                poster_path,
-                plugin_name,
-                provider,
-                duration_seconds,
-            } => {
-                let urls = ctx.settings.get_list("urls");
-                let detailed = ctx.settings.get_bool("detailed");
+        let urls = ctx.settings.get_list("urls");
+        let detailed = ctx.settings.get_bool("detailed");
 
-                let mut payload = NotificationPayload {
-                    event: "riven.media-item.download.success".to_string(),
-                    title: title.clone(),
-                    full_title: full_title.clone().unwrap_or_else(|| title.clone()),
-                    item_type: *item_type,
-                    year: *year,
-                    imdb_id: imdb_id.clone(),
-                    tmdb_id: tmdb_id.clone(),
-                    tvdb_id: None,
-                    poster_path: poster_path.clone(),
-                    downloader: plugin_name.clone(),
-                    provider: provider.clone(),
-                    duration_seconds: *duration_seconds,
-                    timestamp: Utc::now().to_rfc3339(),
-                    is_anime: false,
-                    rating: None,
-                    overview: None,
-                    tvdb_slug: None,
-                };
+        let mut payload = NotificationPayload {
+            event: "riven.media-item.download.success".to_string(),
+            title: info.title.to_string(),
+            full_title: info
+                .full_title
+                .map(str::to_string)
+                .unwrap_or_else(|| info.title.to_string()),
+            item_type: info.item_type,
+            year: info.year,
+            imdb_id: info.imdb_id.map(str::to_string),
+            tmdb_id: info.tmdb_id.map(str::to_string),
+            tvdb_id: None,
+            poster_path: info.poster_path.map(str::to_string),
+            downloader: info.plugin_name.to_string(),
+            provider: info.provider.map(str::to_string),
+            duration_seconds: info.duration_seconds,
+            timestamp: Utc::now().to_rfc3339(),
+            is_anime: false,
+            rating: None,
+            overview: None,
+            tvdb_slug: None,
+        };
 
-                if !rewrite_for_request_root(ctx, *id, &mut payload).await? {
-                    return Ok(HookResponse::Empty);
-                }
-
-                if detailed {
-                    if let Some(api_key) = ctx.settings.get("tmdb_api_key") {
-                        payload.overview = fetch_tmdb_overview(&ctx.http, api_key, &payload).await;
-                    }
-                    if let Some(ref tvdb_id) = payload.tvdb_id.clone() {
-                        payload.tvdb_slug = fetch_tvdb_slug(&ctx.http, tvdb_id).await;
-                    }
-                }
-
-                dispatch_webhooks(ctx, &urls, &payload, detailed).await;
-
-                Ok(HookResponse::Empty)
-            }
-            _ => Ok(HookResponse::Empty),
+        if !rewrite_for_request_root(ctx, info.id, &mut payload).await? {
+            return Ok(HookResponse::Empty);
         }
+
+        if detailed {
+            if let Some(api_key) = ctx.settings.get("tmdb_api_key") {
+                payload.overview = fetch_tmdb_overview(&ctx.http, api_key, &payload).await;
+            }
+            if let Some(ref tvdb_id) = payload.tvdb_id.clone() {
+                payload.tvdb_slug = fetch_tvdb_slug(&ctx.http, tvdb_id).await;
+            }
+        }
+
+        dispatch_webhooks(ctx, &urls, &payload, detailed).await;
+
+        Ok(HookResponse::Empty)
     }
 }
 

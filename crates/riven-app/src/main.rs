@@ -4,6 +4,7 @@ use std::time::Duration;
 use anyhow::Result;
 use tokio::signal;
 use tokio::sync::broadcast;
+use tokio_util::sync::CancellationToken;
 
 use riven_core::events::RivenEvent;
 use riven_core::reindex::ReindexConfig;
@@ -55,14 +56,14 @@ async fn main() -> Result<()> {
     let db_pool = riven_db::connect(&settings.database_url).await?;
     riven_db::run_migrations(&db_pool).await?;
 
-    let log_settings = plugin_logs::load_log_settings(&db_pool).await?;
+    let log_settings = riven_core::logging::load_log_settings(&db_pool, &settings).await?;
     let (log_tx, _) = broadcast::channel::<String>(1024);
     let log_control =
-        plugin_logs::init_logging(&log_settings, &settings.log_directory, log_tx.clone())?;
+        riven_core::logging::init_logging(&log_settings, &settings.log_directory, log_tx.clone())?;
     tracing::info!("riven starting up");
 
-    if settings.unsafe_refresh_database_on_startup {
-        tracing::warn!("unsafe_refresh_database_on_startup is enabled — wiping database");
+    if settings.unsafe_wipe_database_on_startup {
+        tracing::warn!("unsafe_wipe_database_on_startup is enabled — wiping database");
         sqlx::query("DROP SCHEMA public CASCADE; CREATE SCHEMA public;")
             .execute(&db_pool)
             .await?;
@@ -142,6 +143,8 @@ async fn main() -> Result<()> {
         }
     });
 
+    let cancel = CancellationToken::new();
+
     let gql_port = settings.gql_port;
     if settings.api_key.is_empty() {
         tracing::warn!("RIVEN_SETTING__API_KEY is empty — GraphQL API auth is DISABLED (dev only)");
@@ -177,25 +180,27 @@ async fn main() -> Result<()> {
         let notif_tx = notification_tx.clone();
         let log_control = log_control.clone();
         let vfs_mount_manager = vfs_mount_manager.clone();
+        let cancel = cancel.clone();
         async move {
-            if let Err(e) = riven_api::start_server(
-                gql_port,
-                pool,
-                reg,
-                jq.clone(),
-                http_client.clone(),
+            if let Err(e) = riven_api::start_server(riven_api::StartServerConfig {
+                port: gql_port,
+                db_pool: pool,
+                registry: reg,
+                job_queue: jq.clone(),
+                http_client: http_client.clone(),
                 api_key,
                 frontend_auth_signing_secret,
-                log_dir,
+                log_directory: log_dir,
                 log_tx,
-                notif_tx,
-                jq.downloader_config.clone(),
+                notification_tx: notif_tx,
+                downloader_config: jq.downloader_config.clone(),
                 log_control,
-                stream_http_client.clone(),
-                link_tx.clone(),
+                stream_client: stream_http_client.clone(),
+                link_request_tx: link_tx.clone(),
                 cors_allowed_origins,
                 vfs_mount_manager,
-            )
+                cancel,
+            })
             .await
             {
                 tracing::error!(error = %e, "GraphQL server error");
@@ -207,12 +212,26 @@ async fn main() -> Result<()> {
 
     let monitor_task = tokio::spawn({
         let jq = job_queue.clone();
+        let cancel = cancel.clone();
         async move {
             let mut redis_conn = jq.redis.clone();
-            loop {
+            while !cancel.is_cancelled() {
                 riven_queue::clear_worker_registrations(&mut redis_conn).await;
                 riven_queue::purge_orphaned_active_jobs(&mut redis_conn).await;
-                let result = tokio::spawn(riven_queue::start_workers(jq.clone()).run()).await;
+                let signal = {
+                    let cancel = cancel.clone();
+                    async move {
+                        cancel.cancelled().await;
+                        Ok::<_, std::io::Error>(())
+                    }
+                };
+                let result = tokio::spawn(
+                    riven_queue::start_workers(jq.clone()).run_with_signal(signal),
+                )
+                .await;
+                if cancel.is_cancelled() {
+                    break;
+                }
                 match result {
                     Ok(Ok(())) => tracing::warn!("apalis monitor exited, restarting"),
                     Ok(Err(e)) => {
@@ -225,7 +244,10 @@ async fn main() -> Result<()> {
                         tracing::error!(error = ?e, "apalis monitor task failed, restarting in 5s")
                     }
                 }
-                tokio::time::sleep(Duration::from_secs(5)).await;
+                tokio::select! {
+                    _ = tokio::time::sleep(Duration::from_secs(5)) => {}
+                    _ = cancel.cancelled() => break,
+                }
             }
         }
     });
@@ -233,9 +255,14 @@ async fn main() -> Result<()> {
     let scheduler_task = tokio::spawn({
         let db = db_pool.clone();
         let jq = job_queue.clone();
+        let cancel = cancel.clone();
         async move {
-            loop {
-                let result = tokio::spawn(Scheduler::new(db.clone(), jq.clone()).run()).await;
+            while !cancel.is_cancelled() {
+                let scheduler = Scheduler::new(db.clone(), jq.clone(), cancel.clone());
+                let result = tokio::spawn(scheduler.run()).await;
+                if cancel.is_cancelled() {
+                    break;
+                }
                 match result {
                     Ok(_) => tracing::warn!("scheduler exited unexpectedly, restarting"),
                     Err(e) if e.is_panic() => {
@@ -245,7 +272,10 @@ async fn main() -> Result<()> {
                         tracing::error!(error = ?e, "scheduler task failed, restarting in 5s")
                     }
                 }
-                tokio::time::sleep(Duration::from_secs(5)).await;
+                tokio::select! {
+                    _ = tokio::time::sleep(Duration::from_secs(5)) => {}
+                    _ = cancel.cancelled() => break,
+                }
             }
         }
     });
@@ -264,12 +294,20 @@ async fn main() -> Result<()> {
     }
     #[cfg(not(unix))]
     signal::ctrl_c().await?;
-    tracing::info!("shutdown signal received");
+    tracing::info!("shutdown signal received; draining");
 
     job_queue.notify(RivenEvent::CoreShutdown).await;
-    gql_handle.abort();
-    monitor_task.abort();
-    scheduler_task.abort();
+    cancel.cancel();
+
+    // Drain with a hard 30s ceiling. Workers in flight finish their current job
+    // (apalis honors the shutdown signal); axum stops accepting new connections
+    // and lets in-flight requests complete; scheduler exits its select.
+    let drain = async {
+        let _ = tokio::join!(gql_handle, monitor_task, scheduler_task);
+    };
+    if tokio::time::timeout(Duration::from_secs(30), drain).await.is_err() {
+        tracing::warn!("drain timed out after 30s; proceeding to unmount");
+    }
 
     vfs_mount_manager.unmount().await;
 
