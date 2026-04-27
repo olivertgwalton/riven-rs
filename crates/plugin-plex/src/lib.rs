@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 
 use riven_core::events::{DownloadSuccessInfo, EventType, HookResponse};
-use riven_core::http::profiles;
+use riven_core::http::HttpServiceProfile;
 use riven_core::plugin::{Plugin, PluginContext};
 use riven_core::register_plugin;
 use riven_core::settings::{FilesystemSettings, LibraryProfileMembership, PluginSettings};
@@ -13,6 +13,8 @@ use riven_core::types::{ActivePlaybackSession, PlaybackMethod, PlaybackState};
 use riven_db::repo;
 
 const SECTIONS_CACHE_TTL: Duration = Duration::from_secs(300);
+
+pub(crate) const PROFILE: HttpServiceProfile = HttpServiceProfile::new("plex");
 
 pub struct PlexPlugin {
     sections_cache: Arc<RwLock<Option<(Instant, Vec<PlexSection>)>>>,
@@ -272,7 +274,7 @@ async fn get_library_sections(
     let url = format!("{plex_url}/library/sections");
     tracing::debug!(target_url = %url, "fetching plex library sections");
     let resp: PlexSectionsResponse = http
-        .get_json(profiles::PLEX, url.clone(), |client| {
+        .get_json(PROFILE, url.clone(), |client| {
             client
                 .get(&url)
                 .header("x-plex-token", token)
@@ -294,7 +296,7 @@ async fn refresh_section(
     let url = format!("{plex_url}/library/sections/{section_key}/refresh?path={encoded_path}");
     tracing::debug!(target_url = %url, section_key, path, "refreshing plex library section");
     let response = http
-        .send(profiles::PLEX, |client| {
+        .send(PROFILE, |client| {
             client
                 .post(&url)
                 .header("x-plex-token", token)
@@ -313,7 +315,7 @@ async fn get_active_sessions(
     let url = format!("{plex_url}/status/sessions");
     tracing::debug!(target_url = %url, "fetching plex active sessions");
     let resp: PlexSessionsResponse = http
-        .get_json(profiles::PLEX, url.clone(), |client| {
+        .get_json(PROFILE, url.clone(), |client| {
             client
                 .get(&url)
                 .header("x-plex-token", token)

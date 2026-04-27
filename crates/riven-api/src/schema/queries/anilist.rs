@@ -1,6 +1,7 @@
 use async_graphql::{Context, Error, Object, Result, SimpleObject};
 use riven_core::http::HttpClient;
-use riven_core::http::profiles::{ANILIST, ANIZIP};
+
+use crate::profiles::{ANILIST, ANIZIP};
 use serde::Deserialize;
 
 const ANILIST_GRAPHQL_URL: &str = "https://graphql.anilist.co";

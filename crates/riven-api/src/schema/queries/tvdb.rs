@@ -1,7 +1,8 @@
 use async_graphql::{Context, Error, Json, Object, Result};
 use riven_core::http::HttpClient;
-use riven_core::http::profiles::{TMDB, TVDB};
 use riven_core::plugin::PluginRegistry;
+
+use crate::profiles::{TMDB, TVDB};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};

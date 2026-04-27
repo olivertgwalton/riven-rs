@@ -1,41 +1,4 @@
 use super::*;
-#[test]
-fn scrape_url_uses_stremio_identifiers_for_each_media_type() {
-    assert_eq!(
-        scrape_url("sort=quality", MediaItemType::Show, "tt123", None, None),
-        "http://torrentio.strem.fun/sort=quality/stream/series/tt123.json"
-    );
-    assert_eq!(
-        scrape_url(
-            "sort=quality",
-            MediaItemType::Season,
-            "tt123",
-            Some(2),
-            None
-        ),
-        "http://torrentio.strem.fun/sort=quality/stream/series/tt123:2.json"
-    );
-    assert_eq!(
-        scrape_url(
-            "sort=quality",
-            MediaItemType::Episode,
-            "tt123",
-            Some(1),
-            None
-        ),
-        "http://torrentio.strem.fun/sort=quality/stream/series/tt123:1:1.json"
-    );
-    assert_eq!(
-        scrape_url(
-            "sort=quality",
-            MediaItemType::Movie,
-            "tt123",
-            Some(2),
-            Some(3)
-        ),
-        "http://torrentio.strem.fun/sort=quality/stream/movie/tt123.json"
-    );
-}
 
 #[test]
 fn deferred_statuses_cover_torrentio_overload_responses() {

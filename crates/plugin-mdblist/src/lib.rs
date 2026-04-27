@@ -1,15 +1,19 @@
 use async_trait::async_trait;
 use riven_core::events::{EventType, HookResponse};
-use riven_core::http::profiles;
+use riven_core::http::HttpServiceProfile;
 use riven_core::plugin::{ContentCollection, Plugin, PluginContext};
 use riven_core::register_plugin;
 use riven_core::settings::PluginSettings;
 use riven_core::types::*;
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
+use std::time::Duration;
 use url::Url;
 
 const MDBLIST_BASE_URL: &str = "https://api.mdblist.com/";
+
+pub(crate) const PROFILE: HttpServiceProfile =
+    HttpServiceProfile::new("mdblist").with_rate_limit(50, Duration::from_secs(1));
 
 #[derive(Default)]
 pub struct MdblistPlugin;
@@ -37,7 +41,7 @@ impl Plugin for MdblistPlugin {
         };
         // mdblist uses query param auth, not header
         let resp = http
-            .send(profiles::MDBLIST, |client| {
+            .send(PROFILE, |client| {
                 client.get(format!("{MDBLIST_BASE_URL}user?apikey={api_key}"))
             })
             .await;
@@ -152,7 +156,7 @@ async fn fetch_list_items(
             format!("{MDBLIST_BASE_URL}lists/{list_name}/items?apikey={api_key}&offset={offset}");
 
         let resp = http
-            .send_data(profiles::MDBLIST, Some(url.clone()), |client| {
+            .send_data(PROFILE, Some(url.clone()), |client| {
                 client.get(&url)
             })
             .await?;

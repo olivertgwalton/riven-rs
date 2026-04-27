@@ -2,8 +2,10 @@ mod client;
 mod models;
 
 use async_trait::async_trait;
+use std::time::Duration;
 
 use riven_core::events::{EventType, HookResponse, ScrapeRequest};
+use riven_core::http::HttpServiceProfile;
 use riven_core::plugin::{Plugin, PluginContext, SettingField};
 use riven_core::register_plugin;
 use riven_core::settings::PluginSettings;
@@ -11,6 +13,9 @@ use riven_core::settings::PluginSettings;
 use crate::client::{scrape, validate_search};
 
 const DEFAULT_URL: &str = "https://aiostreamsfortheweebs.midnightignite.me/";
+
+pub(crate) const PROFILE: HttpServiceProfile =
+    HttpServiceProfile::new("aiostreams").with_rate_limit(120, Duration::from_secs(60));
 
 #[derive(Default)]
 pub struct AioStreamsPlugin;

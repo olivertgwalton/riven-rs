@@ -4,11 +4,13 @@ mod models;
 use async_trait::async_trait;
 use redis::AsyncCommands;
 use riven_core::events::{EventType, HookResponse, ScrapeRequest};
+use riven_core::http::HttpServiceProfile;
 use riven_core::plugin::{Plugin, PluginContext};
 use riven_core::register_plugin;
 use riven_core::settings::PluginSettings;
 use riven_core::types::*;
 use std::collections::HashMap;
+use std::time::Duration;
 
 use crate::client::{
     add_torrent, check_cache, download_result_from_torz, fetch_user_info, generate_link,
@@ -16,6 +18,26 @@ use crate::client::{
 };
 const DEFAULT_URL: &str = "https://stremthru.13377001.xyz/";
 const STORE_SCORE_TTL_SECS: u64 = 60 * 60 * 24 * 7;
+
+pub(crate) const PROFILE: HttpServiceProfile =
+    HttpServiceProfile::new("stremthru").with_rate_limit(1, Duration::from_secs(1));
+
+pub(crate) const REALDEBRID_PROFILE: HttpServiceProfile = HttpServiceProfile::new("realdebrid");
+pub(crate) const TORBOX_PROFILE: HttpServiceProfile = HttpServiceProfile::new("torbox");
+pub(crate) const ALLDEBRID_PROFILE: HttpServiceProfile = HttpServiceProfile::new("alldebrid");
+pub(crate) const DEBRIDLINK_PROFILE: HttpServiceProfile = HttpServiceProfile::new("debridlink");
+pub(crate) const PREMIUMIZE_PROFILE: HttpServiceProfile = HttpServiceProfile::new("premiumize");
+
+pub(crate) fn debrid_service(store: &str) -> HttpServiceProfile {
+    match store {
+        "realdebrid" => REALDEBRID_PROFILE,
+        "torbox" => TORBOX_PROFILE,
+        "alldebrid" => ALLDEBRID_PROFILE,
+        "debridlink" => DEBRIDLINK_PROFILE,
+        "premiumize" => PREMIUMIZE_PROFILE,
+        _ => HttpServiceProfile::new_owned(store.to_owned()),
+    }
+}
 
 const STORE_NAMES: &[&str] = &[
     "realdebrid",

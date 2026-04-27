@@ -1,13 +1,17 @@
 use async_trait::async_trait;
 use riven_core::events::{DownloadSuccessInfo, EventType, HookResponse};
-use riven_core::http::profiles;
+use riven_core::http::HttpServiceProfile;
 use riven_core::plugin::{ContentCollection, Plugin, PluginContext, validate_api_key};
 use riven_core::register_plugin;
 use riven_core::settings::PluginSettings;
 use riven_core::types::*;
 use serde::Deserialize;
+use std::time::Duration;
 
 const DEFAULT_URL: &str = "http://localhost:5055";
+
+pub(crate) const PROFILE: HttpServiceProfile =
+    HttpServiceProfile::new("seerr").with_rate_limit(20, Duration::from_secs(1));
 const DEFAULT_FILTER: &str = "approved";
 const PAGE_SIZE: u32 = 20;
 
@@ -114,7 +118,7 @@ impl Plugin for SeerrPlugin {
             tracing::debug!(request_id = rid, target_url = %mark_url, "marking seerr request as available");
             if let Err(e) = ctx
                 .http
-                .send(profiles::SEERR, |client| {
+                .send(PROFILE, |client| {
                     client.post(&mark_url).header("x-api-key", api_key)
                 })
                 .await
@@ -144,7 +148,7 @@ impl Plugin for SeerrPlugin {
             tracing::debug!(request_id = rid, target_url = %del_url, "deleting seerr request");
             if let Err(e) = ctx
                 .http
-                .send(profiles::SEERR, |client| {
+                .send(PROFILE, |client| {
                     client.delete(&del_url).header("x-api-key", api_key)
                 })
                 .await
@@ -184,7 +188,7 @@ async fn fetch_seerr_content(
         );
         tracing::debug!(target_url = %req_url, skip, filter, "fetching seerr requests");
         let resp: SeerrRequestResponse = http
-            .get_json(profiles::SEERR, req_url.clone(), |client| {
+            .get_json(PROFILE, req_url.clone(), |client| {
                 client.get(&req_url).header("x-api-key", api_key)
             })
             .await?;

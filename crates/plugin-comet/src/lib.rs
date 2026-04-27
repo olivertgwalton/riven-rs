@@ -1,14 +1,18 @@
 use async_trait::async_trait;
 use serde::Deserialize;
+use std::time::Duration;
 
 use riven_core::events::{EventType, HookResponse, ScrapeRequest};
-use riven_core::http::profiles;
+use riven_core::http::HttpServiceProfile;
 use riven_core::plugin::{Plugin, PluginContext, SettingField};
 use riven_core::register_plugin;
 use riven_core::settings::PluginSettings;
 use riven_core::types::*;
 
 const DEFAULT_URL: &str = "https://comet.feels.legal";
+
+pub(crate) const PROFILE: HttpServiceProfile =
+    HttpServiceProfile::new("comet").with_rate_limit(150, Duration::from_secs(60));
 
 #[derive(Default)]
 pub struct CometPlugin;
@@ -33,7 +37,7 @@ impl Plugin for CometPlugin {
         let base_url = settings.get_or("url", DEFAULT_URL);
         let base_url = base_url.trim_end_matches('/');
         let url = format!("{base_url}/manifest.json");
-        match http.send(profiles::COMET, |client| client.get(&url)).await {
+        match http.send(PROFILE, |client| client.get(&url)).await {
             Ok(resp) => Ok(resp.status().is_success()),
             Err(_) => Ok(false),
         }
@@ -81,7 +85,7 @@ impl Plugin for CometPlugin {
 
         let resp_data = match ctx
             .http
-            .send_data(profiles::COMET, Some(url.clone()), |client| {
+            .send_data(PROFILE, Some(url.clone()), |client| {
                 client.get(&url)
             })
             .await

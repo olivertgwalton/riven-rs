@@ -1,7 +1,8 @@
 use async_graphql::{Context, Error, Object, Result, SimpleObject};
 use riven_core::http::HttpClient;
-use riven_core::http::profiles::TRAKT;
 use riven_core::plugin::PluginRegistry;
+
+use crate::profiles::TRAKT;
 use serde::Deserialize;
 use std::sync::Arc;
 

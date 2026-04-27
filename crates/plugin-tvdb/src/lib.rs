@@ -8,11 +8,16 @@ use std::str::FromStr;
 use std::time::{Duration, Instant};
 
 use riven_core::events::{EventType, HookResponse, IndexRequest};
-use riven_core::http::profiles;
+use riven_core::http::HttpServiceProfile;
 use riven_core::plugin::{Plugin, PluginContext};
 use riven_core::register_plugin;
 use riven_core::settings::PluginSettings;
 use riven_core::types::*;
+
+pub const PROFILE: HttpServiceProfile =
+    HttpServiceProfile::new("tvdb").with_rate_limit(25, Duration::from_secs(1));
+pub(crate) const TVMAZE_PROFILE: HttpServiceProfile =
+    HttpServiceProfile::new("tvmaze").with_rate_limit(20, Duration::from_secs(10));
 
 const TVDB_BASE_URL: &str = "https://api4.thetvdb.com/v4/";
 const TVMAZE_BASE_URL: &str = "https://api.tvmaze.com/";
@@ -40,7 +45,7 @@ impl TvdbPlugin {
 
         tracing::debug!(url = %format!("{TVDB_BASE_URL}login"), "requesting tvdb token");
         let resp: TvdbResponse<TvdbLoginData> = http
-            .send(profiles::TVDB, |client| {
+            .send(PROFILE, |client| {
                 client
                     .post(format!("{TVDB_BASE_URL}login"))
                     .json(&serde_json::json!({ "apikey": api_key }))
@@ -107,7 +112,7 @@ async fn fetch_tvmaze_timezone(
 ) -> anyhow::Result<Option<String>> {
     let url = format!("{TVMAZE_BASE_URL}lookup/shows?thetvdb={tvdb_id}");
     let resp: TvMazeLookupResponse = http
-        .get_json(profiles::TVMAZE, url.clone(), |client| client.get(&url))
+        .get_json(TVMAZE_PROFILE, url.clone(), |client| client.get(&url))
         .await?;
     Ok(resp.network.and_then(|n| n.country).and_then(|c| c.timezone))
 }
@@ -121,7 +126,7 @@ async fn fetch_series(
     let url = format!("{TVDB_BASE_URL}series/{tvdb_id}/extended?short=true&meta=translations");
     tracing::debug!(url = %url, tvdb_id, "requesting tvdb series details");
     let resp: TvdbResponse<TvdbSeries> = http
-        .get_json(profiles::TVDB, url.clone(), |client| {
+        .get_json(PROFILE, url.clone(), |client| {
             client.get(&url).bearer_auth(token)
         })
         .await?;
@@ -297,7 +302,7 @@ async fn fetch_all_episodes(
     loop {
         let url = format!("{TVDB_BASE_URL}series/{tvdb_id}/episodes/official/eng?page={page}");
         let resp: TvdbResponse<TvdbEpisodePage> = http
-            .get_json(profiles::TVDB, url.clone(), |client| {
+            .get_json(PROFILE, url.clone(), |client| {
                 client.get(&url).bearer_auth(token)
             })
             .await?;

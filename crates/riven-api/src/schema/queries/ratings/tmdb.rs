@@ -1,7 +1,8 @@
 use async_graphql::{Context, Error, Result};
 use riven_core::http::HttpClient;
-use riven_core::http::profiles::TMDB;
 use riven_core::plugin::PluginRegistry;
+
+use crate::profiles::TMDB;
 use serde::Deserialize;
 use std::sync::Arc;
 

@@ -16,7 +16,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64};
 
 use anyhow::Result;
-use apalis::prelude::TaskSink;
+use apalis::prelude::{TaskBuilder, TaskSink};
 use apalis_redis::{RedisConfig, RedisStorage};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
@@ -168,6 +168,16 @@ impl JobQueue {
             self.scrape_storage.clone().push(job).await
         })
         .await;
+    }
+
+    /// Push a `ScrapeJob` to run after `delay` via apalis's native `run_at`
+    /// scheduling. Bypasses `push_deduped` since the dedup key only covers the
+    /// in-flight orchestrator phase.
+    pub async fn push_scrape_after(&self, job: ScrapeJob, delay: std::time::Duration) {
+        let task = TaskBuilder::new(job).run_after(delay).build();
+        if let Err(e) = self.scrape_storage.clone().push_task(task).await {
+            tracing::error!(error = %e, "failed to push delayed ScrapeJob");
+        }
     }
     pub async fn push_parse_scrape_results(&self, job: ParseScrapeResultsJob) {
         self.push_deduped("parse", job.id, "ParseScrapeResultsJob", || async {

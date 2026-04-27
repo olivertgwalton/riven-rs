@@ -1,9 +1,10 @@
 
 use reqwest::StatusCode;
 use riven_core::events::ScrapeRequest;
-use riven_core::http::{HttpClient, profiles};
+use riven_core::http::HttpClient;
 use riven_core::types::{MediaItemType, ScrapeEntry, ScrapeResponse};
 
+use crate::PROFILE;
 use crate::models::AioStreamsResponse;
 
 pub async fn validate_search(
@@ -14,7 +15,7 @@ pub async fn validate_search(
 ) -> anyhow::Result<bool> {
     let url = format!("{base_url}/api/v1/search");
     let resp = http
-        .send(profiles::AIOSTREAMS, |client| {
+        .send(PROFILE, |client| {
             client.get(&url).basic_auth(uuid, Some(password)).query(&[
                 ("type", "movie"),
                 ("id", "tt0111161"),
@@ -68,7 +69,7 @@ pub async fn scrape(
     );
     let http_resp = http
         .send_data(
-            profiles::AIOSTREAMS,
+            PROFILE,
             Some(format!("{url}:{media_type}:{id}")),
             |client| {
                 client.get(&url).basic_auth(uuid, Some(password)).query(&[

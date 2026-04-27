@@ -16,7 +16,6 @@ mod event_controller;
 mod helpers;
 mod metadata;
 mod mutations;
-pub mod plugins;
 mod queries;
 mod subscriptions;
 pub mod typed_items;
@@ -38,7 +37,6 @@ pub struct QueryRoot(
     LogsQuery,
     CalendarQuery,
     VfsQuery,
-    plugins::PluginsQuery,
 );
 
 pub type AppSchema = Schema<QueryRoot, MutationRoot, SubscriptionRoot>;

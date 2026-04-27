@@ -62,3 +62,56 @@ impl<'a> StremioScrapeConfig<'a> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn req(item_type: MediaItemType, season: Option<i32>, episode: Option<i32>) -> ScrapeRequest<'static> {
+        ScrapeRequest {
+            id: 0,
+            item_type,
+            imdb_id: Some("tt123"),
+            title: "",
+            season,
+            episode,
+        }
+    }
+
+    #[test]
+    fn movie_has_no_episode_suffix() {
+        let cfg = StremioScrapeConfig::from_request(&req(MediaItemType::Movie, Some(2), Some(3))).unwrap();
+        assert_eq!(cfg.kind, StremioKind::Movie);
+        assert_eq!(cfg.id_suffix(), "");
+        assert_eq!(cfg.full_id(), "tt123");
+    }
+
+    #[test]
+    fn show_falls_back_to_season_1_episode_1() {
+        let cfg = StremioScrapeConfig::from_request(&req(MediaItemType::Show, None, None)).unwrap();
+        assert_eq!(cfg.kind, StremioKind::Series);
+        assert_eq!(cfg.id_suffix(), ":1:1");
+        assert_eq!(cfg.full_id(), "tt123:1:1");
+    }
+
+    #[test]
+    fn season_uses_episode_1() {
+        let cfg = StremioScrapeConfig::from_request(&req(MediaItemType::Season, Some(2), None)).unwrap();
+        assert_eq!(cfg.id_suffix(), ":2:1");
+        assert_eq!(cfg.full_id(), "tt123:2:1");
+    }
+
+    #[test]
+    fn episode_uses_provided_season_and_episode() {
+        let cfg = StremioScrapeConfig::from_request(&req(MediaItemType::Episode, Some(3), Some(7))).unwrap();
+        assert_eq!(cfg.id_suffix(), ":3:7");
+        assert_eq!(cfg.full_id(), "tt123:3:7");
+    }
+
+    #[test]
+    fn missing_imdb_id_returns_none() {
+        let mut request = req(MediaItemType::Movie, None, None);
+        request.imdb_id = None;
+        assert!(StremioScrapeConfig::from_request(&request).is_none());
+    }
+}

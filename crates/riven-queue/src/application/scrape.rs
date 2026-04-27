@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;
+use std::time::Duration;
 
 use futures::stream::{self, StreamExt};
 
@@ -15,9 +16,25 @@ use crate::discovery::rank_streams;
 use crate::flows::{run_plugin_hook, start_plugin_flow};
 use crate::{JobQueue, ParseScrapeResultsJob, ScrapeJob, ScrapePluginJob};
 
-/// How many times we will re-push a `ScrapeJob` whose entire scraper pool was
-/// temporarily deferred before giving up and letting the retry scheduler handle it.
-const MAX_RATE_LIMIT_REPUSH: u32 = 3;
+/// Backoff before the next attempt when every scraper deferred.
+fn rate_limit_backoff(prior_retries: u32) -> Duration {
+    let secs = match prior_retries {
+        0 | 1 => 30 * 60,
+        2..=4 => 2 * 60 * 60,
+        5..=9 => 6 * 60 * 60,
+        _ => 24 * 60 * 60,
+    };
+    Duration::from_secs(secs)
+}
+
+/// Remaining rate-limit retry budget given the configured ceiling and the
+/// item's recorded "no streams" failures. `max == 0` disables the ceiling.
+fn rate_limit_retry_budget(max: u32, failed_attempts: i32) -> u32 {
+    if max == 0 {
+        return u32::MAX;
+    }
+    max.saturating_sub(failed_attempts.max(0) as u32)
+}
 
 /// Bump `failed_attempts`, then — if the item has now blown through the
 /// configured ceiling — flip its state to `Failed` and cascade so the retry
@@ -198,30 +215,45 @@ pub async fn finalize(job: &ScrapeJob, queue: &JobQueue) {
     if result_count == 0 {
         queue.clear_flow_all("scrape", id).await;
 
-        // If every plugin that ran deferred (none returned a genuine "no
-        // streams" verdict) and we haven't exhausted our re-push budget,
-        // re-queue this scrape job immediately rather than leaving the item
-        // stuck in Indexed until the retry scheduler fires.
-        if rate_limited_count > 0 && job.rate_limit_retries < MAX_RATE_LIMIT_REPUSH {
+        // Every scraper deferred. Rate-limit failures don't count as scrape
+        // failures; schedule a delayed retry until the per-item budget
+        // (`max_scrape_attempts - failed_attempts`) is exhausted.
+        if rate_limited_count > 0 {
+            let max = queue.maximum_scrape_attempts.load(Ordering::Relaxed);
+            let budget = rate_limit_retry_budget(max, item.failed_attempts);
+            let next_attempt = job.rate_limit_retries + 1;
+            if next_attempt < budget {
+                let backoff = rate_limit_backoff(job.rate_limit_retries);
+                tracing::warn!(
+                    id,
+                    rate_limited_count,
+                    attempt = next_attempt,
+                    budget,
+                    backoff_secs = backoff.as_secs(),
+                    "all scrapers deferred; scheduling delayed scrape retry"
+                );
+                queue
+                    .push_scrape_after(
+                        ScrapeJob {
+                            rate_limit_retries: next_attempt,
+                            ..job.clone()
+                        },
+                        backoff,
+                    )
+                    .await;
+                return;
+            }
             tracing::warn!(
                 id,
                 rate_limited_count,
-                retry = job.rate_limit_retries + 1,
-                max = MAX_RATE_LIMIT_REPUSH,
-                "all scrapers deferred; re-pushing scrape job"
+                attempts = job.rate_limit_retries + 1,
+                budget,
+                "scrape rate-limit budget exhausted; leaving item in current state"
             );
-            // DedupGuard::Drop releases async — synchronously clear so push_scrape can re-acquire.
-            queue.release_dedup("scrape", id).await;
-            queue
-                .push_scrape(ScrapeJob {
-                    rate_limit_retries: job.rate_limit_retries + 1,
-                    ..job.clone()
-                })
-                .await;
             return;
         }
 
-        tracing::info!(id, rate_limited_count, "no streams found by any scraper");
+        tracing::info!(id, "no streams found by any scraper");
         let item_title = if item.item_type == MediaItemType::Season {
             format!("{} - {}", job.title, item.title)
         } else {

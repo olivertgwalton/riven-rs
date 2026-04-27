@@ -4,15 +4,21 @@ use riven_db::repo;
 use serde::{Deserialize, Serialize};
 
 use riven_core::events::{DownloadSuccessInfo, EventType, HookResponse};
-use riven_core::http::profiles;
+use riven_core::http::{HttpServiceProfile, profiles};
 use riven_core::plugin::{Plugin, PluginContext};
 use riven_core::register_plugin;
 use riven_core::settings::PluginSettings;
 use riven_core::types::*;
+use std::time::Duration;
 
 const TMDB_BASE_URL: &str = "https://api.themoviedb.org/3";
 const TVDB_BASE_URL: &str = "https://api4.thetvdb.com/v4";
 const TVDB_DEFAULT_API_KEY: &str = "6be85335-5c4f-4d8d-b945-d3ed0eb8cdce";
+
+const TMDB_PROFILE: HttpServiceProfile =
+    HttpServiceProfile::new("tmdb").with_rate_limit(40, Duration::from_secs(1));
+const TVDB_PROFILE: HttpServiceProfile =
+    HttpServiceProfile::new("tvdb").with_rate_limit(25, Duration::from_secs(1));
 
 #[derive(Default)]
 pub struct NotificationsPlugin;
@@ -172,7 +178,7 @@ async fn fetch_tmdb_overview(
     let url = format!("{TMDB_BASE_URL}/{media_type}/{tmdb_id}");
     tracing::debug!(target_url = %url, tmdb_id, "fetching tmdb overview for notification");
     let resp = match http
-        .get_json::<TmdbOverviewResponse, _>(profiles::TMDB, url.clone(), |client| {
+        .get_json::<TmdbOverviewResponse, _>(TMDB_PROFILE, url.clone(), |client| {
             client.get(&url).bearer_auth(api_key)
         })
         .await
@@ -499,7 +505,7 @@ async fn fetch_tvdb_slug(http: &riven_core::http::HttpClient, tvdb_id: &str) -> 
     let login_url = format!("{TVDB_BASE_URL}/login");
     tracing::debug!(target_url = %login_url, tvdb_id, "logging in to tvdb for notification slug lookup");
     let login: TvdbResponse<TvdbLoginData> = match http
-        .send(profiles::TVDB, |client| {
+        .send(TVDB_PROFILE, |client| {
             client
                 .post(format!("{TVDB_BASE_URL}/login"))
                 .json(&serde_json::json!({ "apikey": TVDB_DEFAULT_API_KEY }))
@@ -524,7 +530,7 @@ async fn fetch_tvdb_slug(http: &riven_core::http::HttpClient, tvdb_id: &str) -> 
     tracing::debug!(target_url = %series_url, tvdb_id, "fetching tvdb slug for notification");
 
     let resp: TvdbResponse<TvdbSeriesSlug> = match http
-        .get_json(profiles::TVDB, series_url.clone(), |client| {
+        .get_json(TVDB_PROFILE, series_url.clone(), |client| {
             client.get(&series_url).bearer_auth(&token)
         })
         .await

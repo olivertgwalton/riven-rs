@@ -1,13 +1,17 @@
 use async_trait::async_trait;
 use riven_core::events::{EventType, HookResponse};
-use riven_core::http::profiles;
+use riven_core::http::HttpServiceProfile;
 use riven_core::plugin::{ContentCollection, Plugin, PluginContext, validate_api_key};
 use riven_core::register_plugin;
 use riven_core::settings::PluginSettings;
 use riven_core::types::*;
 use serde::Deserialize;
+use std::time::Duration;
 
 const LISTRR_BASE_URL: &str = "https://listrr.pro/api/";
+
+pub(crate) const PROFILE: HttpServiceProfile =
+    HttpServiceProfile::new("listrr").with_rate_limit(50, Duration::from_secs(1));
 
 #[derive(Default)]
 pub struct ListrrPlugin;
@@ -129,7 +133,7 @@ async fn fetch_list_items(
             format!("{LISTRR_BASE_URL}List/{list_type}/{list_id}/ReleaseDate/Descending/{page}");
 
         let resp: ListrrResponse = http
-            .get_json(profiles::LISTRR, url.clone(), |client| {
+            .get_json(PROFILE, url.clone(), |client| {
                 client.get(&url).header("x-api-key", api_key)
             })
             .await?;

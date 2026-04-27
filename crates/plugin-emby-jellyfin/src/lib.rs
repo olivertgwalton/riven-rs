@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use reqwest::Method;
 use riven_core::events::{DownloadSuccessInfo, EventType, HookResponse};
-use riven_core::http::profiles;
+use riven_core::http::HttpServiceProfile;
 use riven_core::plugin::{Plugin, PluginContext, SettingField};
 use riven_core::register_plugin;
 use riven_core::settings::PluginSettings;
@@ -9,6 +9,17 @@ use riven_core::types::{ActivePlaybackSession, PlaybackMethod, PlaybackState};
 use riven_db::repo;
 use serde::Deserialize;
 use serde::Serialize;
+
+pub(crate) const EMBY_PROFILE: HttpServiceProfile = HttpServiceProfile::new("emby");
+pub(crate) const JELLYFIN_PROFILE: HttpServiceProfile = HttpServiceProfile::new("jellyfin");
+
+fn server_profile(plugin: &str) -> HttpServiceProfile {
+    match plugin {
+        "emby" => EMBY_PROFILE,
+        "jellyfin" => JELLYFIN_PROFILE,
+        _ => HttpServiceProfile::new_owned(plugin.to_owned()),
+    }
+}
 
 #[derive(Default)]
 pub struct EmbyPlugin;
@@ -68,7 +79,7 @@ pub(crate) async fn notify_paths(
     tracing::debug!(plugin, target_url = %url, path_count = paths.len(), update_type, "notifying media server about updated library paths");
     let body = LibraryUpdate { updates };
     let resp = http
-        .send(profiles::media_server(plugin), |client| {
+        .send(server_profile(plugin), |client| {
             media_server_request(client, Method::POST, &url, api_key).json(&body)
         })
         .await?;
@@ -90,7 +101,7 @@ async fn refresh_library(
     let url = format!("{base_url}/Library/Refresh");
     tracing::debug!(plugin, target_url = %url, "requesting media server library refresh");
     let resp = http
-        .send(profiles::media_server(plugin), |client| {
+        .send(server_profile(plugin), |client| {
             media_server_request(client, Method::POST, &url, api_key)
         })
         .await?;
@@ -252,7 +263,7 @@ async fn get_active_sessions(
     let url = format!("{base_url}/Sessions");
     tracing::debug!(server, target_url = %url, "fetching active playback sessions from media server");
     let resp: Vec<MediaServerSession> = http
-        .get_json(profiles::media_server(server), url.clone(), |client| {
+        .get_json(server_profile(server), url.clone(), |client| {
             media_server_request(client, Method::GET, &url, api_key)
         })
         .await?;

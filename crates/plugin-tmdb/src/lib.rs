@@ -1,15 +1,19 @@
 use async_trait::async_trait;
 use chrono::NaiveDate;
 use serde::Deserialize;
+use std::time::Duration;
 
 use riven_core::events::{EventType, HookResponse, IndexRequest};
-use riven_core::http::profiles;
+use riven_core::http::HttpServiceProfile;
 use riven_core::plugin::{Plugin, PluginContext};
 use riven_core::register_plugin;
 use riven_core::settings::PluginSettings;
 use riven_core::types::*;
 
 const TMDB_BASE_URL: &str = "https://api.themoviedb.org/3/";
+
+pub const PROFILE: HttpServiceProfile =
+    HttpServiceProfile::new("tmdb").with_rate_limit(40, Duration::from_secs(1));
 
 #[derive(Default)]
 pub struct TmdbPlugin;
@@ -71,7 +75,7 @@ async fn find_tmdb_id(
     let url = format!("{TMDB_BASE_URL}find/{imdb_id}?external_source=imdb_id");
     tracing::debug!(url = %url, imdb_id, "requesting tmdb id lookup");
     let resp: TmdbFindResponse = http
-        .get_json(profiles::TMDB, url.clone(), |client| {
+        .get_json(PROFILE, url.clone(), |client| {
             client.get(&url).bearer_auth(api_key)
         })
         .await?;
@@ -91,7 +95,7 @@ async fn fetch_movie_by_tmdb_id(
         format!("{TMDB_BASE_URL}movie/{tmdb_id}?append_to_response=external_ids,release_dates");
     tracing::debug!(url = %url, tmdb_id, "requesting tmdb movie details");
     let movie: TmdbMovieResponse = http
-        .get_json(profiles::TMDB, url.clone(), |client| {
+        .get_json(PROFILE, url.clone(), |client| {
             client.get(&url).bearer_auth(api_key)
         })
         .await?;

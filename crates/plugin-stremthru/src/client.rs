@@ -1,11 +1,12 @@
 use redis::AsyncCommands;
 
 use riven_core::events::ScrapeRequest;
-use riven_core::http::{HttpClient, profiles};
+use riven_core::http::HttpClient;
 use riven_core::types::{
     CacheCheckFile, CacheCheckResult, DownloadFile, DownloadResult, MediaItemType, build_magnet_uri,
 };
 
+use crate::{PROFILE, debrid_service};
 use crate::models::{
     StremthruCacheCheck, StremthruLink, StremthruResponse, StremthruTorz, StremthruTorznabResponse,
     StremthruUser, parse_torrent_status,
@@ -136,7 +137,7 @@ pub async fn add_torrent(
     tracing::debug!(store, url = %url, "adding torrent via stremthru torz endpoint");
 
     let response = http
-        .send(profiles::STREMTHRU, |client| {
+        .send(PROFILE, |client| {
             client
                 .post(&url)
                 .header("x-stremthru-store-name", store)
@@ -203,7 +204,7 @@ async fn fetch_cache_check(
     tracing::debug!(store, url = %url, "requesting stremthru torz cache check");
     let response = http
         .send_data(
-            profiles::STREMTHRU,
+            PROFILE,
             Some(format!("{store}:{url}?hash={hash_str}")),
             |client| {
                 client
@@ -276,7 +277,7 @@ async fn delete_torrent(
 ) -> anyhow::Result<()> {
     let url = format!("{base_url}v0/store/torz/{torrent_id}");
     let response = http
-        .send(profiles::STREMTHRU, |client| {
+        .send(PROFILE, |client| {
             client
                 .delete(&url)
                 .header("x-stremthru-store-name", store)
@@ -342,7 +343,7 @@ pub async fn scrape_torznab(
         .join("&");
     let response = http
         .send_data(
-            profiles::STREMTHRU,
+            PROFILE,
             Some(format!("{url}?{dedupe_params}")),
             |client| client.get(&url).query(&params),
         )
@@ -440,7 +441,7 @@ pub async fn generate_link(
     let url = format!("{base_url}v0/store/torz/link/generate");
     tracing::debug!(store, url = %url, "generating stremthru torz link");
     let response = http
-        .send(profiles::STREMTHRU, |client| {
+        .send(PROFILE, |client| {
             client
                 .post(&url)
                 .header("x-stremthru-store-name", store)
@@ -502,7 +503,7 @@ pub async fn fetch_user_info(
 ) -> anyhow::Result<riven_core::types::DebridUserInfo> {
     let url = format!("{base_url}v0/store/user");
     let resp: StremthruResponse<StremthruUser> = http
-        .get_json(profiles::STREMTHRU, format!("{store}:{url}"), |client| {
+        .get_json(PROFILE, format!("{store}:{url}"), |client| {
             client
                 .get(&url)
                 .header("x-stremthru-store-name", store)
@@ -552,7 +553,7 @@ async fn fetch_debrid_extra(
     if store == "torbox" {
         let body: serde_json::Value = http
             .get_json(
-                profiles::debrid_service(store),
+                debrid_service(store),
                 format!("{store}:https://api.torbox.app/v1/api/user/me"),
                 |client| {
                     client
@@ -574,7 +575,7 @@ async fn fetch_debrid_extra(
     if store == "realdebrid" {
         let body: serde_json::Value = http
             .get_json(
-                profiles::debrid_service(store),
+                debrid_service(store),
                 format!("{store}:https://api.real-debrid.com/rest/1.0/user"),
                 |client| {
                     client
@@ -616,7 +617,7 @@ async fn fetch_debrid_extra(
 
     let body: serde_json::Value = http
         .get_json(
-            profiles::debrid_service(store),
+            debrid_service(store),
             format!("{store}:{url}"),
             |client| {
                 let request = client.get(&url);

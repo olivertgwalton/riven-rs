@@ -6,7 +6,6 @@ use serde::Deserialize;
 use tokio::time::sleep;
 
 use super::HttpServiceProfile;
-use super::profiles::TRAKT;
 use super::rate_limit::ServiceState;
 
 pub(super) const BACKOFF_BASE_SECS: u64 = 5;
@@ -131,12 +130,10 @@ pub(super) fn parse_rate_limit_pause(
         None
     };
 
-    let service_specific = if profile.name == TRAKT.name {
-        parse_trakt_rate_limit_pause(headers)
-    } else if profile.name == super::profiles::DISCORD_WEBHOOK.name {
-        parse_discord_rate_limit_pause(headers)
-    } else {
-        None
+    let service_specific = match profile.name.as_ref() {
+        "trakt" => parse_trakt_rate_limit_pause(headers),
+        "discord_webhook" => parse_discord_rate_limit_pause(headers),
+        _ => None,
     };
 
     match (retry_after, service_specific) {
@@ -217,8 +214,12 @@ mod tests {
                 .expect("header should parse"),
         );
 
-        let pause = parse_rate_limit_pause(&TRAKT, StatusCode::TOO_MANY_REQUESTS, &headers)
-            .expect("pause should be parsed");
+        let pause = parse_rate_limit_pause(
+            &HttpServiceProfile::new("trakt"),
+            StatusCode::TOO_MANY_REQUESTS,
+            &headers,
+        )
+        .expect("pause should be parsed");
 
         assert!(pause >= Duration::from_secs(80));
     }

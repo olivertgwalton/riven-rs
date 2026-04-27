@@ -1,8 +1,9 @@
 use async_trait::async_trait;
 use serde::Deserialize;
+use std::time::Duration;
 
 use riven_core::events::{EventType, HookResponse};
-use riven_core::http::profiles;
+use riven_core::http::HttpServiceProfile;
 use riven_core::plugin::{ContentCollection, Plugin, PluginContext};
 use riven_core::register_plugin;
 use riven_core::settings::PluginSettings;
@@ -10,6 +11,9 @@ use riven_core::types::*;
 
 const TRAKT_BASE_URL: &str = "https://api.trakt.tv";
 const TRAKT_API_VERSION: &str = "2";
+
+pub const PROFILE: HttpServiceProfile =
+    HttpServiceProfile::new("trakt").with_rate_limit(1000, Duration::from_secs(300));
 
 #[derive(Default)]
 pub struct TraktPlugin;
@@ -245,7 +249,7 @@ async fn fetch_watchlist(
     let url = format!("{TRAKT_BASE_URL}/sync/watchlist/{media_type}");
     tracing::debug!(url = %url, media_type, "requesting trakt watchlist");
     let items: Vec<WrappedItem> = http
-        .get_json(profiles::TRAKT, url.clone(), |client| {
+        .get_json(PROFILE, url.clone(), |client| {
             client
                 .get(&url)
                 .header("trakt-api-key", client_id)
@@ -274,7 +278,7 @@ async fn fetch_user_list(
         "requesting trakt user list"
     );
     let items: Vec<WrappedItem> = http
-        .get_json(profiles::TRAKT, url.clone(), |client| {
+        .get_json(PROFILE, url.clone(), |client| {
             client
                 .get(&url)
                 .header("trakt-api-key", client_id)
@@ -294,7 +298,7 @@ async fn fetch_trending(
     let url = format!("{TRAKT_BASE_URL}/{media_type}/trending?limit={limit}");
     tracing::debug!(url = %url, media_type, limit, "requesting trakt trending");
     let items: Vec<WrappedItem> = http
-        .get_json(profiles::TRAKT, url.clone(), |client| {
+        .get_json(PROFILE, url.clone(), |client| {
             client
                 .get(&url)
                 .header("trakt-api-key", client_id)
@@ -313,7 +317,7 @@ async fn fetch_popular(
     let url = format!("{TRAKT_BASE_URL}/{media_type}/popular?limit={limit}");
     tracing::debug!(url = %url, media_type, limit, "requesting trakt popular");
     let items: Vec<DirectItem> = http
-        .get_json(profiles::TRAKT, url.clone(), |client| {
+        .get_json(PROFILE, url.clone(), |client| {
             client
                 .get(&url)
                 .header("trakt-api-key", client_id)
@@ -333,7 +337,7 @@ async fn fetch_watched(
     let url = format!("{TRAKT_BASE_URL}/{media_type}/watched/{period}?limit={limit}");
     tracing::debug!(url = %url, media_type, period, limit, "requesting trakt watched");
     let items: Vec<WrappedItem> = http
-        .get_json(profiles::TRAKT, url.clone(), |client| {
+        .get_json(PROFILE, url.clone(), |client| {
             client
                 .get(&url)
                 .header("trakt-api-key", client_id)
