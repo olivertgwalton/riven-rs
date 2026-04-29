@@ -1,0 +1,21 @@
+[package]
+name = "riven-usenet"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+tokio = { workspace = true, features = ["io-util", "net", "sync", "time", "rt", "macros"] }
+tokio-rustls = "0.26"
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
+webpki-roots = "1"
+quick-xml = "0.39"
+async-trait = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+redis = { workspace = true }
+bytes = { workspace = true }
+parking_lot = { workspace = true }
+crc32fast = "1"

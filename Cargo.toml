@@ -24,6 +24,10 @@ members = [
     "crates/plugin-trakt",
     "crates/plugin-dashboard",
     "crates/plugin-logs",
+    "crates/plugin-newznab",
+    "crates/plugin-sabnzbd",
+    "crates/plugin-usenet",
+    "crates/riven-usenet",
 ]
 
 [workspace.dependencies]

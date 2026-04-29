@@ -2,6 +2,7 @@ mod auth;
 mod board;
 mod graphql;
 mod media;
+mod usenet;
 mod webhooks;
 
 use std::sync::Arc;
@@ -42,6 +43,7 @@ pub struct StartServerConfig {
     pub link_request_tx: tokio::sync::mpsc::Sender<LinkRequest>,
     pub cors_allowed_origins: Vec<String>,
     pub vfs_mount_manager: Arc<VfsMountManager>,
+    pub usenet_streamer: Option<riven_usenet::UsenetStreamer>,
     pub cancel: tokio_util::sync::CancellationToken,
 }
 
@@ -66,6 +68,7 @@ mod state {
         pub stream_client: reqwest::Client,
         pub link_request_tx: tokio::sync::mpsc::Sender<LinkRequest>,
         pub runtime: tokio::runtime::Handle,
+        pub usenet_streamer: Option<riven_usenet::UsenetStreamer>,
     }
 }
 
@@ -87,6 +90,7 @@ pub async fn start_server(config: StartServerConfig) -> Result<()> {
         link_request_tx,
         cors_allowed_origins,
         vfs_mount_manager,
+        usenet_streamer,
         cancel,
     } = config;
 
@@ -134,6 +138,7 @@ pub async fn start_server(config: StartServerConfig) -> Result<()> {
         stream_client,
         link_request_tx,
         runtime: tokio::runtime::Handle::current(),
+        usenet_streamer,
     };
 
     let app = Router::new()
@@ -145,6 +150,10 @@ pub async fn start_server(config: StartServerConfig) -> Result<()> {
         .route(
             "/media/{entry_id}",
             get(media::media_bridge_handler).head(media::media_bridge_handler),
+        )
+        .route(
+            "/usenet/{info_hash}/{file_index}",
+            get(usenet::usenet_stream_handler).head(usenet::usenet_stream_handler),
         )
         .route("/webhook/seerr", post(webhooks::seerr_webhook))
         .nest("/board", board_ui.with_state(()))

@@ -30,6 +30,8 @@ plugin-trakt = { path = "../plugin-trakt" }
 plugin-dashboard = { path = "../plugin-dashboard" }
 plugin-newznab = { path = "../plugin-newznab" }
 plugin-sabnzbd = { path = "../plugin-sabnzbd" }
+plugin-usenet = { path = "../plugin-usenet" }
+riven-usenet = { path = "../riven-usenet" }
 plugin-logs = { path = "../plugin-logs" }
 tokio = { workspace = true }
 tokio-util = { workspace = true }

@@ -739,6 +739,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "19d374276b40fb8bbdee95aef7c7fa6b5316ec764510eb64b8dd0e2ed0d7e7f5"
 
 [[package]]
+name = "crc32fast"
+version = "1.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9481c1c90cbf2ac953f07c8d4a58aa3945c425b7185c9154d67a65e4230da511"
+dependencies = [
+ "cfg-if",
+]
+
+[[package]]
 name = "criterion"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2919,6 +2928,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "plugin-newznab"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "hex",
+ "inventory",
+ "quick-xml",
+ "redis",
+ "reqwest 0.13.2",
+ "riven-core",
+ "serde",
+ "sha1",
+ "tracing",
+]
+
+[[package]]
 name = "plugin-notifications"
 version = "0.1.0"
 dependencies = [
@@ -2951,6 +2977,22 @@ dependencies = [
  "serde",
  "serde_json",
  "sqlx",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "plugin-sabnzbd"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "inventory",
+ "redis",
+ "reqwest 0.13.2",
+ "riven-core",
+ "serde",
+ "serde_json",
  "tokio",
  "tracing",
 ]
@@ -3061,6 +3103,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "plugin-usenet"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "inventory",
+ "redis",
+ "reqwest 0.13.2",
+ "riven-core",
+ "riven-usenet",
+ "serde",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
 name = "polling"
 version = "3.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3160,6 +3218,15 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "quick-xml"
+version = "0.39.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "958f21e8e7ceb5a1aa7fa87fab28e7c75976e0bfe7e23ff069e0a260f894067d"
+dependencies = [
+ "memchr",
 ]
 
 [[package]]
@@ -3526,6 +3593,7 @@ dependencies = [
  "riven-db",
  "riven-queue",
  "riven-rank",
+ "riven-usenet",
  "riven-vfs",
  "serde",
  "serde_json",
@@ -3552,14 +3620,17 @@ dependencies = [
  "plugin-listrr",
  "plugin-logs",
  "plugin-mdblist",
+ "plugin-newznab",
  "plugin-notifications",
  "plugin-plex",
+ "plugin-sabnzbd",
  "plugin-seerr",
  "plugin-stremthru",
  "plugin-tmdb",
  "plugin-torrentio",
  "plugin-trakt",
  "plugin-tvdb",
+ "plugin-usenet",
  "redis",
  "reqwest 0.13.2",
  "riven-api",
@@ -3567,6 +3638,7 @@ dependencies = [
  "riven-db",
  "riven-queue",
  "riven-rank",
+ "riven-usenet",
  "serde_json",
  "sqlx",
  "tokio",
@@ -3661,6 +3733,27 @@ dependencies = [
  "strsim",
  "thiserror 2.0.18",
  "tracing",
+]
+
+[[package]]
+name = "riven-usenet"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bytes",
+ "crc32fast",
+ "parking_lot",
+ "quick-xml",
+ "redis",
+ "rustls",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-rustls",
+ "tracing",
+ "webpki-roots 1.0.6",
 ]
 
 [[package]]

@@ -9,6 +9,7 @@ riven-db = { path = "../riven-db" }
 riven-rank = { path = "../riven-rank" }
 riven-queue = { path = "../riven-queue" }
 riven-vfs = { path = "../riven-vfs" }
+riven-usenet = { path = "../riven-usenet" }
 apalis-board-api = { workspace = true }
 plugin-dashboard = { path = "../plugin-dashboard" }
 plugin-logs = { path = "../plugin-logs" }

@@ -82,6 +82,7 @@ async fn main() -> Result<()> {
     let http_client = riven_core::http::HttpClient::new(build_http_client()?);
     let stream_http_client = build_streaming_http_client()?;
 
+    let redis_conn_for_streamer = redis_conn.clone();
     let registry = setup::register_plugins(
         http_client.clone(),
         db_pool.clone(),
@@ -89,6 +90,30 @@ async fn main() -> Result<()> {
         settings.effective_vfs_mount_path().to_string(),
     )
     .await;
+
+    // If the `usenet` plugin is configured with NNTP credentials, build a
+    // streamer that the /usenet/ HTTP route can serve from. Failure to build
+    // is non-fatal — Usenet streaming is just disabled.
+    let usenet_streamer: Option<riven_usenet::UsenetStreamer> = match registry
+        .get_plugin_settings_json("usenet")
+        .await
+        .as_ref()
+        .and_then(plugin_usenet::nntp_config_from_json_value)
+    {
+        Some(cfg) => {
+            tracing::info!(
+                host = %cfg.server.host,
+                port = cfg.server.port,
+                tls = cfg.server.use_tls,
+                "usenet streaming enabled"
+            );
+            Some(riven_usenet::UsenetStreamer::new(cfg, redis_conn_for_streamer))
+        }
+        None => {
+            tracing::info!("usenet streaming disabled (plugin not configured)");
+            None
+        }
+    };
     let (notification_tx, _) = broadcast::channel::<String>(512);
 
     let job_queue = Arc::new(
@@ -181,6 +206,7 @@ async fn main() -> Result<()> {
         let notif_tx = notification_tx.clone();
         let log_control = log_control.clone();
         let vfs_mount_manager = vfs_mount_manager.clone();
+        let usenet_streamer = usenet_streamer.clone();
         let cancel = cancel.clone();
         async move {
             if let Err(e) = riven_api::start_server(riven_api::StartServerConfig {
@@ -200,6 +226,7 @@ async fn main() -> Result<()> {
                 link_request_tx: link_tx.clone(),
                 cors_allowed_origins,
                 vfs_mount_manager,
+                usenet_streamer,
                 cancel,
             })
             .await
