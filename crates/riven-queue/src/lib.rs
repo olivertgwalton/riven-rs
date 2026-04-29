@@ -283,101 +283,93 @@ impl JobQueue {
         }
     }
 
-    // ── Scheduled scrape ──────────────────────────────────────────────────────
+    // ── Scheduled tasks ───────────────────────────────────────────────────────
 
     pub async fn schedule_scrape_at(&self, job: ScrapeJob, run_at: DateTime<Utc>) {
-        let now = Utc::now();
-        if run_at <= now {
+        if run_at <= Utc::now() {
             self.clear_scheduled_scrape(job.id).await;
             self.push_scrape(job).await;
             return;
         }
-
-        let config = self.scrape_storage.get_config().clone();
-        let task_id = scheduled_scrape_task_id(job.id).to_string();
-        let meta_key = format!("{}:{}", config.job_meta_hash(), task_id);
-        let payload = match serialize_job_payload(&job) {
-            Ok(p) => p,
-            Err(error) => {
-                tracing::error!(id = job.id, error = %error, "failed to serialize scheduled scrape job");
-                return;
-            }
-        };
-
-        let mut conn = self.redis.clone();
-        let result: redis::RedisResult<()> = redis::pipe()
-            .atomic()
-            .hset(config.job_data_hash(), &task_id, payload)
-            .del(&meta_key)
-            .hset_multiple(
-                &meta_key,
-                &[
-                    ("attempts", "0"),
-                    ("max_attempts", "5"),
-                    ("status", "Pending"),
-                ],
-            )
-            .zrem(config.scheduled_jobs_set(), &task_id)
-            .zrem(config.done_jobs_set(), &task_id)
-            .zrem(config.dead_jobs_set(), &task_id)
-            .zrem(config.failed_jobs_set(), &task_id)
-            .lrem(config.active_jobs_list(), 0, &task_id)
-            .zadd(config.scheduled_jobs_set(), &task_id, run_at.timestamp())
-            .query_async(&mut conn)
-            .await;
-
-        match result {
-            Ok(()) => tracing::info!(id = job.id, run_at = %run_at, "scheduled delayed scrape job"),
-            Err(error) => {
-                tracing::error!(id = job.id, error = %error, "failed to schedule delayed scrape job")
-            }
-        }
+        let id = job.id;
+        let task_id = scheduled_scrape_task_id(id).to_string();
+        self.schedule_apalis_task(
+            "scrape",
+            id,
+            self.scrape_storage.get_config(),
+            &task_id,
+            &job,
+            run_at,
+        )
+        .await;
     }
 
     pub async fn clear_scheduled_scrape(&self, id: i64) {
-        let config = self.scrape_storage.get_config().clone();
         let task_id = scheduled_scrape_task_id(id).to_string();
-        let meta_key = format!("{}:{}", config.job_meta_hash(), task_id);
-        let mut conn = self.redis.clone();
-
-        let result: redis::RedisResult<()> = redis::pipe()
-            .atomic()
-            .zrem(config.scheduled_jobs_set(), &task_id)
-            .hdel(config.job_data_hash(), &task_id)
-            .del(&meta_key)
-            .query_async(&mut conn)
-            .await;
-
-        if let Err(error) = result {
-            tracing::error!(id, error = %error, "failed to clear scheduled scrape job");
-        }
+        self.clear_apalis_scheduled_task(
+            "scrape",
+            id,
+            self.scrape_storage.get_config(),
+            &task_id,
+        )
+        .await;
     }
 
-    // ── Scheduled index ───────────────────────────────────────────────────────
-
     pub async fn schedule_index_at(&self, job: IndexJob, run_at: DateTime<Utc>) {
-        let now = Utc::now();
-        if run_at <= now {
+        if run_at <= Utc::now() {
             self.clear_scheduled_index(job.id).await;
             self.push_index(job).await;
             return;
         }
+        let id = job.id;
+        let task_id = scheduled_index_task_id(id).to_string();
+        self.schedule_apalis_task(
+            "index",
+            id,
+            self.index_storage.get_config(),
+            &task_id,
+            &job,
+            run_at,
+        )
+        .await;
+    }
 
-        let config = self.index_storage.get_config().clone();
-        let task_id = scheduled_index_task_id(job.id).to_string();
-        let meta_key = format!("{}:{}", config.job_meta_hash(), task_id);
-        let payload = match serialize_job_payload(&job) {
+    pub async fn clear_scheduled_index(&self, id: i64) {
+        let task_id = scheduled_index_task_id(id).to_string();
+        self.clear_apalis_scheduled_task(
+            "index",
+            id,
+            self.index_storage.get_config(),
+            &task_id,
+        )
+        .await;
+    }
+
+    /// Force-overwrite an apalis-redis scheduled task: write payload, reset
+    /// metadata, ZADD into the scheduled set, and remove any prior entry for
+    /// this task_id from done/dead/failed/active. The deterministic task_id
+    /// per item gives us "latest call wins" semantics.
+    async fn schedule_apalis_task<Args: Serialize>(
+        &self,
+        kind: &'static str,
+        id: i64,
+        config: &apalis_redis::RedisConfig,
+        task_id: &str,
+        job: &Args,
+        run_at: DateTime<Utc>,
+    ) {
+        let payload = match serialize_job_payload(job) {
             Ok(p) => p,
             Err(error) => {
-                tracing::error!(id = job.id, error = %error, "failed to serialize scheduled index job");
+                tracing::error!(id, kind, %error, "failed to serialize scheduled job");
                 return;
             }
         };
-
+        let meta_key = format!("{}:{}", config.job_meta_hash(), task_id);
         let mut conn = self.redis.clone();
         let result: redis::RedisResult<()> = redis::pipe()
             .atomic()
-            .hset(config.job_data_hash(), &task_id, payload)
+            .hset(config.job_data_hash(), task_id, payload)
             .del(&meta_key)
             .hset_multiple(
                 &meta_key,
@@ -387,39 +379,38 @@ impl JobQueue {
                     ("status", "Pending"),
                 ],
             )
-            .zrem(config.scheduled_jobs_set(), &task_id)
-            .zrem(config.done_jobs_set(), &task_id)
-            .zrem(config.dead_jobs_set(), &task_id)
-            .zrem(config.failed_jobs_set(), &task_id)
-            .lrem(config.active_jobs_list(), 0, &task_id)
-            .zadd(config.scheduled_jobs_set(), &task_id, run_at.timestamp())
+            .zrem(config.scheduled_jobs_set(), task_id)
+            .zrem(config.done_jobs_set(), task_id)
+            .zrem(config.dead_jobs_set(), task_id)
+            .zrem(config.failed_jobs_set(), task_id)
+            .lrem(config.active_jobs_list(), 0, task_id)
+            .zadd(config.scheduled_jobs_set(), task_id, run_at.timestamp())
             .query_async(&mut conn)
             .await;
-
         match result {
-            Ok(()) => tracing::info!(id = job.id, run_at = %run_at, "scheduled delayed index job"),
-            Err(error) => {
-                tracing::error!(id = job.id, error = %error, "failed to schedule delayed index job")
-            }
+            Ok(()) => tracing::info!(id, kind, run_at = %run_at, "scheduled delayed job"),
+            Err(error) => tracing::error!(id, kind, %error, "failed to schedule delayed job"),
         }
     }
 
-    pub async fn clear_scheduled_index(&self, id: i64) {
-        let config = self.index_storage.get_config().clone();
-        let task_id = scheduled_index_task_id(id).to_string();
+    async fn clear_apalis_scheduled_task(
+        &self,
+        kind: &'static str,
+        id: i64,
+        config: &apalis_redis::RedisConfig,
+        task_id: &str,
+    ) {
         let meta_key = format!("{}:{}", config.job_meta_hash(), task_id);
         let mut conn = self.redis.clone();
-
         let result: redis::RedisResult<()> = redis::pipe()
             .atomic()
-            .zrem(config.scheduled_jobs_set(), &task_id)
-            .hdel(config.job_data_hash(), &task_id)
+            .zrem(config.scheduled_jobs_set(), task_id)
+            .hdel(config.job_data_hash(), task_id)
             .del(&meta_key)
             .query_async(&mut conn)
             .await;
-
         if let Err(error) = result {
-            tracing::error!(id, error = %error, "failed to clear scheduled index job");
+            tracing::error!(id, kind, %error, "failed to clear scheduled job");
         }
     }
 
