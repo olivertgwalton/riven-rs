@@ -28,6 +28,8 @@ plugin-emby-jellyfin = { path = "../plugin-emby-jellyfin" }
 plugin-calendar = { path = "../plugin-calendar" }
 plugin-trakt = { path = "../plugin-trakt" }
 plugin-dashboard = { path = "../plugin-dashboard" }
+plugin-newznab = { path = "../plugin-newznab" }
+plugin-sabnzbd = { path = "../plugin-sabnzbd" }
 plugin-logs = { path = "../plugin-logs" }
 tokio = { workspace = true }
 tokio-util = { workspace = true }

@@ -254,12 +254,11 @@ async fn main() -> Result<()> {
     });
 
     let scheduler_task = tokio::spawn({
-        let db = db_pool.clone();
         let jq = job_queue.clone();
         let cancel = cancel.clone();
         async move {
             while !cancel.is_cancelled() {
-                let scheduler = Scheduler::new(db.clone(), jq.clone(), cancel.clone());
+                let scheduler = Scheduler::new(jq.clone(), cancel.clone());
                 let result = tokio::spawn(scheduler.run()).await;
                 if cancel.is_cancelled() {
                     break;

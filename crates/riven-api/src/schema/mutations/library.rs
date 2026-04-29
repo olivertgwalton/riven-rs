@@ -18,11 +18,13 @@ pub struct LibraryMutations;
 #[Object]
 impl LibraryMutations {
     /// Delete a specific filesystem entry (a single downloaded version) by its ID.
-    /// Returns true if the entry was found and deleted.
+    /// Returns true if the entry was found and deleted. The DB trigger on
+    /// `filesystem_entries` recomputes the owning item's state automatically.
     async fn delete_filesystem_entry(&self, ctx: &Context<'_>, id: i64) -> Result<bool> {
         require_library_access(ctx)?;
         let pool = ctx.data::<PgPool>()?;
-        Ok(repo::delete_filesystem_entry(pool, id).await?)
+        let (deleted, _item_id) = repo::delete_filesystem_entry(pool, id).await?;
+        Ok(deleted)
     }
 
     /// Reset items to Indexed state and clear failed_attempts.
@@ -74,16 +76,16 @@ impl LibraryMutations {
         Ok(repo::pause_items_by_ids(pool, ids).await? as i64)
     }
 
-    /// Unpause items (transitions back to Indexed).
+    /// Unpause items (derives next state from current facts).
     async fn unpause_items(&self, ctx: &Context<'_>, ids: Vec<i64>) -> Result<i64> {
         require_library_access(ctx)?;
         let pool = ctx.data::<PgPool>()?;
         Ok(repo::unpause_items_by_ids(pool, ids).await? as i64)
     }
 
-    /// Trigger a scrape for an existing item.
-    /// For shows, optionally provide season_numbers to scrape specific seasons.
-    /// If season_numbers is omitted, all requested seasons in Indexed state are scraped.
+    /// Trigger a scrape for an existing item by entering its
+    /// per-item state machine. For shows, optionally provide season_numbers
+    /// to mark additional seasons requested before processing.
     async fn scrape_item(
         &self,
         ctx: &Context<'_>,
@@ -93,14 +95,26 @@ impl LibraryMutations {
         require_library_access(ctx)?;
         let pool = ctx.data::<PgPool>()?;
         let job_queue = ctx.data::<Arc<JobQueue>>()?;
-        let orchestrator = LibraryOrchestrator::new(job_queue.as_ref());
 
         let item = repo::get_media_item(pool, id)
             .await?
             .ok_or_else(|| Error::new("Item not found"))?;
 
-        orchestrator
-            .queue_scrape_for_item(&item, season_numbers.as_deref(), true)
+        // For Show + specific seasons: flip is_requested on those seasons /
+        // their episodes so ProcessMediaItem's Show fan-out picks them up.
+        if item.item_type == MediaItemType::Show
+            && let Some(seasons) = season_numbers.as_deref()
+            && !seasons.is_empty()
+        {
+            if let Err(err) =
+                repo::mark_seasons_requested_and_get_episodes(pool, item.id, seasons).await
+            {
+                tracing::warn!(show_id = item.id, %err, "failed to mark seasons requested");
+            }
+        }
+
+        job_queue
+            .push_process_media_item(riven_queue::ProcessMediaItemJob::new(item.id))
             .await;
 
         Ok("Scrape queued".to_string())
@@ -162,7 +176,7 @@ impl LibraryMutations {
         imdb_id: Option<String>,
         tmdb_id: Option<String>,
         tvdb_id: Option<String>,
-        seasons: Option<Vec<i32>>,
+        _seasons: Option<Vec<i32>>,
     ) -> Result<MediaItem> {
         require_library_access(ctx)?;
         if !matches!(item_type, MediaItemType::Movie | MediaItemType::Show) {
@@ -173,7 +187,6 @@ impl LibraryMutations {
 
         let pool = ctx.data::<PgPool>()?;
         let job_queue = ctx.data::<Arc<JobQueue>>()?;
-        let orchestrator = LibraryOrchestrator::new(job_queue.as_ref());
 
         let item = if let Some(existing) = repo::find_existing_media_item(
             pool,
@@ -198,8 +211,12 @@ impl LibraryMutations {
         };
 
         if item.imdb_id.is_some() {
-            orchestrator
-                .queue_scrape_for_item(&item, seasons.as_deref(), false)
+            // Unrequested discovery: route through ProcessMediaItem. The
+            // `is_requested=false` flag short-circuits the Download advance
+            // in `MainOrchestrator::on_event`, so this scrapes without
+            // continuing to a download.
+            job_queue
+                .push_process_media_item(riven_queue::ProcessMediaItemJob::new(item.id))
                 .await;
         } else {
             job_queue.push_index(IndexJob::from_item(&item)).await;

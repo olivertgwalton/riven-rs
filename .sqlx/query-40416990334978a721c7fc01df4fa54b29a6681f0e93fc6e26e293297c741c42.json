@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE media_items SET state = 'indexed', updated_at = NOW()\n            WHERE state = 'unreleased' AND aired_at IS NOT NULL\n              AND aired_at <= CURRENT_DATE AND is_requested = true",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "40416990334978a721c7fc01df4fa54b29a6681f0e93fc6e26e293297c741c42"
+}

@@ -56,15 +56,19 @@ pub async fn update_stream_file_size(
     Ok(())
 }
 
-pub async fn link_stream_to_item(pool: &PgPool, media_item_id: i64, stream_id: i64) -> Result<()> {
-    sqlx::query!(
+pub async fn link_stream_to_item(
+    pool: &PgPool,
+    media_item_id: i64,
+    stream_id: i64,
+) -> Result<bool> {
+    let result = sqlx::query!(
         "INSERT INTO media_item_streams (media_item_id, stream_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
         media_item_id,
         stream_id
     )
     .execute(pool)
     .await?;
-    Ok(())
+    Ok(result.rows_affected() > 0)
 }
 
 pub async fn get_streams_for_item(pool: &PgPool, media_item_id: i64) -> Result<Vec<Stream>> {
@@ -644,14 +648,22 @@ pub async fn list_vfs_file_paths(pool: &PgPool, dir_path: &str) -> Result<Vec<St
     .await?)
 }
 
-pub async fn delete_filesystem_entry(pool: &PgPool, entry_id: i64) -> Result<bool> {
-    let rows = sqlx::query_scalar::<_, i64>(
-        "WITH deleted AS (DELETE FROM filesystem_entries WHERE id = $1 AND entry_type = 'media' RETURNING id) SELECT COUNT(*) FROM deleted"
+/// Returns `(was_deleted, owning_media_item_id)`. The id is captured in the
+/// same DELETE so callers can recompute that item's state — losing a media
+/// entry can flip Completed → Scraped/Indexed.
+pub async fn delete_filesystem_entry(
+    pool: &PgPool,
+    entry_id: i64,
+) -> Result<(bool, Option<i64>)> {
+    let row: Option<(i64,)> = sqlx::query_as(
+        "DELETE FROM filesystem_entries \
+         WHERE id = $1 AND entry_type = 'media' \
+         RETURNING media_item_id",
     )
     .bind(entry_id)
-    .fetch_one(pool)
+    .fetch_optional(pool)
     .await?;
-    Ok(rows > 0)
+    Ok((row.is_some(), row.map(|r| r.0)))
 }
 
 pub async fn update_stream_url(pool: &PgPool, entry_id: i64, stream_url: &str) -> Result<()> {

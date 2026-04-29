@@ -36,38 +36,13 @@ fn rate_limit_retry_budget(max: u32, failed_attempts: i32) -> u32 {
     max.saturating_sub(failed_attempts.max(0) as u32)
 }
 
-/// Bump `failed_attempts`, then — if the item has now blown through the
-/// configured ceiling — flip its state to `Failed` and cascade so the retry
-/// scheduler stops picking it up forever.
+/// Bump `failed_attempts`. The DB trigger on the `failed_attempts` column
+/// recomputes state — and applies the `failed_attempts >= max → Failed`
+/// rule + parent cascade automatically.
 async fn record_scrape_failure(queue: &JobQueue, item: &riven_db::entities::MediaItem) {
     let id = item.id;
     if let Err(err) = repo::increment_failed_attempts(&queue.db_pool, id).await {
         tracing::warn!(id, %err, "failed to increment failed_attempts");
-        return;
-    }
-
-    let max = queue.maximum_scrape_attempts.load(Ordering::Relaxed);
-    if max == 0 {
-        return;
-    }
-    // `item.failed_attempts` was read before the increment above.
-    let projected = item.failed_attempts.saturating_add(1) as u32;
-    if projected < max {
-        return;
-    }
-
-    tracing::warn!(
-        id,
-        failed_attempts = projected,
-        max,
-        "item exceeded maximum_scrape_attempts; marking Failed"
-    );
-    if let Err(err) = repo::mark_item_failed(&queue.db_pool, id).await {
-        tracing::warn!(id, %err, "failed to mark item as Failed");
-        return;
-    }
-    if let Err(err) = repo::cascade_state_update(&queue.db_pool, item).await {
-        tracing::warn!(id, %err, "failed to cascade Failed state to parents");
     }
 }
 
@@ -119,7 +94,6 @@ pub async fn start(id: i64, job: &ScrapeJob, queue: &JobQueue) {
                     title: job.title.clone(),
                     season: job.season,
                     episode: job.episode,
-                    auto_download: job.auto_download,
                     rate_limit_retries: job.rate_limit_retries,
                 })
                 .await;
@@ -147,17 +121,6 @@ pub async fn handle_plugin(job: &ScrapePluginJob, queue: &JobQueue) {
         return;
     }
 
-    let event = scrape_event(&ScrapeJob {
-        id: job.id,
-        item_type: job.item_type,
-        imdb_id: job.imdb_id.clone(),
-        title: job.title.clone(),
-        season: job.season,
-        episode: job.episode,
-        auto_download: job.auto_download,
-        rate_limit_retries: job.rate_limit_retries,
-    });
-
     let parent = ScrapeJob {
         id: job.id,
         item_type: job.item_type,
@@ -165,9 +128,9 @@ pub async fn handle_plugin(job: &ScrapePluginJob, queue: &JobQueue) {
         title: job.title.clone(),
         season: job.season,
         episode: job.episode,
-        auto_download: job.auto_download,
         rate_limit_retries: job.rate_limit_retries,
     };
+    let event = scrape_event(&parent);
 
     if run_plugin_hook(
         queue,
@@ -272,10 +235,7 @@ pub async fn finalize(job: &ScrapeJob, queue: &JobQueue) {
 
     tracing::debug!(id, count = result_count, "pushing parse-scrape-results job");
     queue
-        .push_parse_scrape_results(ParseScrapeResultsJob {
-            id,
-            auto_download: job.auto_download,
-        })
+        .push_parse_scrape_results(ParseScrapeResultsJob { id })
         .await;
 }
 
@@ -324,7 +284,7 @@ pub async fn parse_results(id: i64, _job: &ParseScrapeResultsJob, queue: &JobQue
         .await
         .unwrap_or_default();
 
-    let stream_count = stream::iter(ranked)
+    let new_stream_count = stream::iter(ranked)
         .map(|candidate| {
             let pool = queue.db_pool.clone();
             async move {
@@ -345,7 +305,7 @@ pub async fn parse_results(id: i64, _job: &ParseScrapeResultsJob, queue: &JobQue
                     }
                 };
                 match repo::link_stream_to_item(&pool, id, stream.id).await {
-                    Ok(_) => true,
+                    Ok(inserted) => inserted,
                     Err(e) => {
                         tracing::error!(error = %e, "failed to link stream to item");
                         false
@@ -354,7 +314,7 @@ pub async fn parse_results(id: i64, _job: &ParseScrapeResultsJob, queue: &JobQue
             }
         })
         .buffer_unordered(4)
-        .filter(|ok| futures::future::ready(*ok))
+        .filter(|inserted| futures::future::ready(*inserted))
         .count()
         .await;
 
@@ -362,9 +322,9 @@ pub async fn parse_results(id: i64, _job: &ParseScrapeResultsJob, queue: &JobQue
         tracing::error!(error = %e, "failed to update scraped timestamp");
     }
 
-    tracing::info!(id, stream_count, "parse-scrape-results completed");
+    tracing::info!(id, new_stream_count, "parse-scrape-results completed");
 
-    if stream_count == 0 {
+    if new_stream_count == 0 {
         record_scrape_failure(queue, &item).await;
         queue
             .notify(RivenEvent::MediaItemScrapeErrorNoNewStreams {
@@ -374,9 +334,9 @@ pub async fn parse_results(id: i64, _job: &ParseScrapeResultsJob, queue: &JobQue
             })
             .await;
     } else {
-        if let Err(e) = repo::refresh_state_cascade(&queue.db_pool, &item).await {
-            tracing::error!(error = %e, "failed to refresh state after scrape");
-        }
+        // The new media_item_streams rows already triggered a state recompute;
+        // resetting failed_attempts triggers another that incorporates the
+        // counter.
         if let Err(err) = repo::reset_failed_attempts(&queue.db_pool, id).await {
             tracing::warn!(id, %err, "failed to reset failed_attempts");
         }
@@ -385,7 +345,7 @@ pub async fn parse_results(id: i64, _job: &ParseScrapeResultsJob, queue: &JobQue
                 id,
                 title: item_title,
                 item_type,
-                stream_count,
+                stream_count: new_stream_count,
             })
             .await;
     }

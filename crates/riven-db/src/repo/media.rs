@@ -396,32 +396,6 @@ pub async fn update_media_item_index(
     Ok(())
 }
 
-/// Sets state and cascades to parents. Cascade failures are logged, never propagated.
-pub async fn update_media_item_state(pool: &PgPool, id: i64, state: MediaItemState) -> Result<()> {
-    sqlx::query!(
-        "UPDATE media_items SET state = $2, updated_at = NOW() WHERE id = $1",
-        id,
-        state as MediaItemState
-    )
-    .execute(pool)
-    .await?;
-
-    match get_media_item(pool, id).await {
-        Ok(Some(item)) => {
-            // Box::pin breaks the recursive-async-fn type cycle.
-            if let Err(e) = Box::pin(super::state::cascade_state_update(pool, &item)).await {
-                tracing::warn!(id, error = %e, "cascade after state update failed");
-            }
-        }
-        Ok(None) => {}
-        Err(e) => {
-            tracing::warn!(id, error = %e, "cascade after state update: reload failed");
-        }
-    }
-
-    Ok(())
-}
-
 pub async fn set_active_stream(pool: &PgPool, id: i64, stream_id: i64) -> Result<()> {
     sqlx::query("UPDATE media_items SET active_stream_id = $2, updated_at = NOW() WHERE id = $1")
         .bind(id)
@@ -441,70 +415,18 @@ pub async fn update_scraped(pool: &PgPool, id: i64) -> Result<()> {
     Ok(())
 }
 
+/// Transition unreleased items whose air date has passed back into the
+/// derivation pipeline. The UPDATE on `aired_at`/`state` fires the
+/// `media_items_inputs_changed` trigger which recomputes each affected row.
 pub async fn transition_unreleased_aired(pool: &PgPool) -> Result<u64> {
-    let ids: Vec<i64> = sqlx::query_scalar!(
+    let result = sqlx::query!(
         r#"UPDATE media_items SET state = 'indexed', updated_at = NOW()
             WHERE state = 'unreleased' AND aired_at IS NOT NULL
-              AND aired_at <= CURRENT_DATE AND is_requested = true
-        RETURNING id"#,
+              AND aired_at <= CURRENT_DATE AND is_requested = true"#,
     )
-    .fetch_all(pool)
+    .execute(pool)
     .await?;
-
-    let count = ids.len() as u64;
-    recompute_states(pool, &ids).await;
-    Ok(count)
-}
-
-pub(crate) async fn cascade_to_parents(pool: &PgPool, parent_ids: &[i64]) {
-    for parent_id in parent_ids {
-        match get_media_item(pool, *parent_id).await {
-            Ok(Some(parent)) => {
-                if let Err(e) = super::state::refresh_state(pool, &parent).await {
-                    tracing::warn!(parent_id, error = %e, "bulk cascade: refresh_state failed");
-                }
-            }
-            Ok(None) => {}
-            Err(e) => {
-                tracing::warn!(parent_id, error = %e, "bulk cascade: parent reload failed");
-            }
-        }
-    }
-}
-
-pub(crate) async fn cascade_to_parents_of(pool: &PgPool, item_ids: &[i64]) {
-    if item_ids.is_empty() {
-        return;
-    }
-    let parent_ids: Vec<i64> = sqlx::query_scalar(
-        "SELECT DISTINCT parent_id FROM media_items \
-         WHERE id = ANY($1) AND parent_id IS NOT NULL",
-    )
-    .bind(item_ids)
-    .fetch_all(pool)
-    .await
-    .unwrap_or_default();
-    cascade_to_parents(pool, &parent_ids).await;
-}
-
-/// Recompute leaf state from data (filesystem entries, streams, child states)
-/// for each id. Used after bulk writes that change *intent* (clear pause,
-/// reset attempts, transition aired) so an item with existing streams lands
-/// in `Scraped` rather than the placeholder state the bulk UPDATE wrote.
-pub(crate) async fn recompute_states(pool: &PgPool, item_ids: &[i64]) {
-    for id in item_ids {
-        match get_media_item(pool, *id).await {
-            Ok(Some(item)) => {
-                if let Err(e) = super::state::refresh_state(pool, &item).await {
-                    tracing::warn!(id = *id, error = %e, "recompute_states: refresh failed");
-                }
-            }
-            Ok(None) => {}
-            Err(e) => {
-                tracing::warn!(id = *id, error = %e, "recompute_states: reload failed");
-            }
-        }
-    }
+    Ok(result.rows_affected())
 }
 
 pub async fn blacklist_stream_by_hash(
@@ -539,11 +461,6 @@ pub async fn increment_failed_attempts(pool: &PgPool, id: i64) -> Result<()> {
     .execute(pool)
     .await?;
     Ok(())
-}
-
-/// Mark an item as permanently `Failed` so the retry scheduler stops picking it up.
-pub async fn mark_item_failed(pool: &PgPool, id: i64) -> Result<()> {
-    update_media_item_state(pool, id, MediaItemState::Failed).await
 }
 
 pub async fn reset_failed_attempts(pool: &PgPool, id: i64) -> Result<()> {

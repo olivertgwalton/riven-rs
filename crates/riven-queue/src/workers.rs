@@ -7,7 +7,7 @@ use apalis::prelude::*;
 use crate::dedup::DedupGuard;
 use crate::{
     ContentServiceJob, DownloadJob, IndexJob, IndexPluginJob, JobQueue, ParseScrapeResultsJob,
-    PluginHookJob, RankStreamsJob, ScrapeJob, ScrapePluginJob,
+    PluginHookJob, ProcessMediaItemJob, RankStreamsJob, ScrapeJob, ScrapePluginJob,
 };
 
 // ── Job handlers ──────────────────────────────────────────────────────────────
@@ -18,7 +18,7 @@ use crate::{
 
 async fn handle_index_job(job: IndexJob, q: Data<Arc<JobQueue>>) -> Result<(), BoxDynError> {
     let _guard = DedupGuard::new("index", job.id, q.redis.clone());
-    crate::flows::index_item::run(&job, &q).await;
+    crate::application::index::start(&job, &q).await;
     Ok(())
 }
 
@@ -26,13 +26,13 @@ async fn handle_index_plugin_job(
     job: IndexPluginJob,
     q: Data<Arc<JobQueue>>,
 ) -> Result<(), BoxDynError> {
-    crate::flows::index_item::run_plugin(&job, &q).await;
+    crate::application::index::handle_plugin(&job, &q).await;
     Ok(())
 }
 
 async fn handle_scrape_job(job: ScrapeJob, q: Data<Arc<JobQueue>>) -> Result<(), BoxDynError> {
     let _guard = DedupGuard::new("scrape", job.id, q.redis.clone());
-    crate::flows::scrape_item::run(job.id, &job, &q).await;
+    crate::application::scrape::start(job.id, &job, &q).await;
     Ok(())
 }
 
@@ -40,7 +40,7 @@ async fn handle_scrape_plugin_job(
     job: ScrapePluginJob,
     q: Data<Arc<JobQueue>>,
 ) -> Result<(), BoxDynError> {
-    crate::flows::scrape_item::run_plugin(&job, &q).await;
+    crate::application::scrape::handle_plugin(&job, &q).await;
     Ok(())
 }
 
@@ -49,13 +49,13 @@ async fn handle_parse_scrape_results_job(
     q: Data<Arc<JobQueue>>,
 ) -> Result<(), BoxDynError> {
     let _guard = DedupGuard::new("parse", job.id, q.redis.clone());
-    crate::flows::parse_scrape_results::run(job.id, &job, &q).await;
+    crate::application::scrape::parse_results(job.id, &job, &q).await;
     Ok(())
 }
 
 async fn handle_download_job(job: DownloadJob, q: Data<Arc<JobQueue>>) -> Result<(), BoxDynError> {
     let _guard = DedupGuard::new("download", job.id, q.redis.clone());
-    crate::flows::download_item::run(job.id, &job, &q).await;
+    crate::application::download::run(job.id, &job, &q).await;
     Ok(())
 }
 
@@ -64,7 +64,7 @@ async fn handle_rank_streams_job(
     q: Data<Arc<JobQueue>>,
 ) -> Result<(), BoxDynError> {
     let _guard = DedupGuard::new("rank-streams", job.id, q.redis.clone());
-    crate::flows::rank_streams::run(job.id, &job, &q).await;
+    crate::application::download::run_rank_streams(job.id, &job, &q).await;
     Ok(())
 }
 
@@ -73,6 +73,14 @@ async fn handle_content_service_job(
     q: Data<Arc<JobQueue>>,
 ) -> Result<(), BoxDynError> {
     crate::flows::request_content::run(&q).await;
+    Ok(())
+}
+
+async fn handle_process_media_item_job(
+    job: ProcessMediaItemJob,
+    q: Data<Arc<JobQueue>>,
+) -> Result<(), BoxDynError> {
+    crate::application::process_media_item::run(&job, &q).await;
     Ok(())
 }
 
@@ -151,6 +159,11 @@ pub fn start_workers(queue: Arc<JobQueue>) -> Monitor {
     );
     let m = register_worker!(
         m, queue, "riven-content", content_storage, 1, handle_content_service_job, 600
+    );
+    // Per-item state machine — orchestration only, fans out and returns.
+    let m = register_worker!(
+        m, queue, "riven-process-media-item", process_media_item_storage, orchestrator_n,
+        handle_process_media_item_job, 60
     );
 
     let mut m = m;

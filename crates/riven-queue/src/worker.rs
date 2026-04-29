@@ -2,28 +2,20 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use futures::stream::{self, StreamExt};
-use riven_core::types::*;
-use riven_db::repo;
 use tokio_util::sync::CancellationToken;
 
 use crate::JobQueue;
-use crate::orchestrator::LibraryOrchestrator;
+use crate::main_orchestrator::MainOrchestrator;
 
 /// Periodic scheduler.
 pub struct Scheduler {
-    db_pool: sqlx::PgPool,
     job_queue: Arc<JobQueue>,
     cancel: CancellationToken,
 }
 
 impl Scheduler {
-    pub fn new(db_pool: sqlx::PgPool, job_queue: Arc<JobQueue>, cancel: CancellationToken) -> Self {
-        Self {
-            db_pool,
-            job_queue,
-            cancel,
-        }
+    pub fn new(job_queue: Arc<JobQueue>, cancel: CancellationToken) -> Self {
+        Self { job_queue, cancel }
     }
 
     pub async fn run(self) {
@@ -77,53 +69,11 @@ impl Scheduler {
         crate::prune_queue_history(&mut redis).await;
     }
 
-    /// Retry pending top-level items.
+    /// Retry-library actor. Delegated to `MainOrchestrator`, which is the
+    /// single owner of the retry policy.
     async fn retry_library(&self) {
-        let requests = match repo::get_retryable_item_requests(&self.db_pool).await {
-            Ok(requests) => requests,
-            Err(error) => {
-                tracing::error!(%error, "failed to fetch retryable item requests");
-                vec![]
-            }
-        };
-
-        let jq = &self.job_queue;
-        stream::iter(requests)
-            .for_each_concurrent(32, |request| async move {
-                LibraryOrchestrator::new(jq)
-                    .retry_item_request(&request)
-                    .await;
-            })
+        MainOrchestrator::new(Arc::clone(&self.job_queue))
+            .retry_library()
             .await;
-
-        for item_type in [MediaItemType::Movie, MediaItemType::Show] {
-            let items = match repo::get_pending_items_for_retry(&self.db_pool, item_type).await {
-                Ok(items) => items,
-                Err(e) => {
-                    tracing::error!(error = %e, "failed to fetch pending items for retry");
-                    vec![]
-                }
-            };
-
-            stream::iter(items)
-                .for_each_concurrent(32, |item| async move {
-                    match item.state {
-                        MediaItemState::Indexed | MediaItemState::PartiallyCompleted => {
-                            jq.release_dedup("scrape", item.id).await;
-                            LibraryOrchestrator::new(jq)
-                                .queue_scrape_for_item(&item, None, true)
-                                .await;
-                        }
-                        MediaItemState::Scraped => {
-                            jq.release_dedup("download", item.id).await;
-                            LibraryOrchestrator::new(jq)
-                                .queue_download_for_item(&item)
-                                .await;
-                        }
-                        _ => {}
-                    }
-                })
-                .await;
-        }
     }
 }

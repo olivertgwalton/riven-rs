@@ -130,7 +130,6 @@ impl MediaItemMutations {
         }
 
         repo::update_scraped(pool, input.id).await?;
-        repo::refresh_state_cascade(pool, &item).await?;
 
         let fresh = repo::get_media_item(pool, input.id).await?.unwrap_or(item);
         let new_streams_count = repo::get_streams_for_item(pool, input.id)

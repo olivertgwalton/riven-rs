@@ -133,7 +133,8 @@ pub async fn finalize(id: i64, queue: &JobQueue) {
         });
 
     if let Err(e) =
-        apply_indexed_media_item(&queue.db_pool, &item, &merged, requested_seasons.as_deref()).await
+        apply_indexed_media_item(&queue.db_pool, &item, &merged, requested_seasons.as_deref())
+            .await
     {
         tracing::error!(id, error = %e, "failed to persist indexed data");
         if let Err(err) = repo::increment_failed_attempts(&queue.db_pool, id).await {

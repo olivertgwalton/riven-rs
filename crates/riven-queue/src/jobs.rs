@@ -1,3 +1,4 @@
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use riven_core::events::RivenEvent;
@@ -10,12 +11,63 @@ pub struct PluginHookJob {
     pub event: RivenEvent,
 }
 
-const fn default_true() -> bool {
-    true
-}
-
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ContentServiceJob;
+
+/// Per-item state-machine job.
+///
+/// Each step is a separate job execution; after enqueueing children (scrape /
+/// rank-streams) the worker exits, and the child flow's finalize hook
+/// re-pushes this job at the next step.
+///
+/// `next_scrape_attempt_at` is set by `Validate` after a download failure to
+/// defer the next scrape by 30 minutes.
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProcessStep {
+    /// Trigger scrape children. If `next_scrape_attempt_at` is in the future,
+    /// the job re-pushes itself at that time instead.
+    Scrape,
+    /// Trigger download children (rank-streams + find-valid-torrent + persist).
+    Download,
+    /// Inspect the post-download state. If still incomplete: schedule scrape
+    /// +30 min. If Show/Season with incomplete children: fan out child jobs.
+    /// If Completed: emit success.
+    Validate,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProcessMediaItemJob {
+    pub id: i64,
+    pub step: ProcessStep,
+    /// Wall-clock to gate the next Scrape attempt. None means "scrape immediately".
+    #[serde(default)]
+    pub next_scrape_attempt_at: Option<DateTime<Utc>>,
+    /// First-push timestamp; preserved across step re-pushes so the final
+    /// "completed in Xh" log measures the real wall-clock cost.
+    pub started_at: DateTime<Utc>,
+}
+
+impl ProcessMediaItemJob {
+    pub fn new(id: i64) -> Self {
+        Self {
+            id,
+            step: ProcessStep::Scrape,
+            next_scrape_attempt_at: None,
+            started_at: Utc::now(),
+        }
+    }
+
+    pub fn at_step(mut self, step: ProcessStep) -> Self {
+        self.step = step;
+        self
+    }
+
+    pub fn with_next_scrape_attempt(mut self, at: DateTime<Utc>) -> Self {
+        self.next_scrape_attempt_at = Some(at);
+        self
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IndexJob {
@@ -46,8 +98,6 @@ pub struct ScrapeJob {
     pub title: String,
     pub season: Option<i32>,
     pub episode: Option<i32>,
-    #[serde(default = "default_true")]
-    pub auto_download: bool,
     /// Number of times this job has been re-pushed because every scraper
     /// plugin was temporarily deferred. Incremented in `finalize` before re-pushing;
     /// existing jobs in Redis deserialise to 0 via the `default`.
@@ -64,7 +114,6 @@ impl ScrapeJob {
             title: item.title.clone(),
             season: None,
             episode: None,
-            auto_download: true,
             rate_limit_retries: 0,
         }
     }
@@ -81,7 +130,6 @@ impl ScrapeJob {
             title: show_title,
             season: season.season_number,
             episode: None,
-            auto_download: true,
             rate_limit_retries: 0,
         }
     }
@@ -94,7 +142,6 @@ impl ScrapeJob {
             title: show_title,
             season: ep.season_number,
             episode: ep.episode_number,
-            auto_download: true,
             rate_limit_retries: 0,
         }
     }
@@ -119,8 +166,6 @@ pub struct RankStreamsJob {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ParseScrapeResultsJob {
     pub id: i64,
-    #[serde(default = "default_true")]
-    pub auto_download: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -142,8 +187,6 @@ pub struct ScrapePluginJob {
     pub title: String,
     pub season: Option<i32>,
     pub episode: Option<i32>,
-    #[serde(default = "default_true")]
-    pub auto_download: bool,
     /// Carried from the parent `ScrapeJob` so `finalize` can reconstruct it.
     #[serde(default)]
     pub rate_limit_retries: u32,

@@ -5,6 +5,7 @@ pub mod discovery;
 pub mod flows;
 pub mod indexing;
 pub mod jobs;
+pub mod main_orchestrator;
 pub mod maintenance;
 pub mod orchestrator;
 pub mod worker;
@@ -34,8 +35,8 @@ use riven_rank::ResolutionRanks;
 
 pub use dedup::DedupGuard;
 pub use jobs::{
-    ContentServiceJob, DownloadJob, IndexJob, IndexPluginJob, ParseScrapeResultsJob,
-    PluginHookJob, RankStreamsJob, ScrapeJob, ScrapePluginJob,
+    ContentServiceJob, DownloadJob, IndexJob, IndexPluginJob, ParseScrapeResultsJob, PluginHookJob,
+    ProcessMediaItemJob, ProcessStep, RankStreamsJob, ScrapeJob, ScrapePluginJob,
 };
 pub use maintenance::{
     clear_worker_registrations, prune_queue_history, purge_orphaned_active_jobs,
@@ -54,6 +55,7 @@ pub struct JobQueue {
     pub download_storage: RedisStorage<DownloadJob>,
     pub rank_streams_storage: RedisStorage<RankStreamsJob>,
     pub content_storage: RedisStorage<ContentServiceJob>,
+    pub process_media_item_storage: RedisStorage<ProcessMediaItemJob>,
     pub plugin_hook_storages: HashMap<(String, EventType), RedisStorage<PluginHookJob>>,
     pub redis: redis::aio::ConnectionManager,
     pub registry: Arc<PluginRegistry>,
@@ -109,15 +111,17 @@ impl JobQueue {
         );
         let content_storage =
             RedisStorage::new_with_config(apalis_conn.clone(), RedisConfig::new("riven:content"));
+        let process_media_item_storage = RedisStorage::new_with_config(
+            apalis_conn.clone(),
+            RedisConfig::new("riven:process-media-item"),
+        );
 
         let mut plugin_hook_storages: HashMap<(String, EventType), RedisStorage<PluginHookJob>> =
             HashMap::new();
         for (plugin_name, event_type) in registry.subscribed_event_pairs().await {
             let namespace = format!("riven:plugin-hook:{}:{plugin_name}", event_type.slug());
-            let storage = RedisStorage::new_with_config(
-                apalis_conn.clone(),
-                RedisConfig::new(&namespace),
-            );
+            let storage =
+                RedisStorage::new_with_config(apalis_conn.clone(), RedisConfig::new(&namespace));
             plugin_hook_storages.insert((plugin_name, event_type), storage);
         }
 
@@ -136,6 +140,7 @@ impl JobQueue {
             download_storage,
             rank_streams_storage,
             content_storage,
+            process_media_item_storage,
             plugin_hook_storages,
             redis,
             registry,
@@ -153,6 +158,14 @@ impl JobQueue {
             maximum_scrape_attempts: Arc::new(AtomicU32::new(maximum_scrape_attempts)),
             resolution_ranks: Arc::new(RwLock::new(resolution_ranks)),
         })
+    }
+
+    /// Snapshot the current per-item scrape ceiling. `0` disables the ceiling.
+    /// State computation reads this to apply the
+    /// `failed_attempts >= max → Failed` rule.
+    pub fn max_scrape_attempts(&self) -> u32 {
+        self.maximum_scrape_attempts
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     // ── Job push ──────────────────────────────────────────────────────────────
@@ -215,6 +228,41 @@ impl JobQueue {
     pub async fn push_content_service(&self) {
         if let Err(e) = self.content_storage.clone().push(ContentServiceJob).await {
             tracing::error!(error = %e, "failed to push ContentServiceJob");
+        }
+    }
+
+    /// Enqueue a `ProcessMediaItemJob`. Bypasses `push_deduped` because the
+    /// dedup key is per-step (`process-media-item:{step}:{id}`) — the job
+    /// re-pushes itself with a different step at every transition, and we
+    /// always want the new step to land. Inter-step protection comes from
+    /// each child flow's own dedup (`scrape:{id}`, `download:{id}`, …).
+    pub async fn push_process_media_item(&self, job: ProcessMediaItemJob) {
+        if let Err(e) = self.process_media_item_storage.clone().push(job).await {
+            tracing::error!(error = %e, "failed to push ProcessMediaItemJob");
+        }
+    }
+
+    /// Re-push a `ProcessMediaItemJob` with a future `run_at`. Used by the
+    /// `Scrape` step when `next_scrape_attempt_at` is in the future.
+    pub async fn push_process_media_item_at(
+        &self,
+        job: ProcessMediaItemJob,
+        run_at: DateTime<Utc>,
+    ) {
+        let now = Utc::now();
+        if run_at <= now {
+            self.push_process_media_item(job).await;
+            return;
+        }
+        let delay = (run_at - now).to_std().unwrap_or_default();
+        let task = TaskBuilder::new(job).run_after(delay).build();
+        if let Err(e) = self
+            .process_media_item_storage
+            .clone()
+            .push_task(task)
+            .await
+        {
+            tracing::error!(error = %e, "failed to push delayed ProcessMediaItemJob");
         }
     }
 
@@ -306,13 +354,8 @@ impl JobQueue {
 
     pub async fn clear_scheduled_scrape(&self, id: i64) {
         let task_id = scheduled_scrape_task_id(id).to_string();
-        self.clear_apalis_scheduled_task(
-            "scrape",
-            id,
-            self.scrape_storage.get_config(),
-            &task_id,
-        )
-        .await;
+        self.clear_apalis_scheduled_task("scrape", id, self.scrape_storage.get_config(), &task_id)
+            .await;
     }
 
     pub async fn schedule_index_at(&self, job: IndexJob, run_at: DateTime<Utc>) {
@@ -336,13 +379,8 @@ impl JobQueue {
 
     pub async fn clear_scheduled_index(&self, id: i64) {
         let task_id = scheduled_index_task_id(id).to_string();
-        self.clear_apalis_scheduled_task(
-            "index",
-            id,
-            self.index_storage.get_config(),
-            &task_id,
-        )
-        .await;
+        self.clear_apalis_scheduled_task("index", id, self.index_storage.get_config(), &task_id)
+            .await;
     }
 
     /// Force-overwrite an apalis-redis scheduled task: write payload, reset
@@ -365,8 +403,29 @@ impl JobQueue {
                 return;
             }
         };
-        let meta_key = format!("{}:{}", config.job_meta_hash(), task_id);
         let mut conn = self.redis.clone();
+
+        let existing: Option<i64> = redis::cmd("ZSCORE")
+            .arg(config.scheduled_jobs_set())
+            .arg(task_id)
+            .query_async(&mut conn)
+            .await
+            .ok()
+            .flatten();
+        if let Some(existing_ts) = existing
+            && existing_ts <= run_at.timestamp()
+        {
+            tracing::debug!(
+                id,
+                kind,
+                existing_run_at = existing_ts,
+                requested_run_at = run_at.timestamp(),
+                "scheduled task already pending earlier; keeping existing schedule"
+            );
+            return;
+        }
+
+        let meta_key = format!("{}:{}", config.job_meta_hash(), task_id);
         let result: redis::RedisResult<()> = redis::pipe()
             .atomic()
             .hset(config.job_data_hash(), task_id, payload)
@@ -807,7 +866,11 @@ fn flow_rate_limited_key(prefix: &str, id: i64) -> String {
     format!("riven:flow:{prefix}:{id}:rate_limited")
 }
 
-fn deserialize_flow_results<T: DeserializeOwned>(prefix: &str, id: i64, raw: Vec<String>) -> Vec<T> {
+fn deserialize_flow_results<T: DeserializeOwned>(
+    prefix: &str,
+    id: i64,
+    raw: Vec<String>,
+) -> Vec<T> {
     raw.into_iter()
         .filter_map(|s| match serde_json::from_str(&s) {
             Ok(v) => Some(v),

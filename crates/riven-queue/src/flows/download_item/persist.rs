@@ -469,26 +469,19 @@ pub async fn persist_season(
         return SeasonPersistOutcome::Failed;
     }
 
-    // Batch-set all matched episodes to Completed in one UPDATE, then refresh
-    // season and show states once each — replaces N×(SELECT+UPDATE) per episode
-    // with 1 batch UPDATE + 2 lightweight state refreshes.
-    if let Err(e) = repo::batch_set_completed(&queue.db_pool, &completed_episode_ids).await {
-        tracing::error!(error = %e, "failed to batch-set episodes completed");
-    }
-    if let Err(e) = repo::refresh_state(&queue.db_pool, item).await {
-        tracing::error!(error = %e, "failed to refresh season state after download");
-    }
-    if let Err(e) = repo::refresh_state(&queue.db_pool, &show).await {
-        tracing::error!(error = %e, "failed to refresh show state after download");
-    }
+    // The filesystem_entries inserts above already triggered state recomputes
+    // for each episode; the state-cascade trigger walked them up to the
+    // season and show. Just sync the request state and read the now-current
+    // season state.
     LibraryOrchestrator::new(queue)
         .sync_item_request_state(item)
         .await;
 
-    let season_complete = matches!(
-        repo::compute_state(&queue.db_pool, item).await,
-        Ok(MediaItemState::Completed)
-    );
+    let season_complete = repo::get_media_item(&queue.db_pool, item.id)
+        .await
+        .ok()
+        .flatten()
+        .is_some_and(|i| i.state == MediaItemState::Completed);
 
     if !season_complete {
         queue
@@ -654,7 +647,6 @@ async fn persist_supplied_show_download(
         .collect();
 
     let mut completed_episode_ids: Vec<i64> = Vec::new();
-    let mut season_ids: Vec<i64> = Vec::new();
 
     for (file, episode_id) in matched_files {
         let Some(episode) = episode_map.get(&episode_id) else {
@@ -720,9 +712,6 @@ async fn persist_supplied_show_download(
         }
 
         completed_episode_ids.push(episode.id);
-        if let Some(season_id) = episode.parent_id {
-            season_ids.push(season_id);
-        }
     }
 
     if completed_episode_ids.is_empty() {
@@ -732,27 +721,17 @@ async fn persist_supplied_show_download(
         anyhow::bail!("no episode files were persisted from the torrent");
     }
 
-    repo::batch_set_completed(&queue.db_pool, &completed_episode_ids).await?;
-    season_ids.sort_unstable();
-    season_ids.dedup();
-    for season_id in season_ids {
-        if let Some(season) = repo::get_media_item(&queue.db_pool, season_id).await?
-            && let Err(err) = repo::refresh_state(&queue.db_pool, &season).await
-        {
-            tracing::warn!(season_id, %err, "failed to refresh season state");
-        }
-    }
-    if let Err(err) = repo::refresh_state(&queue.db_pool, item).await {
-        tracing::warn!(id = item.id, %err, "failed to refresh item state");
-    }
+    // The filesystem_entries inserts above triggered state recomputes for
+    // each completed episode and cascaded up to the season(s) and the show.
     LibraryOrchestrator::new(queue)
         .sync_item_request_state(item)
         .await;
 
-    let completed = matches!(
-        repo::compute_state(&queue.db_pool, item).await,
-        Ok(MediaItemState::Completed)
-    );
+    let completed = repo::get_media_item(&queue.db_pool, item.id)
+        .await
+        .ok()
+        .flatten()
+        .is_some_and(|i| i.state == MediaItemState::Completed);
 
     if completed {
         finalize_download_success(
@@ -781,9 +760,8 @@ pub async fn finalize_download_success(
     provider: Option<String>,
     plugin_name: Option<String>,
 ) {
-    if let Err(error) = repo::refresh_state_cascade(&queue.db_pool, item).await {
-        tracing::error!(error = %error, "failed to refresh state after download");
-    }
+    // The download persist already triggered state recomputes via the
+    // filesystem_entries inserts; just sync the request state here.
     LibraryOrchestrator::new(queue)
         .sync_item_request_state(item)
         .await;
