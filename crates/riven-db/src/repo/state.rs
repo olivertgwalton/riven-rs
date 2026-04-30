@@ -21,7 +21,7 @@ async fn read_max_attempts(pool: &PgPool) -> Result<i32> {
 
 /// Parent-from-children rollup. `None` means the rollup didn't decide and the
 /// caller should fall through to the leaf rules. Pure so it can be unit-tested.
-fn aggregate_states(
+pub fn aggregate_states(
     parent_type: MediaItemType,
     parent_state: MediaItemState,
     show_status: Option<ShowStatus>,
@@ -167,25 +167,37 @@ async fn load_child_states(
     }
 }
 
-/// Apply the leaf rules to an already-loaded fact bundle.
-fn leaf_state(facts: &ItemFacts, max_attempts: i32) -> MediaItemState {
-    if facts.is_unreleased {
+/// Apply the leaf-state rules. Pure so it can be unit-tested without a DB.
+///
+/// Order matters: `Unreleased` (aired_at in the future) wins over everything,
+/// then sticky `Paused`/`Failed`, then the attempts ceiling, then media-entry
+/// existence (movies / episodes only), then any non-blacklisted stream.
+/// Default is `Indexed`.
+pub fn leaf_state(
+    item_type: MediaItemType,
+    current_state: MediaItemState,
+    is_unreleased: bool,
+    failed_attempts: i32,
+    has_media_entry: bool,
+    has_non_blacklisted_stream: bool,
+    max_attempts: i32,
+) -> MediaItemState {
+    if is_unreleased {
         return MediaItemState::Unreleased;
     }
-    if matches!(facts.state, MediaItemState::Paused | MediaItemState::Failed) {
-        return facts.state;
+    if matches!(
+        current_state,
+        MediaItemState::Paused | MediaItemState::Failed
+    ) {
+        return current_state;
     }
-    if max_attempts > 0 && facts.failed_attempts >= max_attempts {
+    if max_attempts > 0 && failed_attempts >= max_attempts {
         return MediaItemState::Failed;
     }
-    if matches!(
-        facts.item_type,
-        MediaItemType::Movie | MediaItemType::Episode
-    ) && facts.has_media_entry
-    {
+    if matches!(item_type, MediaItemType::Movie | MediaItemType::Episode) && has_media_entry {
         return MediaItemState::Completed;
     }
-    if facts.has_non_blacklisted_stream {
+    if has_non_blacklisted_stream {
         return MediaItemState::Scraped;
     }
     MediaItemState::Indexed
@@ -198,13 +210,24 @@ async fn recompute_one(pool: &PgPool, item_id: i64, max_attempts: i32) -> Result
         return Ok(None);
     };
 
+    let leaf = || {
+        leaf_state(
+            facts.item_type,
+            facts.state,
+            facts.is_unreleased,
+            facts.failed_attempts,
+            facts.has_media_entry,
+            facts.has_non_blacklisted_stream,
+            max_attempts,
+        )
+    };
     let new_state = match facts.item_type {
         MediaItemType::Show | MediaItemType::Season => {
             let children = load_child_states(pool, item_id, facts.item_type).await?;
             aggregate_states(facts.item_type, facts.state, facts.show_status, &children)
-                .unwrap_or_else(|| leaf_state(&facts, max_attempts))
+                .unwrap_or_else(leaf)
         }
-        MediaItemType::Movie | MediaItemType::Episode => leaf_state(&facts, max_attempts),
+        MediaItemType::Movie | MediaItemType::Episode => leaf(),
     };
 
     if new_state == facts.state {
@@ -222,13 +245,6 @@ async fn recompute_one(pool: &PgPool, item_id: i64, max_attempts: i32) -> Result
     Ok(facts.parent_id)
 }
 
-/// Recompute the given items, cascading to parents on state change. Safe to
-/// call with arbitrary input order: every parent enqueued by a state-change
-/// cascade is re-evaluated regardless of whether it appeared earlier in the
-/// queue, so a parent processed before its child gets a second pass against
-/// the now-updated child state. Termination is guaranteed by the tree shape
-/// of `media_items.parent_id` plus the determinism of [`leaf_state`] /
-/// [`aggregate_states`].
 pub async fn recompute(pool: &PgPool, item_ids: &[i64]) -> Result<()> {
     if item_ids.is_empty() {
         return Ok(());
@@ -275,229 +291,3 @@ pub async fn force_recompute(pool: &PgPool, ids: &[i64]) -> Result<()> {
     recompute(pool, ids).await
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use MediaItemState::*;
-
-    fn agg(
-        parent_type: MediaItemType,
-        parent_state: MediaItemState,
-        show_status: Option<ShowStatus>,
-        children: &[MediaItemState],
-    ) -> Option<MediaItemState> {
-        aggregate_states(parent_type, parent_state, show_status, children)
-    }
-
-    #[test]
-    fn empty_children_returns_none() {
-        assert_eq!(agg(MediaItemType::Season, Indexed, None, &[]), None);
-    }
-
-    #[test]
-    fn parent_paused_is_sticky() {
-        assert_eq!(
-            agg(MediaItemType::Season, Paused, None, &[Completed, Indexed]),
-            Some(Paused)
-        );
-    }
-
-    #[test]
-    fn parent_failed_is_sticky() {
-        assert_eq!(
-            agg(MediaItemType::Season, Failed, None, &[Completed]),
-            Some(Failed)
-        );
-    }
-
-    #[test]
-    fn all_paused_propagates() {
-        assert_eq!(
-            agg(MediaItemType::Season, Indexed, None, &[Paused, Paused]),
-            Some(Paused)
-        );
-    }
-
-    #[test]
-    fn all_failed_propagates() {
-        assert_eq!(
-            agg(MediaItemType::Season, Indexed, None, &[Failed, Failed]),
-            Some(Failed)
-        );
-    }
-
-    #[test]
-    fn all_unreleased_propagates() {
-        assert_eq!(
-            agg(
-                MediaItemType::Season,
-                Indexed,
-                None,
-                &[Unreleased, Unreleased]
-            ),
-            Some(Unreleased)
-        );
-    }
-
-    #[test]
-    fn all_completed_season_is_completed() {
-        assert_eq!(
-            agg(
-                MediaItemType::Season,
-                Indexed,
-                None,
-                &[Completed, Completed]
-            ),
-            Some(Completed)
-        );
-    }
-
-    #[test]
-    fn all_completed_continuing_show_is_ongoing() {
-        assert_eq!(
-            agg(
-                MediaItemType::Show,
-                Indexed,
-                Some(ShowStatus::Continuing),
-                &[Completed, Completed]
-            ),
-            Some(Ongoing)
-        );
-    }
-
-    #[test]
-    fn all_completed_ended_show_is_completed() {
-        assert_eq!(
-            agg(
-                MediaItemType::Show,
-                Indexed,
-                Some(ShowStatus::Ended),
-                &[Completed, Completed]
-            ),
-            Some(Completed)
-        );
-    }
-
-    #[test]
-    fn ongoing_child_makes_parent_ongoing() {
-        assert_eq!(
-            agg(MediaItemType::Season, Indexed, None, &[Ongoing, Indexed]),
-            Some(Ongoing)
-        );
-    }
-
-    #[test]
-    fn unreleased_mixed_makes_parent_ongoing() {
-        // Mixed unreleased + indexed isn't all-unreleased, so it falls into
-        // the ongoing/unreleased "any" check.
-        assert_eq!(
-            agg(MediaItemType::Season, Indexed, None, &[Unreleased, Indexed]),
-            Some(Ongoing)
-        );
-    }
-
-    #[test]
-    fn continuing_show_with_indexed_children_is_ongoing() {
-        assert_eq!(
-            agg(
-                MediaItemType::Show,
-                Indexed,
-                Some(ShowStatus::Continuing),
-                &[Indexed, Indexed]
-            ),
-            Some(Ongoing)
-        );
-    }
-
-    #[test]
-    fn partially_completed_when_some_complete_some_not() {
-        assert_eq!(
-            agg(MediaItemType::Season, Indexed, None, &[Completed, Indexed]),
-            Some(PartiallyCompleted)
-        );
-    }
-
-    #[test]
-    fn scraped_when_a_child_is_scraped_and_others_indexed() {
-        assert_eq!(
-            agg(MediaItemType::Season, Indexed, None, &[Scraped, Indexed]),
-            Some(Scraped)
-        );
-    }
-
-    #[test]
-    fn all_indexed_falls_through_to_leaf_rules() {
-        assert_eq!(
-            agg(MediaItemType::Season, Indexed, None, &[Indexed, Indexed]),
-            None
-        );
-    }
-
-    fn facts(
-        item_type: MediaItemType,
-        state: MediaItemState,
-        is_unreleased: bool,
-        failed_attempts: i32,
-        has_media_entry: bool,
-        has_non_blacklisted_stream: bool,
-    ) -> ItemFacts {
-        ItemFacts {
-            item_type,
-            state,
-            show_status: None,
-            parent_id: None,
-            is_unreleased,
-            failed_attempts,
-            has_media_entry,
-            has_non_blacklisted_stream,
-        }
-    }
-
-    #[test]
-    fn leaf_unreleased_takes_precedence() {
-        let f = facts(MediaItemType::Episode, Indexed, true, 0, true, true);
-        assert_eq!(leaf_state(&f, 0), Unreleased);
-    }
-
-    #[test]
-    fn leaf_paused_is_sticky() {
-        let f = facts(MediaItemType::Movie, Paused, false, 0, true, false);
-        assert_eq!(leaf_state(&f, 0), Paused);
-    }
-
-    #[test]
-    fn leaf_failed_is_sticky() {
-        let f = facts(MediaItemType::Movie, Failed, false, 0, true, false);
-        assert_eq!(leaf_state(&f, 0), Failed);
-    }
-
-    #[test]
-    fn leaf_attempts_ceiling_fails() {
-        let f = facts(MediaItemType::Movie, Indexed, false, 5, false, false);
-        assert_eq!(leaf_state(&f, 5), Failed);
-    }
-
-    #[test]
-    fn leaf_attempts_ceiling_disabled_when_zero() {
-        let f = facts(MediaItemType::Movie, Indexed, false, 999, false, false);
-        assert_eq!(leaf_state(&f, 0), Indexed);
-    }
-
-    #[test]
-    fn leaf_completed_when_media_entry_exists() {
-        let f = facts(MediaItemType::Movie, Indexed, false, 0, true, false);
-        assert_eq!(leaf_state(&f, 0), Completed);
-    }
-
-    #[test]
-    fn leaf_scraped_when_only_streams() {
-        let f = facts(MediaItemType::Movie, Indexed, false, 0, false, true);
-        assert_eq!(leaf_state(&f, 0), Scraped);
-    }
-
-    #[test]
-    fn leaf_indexed_when_no_facts() {
-        let f = facts(MediaItemType::Movie, Indexed, false, 0, false, false);
-        assert_eq!(leaf_state(&f, 0), Indexed);
-    }
-}
