@@ -132,7 +132,8 @@ async fn main() -> Result<()> {
     );
     {
         let mut redis = job_queue.redis.clone();
-        riven_queue::prune_queue_history(&mut redis).await;
+        let queues = job_queue.queue_names();
+        riven_queue::prune_queue_history(&mut redis, &queues).await;
     }
 
     let (link_tx, mut link_rx) = tokio::sync::mpsc::channel(64);
@@ -243,9 +244,10 @@ async fn main() -> Result<()> {
         let cancel = cancel.clone();
         async move {
             let mut redis_conn = jq.redis.clone();
+            let queues = jq.queue_names();
             while !cancel.is_cancelled() {
-                riven_queue::clear_worker_registrations(&mut redis_conn).await;
-                riven_queue::purge_orphaned_active_jobs(&mut redis_conn).await;
+                riven_queue::clear_worker_registrations(&mut redis_conn, &queues).await;
+                riven_queue::purge_orphaned_active_jobs(&mut redis_conn, &queues).await;
                 let signal = {
                     let cancel = cancel.clone();
                     async move {

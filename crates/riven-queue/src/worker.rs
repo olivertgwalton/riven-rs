@@ -50,8 +50,9 @@ impl Scheduler {
                 _ = cleanup_tick.tick()        => self.cleanup_runtime_state().await,
                 _ = worker_recovery_tick.tick() => {
                     let mut redis = self.job_queue.redis.clone();
+                    let queues = self.job_queue.queue_names();
                     // 60s threshold: a worker missing two heartbeats is considered dead.
-                    crate::recover_stale_workers(&mut redis, 60).await;
+                    crate::recover_stale_workers(&mut redis, &queues, 60).await;
                 }
             }
         }
@@ -66,7 +67,8 @@ impl Scheduler {
 
     async fn cleanup_runtime_state(&self) {
         let mut redis = self.job_queue.redis.clone();
-        crate::prune_queue_history(&mut redis).await;
+        let queues = self.job_queue.queue_names();
+        crate::prune_queue_history(&mut redis, &queues).await;
     }
 
     /// Retry-library actor. Delegated to `MainOrchestrator`, which is the

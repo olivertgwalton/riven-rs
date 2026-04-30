@@ -168,6 +168,32 @@ impl JobQueue {
             .load(std::sync::atomic::Ordering::Relaxed)
     }
 
+    /// Every apalis-redis queue this `JobQueue` owns — fixed orchestrator queues
+    /// plus the dynamic per-(plugin, event) hook queues. Maintenance routines
+    /// (orphan purge, stale-worker rescue, history prune) iterate this so a new
+    /// queue added in `JobQueue::new` is automatically covered. Missing one
+    /// here causes orphaned active job IDs to kill its worker on first poll.
+    pub fn queue_names(&self) -> Vec<String> {
+        let mut names = vec![
+            "riven:index".to_string(),
+            "riven:index-plugin".to_string(),
+            "riven:scrape".to_string(),
+            "riven:scrape-plugin".to_string(),
+            "riven:parse".to_string(),
+            "riven:download".to_string(),
+            "riven:rank-streams".to_string(),
+            "riven:content".to_string(),
+            "riven:process-media-item".to_string(),
+        ];
+        for (plugin_name, event_type) in self.plugin_hook_storages.keys() {
+            names.push(format!(
+                "riven:plugin-hook:{}:{plugin_name}",
+                event_type.slug()
+            ));
+        }
+        names
+    }
+
     // ── Job push ──────────────────────────────────────────────────────────────
 
     pub async fn push_index(&self, job: IndexJob) {

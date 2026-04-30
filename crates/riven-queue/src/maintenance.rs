@@ -3,18 +3,6 @@ use std::collections::HashSet;
 use apalis_redis::RedisConfig;
 use chrono::Utc;
 
-/// Queue names used by apalis-redis (must match `RedisConfig::new` calls in `JobQueue`).
-pub(crate) const QUEUE_NAMES: &[&str] = &[
-    "riven:index",
-    "riven:index-plugin",
-    "riven:scrape",
-    "riven:scrape-plugin",
-    "riven:parse",
-    "riven:download",
-    "riven:rank-streams",
-    "riven:content",
-];
-
 const APALIS_WORKERS_METADATA_PREFIX: &str = "core::apalis::workers:metadata::";
 
 const COMPLETED_JOB_MAX_AGE_SECS: i64 = 60 * 60 * 6;
@@ -23,20 +11,33 @@ const COMPLETED_JOB_MAX_COUNT: isize = 500;
 const FAILED_JOB_MAX_COUNT: isize = 5_000;
 
 /// Re-enqueue all inflight jobs and clear all worker registrations (called at startup).
-pub async fn clear_worker_registrations(redis: &mut redis::aio::ConnectionManager) {
-    rescue_workers(redis, None).await;
+pub async fn clear_worker_registrations(
+    redis: &mut redis::aio::ConnectionManager,
+    queues: &[String],
+) {
+    rescue_workers(redis, queues, None).await;
 }
 
 /// Re-enqueue inflight jobs from workers whose heartbeat is older than `stale_threshold_secs`.
 pub async fn recover_stale_workers(
     redis: &mut redis::aio::ConnectionManager,
+    queues: &[String],
     stale_threshold_secs: i64,
 ) {
-    rescue_workers(redis, Some(Utc::now().timestamp() - stale_threshold_secs)).await;
+    rescue_workers(
+        redis,
+        queues,
+        Some(Utc::now().timestamp() - stale_threshold_secs),
+    )
+    .await;
 }
 
-async fn rescue_workers(redis: &mut redis::aio::ConnectionManager, max_score: Option<i64>) {
-    for &queue_name in QUEUE_NAMES {
+async fn rescue_workers(
+    redis: &mut redis::aio::ConnectionManager,
+    queues: &[String],
+    max_score: Option<i64>,
+) {
+    for queue_name in queues {
         let config = RedisConfig::new(queue_name);
 
         let members: Vec<String> = match max_score {
@@ -145,8 +146,11 @@ async fn rescue_workers(redis: &mut redis::aio::ConnectionManager, max_score: Op
 /// entry in the job-data hash. These orphans (no data + no meta) are harmless
 /// when idle but cause the worker's poll stream to emit a StreamError the
 /// first time it dequeues them, which kills the worker immediately.
-pub async fn purge_orphaned_active_jobs(redis: &mut redis::aio::ConnectionManager) {
-    for &queue_name in QUEUE_NAMES {
+pub async fn purge_orphaned_active_jobs(
+    redis: &mut redis::aio::ConnectionManager,
+    queues: &[String],
+) {
+    for queue_name in queues {
         let config = RedisConfig::new(queue_name);
         let active_key = config.active_jobs_list();
         let data_key = config.job_data_hash();
@@ -198,8 +202,8 @@ pub async fn purge_orphaned_active_jobs(redis: &mut redis::aio::ConnectionManage
     }
 }
 
-pub async fn prune_queue_history(redis: &mut redis::aio::ConnectionManager) {
-    for &queue in QUEUE_NAMES {
+pub async fn prune_queue_history(redis: &mut redis::aio::ConnectionManager, queues: &[String]) {
+    for queue in queues {
         let config = RedisConfig::new(queue);
         let data = config.job_data_hash();
         let meta = config.job_meta_hash();
