@@ -255,10 +255,10 @@ impl Plugin for UsenetPlugin {
         if !is_nzb_info_hash(info_hash) {
             return Ok(HookResponse::Empty);
         }
-        if let Some(p) = provider {
-            if p != PROVIDER {
-                return Ok(HookResponse::Empty);
-            }
+        if let Some(p) = provider
+            && p != PROVIDER
+        {
+            return Ok(HookResponse::Empty);
         }
         // The persisted stream_url already points at our /usenet/ route, so
         // there is no separate "live link" to refresh. Return empty so the

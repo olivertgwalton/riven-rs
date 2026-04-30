@@ -1,0 +1,102 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT\n              m.item_type    AS \"item_type: MediaItemType\",\n              m.state        AS \"state: MediaItemState\",\n              m.show_status  AS \"show_status: ShowStatus\",\n              m.parent_id,\n              m.failed_attempts,\n              (m.aired_at IS NOT NULL AND m.aired_at > CURRENT_DATE) AS \"is_unreleased!\",\n              EXISTS(\n                  SELECT 1 FROM filesystem_entries fe\n                  WHERE fe.media_item_id = m.id AND fe.entry_type = 'media'\n              ) AS \"has_media_entry!\",\n              EXISTS(\n                  SELECT 1 FROM media_item_streams ms\n                  WHERE ms.media_item_id = m.id\n                    AND ms.stream_id NOT IN (\n                        SELECT stream_id FROM media_item_blacklisted_streams\n                        WHERE media_item_id = m.id\n                    )\n              ) AS \"has_non_blacklisted_stream!\"\n           FROM media_items m WHERE m.id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "item_type: MediaItemType",
+        "type_info": {
+          "Custom": {
+            "name": "media_item_type",
+            "kind": {
+              "Enum": [
+                "movie",
+                "show",
+                "season",
+                "episode"
+              ]
+            }
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "state: MediaItemState",
+        "type_info": {
+          "Custom": {
+            "name": "media_item_state",
+            "kind": {
+              "Enum": [
+                "indexed",
+                "unreleased",
+                "scraped",
+                "ongoing",
+                "partially_completed",
+                "completed",
+                "paused",
+                "failed"
+              ]
+            }
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "show_status: ShowStatus",
+        "type_info": {
+          "Custom": {
+            "name": "show_status",
+            "kind": {
+              "Enum": [
+                "continuing",
+                "ended"
+              ]
+            }
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "parent_id",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 4,
+        "name": "failed_attempts",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 5,
+        "name": "is_unreleased!",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 6,
+        "name": "has_media_entry!",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 7,
+        "name": "has_non_blacklisted_stream!",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      true,
+      false,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "7d90b4cc2d7eafdbc35357f9a343ac15dbef33bc87250527521c0456d8857c61"
+}

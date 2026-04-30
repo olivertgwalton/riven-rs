@@ -202,23 +202,21 @@ fn parse_newznab_xml(body: &str) -> Vec<NewznabItem> {
                 match local {
                     b"enclosure" => {
                         for attr in e.attributes().flatten() {
-                            if attr.key.as_ref() == b"url" {
-                                if let Ok(v) = attr.unescape_value() {
-                                    item.nzb_url = v.into_owned();
-                                }
+                            if attr.key.as_ref() == b"url"
+                                && let Ok(v) = attr.unescape_value()
+                            {
+                                item.nzb_url = v.into_owned();
                             }
                         }
                     }
-                    b"link" => {
-                        // Some indexers emit <link> as the NZB url; only adopt
-                        // when we don't already have one from <enclosure>.
-                        if item.nzb_url.is_empty() {
-                            for attr in e.attributes().flatten() {
-                                if attr.key.as_ref() == b"href" {
-                                    if let Ok(v) = attr.unescape_value() {
-                                        item.nzb_url = v.into_owned();
-                                    }
-                                }
+                    // Some indexers emit <link> as the NZB url; only adopt
+                    // when we don't already have one from <enclosure>.
+                    b"link" if item.nzb_url.is_empty() => {
+                        for attr in e.attributes().flatten() {
+                            if attr.key.as_ref() == b"href"
+                                && let Ok(v) = attr.unescape_value()
+                            {
+                                item.nzb_url = v.into_owned();
                             }
                         }
                     }
@@ -238,10 +236,10 @@ fn parse_newznab_xml(body: &str) -> Vec<NewznabItem> {
                                 _ => {}
                             }
                         }
-                        if let (Some(n), Some(v)) = (name_val, value_val) {
-                            if n.eq_ignore_ascii_case("size") {
-                                item.size = v.parse().ok();
-                            }
+                        if let (Some(n), Some(v)) = (name_val, value_val)
+                            && n.eq_ignore_ascii_case("size")
+                        {
+                            item.size = v.parse().ok();
                         }
                     }
                     _ => {}
@@ -265,10 +263,10 @@ fn parse_newznab_xml(body: &str) -> Vec<NewznabItem> {
             }
             Ok(Event::End(e)) => {
                 let name = e.name();
-                if name.as_ref() == b"item" {
-                    if let Some(item) = current.take() {
-                        items.push(item);
-                    }
+                if name.as_ref() == b"item"
+                    && let Some(item) = current.take()
+                {
+                    items.push(item);
                 }
                 text_target = None;
             }

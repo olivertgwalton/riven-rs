@@ -1,0 +1,38 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT state AS \"state: MediaItemState\"\n               FROM media_items\n               WHERE parent_id = $1\n                 AND item_type = 'episode'",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "state: MediaItemState",
+        "type_info": {
+          "Custom": {
+            "name": "media_item_state",
+            "kind": {
+              "Enum": [
+                "indexed",
+                "unreleased",
+                "scraped",
+                "ongoing",
+                "partially_completed",
+                "completed",
+                "paused",
+                "failed"
+              ]
+            }
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "284ff9350405eac6b42f74eb84e8e57fd9a89fb5ac010ffa8db0dc088495d38a"
+}

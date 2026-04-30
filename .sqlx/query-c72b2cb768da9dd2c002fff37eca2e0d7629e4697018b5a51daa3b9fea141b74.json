@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE media_items SET failed_attempts = 0, updated_at = NOW()\n           WHERE is_requested = true AND failed_attempts > 0 AND updated_at < $1\n           RETURNING id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Timestamptz"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "c72b2cb768da9dd2c002fff37eca2e0d7629e4697018b5a51daa3b9fea141b74"
+}

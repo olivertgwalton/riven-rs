@@ -112,10 +112,10 @@ pub async fn usenet_stream_handler(
     if let Ok(v) = HeaderValue::from_str(&len.to_string()) {
         header_map.insert(CONTENT_LENGTH, v);
     }
-    if partial {
-        if let Ok(v) = HeaderValue::from_str(&format!("bytes {start}-{end}/{total}")) {
-            header_map.insert(CONTENT_RANGE, v);
-        }
+    if partial
+        && let Ok(v) = HeaderValue::from_str(&format!("bytes {start}-{end}/{total}"))
+    {
+        header_map.insert(CONTENT_RANGE, v);
     }
 
     if method == Method::HEAD {

@@ -52,7 +52,8 @@ pub struct NntpConnection {
 
 enum NntpStream {
     Plain(BufReader<TcpStream>),
-    Tls(BufReader<tokio_rustls::client::TlsStream<TcpStream>>),
+    // Boxed: rustls' TlsStream is ~1KB on the stack and dwarfs the Plain variant.
+    Tls(Box<BufReader<tokio_rustls::client::TlsStream<TcpStream>>>),
 }
 
 impl NntpStream {
@@ -132,7 +133,7 @@ impl NntpConnection {
                     .connect(server_name, tcp)
                     .await
                     .map_err(|e| NntpError::Tls(e.to_string()))?;
-                NntpStream::Tls(BufReader::new(tls))
+                NntpStream::Tls(Box::new(BufReader::new(tls)))
             } else {
                 NntpStream::Plain(BufReader::new(tcp))
             };

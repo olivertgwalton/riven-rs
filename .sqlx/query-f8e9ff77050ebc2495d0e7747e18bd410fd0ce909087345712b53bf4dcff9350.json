@@ -1,0 +1,31 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE media_items SET state = $1, updated_at = NOW() WHERE id = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        {
+          "Custom": {
+            "name": "media_item_state",
+            "kind": {
+              "Enum": [
+                "indexed",
+                "unreleased",
+                "scraped",
+                "ongoing",
+                "partially_completed",
+                "completed",
+                "paused",
+                "failed"
+              ]
+            }
+          }
+        },
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "f8e9ff77050ebc2495d0e7747e18bd410fd0ce909087345712b53bf4dcff9350"
+}

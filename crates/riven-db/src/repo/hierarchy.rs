@@ -222,6 +222,7 @@ pub async fn create_season(
     .bind(item_request_id)
     .fetch_one(pool)
     .await?;
+    super::state::recompute(pool, &[item.id]).await?;
     Ok(item)
 }
 
@@ -285,6 +286,7 @@ pub async fn create_episode(
     .bind(aired_at_utc)
     .fetch_one(pool)
     .await?;
+    super::state::recompute(pool, &[item.id]).await?;
     Ok(item)
 }
 
@@ -445,6 +447,12 @@ pub async fn mark_seasons_requested_and_get_episodes(
     .execute(pool)
     .await?;
 
+    // The show's rollup filters seasons by `is_requested = true`, so adding
+    // a season to the requested set can change the show's derived state.
+    // Episode `is_requested` doesn't feed any rollup, so episodes don't need
+    // a recompute here.
+    super::state::recompute(pool, &[show_id]).await?;
+
     Ok(sqlx::query_as::<_, MediaItem>(
         r#"SELECT * FROM media_items
            WHERE parent_id IN (
@@ -504,6 +512,9 @@ pub async fn unmark_unrequested_seasons(
     .bind(requested_season_numbers)
     .execute(pool)
     .await?;
+
+    // Removing seasons from the requested set can change the show's rollup.
+    super::state::recompute(pool, &[show_id]).await?;
 
     Ok(())
 }

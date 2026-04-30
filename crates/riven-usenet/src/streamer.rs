@@ -229,10 +229,10 @@ fn extract_filename(subject: &str) -> String {
     // Common NNTP subject formats:
     //   "[1/12] - "Movie.2024.1080p.mkv" yEnc (1/86)"
     //   "Movie.2024.1080p.mkv (1/86)"
-    if let Some(start) = subject.find('"') {
-        if let Some(rel_end) = subject[start + 1..].find('"') {
-            return subject[start + 1..start + 1 + rel_end].to_string();
-        }
+    if let Some(start) = subject.find('"')
+        && let Some(rel_end) = subject[start + 1..].find('"')
+    {
+        return subject[start + 1..start + 1 + rel_end].to_string();
     }
     // Fall back to the first whitespace-delimited token that has a dot.
     subject

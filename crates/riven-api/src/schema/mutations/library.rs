@@ -105,12 +105,10 @@ impl LibraryMutations {
         if item.item_type == MediaItemType::Show
             && let Some(seasons) = season_numbers.as_deref()
             && !seasons.is_empty()
-        {
-            if let Err(err) =
+            && let Err(err) =
                 repo::mark_seasons_requested_and_get_episodes(pool, item.id, seasons).await
-            {
-                tracing::warn!(show_id = item.id, %err, "failed to mark seasons requested");
-            }
+        {
+            tracing::warn!(show_id = item.id, %err, "failed to mark seasons requested");
         }
 
         job_queue

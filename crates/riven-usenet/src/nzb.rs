@@ -114,18 +114,19 @@ pub fn parse_nzb(xml: &str) -> Result<Vec<NzbFile>, NzbError> {
             }
             Event::CData(c) => {
                 let text = String::from_utf8_lossy(c.as_ref()).into_owned();
-                if matches!(text_target.take(), Some("segment")) {
-                    if let Some(seg) = cur_segment.as_mut() {
-                        seg.message_id = text.trim().trim_matches(|c| c == '<' || c == '>').to_string();
-                    }
+                if matches!(text_target.take(), Some("segment"))
+                    && let Some(seg) = cur_segment.as_mut()
+                {
+                    seg.message_id =
+                        text.trim().trim_matches(|c| c == '<' || c == '>').to_string();
                 }
             }
             Event::End(e) => match e.name().as_ref() {
                 b"segment" => {
-                    if let (Some(file), Some(seg)) = (cur_file.as_mut(), cur_segment.take()) {
-                        if !seg.message_id.is_empty() {
-                            file.segments.push(seg);
-                        }
+                    if let (Some(file), Some(seg)) = (cur_file.as_mut(), cur_segment.take())
+                        && !seg.message_id.is_empty()
+                    {
+                        file.segments.push(seg);
                     }
                     text_target = None;
                 }

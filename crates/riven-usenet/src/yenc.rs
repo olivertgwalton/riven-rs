@@ -101,10 +101,10 @@ pub fn decode(body: &[u8]) -> Result<(Vec<u8>, YencInfo), YencError> {
     }
 
     info.computed_pcrc32 = Some(crc32fast::hash(&out));
-    if let (Some(declared), Some(computed)) = (info.declared_pcrc32, info.computed_pcrc32) {
-        if declared != computed {
-            tracing::warn!(declared, computed, "yEnc pcrc32 mismatch");
-        }
+    if let (Some(declared), Some(computed)) = (info.declared_pcrc32, info.computed_pcrc32)
+        && declared != computed
+    {
+        tracing::warn!(declared, computed, "yEnc pcrc32 mismatch");
     }
 
     Ok((out, info))

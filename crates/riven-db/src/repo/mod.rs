@@ -19,9 +19,8 @@ pub async fn reset_items_by_ids(pool: &PgPool, ids: Vec<i64>) -> Result<u64> {
     if ids.is_empty() {
         return Ok(0);
     }
-    // Setting state='indexed' + zeroing failed_attempts both fire the
-    // recompute trigger; the second UPDATE settles to the truly-derived
-    // state.
+    // Stomp the column to a non-sticky placeholder, zero the attempts ceiling,
+    // then re-derive the real state from current facts.
     let result = sqlx::query!(
         "UPDATE media_items SET state = 'indexed', failed_attempts = 0, updated_at = NOW() \
          WHERE id = ANY($1)",
@@ -29,6 +28,7 @@ pub async fn reset_items_by_ids(pool: &PgPool, ids: Vec<i64>) -> Result<u64> {
     )
     .execute(pool)
     .await?;
+    state::recompute(pool, &ids).await?;
     Ok(result.rows_affected())
 }
 
@@ -42,6 +42,7 @@ pub async fn retry_items_by_ids(pool: &PgPool, ids: Vec<i64>) -> Result<u64> {
     )
     .execute(pool)
     .await?;
+    state::recompute(pool, &ids).await?;
     Ok(result.rows_affected())
 }
 
@@ -49,14 +50,16 @@ pub async fn pause_items_by_ids(pool: &PgPool, ids: Vec<i64>) -> Result<u64> {
     if ids.is_empty() {
         return Ok(0);
     }
-    // `Paused` is the only sticky state the application authors. The
-    // `media_items_state_cascade` trigger propagates this up to parents.
+    // `Paused` is the only sticky state the application authors. The recompute
+    // call below propagates this up to parents (their rollup logic recognises
+    // the new sticky state on the child).
     let result = sqlx::query!(
         "UPDATE media_items SET state = 'paused', updated_at = NOW() WHERE id = ANY($1)",
         &ids[..]
     )
     .execute(pool)
     .await?;
+    state::recompute(pool, &ids).await?;
     Ok(result.rows_affected())
 }
 

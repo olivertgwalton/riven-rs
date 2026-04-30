@@ -68,7 +68,11 @@ pub async fn link_stream_to_item(
     )
     .execute(pool)
     .await?;
-    Ok(result.rows_affected() > 0)
+    let inserted = result.rows_affected() > 0;
+    if inserted {
+        super::state::recompute(pool, &[media_item_id]).await?;
+    }
+    Ok(inserted)
 }
 
 pub async fn get_streams_for_item(pool: &PgPool, media_item_id: i64) -> Result<Vec<Stream>> {
@@ -134,6 +138,7 @@ pub async fn clear_blacklisted_streams(pool: &PgPool, media_item_id: i64) -> Res
     )
     .execute(pool)
     .await?;
+    super::state::recompute(pool, &[media_item_id]).await?;
     Ok(())
 }
 
@@ -473,6 +478,8 @@ pub async fn create_media_entry(
     .fetch_one(pool)
     .await?;
 
+    super::state::recompute(pool, &[media_item_id]).await?;
+
     Ok(entry)
 }
 
@@ -648,9 +655,9 @@ pub async fn list_vfs_file_paths(pool: &PgPool, dir_path: &str) -> Result<Vec<St
     .await?)
 }
 
-/// Returns `(was_deleted, owning_media_item_id)`. The id is captured in the
-/// same DELETE so callers can recompute that item's state — losing a media
-/// entry can flip Completed → Scraped/Indexed.
+/// Returns `(was_deleted, owning_media_item_id)`. Losing a media entry can
+/// flip Completed → Scraped/Indexed, so the affected item is recomputed
+/// before returning.
 pub async fn delete_filesystem_entry(
     pool: &PgPool,
     entry_id: i64,
@@ -663,6 +670,9 @@ pub async fn delete_filesystem_entry(
     .bind(entry_id)
     .fetch_optional(pool)
     .await?;
+    if let Some((media_item_id,)) = row {
+        super::state::recompute(pool, &[media_item_id]).await?;
+    }
     Ok((row.is_some(), row.map(|r| r.0)))
 }
 

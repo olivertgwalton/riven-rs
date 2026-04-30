@@ -21,6 +21,20 @@ use super::helpers::{
     parse_file_path, select_episode_files,
 };
 use crate::JobQueue;
+
+/// A file is persistable only when the VFS can eventually fetch bytes from it.
+/// `stream_url` is used directly; `download_url` is the input the VFS hands to
+/// the provider's link-resolver to mint a fresh `stream_url` on demand. Without
+/// either, the row produces a phantom entry in the VFS — `ls` shows the file
+/// but `read()` fails, which surfaces as Plex seeing the title without ever
+/// scanning media or opening a debrid connection.
+///
+/// The `matched:{id}` sentinel used by show-supplied downloads carries a real
+/// `download_url`, so it passes this check.
+fn has_playable_url(file: &DownloadFile) -> bool {
+    file.download_url.as_deref().is_some_and(|s| !s.is_empty())
+        || file.stream_url.as_deref().is_some_and(|s| !s.is_empty())
+}
 use crate::context::{DownloadHierarchyContext, load_download_hierarchy_context};
 use crate::orchestrator::LibraryOrchestrator;
 pub enum SeasonPersistOutcome {
@@ -138,6 +152,22 @@ pub async fn persist_movie(
     }
     drop(config);
 
+    if !has_playable_url(file) {
+        tracing::warn!(
+            id, info_hash = %info_hash, filename = %file.filename,
+            "matched movie file has no playable URL — blacklisting stream"
+        );
+        if !info_hash.is_empty()
+            && let Err(err) = repo::blacklist_stream_by_hash(&queue.db_pool, id, info_hash).await
+        {
+            tracing::warn!(id, info_hash, %err, "failed to blacklist stream");
+        }
+        queue
+            .notify(RivenEvent::MediaItemDownloadPartialSuccess { id })
+            .await;
+        return false;
+    }
+
     let ext = file
         .filename
         .rfind('.')
@@ -235,6 +265,7 @@ pub async fn persist_episode(
         .files
         .iter()
         .filter(|f| is_video_file(&f.filename))
+        .filter(|f| has_playable_url(f))
         .map(|f| (f, parse_file_path(&f.filename)))
         .filter(|(_, p)| {
             matches_episode_lookup(p, season_number, episode_number, item.absolute_number)
@@ -245,7 +276,7 @@ pub async fn persist_episode(
         tracing::info!(
             id, season = season_number, episode = episode_number,
             info_hash = %info_hash,
-            "no torrent file matched episode — blacklisting stream"
+            "no playable torrent file matched episode — blacklisting stream"
         );
         if !info_hash.is_empty()
             && let Err(err) = repo::blacklist_stream_by_hash(&queue.db_pool, id, info_hash).await
@@ -398,10 +429,13 @@ pub async fn persist_season(
     drop(filesystem_settings);
 
     // Pre-parse all video files once — reused across every episode filter below.
+    // Files without a playable URL are dropped here so they never reach
+    // `create_media_entry` — see `has_playable_url` for why.
     let parsed_video_files: Vec<(&DownloadFile, riven_rank::ParsedData)> = dl
         .files
         .iter()
         .filter(|f| is_video_file(&f.filename))
+        .filter(|f| has_playable_url(f))
         .map(|f| (f, parse_file_path(&f.filename)))
         .collect();
 
@@ -663,6 +697,15 @@ async fn persist_supplied_show_download(
                 | MediaItemState::PartiallyCompleted
                 | MediaItemState::Unreleased
         ) {
+            continue;
+        }
+
+        if !has_playable_url(file) {
+            tracing::warn!(
+                ep_id = episode.id,
+                filename = %file.filename,
+                "supplied-show file has no playable URL; skipping"
+            );
             continue;
         }
 

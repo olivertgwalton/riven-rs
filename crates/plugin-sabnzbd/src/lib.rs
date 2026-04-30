@@ -179,10 +179,10 @@ impl Plugin for SabnzbdPlugin {
         if !is_nzb_info_hash(info_hash) {
             return Ok(HookResponse::Empty);
         }
-        if let Some(p) = provider {
-            if p != PROVIDER {
-                return Ok(HookResponse::Empty);
-            }
+        if let Some(p) = provider
+            && p != PROVIDER
+        {
+            return Ok(HookResponse::Empty);
         }
         // SABnzbd doesn't host live streams; the file is on local disk after
         // download. The DB-stored `stream_url` from `on_download_requested` is

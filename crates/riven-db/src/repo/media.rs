@@ -41,6 +41,7 @@ async fn upsert_top_level_item(
             .bind(existing.id)
             .execute(pool)
             .await?;
+            super::state::recompute(pool, &[existing.id]).await?;
         }
         return Ok((existing, false));
     }
@@ -58,6 +59,7 @@ async fn upsert_top_level_item(
         .bind(item_request_id)
         .fetch_one(pool)
         .await?;
+    super::state::recompute(pool, &[item.id]).await?;
     Ok((item, true))
 }
 
@@ -393,6 +395,7 @@ pub async fn update_media_item_index(
     )
     .execute(pool)
     .await?;
+    super::state::recompute(pool, &[id]).await?;
     Ok(())
 }
 
@@ -416,17 +419,21 @@ pub async fn update_scraped(pool: &PgPool, id: i64) -> Result<()> {
 }
 
 /// Transition unreleased items whose air date has passed back into the
-/// derivation pipeline. The UPDATE on `aired_at`/`state` fires the
-/// `media_items_inputs_changed` trigger which recomputes each affected row.
+/// derivation pipeline. Captures affected ids and runs a recompute so the
+/// state column lands on the truly-derived value (a just-aired episode with
+/// existing media entries should resolve to `Completed`, not `Indexed`).
 pub async fn transition_unreleased_aired(pool: &PgPool) -> Result<u64> {
-    let result = sqlx::query!(
+    let ids: Vec<i64> = sqlx::query_scalar!(
         r#"UPDATE media_items SET state = 'indexed', updated_at = NOW()
             WHERE state = 'unreleased' AND aired_at IS NOT NULL
-              AND aired_at <= CURRENT_DATE AND is_requested = true"#,
+              AND aired_at <= CURRENT_DATE AND is_requested = true
+            RETURNING id"#,
     )
-    .execute(pool)
+    .fetch_all(pool)
     .await?;
-    Ok(result.rows_affected())
+    let count = ids.len() as u64;
+    super::state::recompute(pool, &ids).await?;
+    Ok(count)
 }
 
 pub async fn blacklist_stream_by_hash(
@@ -445,6 +452,7 @@ pub async fn blacklist_stream_by_hash(
         )
         .execute(pool)
         .await?;
+        super::state::recompute(pool, &[media_item_id]).await?;
     }
     Ok(())
 }
@@ -460,6 +468,7 @@ pub async fn increment_failed_attempts(pool: &PgPool, id: i64) -> Result<()> {
     )
     .execute(pool)
     .await?;
+    super::state::recompute(pool, &[id]).await?;
     Ok(())
 }
 
@@ -468,19 +477,23 @@ pub async fn reset_failed_attempts(pool: &PgPool, id: i64) -> Result<()> {
         .bind(id)
         .execute(pool)
         .await?;
+    super::state::recompute(pool, &[id]).await?;
     Ok(())
 }
 
 pub async fn reset_failed_items(pool: &PgPool, older_than_secs: u64) -> Result<u64> {
     let cutoff = Utc::now() - chrono::Duration::seconds(older_than_secs as i64);
-    Ok(sqlx::query!(
+    let ids: Vec<i64> = sqlx::query_scalar!(
         r#"UPDATE media_items SET failed_attempts = 0, updated_at = NOW()
-           WHERE is_requested = true AND failed_attempts > 0 AND updated_at < $1"#,
+           WHERE is_requested = true AND failed_attempts > 0 AND updated_at < $1
+           RETURNING id"#,
         cutoff
     )
-    .execute(pool)
-    .await?
-    .rows_affected())
+    .fetch_all(pool)
+    .await?;
+    let count = ids.len() as u64;
+    super::state::recompute(pool, &ids).await?;
+    Ok(count)
 }
 
 /// Delete top-level items (movies/shows) whose content-service request is no
