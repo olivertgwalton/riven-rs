@@ -88,7 +88,19 @@ pub enum RivenEvent {
         cached_stores: Vec<crate::types::CachedStoreEntry>,
     },
     #[serde(rename = "riven.media-item.download.cache-check-requested")]
-    MediaItemDownloadCacheCheckRequested { hashes: Vec<String> },
+    MediaItemDownloadCacheCheckRequested {
+        hashes: Vec<String>,
+        /// When set, the plugin only checks this single provider (e.g.
+        /// `"realdebrid"`). When `None` the plugin falls back to checking
+        /// every configured provider — used by callers that don't iterate
+        /// providers themselves.
+        ///
+        /// The download flow's per-iteration cache check sets this so an
+        /// early hit on the first provider skips the slower second
+        /// provider's API call entirely.
+        #[serde(default)]
+        provider: Option<String>,
+    },
     #[serde(rename = "riven.media-item.download.error")]
     MediaItemDownloadError {
         id: i64,
@@ -177,6 +189,30 @@ impl RivenEvent {
     /// Returns true for events that should be shown as UI notifications.
     pub fn is_notable(&self) -> bool {
         self.event_type().is_notable()
+    }
+
+    /// The media item id this event references, if any. Used by the
+    /// plugin-hook worker to short-circuit children for items that were
+    /// deleted while their fan-in jobs were queued, and by `cancel_items`
+    /// to find queued jobs to purge.
+    pub fn media_item_id(&self) -> Option<i64> {
+        match self {
+            Self::MediaItemIndexRequested { id, .. }
+            | Self::MediaItemIndexSuccess { id, .. }
+            | Self::MediaItemIndexError { id, .. }
+            | Self::MediaItemIndexErrorIncorrectState { id, .. }
+            | Self::MediaItemScrapeRequested { id, .. }
+            | Self::MediaItemScrapeSuccess { id, .. }
+            | Self::MediaItemScrapeError { id, .. }
+            | Self::MediaItemScrapeErrorIncorrectState { id, .. }
+            | Self::MediaItemScrapeErrorNoNewStreams { id, .. }
+            | Self::MediaItemDownloadRequested { id, .. }
+            | Self::MediaItemDownloadError { id, .. }
+            | Self::MediaItemDownloadErrorIncorrectState { id, .. }
+            | Self::MediaItemDownloadPartialSuccess { id, .. }
+            | Self::MediaItemDownloadSuccess { id, .. } => Some(*id),
+            _ => None,
+        }
     }
 
     pub fn event_type(&self) -> EventType {

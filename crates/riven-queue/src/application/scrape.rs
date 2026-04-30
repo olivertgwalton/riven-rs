@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use futures::stream::{self, StreamExt};
 
-use riven_core::events::{EventType, HookResponse, RivenEvent};
+use riven_core::events::RivenEvent;
 use riven_core::types::*;
 use riven_db::repo;
 
@@ -13,8 +13,7 @@ use crate::context::{
     load_media_item_or_log,
 };
 use crate::discovery::rank_streams;
-use crate::flows::{run_plugin_hook, start_plugin_flow};
-use crate::{JobQueue, ParseScrapeResultsJob, ScrapeJob, ScrapePluginJob};
+use crate::{JobQueue, ParseScrapeResultsJob, ScrapeJob};
 
 /// Backoff before the next attempt when every scraper deferred.
 fn rate_limit_backoff(prior_retries: u32) -> Duration {
@@ -79,79 +78,25 @@ pub async fn start(id: i64, job: &ScrapeJob, queue: &JobQueue) {
         tracing::warn!(id, %err, "failed to clear blacklisted streams");
     }
 
-    if start_plugin_flow(
-        queue,
-        "scrape",
-        id,
-        EventType::MediaItemScrapeRequested,
-        |plugin_name| async move {
-            queue
-                .push_scrape_plugin(ScrapePluginJob {
-                    id,
-                    plugin_name,
-                    item_type: job.item_type,
-                    imdb_id: job.imdb_id.clone(),
-                    title: job.title.clone(),
-                    season: job.season,
-                    episode: job.episode,
-                    rate_limit_retries: job.rate_limit_retries,
-                })
-                .await;
-        },
-    )
-    .await
-        == 0
-    {
-        finalize(job, queue).await;
+    // Persist the parent ScrapeJob so `finalize` — which runs in whichever
+    // plugin-hook worker drains the last child — can reconstruct the
+    // rate-limit retry counter and replay the next attempt.
+    queue.flow_set_context("scrape", id, job).await;
+
+    if queue.fan_out_plugin_hook(scrape_event(job), id).await == 0 {
+        finalize(id, queue).await;
     }
 }
 
-pub async fn handle_plugin(job: &ScrapePluginJob, queue: &JobQueue) {
-    // Guard against items deleted while this job was waiting in the queue.
-    // Without this check the plugin would make a full external HTTP request
-    // before discovering in `finalize` that the item is gone.
-    if load_media_item_or_log(&queue.db_pool, job.id, "scrape-plugin")
-        .await
-        .is_none()
-    {
-        // Last plugin to drain also clears the flow keys so they don't linger until TTL.
-        if queue.flow_complete_child("scrape", job.id).await {
-            queue.clear_flow_all("scrape", job.id).await;
-        }
+pub async fn finalize(id: i64, queue: &JobQueue) {
+    let Some(job) = queue.flow_get_context::<ScrapeJob>("scrape", id).await else {
+        // Context was wiped (cancellation, TTL expiry, race with restart).
+        // We can't reconstruct rate_limit_retries; clear flow state and bail
+        // — the next process-media-item cycle will rebuild from scratch.
+        tracing::warn!(id, "scrape finalize: missing flow context, clearing flow");
+        queue.clear_flow_all("scrape", id).await;
         return;
-    }
-
-    let parent = ScrapeJob {
-        id: job.id,
-        item_type: job.item_type,
-        imdb_id: job.imdb_id.clone(),
-        title: job.title.clone(),
-        season: job.season,
-        episode: job.episode,
-        rate_limit_retries: job.rate_limit_retries,
     };
-    let event = scrape_event(&parent);
-
-    if run_plugin_hook(
-        queue,
-        "scrape",
-        job.id,
-        &job.plugin_name,
-        &event,
-        "scraper",
-        |response| match response {
-            HookResponse::Scrape(streams) if !streams.is_empty() => Some(streams),
-            _ => None,
-        },
-    )
-    .await
-    {
-        finalize(&parent, queue).await;
-    }
-}
-
-pub async fn finalize(job: &ScrapeJob, queue: &JobQueue) {
-    let id = job.id;
 
     // Snapshot the counters and tear down everything except `flow_results`.
     // `flow_results` is owned by the next stage (parse_results) on the success
@@ -160,6 +105,7 @@ pub async fn finalize(job: &ScrapeJob, queue: &JobQueue) {
     let rate_limited_count = queue.flow_rate_limited_count("scrape", id).await;
     queue.clear_flow("scrape", id).await;
     queue.clear_flow_rate_limited("scrape", id).await;
+    queue.flow_clear_context("scrape", id).await;
 
     let Some(item) = load_media_item_or_log(&queue.db_pool, id, "scrape finalize").await else {
         queue.clear_flow_all("scrape", id).await;

@@ -1,5 +1,25 @@
 use serde::{Deserialize, Serialize};
 
+/// How an event reaches its plugin hooks. Picked at compile time per event so
+/// adding a variant to `EventType` forces a corresponding `dispatch_strategy`
+/// arm — without it, a new event would silently default to nothing useful
+/// (broadcast queues that never get pushed to, or fan-in coordination with
+/// no orchestrator on the other end).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DispatchStrategy {
+    /// Notification: every subscriber gets a fire-and-forget plugin-hook job.
+    /// Producer calls `JobQueue::notify`.
+    Broadcast,
+    /// Orchestrator fans out per-plugin children, each plugin-hook job stores
+    /// its result under the flow's `<prefix>` keys, and the last completion
+    /// runs `finalize` inline. `prefix` namespaces the Redis flow keys.
+    FanIn { prefix: &'static str },
+    /// Caller invokes `registry.dispatch` / `dispatch_to_plugin` synchronously
+    /// — no queue. Used when the caller needs the result in-process and the
+    /// extra Redis round-trip would dominate the actual hook cost.
+    Inline,
+}
+
 /// All event types in the system.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum EventType {
@@ -121,4 +141,44 @@ impl EventType {
                     | Self::MediaItemsDeleted
             )
     }
+
+    /// Compile-time mapping from event to its dispatch path. Every variant
+    /// must be listed — the `match` is exhaustive, so a new event can't be
+    /// added without picking a strategy.
+    pub const fn dispatch_strategy(self) -> DispatchStrategy {
+        use DispatchStrategy::*;
+        match self {
+            // ── Inline (synchronous request-response, no queue) ──────────
+            Self::MediaItemDownloadRequested
+            | Self::MediaItemDownloadCacheCheckRequested
+            | Self::MediaItemDownloadProviderListRequested
+            | Self::MediaItemStreamLinkRequested
+            | Self::ActivePlaybackSessionsRequested
+            | Self::DebridUserInfoRequested => Inline,
+
+            // ── Fan-in (orchestrator fans out, finalize aggregates) ──────
+            Self::MediaItemScrapeRequested => FanIn { prefix: "scrape" },
+            Self::MediaItemIndexRequested => FanIn { prefix: "index" },
+            Self::ContentServiceRequested => FanIn { prefix: "content" },
+
+            // ── Broadcast (notifications) ────────────────────────────────
+            Self::CoreStarted
+            | Self::CoreShutdown
+            | Self::ItemRequestCreated
+            | Self::ItemRequestUpdated
+            | Self::MediaItemIndexSuccess
+            | Self::MediaItemIndexError
+            | Self::MediaItemIndexErrorIncorrectState
+            | Self::MediaItemScrapeSuccess
+            | Self::MediaItemScrapeError
+            | Self::MediaItemScrapeErrorIncorrectState
+            | Self::MediaItemScrapeErrorNoNewStreams
+            | Self::MediaItemDownloadError
+            | Self::MediaItemDownloadErrorIncorrectState
+            | Self::MediaItemDownloadPartialSuccess
+            | Self::MediaItemDownloadSuccess
+            | Self::MediaItemsDeleted => Broadcast,
+        }
+    }
+
 }

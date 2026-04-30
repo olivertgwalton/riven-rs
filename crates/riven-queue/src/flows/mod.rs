@@ -1,91 +1,9 @@
 pub mod download_item;
 pub mod request_content;
 
-use std::future::Future;
-
-use futures::future;
-use riven_core::events::{EventType, HookResponse, RivenEvent};
-use riven_core::http::{RateLimitedError, RetryLaterError};
 use riven_db::repo;
 use riven_rank::{QualityProfile, RankSettings};
-use serde::Serialize;
 use serde_json::Value;
-
-use crate::JobQueue;
-
-pub(crate) async fn start_plugin_flow<Push, Fut>(
-    queue: &JobQueue,
-    prefix: &str,
-    id: i64,
-    event_type: EventType,
-    push_plugin_job: Push,
-) -> usize
-where
-    Push: FnMut(String) -> Fut,
-    Fut: Future<Output = ()>,
-{
-    let subscribers = queue.registry.subscriber_names(event_type).await;
-    let pending = subscribers.len();
-
-    if pending == 0 {
-        return 0;
-    }
-
-    queue.init_flow(prefix, id, pending).await;
-
-    // Push all plugin jobs concurrently — each is an independent Redis RPUSH.
-    future::join_all(subscribers.into_iter().map(push_plugin_job)).await;
-
-    pending
-}
-
-pub(crate) async fn run_plugin_hook<T, Extract>(
-    queue: &JobQueue,
-    prefix: &str,
-    id: i64,
-    plugin_name: &str,
-    event: &RivenEvent,
-    hook_label: &str,
-    extract: Extract,
-) -> bool
-where
-    T: Serialize,
-    Extract: FnOnce(HookResponse) -> Option<T>,
-{
-    match queue.registry.dispatch_to_plugin(plugin_name, event).await {
-        Some(Ok(response)) => {
-            if let Some(payload) = extract(response) {
-                tracing::debug!(plugin = plugin_name, id, "{hook_label} responded");
-                queue
-                    .flow_store_result(prefix, id, plugin_name, &payload)
-                    .await;
-            }
-        }
-        Some(Err(ref error)) if error.is::<RateLimitedError>() || error.is::<RetryLaterError>() => {
-            // Record that this child was deferred so `finalize` can distinguish
-            // a temporary upstream failure from a genuine no-results verdict.
-            queue.flow_increment_rate_limited(prefix, id).await;
-            tracing::warn!(
-                plugin = plugin_name,
-                id,
-                "{hook_label} deferred; worker slot freed"
-            );
-        }
-        Some(Err(error)) => {
-            tracing::error!(
-                plugin = plugin_name,
-                id,
-                error = %error,
-                "{hook_label} hook failed"
-            );
-        }
-        None => {
-            tracing::warn!(plugin = plugin_name, id, "{hook_label} not found");
-        }
-    }
-
-    queue.flow_complete_child(prefix, id).await
-}
 
 /// Load `RankSettings` for every profile that has `enabled = true` in the
 /// `ranking_profiles` DB table.

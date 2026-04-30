@@ -1,13 +1,12 @@
 use chrono::{Duration, Utc};
-use riven_core::events::{EventType, HookResponse, RivenEvent};
+use riven_core::events::RivenEvent;
 use riven_core::types::*;
 
 use riven_db::repo;
 
 use crate::context::{load_media_item_or_log, load_requested_seasons};
-use crate::flows::{run_plugin_hook, start_plugin_flow};
 use crate::indexing::apply_indexed_media_item;
-use crate::{IndexJob, IndexPluginJob, JobQueue};
+use crate::{IndexJob, JobQueue};
 
 fn index_event(job: &IndexJob) -> RivenEvent {
     RivenEvent::MediaItemIndexRequested {
@@ -20,81 +19,15 @@ fn index_event(job: &IndexJob) -> RivenEvent {
 }
 
 pub async fn start(job: &IndexJob, queue: &JobQueue) {
-    let Some(item) = load_media_item_or_log(&queue.db_pool, job.id, "indexing").await else {
-        return;
-    };
-
-    if start_plugin_flow(
-        queue,
-        "index",
-        job.id,
-        EventType::MediaItemIndexRequested,
-        |plugin_name| async move {
-            queue
-                .push_index_plugin(IndexPluginJob {
-                    id: job.id,
-                    plugin_name,
-                    item_type: job.item_type,
-                    imdb_id: job.imdb_id.clone(),
-                    tvdb_id: job.tvdb_id.clone(),
-                    tmdb_id: job.tmdb_id.clone(),
-                })
-                .await;
-        },
-    )
-    .await
-        == 0
-    {
-        tracing::warn!(id = job.id, "no indexer subscribers found; retrying in 24h");
-        if let Err(err) = repo::increment_failed_attempts(&queue.db_pool, job.id).await {
-            tracing::warn!(id = job.id, %err, "failed to increment failed_attempts");
-        }
-        queue
-            .notify(RivenEvent::MediaItemIndexError {
-                id: job.id,
-                error: "no indexer plugin responded".into(),
-            })
-            .await;
-        queue
-            .schedule_index_at(IndexJob::from_item(&item), Utc::now() + Duration::hours(24))
-            .await;
-    }
-}
-
-pub async fn handle_plugin(job: &IndexPluginJob, queue: &JobQueue) {
-    // Guard against items deleted while this job was waiting in the queue.
-    if load_media_item_or_log(&queue.db_pool, job.id, "index-plugin")
+    if load_media_item_or_log(&queue.db_pool, job.id, "indexing")
         .await
         .is_none()
     {
-        if queue.flow_complete_child("index", job.id).await {
-            queue.clear_flow_all("index", job.id).await;
-        }
         return;
     }
 
-    let event = index_event(&IndexJob {
-        id: job.id,
-        item_type: job.item_type,
-        imdb_id: job.imdb_id.clone(),
-        tvdb_id: job.tvdb_id.clone(),
-        tmdb_id: job.tmdb_id.clone(),
-    });
-
-    if run_plugin_hook(
-        queue,
-        "index",
-        job.id,
-        &job.plugin_name,
-        &event,
-        "indexer",
-        |response| match response {
-            HookResponse::Index(indexed) => Some(*indexed),
-            _ => None,
-        },
-    )
-    .await
-    {
+    if queue.fan_out_plugin_hook(index_event(job), job.id).await == 0 {
+        // No indexer subscribed — finalize will see zero results and reschedule.
         finalize(job.id, queue).await;
     }
 }

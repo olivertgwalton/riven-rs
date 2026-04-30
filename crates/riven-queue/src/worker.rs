@@ -37,7 +37,7 @@ impl Scheduler {
                     tracing::info!("scheduler shutting down");
                     return;
                 }
-                _ = content_tick.tick()        => self.job_queue.push_content_service().await,
+                _ = content_tick.tick()        => crate::flows::request_content::enqueue(&self.job_queue).await,
                 _ = &mut retry_sleep           => {
                     self.retry_library().await;
                     let next_wait = Self::retry_wait_duration(

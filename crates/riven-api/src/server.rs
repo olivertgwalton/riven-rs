@@ -110,12 +110,11 @@ pub async fn start_server(config: StartServerConfig) -> Result<()> {
 
     let mut board_builder = ApiBuilder::new(Router::new())
         .register(job_queue.index_storage.clone())
-        .register(job_queue.index_plugin_storage.clone())
         .register(job_queue.scrape_storage.clone())
-        .register(job_queue.scrape_plugin_storage.clone())
         .register(job_queue.parse_storage.clone())
         .register(job_queue.download_storage.clone())
-        .register(job_queue.content_storage.clone());
+        .register(job_queue.rank_streams_storage.clone())
+        .register(job_queue.process_media_item_storage.clone());
     for storage in job_queue.plugin_hook_storages.values() {
         board_builder = board_builder.register(storage.clone());
     }

@@ -4,8 +4,8 @@ mod execute;
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
-use riven_core::events::{HookResponse, RivenEvent};
-use riven_core::types::{self, *};
+use riven_core::events::{EventType, HookResponse, RivenEvent};
+use riven_core::types::*;
 use riven_db::entities::{MediaItem, Stream};
 use riven_db::repo;
 use riven_rank::{QualityProfile, RankSettings};
@@ -17,9 +17,7 @@ use crate::flows::download_item::persist::{finalize_download_success, persist_su
 use crate::flows::load_active_profiles;
 use crate::{DownloadJob, JobQueue, RankStreamsJob};
 
-use self::candidates::{
-    CachedCandidate, build_cached_candidates, find_preferred_candidate, rank_candidates_for_profile,
-};
+use self::candidates::rank_streams_for_profile;
 use self::execute::{DownloadAttemptOutcome, attempt_download};
 
 #[derive(Debug, Clone, Deserialize)]
@@ -158,10 +156,11 @@ pub async fn persist_manual_download(
     }
 }
 
-/// Step 1 of the download flow loads the
-/// item, fetches non-blacklisted streams, asks every downloader plugin for
-/// their cache check, and stores the ranked result in Redis for the
-/// `DownloadJob` (find-valid-torrent + persist) to pick up.
+/// Step 1 of the download flow: validate the item is in a processable state
+/// and hand off to `download::run`. Cache-check used to live here (bulk
+/// upfront across every hash + every provider in parallel) but moved into
+/// `download::run`'s per-iteration loop so an early hit on the first provider
+/// short-circuits slower providers.
 pub async fn run_rank_streams(id: i64, job: &RankStreamsJob, queue: &JobQueue) {
     tracing::debug!(id, "running rank-streams step");
 
@@ -180,49 +179,21 @@ pub async fn run_rank_streams(id: i64, job: &RankStreamsJob, queue: &JobQueue) {
         return;
     }
 
-    let ranks = queue.resolution_ranks.read().await.clone();
-    let all_streams = match repo::get_non_blacklisted_streams(&queue.db_pool, id, &ranks).await {
-        Ok(streams) => streams,
-        Err(error) => {
-            tracing::error!(id, error = %error, "failed to fetch streams for download");
-            return;
-        }
-    };
-
-    if all_streams.is_empty() {
-        tracing::debug!(id, "no streams available for download");
-        queue
-            .notify(RivenEvent::MediaItemDownloadError {
-                id,
-                title: item.title.clone(),
-                error: "no streams available for download".into(),
-            })
-            .await;
-        return;
-    }
-
-    let attempt_unknown = queue.downloader_config.read().await.attempt_unknown_downloads;
-    let (cached_info, cache_checked) = collect_cached_info(queue, &all_streams, attempt_unknown).await;
-
     let preferred = job.preferred_info_hash.clone();
-    let magnet_for_preferred = preferred
-        .as_ref()
-        .and_then(|hash| {
-            all_streams
-                .iter()
-                .find(|stream| stream.info_hash.eq_ignore_ascii_case(hash))
-        })
-        .map(|stream| stream.magnet.clone());
-
-    store_rank_result(
-        queue,
-        id,
-        &RankStreamsResult {
-            cached_info,
-            cache_checked,
-        },
-    )
-    .await;
+    let magnet_for_preferred = if let Some(hash) = preferred.as_ref() {
+        let ranks = queue.resolution_ranks.read().await.clone();
+        repo::get_non_blacklisted_streams(&queue.db_pool, id, &ranks)
+            .await
+            .ok()
+            .and_then(|streams| {
+                streams
+                    .into_iter()
+                    .find(|s| s.info_hash.eq_ignore_ascii_case(hash))
+                    .map(|s| s.magnet)
+            })
+    } else {
+        None
+    };
 
     // For the preferred path we carry info_hash/magnet through to the next
     // step; for the normal path placeholders are fine since DownloadJob only
@@ -242,10 +213,10 @@ pub async fn run_rank_streams(id: i64, job: &RankStreamsJob, queue: &JobQueue) {
     queue.push_download(download_job).await;
 }
 
-/// find-valid-torrent` + `download-item`
-/// fused. Reloads the item (matches `findOneOrFail` semantics at the step
-/// boundary), loads the ranked result produced by `run_rank_streams`, and
-/// walks cached candidates until one downloads + persists successfully.
+/// find-valid-torrent + download-item fused. Reloads the item (matches
+/// `findOneOrFail` semantics at the step boundary), iterates ranked streams
+/// per profile, and per stream walks `(plugin, provider)` combinations with
+/// per-iteration cache-check + early exit on the first hit.
 pub async fn run(id: i64, job: &DownloadJob, queue: &JobQueue) {
     let start_time = Instant::now();
     tracing::debug!(id, "running download (find-valid-torrent + persist) step");
@@ -302,74 +273,20 @@ pub async fn run(id: i64, job: &DownloadJob, queue: &JobQueue) {
         return;
     }
 
-    // Prefer the handed-off ranked result. If it's missing (legacy job, TTL
-    // expiry, or the rank step crashed after enqueueing us), recompute.
-    let ranked = match load_rank_result(queue, id).await {
-        Some(result) => result,
-        None => {
-            tracing::debug!(id, "rank-streams result missing; recomputing inline");
-            let attempt_unknown = queue.downloader_config.read().await.attempt_unknown_downloads;
-            let (cached_info, cache_checked) =
-                collect_cached_info(queue, &all_streams, attempt_unknown).await;
-            RankStreamsResult {
-                cached_info,
-                cache_checked,
-            }
-        }
-    };
-
     let is_manual = job.preferred_info_hash.is_some();
     let (max_size_bytes, min_size_bytes) = if is_manual {
         (None, None)
     } else {
         load_bitrate_limits(queue, &item).await
     };
-    let mut candidates: Vec<CachedCandidate<'_>> = if ranked.cache_checked {
-        build_cached_candidates(
-            id,
-            &item,
-            hierarchy.as_ref(),
-            &all_streams,
-            &ranked.cached_info,
-            max_size_bytes,
-            min_size_bytes,
-        )
-    } else {
-        // Direct mode: no plugin did a cache check — pass all streams through with empty stores.
-        all_streams
-            .iter()
-            .map(|s| CachedCandidate {
-                stream: s,
-                stores: vec![],
-            })
-            .collect()
-    };
 
-    // For manually chosen streams, ensure the preferred hash is always in candidates even
-    // if the download-job cache check didn't confirm it (e.g. Redis miss, transient API
-    // variance). The user explicitly selected this stream from the scrape UI where it was
-    // already verified as cached; we trust that choice and let attempt_download do the
-    // final check. Empty stores triggers an on-demand cache check in the plugin.
-    if let Some(preferred) = job.preferred_info_hash.as_deref()
-        && !candidates
-            .iter()
-            .any(|c| c.stream.info_hash.eq_ignore_ascii_case(preferred))
-        && let Some(stream) = all_streams
-            .iter()
-            .find(|s| s.info_hash.eq_ignore_ascii_case(preferred))
-    {
-        let stores = ranked
-            .cached_info
-            .get(&stream.info_hash.to_lowercase())
-            .cloned()
-            .unwrap_or_default();
-        tracing::debug!(
-            id,
-            info_hash = %stream.info_hash,
-            "preferred stream not in cache-checked candidates; including for direct attempt"
-        );
-        candidates.push(CachedCandidate { stream, stores });
-    }
+    // (plugin, provider) iteration order — built once and shared across
+    // every stream and profile. Cache memo keyed on the same pair so each
+    // (plugin, provider) cache check fires at most once per item flow.
+    let plugin_providers = build_plugin_provider_iterations(queue).await;
+    let mut cache = CacheMemo::new(
+        all_streams.iter().map(|s| s.info_hash.clone()).collect(),
+    );
 
     if let Some(preferred_info_hash) = job.preferred_info_hash.as_ref() {
         let _ = run_preferred_stream(
@@ -378,7 +295,9 @@ pub async fn run(id: i64, job: &DownloadJob, queue: &JobQueue) {
             queue,
             start_time,
             preferred_info_hash,
-            &candidates,
+            &all_streams,
+            &plugin_providers,
+            &mut cache,
             hierarchy.as_ref(),
         )
         .await;
@@ -389,13 +308,15 @@ pub async fn run(id: i64, job: &DownloadJob, queue: &JobQueue) {
             queue,
             start_time,
             &active_profiles,
-            &candidates,
+            &all_streams,
+            &plugin_providers,
+            &mut cache,
             hierarchy.as_ref(),
+            max_size_bytes,
+            min_size_bytes,
         )
         .await;
     }
-
-    clear_rank_result(queue, id).await;
 }
 
 /// Load the media item; return `None` (without emitting a user-visible event)
@@ -418,95 +339,126 @@ async fn load_item_silently(queue: &JobQueue, id: i64, phase: &str) -> Option<Me
     }
 }
 
-// ── Ranked-state hand-off between steps ───────────────────────────────────────
+// ── Per-iteration cache check ─────────────────────────────────────────────────
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-struct RankStreamsResult {
-    cached_info: HashMap<String, Vec<CachedStoreEntry>>,
-    cache_checked: bool,
+/// Memoizes cache-check results per `(plugin, provider)` so the same provider
+/// is never queried twice per item flow. The download loop calls
+/// `lookup` once per `(stream, plugin, provider)`; we lazily fetch the full
+/// hash list the first time and reuse the response for every subsequent
+/// stream that asks for the same provider.
+struct CacheMemo {
+    hashes: Vec<String>,
+    /// `(plugin, provider)` → `hash → cached files`. An empty inner Vec is
+    /// stored so we know we already asked and the hash isn't cached.
+    results: HashMap<(String, Option<String>), HashMap<String, Vec<CacheCheckFile>>>,
 }
 
-fn rank_result_key(id: i64) -> String {
-    format!("riven:download:rank-result:{id}")
-}
-
-async fn store_rank_result(queue: &JobQueue, id: i64, result: &RankStreamsResult) {
-    let Ok(payload) = serde_json::to_string(result) else {
-        tracing::error!(id, "failed to serialize rank-streams result");
-        return;
-    };
-    let mut conn = queue.redis.clone();
-    let _: Result<(), _> = redis::cmd("SET")
-        .arg(rank_result_key(id))
-        .arg(payload)
-        .arg("EX")
-        .arg(3600i64)
-        .query_async(&mut conn)
-        .await;
-}
-
-async fn load_rank_result(queue: &JobQueue, id: i64) -> Option<RankStreamsResult> {
-    let mut conn = queue.redis.clone();
-    let raw: Option<String> = redis::cmd("GET")
-        .arg(rank_result_key(id))
-        .query_async(&mut conn)
-        .await
-        .ok()
-        .flatten();
-    raw.and_then(|s| serde_json::from_str(&s).ok())
-}
-
-async fn clear_rank_result(queue: &JobQueue, id: i64) {
-    let mut conn = queue.redis.clone();
-    let _: Result<(), _> = redis::cmd("DEL")
-        .arg(rank_result_key(id))
-        .query_async(&mut conn)
-        .await;
-}
-
-/// Returns `(cached_info, any_plugin_responded)`.
-/// `any_plugin_responded` is false only when every plugin returned `Empty` (direct mode).
-/// A plugin error counts as "responded" so we never accidentally fall into direct mode.
-async fn collect_cached_info(
-    queue: &JobQueue,
-    streams: &[Stream],
-    attempt_unknown_downloads: bool,
-) -> (HashMap<String, Vec<CachedStoreEntry>>, bool) {
-    let hashes: Vec<String> = streams.iter().map(|s| s.info_hash.clone()).collect();
-    let cache_event = RivenEvent::MediaItemDownloadCacheCheckRequested { hashes };
-    let cache_results = queue.registry.dispatch(&cache_event).await;
-
-    let mut cached_info: HashMap<String, Vec<CachedStoreEntry>> = HashMap::new();
-    let mut any_responded = false;
-    for (_, result) in cache_results {
-        match result {
-            Ok(HookResponse::CacheCheck(results)) => {
-                any_responded = true;
-                for result in results {
-                    let is_candidate = matches!(
-                        result.status,
-                        TorrentStatus::Cached | TorrentStatus::Downloaded
-                    ) || (attempt_unknown_downloads
-                        && result.status == TorrentStatus::Unknown);
-                    if is_candidate {
-                        cached_info
-                            .entry(result.hash.to_lowercase())
-                            .or_default()
-                            .push(types::CachedStoreEntry {
-                                store: result.store,
-                                files: result.files,
-                            });
-                    }
-                }
-            }
-            Ok(HookResponse::Empty) => {}
-            Err(_) => {
-                any_responded = true;
-            }
-            _ => {}
+impl CacheMemo {
+    fn new(hashes: Vec<String>) -> Self {
+        Self {
+            hashes,
+            results: HashMap::new(),
         }
     }
-    (cached_info, any_responded)
+
+    /// Look up `info_hash` in the `(plugin, provider)` cache, fetching from
+    /// the plugin if we haven't asked yet. Returns the cached files only when
+    /// the hash is positively cached on this provider.
+    async fn lookup(
+        &mut self,
+        queue: &JobQueue,
+        plugin_name: &str,
+        provider: Option<&str>,
+        info_hash: &str,
+        attempt_unknown: bool,
+    ) -> Option<Vec<CacheCheckFile>> {
+        let key = (plugin_name.to_string(), provider.map(str::to_string));
+        if !self.results.contains_key(&key) {
+            let map = fetch_provider_cache(queue, plugin_name, provider, &self.hashes, attempt_unknown).await;
+            self.results.insert(key.clone(), map);
+        }
+        let map = self.results.get(&key)?;
+        let files = map.get(&info_hash.to_lowercase())?;
+        if files.is_empty() {
+            None
+        } else {
+            Some(files.clone())
+        }
+    }
+}
+
+/// Issue one provider-scoped `MediaItemDownloadCacheCheckRequested` to a
+/// single plugin and reduce the response to `hash → files`. Hashes whose
+/// status is `Unknown` are kept only when `attempt_unknown` is on (matches
+/// the historical bulk-check behaviour).
+async fn fetch_provider_cache(
+    queue: &JobQueue,
+    plugin_name: &str,
+    provider: Option<&str>,
+    hashes: &[String],
+    attempt_unknown: bool,
+) -> HashMap<String, Vec<CacheCheckFile>> {
+    let event = RivenEvent::MediaItemDownloadCacheCheckRequested {
+        hashes: hashes.to_vec(),
+        provider: provider.map(str::to_string),
+    };
+    let response = queue
+        .registry
+        .dispatch_to_plugin(plugin_name, &event)
+        .await;
+    let mut out: HashMap<String, Vec<CacheCheckFile>> = HashMap::new();
+    match response {
+        Some(Ok(HookResponse::CacheCheck(results))) => {
+            for result in results {
+                let keep = matches!(
+                    result.status,
+                    TorrentStatus::Cached | TorrentStatus::Downloaded
+                ) || (attempt_unknown && result.status == TorrentStatus::Unknown);
+                if keep {
+                    out.insert(result.hash.to_lowercase(), result.files);
+                }
+            }
+        }
+        Some(Ok(_)) | None => {}
+        Some(Err(error)) => {
+            tracing::warn!(
+                plugin = plugin_name,
+                provider,
+                error = %error,
+                "cache check failed"
+            );
+        }
+    }
+    out
+}
+
+/// Build the flat `(plugin, provider)` iteration order used by the download
+/// loop. Plugins that subscribe to `MediaItemDownloadRequested` are the
+/// downloader candidates; for each one we ask `MediaItemDownloadProviderListRequested`
+/// for its providers, falling back to a single `None` provider when the
+/// plugin doesn't break itself out per-store.
+async fn build_plugin_provider_iterations(queue: &JobQueue) -> Vec<(String, Option<String>)> {
+    let plugins = queue
+        .registry
+        .subscriber_names(EventType::MediaItemDownloadRequested)
+        .await;
+    let mut out: Vec<(String, Option<String>)> = Vec::new();
+    for plugin in plugins {
+        let response = queue
+            .registry
+            .dispatch_to_plugin(&plugin, &RivenEvent::MediaItemDownloadProviderListRequested)
+            .await;
+        let providers: Vec<Option<String>> = match response {
+            Some(Ok(HookResponse::ProviderList(list))) if !list.is_empty() => {
+                list.into_iter().map(|p| Some(p.store)).collect()
+            }
+            _ => vec![None],
+        };
+        for provider in providers {
+            out.push((plugin.clone(), provider));
+        }
+    }
+    out
 }
 
 async fn load_bitrate_limits(queue: &JobQueue, item: &MediaItem) -> (Option<u64>, Option<u64>) {
@@ -538,50 +490,59 @@ async fn run_preferred_stream(
     queue: &JobQueue,
     start_time: Instant,
     preferred_info_hash: &str,
-    candidates: &[CachedCandidate<'_>],
+    streams: &[Stream],
+    plugin_providers: &[(String, Option<String>)],
+    cache: &mut CacheMemo,
     hierarchy: Option<&DownloadHierarchyContext>,
 ) -> bool {
-    let Some(candidate) = find_preferred_candidate(candidates, preferred_info_hash) else {
+    let Some(stream) = streams
+        .iter()
+        .find(|s| s.info_hash.eq_ignore_ascii_case(preferred_info_hash))
+    else {
         queue
             .notify(RivenEvent::MediaItemDownloadError {
                 id,
                 title: item.title.clone(),
-                error: "selected stream is not cached, valid, or linked to this item".into(),
+                error: "selected stream is not linked to this item".into(),
             })
             .await;
         return false;
     };
 
-    match attempt_download(
-        id,
-        item,
-        queue,
-        candidate.stream,
-        candidate.stores.clone(),
-        None,
-        None,
-        start_time,
-        hierarchy,
-        true,
-    )
-    .await
-    {
-        DownloadAttemptOutcome::Failed => {
-            queue
-                .notify(RivenEvent::MediaItemDownloadError {
-                    id,
-                    title: item.title.clone(),
-                    error: "selected stream could not be downloaded from any provider".into(),
-                })
-                .await;
-            return false;
+    let attempt_unknown = queue.downloader_config.read().await.attempt_unknown_downloads;
+
+    // Walk providers; first one that returns a successful download wins.
+    // The user explicitly picked this stream from the scrape UI, so we trust
+    // its earlier "cached" verdict and let attempt_download fall back to a
+    // direct add when no provider currently reports it cached.
+    for (plugin, provider) in plugin_providers {
+        let cached_files = cache
+            .lookup(queue, plugin, provider.as_deref(), &stream.info_hash, attempt_unknown)
+            .await;
+        let stores = stores_for_attempt(provider, cached_files);
+
+        match attempt_download(
+            id, item, queue, stream, stores, None, None, start_time, hierarchy, true,
+        )
+        .await
+        {
+            DownloadAttemptOutcome::Failed => continue,
+            DownloadAttemptOutcome::TerminalHandled => return true,
+            DownloadAttemptOutcome::Succeeded => {
+                finalize_download_success(id, item, queue, start_time, None, None).await;
+                return true;
+            }
         }
-        DownloadAttemptOutcome::TerminalHandled => return true,
-        DownloadAttemptOutcome::Succeeded => {}
     }
 
-    finalize_download_success(id, item, queue, start_time, None, None).await;
-    true
+    queue
+        .notify(RivenEvent::MediaItemDownloadError {
+            id,
+            title: item.title.clone(),
+            error: "selected stream could not be downloaded from any provider".into(),
+        })
+        .await;
+    false
 }
 
 async fn run_downloads(
@@ -590,15 +551,22 @@ async fn run_downloads(
     queue: &JobQueue,
     start_time: Instant,
     profiles: &[(String, RankSettings)],
-    candidates: &[CachedCandidate<'_>],
+    streams: &[Stream],
+    plugin_providers: &[(String, Option<String>)],
+    cache: &mut CacheMemo,
     hierarchy: Option<&DownloadHierarchyContext>,
+    max_size_bytes: Option<u64>,
+    min_size_bytes: Option<u64>,
 ) -> bool {
     let mut done_profiles: HashSet<String> = fetch_done_profiles(queue, id, item.item_type)
         .await
         .into_iter()
         .collect();
     let mut any_success = false;
-    let mut attempted_hashes: HashSet<String> = HashSet::new();
+    // (info_hash, plugin, provider) — we only skip exact retries; the same
+    // hash can still be tried on a different provider that might have it.
+    let mut attempted: HashSet<(String, String, Option<String>)> = HashSet::new();
+    let attempt_unknown = queue.downloader_config.read().await.attempt_unknown_downloads;
 
     for (profile_name, profile_settings) in profiles {
         if done_profiles.contains(profile_name.as_str()) {
@@ -610,47 +578,77 @@ async fn run_downloads(
             continue;
         }
 
-        let ranked = rank_candidates_for_profile(candidates, item, profile_settings);
+        let ranked = rank_streams_for_profile(streams, item, profile_settings);
         if ranked.is_empty() {
             tracing::debug!(
                 id,
                 profile = profile_name,
-                "no cached stream found for profile"
+                "no stream found for profile"
             );
             continue;
         }
 
-        for candidate in ranked {
-            if queue.is_cancelled(id).await {
-                tracing::debug!(id, "item cancelled; aborting candidate loop");
-                return false;
+        let mut profile_done = false;
+        'streams: for stream in ranked {
+            if profile_done {
+                break;
             }
-            if attempted_hashes.contains(&candidate.stream.info_hash) {
-                continue;
+            if queue.is_cancelled(id).await {
+                tracing::debug!(id, "item cancelled; aborting stream loop");
+                return any_success;
             }
 
-            match attempt_download(
-                id,
-                item,
-                queue,
-                candidate.stream,
-                candidate.stores.clone(),
-                Some(profile_name.as_str()),
-                Some(profile_name.as_str()),
-                start_time,
-                hierarchy,
-                false,
-            )
-            .await
-            {
-                DownloadAttemptOutcome::Failed => {
-                    attempted_hashes.insert(candidate.stream.info_hash.clone());
+            for (plugin, provider) in plugin_providers {
+                let key = (
+                    stream.info_hash.clone(),
+                    plugin.clone(),
+                    provider.clone(),
+                );
+                if attempted.contains(&key) {
+                    continue;
                 }
-                DownloadAttemptOutcome::TerminalHandled => return true,
-                DownloadAttemptOutcome::Succeeded => {
-                    done_profiles.insert(profile_name.clone());
-                    any_success = true;
-                    break;
+
+                let cached_files = cache
+                    .lookup(queue, plugin, provider.as_deref(), &stream.info_hash, attempt_unknown)
+                    .await;
+
+                let is_cached = cached_files.is_some();
+                if !is_cached && !attempt_unknown {
+                    continue;
+                }
+
+                if let Some(files) = &cached_files
+                    && !passes_bitrate_filter(files, max_size_bytes, min_size_bytes)
+                {
+                    continue;
+                }
+
+                let stores = stores_for_attempt(provider, cached_files);
+
+                match attempt_download(
+                    id,
+                    item,
+                    queue,
+                    stream,
+                    stores,
+                    Some(profile_name.as_str()),
+                    Some(profile_name.as_str()),
+                    start_time,
+                    hierarchy,
+                    false,
+                )
+                .await
+                {
+                    DownloadAttemptOutcome::Failed => {
+                        attempted.insert(key);
+                    }
+                    DownloadAttemptOutcome::TerminalHandled => return true,
+                    DownloadAttemptOutcome::Succeeded => {
+                        done_profiles.insert(profile_name.clone());
+                        any_success = true;
+                        profile_done = true;
+                        continue 'streams;
+                    }
                 }
             }
         }
@@ -679,6 +677,38 @@ async fn run_downloads(
     }
 
     finalize_download_success(id, item, queue, start_time, None, None).await;
+    true
+}
+
+fn stores_for_attempt(
+    provider: &Option<String>,
+    cached_files: Option<Vec<CacheCheckFile>>,
+) -> Vec<CachedStoreEntry> {
+    cached_files
+        .map(|files| {
+            vec![CachedStoreEntry {
+                store: provider.clone().unwrap_or_default(),
+                files,
+            }]
+        })
+        .unwrap_or_default()
+}
+
+fn passes_bitrate_filter(
+    files: &[CacheCheckFile],
+    max_size_bytes: Option<u64>,
+    min_size_bytes: Option<u64>,
+) -> bool {
+    if max_size_bytes.is_none() && min_size_bytes.is_none() {
+        return true;
+    }
+    let total: u64 = files.iter().filter_map(|f| f.size).sum();
+    if max_size_bytes.is_some_and(|m| total > m) {
+        return false;
+    }
+    if min_size_bytes.is_some_and(|m| total < m) {
+        return false;
+    }
     true
 }
 

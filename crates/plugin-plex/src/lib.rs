@@ -95,7 +95,11 @@ impl Plugin for PlexPlugin {
             .flat_map(|s| s.locations.iter().map(|l| l.path.clone()))
             .collect();
 
-        let mut refresh_tasks = Vec::new();
+        // De-dupe with a set so a season-pack download (N episodes in the
+        // same Season folder) collapses to one Plex refresh per matching
+        // section, not N identical refreshes hammering the server.
+        let mut refresh_tasks: std::collections::HashSet<(String, String)> =
+            std::collections::HashSet::new();
         let mut all_vfs_dirs: Vec<String> = Vec::new();
         for entry in &entries {
             let dir_path = entry
@@ -117,7 +121,7 @@ impl Plugin for PlexPlugin {
                 for section in &sections {
                     for location in &section.locations {
                         if full_path.starts_with(&location.path) {
-                            refresh_tasks.push((section.key.clone(), full_path.clone()));
+                            refresh_tasks.insert((section.key.clone(), full_path.clone()));
                         }
                     }
                 }

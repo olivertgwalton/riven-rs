@@ -307,6 +307,7 @@ impl Plugin for StremthruPlugin {
     async fn on_download_cache_check_requested(
         &self,
         hashes: &[String],
+        provider: Option<&str>,
         ctx: &PluginContext,
     ) -> anyhow::Result<HookResponse> {
         let check_cache_enabled = ctx.settings.get_or("checkdebridcache", "true") != "false";
@@ -314,7 +315,22 @@ impl Plugin for StremthruPlugin {
             return Ok(HookResponse::Empty);
         }
         let base_url = ctx.settings.get_or("stremthruurl", DEFAULT_URL);
-        let stores = get_configured_stores(&ctx.settings);
+        let mut stores = get_configured_stores(&ctx.settings);
+
+        // Caller-scoped to a single provider — drop the others so we don't
+        // do work the caller already decided is unnecessary. The download
+        // flow uses this so an early hit on the first provider skips slower
+        // ones.
+        if let Some(filter) = provider {
+            stores.retain(|(store, _)| *store == filter);
+            if stores.is_empty() {
+                tracing::debug!(
+                    requested_provider = filter,
+                    "stremthru: requested provider not configured"
+                );
+                return Ok(HookResponse::CacheCheck(Vec::new()));
+            }
+        }
 
         let mut futures = Vec::new();
         for (store, api_key) in &stores {

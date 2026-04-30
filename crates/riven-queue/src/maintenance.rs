@@ -4,6 +4,83 @@ use apalis_redis::RedisConfig;
 use chrono::Utc;
 
 const APALIS_WORKERS_METADATA_PREFIX: &str = "core::apalis::workers:metadata::";
+const APALIS_WORKERS_PREFIX: &str = "core::apalis::workers::";
+
+/// Scan for `core::apalis::workers::<queue>` zsets whose `<queue>` is not in
+/// `live_queues` and drop them along with their metadata hash. Cleans up
+/// zombie worker registrations left by queues that have since been removed
+/// (e.g. `riven:scrape-plugin` after the per-(plugin) hook-queue refactor).
+/// `clear_worker_registrations` only walks the live queue list, so without
+/// this pass the dashboard would keep showing pre-deploy workers indefinitely.
+pub async fn purge_orphaned_worker_sets(
+    redis: &mut redis::aio::ConnectionManager,
+    live_queues: &[String],
+) {
+    let live: HashSet<&str> = live_queues.iter().map(String::as_str).collect();
+    let pattern = format!("{APALIS_WORKERS_PREFIX}riven:*");
+
+    let mut cursor: u64 = 0;
+    let mut removed_queues: Vec<String> = Vec::new();
+    loop {
+        let (next, batch): (u64, Vec<String>) = match redis::cmd("SCAN")
+            .arg(cursor)
+            .arg("MATCH")
+            .arg(&pattern)
+            .arg("COUNT")
+            .arg(200u32)
+            .query_async(redis)
+            .await
+        {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::error!(error = %e, "purge_orphaned_worker_sets: SCAN failed");
+                return;
+            }
+        };
+
+        for key in batch {
+            let Some(queue) = key.strip_prefix(APALIS_WORKERS_PREFIX) else {
+                continue;
+            };
+            // Skip the metadata hash variants — they share the prefix but
+            // include `:metadata::` and refer to a specific worker, not a queue.
+            if key.starts_with(APALIS_WORKERS_METADATA_PREFIX) {
+                continue;
+            }
+            if live.contains(queue) {
+                continue;
+            }
+            // Pull worker ids out so we can drop their per-worker metadata too.
+            let workers: Vec<String> = redis::cmd("ZRANGE")
+                .arg(&key)
+                .arg(0i64)
+                .arg(-1i64)
+                .query_async(redis)
+                .await
+                .unwrap_or_default();
+            let mut pipe = redis::pipe();
+            for worker in &workers {
+                pipe.del(format!("{APALIS_WORKERS_METADATA_PREFIX}{worker}"));
+            }
+            pipe.del(&key);
+            let _: Result<(), _> = pipe.query_async(redis).await;
+            removed_queues.push(queue.to_string());
+        }
+
+        cursor = next;
+        if cursor == 0 {
+            break;
+        }
+    }
+
+    if !removed_queues.is_empty() {
+        tracing::info!(
+            count = removed_queues.len(),
+            queues = ?removed_queues,
+            "purged worker registrations for removed queues"
+        );
+    }
+}
 
 const COMPLETED_JOB_MAX_AGE_SECS: i64 = 60 * 60 * 6;
 const FAILED_JOB_MAX_AGE_SECS: i64 = 60 * 60 * 24;

@@ -20,13 +20,14 @@ use anyhow::Result;
 use apalis::prelude::{TaskBuilder, TaskSink};
 use apalis_redis::{RedisConfig, RedisStorage};
 use chrono::{DateTime, Utc};
+use futures::future;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use tokio::sync::{RwLock, broadcast};
 use ulid::Ulid;
 
 pub use riven_core::downloader::DownloaderConfig;
-use riven_core::events::{EventType, RivenEvent};
+use riven_core::events::{DispatchStrategy, EventType, RivenEvent};
 use riven_core::plugin::PluginRegistry;
 use riven_core::reindex::ReindexConfig;
 use riven_core::settings::FilesystemSettings;
@@ -35,12 +36,12 @@ use riven_rank::ResolutionRanks;
 
 pub use dedup::DedupGuard;
 pub use jobs::{
-    ContentServiceJob, DownloadJob, IndexJob, IndexPluginJob, ParseScrapeResultsJob, PluginHookJob,
-    ProcessMediaItemJob, ProcessStep, RankStreamsJob, ScrapeJob, ScrapePluginJob,
+    DownloadJob, IndexJob, ParseScrapeResultsJob, PluginHookJob, ProcessMediaItemJob, ProcessStep,
+    RankStreamsJob, ScrapeJob,
 };
 pub use maintenance::{
     clear_worker_registrations, prune_queue_history, purge_orphaned_active_jobs,
-    recover_stale_workers,
+    purge_orphaned_worker_sets, recover_stale_workers,
 };
 pub use workers::start_workers;
 
@@ -48,13 +49,10 @@ pub use workers::start_workers;
 
 pub struct JobQueue {
     pub index_storage: RedisStorage<IndexJob>,
-    pub index_plugin_storage: RedisStorage<IndexPluginJob>,
     pub scrape_storage: RedisStorage<ScrapeJob>,
-    pub scrape_plugin_storage: RedisStorage<ScrapePluginJob>,
     pub parse_storage: RedisStorage<ParseScrapeResultsJob>,
     pub download_storage: RedisStorage<DownloadJob>,
     pub rank_streams_storage: RedisStorage<RankStreamsJob>,
-    pub content_storage: RedisStorage<ContentServiceJob>,
     pub process_media_item_storage: RedisStorage<ProcessMediaItemJob>,
     pub plugin_hook_storages: HashMap<(String, EventType), RedisStorage<PluginHookJob>>,
     pub redis: redis::aio::ConnectionManager,
@@ -91,16 +89,8 @@ impl JobQueue {
 
         let index_storage =
             RedisStorage::new_with_config(apalis_conn.clone(), RedisConfig::new("riven:index"));
-        let index_plugin_storage = RedisStorage::new_with_config(
-            apalis_conn.clone(),
-            RedisConfig::new("riven:index-plugin"),
-        );
         let scrape_storage =
             RedisStorage::new_with_config(apalis_conn.clone(), RedisConfig::new("riven:scrape"));
-        let scrape_plugin_storage = RedisStorage::new_with_config(
-            apalis_conn.clone(),
-            RedisConfig::new("riven:scrape-plugin"),
-        );
         let parse_storage =
             RedisStorage::new_with_config(apalis_conn.clone(), RedisConfig::new("riven:parse"));
         let download_storage =
@@ -109,16 +99,19 @@ impl JobQueue {
             apalis_conn.clone(),
             RedisConfig::new("riven:rank-streams"),
         );
-        let content_storage =
-            RedisStorage::new_with_config(apalis_conn.clone(), RedisConfig::new("riven:content"));
         let process_media_item_storage = RedisStorage::new_with_config(
             apalis_conn.clone(),
             RedisConfig::new("riven:process-media-item"),
         );
 
+        // Skip Inline events — caller invokes the registry directly and
+        // awaits in-process, so the queue would never receive a job.
         let mut plugin_hook_storages: HashMap<(String, EventType), RedisStorage<PluginHookJob>> =
             HashMap::new();
         for (plugin_name, event_type) in registry.subscribed_event_pairs().await {
+            if matches!(event_type.dispatch_strategy(), DispatchStrategy::Inline) {
+                continue;
+            }
             let namespace = format!("riven:plugin-hook:{}:{plugin_name}", event_type.slug());
             let storage =
                 RedisStorage::new_with_config(apalis_conn.clone(), RedisConfig::new(&namespace));
@@ -133,13 +126,10 @@ impl JobQueue {
 
         Ok(Self {
             index_storage,
-            index_plugin_storage,
             scrape_storage,
-            scrape_plugin_storage,
             parse_storage,
             download_storage,
             rank_streams_storage,
-            content_storage,
             process_media_item_storage,
             plugin_hook_storages,
             redis,
@@ -176,13 +166,10 @@ impl JobQueue {
     pub fn queue_names(&self) -> Vec<String> {
         let mut names = vec![
             "riven:index".to_string(),
-            "riven:index-plugin".to_string(),
             "riven:scrape".to_string(),
-            "riven:scrape-plugin".to_string(),
             "riven:parse".to_string(),
             "riven:download".to_string(),
             "riven:rank-streams".to_string(),
-            "riven:content".to_string(),
             "riven:process-media-item".to_string(),
         ];
         for (plugin_name, event_type) in self.plugin_hook_storages.keys() {
@@ -241,19 +228,66 @@ impl JobQueue {
         .await;
     }
 
-    pub async fn push_index_plugin(&self, job: IndexPluginJob) {
-        if let Err(e) = self.index_plugin_storage.clone().push(job).await {
-            tracing::error!(error = %e, "failed to push IndexPluginJob");
+    /// Resolve subscribers for `event`, initialise its fan-in flow, and push a
+    /// plugin-hook child job to each subscriber's queue. Returns the number of
+    /// children enqueued — `0` means no plugin subscribed, which the caller
+    /// usually treats as "skip straight to finalize".
+    ///
+    /// Caller-provided `scope` namespaces the flow's Redis keys
+    /// (`riven:flow:<prefix>:<scope>:...`); for per-item events use the media
+    /// item id, for singletons use a fixed value.
+    pub async fn fan_out_plugin_hook(&self, event: RivenEvent, scope: i64) -> usize {
+        let event_type = event.event_type();
+        let DispatchStrategy::FanIn { prefix } = event_type.dispatch_strategy() else {
+            tracing::error!(?event_type, "fan_out_plugin_hook called for non-FanIn event");
+            return 0;
+        };
+        let subscribers = self.registry.subscriber_names(event_type).await;
+        if subscribers.is_empty() {
+            return 0;
         }
+        self.init_flow(prefix, scope, subscribers.len()).await;
+        future::join_all(subscribers.iter().map(|plugin| {
+            let event = event.clone();
+            async move { self.push_plugin_hook(plugin, event, Some(scope)).await }
+        }))
+        .await;
+        subscribers.len()
     }
-    pub async fn push_scrape_plugin(&self, job: ScrapePluginJob) {
-        if let Err(e) = self.scrape_plugin_storage.clone().push(job).await {
-            tracing::error!(error = %e, "failed to push ScrapePluginJob");
-        }
-    }
-    pub async fn push_content_service(&self) {
-        if let Err(e) = self.content_storage.clone().push(ContentServiceJob).await {
-            tracing::error!(error = %e, "failed to push ContentServiceJob");
+
+    /// Push a per-plugin hook job onto the queue dedicated to
+    /// `(plugin_name, event.event_type())`. The plugin-hook worker dispatches
+    /// the event to that single plugin and — for fan-in events — stores the
+    /// response under the `scope` flow keys, then triggers finalize / signals
+    /// the awaiting caller when the last sibling completes.
+    pub async fn push_plugin_hook(
+        &self,
+        plugin_name: &str,
+        event: RivenEvent,
+        scope: Option<i64>,
+    ) {
+        let event_type = event.event_type();
+        let key = (plugin_name.to_string(), event_type);
+        let Some(storage) = self.plugin_hook_storages.get(&key) else {
+            tracing::warn!(
+                plugin = plugin_name,
+                ?event_type,
+                "no plugin-hook storage registered for (plugin, event); skipping push"
+            );
+            return;
+        };
+        let job = PluginHookJob {
+            plugin_name: plugin_name.to_string(),
+            event,
+            scope,
+        };
+        if let Err(e) = storage.clone().push(job).await {
+            tracing::error!(
+                plugin = plugin_name,
+                ?event_type,
+                error = %e,
+                "failed to push plugin-hook job"
+            );
         }
     }
 
@@ -654,6 +688,52 @@ impl JobQueue {
             .unwrap_or(0)
     }
 
+    /// Persist orchestrator parent state (e.g. the original `ScrapeJob`) so
+    /// `finalize` — invoked on the last child completion in a different
+    /// worker — can recover the rate-limit retry counter and any other
+    /// fields not encoded in the per-plugin event payload.
+    pub async fn flow_set_context<T: Serialize>(&self, prefix: &str, scope: i64, ctx: &T) {
+        let Ok(payload) = serde_json::to_string(ctx) else {
+            tracing::error!(prefix, scope, "failed to serialize flow context");
+            return;
+        };
+        let key = flow_context_key(prefix, scope);
+        let mut conn = self.redis.clone();
+        let _: Result<(), _> = redis::pipe()
+            .cmd("SET")
+            .arg(&key)
+            .arg(payload)
+            .arg("EX")
+            .arg(3600i64)
+            .query_async(&mut conn)
+            .await;
+    }
+
+    pub async fn flow_get_context<T: DeserializeOwned>(
+        &self,
+        prefix: &str,
+        scope: i64,
+    ) -> Option<T> {
+        let key = flow_context_key(prefix, scope);
+        let mut conn = self.redis.clone();
+        let raw: Option<String> = redis::cmd("GET")
+            .arg(&key)
+            .query_async(&mut conn)
+            .await
+            .ok()
+            .flatten();
+        raw.and_then(|s| serde_json::from_str(&s).ok())
+    }
+
+    pub async fn flow_clear_context(&self, prefix: &str, scope: i64) {
+        let mut conn = self.redis.clone();
+        let _: Result<(), _> = redis::cmd("DEL")
+            .arg(flow_context_key(prefix, scope))
+            .query_async(&mut conn)
+            .await;
+    }
+
+
     // ── Queue cancellation ────────────────────────────────────────────────────
 
     /// Returns true if `cancel_items` was called for this id recently. In-flight
@@ -671,8 +751,8 @@ impl JobQueue {
     }
 
     /// Purge any queued or scheduled apalis jobs whose payload references one
-    /// of the given media item ids. Also clears dedup keys, flow state, and
-    /// the download rank-result hand-off so the deleted item leaves no debris.
+    /// of the given media item ids. Also clears dedup keys and flow state so
+    /// the deleted item leaves no debris.
     ///
     /// Called from the `remove_items` mutation so deleting a request from the
     /// UI immediately stops its jobs from churning the debrid service.
@@ -696,12 +776,11 @@ impl JobQueue {
             .ignore();
         let _: Result<(), _> = pipe.query_async(&mut conn).await;
 
-        // Every queue that carries a `{ "id": <media_item_id>, ... }` payload.
-        let configs: [apalis_redis::RedisConfig; 7] = [
+        // Every queue that carries a `{ "id": <media_item_id>, ... }` payload
+        // at the top level of the job payload.
+        let configs: [apalis_redis::RedisConfig; 5] = [
             self.index_storage.get_config().clone(),
-            self.index_plugin_storage.get_config().clone(),
             self.scrape_storage.get_config().clone(),
-            self.scrape_plugin_storage.get_config().clone(),
             self.parse_storage.get_config().clone(),
             self.download_storage.get_config().clone(),
             self.rank_streams_storage.get_config().clone(),
@@ -710,6 +789,23 @@ impl JobQueue {
         for config in &configs {
             if let Err(error) = self.purge_queue_for_ids(config, &id_set).await {
                 tracing::warn!(error = %error, queue = %config.job_data_hash(), "failed to purge queue");
+            }
+        }
+
+        // Plugin-hook queues for per-item fan-in events embed the media item
+        // id under `event.id`. Content-service fan-in carries no item id, so
+        // its hook queue is excluded — its singleton flow won't have anything
+        // to cancel for an individual item.
+        for ((_plugin, event_type), storage) in &self.plugin_hook_storages {
+            if !matches!(
+                event_type,
+                EventType::MediaItemScrapeRequested | EventType::MediaItemIndexRequested
+            ) {
+                continue;
+            }
+            let config = storage.get_config().clone();
+            if let Err(error) = self.purge_plugin_hook_queue_for_ids(&config, &id_set).await {
+                tracing::warn!(error = %error, queue = %config.job_data_hash(), "failed to purge plugin-hook queue");
             }
         }
 
@@ -733,11 +829,24 @@ impl JobQueue {
                     .query_async(&mut conn)
                     .await;
             }
-            let _: Result<(), _> = redis::cmd("DEL")
-                .arg(format!("riven:download:rank-result:{id}"))
-                .query_async(&mut conn)
-                .await;
         }
+    }
+
+    /// Same as `purge_queue_for_ids` but reads the media item id from
+    /// `event.id` instead of the job's top-level `id`. Used for the
+    /// per-(plugin, event) hook queues whose payload is `PluginHookJob`.
+    async fn purge_plugin_hook_queue_for_ids(
+        &self,
+        config: &apalis_redis::RedisConfig,
+        ids: &std::collections::HashSet<i64>,
+    ) -> redis::RedisResult<()> {
+        self.purge_queue_with_id_extractor(config, ids, |value| {
+            value
+                .get("event")
+                .and_then(|e| e.get("id"))
+                .and_then(|v| v.as_i64())
+        })
+        .await
     }
 
     async fn purge_queue_for_ids(
@@ -745,6 +854,21 @@ impl JobQueue {
         config: &apalis_redis::RedisConfig,
         ids: &std::collections::HashSet<i64>,
     ) -> redis::RedisResult<()> {
+        self.purge_queue_with_id_extractor(config, ids, |value| {
+            value.get("id").and_then(|v| v.as_i64())
+        })
+        .await
+    }
+
+    async fn purge_queue_with_id_extractor<F>(
+        &self,
+        config: &apalis_redis::RedisConfig,
+        ids: &std::collections::HashSet<i64>,
+        extract_id: F,
+    ) -> redis::RedisResult<()>
+    where
+        F: Fn(&serde_json::Value) -> Option<i64>,
+    {
         let mut conn = self.redis.clone();
         let data_hash = config.job_data_hash();
         let active_list = config.active_jobs_list();
@@ -773,7 +897,7 @@ impl JobQueue {
                 let Ok(value) = serde_json::from_str::<serde_json::Value>(&payload) else {
                     continue;
                 };
-                let Some(id) = value.get("id").and_then(|v| v.as_i64()) else {
+                let Some(id) = extract_id(&value) else {
                     continue;
                 };
                 if ids.contains(&id) {
@@ -845,6 +969,7 @@ impl JobQueue {
             let job = PluginHookJob {
                 plugin_name: plugin_name.clone(),
                 event: event.clone(),
+                scope: None,
             };
             if let Err(error) = storage.clone().push(job).await {
                 tracing::error!(
@@ -890,6 +1015,11 @@ fn flow_results_key(prefix: &str, id: i64) -> String {
 #[inline]
 fn flow_rate_limited_key(prefix: &str, id: i64) -> String {
     format!("riven:flow:{prefix}:{id}:rate_limited")
+}
+
+#[inline]
+fn flow_context_key(prefix: &str, id: i64) -> String {
+    format!("riven:flow:{prefix}:{id}:context")
 }
 
 fn deserialize_flow_results<T: DeserializeOwned>(

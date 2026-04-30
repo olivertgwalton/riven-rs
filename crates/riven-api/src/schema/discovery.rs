@@ -274,7 +274,10 @@ async fn apply_cache_status(registry: &PluginRegistry, streams: &mut [Discovered
         .collect();
 
     let results = registry
-        .dispatch(&RivenEvent::MediaItemDownloadCacheCheckRequested { hashes })
+        .dispatch(&RivenEvent::MediaItemDownloadCacheCheckRequested {
+            hashes,
+            provider: None,
+        })
         .await;
 
     let mut cached_hashes = HashSet::new();

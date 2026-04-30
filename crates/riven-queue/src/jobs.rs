@@ -5,14 +5,21 @@ use riven_core::events::RivenEvent;
 use riven_core::types::MediaItemType;
 use riven_db::entities::MediaItem;
 
+/// One per-plugin invocation of a hook event. For fan-in events the
+/// `scope` discriminator names the orchestrator's flow keys
+/// (`riven:flow:<prefix>:<scope>:results` etc). For broadcast events
+/// (notifications) `scope` is unused.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluginHookJob {
     pub plugin_name: String,
     pub event: RivenEvent,
+    /// Fan-in scope. Required for fan-in events; ignored for broadcast.
+    /// For orchestrator-driven flows (scrape/index) this is the media item id.
+    /// For caller-await flows (content, cache-check, etc.) the caller picks
+    /// a unique value so concurrent calls don't share flow keys.
+    #[serde(default)]
+    pub scope: Option<i64>,
 }
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct ContentServiceJob;
 
 /// Per-item state-machine job.
 ///
@@ -168,26 +175,3 @@ pub struct ParseScrapeResultsJob {
     pub id: i64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct IndexPluginJob {
-    pub id: i64,
-    pub plugin_name: String,
-    pub item_type: MediaItemType,
-    pub imdb_id: Option<String>,
-    pub tvdb_id: Option<String>,
-    pub tmdb_id: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ScrapePluginJob {
-    pub id: i64,
-    pub plugin_name: String,
-    pub item_type: MediaItemType,
-    pub imdb_id: Option<String>,
-    pub title: String,
-    pub season: Option<i32>,
-    pub episode: Option<i32>,
-    /// Carried from the parent `ScrapeJob` so `finalize` can reconstruct it.
-    #[serde(default)]
-    pub rate_limit_retries: u32,
-}

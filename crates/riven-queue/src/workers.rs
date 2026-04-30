@@ -4,10 +4,14 @@ use std::time::Duration;
 use apalis::layers::WorkerBuilderExt;
 use apalis::prelude::*;
 
+use riven_core::events::{DispatchStrategy, EventType, HookResponse, RivenEvent};
+use riven_core::http::{RateLimitedError, RetryLaterError};
+
+use crate::context::load_media_item_or_log;
 use crate::dedup::DedupGuard;
 use crate::{
-    ContentServiceJob, DownloadJob, IndexJob, IndexPluginJob, JobQueue, ParseScrapeResultsJob,
-    PluginHookJob, ProcessMediaItemJob, RankStreamsJob, ScrapeJob, ScrapePluginJob,
+    DownloadJob, IndexJob, JobQueue, ParseScrapeResultsJob, PluginHookJob, ProcessMediaItemJob,
+    RankStreamsJob, ScrapeJob,
 };
 
 // ── Job handlers ──────────────────────────────────────────────────────────────
@@ -22,25 +26,9 @@ async fn handle_index_job(job: IndexJob, q: Data<Arc<JobQueue>>) -> Result<(), B
     Ok(())
 }
 
-async fn handle_index_plugin_job(
-    job: IndexPluginJob,
-    q: Data<Arc<JobQueue>>,
-) -> Result<(), BoxDynError> {
-    crate::application::index::handle_plugin(&job, &q).await;
-    Ok(())
-}
-
 async fn handle_scrape_job(job: ScrapeJob, q: Data<Arc<JobQueue>>) -> Result<(), BoxDynError> {
     let _guard = DedupGuard::new("scrape", job.id, q.redis.clone());
     crate::application::scrape::start(job.id, &job, &q).await;
-    Ok(())
-}
-
-async fn handle_scrape_plugin_job(
-    job: ScrapePluginJob,
-    q: Data<Arc<JobQueue>>,
-) -> Result<(), BoxDynError> {
-    crate::application::scrape::handle_plugin(&job, &q).await;
     Ok(())
 }
 
@@ -68,14 +56,6 @@ async fn handle_rank_streams_job(
     Ok(())
 }
 
-async fn handle_content_service_job(
-    _job: ContentServiceJob,
-    q: Data<Arc<JobQueue>>,
-) -> Result<(), BoxDynError> {
-    crate::flows::request_content::run(&q).await;
-    Ok(())
-}
-
 async fn handle_process_media_item_job(
     job: ProcessMediaItemJob,
     q: Data<Arc<JobQueue>>,
@@ -84,10 +64,32 @@ async fn handle_process_media_item_job(
     Ok(())
 }
 
+/// Per-(plugin, event) hook worker — one queue per plugin per subscribed
+/// event, each running this handler.
+///
+/// `Inline` events never reach this handler — `JobQueue::new` skips creating
+/// their queues. Broadcast events just dispatch and return. Fan-in events
+/// also store the response in the flow's results hash and, on the last
+/// child's completion, run the orchestrator's `finalize` inline.
 async fn handle_plugin_hook_job(
     job: PluginHookJob,
     q: Data<Arc<JobQueue>>,
 ) -> Result<(), BoxDynError> {
+    let event_type = job.event.event_type();
+    match event_type.dispatch_strategy() {
+        DispatchStrategy::Broadcast => handle_broadcast(&job, &q).await,
+        DispatchStrategy::FanIn { prefix } => handle_fan_in(&job, &q, prefix).await,
+        DispatchStrategy::Inline => {
+            // Should be unreachable — Inline events are filtered out at queue
+            // registration time. If a job is here, treat it as a broadcast so
+            // it doesn't sit dead in the queue.
+            tracing::error!(?event_type, "Inline event reached plugin-hook worker");
+            handle_broadcast(&job, &q).await
+        }
+    }
+}
+
+async fn handle_broadcast(job: &PluginHookJob, q: &JobQueue) -> Result<(), BoxDynError> {
     match q
         .registry
         .dispatch_to_plugin(&job.plugin_name, &job.event)
@@ -95,6 +97,116 @@ async fn handle_plugin_hook_job(
     {
         Some(Err(error)) => Err(error.into()),
         Some(Ok(_)) | None => Ok(()),
+    }
+}
+
+async fn handle_fan_in(
+    job: &PluginHookJob,
+    q: &JobQueue,
+    prefix: &'static str,
+) -> Result<(), BoxDynError> {
+    let event_type = job.event.event_type();
+    let Some(scope) = job.scope else {
+        tracing::error!(?event_type, "fan-in plugin-hook job missing scope");
+        return Ok(());
+    };
+
+    // For id-bearing fan-in events, drop the child immediately if the item
+    // was deleted while this job sat in the queue. Without this guard the
+    // plugin still makes a full external HTTP request before discovering in
+    // `finalize` that the item is gone.
+    if let Some(id) = job.event.media_item_id()
+        && load_media_item_or_log(&q.db_pool, id, "plugin-hook").await.is_none()
+    {
+        if q.flow_complete_child(prefix, scope).await {
+            q.clear_flow_all(prefix, scope).await;
+            finalize_event(q, &job.event, scope).await;
+        }
+        return Ok(());
+    }
+
+    match q
+        .registry
+        .dispatch_to_plugin(&job.plugin_name, &job.event)
+        .await
+    {
+        Some(Ok(response)) => {
+            if let Some(payload) = extract_fan_in_response(event_type, response) {
+                q.flow_store_result(prefix, scope, &job.plugin_name, &payload)
+                    .await;
+            }
+        }
+        Some(Err(ref error))
+            if error.is::<RateLimitedError>() || error.is::<RetryLaterError>() =>
+        {
+            q.flow_increment_rate_limited(prefix, scope).await;
+            tracing::warn!(
+                plugin = %job.plugin_name,
+                ?event_type,
+                scope,
+                "plugin hook deferred (rate limited)"
+            );
+        }
+        Some(Err(error)) => {
+            tracing::error!(
+                plugin = %job.plugin_name,
+                ?event_type,
+                scope,
+                error = %error,
+                "plugin hook failed"
+            );
+        }
+        None => {
+            tracing::warn!(plugin = %job.plugin_name, ?event_type, "plugin not found at dispatch time");
+        }
+    }
+
+    if q.flow_complete_child(prefix, scope).await {
+        finalize_event(q, &job.event, scope).await;
+    }
+    Ok(())
+}
+
+/// Return the JSON value that should be stored under the per-plugin slot of
+/// the fan-in flow's results hash. `None` means "this response carries no
+/// useful payload for aggregation" (the empty-streams case for scrape, etc.).
+fn extract_fan_in_response(
+    event_type: EventType,
+    response: HookResponse,
+) -> Option<serde_json::Value> {
+    match (event_type, response) {
+        (EventType::MediaItemScrapeRequested, HookResponse::Scrape(streams)) => {
+            (!streams.is_empty())
+                .then(|| serde_json::to_value(streams).ok())
+                .flatten()
+        }
+        (EventType::MediaItemIndexRequested, HookResponse::Index(indexed)) => {
+            serde_json::to_value(*indexed).ok()
+        }
+        (EventType::ContentServiceRequested, HookResponse::ContentService(response)) => {
+            serde_json::to_value(*response).ok()
+        }
+        _ => None,
+    }
+}
+
+/// Last-child completion handoff for orchestrator-driven fan-in flows. The
+/// matching `finalize` runs inline here in whichever plugin-hook worker
+/// drained the last child.
+async fn finalize_event(queue: &JobQueue, event: &RivenEvent, scope: i64) {
+    match event {
+        RivenEvent::MediaItemScrapeRequested { .. } => {
+            crate::application::scrape::finalize(scope, queue).await;
+        }
+        RivenEvent::MediaItemIndexRequested { .. } => {
+            crate::application::index::finalize(scope, queue).await;
+        }
+        RivenEvent::ContentServiceRequested => {
+            crate::flows::request_content::finalize(scope, queue).await;
+        }
+        _ => {
+            tracing::error!(?event, "finalize_event called for non-fan-in event");
+        }
     }
 }
 
@@ -120,8 +232,10 @@ pub fn start_workers(queue: Arc<JobQueue>) -> Monitor {
     let cpu_n = std::thread::available_parallelism().map_or(4, std::num::NonZeroUsize::get);
 
     // Orchestrators fan-out sub-jobs and return immediately — no IO, no blocking.
-    // Apalis workers return right away so cpu_n allows more items to be fanned out in parallel.
-    let orchestrator_n = cpu_n;
+    // Sized at `cpu * 1.5` so every flow worker (process-media-item, scrape,
+    // download, rank-streams, etc.) can have many items in flight without
+    // changing per-plugin load — the plugin-hook queues are the actual rate cap.
+    let orchestrator_n = cpu_n.saturating_mul(3).div_ceil(2);
 
     // Plugin workers spend almost all their time waiting on external HTTP calls
     // (scrapers, TMDB/TVDB). Our jobs combine both in one task, so we set this high enough that external API rate limits — not
@@ -140,13 +254,7 @@ pub fn start_workers(queue: Arc<JobQueue>) -> Monitor {
         m, queue, "riven-index", index_storage, orchestrator_n, handle_index_job, 60
     );
     let m = register_worker!(
-        m, queue, "riven-index-plugin", index_plugin_storage, plugin_n, handle_index_plugin_job, 180
-    );
-    let m = register_worker!(
         m, queue, "riven-scrape", scrape_storage, orchestrator_n, handle_scrape_job, 60
-    );
-    let m = register_worker!(
-        m, queue, "riven-scrape-plugin", scrape_plugin_storage, plugin_n, handle_scrape_plugin_job, 180
     );
     let m = register_worker!(
         m, queue, "riven-parse", parse_storage, parse_n, handle_parse_scrape_results_job, 300
@@ -156,9 +264,6 @@ pub fn start_workers(queue: Arc<JobQueue>) -> Monitor {
     );
     let m = register_worker!(
         m, queue, "riven-rank-streams", rank_streams_storage, download_n, handle_rank_streams_job, 300
-    );
-    let m = register_worker!(
-        m, queue, "riven-content", content_storage, 1, handle_content_service_job, 600
     );
     // Per-item state machine — orchestration only, fans out and returns.
     let m = register_worker!(
@@ -176,7 +281,7 @@ pub fn start_workers(queue: Arc<JobQueue>) -> Monitor {
                 .backend(storage.clone())
                 .enable_tracing()
                 .catch_panic()
-                .timeout(Duration::from_secs(120))
+                .timeout(Duration::from_secs(180))
                 .concurrency(plugin_n)
                 .data(q.clone())
                 .build(handle_plugin_hook_job)

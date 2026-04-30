@@ -247,6 +247,7 @@ async fn main() -> Result<()> {
             let queues = jq.queue_names();
             while !cancel.is_cancelled() {
                 riven_queue::clear_worker_registrations(&mut redis_conn, &queues).await;
+                riven_queue::purge_orphaned_worker_sets(&mut redis_conn, &queues).await;
                 riven_queue::purge_orphaned_active_jobs(&mut redis_conn, &queues).await;
                 let signal = {
                     let cancel = cancel.clone();

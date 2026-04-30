@@ -4,6 +4,6 @@ mod requests;
 mod response;
 
 pub use event::RivenEvent;
-pub use kind::EventType;
+pub use kind::{DispatchStrategy, EventType};
 pub use requests::{DownloadSuccessInfo, IndexRequest, ScrapeRequest};
 pub use response::HookResponse;

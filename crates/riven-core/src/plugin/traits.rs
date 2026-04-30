@@ -102,9 +102,15 @@ pub trait Plugin: Send + Sync + 'static {
         Ok(HookResponse::Empty)
     }
 
+    /// Check whether a list of torrent hashes is already cached.
+    /// `provider` lets the caller restrict the check to a single provider
+    /// (e.g. `Some("realdebrid")`); `None` means "all configured providers".
+    /// The download flow's per-iteration cache check passes a specific
+    /// provider so an early hit on the first one skips slower providers.
     async fn on_download_cache_check_requested(
         &self,
         _hashes: &[String],
+        _provider: Option<&str>,
         _ctx: &PluginContext,
     ) -> anyhow::Result<HookResponse> {
         Ok(HookResponse::Empty)
@@ -225,8 +231,9 @@ pub trait Plugin: Send + Sync + 'static {
                 self.on_download_requested(*id, info_hash, magnet, cached_stores, ctx)
                     .await
             }
-            RivenEvent::MediaItemDownloadCacheCheckRequested { hashes } => {
-                self.on_download_cache_check_requested(hashes, ctx).await
+            RivenEvent::MediaItemDownloadCacheCheckRequested { hashes, provider } => {
+                self.on_download_cache_check_requested(hashes, provider.as_deref(), ctx)
+                    .await
             }
             RivenEvent::MediaItemDownloadError { .. } => Ok(HookResponse::Empty),
             RivenEvent::MediaItemDownloadErrorIncorrectState { .. } => Ok(HookResponse::Empty),
