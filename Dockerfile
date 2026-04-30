@@ -40,7 +40,7 @@ RUN apk add --no-cache fuse3 ca-certificates
 
 COPY --from=builder /riven /usr/local/bin/riven
 
-RUN mkdir -p /mnt/strm /logs && \
+RUN mkdir -p /logs && \
     echo "user_allow_other" >> /etc/fuse.conf
 
 ENV SQLX_OFFLINE=true
