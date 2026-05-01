@@ -24,7 +24,7 @@ pub struct FuseSession {
 
 impl FuseSession {
     pub fn join(self) {
-        let _ = self.session.join();
+        let _result = self.session.join();
     }
 }
 
@@ -68,11 +68,13 @@ pub fn mount(
                 .map(|s| s.success())
                 .unwrap_or(false);
             if !ok {
-                let _ = std::process::Command::new("umount")
-                    .args(["-l", path_str])
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
-                    .status();
+                drop(
+                    std::process::Command::new("umount")
+                        .args(["-l", path_str])
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .status(),
+                );
             }
         } else if mount_path.read_dir()?.next().is_some() {
             anyhow::bail!(

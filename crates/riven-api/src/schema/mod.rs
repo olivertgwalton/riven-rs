@@ -2,7 +2,6 @@ use crate::vfs_mount::VfsMountManager;
 use async_graphql::{MergedObject, Schema};
 use plugin_calendar::CalendarQuery;
 use plugin_dashboard::DashboardQuery;
-use plugin_logs::LogsQuery;
 use riven_core::downloader::DownloaderConfig;
 use riven_core::http::HttpClient;
 use riven_core::logging::LogControl;
@@ -31,13 +30,7 @@ pub use vfs::VfsQuery;
 // ── Merged query root ──
 
 #[derive(MergedObject, Default)]
-pub struct QueryRoot(
-    CoreQuery,
-    DashboardQuery,
-    LogsQuery,
-    CalendarQuery,
-    VfsQuery,
-);
+pub struct QueryRoot(CoreQuery, DashboardQuery, CalendarQuery, VfsQuery);
 
 pub type AppSchema = Schema<QueryRoot, MutationRoot, SubscriptionRoot>;
 
@@ -65,7 +58,7 @@ pub fn build_schema(
     .data(log_control)
     .data(log_tx)
     .data(vfs_mount_manager);
-    let builder = plugin_logs::register_with_schema(builder, log_directory);
+    let builder = queries::logs::register_with_schema(builder, log_directory);
     let builder = plugin_dashboard::register_with_schema(builder);
     builder.finish()
 }

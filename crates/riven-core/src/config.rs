@@ -11,8 +11,8 @@ pub mod vfs {
     /// Maximum footer size for scanning purposes.
     pub const MAX_FOOTER_SIZE: u64 = 10_485_760; // 10 MB
 
-    /// Target footer size as a percentage of the file size.
-    pub const TARGET_FOOTER_PERCENTAGE: f64 = 0.02; // 2%
+    /// Target footer size as 1/N of file size (50 = 2%).
+    pub const TARGET_FOOTER_DIVISOR: u64 = 50;
 
     /// Chunk size (in bytes) used for streaming calculations.
     pub const CHUNK_SIZE: u64 = 1_048_576; // 1 MB
@@ -43,7 +43,7 @@ pub mod vfs {
 
     /// Calculate footer size for a given file size.
     pub fn footer_size(file_size: u64) -> u64 {
-        let target = (file_size as f64 * TARGET_FOOTER_PERCENTAGE) as u64;
+        let target = file_size / TARGET_FOOTER_DIVISOR;
         let clamped = target.clamp(MIN_FOOTER_SIZE, MAX_FOOTER_SIZE);
         // Align to block boundary
         (clamped / BLOCK_SIZE) * BLOCK_SIZE

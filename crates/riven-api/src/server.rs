@@ -94,6 +94,18 @@ pub async fn start_server(config: StartServerConfig) -> Result<()> {
         cancel,
     } = config;
 
+    // Refuse to start with the unsafe combination of no API key and no CORS
+    // allowlist: a malicious cross-origin page in a victim's browser could
+    // otherwise drive every endpoint as the trusted_api_key admin.
+    let api_key_empty = api_key.as_deref().is_none_or(str::is_empty);
+    if api_key_empty && cors_allowed_origins.is_empty() {
+        anyhow::bail!(
+            "refusing to start: both RIVEN_SETTING__API_KEY and \
+             RIVEN_SETTING__CORS_ALLOWED_ORIGINS are unset. Set at least one \
+             (an API key gates auth; an origins list constrains CORS)."
+        );
+    }
+
     let schema = build_schema(
         db_pool.clone(),
         registry,
@@ -173,8 +185,12 @@ pub async fn start_server(config: StartServerConfig) -> Result<()> {
 
 fn build_cors_layer(allowed: Vec<String>) -> CorsLayer {
     if allowed.is_empty() {
+        // Reachable only when api_key is set (start_server bails on the
+        // empty-key + empty-origins combo). Permissive CORS is acceptable
+        // here because every privileged endpoint gates on the API key.
         tracing::warn!(
-            "CORS is permissive — set RIVEN_SETTING__CORS_ALLOWED_ORIGINS for production"
+            "CORS is permissive — set RIVEN_SETTING__CORS_ALLOWED_ORIGINS to \
+             constrain cross-origin browser access"
         );
         return CorsLayer::permissive();
     }

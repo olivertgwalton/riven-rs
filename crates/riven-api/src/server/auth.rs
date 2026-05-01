@@ -90,12 +90,12 @@ pub(super) fn authorize_request(
         .filter(|value| !value.is_empty())
         .ok_or(AuthError::Forbidden)?;
 
-    let provided_signature = hex::decode(signature).map_err(|_| AuthError::Forbidden)?;
+    let provided_signature = hex::decode(signature).map_err(|_e| AuthError::Forbidden)?;
     let mut mac =
-        Hmac::<Sha256>::new_from_slice(secret.as_bytes()).map_err(|_| AuthError::Forbidden)?;
+        Hmac::<Sha256>::new_from_slice(secret.as_bytes()).map_err(|_e| AuthError::Forbidden)?;
     mac.update(signing_payload(user_id, role_header, timestamp).as_bytes());
     mac.verify_slice(&provided_signature)
-        .map_err(|_| AuthError::Forbidden)?;
+        .map_err(|_e| AuthError::Forbidden)?;
 
     let role = match role_header {
         "admin" => UserRole::Admin,

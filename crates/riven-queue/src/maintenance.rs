@@ -63,7 +63,7 @@ pub async fn purge_orphaned_worker_sets(
                 pipe.del(format!("{APALIS_WORKERS_METADATA_PREFIX}{worker}"));
             }
             pipe.del(&key);
-            let _: Result<(), _> = pipe.query_async(redis).await;
+            let _result: Result<(), _> = pipe.query_async(redis).await;
             removed_queues.push(queue.to_string());
         }
 
@@ -156,7 +156,7 @@ async fn rescue_workers(
                 .del(format!("{APALIS_WORKERS_METADATA_PREFIX}{key}"))
                 .del(key);
         }
-        let _: Result<(), _> = del_pipe.query_async(redis).await;
+        let _result: Result<(), _> = del_pipe.query_async(redis).await;
 
         // Only re-enqueue jobs whose data still exists. Jobs whose data was
         // pruned by `prune_queue_history` would cause the worker to emit a
@@ -184,7 +184,7 @@ async fn rescue_workers(
         };
 
         if !rescued.is_empty() {
-            let _: Result<(), _> = redis::pipe()
+            let _result: Result<(), _> = redis::pipe()
                 .rpush(config.active_jobs_list(), &rescued)
                 .del(config.signal_list())
                 .lpush(config.signal_list(), 1u8)
@@ -198,13 +198,13 @@ async fn rescue_workers(
         }
 
         if max_score.is_none() {
-            let _: Result<(), _> = redis::cmd("DEL")
+            let _result: Result<(), _> = redis::cmd("DEL")
                 .arg(config.workers_set())
                 .query_async(redis)
                 .await;
         } else {
             // Remove all stale worker entries in a single ZREM varargs call.
-            let _: Result<(), _> = redis::cmd("ZREM")
+            let _result: Result<(), _> = redis::cmd("ZREM")
                 .arg(config.workers_set())
                 .arg(&members)
                 .query_async(redis)
@@ -269,7 +269,7 @@ pub async fn purge_orphaned_active_jobs(
         for id in &orphans {
             pipe.cmd("LREM").arg(&active_key).arg(0i64).arg(id);
         }
-        let _: Result<(), _> = pipe.query_async(redis).await;
+        let _result: Result<(), _> = pipe.query_async(redis).await;
 
         tracing::info!(
             queue = queue_name,
@@ -362,7 +362,7 @@ async fn prune_set(
         .iter()
         .map(|id| format!("{job_meta_hash}:{id}"))
         .collect();
-    let _: Result<(), _> = redis::pipe()
+    let _result: Result<(), _> = redis::pipe()
         .atomic()
         .zrem(set_key, &ids)
         .hdel(job_data_hash, &ids)

@@ -18,14 +18,14 @@ impl InFlightRequest {
     }
 
     pub(super) fn finish(&self, result: Result<Arc<HttpResponseData>, String>) {
-        let _ = self.tx.send(Some(result));
+        drop(self.tx.send(Some(result)));
     }
 
     pub(super) async fn wait(&self) -> Result<Arc<HttpResponseData>, String> {
         let mut rx = self.tx.subscribe();
         rx.wait_for(|v| v.is_some())
             .await
-            .map_err(|_| "inflight leader cancelled before completing request".to_string())?
+            .map_err(|_e| "inflight leader cancelled before completing request".to_string())?
             .clone()
             .unwrap()
     }

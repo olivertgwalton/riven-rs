@@ -487,7 +487,7 @@ async fn send_json_webhook(
 }
 
 fn format_duration(seconds: f64) -> String {
-    let total = seconds.round().max(0.0) as u64;
+    let total = u64::try_from(seconds.round().max(0.0) as i64).unwrap_or(0);
     let hours = total / 3600;
     let minutes = (total % 3600) / 60;
     let secs = total % 60;

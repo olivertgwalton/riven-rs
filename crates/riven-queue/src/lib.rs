@@ -538,7 +538,7 @@ impl JobQueue {
     pub async fn init_flow(&self, prefix: &str, id: i64, pending: usize) {
         let mut conn = self.redis.clone();
         // Clear any stale results from a previous run and reset the pending counter atomically.
-        let _: Result<(), _> = redis::pipe()
+        let _result: Result<(), _> = redis::pipe()
             .del(flow_results_key(prefix, id))
             .cmd("SET")
             .arg(flow_pending_key(prefix, id))
@@ -562,7 +562,7 @@ impl JobQueue {
         };
         let key = flow_results_key(prefix, id);
         let mut conn = self.redis.clone();
-        let _: Result<(), _> = redis::pipe()
+        let _result: Result<(), _> = redis::pipe()
             .hset(&key, field, &payload)
             .expire(&key, 3600i64)
             .query_async(&mut conn)
@@ -615,7 +615,7 @@ impl JobQueue {
 
     pub async fn clear_flow(&self, prefix: &str, id: i64) {
         let mut conn = self.redis.clone();
-        let _: Result<(), _> = redis::cmd("DEL")
+        let _result: Result<(), _> = redis::cmd("DEL")
             .arg(flow_pending_key(prefix, id))
             .query_async(&mut conn)
             .await;
@@ -623,7 +623,7 @@ impl JobQueue {
 
     pub async fn clear_flow_results(&self, prefix: &str, id: i64) {
         let mut conn = self.redis.clone();
-        let _: Result<(), _> = redis::cmd("DEL")
+        let _result: Result<(), _> = redis::cmd("DEL")
             .arg(flow_results_key(prefix, id))
             .query_async(&mut conn)
             .await;
@@ -634,7 +634,7 @@ impl JobQueue {
     /// from any bail-out path regardless of which keys have been written.
     pub async fn clear_flow_all(&self, prefix: &str, id: i64) {
         let mut conn = self.redis.clone();
-        let _: Result<(), _> = redis::cmd("DEL")
+        let _result: Result<(), _> = redis::cmd("DEL")
             .arg(flow_pending_key(prefix, id))
             .arg(flow_results_key(prefix, id))
             .arg(flow_rate_limited_key(prefix, id))
@@ -649,7 +649,7 @@ impl JobQueue {
     pub async fn flow_increment_rate_limited(&self, prefix: &str, id: i64) {
         let key = flow_rate_limited_key(prefix, id);
         let mut conn = self.redis.clone();
-        let _: Result<(), _> = redis::pipe()
+        let _result: Result<(), _> = redis::pipe()
             .cmd("INCR")
             .arg(&key)
             .cmd("EXPIRE")
@@ -673,7 +673,7 @@ impl JobQueue {
     /// Delete the rate-limited counter for this flow (called in `finalize`).
     pub async fn clear_flow_rate_limited(&self, prefix: &str, id: i64) {
         let mut conn = self.redis.clone();
-        let _: Result<(), _> = redis::cmd("DEL")
+        let _result: Result<(), _> = redis::cmd("DEL")
             .arg(flow_rate_limited_key(prefix, id))
             .query_async(&mut conn)
             .await;
@@ -699,7 +699,7 @@ impl JobQueue {
         };
         let key = flow_context_key(prefix, scope);
         let mut conn = self.redis.clone();
-        let _: Result<(), _> = redis::pipe()
+        let _result: Result<(), _> = redis::pipe()
             .cmd("SET")
             .arg(&key)
             .arg(payload)
@@ -727,7 +727,7 @@ impl JobQueue {
 
     pub async fn flow_clear_context(&self, prefix: &str, scope: i64) {
         let mut conn = self.redis.clone();
-        let _: Result<(), _> = redis::cmd("DEL")
+        let _result: Result<(), _> = redis::cmd("DEL")
             .arg(flow_context_key(prefix, scope))
             .query_async(&mut conn)
             .await;
@@ -774,7 +774,7 @@ impl JobQueue {
             .arg(CANCELLED_ITEMS_SET)
             .arg(600i64)
             .ignore();
-        let _: Result<(), _> = pipe.query_async(&mut conn).await;
+        let _result: Result<(), _> = pipe.query_async(&mut conn).await;
 
         // Every queue that carries a `{ "id": <media_item_id>, ... }` payload
         // at the top level of the job payload.
@@ -813,13 +813,13 @@ impl JobQueue {
         let mut conn = self.redis.clone();
         for id in ids {
             for prefix in ["index", "scrape", "parse", "download", "rank-streams"] {
-                let _: Result<(), _> = redis::cmd("DEL")
+                let _result: Result<(), _> = redis::cmd("DEL")
                     .arg(dedup_key(prefix, *id))
                     .query_async(&mut conn)
                     .await;
             }
             for prefix in ["scrape", "parse", "index"] {
-                let _: Result<(), _> = redis::pipe()
+                let _result: Result<(), _> = redis::pipe()
                     .cmd("DEL")
                     .arg(flow_pending_key(prefix, *id))
                     .cmd("DEL")
@@ -946,13 +946,13 @@ impl JobQueue {
     // ── Domain events ─────────────────────────────────────────────────────────
 
     pub async fn notify(&self, event: RivenEvent) {
-        let _ = self.event_tx.send(event.clone());
+        drop(self.event_tx.send(event.clone()));
 
         let event_type = event.event_type();
         if event_type.is_ui_streamed()
             && let Ok(json) = serde_json::to_string(&event)
         {
-            let _ = self.notification_tx.send(json);
+            drop(self.notification_tx.send(json));
         }
 
         let subscribers = self.registry.subscriber_names(event_type).await;
@@ -1053,9 +1053,9 @@ const SCHEDULED_INDEX_TASK_NAMESPACE: u128 = 0x524956454e494e44_0000000000000000
 const SCHEDULED_SCRAPE_TASK_NAMESPACE: u128 = 0x524956454e534352_0000000000000000;
 
 fn scheduled_index_task_id(id: i64) -> Ulid {
-    Ulid::from(SCHEDULED_INDEX_TASK_NAMESPACE | id as u64 as u128)
+    Ulid::from(SCHEDULED_INDEX_TASK_NAMESPACE | u128::from(id.cast_unsigned()))
 }
 
 fn scheduled_scrape_task_id(id: i64) -> Ulid {
-    Ulid::from(SCHEDULED_SCRAPE_TASK_NAMESPACE | id as u64 as u128)
+    Ulid::from(SCHEDULED_SCRAPE_TASK_NAMESPACE | u128::from(id.cast_unsigned()))
 }

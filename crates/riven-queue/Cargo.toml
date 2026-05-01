@@ -22,3 +22,6 @@ apalis = { workspace = true }
 apalis-redis = { workspace = true }
 futures = { workspace = true }
 ulid = { workspace = true }
+
+[lints]
+workspace = true

@@ -141,7 +141,7 @@ where
 {
     id.trim()
         .parse()
-        .map_err(|_| Error::new(format!("{label} ID must be numeric")))
+        .map_err(|_e| Error::new(format!("{label} ID must be numeric")))
 }
 
 #[derive(Deserialize)]

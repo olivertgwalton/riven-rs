@@ -32,7 +32,6 @@ plugin-newznab = { path = "../plugin-newznab" }
 plugin-sabnzbd = { path = "../plugin-sabnzbd" }
 plugin-usenet = { path = "../plugin-usenet" }
 riven-usenet = { path = "../riven-usenet" }
-plugin-logs = { path = "../plugin-logs" }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
@@ -45,3 +44,6 @@ redis = { workspace = true }
 reqwest = { workspace = true }
 serde_json = { workspace = true }
 chrono = { workspace = true }
+
+[lints]
+workspace = true

@@ -82,7 +82,7 @@ fn entry_mtime(entry: &FileSystemEntry) -> SystemTime {
     // and re-probe/prune extracted metadata. Use the creation time as the
     // content timestamp for the virtual file.
     let ts = entry.created_at;
-    UNIX_EPOCH + Duration::from_secs(ts.timestamp().max(0) as u64)
+    UNIX_EPOCH + Duration::from_secs(ts.timestamp().max(0).cast_unsigned())
 }
 
 struct OpenedFile {
@@ -109,7 +109,7 @@ impl CachedEntry {
     fn from_db(entry: FileSystemEntry) -> Self {
         Self {
             id: entry.id,
-            file_size: entry.file_size as u64,
+            file_size: u64::try_from(entry.file_size).unwrap_or(0),
             mtime: entry_mtime(&entry),
             download_url: entry.download_url.map(Arc::from),
             stream_url: entry.stream_url.map(Arc::from),
@@ -381,7 +381,7 @@ impl Filesystem for RivenFs {
     fn init(&mut self, _req: &Request, config: &mut KernelConfig) -> std::io::Result<()> {
         // Maximum readahead lets the kernel pipeline reads aggressively, reducing
         // latency stalls between successive FUSE reads during sequential playback.
-        let _ = config.set_max_readahead(128 * 1024 * 1024);
+        let _previous = config.set_max_readahead(128 * 1024 * 1024);
         Ok(())
     }
 

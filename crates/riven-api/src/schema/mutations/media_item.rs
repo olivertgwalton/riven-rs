@@ -136,7 +136,7 @@ impl MediaItemMutations {
             .await?
             .into_iter()
             .filter(|stream| !existing_stream_ids.contains(&stream.id))
-            .count() as i32;
+            .count();
 
         let parse_ctx = build_parse_item_context(pool, fresh.clone()).await;
         if new_streams_count == 0 {
@@ -169,7 +169,7 @@ impl MediaItemMutations {
                 id: input.id,
                 title: parse_ctx.item_title,
                 item_type: parse_ctx.item_type,
-                stream_count: new_streams_count as usize,
+                stream_count: new_streams_count,
             })
             .await;
 
@@ -179,7 +179,7 @@ impl MediaItemMutations {
             status_text: MutationStatusText::Ok,
             error_code: None,
             item: Some(MediaItemUnion::from(fresh)),
-            new_streams_count: Some(new_streams_count),
+            new_streams_count: Some(i32::try_from(new_streams_count).unwrap_or(i32::MAX)),
         })
     }
 

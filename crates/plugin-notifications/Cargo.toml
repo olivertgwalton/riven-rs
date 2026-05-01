@@ -16,3 +16,6 @@ tracing = { workspace = true }
 inventory = { workspace = true }
 chrono = { workspace = true }
 redis = { workspace = true }
+
+[lints]
+workspace = true

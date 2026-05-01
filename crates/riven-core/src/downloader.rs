@@ -22,8 +22,8 @@ impl From<&crate::settings::RivenSettings> for DownloaderConfig {
 
 impl DownloaderConfig {
     pub fn threshold_bytes(mbps: u32, runtime_minutes: i32) -> u64 {
-        let mins = runtime_minutes.max(0) as u64;
-        mins * 60 * mbps as u64 * 125_000
+        let mins = u64::from(runtime_minutes.max(0).cast_unsigned());
+        mins * 60 * u64::from(mbps) * 125_000
     }
 
     pub fn movie_passes(&self, file_size: u64, runtime_minutes: Option<i32>) -> bool {

@@ -67,6 +67,7 @@ impl NotificationsSubscription {
         &self,
         ctx: &Context<'_>,
     ) -> async_graphql::Result<impl Stream<Item = async_graphql::Result<String>>> {
+        crate::schema::auth::require_settings_access(ctx)?;
         let log_tx = ctx.data::<broadcast::Sender<String>>()?;
         let rx = log_tx.subscribe();
         Ok(broadcast_stream(rx).map(Ok))

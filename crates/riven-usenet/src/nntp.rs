@@ -124,7 +124,7 @@ impl NntpConnection {
     pub async fn connect(cfg: &NntpServerConfig) -> Result<Self, NntpError> {
         let connect_fut = async {
             let tcp = TcpStream::connect((cfg.host.as_str(), cfg.port)).await?;
-            tcp.set_nodelay(true).ok();
+            drop(tcp.set_nodelay(true));
             let stream = if cfg.use_tls {
                 let connector = build_tls_connector()?;
                 let server_name = ServerName::try_from(cfg.host.clone())
@@ -142,7 +142,7 @@ impl NntpConnection {
 
         let stream = tokio::time::timeout(cfg.timeout, connect_fut)
             .await
-            .map_err(|_| NntpError::Timeout)??;
+            .map_err(|_e| NntpError::Timeout)??;
 
         let mut conn = NntpConnection { stream };
         let greeting = conn.read_status().await?;
@@ -203,7 +203,7 @@ impl NntpConnection {
     }
 
     pub async fn quit(&mut self) {
-        let _ = self.send("QUIT\r\n").await;
+        drop(self.send("QUIT\r\n").await);
     }
 }
 
@@ -247,7 +247,7 @@ impl NntpPool {
             .permits
             .acquire()
             .await
-            .map_err(|_| NntpError::Protocol("pool closed"))?;
+            .map_err(|_e| NntpError::Protocol("pool closed"))?;
         let mut conn = NntpConnection::connect(&self.cfg).await?;
         let result = conn.fetch_body(message_id).await;
         conn.quit().await;
@@ -258,5 +258,5 @@ impl NntpPool {
 /// Initialize rustls's default crypto provider exactly once. Safe to call
 /// multiple times. Idempotent. Must run before any TLS handshake.
 pub fn init_crypto() {
-    let _ = rustls::crypto::ring::default_provider().install_default();
+    drop(rustls::crypto::ring::default_provider().install_default());
 }

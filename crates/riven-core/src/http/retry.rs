@@ -66,7 +66,7 @@ pub(super) fn parse_retry_after(headers: &HeaderMap) -> Option<Duration> {
     if let Ok(dt) = chrono::DateTime::parse_from_rfc2822(value) {
         let wait = dt.with_timezone(&chrono::Utc) - chrono::Utc::now();
         if wait > chrono::TimeDelta::zero() {
-            return Some(Duration::from_millis(wait.num_milliseconds() as u64));
+            return Some(Duration::from_millis(wait.num_milliseconds().cast_unsigned()));
         }
     }
 
@@ -91,7 +91,7 @@ fn parse_trakt_rate_limit_pause(headers: &HeaderMap) -> Option<Duration> {
     let dt = chrono::DateTime::parse_from_rfc3339(&until).ok()?;
     let wait = dt.with_timezone(&chrono::Utc) - chrono::Utc::now();
     if wait > chrono::TimeDelta::zero() {
-        return Some(Duration::from_millis(wait.num_milliseconds() as u64));
+        return Some(Duration::from_millis(wait.num_milliseconds().cast_unsigned()));
     }
 
     None

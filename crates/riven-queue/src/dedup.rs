@@ -30,7 +30,7 @@ impl Drop for DedupGuard {
         // If the runtime is already shutting down the task is silently dropped, but
         // the safety TTL on the key will clean it up within 30 minutes.
         tokio::spawn(async move {
-            let _: Result<(), _> = redis::cmd("DEL").arg(&key).query_async(&mut conn).await;
+            let _result: Result<(), _> = redis::cmd("DEL").arg(&key).query_async(&mut conn).await;
         });
     }
 }

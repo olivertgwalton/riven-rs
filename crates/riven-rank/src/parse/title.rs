@@ -1,11 +1,3 @@
-#![allow(
-    clippy::items_after_statements,
-    clippy::match_same_arms,
-    clippy::redundant_pub_crate,
-    clippy::too_many_lines,
-    clippy::wildcard_imports
-)]
-
 use regex::Regex;
 use std::sync::LazyLock;
 

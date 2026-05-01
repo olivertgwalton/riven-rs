@@ -16,6 +16,7 @@ use axum::{
 };
 
 use super::ApiState;
+use super::auth::check_api_key;
 
 /// Parse a single-range `Range: bytes=START-END` header. Returns `None` for
 /// no header / unparseable header, `Some(Err(()))` for an unsatisfiable range.
@@ -75,6 +76,10 @@ pub async fn usenet_stream_handler(
     method: Method,
     headers: HeaderMap,
 ) -> Response {
+    if !check_api_key(&state, &headers) {
+        return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
+    }
+
     let Some(streamer) = state.usenet_streamer.as_ref() else {
         return (StatusCode::NOT_FOUND, "usenet streaming not enabled").into_response();
     };

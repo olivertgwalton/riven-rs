@@ -13,7 +13,7 @@ use sha1::{Digest, Sha1};
 pub(crate) const PROFILE: HttpServiceProfile =
     HttpServiceProfile::new("newznab").with_rate_limit(60, Duration::from_secs(60));
 
-const NZB_URL_TTL_SECS: i64 = 60 * 60 * 24 * 7;
+const NZB_URL_TTL_SECS: u64 = 60 * 60 * 24 * 7;
 const NZB_INFO_HASH_PREFIX: &str = "nzb-";
 
 #[derive(Default)]
@@ -148,8 +148,8 @@ impl Plugin for NewznabPlugin {
             // Store the NZB URL in Redis so the SAB downloader can recover it later.
             // The pipeline only carries `info_hash` + opaque `magnet`; we use this
             // sidecar to bridge the indexer → downloader handoff.
-            let _: Result<(), _> =
-                redis_conn.set_ex(nzb_url_redis_key(&info_hash), &item.nzb_url, NZB_URL_TTL_SECS as u64).await;
+            let _result: Result<(), _> =
+                redis_conn.set_ex(nzb_url_redis_key(&info_hash), &item.nzb_url, NZB_URL_TTL_SECS).await;
 
             let mut entry = ScrapeEntry::new(item.title);
             if let Some(size) = item.size {

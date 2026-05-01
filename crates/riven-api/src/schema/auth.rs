@@ -22,7 +22,7 @@ impl RequestAuth {
 
 fn get_request_auth<'ctx>(ctx: &'ctx Context<'_>) -> Result<&'ctx RequestAuth> {
     ctx.data::<RequestAuth>()
-        .map_err(|_| Error::new("Missing request auth context"))
+        .map_err(|_e| Error::new("Missing request auth context"))
 }
 
 fn require_role(ctx: &Context<'_>, minimum_role: UserRole) -> Result<()> {

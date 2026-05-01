@@ -26,6 +26,11 @@ pub struct SettingField {
     pub key_placeholder: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub add_label: Option<&'static str>,
+    /// Optional grouping label. Fields sharing the same `section` are
+    /// rendered together under one heading; fields without a section are
+    /// rendered in the default unnamed group.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub section: Option<&'static str>,
 }
 
 impl SettingField {
@@ -43,6 +48,7 @@ impl SettingField {
             item_fields: None,
             key_placeholder: None,
             add_label: None,
+            section: None,
         }
     }
 
@@ -88,6 +94,11 @@ impl SettingField {
 
     pub const fn with_add_label(mut self, v: &'static str) -> Self {
         self.add_label = Some(v);
+        self
+    }
+
+    pub const fn with_section(mut self, v: &'static str) -> Self {
+        self.section = Some(v);
         self
     }
 }

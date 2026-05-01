@@ -32,7 +32,7 @@ fn rate_limit_retry_budget(max: u32, failed_attempts: i32) -> u32 {
     if max == 0 {
         return u32::MAX;
     }
-    max.saturating_sub(failed_attempts.max(0) as u32)
+    max.saturating_sub(failed_attempts.max(0).cast_unsigned())
 }
 
 /// Bump `failed_attempts`. The DB trigger on the `failed_attempts` column

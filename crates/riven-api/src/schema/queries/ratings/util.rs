@@ -22,7 +22,7 @@ where
 {
     id.trim()
         .parse()
-        .map_err(|_| Error::new(format!("{label} ID must be numeric")))
+        .map_err(|_e| Error::new(format!("{label} ID must be numeric")))
 }
 
 pub(super) fn optional_http(ctx: &Context<'_>, operation: &str) -> Option<HttpClient> {

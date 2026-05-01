@@ -15,3 +15,6 @@ async-trait = { workspace = true }
 async-graphql = { workspace = true }
 anyhow = { workspace = true }
 inventory = { workspace = true }
+
+[lints]
+workspace = true

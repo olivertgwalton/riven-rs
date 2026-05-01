@@ -95,7 +95,7 @@ pub async fn check_cache(
         match serde_json::to_string(result) {
             Ok(payload) => {
                 let cache_key = cache_check_key(store, &result.hash.to_lowercase());
-                let _: Result<(), _> =
+                let _result: Result<(), _> =
                     AsyncCommands::set_ex(&mut conn, &cache_key, payload, CACHE_CHECK_TTL_SECS)
                         .await;
             }
@@ -250,7 +250,7 @@ async fn fetch_cache_check(
                         f.path.clone()
                     },
                     name: f.name,
-                    size: (f.size > 0).then_some(f.size as u64),
+                    size: (f.size > 0).then_some(f.size.cast_unsigned()),
                     link: if f.link.is_empty() {
                         None
                     } else {
@@ -413,7 +413,7 @@ pub fn download_result_from_torz(
         .into_iter()
         .map(|f| DownloadFile {
             filename: file_name_or_path(f.name, f.path),
-            file_size: f.size.max(0) as u64,
+            file_size: f.size.max(0).cast_unsigned(),
             download_url: if f.link.is_empty() {
                 None
             } else {

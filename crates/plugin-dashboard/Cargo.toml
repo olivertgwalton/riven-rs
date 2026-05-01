@@ -14,3 +14,6 @@ inventory = { workspace = true }
 serde_json = { workspace = true }
 sqlx = { workspace = true }
 tokio = { workspace = true }
+
+[lints]
+workspace = true

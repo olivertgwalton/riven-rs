@@ -56,7 +56,11 @@ async fn main() -> Result<()> {
     let db_pool = riven_db::connect(&settings.database_url).await?;
     riven_db::run_migrations(&db_pool).await?;
 
-    let log_settings = riven_core::logging::load_log_settings(&db_pool, &settings).await?;
+    if let Ok(Some(general_settings)) = riven_db::repo::get_setting(&db_pool, "general").await {
+        settings.apply_general_db_override(&general_settings);
+    }
+
+    let log_settings = riven_core::logging::LogSettings::from(&settings);
     let (log_tx, _) = broadcast::channel::<String>(1024);
     let observability =
         riven_core::logging::init_logging(&log_settings, &settings.log_directory, log_tx.clone())?;
@@ -69,10 +73,6 @@ async fn main() -> Result<()> {
             .execute(&db_pool)
             .await?;
         riven_db::run_migrations(&db_pool).await?;
-    }
-
-    if let Ok(Some(general_settings)) = riven_db::repo::get_setting(&db_pool, "general").await {
-        settings.apply_general_db_override(&general_settings);
     }
 
     let redis_client = redis::Client::open(settings.redis_url.as_str())?;
@@ -165,7 +165,7 @@ async fn main() -> Result<()> {
                         _ => None,
                     })
                 });
-                let _ = req.response_tx.send(link);
+                drop(req.response_tx.send(link));
             }
         }
     });
@@ -330,7 +330,17 @@ async fn main() -> Result<()> {
     cancel.cancel();
 
     let drain = async {
-        let _ = tokio::join!(gql_handle, monitor_task, scheduler_task);
+        let (gql_res, monitor_res, scheduler_res) =
+            tokio::join!(gql_handle, monitor_task, scheduler_task);
+        if let Err(e) = gql_res {
+            tracing::error!(error = ?e, "gql task ended with error during drain");
+        }
+        if let Err(e) = monitor_res {
+            tracing::error!(error = ?e, "monitor task ended with error during drain");
+        }
+        if let Err(e) = scheduler_res {
+            tracing::error!(error = ?e, "scheduler task ended with error during drain");
+        }
     };
     if tokio::time::timeout(Duration::from_secs(30), drain).await.is_err() {
         tracing::warn!("drain timed out after 30s; proceeding to unmount");

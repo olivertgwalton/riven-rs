@@ -15,3 +15,6 @@ redis = { workspace = true }
 sha1 = "0.10"
 hex = { workspace = true }
 quick-xml = "0.39"
+
+[lints]
+workspace = true

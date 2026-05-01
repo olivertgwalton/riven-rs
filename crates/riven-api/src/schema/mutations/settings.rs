@@ -189,41 +189,6 @@ impl SettingsMutations {
             .revalidate_plugin(&plugin, enabled, &settings)
             .await;
 
-        if plugin == "logs" {
-            let log_control = ctx.data::<Arc<LogControl>>()?;
-            let log_settings = LogSettings {
-                enabled: enabled
-                    && settings
-                        .get("logging_enabled")
-                        .and_then(coerce_json_bool)
-                        .unwrap_or(true),
-                level: settings
-                    .get("log_level")
-                    .and_then(|value| value.as_str())
-                    .unwrap_or("info")
-                    .to_string(),
-                rotation: settings
-                    .get("log_rotation")
-                    .and_then(|value| value.as_str())
-                    .unwrap_or("hourly")
-                    .to_string(),
-                max_files: settings
-                    .get("log_max_files")
-                    .and_then(|value| value.as_u64())
-                    .map(|value| value as usize)
-                    .filter(|value| *value > 0)
-                    .unwrap_or(5),
-                vfs_debug_logging: settings
-                    .get("vfs_debug_logging")
-                    .and_then(coerce_json_bool)
-                    .unwrap_or(false),
-            };
-
-            log_control
-                .apply(&log_settings)
-                .map_err(|error| Error::new(error.to_string()))?;
-        }
-
         let mut response_settings = settings;
         if let Some(obj) = response_settings.as_object_mut() {
             obj.insert("enabled".to_string(), serde_json::Value::Bool(enabled));
@@ -305,6 +270,37 @@ impl SettingsMutations {
         let pool = ctx.data::<PgPool>()?;
         repo::set_setting(pool, "general", settings.clone()).await?;
 
+        let log_control = ctx.data::<Arc<LogControl>>()?;
+        let log_settings = LogSettings {
+            enabled: settings
+                .get("logging_enabled")
+                .and_then(coerce_json_bool)
+                .unwrap_or(true),
+            level: settings
+                .get("log_level")
+                .and_then(|value| value.as_str())
+                .unwrap_or("info")
+                .to_string(),
+            rotation: settings
+                .get("log_rotation")
+                .and_then(|value| value.as_str())
+                .unwrap_or("hourly")
+                .to_string(),
+            max_files: settings
+                .get("log_max_files")
+                .and_then(|value| value.as_u64())
+                .map(|value| value as usize)
+                .filter(|value| *value > 0)
+                .unwrap_or(5),
+            vfs_debug_logging: settings
+                .get("vfs_debug_logging")
+                .and_then(coerce_json_bool)
+                .unwrap_or(false),
+        };
+        log_control
+            .apply(&log_settings)
+            .map_err(|error| Error::new(error.to_string()))?;
+
         let cfg = ctx.data::<Arc<RwLock<DownloaderConfig>>>()?;
         let mut cfg = cfg.write().await;
         let mbps = |key: &str| settings.get(key).and_then(|v| v.as_u64()).map(|v| v as u32);
@@ -374,6 +370,7 @@ impl SettingsMutations {
 
     /// Recompute stored library-profile matches for every existing media entry.
     async fn rematch_filesystem_library_profiles(&self, ctx: &Context<'_>) -> Result<i64> {
+        require_settings_access(ctx)?;
         let pool = ctx.data::<PgPool>()?;
         let queue = ctx.data::<Arc<JobQueue>>()?;
         let filesystem_settings = queue.filesystem_settings.read().await.clone();

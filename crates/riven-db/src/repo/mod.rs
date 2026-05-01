@@ -89,7 +89,7 @@ pub async fn delete_items_by_ids(pool: &PgPool, ids: Vec<i64>) -> Result<u64> {
 
     // Drop any item_request that no media_item still references — otherwise
     // re-requesting the same show merges the old request's prior seasons back in.
-    let _ = sqlx::query(
+    if let Err(e) = sqlx::query(
         "DELETE FROM item_requests \
          WHERE id NOT IN ( \
              SELECT DISTINCT item_request_id FROM media_items \
@@ -97,7 +97,10 @@ pub async fn delete_items_by_ids(pool: &PgPool, ids: Vec<i64>) -> Result<u64> {
          )",
     )
     .execute(pool)
-    .await;
+    .await
+    {
+        tracing::warn!(error = %e, "failed to prune orphaned item_requests");
+    }
 
     state::force_recompute(pool, &parent_ids).await?;
 

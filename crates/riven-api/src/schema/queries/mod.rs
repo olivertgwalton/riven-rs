@@ -1,5 +1,6 @@
 mod anilist;
 mod external_ids;
+pub(crate) mod logs;
 mod media;
 mod ratings;
 mod settings;
@@ -11,6 +12,7 @@ use async_graphql::MergedObject;
 
 pub use anilist::CoreAnilistQuery;
 pub use external_ids::CoreExternalIdsQuery;
+pub use logs::LogsQuery;
 pub use media::MediaQuery;
 pub use ratings::CoreRatingsQuery;
 pub use settings::CoreSettingsQuery;
@@ -28,4 +30,5 @@ pub struct CoreQuery(
     CoreRatingsQuery,
     CoreTraktQuery,
     CoreTvdbQuery,
+    LogsQuery,
 );

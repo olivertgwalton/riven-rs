@@ -24,7 +24,7 @@ use tracing_subscriber::{
     util::SubscriberInitExt,
 };
 
-use crate::settings::{PluginSettings, RivenSettings};
+use crate::settings::RivenSettings;
 
 #[derive(Debug, Clone)]
 pub struct LogSettings {
@@ -47,64 +47,16 @@ impl Default for LogSettings {
     }
 }
 
-/// Precedence: plugin DB override > `RIVEN_SETTING_LOGS_*` env > top-level `RivenSettings`.
-pub async fn load_log_settings(
-    pool: &sqlx::PgPool,
-    core: &RivenSettings,
-) -> anyhow::Result<LogSettings> {
-    let mut settings = PluginSettings::load("LOGS");
-    if let Some(db_value) = riven_db_get_setting(pool, "plugin.logs").await? {
-        settings.merge_db_override(&db_value);
+impl From<&RivenSettings> for LogSettings {
+    fn from(core: &RivenSettings) -> Self {
+        Self {
+            enabled: core.logging_enabled,
+            level: core.log_level.clone(),
+            rotation: core.log_rotation.clone(),
+            max_files: core.log_max_files.max(1),
+            vfs_debug_logging: core.vfs_debug_logging,
+        }
     }
-
-    let plugin_enabled = riven_db_get_plugin_enabled_setting(pool, "logs")
-        .await
-        .unwrap_or(None)
-        .unwrap_or(true);
-
-    Ok(LogSettings {
-        enabled: plugin_enabled
-            && settings
-                .get("logging_enabled")
-                .map(is_truthy)
-                .unwrap_or(core.logging_enabled),
-        level: settings.get_or("log_level", core.log_level.as_str()),
-        rotation: settings.get_or("log_rotation", "hourly"),
-        max_files: settings
-            .get("log_max_files")
-            .and_then(|value| value.parse::<usize>().ok())
-            .filter(|value| *value > 0)
-            .unwrap_or(5),
-        vfs_debug_logging: settings
-            .get("vfs_debug_logging")
-            .map(is_truthy)
-            .unwrap_or(core.vfs_debug_logging),
-    })
-}
-
-// Inline sqlx mirrors of `riven_db::repo::get_setting` and `get_plugin_enabled_setting`
-// — riven-db depends on riven-core, so we can't depend back.
-async fn riven_db_get_setting(
-    pool: &sqlx::PgPool,
-    key: &str,
-) -> anyhow::Result<Option<serde_json::Value>> {
-    let row: Option<(serde_json::Value,)> =
-        sqlx::query_as("SELECT value FROM settings WHERE key = $1")
-            .bind(key)
-            .fetch_optional(pool)
-            .await?;
-    Ok(row.map(|(v,)| v))
-}
-
-async fn riven_db_get_plugin_enabled_setting(
-    pool: &sqlx::PgPool,
-    plugin: &str,
-) -> anyhow::Result<Option<bool>> {
-    let value = riven_db_get_setting(pool, &format!("plugin.{plugin}")).await?;
-    Ok(value
-        .as_ref()
-        .and_then(|v| v.get("__enabled"))
-        .and_then(serde_json::Value::as_bool))
 }
 
 pub struct LogControl {
@@ -279,8 +231,8 @@ fn build_level_filter(settings: &LogSettings) -> anyhow::Result<EnvFilter> {
     // Both are suppressed together when VFS debug logging is off.
     if !settings.vfs_debug_logging {
         Ok(filter
-            .add_directive("streaming=off".parse().unwrap())
-            .add_directive("log=info".parse().unwrap()))
+            .add_directive("streaming=off".parse()?)
+            .add_directive("log=info".parse()?))
     } else {
         Ok(filter)
     }
@@ -302,13 +254,6 @@ fn build_file_appender(
         .max_log_files(settings.max_files)
         .build(log_directory)
         .map_err(|error| anyhow::anyhow!("failed to initialize log file appender: {error}"))
-}
-
-fn is_truthy(value: &str) -> bool {
-    matches!(
-        value.to_ascii_lowercase().as_str(),
-        "1" | "true" | "yes" | "on"
-    )
 }
 
 fn target_display(target: &str) -> String {
@@ -396,7 +341,7 @@ impl Drop for BroadcastWriter {
         if let Ok(s) = String::from_utf8(std::mem::take(&mut self.buf)) {
             let line = s.trim_end_matches('\n').trim_end_matches('\r').to_string();
             if !line.is_empty() {
-                let _ = self.tx.send(line);
+                drop(self.tx.send(line));
             }
         }
     }

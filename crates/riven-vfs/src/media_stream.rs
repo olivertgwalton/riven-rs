@@ -160,10 +160,15 @@ impl MediaStream {
             "media stream read"
         );
 
+        let Some(first_chunk) = chunks.first().copied() else {
+            tracing::error!(ino = self.ino, "media stream read with no chunks");
+            return ReadOutcome::Error(libc::EIO);
+        };
+
         let outcome = match read_type {
-            ReadType::HeaderScan => self.read_scan_range(start, end, chunks[0], true, &ctx),
+            ReadType::HeaderScan => self.read_scan_range(start, end, first_chunk, true, &ctx),
             ReadType::FooterScan | ReadType::FooterRead => {
-                let chunk = *chunks.last().unwrap_or(&chunks[0]);
+                let chunk = chunks.last().copied().unwrap_or(first_chunk);
                 self.read_scan_range(start, end, chunk, true, &ctx)
             }
             ReadType::GeneralScan => {
@@ -191,8 +196,11 @@ impl MediaStream {
         chunks: &[ChunkRange],
         cache: &RangeCache,
     ) -> ReadOutcome {
+        let Some(first) = chunks.first() else {
+            return ReadOutcome::Error(libc::EIO);
+        };
         match self.collect_chunk_bytes(chunks, cache) {
-            Ok(full) => match slice_request_bytes(&full, start, end, chunks[0].start) {
+            Ok(full) => match slice_request_bytes(&full, start, end, first.start) {
                 Some(slice) => ReadOutcome::Data(slice),
                 None => {
                     tracing::error!(

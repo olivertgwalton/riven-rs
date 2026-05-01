@@ -1,9 +1,3 @@
-#![allow(
-    clippy::missing_panics_doc,
-    clippy::struct_excessive_bools,
-    clippy::too_many_lines
-)]
-
 mod detect;
 mod languages;
 pub(crate) mod patterns;

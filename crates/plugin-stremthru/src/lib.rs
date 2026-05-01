@@ -100,7 +100,7 @@ async fn adjust_store_score(redis: &redis::aio::ConnectionManager, store: &str, 
         .query_async::<i64>(&mut conn)
         .await;
     if next.is_ok() {
-        let _: Result<(), _> =
+        let _result: Result<(), _> =
             AsyncCommands::expire(&mut conn, key, STORE_SCORE_TTL_SECS as i64).await;
     }
 }

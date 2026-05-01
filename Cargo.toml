@@ -23,7 +23,6 @@ members = [
     "crates/plugin-calendar",
     "crates/plugin-trakt",
     "crates/plugin-dashboard",
-    "crates/plugin-logs",
     "crates/plugin-newznab",
     "crates/plugin-sabnzbd",
     "crates/plugin-usenet",
@@ -107,3 +106,53 @@ hex = "0.4"
 
 [patch.crates-io]
 apalis-redis = { path = "vendor/apalis-redis" }
+
+[workspace.lints.clippy]
+# Don't Panic - prevent panics from unwraps. (Removed: indexing_slicing,
+# string_slice, panic, panic_in_result_fn — caused regressions in parser
+# code and test code where the lints misfire.)
+todo = "warn"
+unimplemented = "warn"
+unreachable = "warn"
+get_unwrap = "warn"
+unwrap_in_result = "warn"
+unchecked_time_subtraction = "warn"
+
+# Don't Fail Silently - prevent dropped futures and swallowed errors.
+# (Removed: assertions_on_result_states — minor test ergonomics regression.)
+let_underscore_future = "warn"
+let_underscore_must_use = "warn"
+unused_result_ok = "warn"
+map_err_ignore = "warn"
+
+# Don't Do Bad Async Stuff - prevent deadlocks and concurrency bugs
+await_holding_lock = "warn"
+await_holding_refcell_ref = "warn"
+if_let_mutex = "warn"  # only relevant on editions before 2024
+large_futures = "warn"
+
+# Don't Do Unsafe Things with Memory
+mem_forget = "warn"
+undocumented_unsafe_blocks = "warn"
+multiple_unsafe_ops_per_block = "warn"
+unnecessary_safety_doc = "warn"
+unnecessary_safety_comment = "warn"
+
+# Don't Do Potentially Incorrect Things with Numbers.
+# (Removed: float_cmp, float_cmp_const — wrong for deterministic test values.)
+lossy_float_literal = "warn"
+cast_sign_loss = "warn"
+invalid_upcast_comparisons = "warn"
+
+# Don't Do Bad Things That are Easy to Avoid
+rc_mutex = "warn"
+debug_assert_with_mut_call = "warn"
+iter_not_returning_iterator = "warn"
+expl_impl_clone_on_copy = "warn"
+infallible_try_from = "warn"
+dbg_macro = "warn"
+
+# Don't `allow` Your Way Around These Lints - every suppression must be
+# a deliberate #[expect(..., reason = "…")] rather than a silent #[allow]
+allow_attributes = "warn"
+allow_attributes_without_reason = "warn"

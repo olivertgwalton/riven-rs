@@ -19,3 +19,6 @@ redis = { workspace = true }
 bytes = { workspace = true }
 parking_lot = { workspace = true }
 crc32fast = "1"
+
+[lints]
+workspace = true

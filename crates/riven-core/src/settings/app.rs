@@ -25,6 +25,10 @@ pub struct RivenSettings {
     pub logging_enabled: bool,
     /// Logging level (off, error, warn, info, debug, trace).
     pub log_level: String,
+    /// Rolling-file rotation cadence ("hourly" or "daily").
+    pub log_rotation: String,
+    /// Maximum number of rotated log files to retain on disk.
+    pub log_max_files: usize,
     pub log_directory: String,
     pub gql_port: u16,
     pub dubbed_anime_only: bool,
@@ -82,6 +86,11 @@ struct GeneralSettingsOverride {
     maximum_scrape_attempts: Option<u32>,
     schedule_offset_minutes: Option<u64>,
     unknown_air_date_offset_days: Option<u64>,
+    logging_enabled: Option<bool>,
+    log_level: Option<String>,
+    log_rotation: Option<String>,
+    log_max_files: Option<usize>,
+    vfs_debug_logging: Option<bool>,
 }
 
 impl Default for RivenSettings {
@@ -96,6 +105,8 @@ impl Default for RivenSettings {
             unsafe_wipe_database_on_startup: false,
             logging_enabled: true,
             log_level: "info".into(),
+            log_rotation: "hourly".into(),
+            log_max_files: 5,
             log_directory: "./logs".into(),
             gql_port: 8080,
             dubbed_anime_only: false,
@@ -185,6 +196,14 @@ impl RivenSettings {
         set_if_some(
             &mut self.unknown_air_date_offset_days,
             override_settings.unknown_air_date_offset_days,
+        );
+        set_if_some(&mut self.logging_enabled, override_settings.logging_enabled);
+        set_if_some(&mut self.log_level, override_settings.log_level);
+        set_if_some(&mut self.log_rotation, override_settings.log_rotation);
+        set_if_some(&mut self.log_max_files, override_settings.log_max_files);
+        set_if_some(
+            &mut self.vfs_debug_logging,
+            override_settings.vfs_debug_logging,
         );
     }
 

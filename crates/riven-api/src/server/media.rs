@@ -81,7 +81,7 @@ fn parse_requested_range(
 
     let raw = range_header
         .to_str()
-        .map_err(|_| RangeHeaderError::Invalid)?
+        .map_err(|_e| RangeHeaderError::Invalid)?
         .trim();
     let Some(spec) = raw.strip_prefix("bytes=") else {
         return Err(RangeHeaderError::Invalid);
@@ -98,10 +98,10 @@ fn parse_requested_range(
 
     let requested = RequestedRange {
         start: (!start.is_empty())
-            .then(|| start.parse::<u64>().map_err(|_| RangeHeaderError::Invalid))
+            .then(|| start.parse::<u64>().map_err(|_e| RangeHeaderError::Invalid))
             .transpose()?,
         end: (!end.is_empty())
-            .then(|| end.parse::<u64>().map_err(|_| RangeHeaderError::Invalid))
+            .then(|| end.parse::<u64>().map_err(|_e| RangeHeaderError::Invalid))
             .transpose()?,
     };
 
@@ -301,9 +301,9 @@ pub(super) async fn media_bridge_handler(
         return StatusCode::NOT_FOUND.into_response();
     }
 
-    let requested_range = match parse_requested_range(headers.get(RANGE), entry.file_size as u64) {
+    let requested_range = match parse_requested_range(headers.get(RANGE), u64::try_from(entry.file_size).unwrap_or(0)) {
         Ok(range) => range,
-        Err(error) => return range_error_response(error, entry.file_size as u64),
+        Err(error) => return range_error_response(error, u64::try_from(entry.file_size).unwrap_or(0)),
     };
 
     let mut refreshed_stream_url = false;

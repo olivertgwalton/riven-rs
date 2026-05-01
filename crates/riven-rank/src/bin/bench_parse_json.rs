@@ -20,8 +20,8 @@ fn percentile(sorted: &[f64], p: f64) -> f64 {
     }
 
     let rank = (sorted.len() - 1) as f64 * p;
-    let lower = rank.floor() as usize;
-    let upper = rank.ceil() as usize;
+    let lower = usize::try_from(rank.floor() as i64).unwrap_or(0);
+    let upper = usize::try_from(rank.ceil() as i64).unwrap_or(0);
 
     if lower == upper {
         sorted[lower]
@@ -41,7 +41,7 @@ fn main() -> anyhow::Result<()> {
 
     for title in &titles {
         let t0 = Instant::now();
-        let _ = parse(title);
+        let _parsed = parse(title);
         lat_ms.push(t0.elapsed().as_secs_f64() * 1000.0);
     }
 

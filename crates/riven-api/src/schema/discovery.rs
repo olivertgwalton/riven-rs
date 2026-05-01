@@ -225,7 +225,7 @@ pub async fn discover_streams(
             move || rank_streams(parse_ctx, scraped)
         })
         .await
-        .map_err(|_| Error::new("Failed to rank discovered streams"))?;
+        .map_err(|_e| Error::new("Failed to rank discovered streams"))?;
 
         discovered.extend(ranked.into_iter().map(|candidate| DiscoveredStream {
             key: format!(

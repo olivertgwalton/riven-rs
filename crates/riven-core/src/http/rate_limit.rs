@@ -81,7 +81,7 @@ impl LimiterState {
             self.last_sent = Some(now);
             None
         } else {
-            Some(min_interval - elapsed)
+            Some(min_interval.saturating_sub(elapsed))
         }
     }
 

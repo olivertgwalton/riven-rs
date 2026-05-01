@@ -15,3 +15,6 @@ anyhow = { workspace = true }
 tracing = { workspace = true }
 inventory = { workspace = true }
 chrono = { workspace = true }
+
+[lints]
+workspace = true

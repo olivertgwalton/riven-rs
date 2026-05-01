@@ -14,3 +14,6 @@ anyhow = { workspace = true }
 tracing = { workspace = true }
 inventory = { workspace = true }
 redis = { workspace = true }
+
+[lints]
+workspace = true

@@ -17,3 +17,6 @@ inventory = { workspace = true }
 futures = { workspace = true }
 chrono = { workspace = true }
 redis = { workspace = true }
+
+[lints]
+workspace = true
