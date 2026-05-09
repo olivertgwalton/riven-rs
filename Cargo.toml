@@ -18,6 +18,7 @@ members = [
     "crates/plugin-seerr",
     "crates/plugin-listrr",
     "crates/plugin-mdblist",
+    "crates/plugin-subdl",
     "crates/plugin-notifications",
     "crates/plugin-emby-jellyfin",
     "crates/plugin-calendar",

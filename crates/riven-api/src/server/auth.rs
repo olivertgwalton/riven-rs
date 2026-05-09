@@ -1,4 +1,7 @@
-use axum::http::HeaderMap;
+use axum::extract::{Request, State};
+use axum::http::{HeaderMap, StatusCode};
+use axum::middleware::Next;
+use axum::response::{IntoResponse, Response};
 use chrono::Utc;
 use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
@@ -6,6 +9,27 @@ use sha2::Sha256;
 use crate::schema::auth::{RequestAuth, UserRole};
 
 use super::ApiState;
+
+/// Middleware that rejects any request whose `x-api-key` / `Authorization`
+/// header doesn't match the configured API key. Apply via
+/// `axum::middleware::from_fn_with_state(state.clone(), require_api_key)`
+/// to gate route groups (Apalis UI, Apalis job-queue API, the seerr
+/// webhook, the static frontend fallback).
+///
+/// `check_api_key` already returns `true` when no API key is configured,
+/// so this middleware is a no-op in that mode and we keep
+/// `start_server`'s existing "refuse to start without key + CORS list"
+/// invariant as the safety net.
+pub(super) async fn require_api_key(
+    State(state): State<ApiState>,
+    req: Request,
+    next: Next,
+) -> Response {
+    if !check_api_key(&state, req.headers()) {
+        return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
+    }
+    next.run(req).await
+}
 
 pub(super) const FRONTEND_AUTH_SOURCE_HEADER: &str = "x-riven-auth-source";
 pub(super) const FRONTEND_ROLE_HEADER: &str = "x-riven-user-role";

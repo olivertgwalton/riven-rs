@@ -152,8 +152,13 @@ pub async fn start_server(config: StartServerConfig) -> Result<()> {
         usenet_streamer,
     };
 
-    let app = Router::new()
-        .nest("/api/v1", board_api.with_state(()))
+    // Routes that perform their own per-handler API-key check
+    // (`graphql`, `media`, `usenet`). The handlers own their response
+    // shapes (WS upgrade, range responses, structured GraphQL errors), so
+    // we keep them as concrete routes rather than wrapping them in the
+    // generic 401 middleware — but the outer `require_api_key` layer
+    // applies to them too, providing belt-and-suspenders defence in depth.
+    let routes = Router::new()
         .route(
             "/graphql",
             get(graphql::graphql_get_handler).post(graphql::graphql_handler),
@@ -166,10 +171,30 @@ pub async fn start_server(config: StartServerConfig) -> Result<()> {
             "/usenet/{info_hash}/{file_index}",
             get(usenet::usenet_stream_handler).head(usenet::usenet_stream_handler),
         )
+        .nest("/api/v1", board_api.with_state(()))
         .route("/webhook/seerr", post(webhooks::seerr_webhook))
         .nest("/board", board_ui.with_state(()))
-        .fallback_service(serve_frontend)
+        .fallback_service(serve_frontend);
+
+    // Layer order is outside-in for a request: the LAST `.layer()` is the
+    // outermost. Build up:
+    //   request → cors → require_api_key → board_assets_middleware → router
+    //
+    // `require_api_key` MUST sit outside `board_assets_middleware`,
+    // otherwise the asset middleware would short-circuit auth: it intercepts
+    // any root-level path with a dot that exists in the embedded board UI
+    // bundle (including the bundle's `index.html`), so without an outer
+    // gate the apalis board's bootstrap HTML is reachable unauthenticated.
+    //
+    // When `api_key` is unset, `require_api_key` is a no-op (matching
+    // `check_api_key`'s behaviour); `start_server`'s "key or CORS list"
+    // invariant above keeps that LAN-trusted mode safe.
+    let app = routes
         .layer(axum::middleware::from_fn(board::board_assets_middleware))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            auth::require_api_key,
+        ))
         .layer(build_cors_layer(cors_allowed_origins))
         .with_state(state);
 

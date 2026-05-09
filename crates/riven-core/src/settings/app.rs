@@ -70,6 +70,13 @@ pub struct RivenSettings {
     /// Comma-separated list of allowed CORS origins for the API.
     /// Empty = fall back to permissive CORS (logs a warning on startup).
     pub cors_allowed_origins: String,
+
+    /// Explicit allow-list of plugin names that are enabled by default. When
+    /// `None`, every discovered plugin defaults to enabled if it has effective
+    /// settings (legacy behaviour). When `Some(list)`, only plugins in the list
+    /// (plus `tmdb` and `tvdb`, which are permanently enabled) default to
+    /// enabled. Per-plugin DB overrides still win in either mode.
+    pub enabled_plugins: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -123,11 +130,29 @@ impl Default for RivenSettings {
             frontend_auth_signing_secret: String::new(),
             vfs_cache_max_size_mb: 0,
             cors_allowed_origins: String::new(),
+            enabled_plugins: None,
         }
     }
 }
 
+/// Plugins that are always enabled by default; required for core indexing flows.
+pub const PERMANENTLY_ENABLED_PLUGINS: &[&str] = &["tmdb", "tvdb"];
+
 impl RivenSettings {
+    /// Returns the default `enabled` flag for a plugin given the current
+    /// `enabled_plugins` allow-list. Permanently-enabled plugins are always
+    /// enabled. When no allow-list is configured, falls back to
+    /// `fallback_default`.
+    pub fn plugin_enabled_default(&self, plugin_name: &str, fallback_default: bool) -> bool {
+        if PERMANENTLY_ENABLED_PLUGINS.contains(&plugin_name) {
+            return true;
+        }
+        match &self.enabled_plugins {
+            Some(list) => list.iter().any(|n| n == plugin_name),
+            None => fallback_default,
+        }
+    }
+
     pub fn load() -> anyhow::Result<Self> {
         let mut settings: Self = Figment::new()
             .merge(Serialized::defaults(Self::default()))

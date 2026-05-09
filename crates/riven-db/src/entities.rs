@@ -165,6 +165,12 @@ pub struct FileSystemEntry {
     pub file_hash: Option<String>,
     pub video_file_size: Option<i64>,
     pub opensubtitles_id: Option<String>,
+    /// Subtitle source plugin (e.g. "subdl"). Set when the subtitle was
+    /// fetched by an upstream provider plugin.
+    pub source_provider: Option<String>,
+    /// Provider-specific external identifier for the subtitle (e.g. SubDL
+    /// subtitle id). Used for de-dup / refresh.
+    pub source_id: Option<String>,
     // Multi-version tracking
     pub stream_id: Option<i64>,
     pub resolution: Option<String>,
@@ -283,8 +289,11 @@ pub struct Stream {
     #[sqlx(json(nullable))]
     pub parsed_data: Option<serde_json::Value>,
     pub rank: Option<i64>,
-    /// Actual file size in bytes, recorded after the first download attempt.
-    /// `None` means the size is not yet known (stream has never been tried).
+    /// Best-known file size in bytes — populated at scrape time when the
+    /// scraper reports a size, or recorded after a download attempt rejects
+    /// the stream on a bitrate check. Used by the download loop to pre-filter
+    /// streams that cannot pass the configured bitrate bounds before paying
+    /// for a debrid round-trip. `None` means the size is not yet known.
     pub file_size_bytes: Option<i64>,
 }
 

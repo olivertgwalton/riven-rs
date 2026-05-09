@@ -79,6 +79,38 @@ impl HttpClient {
         };
 
         if is_leader {
+            // RAII guard so a cancelled leader (caller's future dropped while
+            // `self.send(...)` is awaiting) still publishes a failure to the
+            // watch channel and removes the dedupe entry. Without this, the
+            // entry would stay in `inflight` and any future call with the
+            // same key would `state.wait().await` forever — observed when
+            // an iOS HTTP query was cancelled mid-flight: subsequent calls
+            // hung 90s+ with the request never reaching the resolver and no
+            // backend log at all.
+            struct InflightGuard {
+                state: Arc<InFlightRequest>,
+                inflight: Arc<DashMap<String, Arc<InFlightRequest>>>,
+                key: String,
+                completed: bool,
+            }
+            impl Drop for InflightGuard {
+                fn drop(&mut self) {
+                    if !self.completed {
+                        self.state
+                            .finish(Err("inflight leader cancelled before completing request"
+                                .to_string()));
+                    }
+                    self.inflight.remove(&self.key);
+                }
+            }
+
+            let mut guard = InflightGuard {
+                state: state.clone(),
+                inflight: self.inflight.clone(),
+                key: dedupe_key.clone(),
+                completed: false,
+            };
+
             let result = match self.send(profile, make_request).await {
                 Ok(response) => HttpResponseData::from_response(response)
                     .await
@@ -87,7 +119,9 @@ impl HttpClient {
                 Err(e) => Err(e.to_string()),
             };
             state.finish(result.clone());
-            self.inflight.remove(&dedupe_key);
+            guard.completed = true;
+            // Guard's Drop still runs to remove the entry; setting `completed`
+            // just prevents the redundant failure-publish on the channel.
             return result.map_err(anyhow::Error::msg);
         }
 

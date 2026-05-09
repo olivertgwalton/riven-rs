@@ -1,13 +1,14 @@
 use std::sync::Arc;
 
 use riven_core::plugin::{PluginRegistry, collect_plugins};
-use riven_core::settings::PluginSettings;
+use riven_core::settings::{PluginSettings, RivenSettings};
 
 pub async fn register_plugins(
     http: riven_core::http::HttpClient,
     db_pool: sqlx::PgPool,
     redis_conn: redis::aio::ConnectionManager,
     vfs_mount_path: String,
+    settings: &RivenSettings,
 ) -> Arc<PluginRegistry> {
     let registry = PluginRegistry::new();
     let plugins = collect_plugins();
@@ -29,7 +30,9 @@ pub async fn register_plugins(
             .await
             .ok()
             .flatten()
-            .unwrap_or_else(|| plugin_settings.has_effective_values());
+            .unwrap_or_else(|| {
+                settings.plugin_enabled_default(name, plugin_settings.has_effective_values())
+            });
 
         registry
             .register(

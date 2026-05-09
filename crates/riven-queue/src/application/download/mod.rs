@@ -598,6 +598,23 @@ async fn run_downloads(
                 return any_success;
             }
 
+            // Pre-debrid bitrate filter using the size already known for this
+            // stream (from the torznab scrape or recorded by a previous failed
+            // attempt via `update_stream_file_size`). Avoids the multi-second
+            // debrid round-trip + cache-check for streams that cannot pass.
+            if let Some(size) = stream.file_size_bytes
+                && size >= 0
+                && !passes_size_bounds(size as u64, max_size_bytes, min_size_bytes)
+            {
+                tracing::debug!(
+                    id,
+                    info_hash = %stream.info_hash,
+                    file_size = size,
+                    "stream pre-filter: known size violates bitrate threshold; skipping"
+                );
+                continue;
+            }
+
             for (plugin, provider) in plugin_providers {
                 let key = (
                     stream.info_hash.clone(),
@@ -703,10 +720,14 @@ fn passes_bitrate_filter(
         return true;
     }
     let total: u64 = files.iter().filter_map(|f| f.size).sum();
-    if max_size_bytes.is_some_and(|m| total > m) {
+    passes_size_bounds(total, max_size_bytes, min_size_bytes)
+}
+
+fn passes_size_bounds(size: u64, max_size_bytes: Option<u64>, min_size_bytes: Option<u64>) -> bool {
+    if max_size_bytes.is_some_and(|m| size > m) {
         return false;
     }
-    if min_size_bytes.is_some_and(|m| total < m) {
+    if min_size_bytes.is_some_and(|m| size < m) {
         return false;
     }
     true

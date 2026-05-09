@@ -88,6 +88,7 @@ async fn main() -> Result<()> {
         db_pool.clone(),
         redis_conn,
         settings.effective_vfs_mount_path().to_string(),
+        &settings,
     )
     .await;
 

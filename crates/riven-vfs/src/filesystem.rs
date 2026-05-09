@@ -17,6 +17,7 @@ use tokio::sync::mpsc;
 use riven_core::config::vfs::*;
 use riven_core::settings::LibraryProfileMembership;
 use riven_core::stream_link::request_stream_url_blocking;
+use riven_core::types::FileSystemEntryType;
 use riven_core::vfs_layout::VfsLibraryLayout;
 use riven_db::entities::FileSystemEntry;
 use riven_db::repo;
@@ -85,35 +86,58 @@ fn entry_mtime(entry: &FileSystemEntry) -> SystemTime {
     UNIX_EPOCH + Duration::from_secs(ts.timestamp().max(0).cast_unsigned())
 }
 
-struct OpenedFile {
-    entry_id: i64,
-    path: Arc<str>,
-    stream_url: Arc<str>,
-    download_url: Option<Arc<str>>,
-    provider: Option<Arc<str>>,
-    stream_session: MediaStream,
+enum OpenedFile {
+    Media {
+        entry_id: i64,
+        path: Arc<str>,
+        stream_url: Arc<str>,
+        download_url: Option<Arc<str>>,
+        provider: Option<Arc<str>>,
+        stream_session: MediaStream,
+    },
+    /// Subtitle entries are tiny and stored inline in the DB; we hold the full
+    /// payload in the open handle and serve byte-range reads from memory.
+    Subtitle { content: Arc<[u8]> },
 }
 
 #[derive(Clone)]
 struct CachedEntry {
     id: i64,
+    entry_type: FileSystemEntryType,
     file_size: u64,
     mtime: SystemTime,
     download_url: Option<Arc<str>>,
     stream_url: Option<Arc<str>>,
     provider: Option<Arc<str>>,
+    /// For subtitle entries: the inline content. `None` for media entries.
+    subtitle_content: Option<Arc<[u8]>>,
     library_profiles: LibraryProfileMembership,
 }
 
 impl CachedEntry {
     fn from_db(entry: FileSystemEntry) -> Self {
+        let subtitle_content = match entry.entry_type {
+            FileSystemEntryType::Subtitle => entry
+                .subtitle_content
+                .as_deref()
+                .map(|s| Arc::<[u8]>::from(s.as_bytes())),
+            FileSystemEntryType::Media => None,
+        };
+        // For subtitle entries, prefer the actual inline byte length over the
+        // stored file_size — the two should agree but inline is authoritative.
+        let file_size = match (&entry.entry_type, &subtitle_content) {
+            (FileSystemEntryType::Subtitle, Some(content)) => content.len() as u64,
+            _ => u64::try_from(entry.file_size).unwrap_or(0),
+        };
         Self {
             id: entry.id,
-            file_size: u64::try_from(entry.file_size).unwrap_or(0),
+            entry_type: entry.entry_type,
+            file_size,
             mtime: entry_mtime(&entry),
             download_url: entry.download_url.map(Arc::from),
             stream_url: entry.stream_url.map(Arc::from),
             provider: entry.provider.map(Arc::from),
+            subtitle_content,
             library_profiles: LibraryProfileMembership::from_json(entry.library_profiles.as_ref()),
         }
     }
@@ -245,7 +269,10 @@ impl RivenFs {
                     None
                 } else {
                     self.runtime
-                        .block_on(repo::get_media_entry_by_path(&self.db_pool, &actual_path))
+                        .block_on(repo::get_filesystem_entry_by_path(
+                            &self.db_pool,
+                            &actual_path,
+                        ))
                         .ok()
                         .flatten()
                         .map(CachedEntry::from_db)
@@ -322,14 +349,25 @@ impl RivenFs {
         end: u64,
         stream_url: &str,
     ) -> ReadOutcome {
-        handle.stream_session.read(
-            start,
-            end,
-            stream_url,
-            &self.range_cache,
-            &self.stream_client,
-            &self.runtime,
-        )
+        match handle {
+            OpenedFile::Media { stream_session, .. } => stream_session.read(
+                start,
+                end,
+                stream_url,
+                &self.range_cache,
+                &self.stream_client,
+                &self.runtime,
+            ),
+            OpenedFile::Subtitle { content } => {
+                let len = content.len() as u64;
+                if start >= len {
+                    return ReadOutcome::Data(bytes::Bytes::new());
+                }
+                let end = end.min(len - 1);
+                let buf = bytes::Bytes::copy_from_slice(&content[start as usize..=end as usize]);
+                ReadOutcome::Data(buf)
+            }
+        }
     }
 }
 
@@ -543,6 +581,21 @@ impl Filesystem for RivenFs {
             reply.error(Errno::ENOENT);
             return;
         };
+
+        // Subtitle entries serve their inline content directly — no streaming
+        // session, no pre-warm.
+        if entry.entry_type == FileSystemEntryType::Subtitle {
+            let Some(content) = entry.subtitle_content.clone() else {
+                reply.error(Errno::ENOENT);
+                return;
+            };
+            let fd = self.next_fd.fetch_add(1, Ordering::SeqCst);
+            self.file_handles
+                .insert(fd, Mutex::new(OpenedFile::Subtitle { content }));
+            reply.opened(FuseFh(fd), FopenFlags::FOPEN_KEEP_CACHE);
+            return;
+        }
+
         let Some(stream_url) = self.resolve_stream_url(&path, &entry) else {
             reply.error(if entry.download_url.is_some() {
                 Errno::EIO
@@ -568,7 +621,7 @@ impl Filesystem for RivenFs {
 
         self.file_handles.insert(
             fd,
-            Mutex::new(OpenedFile {
+            Mutex::new(OpenedFile::Media {
                 entry_id: entry.id,
                 path,
                 stream_url: Arc::from(stream_url),
@@ -598,25 +651,53 @@ impl Filesystem for RivenFs {
         };
         let mut handle = entry.lock();
 
+        // Subtitle reads bypass the streaming/refresh machinery entirely.
+        if let OpenedFile::Subtitle { content } = &*handle {
+            let len = content.len() as u64;
+            let start = offset;
+            if start >= len {
+                reply.data(&[]);
+                return;
+            }
+            let end = (start + size as u64 - 1).min(len - 1);
+            reply.data(&content[start as usize..=end as usize]);
+            return;
+        }
+
+        let (file_size, path, stream_url, download_url, provider, entry_id) = match &*handle {
+            OpenedFile::Media {
+                stream_session,
+                path,
+                stream_url,
+                download_url,
+                provider,
+                entry_id,
+            } => (
+                stream_session.file_size(),
+                Arc::clone(path),
+                Arc::clone(stream_url),
+                download_url.as_ref().map(Arc::clone),
+                provider.as_ref().map(Arc::clone),
+                *entry_id,
+            ),
+            OpenedFile::Subtitle { .. } => unreachable!(),
+        };
+
         let start = offset;
-        if start >= handle.stream_session.file_size() {
+        if start >= file_size {
             reply.data(&[]);
             return;
         }
-        let end = (start + size as u64 - 1).min(handle.stream_session.file_size() - 1);
+        let end = (start + size as u64 - 1).min(file_size - 1);
 
-        tracing::debug!(target: "streaming", path = %handle.path, offset = start, size, "read");
+        tracing::debug!(target: "streaming", path = %path, offset = start, size, "read");
 
-        let stream_url = Arc::clone(&handle.stream_url);
         let outcome = match self.read_handle(&mut handle, start, end, &stream_url) {
             ReadOutcome::Data(buf) => ReadOutcome::Data(buf),
             ReadOutcome::Error(code) => {
-                let Some(download_url) = handle.download_url.as_ref().map(Arc::clone) else {
+                let Some(download_url) = download_url else {
                     return reply.error(Errno::from_i32(code));
                 };
-                let path = Arc::clone(&handle.path);
-                let entry_id = handle.entry_id;
-                let provider = handle.provider.as_ref().map(Arc::clone);
 
                 tracing::warn!(
                     path = %path,
@@ -634,8 +715,13 @@ impl Filesystem for RivenFs {
                 ) else {
                     return reply.error(Errno::from_i32(code));
                 };
-                handle.stream_url = Arc::from(url);
-                let refreshed = Arc::clone(&handle.stream_url);
+                if let OpenedFile::Media { stream_url, .. } = &mut *handle {
+                    *stream_url = Arc::from(url);
+                }
+                let refreshed = match &*handle {
+                    OpenedFile::Media { stream_url, .. } => Arc::clone(stream_url),
+                    OpenedFile::Subtitle { .. } => unreachable!(),
+                };
                 self.read_handle(&mut handle, start, end, &refreshed)
             }
         };

@@ -263,6 +263,71 @@ pub async fn get_media_entry_by_path(pool: &PgPool, path: &str) -> Result<Option
     .await?)
 }
 
+/// Look up a filesystem entry by VFS path regardless of entry_type. Used by
+/// the VFS layer to resolve subtitle entries (which share path-space with the
+/// media file they sit beside).
+pub async fn get_filesystem_entry_by_path(
+    pool: &PgPool,
+    path: &str,
+) -> Result<Option<FileSystemEntry>> {
+    Ok(sqlx::query_as::<_, FileSystemEntry>(
+        "SELECT * FROM filesystem_entries WHERE path = $1 LIMIT 1",
+    )
+    .bind(path)
+    .fetch_optional(pool)
+    .await?)
+}
+
+/// Insert or replace a subtitle filesystem entry for `(media_item_id, language)`.
+/// Subtitle content is stored inline in `subtitle_content`; the VFS serves it
+/// directly without going through the streaming code path.
+#[allow(clippy::too_many_arguments)]
+pub async fn upsert_subtitle_entry(
+    pool: &PgPool,
+    media_item_id: i64,
+    path: &str,
+    language: &str,
+    subtitle_content: &str,
+    source_provider: &str,
+    source_id: Option<&str>,
+    parent_original_filename: Option<&str>,
+) -> Result<FileSystemEntry> {
+    let file_size = subtitle_content.len() as i64;
+
+    // We can't use an ON CONFLICT (media_item_id, language) clause because the
+    // unique index is partial (entry_type='subtitle'); Postgres only matches
+    // ON CONFLICT against full-relation indexes. Do delete+insert instead so
+    // we always end up with at most one subtitle row per (item, language).
+    sqlx::query(
+        "DELETE FROM filesystem_entries \
+         WHERE media_item_id = $1 AND language = $2 AND entry_type = 'subtitle'",
+    )
+    .bind(media_item_id)
+    .bind(language)
+    .execute(pool)
+    .await?;
+
+    let entry = sqlx::query_as::<_, FileSystemEntry>(
+        "INSERT INTO filesystem_entries \
+         (media_item_id, entry_type, path, file_size, language, subtitle_content, \
+          source_provider, source_id, parent_original_filename) \
+         VALUES ($1, 'subtitle', $2, $3, $4, $5, $6, $7, $8) \
+         RETURNING *",
+    )
+    .bind(media_item_id)
+    .bind(path)
+    .bind(file_size)
+    .bind(language)
+    .bind(subtitle_content)
+    .bind(source_provider)
+    .bind(source_id)
+    .bind(parent_original_filename)
+    .fetch_one(pool)
+    .await?;
+
+    Ok(entry)
+}
+
 pub async fn get_media_entry_by_id(
     pool: &PgPool,
     entry_id: i64,
@@ -571,9 +636,13 @@ pub async fn list_vfs_dir_names(
 }
 
 pub async fn list_vfs_file_names(pool: &PgPool, dir_path: &str) -> Result<Vec<VfsFileName>> {
+    // Listing covers both media and subtitle entries; subtitle entries inherit
+    // their library_profiles from the sibling media entry on insert (or have
+    // NULL membership which renders as "all profiles"), so the same profile
+    // filter that's applied to media files works for them too.
     let sql = "SELECT split_part(path, '/', array_length(string_to_array(trim(both '/' from $1), '/'), 1) + 2) AS name, library_profiles \
          FROM filesystem_entries \
-         WHERE path LIKE ($1 || '/%') AND entry_type = 'media' \
+         WHERE path LIKE ($1 || '/%') AND entry_type IN ('media', 'subtitle') \
          ORDER BY 1";
     Ok(sqlx::query_as::<_, VfsFileName>(sql)
         .bind(dir_path)
