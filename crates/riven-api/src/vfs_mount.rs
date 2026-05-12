@@ -85,7 +85,7 @@ fn mount_with_config(mount_path: &str, config: &VfsMountConfig) -> Result<Option
         return Ok(None);
     }
 
-    let session = riven_vfs::mount(
+    let Some(session) = riven_vfs::mount(
         mount_path,
         config.vfs_layout.clone(),
         config.filesystem_settings_revision.clone(),
@@ -93,7 +93,10 @@ fn mount_with_config(mount_path: &str, config: &VfsMountConfig) -> Result<Option
         config.stream_client.clone(),
         config.link_request_tx.clone(),
         config.cache_max_size_mb,
-    )?;
+    )?
+    else {
+        return Ok(None);
+    };
     Ok(Some(MountedVfs {
         path: mount_path.to_string(),
         session,

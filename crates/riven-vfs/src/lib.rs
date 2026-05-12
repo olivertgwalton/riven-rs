@@ -29,6 +29,10 @@ impl FuseSession {
 }
 
 /// Start the FUSE virtual filesystem.
+///
+/// Returns `Ok(None)` if `mount_path` does not exist — the caller treats this
+/// as "skip VFS for now" rather than auto-creating a directory that may be a
+/// host-managed bind mount not yet ready.
 pub fn mount(
     mount_path: &str,
     vfs_layout: Arc<RwLock<VfsLibraryLayout>>,
@@ -37,12 +41,18 @@ pub fn mount(
     stream_client: reqwest::Client,
     link_request_tx: mpsc::Sender<riven_core::stream_link::LinkRequest>,
     cache_max_size_mb: u64,
-) -> Result<FuseSession> {
+) -> Result<Option<FuseSession>> {
     let mount_path = Path::new(mount_path);
 
     if !mount_path.exists() {
-        std::fs::create_dir_all(mount_path)?;
-    } else {
+        tracing::warn!(
+            path = %mount_path.display(),
+            "VFS mount path does not exist; skipping VFS mount"
+        );
+        return Ok(None);
+    }
+
+    {
         // Attempt lazy unmount only if a FUSE filesystem is already mounted here,
         // to avoid accidentally unmounting a legitimate bind mount (e.g. Docker's
         // rshared bind mount), which would break mount propagation to the host.
@@ -110,5 +120,5 @@ pub fn mount(
     let session = fuser::spawn_mount2(fs, mount_path, &config)?;
     tracing::info!(path = %mount_path.display(), "VFS mounted");
 
-    Ok(FuseSession { session })
+    Ok(Some(FuseSession { session }))
 }
