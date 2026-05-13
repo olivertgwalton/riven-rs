@@ -3097,6 +3097,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "futures",
  "hex",
  "inventory",
  "quick-xml",
@@ -3104,6 +3105,7 @@ dependencies = [
  "reqwest 0.13.2",
  "riven-core",
  "serde",
+ "serde_json",
  "sha1",
  "tracing",
 ]

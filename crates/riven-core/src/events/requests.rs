@@ -4,6 +4,7 @@ pub struct ScrapeRequest<'a> {
     pub id: i64,
     pub item_type: MediaItemType,
     pub imdb_id: Option<&'a str>,
+    pub tvdb_id: Option<&'a str>,
     pub title: &'a str,
     pub season: Option<i32>,
     pub episode: Option<i32>,

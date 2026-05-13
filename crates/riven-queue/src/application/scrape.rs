@@ -50,6 +50,7 @@ fn scrape_event(job: &ScrapeJob) -> RivenEvent {
         id: job.id,
         item_type: job.item_type,
         imdb_id: job.imdb_id.clone(),
+        tvdb_id: job.tvdb_id.clone(),
         title: job.title.clone(),
         season: job.season,
         episode: job.episode,

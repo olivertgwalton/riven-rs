@@ -126,10 +126,24 @@ fn setting_value_to_string(value: &serde_json::Value) -> Option<String> {
         serde_json::Value::String(s) if !s.is_empty() => {
             // Transparent decryption: `enc:v1:` envelopes are decrypted; legacy
             // plaintext-on-disk values pass through unchanged.
-            Some(crate::secret::decrypt_if_encrypted(s).unwrap_or_else(|e| {
-                tracing::warn!(error = %e, "failed to decrypt setting value; passing ciphertext through");
-                s.clone()
-            }))
+            //
+            // If a value *is* an envelope but decryption fails (most commonly
+            // because the secret key changed between runs), drop the value
+            // entirely. Passing the raw ciphertext through would silently send
+            // garbage to the plugin (e.g. an indexer would receive
+            // `enc:v1:...` as its `apikey` query param), masking the real
+            // problem; leaving the value unset surfaces it as a validation
+            // failure so the user knows to re-enter the credential.
+            match crate::secret::decrypt_if_encrypted(s) {
+                Ok(plaintext) => Some(plaintext),
+                Err(e) => {
+                    tracing::error!(
+                        error = %e,
+                        "failed to decrypt setting value; dropping it. The secret key likely changed between runs — set RIVEN_SECRET_KEY or persist RIVEN_SECRET_KEY_PATH across restarts.",
+                    );
+                    None
+                }
+            }
         }
         serde_json::Value::Bool(b) => Some(b.to_string()),
         serde_json::Value::Number(n) => Some(n.to_string()),

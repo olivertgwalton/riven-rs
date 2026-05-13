@@ -102,6 +102,8 @@ pub struct ScrapeJob {
     pub id: i64,
     pub item_type: MediaItemType,
     pub imdb_id: Option<String>,
+    #[serde(default)]
+    pub tvdb_id: Option<String>,
     pub title: String,
     pub season: Option<i32>,
     pub episode: Option<i32>,
@@ -118,6 +120,7 @@ impl ScrapeJob {
             id: item.id,
             item_type: item.item_type,
             imdb_id: item.imdb_id.clone(),
+            tvdb_id: None,
             title: item.title.clone(),
             season: None,
             episode: None,
@@ -129,11 +132,13 @@ impl ScrapeJob {
         season: &MediaItem,
         show_title: String,
         show_imdb_id: Option<String>,
+        show_tvdb_id: Option<String>,
     ) -> Self {
         Self {
             id: season.id,
             item_type: season.item_type,
             imdb_id: show_imdb_id,
+            tvdb_id: show_tvdb_id,
             title: show_title,
             season: season.season_number,
             episode: None,
@@ -141,11 +146,17 @@ impl ScrapeJob {
         }
     }
 
-    pub fn for_episode(ep: &MediaItem, show_title: String, show_imdb_id: Option<String>) -> Self {
+    pub fn for_episode(
+        ep: &MediaItem,
+        show_title: String,
+        show_imdb_id: Option<String>,
+        show_tvdb_id: Option<String>,
+    ) -> Self {
         Self {
             id: ep.id,
             item_type: ep.item_type,
             imdb_id: show_imdb_id,
+            tvdb_id: show_tvdb_id,
             title: show_title,
             season: ep.season_number,
             episode: ep.episode_number,

@@ -8,12 +8,40 @@ use crate::nntp::NntpError;
 use crate::nzb::{
     NzbFile, NzbSegment, detect_rar_volume_set, filename_from_subject, looks_like_media, parse_nzb,
 };
-use crate::rar::{self, RarVolumeFileEntry};
+use crate::rar::{self, RarEncryption, RarVolumeFileEntry};
 
 use super::{
     FetchFuture, META_TTL_SECS, NzbMeta, NzbMetaFile, NzbMetaSource, NzbRarPart, NzbRarSlice,
     StreamerError, UsenetStreamer, io_error, meta_key,
 };
+
+/// In-progress per-inner-file accumulator during multi-file RAR reconstruction.
+struct RarFileGroup {
+    name: String,
+    unpacked_size: u64,
+    encryption: Option<RarEncryption>,
+    slices: Vec<NzbRarSlice>,
+    /// Running sum of `slices[i].length`. When this equals `unpacked_size`
+    /// after every volume has been visited, the file's coverage is complete
+    /// and it's safe to expose as a virtual file.
+    plaintext_sum: u64,
+}
+
+/// Match against the same extensions the downstream persist step accepts as
+/// playable video — see `crates/riven-queue/src/flows/download_item/helpers.rs`
+/// `is_video_file`. Kept in sync intentionally: returning a virtual file
+/// whose extension the queue ignores wastes an ingest cycle.
+fn is_media_filename(name: &str) -> bool {
+    let ext = name
+        .rsplit('.')
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    matches!(
+        ext.as_str(),
+        "mp4" | "mkv" | "avi" | "mov" | "wmv" | "flv" | "webm"
+    )
+}
 
 /// Sample size for the article-availability probe at ingest. Up to this
 /// many random segments from the candidate file are STAT-checked.
@@ -91,47 +119,58 @@ impl UsenetStreamer {
         }
 
         // For stored multi-volume RAR archives the contained media isn't
-        // present as a top-level NZB file — try building a virtual file first.
-        let (meta_files, file_password) = match self.try_build_rar_virtual_file(&files, password).await? {
-            Some(virtual_file) => {
-                let is_encrypted = matches!(
-                    &virtual_file.source,
-                    NzbMetaSource::Rar { slices, .. } if slices.iter().any(|s| s.encryption.is_some())
-                );
-                if let NzbMetaSource::Rar { parts, .. } = &virtual_file.source {
-                    let probe_segments: Vec<NzbSegment> = parts
-                        .iter()
-                        .flat_map(|p| p.segments.iter().cloned())
-                        .collect();
-                    self.probe_availability(&probe_segments).await?;
+        // present as a top-level NZB file — try building virtual files first.
+        // A single-file RAR archive produces one virtual file (movie); a
+        // multi-file RAR (season pack) produces one virtual file per inner
+        // media file.
+        let (meta_files, file_password) =
+            match self.try_build_rar_virtual_files(&files, password).await? {
+                Some(virtual_files) if !virtual_files.is_empty() => {
+                    let is_encrypted = virtual_files.iter().any(|vf| {
+                        matches!(
+                            &vf.source,
+                            NzbMetaSource::Rar { slices, .. }
+                                if slices.iter().any(|s| s.encryption.is_some())
+                        )
+                    });
+                    // All virtual files share the same `parts` array; probe
+                    // availability once across every segment.
+                    if let Some(NzbMetaSource::Rar { parts, .. }) =
+                        virtual_files.first().map(|vf| &vf.source)
+                    {
+                        let probe_segments: Vec<NzbSegment> = parts
+                            .iter()
+                            .flat_map(|p| p.segments.iter().cloned())
+                            .collect();
+                        self.probe_availability(&probe_segments).await?;
+                    }
+                    let mut out = virtual_files;
+                    // Keep the underlying RAR parts as additional entries so
+                    // sidecars (par2/nfo/etc.) and the parts themselves remain
+                    // reachable for debugging.
+                    for f in &files {
+                        out.push(direct_meta_file(f));
+                    }
+                    let pw = if is_encrypted {
+                        password.map(str::to_string)
+                    } else {
+                        None
+                    };
+                    (out, pw)
                 }
-                let mut out = vec![virtual_file];
-                // Keep the underlying RAR parts as additional entries so
-                // sidecars (par2/nfo/etc.) and the parts themselves remain
-                // reachable for debugging.
-                for f in &files {
-                    out.push(direct_meta_file(f));
+                _ => {
+                    let mut ordered: Vec<NzbMetaFile> = files.iter().map(direct_meta_file).collect();
+                    if let Some(primary_idx) = pick_primary_media_index(&files) {
+                        ordered.swap(0, primary_idx);
+                    }
+                    if let Some(primary) = ordered.first()
+                        && let NzbMetaSource::Direct { segments, .. } = &primary.source
+                    {
+                        self.probe_availability(segments).await?;
+                    }
+                    (ordered, None)
                 }
-                let pw = if is_encrypted {
-                    password.map(str::to_string)
-                } else {
-                    None
-                };
-                (out, pw)
-            }
-            None => {
-                let mut ordered: Vec<NzbMetaFile> = files.iter().map(direct_meta_file).collect();
-                if let Some(primary_idx) = pick_primary_media_index(&files) {
-                    ordered.swap(0, primary_idx);
-                }
-                if let Some(primary) = ordered.first()
-                    && let NzbMetaSource::Direct { segments, .. } = &primary.source
-                {
-                    self.probe_availability(segments).await?;
-                }
-                (ordered, None)
-            }
-        };
+            };
 
         let meta = NzbMeta {
             info_hash: info_hash.to_string(),
@@ -153,16 +192,21 @@ impl UsenetStreamer {
         Ok(meta)
     }
 
-    /// If `files` contains a stored multi-volume RAR archive whose contained
-    /// file is media, fetch each volume's header bytes, parse them, and
-    /// return a virtual `NzbMetaFile` representing the contained file.
-    /// Returns `Ok(None)` if no RAR set, if it isn't stored, or if any
-    /// volume's header can't be fetched/parsed.
-    async fn try_build_rar_virtual_file(
+    /// If `files` contains a stored multi-volume RAR archive, fetch each
+    /// volume's header bytes, parse them, and return one virtual `NzbMetaFile`
+    /// per contained media file. A single-file RAR (movie split across
+    /// volumes) yields one virtual file; a multi-file RAR (season pack)
+    /// yields one per inner episode.
+    ///
+    /// Returns `Ok(None)` if it isn't a RAR set, any volume's header can't be
+    /// fetched/parsed, or no inner media file's slices add up to its declared
+    /// unpacked size. The caller falls back to exposing the top-level NZB
+    /// files directly when this returns `None`.
+    async fn try_build_rar_virtual_files(
         &self,
         files: &[NzbFile],
         password: Option<&str>,
-    ) -> Result<Option<NzbMetaFile>, StreamerError> {
+    ) -> Result<Option<Vec<NzbMetaFile>>, StreamerError> {
         let Some(ordered_indices) = detect_rar_volume_set(files) else {
             return Ok(None);
         };
@@ -171,7 +215,8 @@ impl UsenetStreamer {
         }
 
         let mut parts: Vec<NzbRarPart> = Vec::with_capacity(ordered_indices.len());
-        let mut entries_per_volume: Vec<RarVolumeFileEntry> = Vec::with_capacity(ordered_indices.len());
+        let mut volume_entries: Vec<Vec<RarVolumeFileEntry>> =
+            Vec::with_capacity(ordered_indices.len());
 
         for (vol_idx, &nzb_idx) in ordered_indices.iter().enumerate() {
             let f = &files[nzb_idx];
@@ -179,6 +224,7 @@ impl UsenetStreamer {
                 return Ok(None);
             }
             let part = build_rar_part(f);
+
             let header_bytes = match self
                 .fetch_volume_header_bytes(&part, RAR_HEADER_PROBE_BYTES)
                 .await
@@ -194,7 +240,6 @@ impl UsenetStreamer {
                     return Ok(None);
                 }
             };
-
             let parsed = match rar::parse_volume_header(&header_bytes) {
                 Ok(h) => h,
                 Err(error) => {
@@ -207,34 +252,30 @@ impl UsenetStreamer {
                     return Ok(None);
                 }
             };
-
-            // Require a single stored primary entry per volume (typical scene
-            // packaging); bail if anything's weird.
-            let Some(file_entry) = parsed.files.into_iter().find(|e| e.is_stored()) else {
+            let entries: Vec<RarVolumeFileEntry> =
+                parsed.files.into_iter().filter(|e| e.is_stored()).collect();
+            if entries.is_empty() {
                 tracing::debug!(
                     vol_idx,
                     "no stored file entry in this RAR volume; bailing"
                 );
                 return Ok(None);
-            };
-
-            // RAR4 sanity: volume 0 must not have split_before; later
-            // volumes must. RAR5 leaves both flags false on this parser
-            // since split detection lives in extra-area records — we let
-            // the sum-vs-unpacked-size check below catch malformed sets.
-            if vol_idx == 0 && file_entry.split_before {
-                tracing::debug!("first volume has SPLIT_BEFORE set; bailing");
-                return Ok(None);
             }
 
-            entries_per_volume.push(file_entry);
+            volume_entries.push(entries);
             parts.push(part);
         }
 
-        // First volume's declared unpacked size is the contained file's true
-        // size; the sum of slice plaintext lengths must match.
-        let total_unpacked = entries_per_volume[0].unpacked_size;
-        let any_encrypted = entries_per_volume.iter().any(|e| e.encryption.is_some());
+        // Walk every (volume, stored_entry) pair in order and group by
+        // inner-file name. Each unique name becomes a candidate virtual file
+        // assembled from its per-volume slices. Grouping by name (rather than
+        // relying on RAR4's split_before/after flags) means we also handle
+        // RAR5 archives — our parser doesn't read RAR5 extra-area split
+        // records, so those entries arrive with both flags zero.
+        let any_encrypted = volume_entries
+            .iter()
+            .flatten()
+            .any(|e| e.encryption.is_some());
         if any_encrypted && password.is_none() {
             tracing::warn!(
                 "RAR archive is encrypted but no archive password configured; \
@@ -242,45 +283,154 @@ impl UsenetStreamer {
             );
             return Err(StreamerError::MissingPassword);
         }
-        let mut slices = Vec::with_capacity(entries_per_volume.len());
-        let mut plaintext_sum: u64 = 0;
-        for (i, entry) in entries_per_volume.iter().enumerate() {
-            // For encrypted slices `packed_size` is the on-volume
-            // ciphertext byte count (16-byte aligned). The slice's
-            // PLAINTEXT length is the per-volume contribution to the
-            // contained file's unpacked size. We reconstruct it by
-            // subtracting any cumulative excess from the running total —
-            // last volume absorbs the diff.
-            let cipher_len = entry.packed_size;
-            let plaintext_len = if entry.encryption.is_some() {
-                cipher_len.min(total_unpacked.saturating_sub(plaintext_sum))
-            } else {
-                cipher_len
-            };
-            slices.push(NzbRarSlice {
-                part_index: i,
-                start_in_part: entry.data_offset,
-                length: plaintext_len,
-                encryption: entry.encryption.clone(),
-                ciphertext_length: cipher_len,
-            });
-            plaintext_sum = plaintext_sum.saturating_add(plaintext_len);
-        }
-        if plaintext_sum != total_unpacked {
-            tracing::debug!(
-                plaintext_sum,
-                declared = total_unpacked,
-                "RAR slice plaintext total != declared unpacked size; bailing"
-            );
-            return Ok(None);
+
+        // Preserve first-occurrence order so the returned files match the
+        // playback order in the archive (E01 before E02, etc.).
+        let mut group_order: Vec<String> = Vec::new();
+        let mut groups: std::collections::HashMap<String, RarFileGroup> =
+            std::collections::HashMap::new();
+
+        for (vol_idx, entries) in volume_entries.iter().enumerate() {
+            for entry in entries {
+                let g = groups.entry(entry.name.clone()).or_insert_with(|| {
+                    group_order.push(entry.name.clone());
+                    RarFileGroup {
+                        name: entry.name.clone(),
+                        unpacked_size: entry.unpacked_size,
+                        encryption: entry.encryption.clone(),
+                        slices: Vec::new(),
+                        plaintext_sum: 0,
+                    }
+                });
+                // Encrypted slice plaintext length is capped at the file's
+                // remaining unpacked bytes — the last volume absorbs the
+                // 16-byte AES padding difference.
+                let cipher_len = entry.packed_size;
+                let plaintext_len = if g.encryption.is_some() {
+                    cipher_len.min(g.unpacked_size.saturating_sub(g.plaintext_sum))
+                } else {
+                    cipher_len
+                };
+                g.slices.push(NzbRarSlice {
+                    part_index: vol_idx,
+                    start_in_part: entry.data_offset,
+                    length: plaintext_len,
+                    encryption: entry.encryption.clone(),
+                    ciphertext_length: cipher_len,
+                });
+                g.plaintext_sum = g.plaintext_sum.saturating_add(plaintext_len);
+            }
         }
 
-        let contained_name = entries_per_volume[0].name.clone();
-        Ok(Some(NzbMetaFile {
-            filename: contained_name,
-            total_size: total_unpacked,
-            source: NzbMetaSource::Rar { parts, slices },
-        }))
+        // For each inner file whose observed slices don't cover its declared
+        // unpacked size, synthesize the missing first slice. This handles
+        // the common case where the 32 KB front-of-volume probe sees the
+        // previous file's end-continuation header (with `split_after=false`)
+        // and breaks before reaching the next file's start header in the
+        // same "transition" volume.
+        //
+        // Synthesis is pure arithmetic on what we already know:
+        //   - The file's `unpacked_size` is repeated in every continuation
+        //     header so we have it from any observed slice.
+        //   - The missing chunk lives in the volume immediately before the
+        //     file's first observed slice. In that volume, our parser's
+        //     last seen entry's `data_offset + packed_size` is the byte
+        //     position where the previous file's data ended — i.e. exactly
+        //     where this file's missing first chunk begins.
+        //   - The missing length is `unpacked_size - plaintext_sum`.
+        //
+        // Works for both RAR4 and RAR5; no split-flag dependency. The
+        // edge case it doesn't handle is a small inner file fitting
+        // entirely inside a single transition volume with no observed
+        // continuation in a later volume (would require fetching).
+        // Season-pack episodes are large enough that this doesn't happen.
+        for name in &group_order {
+            let Some(g) = groups.get(name) else { continue };
+            if g.plaintext_sum >= g.unpacked_size {
+                continue;
+            }
+            let Some(first_slice) = g.slices.first() else {
+                continue;
+            };
+            let prev_vol = match first_slice.part_index.checked_sub(1) {
+                Some(v) => v,
+                None => continue, // first observed slice is in vol 0 — nowhere to look back to
+            };
+            let Some(prev_last) = volume_entries[prev_vol].last() else {
+                continue;
+            };
+            let synth_start = prev_last.data_offset.saturating_add(prev_last.packed_size);
+            let synth_len = g.unpacked_size.saturating_sub(g.plaintext_sum);
+            // Encrypted RAR multi-file synthesis would need AES-block
+            // alignment maths the observed slices already encode for us;
+            // it's not in scope here. Drop those rather than risk emitting
+            // an unreadable virtual file.
+            if g.encryption.is_some() {
+                tracing::debug!(
+                    name = %g.name,
+                    "incomplete encrypted RAR inner file; synthesis skipped"
+                );
+                continue;
+            }
+            let synth_slice = NzbRarSlice {
+                part_index: prev_vol,
+                start_in_part: synth_start,
+                length: synth_len,
+                encryption: None,
+                ciphertext_length: synth_len,
+            };
+            tracing::debug!(
+                name = %g.name,
+                prev_vol,
+                synth_start,
+                synth_len,
+                "synthesized missing first slice for RAR inner file"
+            );
+            let g = groups.get_mut(name).expect("group exists");
+            g.slices.insert(0, synth_slice);
+            g.plaintext_sum = g.plaintext_sum.saturating_add(synth_len);
+        }
+
+        // Validate and filter. A group is usable when (a) its slice plaintext
+        // sum equals the declared unpacked size — i.e. we observed every
+        // volume the file lives in — and (b) it has a media file extension.
+        // Anything else (incomplete coverage, .nfo, .sfv, sample.mkv if the
+        // sample isn't actually playable, etc.) gets dropped here so the
+        // persist step downstream doesn't waste a slot on it.
+        let mut out: Vec<NzbMetaFile> = Vec::new();
+        for name in group_order {
+            let Some(g) = groups.remove(&name) else { continue };
+            if g.plaintext_sum != g.unpacked_size {
+                tracing::debug!(
+                    name = %g.name,
+                    plaintext_sum = g.plaintext_sum,
+                    declared = g.unpacked_size,
+                    "RAR inner file slices do not cover its declared size; skipping"
+                );
+                continue;
+            }
+            if !is_media_filename(&g.name) {
+                tracing::debug!(
+                    name = %g.name,
+                    "RAR inner file is not a media type; skipping"
+                );
+                continue;
+            }
+            out.push(NzbMetaFile {
+                filename: g.name,
+                total_size: g.unpacked_size,
+                source: NzbMetaSource::Rar {
+                    parts: parts.clone(),
+                    slices: g.slices,
+                },
+            });
+        }
+
+        if out.is_empty() {
+            tracing::debug!("no usable media files reconstructed from RAR set; bailing");
+            return Ok(None);
+        }
+        Ok(Some(out))
     }
 
     /// Read up to `wanted` bytes from the start of a RAR volume (one NZB
@@ -301,6 +451,7 @@ impl UsenetStreamer {
         }
         Ok(buf)
     }
+
 }
 
 pub(crate) fn direct_meta_file(f: &NzbFile) -> NzbMetaFile {

@@ -189,7 +189,23 @@ pub fn decrypt_if_encrypted(s: &str) -> Result<String, SecretError> {
 pub fn decrypt_nested(v: &serde_json::Value) -> serde_json::Value {
     match v {
         serde_json::Value::String(s) => {
-            serde_json::Value::String(decrypt_if_encrypted(s).unwrap_or_else(|_e| s.clone()))
+            // Same rationale as `setting_value_to_string` in
+            // `riven-core::settings::plugin`: if a string looks like an
+            // envelope but decryption fails (typically because the secret
+            // key changed between runs) we substitute empty rather than
+            // returning the ciphertext, so callers see a missing
+            // credential instead of silently sending base64 noise to a
+            // remote service.
+            match decrypt_if_encrypted(s) {
+                Ok(plaintext) => serde_json::Value::String(plaintext),
+                Err(e) => {
+                    tracing::error!(
+                        error = %e,
+                        "failed to decrypt nested setting value; clearing it. The secret key likely changed — set RIVEN_SECRET_KEY or persist RIVEN_SECRET_KEY_PATH across restarts.",
+                    );
+                    serde_json::Value::String(String::new())
+                }
+            }
         }
         serde_json::Value::Array(items) => {
             serde_json::Value::Array(items.iter().map(decrypt_nested).collect())

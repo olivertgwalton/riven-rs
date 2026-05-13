@@ -65,6 +65,7 @@ pub async fn run_scrape_discovery(
     registry: &PluginRegistry,
     item_type: MediaItemType,
     imdb_id: Option<&str>,
+    tvdb_id: Option<&str>,
     title: &str,
     season: Option<i32>,
     episode: Option<i32>,
@@ -73,6 +74,7 @@ pub async fn run_scrape_discovery(
         id: 0,
         item_type,
         imdb_id: imdb_id.map(ToOwned::to_owned),
+        tvdb_id: tvdb_id.map(ToOwned::to_owned),
         title: title.to_string(),
         season,
         episode,
@@ -209,12 +211,15 @@ pub async fn discover_streams(
         dubbed_anime_only,
     )?;
 
+    let tvdb_id = indexed.tvdb_id.as_deref().or(tvdb_id);
+
     let mut discovered = Vec::new();
     for target in targets {
         let scraped = run_scrape_discovery(
             registry,
             target.item_type,
             imdb_id,
+            tvdb_id,
             &target.scrape_title,
             target.season_number,
             None,

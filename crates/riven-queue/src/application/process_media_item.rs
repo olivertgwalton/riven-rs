@@ -85,13 +85,23 @@ async fn handle_scrape(job: &ProcessMediaItemJob, item: &MediaItem, queue: &JobQ
         MediaItemType::Season => {
             let ctx = load_show_context(&queue.db_pool, item).await;
             queue
-                .push_scrape(ScrapeJob::for_season(item, ctx.title, ctx.imdb_id))
+                .push_scrape(ScrapeJob::for_season(
+                    item,
+                    ctx.title,
+                    ctx.imdb_id,
+                    ctx.tvdb_id,
+                ))
                 .await;
         }
         MediaItemType::Episode => {
             let ctx = load_show_context(&queue.db_pool, item).await;
             queue
-                .push_scrape(ScrapeJob::for_episode(item, ctx.title, ctx.imdb_id))
+                .push_scrape(ScrapeJob::for_episode(
+                    item,
+                    ctx.title,
+                    ctx.imdb_id,
+                    ctx.tvdb_id,
+                ))
                 .await;
         }
         MediaItemType::Show => {

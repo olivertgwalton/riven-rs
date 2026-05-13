@@ -72,6 +72,7 @@ mod tests {
             id: 0,
             item_type,
             imdb_id: Some("tt123"),
+            tvdb_id: None,
             title: "",
             season,
             episode,

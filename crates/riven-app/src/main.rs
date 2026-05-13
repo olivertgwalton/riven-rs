@@ -15,8 +15,11 @@ use riven_queue::{DownloaderConfig, JobQueue};
 include!(concat!(env!("OUT_DIR"), "/plugin_crates.rs"));
 mod setup;
 
+const USER_AGENT: &str = concat!("riven-rs/", env!("CARGO_PKG_VERSION"));
+
 fn build_http_client() -> Result<reqwest::Client> {
     Ok(reqwest::Client::builder()
+        .user_agent(USER_AGENT)
         .connect_timeout(Duration::from_secs(
             riven_core::config::vfs::CONNECT_TIMEOUT_SECS,
         ))
@@ -34,6 +37,7 @@ fn build_http_client() -> Result<reqwest::Client> {
 
 fn build_streaming_http_client() -> Result<reqwest::Client> {
     Ok(reqwest::Client::builder()
+        .user_agent(USER_AGENT)
         .connect_timeout(Duration::from_secs(
             riven_core::config::vfs::CONNECT_TIMEOUT_SECS,
         ))

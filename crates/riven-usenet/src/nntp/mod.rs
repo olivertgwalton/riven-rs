@@ -152,8 +152,7 @@ pub(crate) fn build_tls_connector() -> Result<TlsConnector, NntpError> {
 /// One configured NNTP provider with its own bounded connection pool.
 /// `priority` orders providers: lower number = tried first. `is_backup`
 /// flags block accounts / fill providers — only consulted after every
-/// primary returned `ArticleNotFound`. Matches decypharr's
-/// `priority`/`is_backup` semantics.
+/// primary returned `ArticleNotFound`.
 #[derive(Debug, Clone)]
 pub struct NntpProvider {
     pub config: NntpServerConfig,

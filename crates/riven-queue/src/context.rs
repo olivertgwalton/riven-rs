@@ -11,6 +11,7 @@ use crate::discovery::{ParseContext, load_active_profiles, load_dubbed_anime_onl
 pub struct ShowContext {
     pub title: String,
     pub imdb_id: Option<String>,
+    pub tvdb_id: Option<String>,
 }
 
 pub struct ParseItemContext {
@@ -113,6 +114,7 @@ pub async fn load_show_context(db_pool: &sqlx::PgPool, item: &MediaItem) -> Show
         return ShowContext {
             title: item.title.clone(),
             imdb_id: item.imdb_id.clone(),
+            tvdb_id: item.tvdb_id.clone(),
         };
     };
 
@@ -120,11 +122,13 @@ pub async fn load_show_context(db_pool: &sqlx::PgPool, item: &MediaItem) -> Show
         ShowContext {
             title: show_title,
             imdb_id: hierarchy.resolved_show_imdb_id,
+            tvdb_id: hierarchy.resolved_show_tvdb_id,
         }
     } else {
         ShowContext {
             title: item.title.clone(),
             imdb_id: item.imdb_id.clone(),
+            tvdb_id: item.tvdb_id.clone(),
         }
     }
 }

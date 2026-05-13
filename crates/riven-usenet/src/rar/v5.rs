@@ -142,8 +142,7 @@ pub(super) fn parse_volume_header_v5(bytes: &[u8]) -> Result<RarVolumeHeader, Ra
                 // straight to `header_end + extra_size + data_size` below.
 
                 // Compression method lives at bits 8-10 of compression_info
-                // (mask 0x0700). 0 = store. (The rarlab tech note's mask
-                // wording differs but decypharr's working impl uses this.)
+                // (mask 0x0700). 0 = store.
                 let method_bits = (compression_info >> 8) & 0b111;
                 let is_stored = method_bits == 0;
 
@@ -151,8 +150,7 @@ pub(super) fn parse_volume_header_v5(bytes: &[u8]) -> Result<RarVolumeHeader, Ra
                 // RAR5 archives set 0x01 on continuation file headers even
                 // though they carry data. Treat a non-zero data area as
                 // proof of an actual file.
-                let is_directory =
-                    file_flags & RAR5_FILE_FLAG_DIRECTORY != 0 && data_size == 0;
+                let is_directory = file_flags & RAR5_FILE_FLAG_DIRECTORY != 0 && data_size == 0;
 
                 tracing::trace!(
                     name = %name,
@@ -247,11 +245,7 @@ fn parse_rar5_file_extra(bytes: &[u8], start: usize, end: usize) -> Option<RarEn
 
 /// Parse an RAR5 file-encryption record body. Returns None if the bytes
 /// don't conform (truncated, wrong version, etc.).
-fn parse_rar5_encryption_record(
-    bytes: &[u8],
-    start: usize,
-    end: usize,
-) -> Option<RarEncryption> {
+fn parse_rar5_encryption_record(bytes: &[u8], start: usize, end: usize) -> Option<RarEncryption> {
     let mut pos = start;
     let version = read_vint(bytes, &mut pos)?;
     let flags = read_vint(bytes, &mut pos)?;

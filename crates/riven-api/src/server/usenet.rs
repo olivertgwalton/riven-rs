@@ -151,9 +151,7 @@ pub async fn usenet_stream_handler(
     if let Ok(v) = HeaderValue::from_str(&len.to_string()) {
         header_map.insert(CONTENT_LENGTH, v);
     }
-    if partial
-        && let Ok(v) = HeaderValue::from_str(&format!("bytes {start}-{end}/{total}"))
-    {
+    if partial && let Ok(v) = HeaderValue::from_str(&format!("bytes {start}-{end}/{total}")) {
         header_map.insert(CONTENT_RANGE, v);
     }
 
@@ -168,9 +166,6 @@ pub async fn usenet_stream_handler(
         return resp;
     }
 
-    // 256 KB body chunks match decypharr's streamBufferSize — smaller
-    // bursts let the body stream surface client disconnects more
-    // promptly than the prior 4 MB units.
     const BUFFER_THRESHOLD: u64 = 1024 * 1024;
     const STREAM_CHUNK_BYTES: u64 = 256 * 1024;
     let status = if partial {
@@ -180,7 +175,10 @@ pub async fn usenet_stream_handler(
     };
 
     if len <= BUFFER_THRESHOLD {
-        return match streamer.read_range(&info_hash, file_index, start, end).await {
+        return match streamer
+            .read_range(&info_hash, file_index, start, end)
+            .await
+        {
             Ok(bytes) => {
                 let mut resp = Response::new(Body::from(bytes));
                 *resp.status_mut() = status;
@@ -189,8 +187,7 @@ pub async fn usenet_stream_handler(
             }
             Err(e) => {
                 tracing::warn!(info_hash, file_index, error = %e, "usenet read_range failed");
-                (StatusCode::BAD_GATEWAY, format!("upstream error: {e}"))
-                    .into_response()
+                (StatusCode::BAD_GATEWAY, format!("upstream error: {e}")).into_response()
             }
         };
     }
@@ -276,7 +273,11 @@ pub async fn usenet_stream_handler(
     let info_hash_owned = info_hash.clone();
     let streamer = streamer.clone();
     tracing::info!(
-        info_hash, file_index, start, end, len,
+        info_hash,
+        file_index,
+        start,
+        end,
+        len,
         "usenet body stream starting"
     );
     let stream = futures::stream::unfold(initial, move |mut state| {
@@ -306,12 +307,19 @@ pub async fn usenet_stream_handler(
                     let requested = (chunk_end - state.pos + 1) as usize;
                     if returned != requested {
                         tracing::warn!(
-                            pos = state.pos, chunk_end, returned, requested, elapsed_ms,
+                            pos = state.pos,
+                            chunk_end,
+                            returned,
+                            requested,
+                            elapsed_ms,
                             "usenet body chunk SHORT — emitting fewer bytes than requested"
                         );
                     } else {
                         tracing::debug!(
-                            pos = state.pos, returned, elapsed_ms, "usenet body chunk ok"
+                            pos = state.pos,
+                            returned,
+                            elapsed_ms,
+                            "usenet body chunk ok"
                         );
                     }
                     state.pos = chunk_end.saturating_add(1);

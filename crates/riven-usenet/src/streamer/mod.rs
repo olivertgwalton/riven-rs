@@ -42,16 +42,6 @@ mod tests;
 /// boxing erases the type so they fit in the same collection.
 pub(crate) type FetchFuture<T> = Pin<Box<dyn Future<Output = T> + Send>>;
 
-/// Segments fetched concurrently within a single read request. Bounded so
-/// we don't queue an entire 50 MB volume into the NNTP pool on every read.
-///
-/// Back-pressure model: there's no per-stream semaphore. The global NNTP
-/// pool's connection limit (sum of `max_connections` across providers)
-/// is the true concurrency cap; multiple concurrent streams contend for
-/// permits and queue fairly. This matches decypharr's design — they
-/// don't have a per-stream limit either. If multi-stream playback gets
-/// laggy, the right knob to turn is `max_connections` per provider, not
-/// internal lookahead.
 pub(crate) const READ_PREFETCH_WINDOW: usize = 8;
 /// Default decoded-segment cache budget. Overridable via env var.
 /// Size up linearly with expected concurrent stream count: each stream
@@ -183,9 +173,7 @@ pub enum StreamerError {
     BadRange,
     #[error("no media files in NZB")]
     NoMediaFile,
-    #[error(
-        "article availability too low: {missing}/{checked} segments missing from provider"
-    )]
+    #[error("article availability too low: {missing}/{checked} segments missing from provider")]
     IncompleteRelease { missing: usize, checked: usize },
     #[error("archive is encrypted but no password was provided")]
     MissingPassword,
@@ -238,7 +226,8 @@ fn global_decoded_sizes() -> Arc<DecodedSizes> {
 
 fn global_permanent_fails() -> Arc<PermanentFails> {
     static C: OnceLock<Arc<PermanentFails>> = OnceLock::new();
-    C.get_or_init(|| Arc::new(PermanentFails::default())).clone()
+    C.get_or_init(|| Arc::new(PermanentFails::default()))
+        .clone()
 }
 
 fn global_in_flight() -> Arc<InFlight> {
@@ -277,7 +266,8 @@ impl UsenetStreamer {
             return Ok(hit);
         }
         let mut redis = self.redis.clone();
-        let raw: Option<String> = redis::AsyncCommands::get(&mut redis, meta_key(info_hash)).await?;
+        let raw: Option<String> =
+            redis::AsyncCommands::get(&mut redis, meta_key(info_hash)).await?;
         let raw = raw.ok_or_else(|| StreamerError::NotIngested(info_hash.to_string()))?;
         let meta: NzbMeta = serde_json::from_str(&raw)
             .map_err(|e| StreamerError::Redis(redis::RedisError::from(io_error(e.to_string()))))?;

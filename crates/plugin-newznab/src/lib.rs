@@ -38,6 +38,185 @@ pub fn nzb_url_redis_key(info_hash: &str) -> String {
     format!("riven:nzb:url:{info_hash}")
 }
 
+/// One configured Newznab/Torznab-compatible indexer.
+#[derive(Debug, Clone)]
+struct Indexer {
+    /// Short label from the dictionary key. Used purely for log lines.
+    name: String,
+    url: String,
+    apikey: String,
+    categories: String,
+}
+
+/// Read the configured indexer list out of the `indexers` dictionary
+/// setting. The dictionary maps a short label to `{ url, apikey,
+/// categories? }`; the user adds entries via the "Add indexer" button in
+/// the UI. Returns an empty Vec when nothing is configured.
+fn indexers_from_settings(settings: &PluginSettings) -> Vec<Indexer> {
+    settings
+        .get("indexers")
+        .and_then(parse_indexers_str)
+        .unwrap_or_default()
+}
+
+fn parse_indexers_str(raw: &str) -> Option<Vec<Indexer>> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let v: serde_json::Value = serde_json::from_str(trimmed).ok()?;
+    let map = v.as_object()?;
+    let mut indexers = Vec::with_capacity(map.len());
+    for (name, entry) in map.iter() {
+        let obj = match entry.as_object() {
+            Some(o) => o,
+            None => continue,
+        };
+        let url = obj
+            .get("url")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default();
+        let apikey = obj
+            .get("apikey")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default();
+        if url.is_empty() || apikey.is_empty() {
+            continue;
+        }
+        let categories = obj
+            .get("categories")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "2000,5000".to_string());
+        indexers.push(Indexer {
+            name: name.to_string(),
+            url,
+            apikey,
+            categories,
+        });
+    }
+    (!indexers.is_empty()).then_some(indexers)
+}
+
+/// Build the (search_type, query_params) tuple for one scrape request. The
+/// returned params have NO indexer-specific bits (apikey, cat) so the same
+/// base can be reused across every indexer in the fan-out.
+fn build_query(
+    request: &ScrapeRequest<'_>,
+) -> Option<(&'static str, Vec<(&'static str, String)>)> {
+    let imdb_numeric = request.imdb_id.map(|s| s.trim_start_matches("tt"));
+
+    // For TV searches prefer `tvdbid` — NZBGeek and most public newznab
+    // indexers tag TV releases by TVDB and have spotty IMDb coverage, so
+    // an imdbid-only query frequently returns zero results even when the
+    // show is well-indexed. Movies stay on imdbid (the standard there).
+    let tv_id_param: Option<(&'static str, String)> = request
+        .tvdb_id
+        .map(|v| ("tvdbid", v.to_string()))
+        .or_else(|| imdb_numeric.map(|v| ("imdbid", v.to_string())));
+
+    match request.item_type {
+        MediaItemType::Movie => {
+            let imdb_numeric = imdb_numeric?;
+            Some(("movie", vec![("imdbid", imdb_numeric.to_string())]))
+        }
+        MediaItemType::Show => {
+            let id = tv_id_param?;
+            Some(("tvsearch", vec![id]))
+        }
+        MediaItemType::Season => {
+            let id = tv_id_param?;
+            Some((
+                "tvsearch",
+                vec![id, ("season", request.season_or_1().to_string())],
+            ))
+        }
+        MediaItemType::Episode => {
+            let id = tv_id_param?;
+            Some((
+                "tvsearch",
+                vec![
+                    id,
+                    ("season", request.season_or_1().to_string()),
+                    ("ep", request.episode_or_1().to_string()),
+                ],
+            ))
+        }
+    }
+}
+
+/// Issue one scrape against one indexer and return its items. Errors are
+/// returned to the caller so the fan-out can log per-indexer failures
+/// without poisoning the rest.
+async fn scrape_one(
+    indexer: &Indexer,
+    request: &ScrapeRequest<'_>,
+    search_type: &'static str,
+    base_params: &[(&'static str, String)],
+    http: &riven_core::http::HttpClient,
+) -> anyhow::Result<Vec<NewznabItem>> {
+    let base_url = indexer.url.trim_end_matches('/');
+    let url = format!("{base_url}/api");
+
+    let mut params: Vec<(&'static str, String)> = base_params.to_vec();
+    params.push(("t", search_type.to_string()));
+    params.push(("apikey", indexer.apikey.clone()));
+    params.push(("cat", indexer.categories.clone()));
+    params.push(("limit", "100".to_string()));
+
+    tracing::debug!(
+        indexer = %indexer.name,
+        url = %url,
+        search_type,
+        imdb_id = request.imdb_id,
+        tvdb_id = request.tvdb_id,
+        "requesting newznab"
+    );
+
+    let resp = http
+        .send_data(PROFILE, Some(url.clone()), |client| {
+            client.get(&url).query(&params)
+        })
+        .await?;
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().unwrap_or_default();
+        anyhow::bail!(
+            "newznab returned HTTP {status}: {}",
+            body.chars().take(200).collect::<String>()
+        );
+    }
+    let body = resp.text().unwrap_or_default();
+    let items = parse_newznab_xml(&body);
+    if items.is_empty() {
+        let logged_query = params
+            .iter()
+            .map(|(k, v)| {
+                if k.eq_ignore_ascii_case("apikey") {
+                    format!("{k}=REDACTED")
+                } else {
+                    format!("{k}={v}")
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("&");
+        tracing::debug!(
+            indexer = %indexer.name,
+            status = %status,
+            query = %logged_query,
+            body_len = body.len(),
+            imdb_id = request.imdb_id,
+            tvdb_id = request.tvdb_id,
+            snippet = %body.chars().take(500).collect::<String>(),
+            "newznab returned no items; response snippet",
+        );
+    }
+    Ok(items)
+}
+
 #[async_trait]
 impl Plugin for NewznabPlugin {
     fn name(&self) -> &'static str {
@@ -53,23 +232,32 @@ impl Plugin for NewznabPlugin {
         settings: &PluginSettings,
         _http: &riven_core::http::HttpClient,
     ) -> anyhow::Result<bool> {
-        Ok(settings.get("url").is_some() && settings.get("apikey").is_some())
+        Ok(!indexers_from_settings(settings).is_empty())
     }
 
     fn settings_schema(&self) -> Vec<SettingField> {
         vec![
-            SettingField::new("url", "Indexer URL", "url")
-                .required()
-                .with_placeholder("https://nzbgeek.info")
+            SettingField::new("indexers", "Indexers", "dictionary")
+                .with_key_placeholder("indexer_name")
+                .with_add_label("Add indexer")
                 .with_description(
-                    "Base URL of a Newznab/Torznab-compatible indexer (Prowlarr, NZBHydra2, NZBGeek, etc.).",
-                ),
-            SettingField::new("apikey", "API Key", "password").required(),
-            SettingField::new("categories", "Categories", "text")
-                .with_default("2000,5000")
-                .with_description(
-                    "Comma-separated Newznab category IDs. 2000 = Movies, 5000 = TV.",
-                ),
+                    "One or more Newznab/Torznab-compatible indexers (NZBGeek, \
+                     NZBfinder, Prowlarr, NZBHydra2, etc.). Each entry is named \
+                     (any short label) and configures one indexer. Scrapes fan \
+                     out to every indexer in parallel and results are merged \
+                     by NZB URL — duplicates across indexers count once.",
+                )
+                .with_item_fields(vec![
+                    SettingField::new("url", "Indexer URL", "url")
+                        .required()
+                        .with_placeholder("https://nzbgeek.info"),
+                    SettingField::new("apikey", "API Key", "password").required(),
+                    SettingField::new("categories", "Categories", "text")
+                        .with_default("2000,5000")
+                        .with_description(
+                            "Comma-separated Newznab category IDs. 2000 = Movies, 5000 = TV.",
+                        ),
+                ]),
         ]
     }
 
@@ -78,87 +266,86 @@ impl Plugin for NewznabPlugin {
         request: &ScrapeRequest<'_>,
         ctx: &PluginContext,
     ) -> anyhow::Result<HookResponse> {
-        let Some(imdb_id) = request.imdb_id else {
+        let indexers = indexers_from_settings(&ctx.settings);
+        if indexers.is_empty() {
             return Ok(HookResponse::Empty);
-        };
-        let Some(base_url) = ctx.settings.get("url") else {
-            return Ok(HookResponse::Empty);
-        };
-        let Some(api_key) = ctx.settings.get("apikey") else {
-            return Ok(HookResponse::Empty);
-        };
-        let base_url = base_url.trim_end_matches('/');
-        // Newznab `imdbid` is the numeric portion only.
-        let imdb_numeric = imdb_id.trim_start_matches("tt");
-
-        let (search_type, mut params) = match request.item_type {
-            MediaItemType::Movie => ("movie", vec![("imdbid", imdb_numeric.to_string())]),
-            MediaItemType::Show => ("tvsearch", vec![("imdbid", imdb_numeric.to_string())]),
-            MediaItemType::Season => (
-                "tvsearch",
-                vec![
-                    ("imdbid", imdb_numeric.to_string()),
-                    ("season", request.season_or_1().to_string()),
-                ],
-            ),
-            MediaItemType::Episode => (
-                "tvsearch",
-                vec![
-                    ("imdbid", imdb_numeric.to_string()),
-                    ("season", request.season_or_1().to_string()),
-                    ("ep", request.episode_or_1().to_string()),
-                ],
-            ),
-        };
-        params.push(("t", search_type.to_string()));
-        params.push(("apikey", api_key.to_string()));
-        params.push((
-            "cat",
-            ctx.settings.get_or("categories", "2000,5000").to_string(),
-        ));
-        params.push(("limit", "100".to_string()));
-
-        let url = format!("{base_url}/api");
-        tracing::debug!(url = %url, search_type, imdb_id, "requesting newznab");
-
-        let resp = ctx
-            .http
-            .send_data(PROFILE, Some(url.clone()), |client| {
-                client.get(&url).query(&params)
-            })
-            .await?;
-        let status = resp.status();
-        if !status.is_success() {
-            let body = resp.text().unwrap_or_default();
-            anyhow::bail!(
-                "newznab returned HTTP {status}: {}",
-                body.chars().take(200).collect::<String>()
-            );
         }
-        let body = resp.text().unwrap_or_default();
-        let items = parse_newznab_xml(&body);
+        let Some((search_type, base_params)) = build_query(request) else {
+            return Ok(HookResponse::Empty);
+        };
+
+        // Fire every indexer in parallel. One indexer's failure (auth,
+        // network, malformed XML) is logged and skipped — the others still
+        // contribute. Without parallelism, scrape latency would scale
+        // linearly with indexer count, and that adds up fast for fan-in
+        // flows (a 33-season show with 5 indexers = 165 sequential
+        // round-trips).
+        let http = &ctx.http;
+        let scrape_futures = indexers.iter().map(|indexer| {
+            let base_params = base_params.clone();
+            async move {
+                let result =
+                    scrape_one(indexer, request, search_type, &base_params, http).await;
+                (indexer, result)
+            }
+        });
+        let outcomes = futures::future::join_all(scrape_futures).await;
 
         let mut results = ScrapeResponse::new();
         let mut redis_conn = ctx.redis.clone();
-        for item in items {
-            if item.title.is_empty() || item.nzb_url.is_empty() {
-                continue;
-            }
-            let info_hash = nzb_info_hash(&item.nzb_url);
-            // Store the NZB URL in Redis so the SAB downloader can recover it later.
-            // The pipeline only carries `info_hash` + opaque `magnet`; we use this
-            // sidecar to bridge the indexer → downloader handoff.
-            let _result: Result<(), _> =
-                redis_conn.set_ex(nzb_url_redis_key(&info_hash), &item.nzb_url, NZB_URL_TTL_SECS).await;
+        let mut per_indexer_counts: Vec<(String, usize)> = Vec::with_capacity(outcomes.len());
+        for (indexer, outcome) in outcomes {
+            match outcome {
+                Ok(items) => {
+                    let mut added = 0usize;
+                    for item in items {
+                        if item.title.is_empty() || item.nzb_url.is_empty() {
+                            continue;
+                        }
+                        let info_hash = nzb_info_hash(&item.nzb_url);
+                        // Same NZB URL hashed by multiple indexers collapses
+                        // to the same info_hash, so duplicates across
+                        // indexers are deduped here.
+                        let was_new = !results.contains_key(&info_hash);
+                        // Store the NZB URL in Redis so the SAB downloader
+                        // can recover it later. The pipeline only carries
+                        // `info_hash` + opaque `magnet`; this sidecar
+                        // bridges the indexer → downloader handoff.
+                        let _result: Result<(), _> = redis_conn
+                            .set_ex(nzb_url_redis_key(&info_hash), &item.nzb_url, NZB_URL_TTL_SECS)
+                            .await;
 
-            let mut entry = ScrapeEntry::new(item.title);
-            if let Some(size) = item.size {
-                entry.file_size_bytes = Some(size);
+                        let mut entry = ScrapeEntry::new(item.title);
+                        if let Some(size) = item.size {
+                            entry.file_size_bytes = Some(size);
+                        }
+                        if was_new {
+                            added += 1;
+                        }
+                        results.insert(info_hash, entry);
+                    }
+                    per_indexer_counts.push((indexer.name.clone(), added));
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        indexer = %indexer.name,
+                        %error,
+                        imdb_id = request.imdb_id,
+                        tvdb_id = request.tvdb_id,
+                        "newznab indexer scrape failed; skipping",
+                    );
+                    per_indexer_counts.push((indexer.name.clone(), 0));
+                }
             }
-            results.insert(info_hash, entry);
         }
 
-        tracing::info!(count = results.len(), imdb_id, "newznab scrape complete");
+        tracing::info!(
+            count = results.len(),
+            indexers = ?per_indexer_counts,
+            imdb_id = request.imdb_id,
+            tvdb_id = request.tvdb_id,
+            "newznab scrape complete"
+        );
         Ok(HookResponse::Scrape(results))
     }
 }
@@ -303,5 +490,46 @@ mod tests {
         let b = nzb_info_hash("https://example/x.nzb");
         assert_eq!(a, b);
         assert!(is_nzb_info_hash(&a));
+    }
+
+    #[test]
+    fn parses_indexer_dictionary() {
+        let raw = r#"{
+            "geek": {"url": "https://nzbgeek.info", "apikey": "abc"},
+            "finder": {"url": "https://nzbfinder.ws/", "apikey": "def", "categories": "5000"}
+        }"#;
+        let mut parsed = parse_indexers_str(raw).expect("non-empty");
+        parsed.sort_by(|a, b| a.name.cmp(&b.name));
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].name, "finder");
+        assert_eq!(parsed[0].categories, "5000");
+        assert_eq!(parsed[1].name, "geek");
+        // Default categories when omitted.
+        assert_eq!(parsed[1].categories, "2000,5000");
+    }
+
+    #[test]
+    fn ignores_indexer_entries_missing_credentials() {
+        // Entry without apikey is silently skipped, not a hard failure —
+        // the user is mid-edit and the half-configured entry shouldn't
+        // crash scrapes from the entries that are complete.
+        let raw = r#"{
+            "good": {"url": "https://nzbgeek.info", "apikey": "abc"},
+            "blank": {"url": "https://example.com", "apikey": ""},
+            "no-url": {"url": "", "apikey": "k"}
+        }"#;
+        let parsed = parse_indexers_str(raw).expect("at least one valid");
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].name, "good");
+    }
+
+    #[test]
+    fn empty_or_invalid_dictionary_returns_none() {
+        assert!(parse_indexers_str("").is_none());
+        assert!(parse_indexers_str("   ").is_none());
+        assert!(parse_indexers_str("not json").is_none());
+        assert!(parse_indexers_str("{}").is_none());
+        // Every entry missing required fields.
+        assert!(parse_indexers_str(r#"{"x":{"url":"a"}}"#).is_none());
     }
 }

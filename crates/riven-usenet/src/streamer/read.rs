@@ -105,10 +105,7 @@ impl UsenetStreamer {
 
     /// Inner retry loop. Side effects (cache.put, fails.mark_dead) are
     /// the caller's responsibility — keeps this fn purely about fetching.
-    async fn do_fetch_with_retry(
-        &self,
-        message_id: &str,
-    ) -> Result<Arc<Vec<u8>>, StreamerError> {
+    async fn do_fetch_with_retry(&self, message_id: &str) -> Result<Arc<Vec<u8>>, StreamerError> {
         let mut last_err: Option<NntpError> = None;
         for attempt in 0..NNTP_FETCH_ATTEMPTS {
             tracing::debug!(attempt, message_id, "nntp fetch starting");
@@ -143,18 +140,16 @@ impl UsenetStreamer {
                     );
                     last_err = Some(e);
                     if attempt + 1 < NNTP_FETCH_ATTEMPTS {
-                        tokio::time::sleep(std::time::Duration::from_millis(
-                            NNTP_RETRY_DELAY_MS,
-                        ))
-                        .await;
+                        tokio::time::sleep(std::time::Duration::from_millis(NNTP_RETRY_DELAY_MS))
+                            .await;
                     }
                 }
             }
         }
         tracing::error!(message_id, "nntp fetch exhausted retries");
-        Err(StreamerError::Nntp(last_err.unwrap_or(NntpError::Protocol(
-            "retry exhausted without error",
-        ))))
+        Err(StreamerError::Nntp(last_err.unwrap_or(
+            NntpError::Protocol("retry exhausted without error"),
+        )))
     }
 
     /// Background-warm the segment cache for the segments that overlap
@@ -223,21 +218,20 @@ impl UsenetStreamer {
         let mut iter = mids.into_iter();
         let mut in_flight: FuturesOrdered<FetchFuture<Result<Arc<Vec<u8>>, StreamerError>>> =
             FuturesOrdered::new();
-        let push_next =
-            |iter: &mut std::vec::IntoIter<String>,
-             in_flight: &mut FuturesOrdered<FetchFuture<Result<Arc<Vec<u8>>, StreamerError>>>,
-             streamer: UsenetStreamer| {
-                while in_flight.len() < PREFETCH_CONCURRENCY {
-                    let Some(mid) = iter.next() else { return };
-                    if streamer.cache.get(&mid).is_some() {
-                        continue;
-                    }
-                    let s = streamer.clone();
-                    in_flight.push_back(Box::pin(async move {
-                        s.fetch_decoded_cached(&mid).await
-                    }));
+        let push_next = |iter: &mut std::vec::IntoIter<String>,
+                         in_flight: &mut FuturesOrdered<
+            FetchFuture<Result<Arc<Vec<u8>>, StreamerError>>,
+        >,
+                         streamer: UsenetStreamer| {
+            while in_flight.len() < PREFETCH_CONCURRENCY {
+                let Some(mid) = iter.next() else { return };
+                if streamer.cache.get(&mid).is_some() {
+                    continue;
                 }
-            };
+                let s = streamer.clone();
+                in_flight.push_back(Box::pin(async move { s.fetch_decoded_cached(&mid).await }));
+            }
+        };
         push_next(&mut iter, &mut in_flight, self.clone());
         while let Some(_r) = in_flight.next().await {
             push_next(&mut iter, &mut in_flight, self.clone());
@@ -265,11 +259,18 @@ impl UsenetStreamer {
 
         match &file.source {
             NzbMetaSource::Direct { offsets, segments } => {
-                self.read_direct(offsets, segments, start, end_inclusive).await
+                self.read_direct(offsets, segments, start, end_inclusive)
+                    .await
             }
             NzbMetaSource::Rar { parts, slices } => {
-                self.read_rar(parts, slices, meta.password.as_deref(), start, end_inclusive)
-                    .await
+                self.read_rar(
+                    parts,
+                    slices,
+                    meta.password.as_deref(),
+                    start,
+                    end_inclusive,
+                )
+                .await
             }
         }
     }
@@ -348,5 +349,4 @@ impl UsenetStreamer {
 
         Ok(decoded_concat)
     }
-
 }
