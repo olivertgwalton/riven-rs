@@ -30,6 +30,19 @@ pub async fn open_stream(client: &Client, url: &str, start: u64) -> Result<Respo
     }
 }
 
+/// Extract the inclusive end byte of the response body from its
+/// `Content-Range` header (`bytes start-end/total`). Returns `None` for
+/// a plain `200 OK` (no Content-Range) or an unparseable header — callers
+/// then fall back to assuming the body extends to the file's last byte.
+pub fn response_body_end(response: &Response) -> Option<u64> {
+    let header = response.headers().get(reqwest::header::CONTENT_RANGE)?;
+    let s = header.to_str().ok()?;
+    let rest = s.strip_prefix("bytes ")?;
+    let (range_part, _total) = rest.split_once('/')?;
+    let (_start, end) = range_part.split_once('-')?;
+    end.parse::<u64>().ok()
+}
+
 pub async fn fetch_range(client: &Client, url: &str, start: u64, end: u64) -> Result<Bytes> {
     let range = format!("bytes={start}-{end}");
     let expected_len = (end - start + 1) as usize;

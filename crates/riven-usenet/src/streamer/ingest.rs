@@ -223,7 +223,7 @@ impl UsenetStreamer {
             if f.segments.is_empty() {
                 return Ok(None);
             }
-            let part = build_rar_part(f);
+            let mut part = build_rar_part(f);
 
             let header_bytes = match self
                 .fetch_volume_header_bytes(&part, RAR_HEADER_PROBE_BYTES)
@@ -240,6 +240,16 @@ impl UsenetStreamer {
                     return Ok(None);
                 }
             };
+
+            // The header probe just decoded the first segment(s) of this
+            // part. Their decoded sizes are memoized — record the first
+            // one as the part's uniform segment size so the read path can
+            // map decoded positions to segments in O(1).
+            if let Some(first_seg) = part.segments.first()
+                && let Some(size) = self.decoded_sizes.get(&first_seg.message_id)
+            {
+                part.decoded_seg_size = Some(size);
+            }
             let parsed = match rar::parse_volume_header(&header_bytes) {
                 Ok(h) => h,
                 Err(error) => {
@@ -485,6 +495,7 @@ fn build_rar_part(f: &NzbFile) -> NzbRarPart {
         total_size: acc,
         offsets,
         segments: f.segments.clone(),
+        decoded_seg_size: None,
     }
 }
 

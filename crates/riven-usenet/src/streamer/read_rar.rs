@@ -137,8 +137,101 @@ impl UsenetStreamer {
     }
 
     /// Read decoded bytes `[dec_start, dec_end_inclusive]` from a single
-    /// part's segment stream, with exact decoded-byte addressing.
+    /// part's segment stream with exact decoded-byte addressing.
+    ///
+    /// When `part.decoded_seg_size` is known (populated at ingest from the
+    /// first segment's yEnc part size), we map decoded positions to
+    /// segments in O(1) and fetch only the segments that overlap the
+    /// request. Otherwise we walk from the first segment with an unknown
+    /// decoded size, which is slow on cold seeks but self-corrects via
+    /// `DecodedSizes` memoization.
     async fn read_decoded_range_within_part(
+        &self,
+        part: &NzbRarPart,
+        dec_start: u64,
+        dec_end_inclusive: u64,
+    ) -> Result<Vec<u8>, StreamerError> {
+        match part.decoded_seg_size {
+            Some(seg_size) if seg_size > 0 => {
+                self.read_decoded_range_uniform(part, seg_size, dec_start, dec_end_inclusive)
+                    .await
+            }
+            _ => {
+                self.read_decoded_range_walk(part, dec_start, dec_end_inclusive)
+                    .await
+            }
+        }
+    }
+
+    /// Fast path: uniform segment size known, jump directly to the segment
+    /// containing `dec_start` and fetch just the overlapping segments.
+    async fn read_decoded_range_uniform(
+        &self,
+        part: &NzbRarPart,
+        seg_size: u64,
+        dec_start: u64,
+        dec_end_inclusive: u64,
+    ) -> Result<Vec<u8>, StreamerError> {
+        let want_len = (dec_end_inclusive - dec_start + 1) as usize;
+        let mut out = Vec::with_capacity(want_len);
+
+        let total_segs = part.segments.len();
+        let first_seg = (dec_start / seg_size) as usize;
+        let last_seg = ((dec_end_inclusive / seg_size) as usize).min(total_segs - 1);
+        if first_seg >= total_segs {
+            return Ok(out);
+        }
+
+        let mut in_flight: FuturesOrdered<FetchFuture<(usize, Result<Arc<Vec<u8>>, StreamerError>)>> =
+            FuturesOrdered::new();
+        let mut next_to_launch = first_seg;
+
+        while in_flight.len() < READ_PREFETCH_WINDOW && next_to_launch <= last_seg {
+            let i = next_to_launch;
+            let mid = part.segments[i].message_id.clone();
+            let streamer = self.clone();
+            in_flight.push_back(Box::pin(async move {
+                (i, streamer.fetch_decoded_cached(&mid).await)
+            }));
+            next_to_launch += 1;
+        }
+
+        while let Some((idx, result)) = in_flight.next().await {
+            let decoded = result?;
+            if next_to_launch <= last_seg {
+                let i = next_to_launch;
+                let mid = part.segments[i].message_id.clone();
+                let streamer = self.clone();
+                in_flight.push_back(Box::pin(async move {
+                    (i, streamer.fetch_decoded_cached(&mid).await)
+                }));
+                next_to_launch += 1;
+            }
+
+            let seg_lo = (idx as u64) * seg_size;
+            let dec_len_usize = decoded.len();
+            // Last segment may be shorter than seg_size; otherwise the
+            // fetched length confirms our uniform assumption.
+            let take_lo_u64 = dec_start.saturating_sub(seg_lo);
+            let take_lo = (take_lo_u64 as usize).min(dec_len_usize);
+            let take_hi_inclusive_u64 = dec_end_inclusive.saturating_sub(seg_lo);
+            let take_hi_inclusive =
+                (take_hi_inclusive_u64 as usize).min(dec_len_usize.saturating_sub(1));
+            if take_lo <= take_hi_inclusive {
+                out.extend_from_slice(&decoded[take_lo..=take_hi_inclusive]);
+            }
+
+            if out.len() >= want_len {
+                break;
+            }
+        }
+
+        Ok(out)
+    }
+
+    /// Slow fallback: no uniform size known. Walk segments from the first
+    /// non-memoized one to build the decoded cursor exactly.
+    async fn read_decoded_range_walk(
         &self,
         part: &NzbRarPart,
         dec_start: u64,
@@ -151,8 +244,6 @@ impl UsenetStreamer {
         let total_segs = part.segments.len();
         let mut next_to_launch = 0usize;
 
-        // Skip past memoized segments that fully end before dec_start. Only
-        // segments with known decoded sizes can be skipped exactly.
         while next_to_launch < total_segs {
             let seg = &part.segments[next_to_launch];
             let Some(size) = self.decoded_sizes.get(&seg.message_id) else {
@@ -165,18 +256,6 @@ impl UsenetStreamer {
                 break;
             }
         }
-
-        // Note: an earlier version of this function tried to short-cut
-        // cold seeks by using cumulative encoded offsets as a proxy for
-        // the decoded cursor. That broke the loop's termination
-        // condition (`seg_lo > dec_end_inclusive`) because seg_lo would
-        // then be in encoded byte space while dec_end_inclusive stays
-        // in decoded byte space, and the encoded value overshoots the
-        // decoded one by ~2 %. The loop exited a segment or two early
-        // and emitted short bodies. We now always walk from the first
-        // segment with an unknown decoded size — slower for the FIRST
-        // cold seek into a region (segments fetched once to learn their
-        // sizes), free thereafter via `DecodedSizes` memoization.
 
         let mut in_flight: FuturesOrdered<FetchFuture<Result<Arc<Vec<u8>>, StreamerError>>> =
             FuturesOrdered::new();
@@ -212,9 +291,6 @@ impl UsenetStreamer {
                 break;
             }
 
-            // Bound take_lo / take_hi against the actual decoded length.
-            // After the cold-seek encoded-offset approximation, `decoded_cursor`
-            // may be slightly off — clamp to keep the slice in-range.
             let dec_len_usize = decoded.len();
             let take_lo = (dec_start.max(seg_lo) - seg_lo) as usize;
             let take_hi_inclusive = (dec_end_inclusive.min(seg_hi - 1) - seg_lo) as usize;

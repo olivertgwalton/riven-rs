@@ -112,14 +112,29 @@ impl UsenetStreamer {
             let started = std::time::Instant::now();
             match self.pool.fetch_body(message_id).await {
                 Ok(body) => {
-                    let elapsed_ms = started.elapsed().as_millis();
-                    let (decoded, _info) = yenc::decode(&body)?;
+                    let wire_ms = started.elapsed().as_millis();
+                    let encoded_len = body.len();
+                    let decode_started = std::time::Instant::now();
+                    let decoded = match tokio::task::spawn_blocking(move || yenc::decode(&body))
+                        .await
+                    {
+                        Ok(Ok((decoded, _info))) => decoded,
+                        Ok(Err(e)) => return Err(StreamerError::Yenc(e)),
+                        Err(join_err) => {
+                            tracing::warn!(message_id, error = %join_err, "yenc decode task panicked");
+                            return Err(StreamerError::Nntp(NntpError::Protocol(
+                                "yenc decode task panicked",
+                            )));
+                        }
+                    };
+                    let decode_ms = decode_started.elapsed().as_millis();
                     tracing::debug!(
                         attempt,
                         message_id,
-                        encoded_len = body.len(),
+                        encoded_len,
                         decoded_len = decoded.len(),
-                        elapsed_ms,
+                        wire_ms,
+                        decode_ms,
                         "nntp fetch ok"
                     );
                     return Ok(Arc::new(decoded));
@@ -153,13 +168,11 @@ impl UsenetStreamer {
     }
 
     /// Background-warm the segment cache for the segments that overlap
-    /// `[start, end_inclusive]` of `file_index`. Concurrency is
-    /// deliberately small (`PREFETCH_CONCURRENCY`) so the NNTP pool's
-    /// permits remain available for the body stream's own reads — an
-    /// eager unbounded prefetch starves them and ends the response short.
-    ///
-    /// Currently no caller invokes this; kept available for callers that
-    /// want decypharr-style `Prefetch` semantics.
+    /// `[start, end_inclusive]` of `file_index`. Concurrency is sized to
+    /// match `READ_PREFETCH_WINDOW` so the prefetch can saturate the
+    /// NNTP pool ahead of the body stream's own reads; in-flight
+    /// deduplication via `fetch_decoded_cached` makes this safe —
+    /// overlapping segments share a single fetch instead of doubling up.
     pub async fn prefetch_range(
         &self,
         info_hash: &str,
@@ -167,7 +180,7 @@ impl UsenetStreamer {
         start: u64,
         end_inclusive: u64,
     ) {
-        const PREFETCH_CONCURRENCY: usize = 4;
+        const PREFETCH_CONCURRENCY: usize = READ_PREFETCH_WINDOW;
 
         let Ok(meta) = self.load_meta(info_hash).await else {
             return;
@@ -236,6 +249,48 @@ impl UsenetStreamer {
         while let Some(_r) = in_flight.next().await {
             push_next(&mut iter, &mut in_flight, self.clone());
         }
+    }
+
+    /// Warm the segment cache for the head and tail of `file_index`.
+    /// Players probe the start (container header, codec init) and end
+    /// (MKV cues, fragmented MP4 moov) before sequential playback.
+    /// Idempotent per `(info_hash, file_index)` per process.
+    pub async fn precache_head_tail(&self, info_hash: &str, file_index: usize) {
+        const PRECACHE_HEAD_BYTES: u64 = 4 * 1024 * 1024;
+        const PRECACHE_TAIL_BYTES: u64 = 4 * 1024 * 1024;
+
+        if !self.precached.claim(info_hash, file_index) {
+            return;
+        }
+        let Ok(meta) = self.load_meta(info_hash).await else {
+            return;
+        };
+        let Some(file) = meta.files.get(file_index) else {
+            return;
+        };
+        let total = file.total_size;
+        if total == 0 {
+            return;
+        }
+
+        let head_end = PRECACHE_HEAD_BYTES.saturating_sub(1).min(total - 1);
+        let tail_start = total.saturating_sub(PRECACHE_TAIL_BYTES);
+        let tail_end = total - 1;
+
+        let started = std::time::Instant::now();
+        let head = self.prefetch_range(info_hash, file_index, 0, head_end);
+        if tail_start > head_end {
+            let tail = self.prefetch_range(info_hash, file_index, tail_start, tail_end);
+            tokio::join!(head, tail);
+        } else {
+            head.await;
+        }
+        tracing::info!(
+            info_hash,
+            file_index,
+            elapsed_ms = started.elapsed().as_millis(),
+            "usenet precache done"
+        );
     }
 
     /// Read `[start, end_inclusive]` from `file_index`. Walks the meta's

@@ -29,7 +29,9 @@ use serde::{Deserialize, Serialize};
 use crate::cache::SegmentCache;
 use crate::nntp::{NntpPool, NntpServerConfig};
 use crate::nzb::NzbSegment;
-use crate::state::{ActiveStreams, DecodedSizes, InFlight, MetaCache, PermanentFails};
+use crate::state::{
+    ActiveStreams, DecodedSizes, InFlight, MetaCache, MigratedMetas, PermanentFails, PrecachedFiles,
+};
 
 mod ingest;
 mod read;
@@ -135,6 +137,14 @@ pub struct NzbRarPart {
     pub total_size: u64,
     pub offsets: Vec<u64>,
     pub segments: Vec<NzbSegment>,
+    /// Uniform decoded byte size of every non-last segment. yEnc posters
+    /// use a fixed `=ypart` size, so once we know it (from the first
+    /// segment fetched at ingest) every segment boundary in the part
+    /// becomes a constant-time lookup. `None` means a legacy meta
+    /// ingested before this field existed — read path falls back to
+    /// walking from the start of the part.
+    #[serde(default)]
+    pub decoded_seg_size: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -195,6 +205,8 @@ pub struct UsenetStreamer {
     pub(crate) decoded_sizes: Arc<DecodedSizes>,
     pub(crate) fails: Arc<PermanentFails>,
     pub(crate) in_flight: Arc<InFlight>,
+    pub(crate) precached: Arc<PrecachedFiles>,
+    pub(crate) migrated: Arc<MigratedMetas>,
     pub(crate) redis: redis::aio::ConnectionManager,
 }
 
@@ -235,6 +247,16 @@ fn global_in_flight() -> Arc<InFlight> {
     C.get_or_init(|| Arc::new(InFlight::default())).clone()
 }
 
+fn global_precached_files() -> Arc<PrecachedFiles> {
+    static C: OnceLock<Arc<PrecachedFiles>> = OnceLock::new();
+    C.get_or_init(|| Arc::new(PrecachedFiles::default())).clone()
+}
+
+fn global_migrated_metas() -> Arc<MigratedMetas> {
+    static C: OnceLock<Arc<MigratedMetas>> = OnceLock::new();
+    C.get_or_init(|| Arc::new(MigratedMetas::default())).clone()
+}
+
 /// Public accessor: registry of currently-streaming items. The
 /// `/usenet/` handler registers a stream on body-stream start and
 /// removes it when the body completes or is dropped.
@@ -246,13 +268,26 @@ pub fn active_streams() -> Arc<ActiveStreams> {
 impl UsenetStreamer {
     pub fn new(cfg: NntpConfig, redis: redis::aio::ConnectionManager) -> Self {
         crate::nntp::init_crypto();
+        let pool = NntpPool::new_multi(cfg.providers);
+        // Fire-and-forget: open a handful of authenticated NNTP sockets
+        // per provider so the first stream request finds hot connections
+        // in the pool instead of paying TCP + TLS + AUTHINFO latency
+        // (each costs ~5 round-trips and dominates first-byte time).
+        {
+            let pool = pool.clone();
+            tokio::spawn(async move {
+                pool.prewarm().await;
+            });
+        }
         Self {
-            pool: Arc::new(NntpPool::new_multi(cfg.providers)),
+            pool,
             cache: global_cache(),
             meta_cache: global_meta_cache(),
             decoded_sizes: global_decoded_sizes(),
             fails: global_permanent_fails(),
             in_flight: global_in_flight(),
+            precached: global_precached_files(),
+            migrated: global_migrated_metas(),
             redis,
         }
     }
@@ -263,6 +298,7 @@ impl UsenetStreamer {
 
     pub async fn load_meta(&self, info_hash: &str) -> Result<Arc<NzbMeta>, StreamerError> {
         if let Some(hit) = self.meta_cache.get(info_hash) {
+            self.maybe_kick_backfill(&hit);
             return Ok(hit);
         }
         let mut redis = self.redis.clone();
@@ -273,7 +309,138 @@ impl UsenetStreamer {
             .map_err(|e| StreamerError::Redis(redis::RedisError::from(io_error(e.to_string()))))?;
         let arc = Arc::new(meta);
         self.meta_cache.put(info_hash.to_string(), arc.clone());
+        self.maybe_kick_backfill(&arc);
         Ok(arc)
+    }
+
+    /// If this meta has any RAR part missing `decoded_seg_size` (legacy
+    /// ingest), spawn a one-shot background task that probes one segment
+    /// per part to fill it in and rewrites the meta to Redis + cache.
+    fn maybe_kick_backfill(&self, meta: &Arc<NzbMeta>) {
+        let needs = meta.files.iter().any(|f| match &f.source {
+            NzbMetaSource::Rar { parts, .. } => parts.iter().any(|p| p.decoded_seg_size.is_none()),
+            _ => false,
+        });
+        if !needs {
+            return;
+        }
+        if !self.migrated.claim(&meta.info_hash) {
+            return;
+        }
+        let streamer = self.clone();
+        let info_hash = meta.info_hash.clone();
+        tokio::spawn(async move {
+            if let Err(e) = streamer.backfill_decoded_seg_sizes(&info_hash).await {
+                tracing::warn!(info_hash, error = %e, "decoded_seg_size backfill failed");
+            }
+        });
+    }
+
+    /// Fetch the first segment of every RAR part missing `decoded_seg_size`,
+    /// stamp the part with the learned size, and persist the updated meta.
+    async fn backfill_decoded_seg_sizes(&self, info_hash: &str) -> Result<(), StreamerError> {
+        use futures::StreamExt;
+        use futures::stream::FuturesUnordered;
+
+        let arc = self.load_meta_raw(info_hash).await?;
+        let mut meta = (*arc).clone();
+        let started = std::time::Instant::now();
+
+        let mut to_probe: Vec<(usize, usize, String)> = Vec::new();
+        for (fi, f) in meta.files.iter().enumerate() {
+            if let NzbMetaSource::Rar { parts, .. } = &f.source {
+                for (pi, p) in parts.iter().enumerate() {
+                    if p.decoded_seg_size.is_none()
+                        && let Some(seg) = p.segments.first()
+                    {
+                        to_probe.push((fi, pi, seg.message_id.clone()));
+                    }
+                }
+            }
+        }
+        if to_probe.is_empty() {
+            return Ok(());
+        }
+        let total = to_probe.len();
+
+        // Cap concurrency to the prefetch window so we don't monopolise
+        // the NNTP pool for in-flight playback reads.
+        const BACKFILL_CONCURRENCY: usize = 8;
+        let mut iter = to_probe.into_iter();
+        let mut in_flight: FuturesUnordered<FetchFuture<(usize, usize, Result<u64, StreamerError>)>> =
+            FuturesUnordered::new();
+        let launch = |iter: &mut std::vec::IntoIter<(usize, usize, String)>,
+                          in_flight: &mut FuturesUnordered<
+            FetchFuture<(usize, usize, Result<u64, StreamerError>)>,
+        >,
+                          streamer: UsenetStreamer| {
+            while in_flight.len() < BACKFILL_CONCURRENCY {
+                let Some((fi, pi, mid)) = iter.next() else { return };
+                let s = streamer.clone();
+                in_flight.push(Box::pin(async move {
+                    let r = s.fetch_decoded_cached(&mid).await.map(|arc| arc.len() as u64);
+                    (fi, pi, r)
+                }));
+            }
+        };
+        launch(&mut iter, &mut in_flight, self.clone());
+
+        let mut filled = 0usize;
+        while let Some((fi, pi, result)) = in_flight.next().await {
+            launch(&mut iter, &mut in_flight, self.clone());
+            match result {
+                Ok(size) if size > 0 => {
+                    if let NzbMetaSource::Rar { parts, .. } = &mut meta.files[fi].source {
+                        parts[pi].decoded_seg_size = Some(size);
+                        filled += 1;
+                    }
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::debug!(info_hash, fi, pi, error = %e, "backfill probe failed");
+                }
+            }
+        }
+
+        if filled == 0 {
+            return Ok(());
+        }
+
+        let json = serde_json::to_string(&meta).map_err(|e| {
+            StreamerError::Redis(redis::RedisError::from(io_error(e.to_string())))
+        })?;
+        let mut redis = self.redis.clone();
+        let _: () = redis::AsyncCommands::set_ex(
+            &mut redis,
+            meta_key(info_hash),
+            json,
+            META_TTL_SECS as u64,
+        )
+        .await?;
+        let arc = Arc::new(meta);
+        self.meta_cache.put(info_hash.to_string(), arc);
+
+        tracing::info!(
+            info_hash,
+            filled,
+            total,
+            elapsed_ms = started.elapsed().as_millis(),
+            "decoded_seg_size backfill complete"
+        );
+        Ok(())
+    }
+
+    async fn load_meta_raw(&self, info_hash: &str) -> Result<Arc<NzbMeta>, StreamerError> {
+        if let Some(hit) = self.meta_cache.get(info_hash) {
+            return Ok(hit);
+        }
+        let mut redis = self.redis.clone();
+        let raw: Option<String> =
+            redis::AsyncCommands::get(&mut redis, meta_key(info_hash)).await?;
+        let raw = raw.ok_or_else(|| StreamerError::NotIngested(info_hash.to_string()))?;
+        let meta: NzbMeta = serde_json::from_str(&raw)
+            .map_err(|e| StreamerError::Redis(redis::RedisError::from(io_error(e.to_string()))))?;
+        Ok(Arc::new(meta))
     }
 }
 

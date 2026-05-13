@@ -115,6 +115,21 @@ pub async fn usenet_stream_handler(
     let total = file.total_size;
     let content_type = guess_content_type(&file.filename);
 
+    // Fire-and-forget head+tail precache the first time this file is
+    // touched in the process. Players (Plex/Jellyfin/ffprobe) almost
+    // always read a few MB at the start and seek near the end for the
+    // MKV cue index before sequential playback — precaching both
+    // windows means those probes hit the segment cache instead of
+    // spending NNTP round-trips. `PrecachedFiles::claim` makes this a
+    // no-op after the first call per (info_hash, file_index).
+    {
+        let streamer = streamer.clone();
+        let info_hash = info_hash.clone();
+        tokio::spawn(async move {
+            streamer.precache_head_tail(&info_hash, file_index).await;
+        });
+    }
+
     // Cap any single response at the same lookahead window the VFS uses
     // for its sequential reader (32 MB). Mirrors debrid CDN behaviour:
     // an open-ended Range request gets a bounded 206 Partial Content,

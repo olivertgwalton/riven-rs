@@ -20,14 +20,6 @@ use crate::{DownloadJob, JobQueue, RankStreamsJob};
 use self::candidates::rank_streams_for_profile;
 use self::execute::{DownloadAttemptOutcome, attempt_download};
 
-/// NZB info_hashes are synthetic (`nzb-<sha1>`) and don't represent torrents
-/// at any debrid provider, so cache-check never reports them as cached.
-/// They're always "available" — the NZB URL is in Redis and the configured
-/// usenet plugin can ingest it on demand. Skip the cache-check gate for them.
-fn is_nzb_info_hash(info_hash: &str) -> bool {
-    info_hash.starts_with("nzb-")
-}
-
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ManualDownloadFileInput {
@@ -634,7 +626,7 @@ async fn run_downloads(
                     .await;
 
                 let is_cached = cached_files.is_some();
-                if !is_cached && !attempt_unknown && !is_nzb_info_hash(&stream.info_hash) {
+                if !is_cached && !attempt_unknown {
                     continue;
                 }
 

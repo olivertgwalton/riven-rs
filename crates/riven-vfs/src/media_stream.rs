@@ -8,7 +8,7 @@ use tokio_util::io::StreamReader;
 use crate::cache::{RangeCache, cache_get, cache_put};
 use crate::chunks::{ChunkRange, FileLayout};
 use crate::detect::{ReadType, detect_read_type};
-use crate::stream::{fetch_range, open_stream};
+use crate::stream::{fetch_range, open_stream, response_body_end};
 
 pub enum ReadOutcome {
     Data(Bytes),
@@ -35,11 +35,15 @@ type ResponseReader = BufReader<StreamReader<HttpByteStream, Bytes>>;
 
 struct SequentialReader {
     read_pos: u64,
+    /// Exclusive end byte of the response body. Origin servers (debrid CDNs,
+    /// the local /usenet/ route) cap open-ended `bytes=start-` requests to a
+    /// bounded window, so the body ends well before EOF. Reading past this
+    /// returns early-EOF; we must reopen instead.
+    body_end_exclusive: u64,
     reader: ResponseReader,
 }
 
 impl SequentialReader {
-    const LOOKAHEAD_WINDOW: u64 = 32 * 1024 * 1024;
     const DISCARD_BUFFER_SIZE: usize = 64 * 1024;
 
     fn open(
@@ -51,6 +55,9 @@ impl SequentialReader {
         let response = runtime
             .block_on(open_stream(&client, &url, start_pos))
             .ok()?;
+        let body_end_exclusive = response_body_end(&response)
+            .map(|end_inclusive| end_inclusive.saturating_add(1))
+            .unwrap_or(u64::MAX);
         let stream = response.bytes_stream().map_err(io::Error::other).boxed();
         let reader = BufReader::with_capacity(
             riven_core::config::vfs::CHUNK_SIZE as usize * 2,
@@ -59,12 +66,16 @@ impl SequentialReader {
 
         Some(Self {
             read_pos: start_pos,
+            body_end_exclusive,
             reader,
         })
     }
 
-    fn can_resume_from(&self, pos: u64) -> bool {
-        pos >= self.read_pos && pos <= self.read_pos + Self::LOOKAHEAD_WINDOW
+    /// Whether this reader's body still covers `[start, end_inclusive]`.
+    /// Returns false when `end_inclusive` falls past the body window so
+    /// the caller will reopen at `start` instead of reading an early-EOF.
+    fn can_serve(&self, start: u64, end_inclusive: u64) -> bool {
+        start >= self.read_pos && end_inclusive < self.body_end_exclusive
     }
 
     fn read_chunk(
@@ -301,25 +312,24 @@ impl MediaStream {
         end: u64,
         ctx: &ReadContext<'_>,
     ) -> ReadOutcome {
-        let Some(first_missing) = chunks
+        let all_cached = chunks
             .iter()
-            .find(|chunk| cache_get(ctx.cache, (self.ino, chunk.start, chunk.end)).is_none())
-            .copied()
-        else {
+            .all(|chunk| cache_get(ctx.cache, (self.ino, chunk.start, chunk.end)).is_some());
+        if all_cached {
             return self.read_cached_chunks(start, end, chunks, ctx.cache);
-        };
+        }
 
         for attempt in 0..2 {
-            if !self.ensure_sequential_reader(first_missing.start, ctx) {
-                tracing::error!(ino = self.ino, "failed to start sequential reader");
-                return ReadOutcome::Error(libc::EIO);
-            }
-
             let mut failed = false;
 
             for chunk in chunks {
                 if cache_get(ctx.cache, (self.ino, chunk.start, chunk.end)).is_some() {
                     continue;
+                }
+
+                if !self.ensure_sequential_reader_for(chunk.start, chunk.end, ctx) {
+                    tracing::error!(ino = self.ino, "failed to start sequential reader");
+                    return ReadOutcome::Error(libc::EIO);
                 }
 
                 match self.read_body_chunk(*chunk, ctx, attempt) {
@@ -342,11 +352,16 @@ impl MediaStream {
         ReadOutcome::Error(libc::EIO)
     }
 
-    fn ensure_sequential_reader(&mut self, start: u64, ctx: &ReadContext<'_>) -> bool {
+    fn ensure_sequential_reader_for(
+        &mut self,
+        start: u64,
+        end_inclusive: u64,
+        ctx: &ReadContext<'_>,
+    ) -> bool {
         let need_restart = self
             .sequential
             .as_ref()
-            .is_none_or(|reader| !reader.can_resume_from(start));
+            .is_none_or(|reader| !reader.can_serve(start, end_inclusive));
 
         if need_restart {
             tracing::debug!(target: "streaming", ino = self.ino, position = start, "starting sequential reader");

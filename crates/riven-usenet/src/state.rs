@@ -6,7 +6,7 @@
 //! message_id) so the same instance is reused by the ingest path and the
 //! read path inside the same process.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -57,8 +57,7 @@ impl DecodedSizes {
 /// Coordinates concurrent fetches of the same segment. Without this, the
 /// body stream and the optional eager prefetch can both issue an NNTP
 /// `BODY` for the same message-id; with it, the second caller waits on
-/// the first's promise and then reads from the segment cache. Matches
-/// decypharr's `fetchPromise` deduplication.
+/// the first's promise and then reads from the segment cache.
 ///
 /// Race-free against the classic Notify pitfall (`notify_waiters()`
 /// doesn't store a permit, so a waiter that registers after the call
@@ -143,6 +142,39 @@ impl PermanentFails {
 
     pub fn mark_dead(&self, message_id: String) {
         self.inner.lock().insert(message_id, ());
+    }
+}
+
+/// Tracks files for which the head+tail precache has already been
+/// kicked off in this process. The first stream request for a file
+/// eagerly warms the first and last few MB so probes and seek-to-end
+/// hits are served from cache.
+#[derive(Default)]
+pub struct PrecachedFiles {
+    inner: Mutex<HashSet<String>>,
+}
+
+impl PrecachedFiles {
+    /// Returns `true` exactly once per `(info_hash, file_index)` pair —
+    /// the caller is responsible for actually performing the precache.
+    /// Subsequent callers see `false` and skip.
+    pub fn claim(&self, info_hash: &str, file_index: usize) -> bool {
+        let key = format!("{info_hash}:{file_index}");
+        self.inner.lock().insert(key)
+    }
+}
+
+/// Tracks NzbMeta instances for which the in-place backfill of
+/// `decoded_seg_size` (for old metas ingested before that field existed)
+/// has been started. Single-shot per `info_hash` per process.
+#[derive(Default)]
+pub struct MigratedMetas {
+    inner: Mutex<HashSet<String>>,
+}
+
+impl MigratedMetas {
+    pub fn claim(&self, info_hash: &str) -> bool {
+        self.inner.lock().insert(info_hash.to_string())
     }
 }
 

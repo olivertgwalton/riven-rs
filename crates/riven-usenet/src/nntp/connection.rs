@@ -11,6 +11,10 @@ pub struct NntpConnection {
 
 impl NntpConnection {
     pub async fn connect(cfg: &NntpServerConfig) -> Result<Self, NntpError> {
+        // Sized to absorb a typical ~720 KB segment body in roughly one
+        // fill rather than thousands of 8 KB syscalls.
+        const NNTP_READ_BUF: usize = 512 * 1024;
+
         let connect_fut = async {
             let tcp = TcpStream::connect((cfg.host.as_str(), cfg.port)).await?;
             drop(tcp.set_nodelay(true));
@@ -22,9 +26,9 @@ impl NntpConnection {
                     .connect(server_name, tcp)
                     .await
                     .map_err(|e| NntpError::Tls(e.to_string()))?;
-                NntpStream::Tls(Box::new(BufReader::new(tls)))
+                NntpStream::Tls(Box::new(BufReader::with_capacity(NNTP_READ_BUF, tls)))
             } else {
-                NntpStream::Plain(BufReader::new(tcp))
+                NntpStream::Plain(BufReader::with_capacity(NNTP_READ_BUF, tcp))
             };
             Ok::<NntpStream, NntpError>(stream)
         };
@@ -89,6 +93,17 @@ impl NntpConnection {
             return Err(NntpError::ServerError(status));
         }
         Ok(self.stream.read_until_dot().await?)
+    }
+
+    /// RFC 3977 `DATE` — used as a cheap liveness ping before reusing
+    /// a stale-but-not-expired pooled connection.
+    pub async fn date(&mut self) -> Result<(), NntpError> {
+        self.send("DATE\r\n").await?;
+        let status = self.read_status().await?;
+        if status.starts_with("111") {
+            return Ok(());
+        }
+        Err(NntpError::ServerError(status))
     }
 
     /// `STAT <message-id>`. Returns `Ok(true)` if the article exists on the
