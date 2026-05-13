@@ -15,6 +15,21 @@ pub async fn apply_indexed_media_item(
 ) -> Result<()> {
     repo::update_media_item_index(db_pool, item.id, indexed).await?;
 
+    // Backfill any external IDs the indexer resolved onto the parent
+    // item_request. Prevents duplicate requests where a later request
+    // arrives with a different ID set than the original (e.g. only tmdb_id
+    // when the original was created with only imdb_id).
+    if let Some(request_id) = item.item_request_id {
+        repo::backfill_item_request_external_ids(
+            db_pool,
+            request_id,
+            indexed.imdb_id.as_deref(),
+            indexed.tvdb_id.as_deref(),
+            indexed.tmdb_id.as_deref(),
+        )
+        .await?;
+    }
+
     if item.item_type == MediaItemType::Movie {
         return Ok(());
     }
@@ -64,6 +79,13 @@ pub async fn apply_indexed_media_item(
                 )
                 .await?;
             }
+        }
+
+        // Once seasons have been (re-)materialized, recompute the
+        // partial-request flag. Must run AFTER the season inserts above so
+        // the denominator (count of non-special seasons) is current.
+        if let Some(request_id) = item.item_request_id {
+            repo::recompute_is_partial_request(db_pool, request_id, item.id).await?;
         }
     }
 

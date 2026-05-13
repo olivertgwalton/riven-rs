@@ -25,7 +25,6 @@ members = [
     "crates/plugin-trakt",
     "crates/plugin-dashboard",
     "crates/plugin-newznab",
-    "crates/plugin-sabnzbd",
     "crates/plugin-usenet",
     "crates/riven-usenet",
 ]
@@ -72,12 +71,12 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 tracing-appender = "0.2"
 
-# Telemetry
+
 tracing-opentelemetry = "0.32"
 opentelemetry = "0.31"
 opentelemetry_sdk = { version = "0.31", features = ["rt-tokio"] }
 opentelemetry-otlp = { version = "0.31", features = ["grpc-tonic", "trace"] }
-sentry = { version = "0.47", default-features = false, features = ["backtrace", "contexts", "panic", "tracing", "reqwest", "rustls", "anyhow"] }
+sentry = { version = "0.48", default-features = false, features = ["backtrace", "contexts", "panic", "tracing", "reqwest", "rustls", "anyhow"] }
 
 # Error handling
 anyhow = "1"
@@ -91,7 +90,7 @@ chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = { version = "0.10", features = ["serde"] }
 regex = "1"
 strsim = "0.11"
-lru = "0.17"
+lru = "0.18"
 async-trait = "0.1"
 futures = "0.3"
 parking_lot = "0.12"
@@ -104,6 +103,12 @@ ulid = "1"
 hmac = "0.13"
 sha2 = "0.11"
 hex = "0.4"
+pbkdf2 = { version = "0.13", default-features = false, features = ["hmac"] }
+aes = "0.9"
+cbc = "0.2"
+aes-gcm = "0.10"
+rand = "0.9"
+base64 = "0.22"
 
 [patch.crates-io]
 apalis-redis = { path = "vendor/apalis-redis" }

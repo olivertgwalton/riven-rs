@@ -132,13 +132,29 @@ pub async fn create_item_request(
             }
 
             if existing_seasons != desired_seasons {
+                // If the existing request had already reached a terminal-ish
+                // state (completed/ongoing/unreleased), flag it as having had
+                // additional seasons appended so the indexer knows to
+                // re-process. New requests (still `requested`/`failed`) or
+                // requests already mid-extension are left untouched.
+                let bump_state = matches!(
+                    existing.state,
+                    ItemRequestState::Completed
+                        | ItemRequestState::Ongoing
+                        | ItemRequestState::Unreleased
+                );
                 let updated = sqlx::query_as::<_, ItemRequest>(
-                    "UPDATE item_requests SET seasons = $1 WHERE id = $2 RETURNING *",
+                    "UPDATE item_requests
+                        SET seasons = $1,
+                            state = CASE WHEN $3 THEN 'requested_additional_seasons'::item_request_state ELSE state END
+                      WHERE id = $2
+                      RETURNING *",
                 )
                 .bind(
                     desired_seasons.map(|values| serde_json::to_value(values).unwrap_or_default()),
                 )
                 .bind(existing.id)
+                .bind(bump_state)
                 .fetch_one(pool)
                 .await?;
                 return Ok(UpsertedItemRequest {
@@ -174,6 +190,70 @@ pub async fn create_item_request(
         request,
         action: ItemRequestUpsertAction::Created,
     })
+}
+
+/// Backfill `imdb_id`/`tvdb_id`/`tmdb_id` on an item_request from the values
+/// the indexer resolved. Only fills in IDs that were previously NULL so we
+/// never clobber what the user originally supplied. Prevents duplicate
+/// requests where a later request comes in with a different ID set than the
+/// original (e.g. only tmdb_id when the original only had imdb_id).
+pub async fn backfill_item_request_external_ids(
+    pool: &PgPool,
+    request_id: i64,
+    imdb_id: Option<&str>,
+    tvdb_id: Option<&str>,
+    tmdb_id: Option<&str>,
+) -> Result<()> {
+    if imdb_id.is_none() && tvdb_id.is_none() && tmdb_id.is_none() {
+        return Ok(());
+    }
+    sqlx::query(
+        "UPDATE item_requests
+            SET imdb_id = COALESCE(imdb_id, $2),
+                tvdb_id = COALESCE(tvdb_id, $3),
+                tmdb_id = COALESCE(tmdb_id, $4)
+          WHERE id = $1",
+    )
+    .bind(request_id)
+    .bind(imdb_id)
+    .bind(tvdb_id)
+    .bind(tmdb_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Recompute `is_partial_request` after the indexer has populated the show's
+/// seasons. A request is "partial" when the user requested a strict subset
+/// of the non-special seasons that actually exist on the show. Special
+/// seasons (`season_number = 0`, `is_special = true`) are excluded from the
+/// denominator.
+pub async fn recompute_is_partial_request(
+    pool: &PgPool,
+    request_id: i64,
+    show_id: i64,
+) -> Result<()> {
+    sqlx::query(
+        r#"UPDATE item_requests
+              SET is_partial_request = (
+                  CASE
+                      WHEN seasons IS NULL THEN false
+                      WHEN jsonb_array_length(seasons) = 0 THEN false
+                      ELSE jsonb_array_length(seasons) < (
+                          SELECT COUNT(*) FROM media_items
+                           WHERE parent_id = $2
+                             AND item_type = 'season'
+                             AND COALESCE(is_special, false) = false
+                      )
+                  END
+              )
+            WHERE id = $1"#,
+    )
+    .bind(request_id)
+    .bind(show_id)
+    .execute(pool)
+    .await?;
+    Ok(())
 }
 
 pub async fn update_item_request_state(

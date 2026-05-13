@@ -21,8 +21,8 @@ use riven_core::settings::PluginSettings;
 use riven_core::types::{
     CachedStoreEntry, DownloadFile, DownloadResult, ProviderInfo, StreamLinkResponse,
 };
+use riven_usenet::nntp::{NntpProvider, NntpServerConfig};
 use riven_usenet::{NntpConfig, UsenetStreamer};
-use riven_usenet::nntp::NntpServerConfig;
 use std::time::Duration;
 
 const PROVIDER: &str = "usenet";
@@ -43,63 +43,96 @@ pub struct UsenetPlugin;
 
 register_plugin!(UsenetPlugin);
 
-/// Build an NNTP server config from this plugin's settings. Returns `None`
-/// if any required field is missing. Called both by the plugin itself
-/// (during ingest) and by riven-app at startup (to construct the streamer).
-pub fn nntp_config_from_settings(settings: &PluginSettings) -> Option<NntpConfig> {
-    let host = settings.get("nntphost")?.to_string();
-    let port: u16 = settings.get_parsed_or("nntpport", 563);
-    let user = settings.get("nntpuser").map(|s| s.to_string());
-    let pass = settings.get("nntppass").map(|s| s.to_string());
-    let use_tls = settings
-        .get("nntptls")
-        .map(|s| !matches!(s.to_ascii_lowercase().as_str(), "false" | "0" | "no"))
-        .unwrap_or(true);
-    let max_connections: u32 = settings.get_parsed_or("maxconnections", 8);
-    Some(NntpConfig {
-        server: NntpServerConfig {
-            host,
-            port,
-            user,
-            pass,
-            use_tls,
-            max_connections,
-            timeout: Duration::from_secs(30),
-        },
-    })
+#[derive(Debug, serde::Deserialize)]
+struct ProviderJson {
+    host: String,
+    #[serde(default = "default_port")]
+    port: u16,
+    #[serde(default)]
+    user: Option<String>,
+    #[serde(default)]
+    pass: Option<String>,
+    #[serde(default = "default_tls")]
+    tls: bool,
+    #[serde(default = "default_max_conns")]
+    max_connections: u32,
+    #[serde(default)]
+    priority: i32,
+    #[serde(default)]
+    backup: bool,
 }
 
-/// Build NNTP config directly from a JSON object whose keys mirror the
-/// plugin's settings schema (lowercase, dash-stripped — e.g. `nntphost`).
+fn default_port() -> u16 {
+    563
+}
+fn default_tls() -> bool {
+    true
+}
+fn default_max_conns() -> u32 {
+    8
+}
+
+impl ProviderJson {
+    fn into_provider(self) -> NntpProvider {
+        NntpProvider {
+            config: NntpServerConfig {
+                host: self.host,
+                port: self.port,
+                user: self.user,
+                pass: self.pass,
+                use_tls: self.tls,
+                max_connections: self.max_connections,
+                timeout: Duration::from_secs(30),
+            },
+            priority: self.priority,
+            is_backup: self.backup,
+        }
+    }
+}
+
+/// Build the multi-provider NNTP config from this plugin's settings.
+///
+/// The settings store one `dictionary` field, `nntpproviders`, persisted
+/// as a JSON-encoded object `{ "<provider_name>": { host, port, ... }, ... }`.
+/// Returns `None` if the field is absent, blank, malformed, or empty.
+pub fn nntp_config_from_settings(settings: &PluginSettings) -> Option<NntpConfig> {
+    let raw = settings.get("nntpproviders")?;
+    parse_providers_str(raw)
+}
+
+/// Build NNTP config from a JSON object whose `nntpproviders` field is
+/// either a JSON object (canonical, when loaded from DB JSONB) or a
+/// JSON-encoded string holding the object (when loaded via the
+/// flattened settings store).
 pub fn nntp_config_from_json_value(value: &serde_json::Value) -> Option<NntpConfig> {
-    let obj = value.as_object()?;
-    let get = |k: &str| -> Option<String> {
-        obj.get(k)
-            .and_then(|v| v.as_str())
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-    };
-    let host = get("nntphost")?;
-    let port: u16 = get("nntpport").and_then(|s| s.parse().ok()).unwrap_or(563);
-    let user = get("nntpuser");
-    let pass = get("nntppass");
-    let use_tls = get("nntptls")
-        .map(|s| !matches!(s.to_ascii_lowercase().as_str(), "false" | "0" | "no"))
-        .unwrap_or(true);
-    let max_connections: u32 = get("maxconnections")
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(8);
-    Some(NntpConfig {
-        server: NntpServerConfig {
-            host,
-            port,
-            user,
-            pass,
-            use_tls,
-            max_connections,
-            timeout: Duration::from_secs(30),
-        },
-    })
+    let raw_field = value.as_object()?.get("nntpproviders")?;
+    match raw_field {
+        serde_json::Value::Object(_) => parse_providers_value(raw_field),
+        serde_json::Value::String(s) => parse_providers_str(s),
+        _ => None,
+    }
+}
+
+fn parse_providers_str(raw: &str) -> Option<NntpConfig> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let v: serde_json::Value = serde_json::from_str(trimmed).ok()?;
+    parse_providers_value(&v)
+}
+
+fn parse_providers_value(v: &serde_json::Value) -> Option<NntpConfig> {
+    let map = v.as_object()?;
+    let mut providers: Vec<NntpProvider> = Vec::with_capacity(map.len());
+    for (_name, entry) in map.iter() {
+        let parsed: ProviderJson = serde_json::from_value(entry.clone()).ok()?;
+        providers.push(parsed.into_provider());
+    }
+    if providers.is_empty() {
+        return None;
+    }
+    Some(NntpConfig { providers })
 }
 
 #[async_trait]
@@ -126,24 +159,53 @@ impl Plugin for UsenetPlugin {
 
     fn settings_schema(&self) -> Vec<SettingField> {
         vec![
-            SettingField::new("nntphost", "NNTP Host", "text")
+            SettingField::new("nntpproviders", "NNTP Providers", "dictionary")
                 .required()
-                .with_placeholder("news.example.com"),
-            SettingField::new("nntpport", "NNTP Port", "text").with_default("563"),
-            SettingField::new("nntpuser", "NNTP Username", "text"),
-            SettingField::new("nntppass", "NNTP Password", "password"),
-            SettingField::new("nntptls", "Use TLS", "boolean").with_default("true"),
-            SettingField::new("maxconnections", "Max Connections", "text")
-                .with_default("8")
+                .with_key_placeholder("provider_name")
+                .with_add_label("Add provider")
                 .with_description(
-                    "Concurrent NNTP connections. Should not exceed your provider's per-account limit.",
+                    "One or more NNTP providers. Each entry is named (any short label) \
+                     and configures one server. With multiple providers, primaries are \
+                     tried first by priority; backups are only consulted after every \
+                     primary returned article-not-found.",
+                )
+                .with_item_fields(vec![
+                    SettingField::new("host", "Host", "text")
+                        .required()
+                        .with_placeholder("news.newshosting.com"),
+                    SettingField::new("port", "Port", "number").with_default("563"),
+                    SettingField::new("user", "Username", "text"),
+                    SettingField::new("pass", "Password", "password"),
+                    SettingField::new("tls", "Use TLS", "boolean").with_default("true"),
+                    SettingField::new("max_connections", "Max Connections", "number")
+                        .with_default("8")
+                        .with_description(
+                            "Concurrent NNTP connections. Should not exceed the \
+                             provider's per-account limit.",
+                        ),
+                    SettingField::new("priority", "Priority", "number")
+                        .with_default("0")
+                        .with_description("Lower numbers are tried first."),
+                    SettingField::new("backup", "Backup", "boolean")
+                        .with_default("false")
+                        .with_description(
+                            "Consult only after every primary returned article-not-found. \
+                             Typical block-account or fill-provider setup.",
+                        ),
+                ]),
+            SettingField::new("archivepassword", "Archive Password", "password")
+                .with_description(
+                    "Password for encrypted RAR archives. Applied to every encrypted \
+                     archive encountered. Leave blank if your releases are not encrypted.",
                 ),
             SettingField::new("publicbaseurl", "Public Base URL", "url")
                 .required()
                 .with_placeholder("http://riven.local:8080")
                 .with_description(
-                    "Base URL of this riven-api instance, used to construct stream URLs that \
-                     point back at the /usenet/ streaming route.",
+                    "Base URL of this riven-api instance, used to construct stream URLs \
+                     that point back at the /usenet/ streaming route. Use a loopback \
+                     address (http://127.0.0.1:<port>) so the VFS reaches /usenet/ from \
+                     localhost and the route's loopback auth exemption applies.",
                 ),
         ]
     }
@@ -168,7 +230,6 @@ impl Plugin for UsenetPlugin {
         };
         let public_base = public_base.trim_end_matches('/').to_string();
 
-        // Look up the NZB URL stored by the indexer plugin.
         let mut redis = ctx.redis.clone();
         let nzb_url: Option<String> =
             AsyncCommands::get::<_, Option<String>>(&mut redis, nzb_url_redis_key(info_hash))
@@ -180,7 +241,6 @@ impl Plugin for UsenetPlugin {
             return Ok(HookResponse::DownloadStreamUnavailable);
         };
 
-        // Download the NZB itself (XML, small).
         let resp = ctx
             .http
             .send_data(PROFILE, Some(nzb_url.clone()), |client| {
@@ -192,9 +252,11 @@ impl Plugin for UsenetPlugin {
         }
         let xml = resp.text().unwrap_or_default();
 
-        // Parse + persist segment metadata. Engine fetches NNTP bytes lazily later.
+        // `archivepassword` is consulted only when the archive's RAR file
+        // headers report encryption; passing it always is harmless.
         let streamer = UsenetStreamer::new(nntp_cfg, ctx.redis.clone());
-        let meta = match streamer.ingest(info_hash, &xml).await {
+        let password = ctx.settings.get("archivepassword");
+        let meta = match streamer.ingest(info_hash, &xml, password).await {
             Ok(m) => m,
             Err(e) => {
                 tracing::warn!(info_hash, error = %e, "usenet ingest failed");
@@ -261,8 +323,7 @@ impl Plugin for UsenetPlugin {
             return Ok(HookResponse::Empty);
         }
         // The persisted stream_url already points at our /usenet/ route, so
-        // there is no separate "live link" to refresh. Return empty so the
-        // caller falls through to the entry's stored stream_url.
+        // there is no separate "live link" to refresh.
         Ok(HookResponse::StreamLink(StreamLinkResponse {
             link: String::new(),
         }))

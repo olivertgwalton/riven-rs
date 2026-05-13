@@ -94,7 +94,6 @@ impl PluginSettings {
         }
     }
 
-    /// Serialize the active settings to a JSON object (string values).
     pub fn to_json(&self) -> serde_json::Value {
         let map = self
             .values
@@ -124,10 +123,24 @@ fn normalize_key(key: &str) -> String {
 
 fn setting_value_to_string(value: &serde_json::Value) -> Option<String> {
     match value {
-        serde_json::Value::String(s) if !s.is_empty() => Some(s.clone()),
+        serde_json::Value::String(s) if !s.is_empty() => {
+            // Transparent decryption: `enc:v1:` envelopes are decrypted; legacy
+            // plaintext-on-disk values pass through unchanged.
+            Some(crate::secret::decrypt_if_encrypted(s).unwrap_or_else(|e| {
+                tracing::warn!(error = %e, "failed to decrypt setting value; passing ciphertext through");
+                s.clone()
+            }))
+        }
         serde_json::Value::Bool(b) => Some(b.to_string()),
         serde_json::Value::Number(n) => Some(n.to_string()),
-        serde_json::Value::Array(_) => Some(value.to_string()),
+        // Arrays + objects are kept as JSON-encoded strings so plugin
+        // settings can carry structured values (e.g. dictionary fields
+        // representing a list of NNTP providers). Encrypted password
+        // sub-fields inside these objects are decrypted at the same
+        // time so callers don't have to know about the envelope.
+        serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
+            Some(crate::secret::decrypt_nested(value).to_string())
+        }
         _ => None,
     }
 }

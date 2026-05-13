@@ -61,6 +61,8 @@ fn sample_entry(path: &str, original_filename: Option<&str>) -> FileSystemEntry 
         plugin: None,
         provider: None,
         provider_download_id: None,
+        source_provider: None,
+        source_id: None,
         library_profiles: None,
         media_metadata: None,
         language: None,

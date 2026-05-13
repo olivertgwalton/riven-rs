@@ -30,7 +30,6 @@ plugin-calendar = { path = "../plugin-calendar" }
 plugin-trakt = { path = "../plugin-trakt" }
 plugin-dashboard = { path = "../plugin-dashboard" }
 plugin-newznab = { path = "../plugin-newznab" }
-plugin-sabnzbd = { path = "../plugin-sabnzbd" }
 plugin-usenet = { path = "../plugin-usenet" }
 riven-usenet = { path = "../riven-usenet" }
 tokio = { workspace = true }

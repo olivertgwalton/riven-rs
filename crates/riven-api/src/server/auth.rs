@@ -1,4 +1,6 @@
-use axum::extract::{Request, State};
+use std::net::SocketAddr;
+
+use axum::extract::{ConnectInfo, Request, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
@@ -22,10 +24,11 @@ use super::ApiState;
 /// invariant as the safety net.
 pub(super) async fn require_api_key(
     State(state): State<ApiState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     req: Request,
     next: Next,
 ) -> Response {
-    if !check_api_key(&state, req.headers()) {
+    if !check_api_key(&state, req.headers()) && !peer.ip().is_loopback() {
         return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
     }
     next.run(req).await

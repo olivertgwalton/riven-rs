@@ -5,6 +5,7 @@ pub mod http;
 pub mod logging;
 pub mod plugin;
 pub mod reindex;
+pub mod secret;
 pub mod settings;
 pub mod stream_link;
 pub mod stremio;

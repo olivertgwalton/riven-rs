@@ -136,7 +136,6 @@ pub fn parse_nzb(xml: &str) -> Result<Vec<NzbFile>, NzbError> {
                 }
                 b"file" => {
                     if let Some(mut file) = cur_file.take() {
-                        // Sort segments by `number` so cumulative offsets are correct.
                         file.segments.sort_by_key(|s| s.number);
                         if !file.segments.is_empty() {
                             files.push(file);
@@ -153,6 +152,82 @@ pub fn parse_nzb(xml: &str) -> Result<Vec<NzbFile>, NzbError> {
         return Err(NzbError::Malformed("no files with segments found"));
     }
     Ok(files)
+}
+
+/// Best-effort filename extractor for a yEnc subject. Used to detect RAR
+/// volume patterns. Returns the subject verbatim if no quoted name is found.
+pub fn filename_from_subject(subject: &str) -> String {
+    if let Some(start) = subject.find('"')
+        && let Some(rel_end) = subject[start + 1..].find('"')
+    {
+        return subject[start + 1..start + 1 + rel_end].to_string();
+    }
+    subject
+        .split_whitespace()
+        .find(|t| t.contains('.'))
+        .unwrap_or(subject)
+        .to_string()
+}
+
+/// Determine the volume index of a RAR filename.
+///
+/// Recognises:
+///   - `.rar` -> 0
+///   - `.r00`, `.r01`, ..., `.r999` -> n+1
+///   - `.partNN.rar` -> NN-1 (so `.part01.rar` is 0)
+///
+/// Returns `None` if the filename isn't a recognised RAR volume name.
+pub fn rar_volume_index(filename: &str) -> Option<u32> {
+    let lower = filename.to_ascii_lowercase();
+    let bytes = lower.as_bytes();
+
+    // .partNN.rar (NN can be any width, scan back from .rar)
+    if let Some(rar_pos) = lower.rfind(".rar")
+        && rar_pos + 4 == lower.len()
+    {
+        let prefix = &lower[..rar_pos];
+        if let Some(part_pos) = prefix.rfind(".part") {
+            let num = &prefix[part_pos + 5..];
+            if !num.is_empty() && num.bytes().all(|b| b.is_ascii_digit()) {
+                if let Ok(n) = num.parse::<u32>()
+                    && n >= 1
+                {
+                    return Some(n - 1);
+                }
+            }
+        }
+        return Some(0);
+    }
+
+    if bytes.len() >= 4 && bytes[bytes.len() - 4] == b'.' && bytes[bytes.len() - 3] == b'r' {
+        let tail = &lower[lower.len() - 2..];
+        if tail.bytes().all(|b| b.is_ascii_digit())
+            && let Ok(n) = tail.parse::<u32>()
+        {
+            return Some(n + 1);
+        }
+    }
+
+    None
+}
+
+/// Find the indices of NZB files that form the (single) RAR archive, ordered
+/// by volume. Returns `None` if no RAR set is detected. Currently assumes one
+/// RAR set per NZB — which matches typical scene/p2p packaging.
+pub fn detect_rar_volume_set(files: &[NzbFile]) -> Option<Vec<usize>> {
+    let mut indexed: Vec<(u32, usize)> = files
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, f)| {
+            let filename = filename_from_subject(&f.subject);
+            rar_volume_index(&filename).map(|vol| (vol, idx))
+        })
+        .collect();
+    if indexed.is_empty() {
+        return None;
+    }
+    indexed.sort_by_key(|(vol, _)| *vol);
+    Some(indexed.into_iter().map(|(_, idx)| idx).collect())
 }
 
 /// True if the file's subject looks like a video/media payload rather than a
@@ -218,5 +293,42 @@ mod tests {
         assert!(looks_like_media(&f));
         f.subject = "movie.par2".into();
         assert!(!looks_like_media(&f));
+    }
+
+    #[test]
+    fn rar_volume_indices() {
+        assert_eq!(rar_volume_index("release.rar"), Some(0));
+        assert_eq!(rar_volume_index("release.r00"), Some(1));
+        assert_eq!(rar_volume_index("release.r34"), Some(35));
+        assert_eq!(rar_volume_index("release.part01.rar"), Some(0));
+        assert_eq!(rar_volume_index("release.part12.rar"), Some(11));
+        assert_eq!(rar_volume_index("not-a-rar.mkv"), None);
+        assert_eq!(rar_volume_index("release.par2"), None);
+    }
+
+    #[test]
+    fn detects_rar_set_in_order() {
+        let mk = |s: &str| NzbFile {
+            subject: format!(r#""{s}" yEnc"#),
+            poster: String::new(),
+            groups: vec![],
+            segments: vec![],
+        };
+        let files = vec![
+            mk("release.r05"),
+            mk("release.rar"),
+            mk("release.par2"),
+            mk("release.r00"),
+            mk("release.r10"),
+        ];
+        let indices = detect_rar_volume_set(&files).expect("should detect RAR set");
+        let names: Vec<&str> = indices
+            .iter()
+            .map(|&i| files[i].subject.as_str())
+            .collect();
+        assert!(names[0].contains("release.rar"));
+        assert!(names[1].contains("release.r00"));
+        assert!(names[2].contains("release.r05"));
+        assert!(names[3].contains("release.r10"));
     }
 }

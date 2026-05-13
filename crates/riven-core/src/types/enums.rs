@@ -103,9 +103,14 @@ pub enum ItemRequestType {
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, sqlx::Type, async_graphql::Enum,
 )]
-#[sqlx(type_name = "item_request_state", rename_all = "lowercase")]
+#[sqlx(type_name = "item_request_state", rename_all = "snake_case")]
 pub enum ItemRequestState {
     Requested,
+    /// An existing request had additional seasons appended after it was
+    /// already completed/ongoing. Signals to the indexer that it should
+    /// re-process this show; the recompute pipeline will then transition it
+    /// back to its derived state (completed/ongoing/unreleased).
+    RequestedAdditionalSeasons,
     Completed,
     Failed,
     Ongoing,

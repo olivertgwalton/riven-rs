@@ -1,5 +1,6 @@
 mod client;
 mod models;
+mod newznab;
 
 use async_trait::async_trait;
 use redis::AsyncCommands;
@@ -13,11 +14,15 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use crate::client::{
-    add_torrent, check_cache, download_result_from_torz, fetch_user_info, generate_link,
-    scrape_torznab,
+    add_newz, add_torrent, check_cache, download_result_from_newz, download_result_from_torz,
+    fetch_user_info, generate_link, scrape_torznab,
 };
+use crate::newznab::{is_nzb_info_hash, nzb_url_redis_key, scrape_newznab};
+
 const DEFAULT_URL: &str = "https://stremthru.13377001.xyz/";
 const STORE_SCORE_TTL_SECS: u64 = 60 * 60 * 24 * 7;
+
+const NEWZ_POLL_TIMEOUT_SECS: u64 = 1800;
 
 pub(crate) const PROFILE: HttpServiceProfile =
     HttpServiceProfile::new("stremthru").with_rate_limit(1, Duration::from_secs(1));
@@ -66,6 +71,17 @@ fn get_configured_stores(settings: &PluginSettings) -> Vec<(&'static str, String
                 .map(|api_key| (*name, api_key.to_string()))
         })
         .collect()
+}
+
+/// Newz-capable stores: the configured debrid stores plus `stremthru` itself
+/// when `stremthruauth` is set (a self-hosted StremThru with NNTP +
+/// Newznab indexers configured in its dashboard).
+fn get_newz_stores(settings: &PluginSettings) -> Vec<(&'static str, String)> {
+    let mut stores = get_configured_stores(settings);
+    if let Some(auth) = settings.get("stremthruauth") {
+        stores.push(("stremthru", auth.to_string()));
+    }
+    stores
 }
 
 fn store_score_key(store: &str) -> String {
@@ -139,6 +155,15 @@ impl Plugin for StremthruPlugin {
             SettingField::new("scrapenabled", "Enable Torznab Scraper", "boolean")
                 .with_default("true")
                 .with_description("Scrape torrent results via the StremThru Torznab endpoint. Disable to use StremThru only for downloading and cache checks."),
+            SettingField::new("newznabenabled", "Enable Newznab (NZB) Scraper", "boolean")
+                .with_default("false")
+                .with_description("Scrape NZB results via the StremThru Newznab aggregator endpoint. Requires `stremthruauth`."),
+            SettingField::new("stremthruauth", "StremThru Auth", "password")
+                .with_placeholder("username:apikey")
+                .with_description("STREMTHRU_AUTH credentials. Used as the `apikey` query parameter for /v0/newznab/api AND as the store authorization when dispatching NZBs to a self-hosted StremThru (NNTP + indexers configured in its dashboard)."),
+            SettingField::new("newznabcategories", "Newznab Categories", "text")
+                .with_default("2000,5000")
+                .with_description("Comma-separated Newznab category IDs (2000 = Movies, 5000 = TV)."),
             SettingField::new("checkdebridcache", "Check Debrid Cache", "boolean")
                 .with_default("true")
                 .with_description("When enabled, queries /store/torz/check first and only attempts add_torrent on confirmed cached/downloaded hashes. When disabled, skips the cache check and calls add_torrent directly on each ranked stream."),
@@ -159,12 +184,50 @@ impl Plugin for StremthruPlugin {
         req: &ScrapeRequest<'_>,
         ctx: &PluginContext,
     ) -> anyhow::Result<HookResponse> {
-        if ctx.settings.get_or("scrapenabled", "true") == "false" {
+        let base_url = ctx.settings.get_or("stremthruurl", DEFAULT_URL);
+        let torz_enabled = ctx.settings.get_or("scrapenabled", "true") != "false";
+        let newz_enabled = ctx.settings.get_or("newznabenabled", "false") != "false"
+            && ctx.settings.get("stremthruauth").is_some();
+
+        if !torz_enabled && !newz_enabled {
             return Ok(HookResponse::Empty);
         }
-        let base_url = ctx.settings.get_or("stremthruurl", DEFAULT_URL);
-        let results = scrape_torznab(&ctx.http, &base_url, req).await?;
-        Ok(HookResponse::Scrape(results))
+
+        let mut combined = riven_core::types::ScrapeResponse::new();
+
+        if torz_enabled {
+            match scrape_torznab(&ctx.http, &base_url, req).await {
+                Ok(results) => combined.extend(results),
+                Err(error) => {
+                    tracing::warn!(error = %error, "stremthru torznab scrape failed");
+                }
+            }
+        }
+
+        if newz_enabled {
+            let apikey = ctx.settings.get_or("stremthruauth", "").to_string();
+            let categories = ctx
+                .settings
+                .get_or("newznabcategories", "2000,5000")
+                .to_string();
+            match scrape_newznab(
+                &ctx.http,
+                &ctx.redis,
+                &base_url,
+                &apikey,
+                &categories,
+                req,
+            )
+            .await
+            {
+                Ok(results) => combined.extend(results),
+                Err(error) => {
+                    tracing::warn!(error = %error, "stremthru newznab scrape failed");
+                }
+            }
+        }
+
+        Ok(HookResponse::Scrape(combined))
     }
 
     async fn on_download_requested(
@@ -180,7 +243,19 @@ impl Plugin for StremthruPlugin {
         let score_map = get_store_scores(&ctx.redis, &stores).await;
         let mut any_network_error = false;
 
-                // Build the ordered list of (store, api_key, file_count) to try.
+        if is_nzb_info_hash(info_hash) {
+            let newz_stores = get_newz_stores(&ctx.settings);
+            let newz_scores = get_store_scores(&ctx.redis, &newz_stores).await;
+            return handle_newz_download(
+                info_hash,
+                &base_url,
+                &newz_stores,
+                &newz_scores,
+                ctx,
+            )
+            .await;
+        }
+
                 // Priority: pre-checked stores from the bulk cache check > on-demand
                 // cache check > direct add (when checkdebridcache is disabled).
                 #[derive(Clone)]
@@ -213,7 +288,6 @@ impl Plugin for StremthruPlugin {
                     });
                     v
                 } else if ctx.settings.get_or("checkdebridcache", "true") != "false" {
-                    // Fallback on-demand check (e.g. manual download trigger with no pre-check data).
                     let hashes = vec![info_hash.to_lowercase()];
                     let checks = futures::future::join_all(stores.iter().map(|(s, k)| async {
                         let r = check_cache(&ctx.http, &ctx.redis, &base_url, s, k, &hashes).await;
@@ -254,7 +328,6 @@ impl Plugin for StremthruPlugin {
                     });
                     v
                 } else {
-                    // Direct mode: skip cache check entirely.
                     let mut v: Vec<StoreAttempt<'_>> = stores
                         .iter()
                         .map(|(s, k)| StoreAttempt { store: s, api_key: k.as_str(), file_count: 0 })
@@ -314,13 +387,22 @@ impl Plugin for StremthruPlugin {
         if !check_cache_enabled {
             return Ok(HookResponse::Empty);
         }
+        // NZB hashes are synthetic (sha1 of the NZB URL) and don't map to
+        // StremThru's content-hash-keyed cache.
+        let hashes: Vec<String> = hashes
+            .iter()
+            .filter(|h| !is_nzb_info_hash(h))
+            .cloned()
+            .collect();
+        if hashes.is_empty() {
+            return Ok(HookResponse::CacheCheck(Vec::new()));
+        }
+        let hashes = hashes.as_slice();
         let base_url = ctx.settings.get_or("stremthruurl", DEFAULT_URL);
         let mut stores = get_configured_stores(&ctx.settings);
 
-        // Caller-scoped to a single provider — drop the others so we don't
-        // do work the caller already decided is unnecessary. The download
-        // flow uses this so an early hit on the first provider skips slower
-        // ones.
+        // Caller-scoped to a single provider — drop the others so an early
+        // hit on the first provider skips slower ones.
         if let Some(filter) = provider {
             stores.retain(|(store, _)| *store == filter);
             if stores.is_empty() {
@@ -375,7 +457,10 @@ impl Plugin for StremthruPlugin {
         ctx: &PluginContext,
     ) -> anyhow::Result<HookResponse> {
         let base_url = ctx.settings.get_or("stremthruurl", DEFAULT_URL);
-        let stores = get_configured_stores(&ctx.settings);
+        // Use the newz-inclusive store list: an entry originally served by
+        // the StremThru aggregator store must be reachable again for the
+        // link refresh.
+        let stores = get_newz_stores(&ctx.settings);
         let score_map = get_store_scores(&ctx.redis, &stores).await;
         let mut ordered_stores: Vec<(&str, &str)> = stores
             .iter()
@@ -425,6 +510,68 @@ impl Plugin for StremthruPlugin {
         }
         Ok(HookResponse::UserInfo(infos))
     }
+}
+
+async fn handle_newz_download(
+    info_hash: &str,
+    base_url: &str,
+    stores: &[(&str, String)],
+    score_map: &HashMap<String, i64>,
+    ctx: &PluginContext,
+) -> anyhow::Result<HookResponse> {
+    let mut redis = ctx.redis.clone();
+    let nzb_url: Option<String> =
+        AsyncCommands::get::<_, Option<String>>(&mut redis, nzb_url_redis_key(info_hash))
+            .await
+            .ok()
+            .flatten();
+    let Some(nzb_url) = nzb_url else {
+        tracing::warn!(info_hash, "no NZB URL in Redis; cannot dispatch to stremthru newz");
+        return Ok(HookResponse::DownloadStreamUnavailable);
+    };
+
+    let mut ordered: Vec<(&str, &str)> = stores
+        .iter()
+        .map(|(store, api_key)| (*store, api_key.as_str()))
+        .collect();
+    ordered.sort_by(|(a, _), (b, _)| {
+        let sa = score_map.get(*a).copied().unwrap_or_default();
+        let sb = score_map.get(*b).copied().unwrap_or_default();
+        sb.cmp(&sa).then_with(|| a.cmp(b))
+    });
+
+    let poll_timeout = Duration::from_secs(NEWZ_POLL_TIMEOUT_SECS);
+    let mut any_network_error = false;
+    for (store, api_key) in ordered {
+        match add_newz(&ctx.http, base_url, store, api_key, &nzb_url, poll_timeout).await {
+            Ok(Some(newz)) => {
+                adjust_store_score(&ctx.redis, store, 5).await;
+                tracing::debug!(store, info_hash, files = newz.files.len(), "newz added");
+                let download = download_result_from_newz(store, info_hash, newz);
+                return Ok(HookResponse::Download(Box::new(download)));
+            }
+            Ok(None) => {
+                adjust_store_score(&ctx.redis, store, -2).await;
+                tracing::debug!(store, info_hash, "add_newz returned unavailable");
+            }
+            Err(error) => {
+                adjust_store_score(&ctx.redis, store, -1).await;
+                if error
+                    .downcast_ref::<reqwest::Error>()
+                    .map(|e| e.is_connect() || e.is_timeout() || e.is_request())
+                    .unwrap_or(false)
+                {
+                    any_network_error = true;
+                }
+                tracing::warn!(store, error = %error, "stremthru add_newz failed");
+            }
+        }
+    }
+
+    if any_network_error {
+        anyhow::bail!("network error contacting newz store");
+    }
+    Ok(HookResponse::DownloadStreamUnavailable)
 }
 
 #[cfg(test)]

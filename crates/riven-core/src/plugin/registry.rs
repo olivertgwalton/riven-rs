@@ -9,7 +9,6 @@ use crate::types::ContentServiceResponse;
 
 pub const PLUGIN_ENABLED_PREFIX: &str = "plugin_enabled.";
 
-/// Registration entry for the inventory-based plugin system.
 pub struct PluginRegistration {
     pub create: fn() -> Box<dyn Plugin>,
 }
@@ -234,6 +233,44 @@ impl PluginRegistry {
             .find(|p| p.plugin.name() == name)
             .map(|p| p.context.settings.to_json())
     }
+
+    /// All field keys declared as `type: "password"` in this plugin's
+    /// schema, including those nested inside `dictionary` / `object` /
+    /// `string_array` containers. The save path uses this set to know
+    /// which leaves to encrypt before persisting.
+    pub async fn plugin_password_keys(
+        &self,
+        name: &str,
+    ) -> std::collections::HashSet<String> {
+        let mut out = std::collections::HashSet::new();
+        let plugins = self.plugins.read().await;
+        let Some(p) = plugins.iter().find(|p| p.plugin.name() == name) else {
+            return out;
+        };
+        let schema = plugin_settings_schema(&*p.plugin);
+        collect_password_keys(&schema, &mut out);
+        out
+    }
+}
+
+fn collect_password_keys(
+    fields: &[super::SettingField],
+    out: &mut std::collections::HashSet<String>,
+) {
+    for field in fields {
+        if field.field_type == "password" {
+            out.insert(field.key.to_string());
+        }
+        if let Some(nested) = field.fields.as_ref() {
+            collect_password_keys(nested, out);
+        }
+        if let Some(items) = field.item_fields.as_ref() {
+            collect_password_keys(items, out);
+        }
+    }
+}
+
+impl PluginRegistry {
 
     pub async fn is_plugin_enabled(&self, name: &str) -> Option<bool> {
         self.plugins

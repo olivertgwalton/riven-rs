@@ -14,8 +14,6 @@ use tokio::sync::RwLock;
 use crate::schema::auth::require_settings_access;
 use crate::vfs_mount::VfsMountManager;
 
-// ── Helpers ──
-
 fn coerce_json_bool(value: &serde_json::Value) -> Option<bool> {
     match value {
         serde_json::Value::Bool(enabled) => Some(*enabled),
@@ -47,8 +45,6 @@ pub(super) async fn rematch_filesystem_library_profiles_inner(
 
     Ok(repo::update_library_profiles_batch(pool, &updates).await? as i64)
 }
-
-// ── Resolver ──
 
 #[derive(Default)]
 pub struct SettingsMutations;
@@ -181,10 +177,18 @@ impl SettingsMutations {
             None => repo::get_plugin_enabled(pool, &plugin).await?,
         };
 
-        repo::set_setting(pool, &key, settings.clone()).await?;
+        // Encrypt password-typed fields (including those nested inside
+        // dictionary/object containers) before persisting. The in-process
+        // `settings` value stays plaintext for revalidation; only the on-disk
+        // form is encrypted.
+        let registry = ctx.data::<Arc<PluginRegistry>>()?;
+        let password_keys = registry.plugin_password_keys(&plugin).await;
+        let encrypted_for_storage =
+            riven_core::secret::encrypt_password_fields(&settings, &password_keys);
+
+        repo::set_setting(pool, &key, encrypted_for_storage).await?;
         repo::set_plugin_enabled(pool, &plugin, enabled).await?;
 
-        let registry = ctx.data::<Arc<PluginRegistry>>()?;
         let valid = registry
             .revalidate_plugin(&plugin, enabled, &settings)
             .await;

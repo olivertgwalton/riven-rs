@@ -46,9 +46,8 @@ pub(super) async fn seerr_webhook(
 }
 
 async fn handle_notification(state: &ApiState, n: NotificationPayload) {
-    // We only act on notifications that imply a fresh request to fulfil.
-    // For other notification types we log and return — the periodic poll
-    // will eventually reconcile state.
+    // Only act on notifications that imply a fresh request to fulfil; the
+    // periodic poll reconciles other notification types.
     let trigger_kinds = [
         "MEDIA_PENDING",
         "MEDIA_APPROVED",
@@ -156,8 +155,7 @@ fn parse_requested_seasons(extra: &[ExtraField]) -> Option<Vec<i32>> {
 enum SeerrWebhookPayload {
     Test {
         #[serde(rename = "notification_type")]
-        #[allow(dead_code)]
-        notification_type: TestKind,
+        _notification_type: TestKind,
     },
     Notification(NotificationPayload),
 }

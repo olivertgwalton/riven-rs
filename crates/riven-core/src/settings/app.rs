@@ -30,6 +30,10 @@ pub struct RivenSettings {
     /// Maximum number of rotated log files to retain on disk.
     pub log_max_files: usize,
     pub log_directory: String,
+    /// Host/interface the GraphQL server binds to. Default `0.0.0.0` (all
+    /// interfaces) preserves prior behavior. Set to `127.0.0.1` for
+    /// loopback-only.
+    pub gql_host: String,
     pub gql_port: u16,
     pub dubbed_anime_only: bool,
     /// When true, torrents with unknown cache status are included as download candidates.
@@ -115,6 +119,7 @@ impl Default for RivenSettings {
             log_rotation: "hourly".into(),
             log_max_files: 5,
             log_directory: "./logs".into(),
+            gql_host: "0.0.0.0".into(),
             gql_port: 8080,
             dubbed_anime_only: false,
             attempt_unknown_downloads: false,

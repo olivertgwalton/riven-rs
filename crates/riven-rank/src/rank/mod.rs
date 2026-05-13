@@ -41,6 +41,18 @@ pub struct RankedTorrent {
     pub lev_ratio: f64,
 }
 
+/// Accepts the hash shapes the pipeline produces:
+///   - 32 or 40 hex chars (sha1/sha256 torrent info_hash)
+///   - `nzb-` + 40 hex chars (synthetic NZB info_hash from `plugin-newznab`)
+fn is_valid_info_hash(hash: &str) -> bool {
+    let body = hash.strip_prefix("nzb-").unwrap_or(hash);
+    if body.len() == 40 || body.len() == 32 {
+        body.bytes().all(|b| b.is_ascii_hexdigit())
+    } else {
+        false
+    }
+}
+
 /// Compute a similarity ratio in [0, 1] between two pre-normalised strings.
 ///
 /// Callers are responsible for normalising (lowercasing, removing punctuation)
@@ -71,21 +83,16 @@ pub fn rank_torrent<S: BuildHasher>(
     aliases: &HashMap<String, Vec<String>, S>,
     settings: &RankSettings,
 ) -> Result<RankedTorrent, RankError> {
-    // 1. Validate hash (32 or 40 hex chars)
-    let hash_len = hash.len();
-    if (hash_len != 32 && hash_len != 40) || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
+    if !is_valid_info_hash(hash) {
         return Err(RankError::InvalidHash);
     }
 
-    // 2. Parse title
     let data = parse(raw_title);
 
-    // 3. Check adult content
     if settings.options.content.remove_adult_content && data.adult {
         return Err(RankError::AdultContent);
     }
 
-    // 4. Check title similarity
     let best_ratio = if correct_title.is_empty() {
         0.0
     } else {
@@ -118,10 +125,8 @@ pub fn rank_torrent<S: BuildHasher>(
         best_ratio
     };
 
-    // 5. Compute score
     let (total_score, score_parts) = get_rank(&data, settings, &DEFAULT_MODEL);
 
-    // 6. Check fetch
     let (fetch, failed_checks) = check_fetch(&data, settings);
 
     if !fetch {
@@ -130,7 +135,6 @@ pub fn rank_torrent<S: BuildHasher>(
         });
     }
 
-    // 7. Check score threshold
     if total_score < settings.options.remove_ranks_under {
         return Err(RankError::RankUnderThreshold {
             rank: total_score,
@@ -160,8 +164,7 @@ pub fn rank_torrent_fast<S: BuildHasher>(
     aliases: &HashMap<String, Vec<String>, S>,
     settings: &RankSettings,
 ) -> Result<RankedTorrent, RankError> {
-    let hash_len = hash.len();
-    if (hash_len != 32 && hash_len != 40) || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
+    if !is_valid_info_hash(hash) {
         return Err(RankError::InvalidHash);
     }
 
@@ -232,10 +235,8 @@ mod tests {
         let ratio = lev_ratio("toy story", "toy story 1995");
         assert!(ratio > 0.78 && ratio < 0.79);
 
-        // Exact match (both inputs pre-normalised to lowercase)
         assert_eq!(lev_ratio("toy story", "toy story"), 1.0);
 
-        // Completely different (all 3 chars differ: dist=3, total=6, ratio=0.5)
         assert!(lev_ratio("abc", "xyz") < 0.6);
     }
 }

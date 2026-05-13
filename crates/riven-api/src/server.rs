@@ -27,6 +27,7 @@ use crate::vfs_mount::VfsMountManager;
 pub use state::ApiState;
 
 pub struct StartServerConfig {
+    pub host: String,
     pub port: u16,
     pub db_pool: sqlx::PgPool,
     pub registry: Arc<PluginRegistry>,
@@ -74,6 +75,7 @@ mod state {
 
 pub async fn start_server(config: StartServerConfig) -> Result<()> {
     let StartServerConfig {
+        host,
         port,
         db_pool,
         registry,
@@ -152,12 +154,10 @@ pub async fn start_server(config: StartServerConfig) -> Result<()> {
         usenet_streamer,
     };
 
-    // Routes that perform their own per-handler API-key check
-    // (`graphql`, `media`, `usenet`). The handlers own their response
-    // shapes (WS upgrade, range responses, structured GraphQL errors), so
-    // we keep them as concrete routes rather than wrapping them in the
-    // generic 401 middleware — but the outer `require_api_key` layer
-    // applies to them too, providing belt-and-suspenders defence in depth.
+    // `graphql`, `media`, `usenet` own their response shapes (WS upgrade,
+    // range responses, structured GraphQL errors), so they perform their own
+    // per-handler API-key check. The outer `require_api_key` layer also
+    // applies, providing belt-and-suspenders defence in depth.
     let routes = Router::new()
         .route(
             "/graphql",
@@ -198,12 +198,17 @@ pub async fn start_server(config: StartServerConfig) -> Result<()> {
         .layer(build_cors_layer(cors_allowed_origins))
         .with_state(state);
 
-    let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}")).await?;
-    tracing::info!(port = port, "GraphQL server listening");
+    let listener = tokio::net::TcpListener::bind(format!("{host}:{port}")).await?;
+    tracing::info!(host = %host, port = port, "GraphQL server listening");
 
-    axum::serve(listener, app)
-        .with_graceful_shutdown(async move { cancel.cancelled().await })
-        .await?;
+    // `into_make_service_with_connect_info` so the `/usenet/` handler can
+    // extract the peer `SocketAddr` for its loopback auth exemption.
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(async move { cancel.cancelled().await })
+    .await?;
 
     Ok(())
 }

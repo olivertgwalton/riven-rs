@@ -20,6 +20,14 @@ use crate::{DownloadJob, JobQueue, RankStreamsJob};
 use self::candidates::rank_streams_for_profile;
 use self::execute::{DownloadAttemptOutcome, attempt_download};
 
+/// NZB info_hashes are synthetic (`nzb-<sha1>`) and don't represent torrents
+/// at any debrid provider, so cache-check never reports them as cached.
+/// They're always "available" — the NZB URL is in Redis and the configured
+/// usenet plugin can ingest it on demand. Skip the cache-check gate for them.
+fn is_nzb_info_hash(info_hash: &str) -> bool {
+    info_hash.starts_with("nzb-")
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ManualDownloadFileInput {
@@ -195,19 +203,19 @@ pub async fn run_rank_streams(id: i64, job: &RankStreamsJob, queue: &JobQueue) {
         None
     };
 
-    // For the preferred path we carry info_hash/magnet through to the next
-    // step; for the normal path placeholders are fine since DownloadJob only
-    // consults `preferred_info_hash` for selection.
+    // Preferred path carries info_hash/magnet; the normal path's placeholders
+    // are fine since DownloadJob only consults `preferred_info_hash` for
+    // selection.
     let download_job = DownloadJob {
         id,
         info_hash: preferred.clone().unwrap_or_default(),
         magnet: magnet_for_preferred.unwrap_or_default(),
         preferred_info_hash: preferred,
     };
-    // Clear any stale `download` dedup key before the hand-off. The rank-streams
-    // dedup guard ensures we are the sole caller for this id, so a lingering
-    // key can only come from an earlier crash/restart (30-min safety TTL). If
-    // we don't clear it, `push_deduped` silently no-ops and the item is stuck
+    // Clear any stale `download` dedup key before hand-off. The rank-streams
+    // dedup guard makes us the sole caller for this id, so a lingering key
+    // can only come from an earlier crash/restart (30-min safety TTL).
+    // Without this clear, `push_deduped` silently no-ops and the item stays
     // at Scraped.
     queue.release_dedup("download", id).await;
     queue.push_download(download_job).await;
@@ -280,9 +288,8 @@ pub async fn run(id: i64, job: &DownloadJob, queue: &JobQueue) {
         load_bitrate_limits(queue, &item).await
     };
 
-    // (plugin, provider) iteration order — built once and shared across
-    // every stream and profile. Cache memo keyed on the same pair so each
-    // (plugin, provider) cache check fires at most once per item flow.
+    // Cache memo keyed on (plugin, provider) so each cache check fires at
+    // most once per item flow.
     let plugin_providers = build_plugin_provider_iterations(queue).await;
     let mut cache = CacheMemo::new(
         all_streams.iter().map(|s| s.info_hash.clone()).collect(),
@@ -338,8 +345,6 @@ async fn load_item_silently(queue: &JobQueue, id: i64, phase: &str) -> Option<Me
         }
     }
 }
-
-// ── Per-iteration cache check ─────────────────────────────────────────────────
 
 /// Memoizes cache-check results per `(plugin, provider)` so the same provider
 /// is never queried twice per item flow. The download loop calls
@@ -511,7 +516,6 @@ async fn run_preferred_stream(
 
     let attempt_unknown = queue.downloader_config.read().await.attempt_unknown_downloads;
 
-    // Walk providers; first one that returns a successful download wins.
     // The user explicitly picked this stream from the scrape UI, so we trust
     // its earlier "cached" verdict and let attempt_download fall back to a
     // direct add when no provider currently reports it cached.
@@ -630,7 +634,7 @@ async fn run_downloads(
                     .await;
 
                 let is_cached = cached_files.is_some();
-                if !is_cached && !attempt_unknown {
+                if !is_cached && !attempt_unknown && !is_nzb_info_hash(&stream.info_hash) {
                     continue;
                 }
 

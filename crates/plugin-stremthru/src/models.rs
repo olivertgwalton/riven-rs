@@ -68,6 +68,30 @@ pub struct StremthruLink {
 }
 
 #[derive(Deserialize)]
+pub struct StremthruNewzAdd {
+    pub id: String,
+}
+
+#[derive(Deserialize)]
+pub struct StremthruNewz {
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub files: Vec<StremthruNewzFile>,
+}
+
+#[derive(Deserialize)]
+pub struct StremthruNewzFile {
+    pub name: String,
+    #[serde(default)]
+    pub path: String,
+    #[serde(default)]
+    pub size: i64,
+    #[serde(default)]
+    pub link: String,
+}
+
+#[derive(Deserialize)]
 pub struct StremthruUser {
     pub email: Option<String>,
     pub subscription_status: Option<String>,
@@ -87,7 +111,6 @@ pub struct StremthruTorznabChannel {
 #[derive(Deserialize)]
 pub struct StremthruTorznabItem {
     pub title: String,
-    /// Total torrent size in bytes as reported by the torznab feed.
     #[serde(default)]
     pub size: Option<u64>,
     #[serde(default)]

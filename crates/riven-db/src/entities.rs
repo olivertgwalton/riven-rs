@@ -312,6 +312,9 @@ pub struct ItemRequest {
     pub completed_at: Option<DateTime<Utc>>,
     pub state: ItemRequestState,
     pub seasons: Option<serde_json::Value>,
+    /// True when the request specifies a strict subset of the show's
+    /// non-special seasons. Computed at indexer time. Always false for movies.
+    pub is_partial_request: bool,
 }
 
 // ── Media Item with relations (for VFS readdir) ──

@@ -8,8 +8,8 @@ use riven_core::types::{
 
 use crate::{PROFILE, debrid_service};
 use crate::models::{
-    StremthruCacheCheck, StremthruLink, StremthruResponse, StremthruTorz, StremthruTorznabResponse,
-    StremthruUser, parse_torrent_status,
+    StremthruCacheCheck, StremthruLink, StremthruNewz, StremthruNewzAdd, StremthruResponse,
+    StremthruTorz, StremthruTorznabResponse, StremthruUser, parse_torrent_status,
 };
 
 pub const CACHE_CHECK_TTL_SECS: u64 = 60 * 60 * 24;
@@ -81,9 +81,9 @@ pub async fn check_cache(
     }
 
     for result in &fetched_results {
-        // Only cache stable results. Ephemeral statuses (downloading, queued, etc.) are skipped
-        // so they're re-checked next scrape pass. Unknown covers unrecognised status strings —
-        // cached to avoid hammering the API, but not treated as a positive cache hit for dispatch.
+        // Only cache stable results. Ephemeral statuses (downloading, queued) get re-checked
+        // next scrape pass. Unknown is cached to avoid hammering the API but isn't treated as
+        // a positive hit for dispatch.
         if !matches!(
             result.status,
             riven_core::types::TorrentStatus::Cached
@@ -168,8 +168,6 @@ pub async fn add_torrent(
     //                DownloadFinished/DownloadPresent flags aren't set on the
     //                initial ADD response come back with this status even
     //                though the files are accessible.
-    // Any other status (queued, downloading, processing, empty) means the
-    // torrent isn't ready — clean it up and signal unavailability.
     if !matches!(data.status.as_str(), "downloaded" | "cached") {
         let torrent_id = data.id;
         tracing::debug!(
@@ -186,6 +184,144 @@ pub async fn add_torrent(
     }
 
     Ok(Some(data))
+}
+
+/// Submits an NZB URL to a Newz-capable store via StremThru, polls until the
+/// item is ready, and returns the parsed file list. Returns `Ok(None)` when
+/// the store accepted the NZB but never reached a ready state within the
+/// poll window — caller treats this as "unavailable" the same way the torz
+/// path treats `add_torrent` failures.
+pub async fn add_newz(
+    http: &HttpClient,
+    base_url: &str,
+    store: &str,
+    api_key: &str,
+    nzb_url: &str,
+    poll_timeout: std::time::Duration,
+) -> anyhow::Result<Option<StremthruNewz>> {
+    if nzb_url.is_empty() {
+        anyhow::bail!("add_newz: empty nzb_url");
+    }
+    let url = format!("{base_url}v0/store/newz");
+    tracing::debug!(store, url = %url, "adding newz via stremthru");
+
+    let response = http
+        .send(PROFILE, |client| {
+            client
+                .post(&url)
+                .header("x-stremthru-store-name", store)
+                .header(
+                    "x-stremthru-store-authorization",
+                    format!("Bearer {api_key}"),
+                )
+                .json(&serde_json::json!({ "link": nzb_url }))
+        })
+        .await?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        anyhow::bail!("store newz add rejected: HTTP {} - {}", status, body);
+    }
+
+    let text = response.text().await?;
+    let resp: StremthruResponse<StremthruNewzAdd> = serde_json::from_str(&text)
+        .map_err(|e| anyhow::anyhow!("invalid newz add response: {e}; body={text}"))?;
+    let Some(added) = resp.data else {
+        return Ok(None);
+    };
+
+    poll_newz(http, base_url, store, api_key, &added.id, poll_timeout).await
+}
+
+async fn poll_newz(
+    http: &HttpClient,
+    base_url: &str,
+    store: &str,
+    api_key: &str,
+    newz_id: &str,
+    timeout: std::time::Duration,
+) -> anyhow::Result<Option<StremthruNewz>> {
+    let url = format!("{base_url}v0/store/newz/{newz_id}");
+    let started = std::time::Instant::now();
+    let mut interval = std::time::Duration::from_secs(3);
+    loop {
+        let response = http
+            .send(PROFILE, |client| {
+                client
+                    .get(&url)
+                    .header("x-stremthru-store-name", store)
+                    .header(
+                        "x-stremthru-store-authorization",
+                        format!("Bearer {api_key}"),
+                    )
+            })
+            .await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            anyhow::bail!("store newz get rejected: HTTP {} - {}", status, body);
+        }
+
+        let text = response.text().await?;
+        let resp: StremthruResponse<StremthruNewz> = serde_json::from_str(&text)
+            .map_err(|e| anyhow::anyhow!("invalid newz get response: {e}; body={text}"))?;
+        let Some(data) = resp.data else {
+            return Ok(None);
+        };
+
+        if matches!(data.status.as_str(), "downloaded" | "cached") {
+            return Ok(Some(data));
+        }
+
+        if matches!(data.status.as_str(), "failed" | "invalid") {
+            tracing::debug!(store, newz_id, status = %data.status, "newz item ended in terminal state");
+            return Ok(None);
+        }
+
+        if started.elapsed() > timeout {
+            tracing::debug!(
+                store,
+                newz_id,
+                status = %data.status,
+                "newz poll timed out before item became ready"
+            );
+            return Ok(None);
+        }
+        tokio::time::sleep(interval).await;
+        if interval < std::time::Duration::from_secs(30) {
+            interval = (interval * 2).min(std::time::Duration::from_secs(30));
+        }
+    }
+}
+
+pub fn download_result_from_newz(
+    store: &str,
+    info_hash: &str,
+    newz: StremthruNewz,
+) -> DownloadResult {
+    let files = newz
+        .files
+        .into_iter()
+        .map(|f| DownloadFile {
+            filename: file_name_or_path(f.name, f.path),
+            file_size: f.size.max(0).cast_unsigned(),
+            download_url: if f.link.is_empty() {
+                None
+            } else {
+                Some(f.link)
+            },
+            stream_url: None,
+        })
+        .collect();
+
+    DownloadResult {
+        info_hash: info_hash.to_string(),
+        files,
+        provider: Some(store.to_string()),
+        plugin_name: "stremthru".to_string(),
+    }
 }
 
 async fn fetch_cache_check(
@@ -260,7 +396,7 @@ async fn fetch_cache_check(
                 .collect();
             CacheCheckResult {
                 hash: item.hash,
-                store: String::new(), // set by check_cache after fetch
+                store: String::new(),
                 status,
                 files,
             }
@@ -373,7 +509,6 @@ pub async fn scrape_torznab(
         if info_hash.is_empty() || item.title.is_empty() {
             continue;
         }
-        // Size from the top-level field; fall back to a torznab attr named "size".
         let file_size_bytes = item.size.or_else(|| {
             item.attr.iter().find_map(|a| {
                 if a.attributes.name == "size" {
@@ -438,8 +573,12 @@ pub async fn generate_link(
     api_key: &str,
     magnet: &str,
 ) -> anyhow::Result<String> {
-    let url = format!("{base_url}v0/store/torz/link/generate");
-    tracing::debug!(store, url = %url, "generating stremthru torz link");
+    // The same /link/generate shape exists for both torz (torrents) and newz
+    // (usenet). The link itself is the only signal we have to decide which
+    // namespace it belongs to once we're past the initial download.
+    let kind = if magnet.contains("/store/newz/") { "newz" } else { "torz" };
+    let url = format!("{base_url}v0/store/{kind}/link/generate");
+    tracing::debug!(store, kind, url = %url, "generating stremthru link");
     let response = http
         .send(PROFILE, |client| {
             client
@@ -549,7 +688,6 @@ async fn fetch_debrid_extra(
     store: &str,
     api_key: &str,
 ) -> anyhow::Result<DebridExtra> {
-    // TorBox: single API call returns all extra fields
     if store == "torbox" {
         let body: serde_json::Value = http
             .get_json(
@@ -571,7 +709,6 @@ async fn fetch_debrid_extra(
         });
     }
 
-    // Real-Debrid: single API call returns all extra fields
     if store == "realdebrid" {
         let body: serde_json::Value = http
             .get_json(
@@ -592,7 +729,6 @@ async fn fetch_debrid_extra(
         });
     }
 
-    // Other stores: fetch only premium_until
     let (url, bearer, pointer, is_unix): (String, Option<String>, &str, bool) = match store {
         "alldebrid" => (
             "https://api.alldebrid.com/v4/user".into(),

@@ -13,7 +13,6 @@ use riven_queue::{DownloaderConfig, JobQueue};
 
 // Force plugin crate linking so inventory collects registrations.
 include!(concat!(env!("OUT_DIR"), "/plugin_crates.rs"));
-
 mod setup;
 
 fn build_http_client() -> Result<reqwest::Client> {
@@ -93,8 +92,8 @@ async fn main() -> Result<()> {
     .await;
 
     // If the `usenet` plugin is configured with NNTP credentials, build a
-    // streamer that the /usenet/ HTTP route can serve from. Failure to build
-    // is non-fatal — Usenet streaming is just disabled.
+    // streamer that the /usenet/ route can serve from. Failure to build is
+    // non-fatal — Usenet streaming is just disabled.
     let usenet_streamer: Option<riven_usenet::UsenetStreamer> = match registry
         .get_plugin_settings_json("usenet")
         .await
@@ -102,10 +101,12 @@ async fn main() -> Result<()> {
         .and_then(plugin_usenet::nntp_config_from_json_value)
     {
         Some(cfg) => {
+            let primary = cfg.primary();
             tracing::info!(
-                host = %cfg.server.host,
-                port = cfg.server.port,
-                tls = cfg.server.use_tls,
+                providers = cfg.providers.len(),
+                host = primary.map(|c| c.host.as_str()).unwrap_or("?"),
+                port = primary.map(|c| c.port).unwrap_or(0),
+                tls = primary.map(|c| c.use_tls).unwrap_or(true),
                 "usenet streaming enabled"
             );
             Some(riven_usenet::UsenetStreamer::new(cfg, redis_conn_for_streamer))
@@ -115,6 +116,7 @@ async fn main() -> Result<()> {
             None
         }
     };
+
     let (notification_tx, _) = broadcast::channel::<String>(512);
 
     let job_queue = Arc::new(
@@ -173,6 +175,7 @@ async fn main() -> Result<()> {
 
     let cancel = CancellationToken::new();
 
+    let gql_host = settings.gql_host.clone();
     let gql_port = settings.gql_port;
     if settings.api_key.is_empty() {
         tracing::warn!("RIVEN_SETTING__API_KEY is empty — GraphQL API auth is DISABLED (dev only)");
@@ -212,6 +215,7 @@ async fn main() -> Result<()> {
         let cancel = cancel.clone();
         async move {
             if let Err(e) = riven_api::start_server(riven_api::StartServerConfig {
+                host: gql_host,
                 port: gql_port,
                 db_pool: pool,
                 registry: reg,
