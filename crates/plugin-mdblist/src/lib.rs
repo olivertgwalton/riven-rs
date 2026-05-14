@@ -104,8 +104,8 @@ async fn fetch_and_build_content(
             let Some(dedupe_key) = item
                 .id
                 .map(|id| id.to_string())
-                .or_else(|| item.ids.tmdb.map(|id| id.to_string()))
-                .or_else(|| item.ids.imdb.clone())
+                .or_else(|| item.tmdb_id().map(|id| id.to_string()))
+                .or_else(|| item.imdb_id())
             else {
                 continue;
             };
@@ -113,9 +113,9 @@ async fn fetch_and_build_content(
                 continue;
             }
             content.insert_movie(ExternalIds {
-                imdb_id: item.ids.imdb,
-                tmdb_id: item.ids.tmdb.map(|id| id.to_string()),
-                tvdb_id: item.ids.tvdb.map(|id| id.to_string()),
+                imdb_id: item.imdb_id(),
+                tmdb_id: item.tmdb_id().map(|id| id.to_string()),
+                tvdb_id: item.tvdb_id().map(|id| id.to_string()),
                 ..Default::default()
             });
         }
@@ -124,8 +124,8 @@ async fn fetch_and_build_content(
             let Some(dedupe_key) = item
                 .id
                 .map(|id| id.to_string())
-                .or_else(|| item.tvdb_id.map(|id| id.to_string()))
-                .or_else(|| item.imdb_id.clone())
+                .or_else(|| item.tvdb_id().map(|id| id.to_string()))
+                .or_else(|| item.imdb_id())
             else {
                 continue;
             };
@@ -133,8 +133,8 @@ async fn fetch_and_build_content(
                 continue;
             }
             content.insert_show(ExternalIds {
-                imdb_id: item.imdb_id,
-                tvdb_id: item.tvdb_id.map(|id| id.to_string()),
+                imdb_id: item.imdb_id(),
+                tvdb_id: item.tvdb_id().map(|id| id.to_string()),
                 ..Default::default()
             });
         }
@@ -170,14 +170,14 @@ async fn fetch_list_items(
         let mut count = 0;
 
         for item in items.movies.unwrap_or_default() {
-            if let Some(id) = item.id.or(item.ids.tmdb) {
+            if let Some(id) = item.id.or(item.tmdb_id()) {
                 count += 1;
                 movie_ids.entry(id).or_insert(item);
             }
         }
 
         for item in items.shows.unwrap_or_default() {
-            if let Some(id) = item.id.or(item.tvdb_id) {
+            if let Some(id) = item.id.or(item.tvdb_id()) {
                 count += 1;
                 show_ids.entry(id).or_insert(item);
             }
@@ -221,34 +221,51 @@ fn normalize_list_name(value: &str) -> Option<String> {
 
 #[derive(Deserialize)]
 struct MdblistListItemsResponse {
-    movies: Option<Vec<MdblistMovie>>,
-    shows: Option<Vec<MdblistShow>>,
+    movies: Option<Vec<MdblistItem>>,
+    shows: Option<Vec<MdblistItem>>,
 }
 
 struct MdblistListItems {
-    movies: Vec<MdblistMovie>,
-    shows: Vec<MdblistShow>,
+    movies: Vec<MdblistItem>,
+    shows: Vec<MdblistItem>,
 }
 
+/// A single movie/show entry from the list-items endpoint.
+///
+/// MDBList is inconsistent about where it exposes external IDs: every item
+/// carries a nested `ids` object, but only some also repeat `imdb_id`/`tvdb_id`
+/// at the top level — shows have been observed with the top-level fields
+/// missing entirely. Parse both shapes and let the accessors prefer the nested
+/// `ids` object so neither movies nor shows silently lose their IDs (which
+/// would land them in the library as un-indexable "Unknown" entries).
 #[derive(Clone, Deserialize)]
-struct MdblistMovie {
+struct MdblistItem {
     id: Option<i64>,
+    imdb_id: Option<String>,
+    tvdb_id: Option<i64>,
     #[serde(default)]
-    ids: MdblistMovieIds,
+    ids: MdblistIds,
 }
 
 #[derive(Clone, Default, Deserialize)]
-struct MdblistMovieIds {
+struct MdblistIds {
     imdb: Option<String>,
     tmdb: Option<i64>,
     tvdb: Option<i64>,
 }
 
-#[derive(Clone, Deserialize)]
-struct MdblistShow {
-    id: Option<i64>,
-    imdb_id: Option<String>,
-    tvdb_id: Option<i64>,
+impl MdblistItem {
+    fn imdb_id(&self) -> Option<String> {
+        self.ids.imdb.clone().or_else(|| self.imdb_id.clone())
+    }
+
+    fn tmdb_id(&self) -> Option<i64> {
+        self.ids.tmdb
+    }
+
+    fn tvdb_id(&self) -> Option<i64> {
+        self.ids.tvdb.or(self.tvdb_id)
+    }
 }
 
 #[cfg(test)]

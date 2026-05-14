@@ -1,32 +1,113 @@
+use std::time::Duration;
+
 use anyhow::Result;
 use bytes::Bytes;
 use reqwest::{Client, Response, StatusCode};
-use std::time::Duration;
+
+use riven_core::config::vfs::{
+    ACTIVITY_TIMEOUT_SECS, STREAM_RETRY_BASE_DELAY_MS, STREAM_RETRY_MAX_ATTEMPTS,
+};
+
+/// A failed stream request, tagged with whether retrying the *same* URL is
+/// worthwhile. Only a permanent HTTP status (a 4xx other than 408/425/429)
+/// proves the URL itself is bad — every other failure (no response at all, a
+/// 5xx, a truncated or mis-ranged body) is treated as transient and retried
+/// in-place before the caller escalates to refreshing the stream URL.
+struct StreamError {
+    transient: bool,
+    source: anyhow::Error,
+}
+
+impl StreamError {
+    fn transient(source: anyhow::Error) -> Self {
+        Self {
+            transient: true,
+            source,
+        }
+    }
+
+    fn permanent(source: anyhow::Error) -> Self {
+        Self {
+            transient: false,
+            source,
+        }
+    }
+}
+
+fn status_is_transient(status: StatusCode) -> bool {
+    status.is_server_error()
+        || matches!(
+            status,
+            StatusCode::REQUEST_TIMEOUT | StatusCode::TOO_EARLY | StatusCode::TOO_MANY_REQUESTS
+        )
+}
+
+/// Runs `attempt` up to `STREAM_RETRY_MAX_ATTEMPTS` times, backing off
+/// exponentially between transient failures. A permanent failure returns
+/// immediately; an exhausted transient failure returns its last error. Either
+/// way the caller then refreshes the stream URL and retries once more.
+async fn with_retry<T, F, Fut>(url: &str, what: &str, mut attempt: F) -> Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, StreamError>>,
+{
+    let mut tries = 0u32;
+    loop {
+        match attempt().await {
+            Ok(value) => return Ok(value),
+            Err(error) => {
+                tries += 1;
+                if !error.transient || tries >= STREAM_RETRY_MAX_ATTEMPTS {
+                    return Err(error.source);
+                }
+                let delay = STREAM_RETRY_BASE_DELAY_MS << (tries - 1);
+                tracing::debug!(
+                    target: "streaming",
+                    url,
+                    what,
+                    attempt = tries,
+                    delay_ms = delay,
+                    error = %error.source,
+                    "transient stream failure, retrying in-place"
+                );
+                tokio::time::sleep(Duration::from_millis(delay)).await;
+            }
+        }
+    }
+}
 
 pub async fn open_stream(client: &Client, url: &str, start: u64) -> Result<Response> {
+    with_retry(url, "open", || open_stream_once(client, url, start)).await
+}
+
+async fn open_stream_once(client: &Client, url: &str, start: u64) -> Result<Response, StreamError> {
     let range = format!("bytes={start}-");
     let response = client
         .get(url)
         .header("range", &range)
         .header("accept-encoding", "identity")
         .header("connection", "keep-alive")
-        .timeout(Duration::from_secs(
-            riven_core::config::vfs::ACTIVITY_TIMEOUT_SECS,
-        ))
+        .timeout(Duration::from_secs(ACTIVITY_TIMEOUT_SECS))
         .send()
-        .await?;
+        .await
+        .map_err(|e| StreamError::transient(e.into()))?;
 
     match response.status() {
         StatusCode::OK if start == 0 => Ok(response),
         StatusCode::PARTIAL_CONTENT => {
-            validate_content_range(&response, start, None)?;
+            validate_content_range(&response, start, None).map_err(StreamError::transient)?;
             Ok(response)
         }
-        status => anyhow::bail!(
-            "stream request {} failed with status {} for {url}",
-            range,
-            status
-        ),
+        status => {
+            let error = anyhow::anyhow!(
+                "stream request {range} failed with status {status} for {url}"
+            );
+            Err(if status_is_transient(status) {
+                StreamError::transient(error)
+            } else {
+                StreamError::permanent(error)
+            })
+        }
     }
 }
 
@@ -44,6 +125,15 @@ pub fn response_body_end(response: &Response) -> Option<u64> {
 }
 
 pub async fn fetch_range(client: &Client, url: &str, start: u64, end: u64) -> Result<Bytes> {
+    with_retry(url, "range", || fetch_range_once(client, url, start, end)).await
+}
+
+async fn fetch_range_once(
+    client: &Client,
+    url: &str,
+    start: u64,
+    end: u64,
+) -> Result<Bytes, StreamError> {
     let range = format!("bytes={start}-{end}");
     let expected_len = (end - start + 1) as usize;
 
@@ -52,30 +142,33 @@ pub async fn fetch_range(client: &Client, url: &str, start: u64, end: u64) -> Re
         .header("range", &range)
         .header("accept-encoding", "identity")
         .header("connection", "keep-alive")
-        .timeout(Duration::from_secs(
-            riven_core::config::vfs::ACTIVITY_TIMEOUT_SECS,
-        ))
+        .timeout(Duration::from_secs(ACTIVITY_TIMEOUT_SECS))
         .send()
-        .await?;
+        .await
+        .map_err(|e| StreamError::transient(e.into()))?;
 
-    if response.status() != StatusCode::PARTIAL_CONTENT {
-        anyhow::bail!(
-            "stream range request {} failed with status {} for {url}",
-            range,
-            response.status()
-        );
+    let status = response.status();
+    if status != StatusCode::PARTIAL_CONTENT {
+        let error =
+            anyhow::anyhow!("stream range request {range} failed with status {status} for {url}");
+        return Err(if status_is_transient(status) {
+            StreamError::transient(error)
+        } else {
+            StreamError::permanent(error)
+        });
     }
 
-    validate_content_range(&response, start, Some(end))?;
+    validate_content_range(&response, start, Some(end)).map_err(StreamError::transient)?;
 
-    let bytes = response.bytes().await?;
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|e| StreamError::transient(e.into()))?;
     if bytes.len() != expected_len {
-        anyhow::bail!(
-            "stream range request {} returned {} bytes, expected {} for {url}",
-            range,
+        return Err(StreamError::transient(anyhow::anyhow!(
+            "stream range request {range} returned {} bytes, expected {expected_len} for {url}",
             bytes.len(),
-            expected_len
-        );
+        )));
     }
 
     Ok(bytes)

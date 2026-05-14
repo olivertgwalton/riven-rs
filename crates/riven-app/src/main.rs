@@ -53,6 +53,48 @@ fn build_streaming_http_client() -> Result<reqwest::Client> {
         .build()?)
 }
 
+/// Handle a debrid "torrent is dead" signal for a VFS entry: blacklist the
+/// entry's stream so the download flow won't pick it again, drop the stale
+/// filesystem entry (which demotes the item out of `Completed`), and queue a
+/// re-download from the next-best stream.
+async fn handle_dead_link(pool: &sqlx::PgPool, job_queue: &JobQueue, entry_id: i64) {
+    let entry = match riven_db::repo::get_media_entry_by_id(pool, entry_id).await {
+        Ok(Some(entry)) => entry,
+        Ok(None) => return,
+        Err(error) => {
+            tracing::warn!(entry_id, %error, "dead-link: failed to load entry");
+            return;
+        }
+    };
+    let media_item_id = entry.media_item_id;
+    tracing::warn!(
+        entry_id,
+        media_item_id,
+        path = %entry.path,
+        "debrid reports torrent is dead — blacklisting stream and re-downloading"
+    );
+
+    if let Some(stream_id) = entry.stream_id
+        && let Err(error) =
+            riven_db::repo::blacklist_stream_by_id(pool, media_item_id, stream_id).await
+    {
+        tracing::warn!(entry_id, media_item_id, %error, "dead-link: failed to blacklist stream");
+    }
+
+    // Removing the media entry clears `has_media_entry`, so the item's state
+    // recomputes out of `Completed` and becomes eligible for re-download.
+    if let Err(error) = riven_db::repo::delete_filesystem_entry(pool, entry_id).await {
+        tracing::warn!(entry_id, %error, "dead-link: failed to delete filesystem entry");
+    }
+
+    if !job_queue.push_download_from_best_stream(media_item_id).await {
+        tracing::warn!(
+            media_item_id,
+            "dead-link: no non-blacklisted stream remains — item needs re-scrape"
+        );
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let mut settings = riven_core::settings::RivenSettings::load()?;
@@ -158,21 +200,50 @@ async fn main() -> Result<()> {
 
     tokio::spawn({
         let link_registry = registry.clone();
+        let link_pool = db_pool.clone();
+        let link_jq = job_queue.clone();
         async move {
             while let Some(req) = link_rx.recv().await {
+                let entry_id = req.entry_id;
+                let current_url = req.current_url;
                 let event = RivenEvent::MediaItemStreamLinkRequested {
                     magnet: req.download_url,
                     info_hash: String::new(),
                     provider: req.provider,
                 };
                 let results = link_registry.dispatch(&event).await;
-                let link = results.into_iter().find_map(|(_, r)| {
-                    r.ok().and_then(|resp| match resp {
-                        riven_core::events::HookResponse::StreamLink(sl) => Some(sl.link),
-                        _ => None,
-                    })
-                });
-                drop(req.response_tx.send(link));
+
+                let mut link = None;
+                let mut dead = false;
+                for (_, result) in results {
+                    match result {
+                        Ok(riven_core::events::HookResponse::StreamLink(sl)) => {
+                            link = Some(sl.link);
+                            break;
+                        }
+                        Ok(riven_core::events::HookResponse::StreamLinkDead) => dead = true,
+                        _ => {}
+                    }
+                }
+
+                // A refresh that hands back the exact URL the caller already
+                // knows is dead means the debrid service has nothing fresher —
+                // treat it as a dead link, same as an explicit 404.
+                let stale_repeat = matches!(
+                    (&link, &current_url),
+                    (Some(link), Some(current)) if link == current
+                );
+                // Dead: the store reported the torrent is gone, or every store
+                // could only re-offer the known-dead URL.
+                let is_dead = dead || stale_repeat;
+
+                // Never hand a known-dead URL back to the caller.
+                let response = if is_dead { None } else { link };
+                drop(req.response_tx.send(response));
+
+                if is_dead && let Some(entry_id) = entry_id {
+                    handle_dead_link(&link_pool, &link_jq, entry_id).await;
+                }
             }
         }
     });

@@ -19,6 +19,10 @@ pub enum HookResponse {
     CacheCheck(Vec<CacheCheckResult>),
     ProviderList(Vec<ProviderInfo>),
     StreamLink(StreamLinkResponse),
+    /// The plugin reached the debrid store but it reported the torrent is
+    /// permanently gone (a fatal HTTP status). The link-request consumer
+    /// should blacklist this stream and re-download rather than retry.
+    StreamLinkDead,
     UserInfo(Vec<DebridUserInfo>),
     ActivePlaybackSessions(Vec<ActivePlaybackSession>),
     Empty,

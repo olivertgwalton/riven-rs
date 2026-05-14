@@ -15,7 +15,7 @@ use std::time::Duration;
 
 use crate::client::{
     add_newz, add_torrent, check_cache, download_result_from_newz, download_result_from_torz,
-    fetch_user_info, generate_link, scrape_torznab,
+    GeneratedLink, fetch_user_info, generate_link, scrape_torznab,
 };
 use crate::newznab::{is_nzb_info_hash, nzb_url_redis_key, scrape_newznab};
 
@@ -472,6 +472,7 @@ impl Plugin for StremthruPlugin {
             score_b.cmp(&score_a).then_with(|| store_a.cmp(store_b))
         });
 
+        let mut saw_dead = false;
         for (store, api_key) in ordered_stores {
             if let Some(p) = provider
                 && store != p
@@ -480,15 +481,25 @@ impl Plugin for StremthruPlugin {
             }
             let result = generate_link(&ctx.http, &base_url, store, api_key, magnet).await;
             match result {
-                Ok(link) => {
+                Ok(GeneratedLink::Link(link)) => {
                     adjust_store_score(&ctx.redis, store, 1).await;
                     return Ok(HookResponse::StreamLink(StreamLinkResponse { link }));
+                }
+                Ok(GeneratedLink::Dead) => {
+                    adjust_store_score(&ctx.redis, store, -1).await;
+                    saw_dead = true;
                 }
                 Err(error) => {
                     adjust_store_score(&ctx.redis, store, -1).await;
                     tracing::warn!(store, error = %error, "generate link failed");
                 }
             }
+        }
+        // No store produced a link. If at least one store reported the torrent
+        // is gone (and none merely errored transiently), surface that so the
+        // link-request consumer can blacklist the stream and re-download.
+        if saw_dead {
+            return Ok(HookResponse::StreamLinkDead);
         }
         anyhow::bail!("no store could generate a stream link")
     }

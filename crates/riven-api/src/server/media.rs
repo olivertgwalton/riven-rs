@@ -186,6 +186,8 @@ async fn resolve_media_stream_url(
     let url = request_stream_url(
         entry.download_url.as_deref(),
         entry.provider.as_deref(),
+        Some(entry.id),
+        entry.stream_url.as_deref(),
         &state.link_request_tx,
     )
     .await?;

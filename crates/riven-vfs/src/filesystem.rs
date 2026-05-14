@@ -174,6 +174,11 @@ pub struct RivenFs {
     readdir_cache: DashMap<u64, (Vec<DirEntry>, Instant)>,
     entry_cache: DashMap<String, (Option<Arc<CachedEntry>>, Instant)>,
     prewarm_semaphore: Arc<Semaphore>,
+    // Coalesces concurrent stream-URL refreshes for the same entry: a library
+    // scan opening many handles of one file, or several reads racing, would
+    // otherwise each fire their own link-resolver request. Whoever wins the
+    // per-entry lock refreshes; the rest re-read the URL the winner persisted.
+    link_refresh_locks: DashMap<i64, Arc<Mutex<()>>>,
 }
 
 impl RivenFs {
@@ -217,6 +222,7 @@ impl RivenFs {
             readdir_cache: DashMap::new(),
             entry_cache: DashMap::new(),
             prewarm_semaphore: Arc::new(Semaphore::new(8)),
+            link_refresh_locks: DashMap::new(),
         }
     }
 
@@ -287,28 +293,67 @@ impl RivenFs {
         result
     }
 
+    /// Mint a fresh stream URL for an entry and persist it, coalescing
+    /// concurrent callers. `current_url` is the URL the caller already knows is
+    /// unusable (or `None` if the entry had no URL yet) — once the per-entry
+    /// lock is held, the DB is re-checked and any *different* URL a peer
+    /// persisted while we waited is returned instead of firing another request.
     fn request_and_persist_stream_url(
         &self,
         path: &str,
         entry_id: i64,
         download_url: Option<&str>,
         provider: Option<&str>,
+        current_url: Option<&str>,
     ) -> Option<String> {
+        let lock = self
+            .link_refresh_locks
+            .entry(entry_id)
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone();
+        let guard = lock.lock();
+
+        // A peer that held the lock before us may have already refreshed it.
+        if let Ok(Some(entry)) = self
+            .runtime
+            .block_on(riven_db::repo::get_media_entry_by_id(&self.db_pool, entry_id))
+            && let Some(fresh) = entry.stream_url
+            && Some(fresh.as_str()) != current_url
+        {
+            self.entry_cache.remove(path);
+            drop(guard);
+            self.link_refresh_locks
+                .remove_if(&entry_id, |_, arc| Arc::strong_count(arc) <= 2);
+            return Some(fresh);
+        }
+
         let url = request_stream_url_blocking(
             download_url,
             provider,
+            Some(entry_id),
+            current_url,
             &self.link_request_tx,
             &self.runtime,
-        )?;
-        if let Err(err) = self.runtime.block_on(riven_db::repo::update_stream_url(
-            &self.db_pool,
-            entry_id,
-            &url,
-        )) {
+        );
+
+        if let Some(url) = url.as_deref()
+            && let Err(err) = self.runtime.block_on(riven_db::repo::update_stream_url(
+                &self.db_pool,
+                entry_id,
+                url,
+            ))
+        {
             tracing::warn!(entry_id, %err, "failed to persist refreshed stream url");
         }
+        // Drop the cached entry either way: on success it now holds a stale
+        // URL, and on failure (including a dead-link refusal) the link-request
+        // consumer may have just deleted the row entirely.
         self.entry_cache.remove(path);
-        Some(url)
+
+        drop(guard);
+        self.link_refresh_locks
+            .remove_if(&entry_id, |_, arc| Arc::strong_count(arc) <= 2);
+        url
     }
 
     fn resolve_stream_url(&self, path: &str, entry: &CachedEntry) -> Option<String> {
@@ -321,7 +366,51 @@ impl RivenFs {
             entry.id,
             entry.download_url.as_deref(),
             entry.provider.as_deref(),
+            None,
         )
+    }
+
+    /// A stream-URL refresh failed. If the handle's entry was deleted out from
+    /// under it — typically because a dead-link re-download replaced it with a
+    /// fresh entry at the same path — the open handle is stale. Rebind it to
+    /// the new entry so the in-flight read can be retried instead of failing.
+    /// Returns the new stream URL, or `None` if there is no fresh entry to
+    /// rebind to (a genuine dead end).
+    fn rebind_stale_handle(
+        &self,
+        handle: &mut OpenedFile,
+        path: &str,
+        stale_entry_id: i64,
+    ) -> Option<Arc<str>> {
+        // `request_and_persist_stream_url` already evicted the cache entry, so
+        // this re-reads from the DB and picks up any replacement row.
+        let fresh = self.get_entry_cached(path)?;
+        // Only rebind when the path resolves to a genuinely *different* media
+        // entry — otherwise the failure is a real dead end, not a stale handle.
+        if fresh.id == stale_entry_id || fresh.entry_type != FileSystemEntryType::Media {
+            return None;
+        }
+        let url: Arc<str> = Arc::from(self.resolve_stream_url(path, &fresh)?);
+        if let OpenedFile::Media {
+            entry_id,
+            stream_url,
+            download_url,
+            provider,
+            ..
+        } = handle
+        {
+            tracing::warn!(
+                path,
+                stale_entry_id,
+                new_entry_id = fresh.id,
+                "open handle outlived its entry — rebinding to the replacement"
+            );
+            *entry_id = fresh.id;
+            *download_url = fresh.download_url.clone();
+            *provider = fresh.provider.clone();
+            *stream_url = Arc::clone(&url);
+        }
+        Some(url)
     }
 
     fn resolve_path(&self, parent_ino: u64, name: &str) -> Arc<str> {
@@ -707,22 +796,31 @@ impl Filesystem for RivenFs {
                     "read failed, refreshing stream url and retrying once"
                 );
 
-                let Some(url) = self.request_and_persist_stream_url(
+                match self.request_and_persist_stream_url(
                     &path,
                     entry_id,
                     Some(download_url.as_ref()),
                     provider.as_deref(),
-                ) else {
-                    return reply.error(Errno::from_i32(code));
-                };
-                if let OpenedFile::Media { stream_url, .. } = &mut *handle {
-                    *stream_url = Arc::from(url);
+                    Some(stream_url.as_ref()),
+                ) {
+                    Some(url) => {
+                        if let OpenedFile::Media { stream_url, .. } = &mut *handle {
+                            *stream_url = Arc::from(url);
+                        }
+                        let refreshed = match &*handle {
+                            OpenedFile::Media { stream_url, .. } => Arc::clone(stream_url),
+                            OpenedFile::Subtitle { .. } => unreachable!(),
+                        };
+                        self.read_handle(&mut handle, start, end, &refreshed)
+                    }
+                    // The refresh produced nothing. The handle's entry may have
+                    // been replaced by a dead-link re-download — rebind to the
+                    // fresh entry at this path and retry once before giving up.
+                    None => match self.rebind_stale_handle(&mut handle, &path, entry_id) {
+                        Some(rebound) => self.read_handle(&mut handle, start, end, &rebound),
+                        None => ReadOutcome::Error(code),
+                    },
                 }
-                let refreshed = match &*handle {
-                    OpenedFile::Media { stream_url, .. } => Arc::clone(stream_url),
-                    OpenedFile::Subtitle { .. } => unreachable!(),
-                };
-                self.read_handle(&mut handle, start, end, &refreshed)
             }
         };
 
@@ -730,6 +828,20 @@ impl Filesystem for RivenFs {
             ReadOutcome::Data(buf) => reply.data(&buf),
             ReadOutcome::Error(code) => reply.error(Errno::from_i32(code)),
         }
+    }
+
+    // The VFS is read-only, so there is nothing to flush — but the kernel
+    // issues `flush` on every `close()`, and the fuser default handler
+    // answers `ENOSYS` and logs a "[Not Implemented]" warning each time.
+    fn flush(
+        &self,
+        _req: &Request,
+        _ino: INodeNo,
+        _fh: FuseFh,
+        _lock_owner: LockOwner,
+        reply: ReplyEmpty,
+    ) {
+        reply.ok();
     }
 
     fn release(

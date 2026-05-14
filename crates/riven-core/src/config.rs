@@ -29,6 +29,16 @@ pub mod vfs {
     /// Timeout for waiting for a chunk to become available.
     pub const CHUNK_TIMEOUT_SECS: u64 = 10;
 
+    /// Number of times a stream request is retried in-place against the same
+    /// URL before the caller escalates to refreshing the stream URL. Transient
+    /// CDN failures (502/503/504/429, connection resets) usually clear within a
+    /// retry or two, so this absorbs them without a link-resolver round-trip.
+    pub const STREAM_RETRY_MAX_ATTEMPTS: u32 = 3;
+
+    /// Base delay for exponential backoff between stream request retries. Delay
+    /// for attempt `n` (0-indexed) is `STREAM_RETRY_BASE_DELAY_MS << n`.
+    pub const STREAM_RETRY_BASE_DELAY_MS: u64 = 200;
+
     /// Tolerance for detecting scan reads (in blocks).
     pub const SCAN_TOLERANCE_BLOCKS: u64 = 25;
 

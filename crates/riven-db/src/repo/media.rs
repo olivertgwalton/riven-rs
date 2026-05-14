@@ -436,6 +436,25 @@ pub async fn transition_unreleased_aired(pool: &PgPool) -> Result<u64> {
     Ok(count)
 }
 
+/// Blacklist a stream for a media item by its `streams.id`. Used when the
+/// caller already holds the stream id (e.g. from a `filesystem_entries` row)
+/// and need not resolve it from an info-hash.
+pub async fn blacklist_stream_by_id(
+    pool: &PgPool,
+    media_item_id: i64,
+    stream_id: i64,
+) -> Result<()> {
+    sqlx::query!(
+        "INSERT INTO media_item_blacklisted_streams (media_item_id, stream_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+        media_item_id,
+        stream_id
+    )
+    .execute(pool)
+    .await?;
+    super::state::recompute(pool, &[media_item_id]).await?;
+    Ok(())
+}
+
 pub async fn blacklist_stream_by_hash(
     pool: &PgPool,
     media_item_id: i64,

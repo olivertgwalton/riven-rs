@@ -566,13 +566,22 @@ pub fn download_result_from_torz(
     }
 }
 
+/// Outcome of a stream-link generation attempt against a single store.
+pub enum GeneratedLink {
+    /// The store minted a fresh stream URL.
+    Link(String),
+    /// The store reported the torrent is permanently gone (fatal HTTP status).
+    /// Distinct from a transient error — the caller should blacklist, not retry.
+    Dead,
+}
+
 pub async fn generate_link(
     http: &HttpClient,
     base_url: &str,
     store: &str,
     api_key: &str,
     magnet: &str,
-) -> anyhow::Result<String> {
+) -> anyhow::Result<GeneratedLink> {
     // The same /link/generate shape exists for both torz (torrents) and newz
     // (usenet). The link itself is the only signal we have to decide which
     // namespace it belongs to once we're past the initial download.
@@ -594,6 +603,10 @@ pub async fn generate_link(
 
     if !response.status().is_success() {
         let status = response.status();
+        if riven_core::stream_link::is_fatal_status_code(status.as_u16()) {
+            tracing::warn!(store, %status, "store reports torrent is dead");
+            return Ok(GeneratedLink::Dead);
+        }
         let body = response.text().await.unwrap_or_default();
         anyhow::bail!("store rejected link generation: HTTP {} - {}", status, body);
     }
@@ -602,10 +615,11 @@ pub async fn generate_link(
     let resp: StremthruResponse<StremthruLink> = serde_json::from_str(&text)
         .map_err(|error| anyhow::anyhow!("invalid generate-link response: {error}; body={text}"))?;
 
-    Ok(resp
-        .data
-        .ok_or_else(|| anyhow::anyhow!("{}", describe_empty_link_response(&text)))?
-        .link)
+    Ok(GeneratedLink::Link(
+        resp.data
+            .ok_or_else(|| anyhow::anyhow!("{}", describe_empty_link_response(&text)))?
+            .link,
+    ))
 }
 
 fn describe_empty_link_response(body: &str) -> String {
