@@ -70,6 +70,7 @@ pub(super) fn authorize_request(
     headers: &HeaderMap,
 ) -> Result<RequestAuth, AuthError> {
     if !check_api_key(state, headers) {
+        tracing::warn!("auth rejected: api key missing or mismatched");
         return Err(AuthError::Unauthorized);
     }
 
@@ -86,43 +87,119 @@ pub(super) fn authorize_request(
         .and_then(|value| value.to_str().ok())
     {
         Some(role @ ("admin" | "manager" | "user")) => role,
-        _ => return Err(AuthError::Forbidden),
+        other => {
+            tracing::warn!(
+                received = ?other,
+                "frontend auth rejected: missing or invalid x-riven-user-role header"
+            );
+            return Err(AuthError::Forbidden);
+        }
     };
 
-    let user_id = headers
+    let user_id = match headers
         .get(FRONTEND_USER_ID_HEADER)
         .and_then(|value| value.to_str().ok())
         .filter(|value| !value.trim().is_empty())
-        .ok_or(AuthError::Forbidden)?;
+    {
+        Some(id) => id,
+        None => {
+            tracing::warn!("frontend auth rejected: missing or empty x-riven-user-id header");
+            return Err(AuthError::Forbidden);
+        }
+    };
 
-    let timestamp = headers
+    let timestamp = match headers
         .get(FRONTEND_AUTH_TIMESTAMP_HEADER)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.parse::<i64>().ok())
-        .ok_or(AuthError::Forbidden)?;
+    {
+        Some(ts) => ts,
+        None => {
+            tracing::warn!(
+                user_id,
+                "frontend auth rejected: missing or unparseable x-riven-auth-timestamp header"
+            );
+            return Err(AuthError::Forbidden);
+        }
+    };
 
     let now = Utc::now().timestamp();
-    if (now - timestamp).abs() > FRONTEND_AUTH_MAX_SKEW_SECS {
+    let skew = now - timestamp;
+    if skew.abs() > FRONTEND_AUTH_MAX_SKEW_SECS {
+        tracing::warn!(
+            user_id,
+            client_timestamp = timestamp,
+            server_timestamp = now,
+            skew_secs = skew,
+            max_skew_secs = FRONTEND_AUTH_MAX_SKEW_SECS,
+            "frontend auth rejected: clock skew exceeds maximum (check NTP on host)"
+        );
         return Err(AuthError::Forbidden);
     }
 
-    let signature = headers
+    let signature = match headers
         .get(FRONTEND_AUTH_SIGNATURE_HEADER)
         .and_then(|value| value.to_str().ok())
-        .ok_or(AuthError::Forbidden)?;
+    {
+        Some(sig) => sig,
+        None => {
+            tracing::warn!(
+                user_id,
+                "frontend auth rejected: missing x-riven-auth-signature header"
+            );
+            return Err(AuthError::Forbidden);
+        }
+    };
 
-    let secret = state
+    let secret = match state
         .frontend_auth_signing_secret
         .as_deref()
         .filter(|value| !value.is_empty())
-        .ok_or(AuthError::Forbidden)?;
+    {
+        Some(s) => s,
+        None => {
+            tracing::warn!(
+                user_id,
+                "frontend auth rejected: backend RIVEN_SETTING__FRONTEND_AUTH_SIGNING_SECRET is unset or empty"
+            );
+            return Err(AuthError::Forbidden);
+        }
+    };
 
-    let provided_signature = hex::decode(signature).map_err(|_e| AuthError::Forbidden)?;
-    let mut mac =
-        Hmac::<Sha256>::new_from_slice(secret.as_bytes()).map_err(|_e| AuthError::Forbidden)?;
+    let provided_signature = match hex::decode(signature) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            tracing::warn!(
+                user_id,
+                error = %error,
+                "frontend auth rejected: x-riven-auth-signature is not valid hex"
+            );
+            return Err(AuthError::Forbidden);
+        }
+    };
+    let mut mac = match Hmac::<Sha256>::new_from_slice(secret.as_bytes()) {
+        Ok(mac) => mac,
+        Err(error) => {
+            tracing::warn!(
+                user_id,
+                error = %error,
+                "frontend auth rejected: failed to initialise HMAC with configured secret"
+            );
+            return Err(AuthError::Forbidden);
+        }
+    };
     mac.update(signing_payload(user_id, role_header, timestamp).as_bytes());
-    mac.verify_slice(&provided_signature)
-        .map_err(|_e| AuthError::Forbidden)?;
+    if let Err(error) = mac.verify_slice(&provided_signature) {
+        tracing::warn!(
+            user_id,
+            role = role_header,
+            timestamp,
+            error = %error,
+            "frontend auth rejected: HMAC signature mismatch (frontend and backend secrets differ, \
+             or signing payload format differs from `v1\\n{{user_id}}\\n{{role}}\\n{{timestamp}}`)"
+        );
+        return Err(AuthError::Forbidden);
+    }
 
     let role = match role_header {
         "admin" => UserRole::Admin,
@@ -131,5 +208,6 @@ pub(super) fn authorize_request(
         _ => return Err(AuthError::Forbidden),
     };
 
+    tracing::debug!(user_id, role = role_header, "frontend auth accepted");
     Ok(RequestAuth { role })
 }
