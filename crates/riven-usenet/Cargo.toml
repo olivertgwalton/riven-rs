@@ -1,7 +1,7 @@
 [package]
 name = "riven-usenet"
 version = "0.1.0"
-edition = "2024"
+edition.workspace = true
 
 [dependencies]
 tokio = { workspace = true, features = ["io-util", "net", "sync", "time", "rt", "macros"] }

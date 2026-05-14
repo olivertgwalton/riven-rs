@@ -203,19 +203,12 @@ fn log_max_level(settings: &LogSettings) -> LevelFilter {
     if !settings.enabled {
         return LevelFilter::Off;
     }
-    let configured = match settings.level.as_str() {
+    match settings.level.as_str() {
         "trace" => LevelFilter::Trace,
         "debug" => LevelFilter::Debug,
         "warn" => LevelFilter::Warn,
         "error" => LevelFilter::Error,
         _ => LevelFilter::Info,
-    };
-    // When VFS debug logging is off, cap at Info so fuser's log::debug!() calls
-    // are stopped at the log-crate level before any record is created.
-    if settings.vfs_debug_logging {
-        configured
-    } else {
-        configured.min(LevelFilter::Info)
     }
 }
 
@@ -225,14 +218,17 @@ fn build_level_filter(settings: &LogSettings) -> anyhow::Result<EnvFilter> {
         .map(|filter| filter.add_directive("apalis_core=info".parse().unwrap()))
         .map_err(|error| anyhow::anyhow!("invalid log level '{}': {error}", settings.level))?;
 
-    // "streaming" target: riven VFS/media-stream debug logs.
-    // "log" target: tracing-log 0.2 bridges all log-crate records (including
-    // fuser FUSE kernel traces) under this fixed target.
-    // Both are suppressed together when VFS debug logging is off.
+    // When VFS debug logging is off, silence the noisy targets without
+    // capping the global log level:
+    //   - "streaming": riven VFS/media-stream debug logs.
+    //   - "log": tracing-log 0.2 bridges log-crate records under this target
+    //     when no module path is available.
+    //   - "fuser": FUSE kernel traces from the fuser crate.
     if !settings.vfs_debug_logging {
         Ok(filter
             .add_directive("streaming=off".parse()?)
-            .add_directive("log=info".parse()?))
+            .add_directive("log=info".parse()?)
+            .add_directive("fuser=info".parse()?))
     } else {
         Ok(filter)
     }

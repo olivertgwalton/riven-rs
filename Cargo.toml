@@ -29,6 +29,9 @@ members = [
     "crates/riven-usenet",
 ]
 
+[workspace.package]
+edition = "2024"
+
 [workspace.dependencies]
 # Async runtime
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time", "net", "signal", "io-util"] }

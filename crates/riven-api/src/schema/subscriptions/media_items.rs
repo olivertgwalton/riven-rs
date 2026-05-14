@@ -1,7 +1,7 @@
-use async_graphql::{Context, Subscription};
+use async_graphql::{Context, SimpleObject, Subscription};
 use futures::stream::{self, Stream, StreamExt};
 use riven_core::events::RivenEvent;
-use riven_core::types::MediaItemType;
+use riven_core::types::{ItemRequestType, MediaItemType};
 use riven_db::entities::MediaItem;
 use riven_db::repo;
 use std::sync::Arc;
@@ -10,6 +10,17 @@ use super::super::queries::MediaQuery;
 use super::super::typed_items::Show;
 use super::super::types::MediaItemStateTree;
 use super::broadcast_stream;
+
+/// Discriminated notification emitted by the unified `mediaEvents`
+/// subscription. Clients that only need a "something changed" signal
+/// (home / library / dashboard live-refresh) subscribe to this one
+/// stream instead of opening 8 parallel multipart connections — keeping
+/// them under the per-origin HTTP/1.1 connection cap.
+#[derive(SimpleObject, Clone)]
+pub struct MediaEventNotification {
+    pub kind: String,
+    pub item_id: Option<i64>,
+}
 
 fn event_item_id(event: &RivenEvent) -> Option<i64> {
     match event {
@@ -196,6 +207,80 @@ impl MediaItemsSubscription {
                 } else {
                     None
                 }
+            }),
+        )
+    }
+
+    /// Unified media-event stream. Fires once for any of:
+    /// `movie_requested`, `show_requested`, `show_request_updated`,
+    /// `show_indexed`, `item_scraped`, `item_downloaded`, `item_failed`,
+    /// `items_deleted`. Use this when you only need to know that *something*
+    /// changed (e.g. to refetch a list). One subscription replaces eight,
+    /// which matters on HTTP/1.1 deployments where the per-origin connection
+    /// cap (6 in Safari) would otherwise be exhausted by the individual
+    /// subscriptions.
+    async fn media_events(
+        &self,
+        ctx: &Context<'_>,
+    ) -> async_graphql::Result<impl Stream<Item = async_graphql::Result<MediaEventNotification>>>
+    {
+        let queue = Arc::clone(ctx.data::<Arc<riven_queue::JobQueue>>()?);
+        Ok(
+            broadcast_stream(queue.event_tx.subscribe()).filter_map(|event| async move {
+                let notification = match event {
+                    RivenEvent::ItemRequestCreated {
+                        item_id,
+                        request_type,
+                        ..
+                    } => Some(MediaEventNotification {
+                        kind: match request_type {
+                            ItemRequestType::Movie => "movie_requested".into(),
+                            ItemRequestType::Show => "show_requested".into(),
+                        },
+                        item_id: Some(item_id),
+                    }),
+                    RivenEvent::ItemRequestUpdated {
+                        item_id,
+                        request_type: ItemRequestType::Show,
+                        ..
+                    } => Some(MediaEventNotification {
+                        kind: "show_request_updated".into(),
+                        item_id: Some(item_id),
+                    }),
+                    RivenEvent::MediaItemIndexSuccess {
+                        id,
+                        item_type: MediaItemType::Show,
+                        ..
+                    } => Some(MediaEventNotification {
+                        kind: "show_indexed".into(),
+                        item_id: Some(id),
+                    }),
+                    RivenEvent::MediaItemScrapeSuccess { id, .. } => Some(MediaEventNotification {
+                        kind: "item_scraped".into(),
+                        item_id: Some(id),
+                    }),
+                    RivenEvent::MediaItemDownloadSuccess { id, .. } => {
+                        Some(MediaEventNotification {
+                            kind: "item_downloaded".into(),
+                            item_id: Some(id),
+                        })
+                    }
+                    RivenEvent::MediaItemScrapeError { id, .. }
+                    | RivenEvent::MediaItemScrapeErrorNoNewStreams { id, .. }
+                    | RivenEvent::MediaItemDownloadError { id, .. }
+                    | RivenEvent::MediaItemDownloadPartialSuccess { id } => {
+                        Some(MediaEventNotification {
+                            kind: "item_failed".into(),
+                            item_id: Some(id),
+                        })
+                    }
+                    RivenEvent::MediaItemsDeleted { .. } => Some(MediaEventNotification {
+                        kind: "items_deleted".into(),
+                        item_id: None,
+                    }),
+                    _ => None,
+                };
+                notification.map(Ok)
             }),
         )
     }
