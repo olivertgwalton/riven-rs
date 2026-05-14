@@ -109,9 +109,6 @@ hex = "0.4"
 pbkdf2 = { version = "0.13", default-features = false, features = ["hmac"] }
 aes = "0.9"
 cbc = "0.2"
-aes-gcm = "0.10"
-rand = "0.9"
-base64 = "0.22"
 
 [patch.crates-io]
 apalis-redis = { path = "vendor/apalis-redis" }

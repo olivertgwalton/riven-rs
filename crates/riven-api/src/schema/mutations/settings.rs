@@ -177,18 +177,10 @@ impl SettingsMutations {
             None => repo::get_plugin_enabled(pool, &plugin).await?,
         };
 
-        // Encrypt password-typed fields (including those nested inside
-        // dictionary/object containers) before persisting. The in-process
-        // `settings` value stays plaintext for revalidation; only the on-disk
-        // form is encrypted.
-        let registry = ctx.data::<Arc<PluginRegistry>>()?;
-        let password_keys = registry.plugin_password_keys(&plugin).await;
-        let encrypted_for_storage =
-            riven_core::secret::encrypt_password_fields(&settings, &password_keys);
-
-        repo::set_setting(pool, &key, encrypted_for_storage).await?;
+        repo::set_setting(pool, &key, settings.clone()).await?;
         repo::set_plugin_enabled(pool, &plugin, enabled).await?;
 
+        let registry = ctx.data::<Arc<PluginRegistry>>()?;
         let valid = registry
             .revalidate_plugin(&plugin, enabled, &settings)
             .await;

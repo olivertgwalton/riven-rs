@@ -31,9 +31,6 @@ dashmap = { workspace = true }
 bytes = { workspace = true }
 redis = { workspace = true }
 sqlx = { workspace = true }
-aes-gcm = { workspace = true }
-rand = { workspace = true }
-base64 = { workspace = true }
 
 [dev-dependencies]
 axum = { workspace = true }
