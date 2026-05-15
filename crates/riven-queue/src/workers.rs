@@ -6,6 +6,7 @@ use apalis::prelude::*;
 
 use riven_core::events::{DispatchStrategy, EventType, HookResponse, RivenEvent};
 use riven_core::http::{RateLimitedError, RetryLaterError};
+use riven_core::types::MediaItemState;
 
 use crate::context::load_media_item_or_log;
 use crate::dedup::DedupGuard;
@@ -111,18 +112,30 @@ async fn handle_fan_in(
         return Ok(());
     };
 
-    // For id-bearing fan-in events, drop the child immediately if the item
-    // was deleted while this job sat in the queue. Without this guard the
-    // plugin still makes a full external HTTP request before discovering in
-    // `finalize` that the item is gone.
-    if let Some(id) = job.event.media_item_id()
-        && load_media_item_or_log(&q.db_pool, id, "plugin-hook").await.is_none()
-    {
-        if q.flow_complete_child(prefix, scope).await {
-            q.clear_flow_all(prefix, scope).await;
-            finalize_event(q, &job.event, scope).await;
+    if let Some(id) = job.event.media_item_id() {
+        let maybe_item = load_media_item_or_log(&q.db_pool, id, "plugin-hook").await;
+        let drop_child = match (&job.event, &maybe_item) {
+            (_, None) => true,
+            (RivenEvent::MediaItemScrapeRequested { .. }, Some(item))
+                if !is_scrapeable(item.state) =>
+            {
+                tracing::debug!(
+                    id,
+                    state = ?item.state,
+                    plugin = %job.plugin_name,
+                    "skipping stale scrape plugin-hook job; item no longer processable"
+                );
+                true
+            }
+            _ => false,
+        };
+        if drop_child {
+            if q.flow_complete_child(prefix, scope).await {
+                q.clear_flow_all(prefix, scope).await;
+                finalize_event(q, &job.event, scope).await;
+            }
+            return Ok(());
         }
-        return Ok(());
     }
 
     match q
@@ -136,9 +149,7 @@ async fn handle_fan_in(
                     .await;
             }
         }
-        Some(Err(ref error))
-            if error.is::<RateLimitedError>() || error.is::<RetryLaterError>() =>
-        {
+        Some(Err(ref error)) if error.is::<RateLimitedError>() || error.is::<RetryLaterError>() => {
             q.flow_increment_rate_limited(prefix, scope).await;
             tracing::warn!(
                 plugin = %job.plugin_name,
@@ -167,6 +178,18 @@ async fn handle_fan_in(
     Ok(())
 }
 
+/// States the scrape pipeline accepts. Kept in sync with the dispatch-time
+/// gate in `scrape::start` and the post-fan-in gate in `parse_results`.
+fn is_scrapeable(state: MediaItemState) -> bool {
+    matches!(
+        state,
+        MediaItemState::Indexed
+            | MediaItemState::Ongoing
+            | MediaItemState::Scraped
+            | MediaItemState::PartiallyCompleted
+    )
+}
+
 /// Return the JSON value that should be stored under the per-plugin slot of
 /// the fan-in flow's results hash. `None` means "this response carries no
 /// useful payload for aggregation" (the empty-streams case for scrape, etc.).
@@ -175,11 +198,10 @@ fn extract_fan_in_response(
     response: HookResponse,
 ) -> Option<serde_json::Value> {
     match (event_type, response) {
-        (EventType::MediaItemScrapeRequested, HookResponse::Scrape(streams)) => {
-            (!streams.is_empty())
-                .then(|| serde_json::to_value(streams).ok())
-                .flatten()
-        }
+        (EventType::MediaItemScrapeRequested, HookResponse::Scrape(streams)) => (!streams
+            .is_empty())
+        .then(|| serde_json::to_value(streams).ok())
+        .flatten(),
         (EventType::MediaItemIndexRequested, HookResponse::Index(indexed)) => {
             serde_json::to_value(*indexed).ok()
         }
@@ -251,24 +273,59 @@ pub fn start_workers(queue: Arc<JobQueue>) -> Monitor {
 
     let m = Monitor::new();
     let m = register_worker!(
-        m, queue, "riven-index", index_storage, orchestrator_n, handle_index_job, 60
+        m,
+        queue,
+        "riven-index",
+        index_storage,
+        orchestrator_n,
+        handle_index_job,
+        60
     );
     let m = register_worker!(
-        m, queue, "riven-scrape", scrape_storage, orchestrator_n, handle_scrape_job, 60
+        m,
+        queue,
+        "riven-scrape",
+        scrape_storage,
+        orchestrator_n,
+        handle_scrape_job,
+        60
     );
     let m = register_worker!(
-        m, queue, "riven-parse", parse_storage, parse_n, handle_parse_scrape_results_job, 300
+        m,
+        queue,
+        "riven-parse",
+        parse_storage,
+        parse_n,
+        handle_parse_scrape_results_job,
+        300
     );
     let m = register_worker!(
-        m, queue, "riven-download", download_storage, download_n, handle_download_job, 600
+        m,
+        queue,
+        "riven-download",
+        download_storage,
+        download_n,
+        handle_download_job,
+        600
     );
     let m = register_worker!(
-        m, queue, "riven-rank-streams", rank_streams_storage, download_n, handle_rank_streams_job, 300
+        m,
+        queue,
+        "riven-rank-streams",
+        rank_streams_storage,
+        download_n,
+        handle_rank_streams_job,
+        300
     );
     // Per-item state machine — orchestration only, fans out and returns.
     let m = register_worker!(
-        m, queue, "riven-process-media-item", process_media_item_storage, orchestrator_n,
-        handle_process_media_item_job, 60
+        m,
+        queue,
+        "riven-process-media-item",
+        process_media_item_storage,
+        orchestrator_n,
+        handle_process_media_item_job,
+        60
     );
 
     let mut m = m;
