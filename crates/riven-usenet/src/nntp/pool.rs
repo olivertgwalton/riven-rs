@@ -27,7 +27,7 @@ const REAPER_INTERVAL: Duration = Duration::from_secs(5);
 /// before other consumers (ingest, scrape) can dial.
 const PREWARM_CAP: usize = 8;
 /// Consecutive transient/connection failures before a provider is muted by
-/// its circuit breaker. Mirrors nzbdav's `ProviderCircuitBreaker.FailureThreshold`.
+/// its circuit breaker.
 const BREAKER_FAILURE_THRESHOLD: u32 = 3;
 /// First cooldown after tripping. Doubled on each subsequent re-trip until
 /// `BREAKER_MAX_COOLDOWN`.
@@ -327,12 +327,9 @@ impl NntpPool {
         let mut last_err: Option<NntpError> = None;
 
         // Build the order: providers whose breaker is *not* tripped come
-        // first, in the existing priority order. Tripped providers come
-        // last so they still get a "probe" attempt when every healthy
-        // provider has been exhausted (mirrors nzbdav's
-        // `GetOrderedProviders` "include tripped when all-tripped" rule —
-        // we keep it always-on so a one-off probe runs as a tail fallback
-        // and the breaker has a chance to reset).
+        // first, in the existing priority order. Tripped providers come last
+        // so they still get a probe attempt when every healthy provider has
+        // been exhausted; that tail probe gives the breaker a chance to reset.
         let mut order: Vec<usize> = Vec::with_capacity(self.slots.len());
         let mut tripped: Vec<usize> = Vec::new();
         for (idx, slot) in self.slots.iter().enumerate() {

@@ -51,8 +51,8 @@ pub fn is_video_file(filename: &str) -> bool {
 }
 
 /// Heuristic check for an obfuscated filename — random hash/blob stems with no
-/// release-name structure. Mirrors what SABnzbd, decypharr, and nzbdav apply
-/// when deciding whether to fall back to the NZB release title:
+/// release-name structure. Used to decide whether to fall back to the NZB
+/// release title:
 ///
 /// - long alphanumeric stems with no spaces, dots, dashes, or underscores
 ///   between the first and last character (e.g. `VfYc6l3ibzTHwlPkvX1hocwymwUNt6yt`)

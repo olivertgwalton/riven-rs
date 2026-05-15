@@ -151,8 +151,7 @@ fn build_query(
 
 /// Outcome of one indexer's scrape. Separates rate-limit (transient,
 /// retryable) from generic errors so the caller can promote an
-/// all-indexers-rate-limited outcome into `RateLimitedError`. Mirrors
-/// nzbdav's queue-level rateLimit + RateLimitError throw.
+/// all-indexers-rate-limited outcome into `RateLimitedError`.
 #[derive(Debug)]
 enum ScrapeOutcome {
     Ok(Vec<NewznabItem>),
@@ -398,12 +397,10 @@ impl Plugin for NewznabPlugin {
         }
 
         // Promote "every indexer rate-limited, no successes" into a
-        // RateLimitedError so the scrape framework schedules a delayed
-        // retry instead of recording a permanent "no streams" failure.
-        // Mirrors nzbdav's `queue.rateLimit(...) + throw RateLimitError()`
-        // when a 429 is hit. We require zero successful indexers to avoid
-        // failing the whole scrape when some indexers contributed results
-        // even if others 429'd.
+        // RateLimitedError so the scrape framework schedules a delayed retry
+        // instead of recording a permanent "no streams" failure. We require
+        // zero successful indexers to avoid failing the whole scrape when some
+        // indexers contributed results even if others 429'd.
         if rate_limited_count > 0 && ok_count == 0 && indexer_count > 0 {
             tracing::warn!(
                 rate_limited_count,

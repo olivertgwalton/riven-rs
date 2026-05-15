@@ -22,8 +22,8 @@ pub struct NzbFile {
 /// Parsed NZB document: the head metadata (`<meta type="...">` entries) plus
 /// the per-file segment lists. Head metadata is keyed by the `type` attribute
 /// (lowercased) and carries the inner text value — typical entries are
-/// `title`, `password`, `category`, `tag`. Both decypharr and nzbdav use this
-/// for fallback naming and password-protected archives.
+/// `title`, `password`, `category`, `tag`. Used for fallback naming and
+/// password-protected archives.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct NzbDocument {
     pub meta: HashMap<String, String>,
@@ -32,9 +32,8 @@ pub struct NzbDocument {
 
 impl NzbDocument {
     /// Best-effort release title for the NZB. Used as a fallback when inner
-    /// filenames are obfuscated. Priority mirrors decypharr's
-    /// `determineNZBName`: meta `name` → meta `title` → first file's
-    /// subject-derived filename (without extension).
+    /// filenames are obfuscated. Priority: meta `name` → meta `title` → first
+    /// file's subject-derived filename (without extension).
     pub fn release_title(&self) -> Option<String> {
         if let Some(name) = self.meta.get("name").filter(|s| !s.is_empty()) {
             return Some(name.clone());
@@ -53,9 +52,9 @@ impl NzbDocument {
     }
 
     /// Password to apply to encrypted archive entries, if any. Sourced from
-    /// `<meta type="password">`. nzbdav additionally accepts a `{{pw}}.nzb` /
-    /// `password=pw.nzb` filename suffix; that's the caller's responsibility
-    /// (the NZB body doesn't carry the filename).
+    /// `<meta type="password">`. A `{{pw}}.nzb` / `password=pw.nzb` filename
+    /// suffix is the caller's responsibility (the NZB body doesn't carry the
+    /// filename).
     pub fn password(&self) -> Option<&str> {
         self.meta
             .get("password")
@@ -311,10 +310,9 @@ pub fn filename_from_subject(subject: &str) -> String {
 
 /// Decompose a RAR volume filename into `(base, volume_index)`.
 ///
-/// The `base` is what decypharr's `groupFiles` calls the "group key": every
-/// volume of the same archive normalises to the same base, so multi-set NZBs
-/// (e.g. season packs where each episode has its own RAR set) split cleanly
-/// into one group per inner archive.
+/// The `base` is a group key — every volume of the same archive normalises to
+/// the same base, so multi-set NZBs (e.g. season packs where each episode has
+/// its own RAR set) split cleanly into one group per inner archive.
 ///
 /// Strips `.partNN.rar`, `.rNN`, or plain `.rar` from the filename to derive
 /// the base. Returns `None` if the filename isn't a recognised RAR volume
@@ -368,8 +366,6 @@ pub fn rar_volume_info(filename: &str) -> Option<(String, u32)> {
 /// one logical archive's volumes. A movie release with a single archive
 /// produces one group; a season pack with one archive per episode produces
 /// N groups. Non-RAR files (par2/sfv/nfo/.mkv) are excluded.
-///
-/// Mirrors decypharr's `groupFiles` (pkg/usenet/parser/parser.go:231).
 pub fn detect_rar_volume_groups(files: &[NzbFile]) -> Vec<Vec<usize>> {
     let mut groups: HashMap<String, Vec<(u32, usize)>> = HashMap::new();
     for (idx, f) in files.iter().enumerate() {

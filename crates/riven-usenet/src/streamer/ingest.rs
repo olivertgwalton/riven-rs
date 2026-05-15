@@ -114,9 +114,7 @@ impl UsenetStreamer {
     /// Parse an NZB, build the appropriate metadata (direct file or virtual
     /// RAR-contained file), and persist to Redis. `password` is consulted
     /// only when the archive's file headers report encryption; when omitted,
-    /// the NZB's own `<meta type="password">` is used as a fallback
-    /// (mirroring SABnzbd / nzbdav / decypharr behaviour for password-bearing
-    /// NZBs).
+    /// the NZB's own `<meta type="password">` is used as a fallback.
     pub async fn ingest(
         &self,
         info_hash: &str,
@@ -130,8 +128,7 @@ impl UsenetStreamer {
         // meta is still alive in Redis, reuse it — re-fetching RAR headers
         // is the most expensive step in this method (parallel volume probes
         // + header parses) and there's nothing about a duplicate submission
-        // that could change the result. Mirrors nzbdav's
-        // duplicate-NZB-by-info-hash short-circuit in `QueueItemProcessor`.
+        // that could change the result.
         let mut redis = self.redis.clone();
         if let Ok(Some(json)) =
             AsyncCommands::get::<_, Option<String>>(&mut redis, meta_key(info_hash)).await
@@ -215,14 +212,13 @@ impl UsenetStreamer {
                 }
             };
 
-        // PAR2-based name recovery (nzbdav `GetPar2FileDescriptorsStep`).
-        // When the assembled virtual files have obfuscated inner names, fetch
-        // the NZB's smallest PAR2 file and parse its `FileDesc` packets — those
-        // hold the original (pre-obfuscation) filenames the par2 set was
-        // created over. If the FileDesc media count matches the virtual file
-        // count, rename in NZB order so persist_season's per-episode matcher
-        // can recognise S01E01 / S01E02 / ... and avoid the sort-order
-        // fallback altogether.
+        // PAR2-based name recovery. When the assembled virtual files have
+        // obfuscated inner names, fetch the NZB's smallest PAR2 file and parse
+        // its `FileDesc` packets — those hold the original (pre-obfuscation)
+        // filenames the par2 set was created over. If the FileDesc media count
+        // matches the virtual file count, rename in NZB order so
+        // persist_season's per-episode matcher can recognise S01E01 / S01E02 /
+        // ... and avoid the sort-order fallback altogether.
         let obfuscated_playable: Vec<usize> = meta_files
             .iter()
             .enumerate()
@@ -253,12 +249,10 @@ impl UsenetStreamer {
             }
         }
 
-        // Obfuscated single-file rename: nzbdav's `archiveFiles.Count == 1
-        // && IsProbablyObfuscated` + decypharr's `hasOneFile` rewrite. Last
-        // resort when par2 recovery didn't apply (no par2 present, or count
-        // mismatch). When exactly one playable virtual file emerged and its
-        // name is still a random hash, restore the release title from the
-        // NZB head metadata.
+        // Obfuscated single-file rename — last resort when par2 recovery didn't
+        // apply (no par2 present, or count mismatch). When exactly one playable
+        // virtual file emerged and its name is still a random hash, restore the
+        // release title from the NZB head metadata.
         let playable_count = meta_files
             .iter()
             .filter(|f| is_media_filename(&f.filename))
@@ -310,11 +304,10 @@ impl UsenetStreamer {
     /// If `files` contains one or more stored multi-volume RAR archives,
     /// build a virtual `NzbMetaFile` per inner media file across every set.
     ///
-    /// Mirrors decypharr's `groupFiles` (`pkg/usenet/parser/parser.go:231`):
-    /// NZB files are normalised by base name (`{base}.partNN.rar`, `{base}.rNN`)
-    /// and each group is parsed as its own RAR set. A movie release yields
-    /// one group → one or more inner files; an iVy season pack with N
-    /// episodes yields N groups, each contributing its episode's inner
+    /// NZB files are normalised by base name (`{base}.partNN.rar`,
+    /// `{base}.rNN`) and each group is parsed as its own RAR set. A movie
+    /// release yields one group → one or more inner files; a season pack with
+    /// N episodes yields N groups, each contributing its episode's inner
     /// `.mkv`. Returns `Ok(None)` only when no group parses (so the caller
     /// falls back to exposing raw NZB files); a partial set — say 22 of 23
     /// episodes parse — returns the successful 22 and the persist layer's
@@ -381,10 +374,9 @@ impl UsenetStreamer {
         }
 
         // Build all parts up front so we can fan out header fetches in
-        // parallel. A 73-volume FLUX episode sequentially is 73 round-trips
-        // through the rate-limited NNTP path; parallelism caps overall
-        // wall-clock at roughly the slowest single fetch. Mirrors
-        // decypharr's `iter.Mapper(maxConcurrent)` in `rar.go:289`.
+        // parallel. A 73-volume episode sequentially is 73 round-trips through
+        // the rate-limited NNTP path; parallelism caps overall wall-clock at
+        // roughly the slowest single fetch.
         let mut parts: Vec<NzbRarPart> = Vec::with_capacity(ordered_indices.len());
         for &nzb_idx in ordered_indices {
             let f = &files[nzb_idx];

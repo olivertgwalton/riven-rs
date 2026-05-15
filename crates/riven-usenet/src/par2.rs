@@ -4,9 +4,9 @@
 //! The spec [par2-2.0](https://parchive.sourceforge.net/docs/specifications/parity-volume-spec/article-spec.html)
 //! defines a packet container with a fixed 64-byte header followed by a
 //! per-packet-type body. We care only about `FileDesc` (`"PAR 2.0\0FileDesc"`),
-//! which gives us the file ID + MD5 + 16K-MD5 + length + UTF-8 filename. nzbdav
-//! uses this to map obfuscated downloaded files back to their real names via
-//! a 16K-MD5 lookup; decypharr ignores par2 entirely.
+//! which gives us the file ID + MD5 + 16K-MD5 + length + UTF-8 filename. The
+//! ingest path uses these to map obfuscated NZB filenames back to their real
+//! names.
 //!
 //! This module is a strict parser — anything malformed yields `Err`. The
 //! caller is responsible for fetching the par2 file body (usually the smallest

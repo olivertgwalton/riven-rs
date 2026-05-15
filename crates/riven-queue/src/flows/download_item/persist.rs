@@ -280,9 +280,7 @@ pub async fn persist_episode(
     // Obfuscated-NZB fallback: when no inner filename parses to S/E but the
     // payload is a single video file with a random/hash name, trust the stream
     // selection (the release title was already vetted by the ranker) and
-    // accept that one file. Mirrors decypharr's "rename single-file NZB to
-    // release title" and nzbdav's `archiveFiles.Count == 1 && IsProbablyObfuscated`
-    // path — typical iVy/FLUX releases where inner files like
+    // accept that one file. Typical for releases where inner files like
     // `VfYc6l3ibzTHwlPkvX1hocwymwUNt6yt.mkv` carry no episode metadata.
     if matched.is_empty()
         && playable_videos.len() == 1
@@ -480,16 +478,15 @@ pub async fn persist_season(
     }
 
     // Obfuscated-season-pack fallback: when no inner filename parses to a
-    // recognisable S/E *and* the pack is exactly the right shape (one
-    // playable video file per episode, all obfuscated), assign files to
-    // episodes in NZB/sort order. Mirrors nzbdav's single-file-archive
-    // rename to mount-folder name, generalised to multi-file packs.
+    // recognisable S/E *and* the pack is exactly the right shape (one playable
+    // video file per episode, all obfuscated), assign files to episodes in
+    // NZB/sort order.
     //
     // Constraints kept tight on purpose: a partial match (e.g. 22 of 23
-    // episodes match normally, 1 obfuscated file left over) is *not*
-    // covered — that's safer left to the per-episode cascade than to a
-    // brittle index-based guess. The release-title S/E vetting that
-    // ranked this pack is what justifies trusting the order here.
+    // episodes match normally, 1 obfuscated file left over) is *not* covered —
+    // that's safer left to the per-episode cascade than to a brittle
+    // index-based guess. The release-title S/E vetting that ranked this pack
+    // is what justifies trusting the order here.
     let no_normal_matches = episode_matches.iter().all(|(_, m)| m.is_empty());
     if no_normal_matches
         && !episodes.is_empty()
