@@ -10,8 +10,14 @@ use super::rate_limit::ServiceState;
 
 pub(super) const BACKOFF_BASE_SECS: u64 = 5;
 const JITTER: f64 = 0.5;
-/// Cap on how long a 429 `Retry-After` pause is registered on the service state.
-pub(super) const MAX_RETRY_AFTER_SECS: u64 = 60;
+/// Fallback pause when a 429 response carries no usable `Retry-After` header.
+/// Matches riven-ts' `defaultWaitMs = 10_000` in
+/// `packages/util-plugin-sdk/lib/datasource/index.ts`: many indexers (nzbgeek,
+/// most newznab variants) return bare 429s, and without this the limiter falls
+/// straight back to the configured rate and keeps hammering. 10 s is long
+/// enough to break a tight retry loop, short enough that legitimate transient
+/// 429s clear quickly.
+pub(super) const DEFAULT_429_PAUSE_SECS: u64 = 10;
 
 /// Returns `true` for transient network errors that warrant a retry (connection
 /// failures, timeouts, stale keep-alive races producing `IncompleteMessage`).
@@ -124,8 +130,11 @@ pub(super) fn parse_rate_limit_pause(
     status: StatusCode,
     headers: &HeaderMap,
 ) -> Option<Duration> {
+    // Mirror riven-ts: trust whatever `Retry-After` the server sent (no cap),
+    // and fall back to a default pause when the header is missing — many
+    // indexers send bare 429s.
     let retry_after = if status == StatusCode::TOO_MANY_REQUESTS {
-        parse_retry_after(headers).map(|delay| delay.min(Duration::from_secs(MAX_RETRY_AFTER_SECS)))
+        Some(parse_retry_after(headers).unwrap_or(Duration::from_secs(DEFAULT_429_PAUSE_SECS)))
     } else {
         None
     };

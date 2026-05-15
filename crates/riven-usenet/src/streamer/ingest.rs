@@ -6,8 +6,10 @@ use redis::AsyncCommands;
 
 use crate::nntp::NntpError;
 use crate::nzb::{
-    NzbFile, NzbSegment, detect_rar_volume_set, filename_from_subject, looks_like_media, parse_nzb,
+    NzbFile, NzbSegment, detect_rar_volume_groups, filename_from_subject, looks_like_media,
+    looks_obfuscated, parse_nzb_document,
 };
+use crate::par2::{Par2FileDesc, looks_like_par2, parse_file_descriptors};
 use crate::rar::{self, RarEncryption, RarVolumeFileEntry};
 
 use super::{
@@ -106,14 +108,26 @@ impl UsenetStreamer {
 
     /// Parse an NZB, build the appropriate metadata (direct file or virtual
     /// RAR-contained file), and persist to Redis. `password` is consulted
-    /// only when the archive's file headers report encryption.
+    /// only when the archive's file headers report encryption; when omitted,
+    /// the NZB's own `<meta type="password">` is used as a fallback
+    /// (mirroring SABnzbd / nzbdav / decypharr behaviour for password-bearing
+    /// NZBs).
     pub async fn ingest(
         &self,
         info_hash: &str,
         nzb_xml: &str,
         password: Option<&str>,
     ) -> Result<NzbMeta, StreamerError> {
-        let files = parse_nzb(nzb_xml)?;
+        let document = parse_nzb_document(nzb_xml)?;
+        let release_title = document.release_title();
+        // Caller-supplied password wins; fall back to the NZB's `<meta>`
+        // password entry. Owning the resolved value keeps the borrow lifetime
+        // simple across the rest of this function.
+        let resolved_password: Option<String> = password
+            .map(str::to_string)
+            .or_else(|| document.password().map(str::to_string));
+        let password = resolved_password.as_deref();
+        let files = document.files;
         if files.is_empty() {
             return Err(StreamerError::NoMediaFile);
         }
@@ -123,7 +137,7 @@ impl UsenetStreamer {
         // A single-file RAR archive produces one virtual file (movie); a
         // multi-file RAR (season pack) produces one virtual file per inner
         // media file.
-        let (meta_files, file_password) =
+        let (mut meta_files, file_password) =
             match self.try_build_rar_virtual_files(&files, password).await? {
                 Some(virtual_files) if !virtual_files.is_empty() => {
                     let is_encrypted = virtual_files.iter().any(|vf| {
@@ -172,6 +186,80 @@ impl UsenetStreamer {
                 }
             };
 
+        // PAR2-based name recovery (nzbdav `GetPar2FileDescriptorsStep`).
+        // When the assembled virtual files have obfuscated inner names, fetch
+        // the NZB's smallest PAR2 file and parse its `FileDesc` packets — those
+        // hold the original (pre-obfuscation) filenames the par2 set was
+        // created over. If the FileDesc media count matches the virtual file
+        // count, rename in NZB order so persist_season's per-episode matcher
+        // can recognise S01E01 / S01E02 / ... and avoid the sort-order
+        // fallback altogether.
+        let obfuscated_playable: Vec<usize> = meta_files
+            .iter()
+            .enumerate()
+            .filter(|(_, f)| is_media_filename(&f.filename) && looks_obfuscated(&f.filename))
+            .map(|(i, _)| i)
+            .collect();
+        if !obfuscated_playable.is_empty()
+            && let Some(par2_names) = self.recover_filenames_from_par2(&files).await
+        {
+            if par2_names.len() == obfuscated_playable.len() {
+                for (slot, recovered) in obfuscated_playable.iter().zip(par2_names.iter()) {
+                    let old = meta_files[*slot].filename.clone();
+                    meta_files[*slot].filename = recovered.clone();
+                    tracing::info!(
+                        info_hash,
+                        old = %old,
+                        new = %recovered,
+                        "renamed obfuscated file via par2 FileDesc"
+                    );
+                }
+            } else {
+                tracing::debug!(
+                    info_hash,
+                    par2_count = par2_names.len(),
+                    obfuscated_count = obfuscated_playable.len(),
+                    "par2 FileDesc count differs from obfuscated file count; skipping rename"
+                );
+            }
+        }
+
+        // Obfuscated single-file rename: nzbdav's `archiveFiles.Count == 1
+        // && IsProbablyObfuscated` + decypharr's `hasOneFile` rewrite. Last
+        // resort when par2 recovery didn't apply (no par2 present, or count
+        // mismatch). When exactly one playable virtual file emerged and its
+        // name is still a random hash, restore the release title from the
+        // NZB head metadata.
+        let playable_count = meta_files
+            .iter()
+            .filter(|f| is_media_filename(&f.filename))
+            .count();
+        if playable_count == 1
+            && let Some(release_title) = release_title.as_deref()
+        {
+            if let Some(file) = meta_files
+                .iter_mut()
+                .find(|f| is_media_filename(&f.filename))
+            {
+                if looks_obfuscated(&file.filename) {
+                    let ext = file
+                        .filename
+                        .rsplit('.')
+                        .next()
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or("mkv");
+                    let new_name = format!("{release_title}.{ext}");
+                    tracing::info!(
+                        info_hash,
+                        old = %file.filename,
+                        new = %new_name,
+                        "renamed obfuscated single-file NZB to release title"
+                    );
+                    file.filename = new_name;
+                }
+            }
+        }
+
         let meta = NzbMeta {
             info_hash: info_hash.to_string(),
             files: meta_files,
@@ -192,43 +280,142 @@ impl UsenetStreamer {
         Ok(meta)
     }
 
-    /// If `files` contains a stored multi-volume RAR archive, fetch each
-    /// volume's header bytes, parse them, and return one virtual `NzbMetaFile`
-    /// per contained media file. A single-file RAR (movie split across
-    /// volumes) yields one virtual file; a multi-file RAR (season pack)
-    /// yields one per inner episode.
+    /// If `files` contains one or more stored multi-volume RAR archives,
+    /// build a virtual `NzbMetaFile` per inner media file across every set.
     ///
-    /// Returns `Ok(None)` if it isn't a RAR set, any volume's header can't be
-    /// fetched/parsed, or no inner media file's slices add up to its declared
-    /// unpacked size. The caller falls back to exposing the top-level NZB
-    /// files directly when this returns `None`.
+    /// Mirrors decypharr's `groupFiles` (`pkg/usenet/parser/parser.go:231`):
+    /// NZB files are normalised by base name (`{base}.partNN.rar`, `{base}.rNN`)
+    /// and each group is parsed as its own RAR set. A movie release yields
+    /// one group → one or more inner files; an iVy season pack with N
+    /// episodes yields N groups, each contributing its episode's inner
+    /// `.mkv`. Returns `Ok(None)` only when no group parses (so the caller
+    /// falls back to exposing raw NZB files); a partial set — say 22 of 23
+    /// episodes parse — returns the successful 22 and the persist layer's
+    /// cascade picks up the missing one as a per-episode scrape.
     async fn try_build_rar_virtual_files(
         &self,
         files: &[NzbFile],
         password: Option<&str>,
     ) -> Result<Option<Vec<NzbMetaFile>>, StreamerError> {
-        let Some(ordered_indices) = detect_rar_volume_set(files) else {
+        let groups = detect_rar_volume_groups(files);
+        if groups.is_empty() {
             return Ok(None);
-        };
+        }
+        let mut all_virtual: Vec<NzbMetaFile> = Vec::new();
+        let mut missing_password = false;
+        for (group_idx, ordered_indices) in groups.iter().enumerate() {
+            match self
+                .build_rar_group_virtual_files(files, ordered_indices, password)
+                .await
+            {
+                Ok(Some(mut group_files)) => all_virtual.append(&mut group_files),
+                Ok(None) => {
+                    tracing::debug!(
+                        group_idx,
+                        volumes = ordered_indices.len(),
+                        "RAR group did not produce usable virtual files; skipping"
+                    );
+                }
+                Err(StreamerError::MissingPassword) => {
+                    missing_password = true;
+                    // Keep iterating — other groups in the same NZB might be
+                    // unencrypted and still recoverable.
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        if all_virtual.is_empty() {
+            if missing_password {
+                return Err(StreamerError::MissingPassword);
+            }
+            return Ok(None);
+        }
+        if missing_password {
+            tracing::warn!(
+                produced = all_virtual.len(),
+                "some RAR groups in this NZB are encrypted and could not be ingested without a password"
+            );
+        }
+        Ok(Some(all_virtual))
+    }
+
+    /// Per-group RAR ingest: walk one archive's volumes, parse headers,
+    /// produce one `NzbMetaFile` per inner stored media file. Extracted from
+    /// the original whole-NZB body so `try_build_rar_virtual_files` can fan
+    /// out across multiple sets in a single NZB.
+    async fn build_rar_group_virtual_files(
+        &self,
+        files: &[NzbFile],
+        ordered_indices: &[usize],
+        password: Option<&str>,
+    ) -> Result<Option<Vec<NzbMetaFile>>, StreamerError> {
         if ordered_indices.is_empty() {
             return Ok(None);
         }
 
+        // Build all parts up front so we can fan out header fetches in
+        // parallel. A 73-volume FLUX episode sequentially is 73 round-trips
+        // through the rate-limited NNTP path; parallelism caps overall
+        // wall-clock at roughly the slowest single fetch. Mirrors
+        // decypharr's `iter.Mapper(maxConcurrent)` in `rar.go:289`.
         let mut parts: Vec<NzbRarPart> = Vec::with_capacity(ordered_indices.len());
-        let mut volume_entries: Vec<Vec<RarVolumeFileEntry>> =
-            Vec::with_capacity(ordered_indices.len());
-
-        for (vol_idx, &nzb_idx) in ordered_indices.iter().enumerate() {
+        for &nzb_idx in ordered_indices {
             let f = &files[nzb_idx];
             if f.segments.is_empty() {
                 return Ok(None);
             }
-            let mut part = build_rar_part(f);
+            parts.push(build_rar_part(f));
+        }
 
-            let header_bytes = match self
-                .fetch_volume_header_bytes(&part, RAR_HEADER_PROBE_BYTES)
-                .await
-            {
+        // Concurrency cap of 8 — well below typical per-account connection
+        // limits (Newshosting=100, EZNews=50) and high enough to make
+        // ingest of a 73-volume episode pack feel snappy.
+        //
+        // Uses `FuturesOrdered` with `streamer.clone()` (cheap — UsenetStreamer
+        // is a bag of Arcs) rather than `stream::buffered` with `&self`,
+        // matching the prefetch path in `read.rs`. `buffered` with `async
+        // move` closures over `&self` trips a higher-ranked-Send bound in
+        // async-trait-emitted future types (`Send is not general enough` at
+        // the method boundary).
+        const HEADER_FETCH_CONCURRENCY: usize = 8;
+        let mut header_results: Vec<Result<Vec<u8>, StreamerError>> =
+            Vec::with_capacity(parts.len());
+        let mut pending: FuturesOrdered<FetchFuture<Result<Vec<u8>, StreamerError>>> =
+            FuturesOrdered::new();
+        let mut next_to_submit = 0usize;
+        while next_to_submit < parts.len()
+            && pending.len() < HEADER_FETCH_CONCURRENCY
+        {
+            let part = parts[next_to_submit].clone();
+            let streamer = self.clone();
+            pending.push_back(Box::pin(async move {
+                streamer
+                    .fetch_volume_header_bytes(&part, RAR_HEADER_PROBE_BYTES)
+                    .await
+            }));
+            next_to_submit += 1;
+        }
+        while let Some(result) = pending.next().await {
+            header_results.push(result);
+            if next_to_submit < parts.len() {
+                let part = parts[next_to_submit].clone();
+                let streamer = self.clone();
+                pending.push_back(Box::pin(async move {
+                    streamer
+                        .fetch_volume_header_bytes(&part, RAR_HEADER_PROBE_BYTES)
+                        .await
+                }));
+                next_to_submit += 1;
+            }
+        }
+
+        let mut volume_entries: Vec<Vec<RarVolumeFileEntry>> =
+            Vec::with_capacity(parts.len());
+
+        for (vol_idx, (part, fetch_result)) in
+            parts.iter_mut().zip(header_results).enumerate()
+        {
+            let header_bytes = match fetch_result {
                 Ok(b) => b,
                 Err(error) => {
                     tracing::debug!(
@@ -273,7 +460,6 @@ impl UsenetStreamer {
             }
 
             volume_entries.push(entries);
-            parts.push(part);
         }
 
         // Walk every (volume, stored_entry) pair in order and group by
@@ -462,6 +648,68 @@ impl UsenetStreamer {
         Ok(buf)
     }
 
+    /// Fetch and parse the NZB's smallest PAR2 file, returning the media
+    /// filenames it claims (one entry per FileDesc packet, NZB order). The
+    /// caller pairs these against obfuscated virtual files to recover real
+    /// names. Returns `None` if there's no PAR2 file, the fetch fails, the
+    /// blob has no FileDesc packets, or every recovered name is itself
+    /// obfuscated.
+    ///
+    /// We pick the smallest par2 because:
+    ///   - the `*.par2` index packet is always the smallest in a set,
+    ///   - `*.volNN+NN.par2` slices duplicate the same FileDesc packets but
+    ///     are larger and contain unused recovery data.
+    /// Fetching just the index keeps the NZB-download quota cost to one file.
+    async fn recover_filenames_from_par2(&self, files: &[NzbFile]) -> Option<Vec<String>> {
+        let smallest = files
+            .iter()
+            .filter(|f| {
+                let name = filename_from_subject(&f.subject);
+                looks_like_par2(&name)
+            })
+            .min_by_key(|f| f.segments.iter().map(|s| s.bytes).sum::<u64>())?;
+        if smallest.segments.is_empty() {
+            return None;
+        }
+        let total_bytes: u64 = smallest.segments.iter().map(|s| s.bytes).sum();
+        let mut buf: Vec<u8> = Vec::with_capacity(total_bytes as usize);
+        for seg in &smallest.segments {
+            match self.fetch_decoded_cached(&seg.message_id).await {
+                Ok(decoded) => buf.extend_from_slice(&decoded),
+                Err(error) => {
+                    tracing::debug!(
+                        error = %error,
+                        message_id = %seg.message_id,
+                        "par2 segment fetch failed; skipping par2 recovery"
+                    );
+                    return None;
+                }
+            }
+        }
+        let descs: Vec<Par2FileDesc> = match parse_file_descriptors(&buf) {
+            Ok(d) => d,
+            Err(error) => {
+                tracing::debug!(error = %error, "par2 FileDesc parse failed");
+                return None;
+            }
+        };
+        let media: Vec<String> = descs
+            .into_iter()
+            .filter(|d| is_media_filename(&d.filename))
+            .map(|d| d.filename)
+            .collect();
+        if media.is_empty() {
+            return None;
+        }
+        // If everything the par2 set named is itself obfuscated, the recovery
+        // is no better than what we have. Skip — the downstream sort-order
+        // fallback in persist_season will still work.
+        if media.iter().all(|n| looks_obfuscated(n)) {
+            tracing::debug!("par2 FileDesc names are themselves obfuscated; skipping rename");
+            return None;
+        }
+        Some(media)
+    }
 }
 
 pub(crate) fn direct_meta_file(f: &NzbFile) -> NzbMetaFile {

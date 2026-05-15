@@ -17,8 +17,8 @@ fn is_item_deleted_fk_error(err: &anyhow::Error) -> bool {
 }
 
 use super::helpers::{
-    episode_vfs_path, handle_bitrate_failure, is_video_file, matches_episode_lookup,
-    parse_file_path, select_episode_files,
+    episode_vfs_path, handle_bitrate_failure, is_video_file, looks_obfuscated,
+    matches_episode_lookup, parse_file_path, select_episode_files,
 };
 use crate::JobQueue;
 
@@ -261,16 +261,42 @@ pub async fn persist_episode(
 
     tracing::debug!(id, info_hash, files = dl.files.len(), "persisting episode");
 
-    let matched: Vec<(&DownloadFile, riven_rank::ParsedData)> = dl
+    let playable_videos: Vec<(&DownloadFile, riven_rank::ParsedData)> = dl
         .files
         .iter()
         .filter(|f| is_video_file(&f.filename))
         .filter(|f| has_playable_url(f))
         .map(|f| (f, parse_file_path(&f.filename)))
+        .collect();
+
+    let mut matched: Vec<(&DownloadFile, riven_rank::ParsedData)> = playable_videos
+        .iter()
         .filter(|(_, p)| {
             matches_episode_lookup(p, season_number, episode_number, item.absolute_number)
         })
+        .map(|(f, p)| (*f, p.clone()))
         .collect();
+
+    // Obfuscated-NZB fallback: when no inner filename parses to S/E but the
+    // payload is a single video file with a random/hash name, trust the stream
+    // selection (the release title was already vetted by the ranker) and
+    // accept that one file. Mirrors decypharr's "rename single-file NZB to
+    // release title" and nzbdav's `archiveFiles.Count == 1 && IsProbablyObfuscated`
+    // path — typical iVy/FLUX releases where inner files like
+    // `VfYc6l3ibzTHwlPkvX1hocwymwUNt6yt.mkv` carry no episode metadata.
+    if matched.is_empty()
+        && playable_videos.len() == 1
+        && looks_obfuscated(&playable_videos[0].0.filename)
+    {
+        tracing::info!(
+            id, season = season_number, episode = episode_number,
+            info_hash = %info_hash,
+            filename = %playable_videos[0].0.filename,
+            "obfuscated single-file NZB; accepting based on stream release title"
+        );
+        let (file, _) = &playable_videos[0];
+        matched.push((*file, riven_rank::ParsedData::default()));
+    }
 
     if matched.is_empty() {
         tracing::info!(
@@ -451,6 +477,51 @@ pub async fn persist_season(
             .map(|(f, p)| (*f, p.clone()))
             .collect();
         episode_matches.push((ep, matched));
+    }
+
+    // Obfuscated-season-pack fallback: when no inner filename parses to a
+    // recognisable S/E *and* the pack is exactly the right shape (one
+    // playable video file per episode, all obfuscated), assign files to
+    // episodes in NZB/sort order. Mirrors nzbdav's single-file-archive
+    // rename to mount-folder name, generalised to multi-file packs.
+    //
+    // Constraints kept tight on purpose: a partial match (e.g. 22 of 23
+    // episodes match normally, 1 obfuscated file left over) is *not*
+    // covered — that's safer left to the per-episode cascade than to a
+    // brittle index-based guess. The release-title S/E vetting that
+    // ranked this pack is what justifies trusting the order here.
+    let no_normal_matches = episode_matches.iter().all(|(_, m)| m.is_empty());
+    if no_normal_matches
+        && !episodes.is_empty()
+        && parsed_video_files.len() == episodes.len()
+        && parsed_video_files
+            .iter()
+            .all(|(f, _)| looks_obfuscated(&f.filename))
+    {
+        let mut ordered: Vec<&(&DownloadFile, riven_rank::ParsedData)> =
+            parsed_video_files.iter().collect();
+        // Stable filename sort — obfuscated names sort consistently and
+        // typically follow upload order on the indexer side.
+        ordered.sort_by(|a, b| a.0.filename.cmp(&b.0.filename));
+        let mut by_ep: Vec<(&MediaItem, Vec<(&DownloadFile, riven_rank::ParsedData)>)> =
+            Vec::with_capacity(episodes.len());
+        let mut episodes_sorted = episodes.iter().collect::<Vec<_>>();
+        episodes_sorted.sort_by_key(|e| e.episode_number.unwrap_or(0));
+        for (idx, ep) in episodes_sorted.iter().enumerate() {
+            by_ep.push((*ep, vec![(ordered[idx].0, riven_rank::ParsedData::default())]));
+        }
+        let example = ordered
+            .first()
+            .map(|(f, _)| f.filename.as_str())
+            .unwrap_or("");
+        tracing::info!(
+            id, season = season_number, info_hash = %info_hash,
+            file_count = parsed_video_files.len(),
+            episode_count = episodes.len(),
+            example_filename = %example,
+            "obfuscated season pack matched 1:1 to episodes by sort order"
+        );
+        episode_matches = by_ep;
     }
 
     let mut completed_episode_ids: Vec<i64> = Vec::new();

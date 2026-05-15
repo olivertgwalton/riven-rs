@@ -69,7 +69,6 @@ pub async fn start(id: i64, job: &ScrapeJob, queue: &JobQueue) {
             | MediaItemState::Ongoing
             | MediaItemState::Scraped
             | MediaItemState::PartiallyCompleted
-            | MediaItemState::Completed
     ) {
         tracing::debug!(id, state = ?item.state, "skipping scrape");
         return;
@@ -114,11 +113,20 @@ pub async fn finalize(id: i64, queue: &JobQueue) {
     };
 
     // Skip items in terminal/non-processable states — stale plugin jobs can
-    // still drain after an item is marked Failed; without this guard they
-    // would fire spurious "no streams" notifications indefinitely.
-    if matches!(item.state, MediaItemState::Failed | MediaItemState::Paused) {
+    // still drain after an item is marked Failed or Completed (e.g. a season
+    // pack downloaded every requested episode while this scrape was in
+    // flight); without this guard they would fire spurious "no streams"
+    // notifications indefinitely. Emit IncorrectState (mirrors riven-ts
+    // ScraperService.scrapeItem) so subscribers can observe the skip.
+    if matches!(
+        item.state,
+        MediaItemState::Failed | MediaItemState::Paused | MediaItemState::Completed
+    ) {
         tracing::debug!(id, state = ?item.state, "skipping finalize for non-processable state");
         queue.clear_flow_all("scrape", id).await;
+        queue
+            .notify(RivenEvent::MediaItemScrapeErrorIncorrectState { id })
+            .await;
         return;
     }
 
@@ -208,6 +216,9 @@ pub async fn parse_results(id: i64, _job: &ParseScrapeResultsJob, queue: &JobQue
     );
     if !processable {
         tracing::debug!(id, state = ?item.state, "item not in processable state for scrape persist; skipping");
+        queue
+            .notify(RivenEvent::MediaItemScrapeErrorIncorrectState { id })
+            .await;
         return;
     }
 

@@ -12,7 +12,6 @@
 //! through Redis-stored NZB metadata.
 
 use async_trait::async_trait;
-use futures::stream::{FuturesUnordered, StreamExt};
 use lru::LruCache;
 use redis::AsyncCommands;
 use riven_core::events::{EventType, HookResponse};
@@ -21,13 +20,11 @@ use riven_core::plugin::{Plugin, PluginContext, SettingField};
 use riven_core::register_plugin;
 use riven_core::settings::PluginSettings;
 use riven_core::types::{
-    CacheCheckFile, CacheCheckResult, CachedStoreEntry, DownloadFile, DownloadResult, ProviderInfo,
+    CacheCheckResult, CachedStoreEntry, DownloadFile, DownloadResult, ProviderInfo,
     StreamLinkResponse, TorrentStatus,
 };
-use riven_usenet::nntp::{NntpPool, NntpProvider, NntpServerConfig};
-use riven_usenet::nzb::{NzbFile, filename_from_subject, looks_like_media, parse_nzb};
+use riven_usenet::nntp::{NntpProvider, NntpServerConfig};
 use riven_usenet::{NntpConfig, UsenetStreamer};
-use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
@@ -35,44 +32,23 @@ use std::time::Duration;
 const PROVIDER: &str = "usenet";
 const NZB_INFO_HASH_PREFIX: &str = "nzb-";
 
-/// Cap on the per-cache-check parallel STAT probes. Each probe issues one
-/// `STAT` against the configured NNTP provider; the cap is well below typical
-/// per-account connection limits so a busy scrape doesn't starve the streamer
-/// of sockets.
-const PROBE_CONCURRENCY: usize = 8;
-
 /// Process-wide cache of recently-fetched NZB XML bodies, keyed by info_hash.
-/// Populated by the cache-check probe; consulted by `on_download_requested`
-/// so the same XML isn't re-fetched within a single download flow. Bounded
-/// so a long-running session doesn't pin every NZB it has ever seen.
+/// Consulted by `on_download_requested` so a re-attempt within one download
+/// flow doesn't re-fetch the XML. Bounded so a long-running session doesn't
+/// pin every NZB it has ever seen.
 fn nzb_body_cache() -> &'static Mutex<LruCache<String, Arc<String>>> {
     static C: OnceLock<Mutex<LruCache<String, Arc<String>>>> = OnceLock::new();
     C.get_or_init(|| Mutex::new(LruCache::new(NonZeroUsize::new(256).unwrap())))
 }
 
-/// Process-wide NNTP pool cache, keyed by the raw `nntpproviders` settings
-/// JSON. The cache-check probe runs once per item; reusing a pool keeps the
-/// authenticated NNTP sockets hot instead of re-dialing for every probe.
-fn nntp_pool_cache() -> &'static Mutex<HashMap<String, Arc<NntpPool>>> {
-    static C: OnceLock<Mutex<HashMap<String, Arc<NntpPool>>>> = OnceLock::new();
-    C.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-fn pool_for_settings(settings: &PluginSettings) -> Option<Arc<NntpPool>> {
-    let raw = settings.get("nntpproviders")?.to_string();
-    if let Some(p) = nntp_pool_cache().lock().unwrap().get(&raw) {
-        return Some(p.clone());
-    }
-    let cfg = parse_providers_str(&raw)?;
-    let pool = NntpPool::new_multi(cfg.providers);
-    nntp_pool_cache()
-        .lock()
-        .unwrap()
-        .insert(raw, pool.clone());
-    Some(pool)
-}
-
-pub(crate) const PROFILE: HttpServiceProfile = HttpServiceProfile::new("usenet-nzb-fetch");
+/// Rate-limit NZB body fetches. Indexers (NZBgeek, DrunkenSlug, etc.) cap
+/// the download endpoint separately from the search API and start returning
+/// 429s well before the per-day quota — the season→episode cascade can fan
+/// out dozens of probes in a single tick, which trips the limit instantly.
+/// 30/min is conservative across the common indexers and aligns with the
+/// newznab plugin's API limit.
+pub(crate) const PROFILE: HttpServiceProfile =
+    HttpServiceProfile::new("usenet-nzb-fetch").with_rate_limit(30, Duration::from_secs(60));
 
 fn nzb_url_redis_key(info_hash: &str) -> String {
     format!("riven:nzb:url:{info_hash}")
@@ -259,7 +235,7 @@ impl Plugin for UsenetPlugin {
         &self,
         hashes: &[String],
         provider: Option<&str>,
-        ctx: &PluginContext,
+        _ctx: &PluginContext,
     ) -> anyhow::Result<HookResponse> {
         // Only respond when the caller is asking about our provider (or did
         // not narrow). Other providers (realdebrid, alldebrid, …) get the
@@ -269,36 +245,35 @@ impl Plugin for UsenetPlugin {
         {
             return Ok(HookResponse::Empty);
         }
-        let Some(pool) = pool_for_settings(&ctx.settings) else {
-            return Ok(HookResponse::Empty);
-        };
 
         let nzb_hashes: Vec<&String> = hashes.iter().filter(|h| is_nzb_info_hash(h)).collect();
         if nzb_hashes.is_empty() {
             return Ok(HookResponse::Empty);
         }
 
-        // Run probes concurrently up to `PROBE_CONCURRENCY`. A scrape can
-        // surface dozens of NZB candidates for one item; probing them
-        // serially turns a sub-second gate into seconds of latency.
-        let mut tasks = FuturesUnordered::new();
-        let mut iter = nzb_hashes.into_iter();
-        for _ in 0..PROBE_CONCURRENCY {
-            if let Some(h) = iter.next() {
-                tasks.push(probe_one(h.clone(), pool.clone(), ctx));
-            } else {
-                break;
-            }
-        }
-        let mut results: Vec<CacheCheckResult> = Vec::new();
-        while let Some(outcome) = tasks.next().await {
-            if let Some(r) = outcome {
-                results.push(r);
-            }
-            if let Some(h) = iter.next() {
-                tasks.push(probe_one(h.clone(), pool.clone(), ctx));
-            }
-        }
+        // Treat every NZB candidate as "Cached" without probing. Probing was
+        // structurally wrong for usenet: each probe cost one full NZB-XML
+        // download from the indexer plus one NNTP STAT, and with dozens of
+        // candidates per item the per-indexer rate limit (nzbgeek/drunkenslug
+        // ~25-30/min) is exhausted before any actual download is attempted —
+        // which turns *every* candidate into `Unknown` and starves the
+        // download loop.
+        //
+        // Mirrors decypharr's `Process`/`Manager.AddNZB` and nzbdav's queue
+        // pipeline: both projects skip per-candidate verification and let
+        // the real download path discover dead releases and fall through to
+        // the next ranked stream. The streamer's ingest step still STATs a
+        // sample of segments before exposing the file, so dead NZBs are
+        // still caught — just at ingest time rather than cache-check time.
+        let results: Vec<CacheCheckResult> = nzb_hashes
+            .into_iter()
+            .map(|h| CacheCheckResult {
+                hash: h.clone(),
+                store: PROVIDER.to_string(),
+                status: TorrentStatus::Cached,
+                files: Vec::new(),
+            })
+            .collect();
         Ok(HookResponse::CacheCheck(results))
     }
 
@@ -401,6 +376,7 @@ impl Plugin for UsenetPlugin {
         // there is no separate "live link" to refresh.
         Ok(HookResponse::StreamLink(StreamLinkResponse {
             link: String::new(),
+            provider: Some(PROVIDER.to_string()),
         }))
     }
 }
@@ -439,96 +415,3 @@ async fn fetch_nzb_xml(info_hash: &str, ctx: &PluginContext) -> Option<Arc<Strin
     Some(arc)
 }
 
-/// Pick the first segment of a media file (.mkv/.mp4/...) to STAT — that's
-/// what we care about staying alive. Falls back to the first segment of any
-/// file when no media file is detected (e.g. obfuscated subjects).
-fn probe_message_id(files: &[NzbFile]) -> Option<(String, String)> {
-    files
-        .iter()
-        .filter(|f| looks_like_media(f))
-        .chain(files.iter())
-        .find_map(|f| {
-            f.segments
-                .first()
-                .map(|s| (f.subject.clone(), s.message_id.clone()))
-        })
-}
-
-/// Synthesise a `CacheCheckFile` list from a parsed NZB so the download
-/// loop's per-stream bitrate filter has sizes to work with. Only media files
-/// are emitted; par2/nfo/sfv companions add noise but no payload.
-fn synthesize_files(files: &[NzbFile]) -> Vec<CacheCheckFile> {
-    files
-        .iter()
-        .filter(|f| looks_like_media(f))
-        .enumerate()
-        .map(|(idx, f)| {
-            let size: u64 = f.segments.iter().map(|s| s.bytes).sum();
-            CacheCheckFile {
-                index: idx as u32,
-                name: filename_from_subject(&f.subject),
-                path: String::new(),
-                size: Some(size),
-                link: None,
-            }
-        })
-        .collect()
-}
-
-/// Probe one NZB hash: fetch + parse + STAT the leading article. The verdict
-/// (`Cached` / dropped / `Unknown` on transient error) feeds the download
-/// loop's per-stream gate the same way debrid cache-check verdicts do.
-async fn probe_one(
-    hash: String,
-    pool: Arc<NntpPool>,
-    ctx: &PluginContext,
-) -> Option<CacheCheckResult> {
-    let xml = fetch_nzb_xml(&hash, ctx).await?;
-    let files = match parse_nzb(&xml) {
-        Ok(f) => f,
-        Err(e) => {
-            tracing::debug!(info_hash = %hash, error = %e, "usenet probe: NZB parse failed");
-            return None;
-        }
-    };
-    let (subject, mid) = probe_message_id(&files)?;
-    match pool.stat(&mid).await {
-        Ok(true) => {
-            tracing::debug!(info_hash = %hash, subject = %subject, mid = %mid, "usenet probe: alive");
-            Some(CacheCheckResult {
-                hash,
-                store: PROVIDER.to_string(),
-                status: TorrentStatus::Cached,
-                files: synthesize_files(&files),
-            })
-        }
-        Ok(false) => {
-            // Article missing — typical for old public NZBs whose payload
-            // has expired. Emit nothing so the download loop treats it as
-            // "not cached on this provider" and moves on to the next
-            // ranked NZB (usually a different indexer's posting of the
-            // same release).
-            tracing::info!(
-                info_hash = %hash,
-                subject = %subject,
-                mid = %mid,
-                "usenet probe: article missing; NZB skipped"
-            );
-            None
-        }
-        Err(e) => {
-            // Transient NNTP failure (auth, network). We don't know whether
-            // the article is alive, so return `Unknown` — users with
-            // `attempt_unknown_downloads` enabled will still try; otherwise
-            // it's gated. Matches the debrid plugins' behaviour on store
-            // errors.
-            tracing::warn!(info_hash = %hash, error = %e, "usenet probe: STAT errored");
-            Some(CacheCheckResult {
-                hash,
-                store: PROVIDER.to_string(),
-                status: TorrentStatus::Unknown,
-                files: synthesize_files(&files),
-            })
-        }
-    }
-}

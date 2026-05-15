@@ -360,7 +360,10 @@ impl CacheMemo {
 
     /// Look up `info_hash` in the `(plugin, provider)` cache, fetching from
     /// the plugin if we haven't asked yet. Returns the cached files only when
-    /// the hash is positively cached on this provider.
+    /// the hash is positively cached on this provider — an empty file list
+    /// still counts as "cached," it just means the plugin didn't surface
+    /// per-file metadata at cache-check time (the usenet plugin does this
+    /// deliberately to skip the per-candidate NZB-XML fetch).
     async fn lookup(
         &mut self,
         queue: &JobQueue,
@@ -375,12 +378,10 @@ impl CacheMemo {
             self.results.insert(key.clone(), map);
         }
         let map = self.results.get(&key)?;
-        let files = map.get(&info_hash.to_lowercase())?;
-        if files.is_empty() {
-            None
-        } else {
-            Some(files.clone())
-        }
+        // Presence in the map means the plugin returned a positive
+        // verdict for this hash. Empty `files` is valid and proceeds to
+        // attempt_download; the bitrate pre-filter just gets skipped.
+        map.get(&info_hash.to_lowercase()).cloned()
     }
 }
 
@@ -713,6 +714,14 @@ fn passes_bitrate_filter(
     min_size_bytes: Option<u64>,
 ) -> bool {
     if max_size_bytes.is_none() && min_size_bytes.is_none() {
+        return true;
+    }
+    // Empty file list means the plugin didn't surface per-file metadata at
+    // cache-check time (e.g. the usenet plugin skips per-candidate NZB-XML
+    // fetches). The stream-level size pre-filter at the call site already
+    // handled the bitrate gate using the indexer-supplied `file_size_bytes`,
+    // so there's nothing extra to check here.
+    if files.is_empty() {
         return true;
     }
     let total: u64 = files.iter().filter_map(|f| f.size).sum();

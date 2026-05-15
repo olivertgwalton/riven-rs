@@ -17,10 +17,12 @@ pub mod cache;
 pub mod crypto;
 pub mod nntp;
 pub mod nzb;
+pub mod par2;
 pub mod rar;
 pub mod state;
 pub mod streamer;
 pub mod yenc;
 
-pub use nzb::{NzbFile, NzbSegment, parse_nzb};
+pub use nzb::{NzbDocument, NzbFile, NzbSegment, parse_nzb, parse_nzb_document};
+pub use par2::{Par2FileDesc, looks_like_par2, parse_file_descriptors};
 pub use streamer::{NntpConfig, NzbMeta, NzbMetaFile, UsenetStreamer, active_streams};

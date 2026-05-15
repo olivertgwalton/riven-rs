@@ -18,6 +18,7 @@ use riven_core::types::*;
 use riven_db::entities::MediaItem;
 use riven_db::repo;
 
+use crate::application::process_media_item::fan_out_to_children;
 use crate::context;
 use crate::orchestrator::LibraryOrchestrator;
 use crate::{IndexJob, JobQueue, ProcessMediaItemJob, ProcessStep};
@@ -80,10 +81,16 @@ impl MainOrchestrator {
             }
             // Scrape produced no new streams. `record_scrape_failure` already
             // ran inside scrape `parse_results`, bumping `failed_attempts` and
-            // recomputing state (which may flip to Failed). No further action
-            // here — the next `retry_library` cycle picks the show up after
-            // its `failed_attempts` cooldown elapses.
-            RivenEvent::MediaItemScrapeErrorNoNewStreams { .. } => {}
+            // recomputing state. Mirroring riven-ts' `fanOutDownload`, also
+            // fan out to children so a Season with no available season pack
+            // falls back to per-episode scrape/download attempts (the children
+            // pull from the same indexer pool but match against episode-level
+            // candidates the season-level filter rejects).
+            RivenEvent::MediaItemScrapeErrorNoNewStreams { id, .. } => {
+                if let Some(item) = self.load_item(*id).await {
+                    fan_out_to_children(&item, &self.queue).await;
+                }
+            }
 
             // ── Download ─────────────────────────────────────────────────────
             //
@@ -91,14 +98,32 @@ impl MainOrchestrator {
             // Validate, which centralises the post-download decision: emit
             // completion, fan out to incomplete children, or schedule a
             // re-scrape +30 min.
-            RivenEvent::MediaItemDownloadSuccess { id, .. }
-            | RivenEvent::MediaItemDownloadPartialSuccess { id }
+            //
+            // Additionally, on partial-success and error we fan out to
+            // children directly here (mirroring riven-ts' `fanOutDownload`
+            // actions on `download.partial-success` and `download.error`).
+            // Validate's own fan_out only fires for PartiallyCompleted/
+            // Ongoing states — a Season whose pack failed every persist
+            // attempt stays in `Scraped` and would otherwise just reschedule
+            // its own scrape in 30 min, leaving episode-level NZBs
+            // (per-episode releases that don't match the pack) untried.
+            RivenEvent::MediaItemDownloadSuccess { id, .. } => {
+                self.queue
+                    .push_process_media_item(
+                        ProcessMediaItemJob::new(*id).at_step(ProcessStep::Validate),
+                    )
+                    .await;
+            }
+            RivenEvent::MediaItemDownloadPartialSuccess { id }
             | RivenEvent::MediaItemDownloadError { id, .. } => {
                 self.queue
                     .push_process_media_item(
                         ProcessMediaItemJob::new(*id).at_step(ProcessStep::Validate),
                     )
                     .await;
+                if let Some(item) = self.load_item(*id).await {
+                    fan_out_to_children(&item, &self.queue).await;
+                }
             }
 
             _ => {}

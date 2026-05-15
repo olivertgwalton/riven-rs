@@ -1,5 +1,6 @@
 use std::collections::VecDeque;
 use std::sync::{Arc, Weak};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
@@ -25,6 +26,92 @@ const REAPER_INTERVAL: Duration = Duration::from_secs(5);
 /// streamer doesn't consume the entire provider connection allowance
 /// before other consumers (ingest, scrape) can dial.
 const PREWARM_CAP: usize = 8;
+/// Consecutive transient/connection failures before a provider is muted by
+/// its circuit breaker. Mirrors nzbdav's `ProviderCircuitBreaker.FailureThreshold`.
+const BREAKER_FAILURE_THRESHOLD: u32 = 3;
+/// First cooldown after tripping. Doubled on each subsequent re-trip until
+/// `BREAKER_MAX_COOLDOWN`.
+const BREAKER_INITIAL_COOLDOWN: Duration = Duration::from_secs(60);
+/// Cap on the exponential backoff so a permanently-broken provider doesn't
+/// vanish forever — a probe still runs every 5 min to check recovery.
+const BREAKER_MAX_COOLDOWN: Duration = Duration::from_secs(5 * 60);
+
+/// Per-provider circuit breaker. Records consecutive transient failures and
+/// suppresses provider use for a cooldown window once `FAILURE_THRESHOLD` is
+/// crossed. Successful ops reset the failure counter; an op completing while
+/// the breaker is tripped (a single probe `try_each` allows when every
+/// provider is tripped) either resets the breaker or re-trips it with a
+/// doubled cooldown.
+#[derive(Default)]
+struct CircuitBreaker {
+    /// Consecutive failure count; reset to 0 on success.
+    consecutive_failures: AtomicU64,
+    /// Next attempt allowed at, as `Instant::elapsed_since` reference epoch.
+    /// 0 = not tripped. We can't store `Instant` atomically; store millis
+    /// from a process-local epoch instead.
+    tripped_until_ms: AtomicU64,
+    /// Current cooldown duration in millis. Doubled on re-trip.
+    current_cooldown_ms: AtomicU64,
+}
+
+impl CircuitBreaker {
+    fn new() -> Self {
+        Self {
+            consecutive_failures: AtomicU64::new(0),
+            tripped_until_ms: AtomicU64::new(0),
+            current_cooldown_ms: AtomicU64::new(BREAKER_INITIAL_COOLDOWN.as_millis() as u64),
+        }
+    }
+
+    fn now_ms() -> u64 {
+        // Process-local monotonic ms. `Instant` can't be coerced to a stable
+        // u64 across the process directly, so anchor on the first call.
+        use std::sync::OnceLock;
+        static EPOCH: OnceLock<Instant> = OnceLock::new();
+        let epoch = EPOCH.get_or_init(Instant::now);
+        epoch.elapsed().as_millis() as u64
+    }
+
+    /// True if the breaker is currently muting this provider.
+    fn is_tripped(&self) -> bool {
+        let until = self.tripped_until_ms.load(Ordering::Relaxed);
+        until != 0 && Self::now_ms() < until
+    }
+
+    fn record_success(&self) {
+        self.consecutive_failures.store(0, Ordering::Relaxed);
+        self.tripped_until_ms.store(0, Ordering::Relaxed);
+        self.current_cooldown_ms
+            .store(BREAKER_INITIAL_COOLDOWN.as_millis() as u64, Ordering::Relaxed);
+    }
+
+    fn record_failure(&self, host: &str) {
+        // Trip the breaker on the failure that crosses the threshold and
+        // double the cooldown when a re-trip happens after a probe.
+        let was_tripped = self.is_tripped();
+        let count = self
+            .consecutive_failures
+            .fetch_add(1, Ordering::Relaxed)
+            .saturating_add(1) as u32;
+        if was_tripped || count >= BREAKER_FAILURE_THRESHOLD {
+            let cooldown = if was_tripped {
+                let doubled = self.current_cooldown_ms.load(Ordering::Relaxed).saturating_mul(2);
+                doubled.min(BREAKER_MAX_COOLDOWN.as_millis() as u64)
+            } else {
+                self.current_cooldown_ms.load(Ordering::Relaxed)
+            };
+            self.current_cooldown_ms.store(cooldown, Ordering::Relaxed);
+            self.tripped_until_ms
+                .store(Self::now_ms() + cooldown, Ordering::Relaxed);
+            tracing::warn!(
+                host,
+                cooldown_secs = cooldown / 1000,
+                consecutive_failures = count,
+                "NNTP provider circuit breaker tripped"
+            );
+        }
+    }
+}
 
 struct Idle {
     conn: NntpConnection,
@@ -41,6 +128,7 @@ struct ProviderSlot {
     /// LIFO: hottest conn at the back. Reaper sweeps the front (oldest)
     /// and can short-circuit at the first non-expired entry.
     idle: Arc<Mutex<VecDeque<Idle>>>,
+    breaker: Arc<CircuitBreaker>,
 }
 
 struct Checkout {
@@ -84,6 +172,7 @@ impl NntpPool {
                     provider: p,
                     permits,
                     idle: Arc::new(Mutex::new(VecDeque::new())),
+                    breaker: Arc::new(CircuitBreaker::new()),
                 }
             })
             .collect();
@@ -256,9 +345,28 @@ impl NntpPool {
         let mut not_found = false;
         let mut last_err: Option<NntpError> = None;
 
-        for slot_idx in 0..self.slots.len() {
+        // Build the order: providers whose breaker is *not* tripped come
+        // first, in the existing priority order. Tripped providers come
+        // last so they still get a "probe" attempt when every healthy
+        // provider has been exhausted (mirrors nzbdav's
+        // `GetOrderedProviders` "include tripped when all-tripped" rule —
+        // we keep it always-on so a one-off probe runs as a tail fallback
+        // and the breaker has a chance to reset).
+        let mut order: Vec<usize> = Vec::with_capacity(self.slots.len());
+        let mut tripped: Vec<usize> = Vec::new();
+        for (idx, slot) in self.slots.iter().enumerate() {
+            if slot.breaker.is_tripped() {
+                tripped.push(idx);
+            } else {
+                order.push(idx);
+            }
+        }
+        order.extend(tripped);
+
+        for slot_idx in order {
             let host = self.slots[slot_idx].provider.config.host.clone();
             let is_backup = self.slots[slot_idx].provider.is_backup;
+            let breaker = self.slots[slot_idx].breaker.clone();
             let checkout = match self.acquire(slot_idx).await {
                 Ok(c) => c,
                 Err(e) => {
@@ -268,6 +376,7 @@ impl NntpPool {
                         error = %e,
                         "NNTP acquire failed; trying next provider"
                     );
+                    breaker.record_failure(&host);
                     last_err = Some(e);
                     continue;
                 }
@@ -280,6 +389,7 @@ impl NntpPool {
             let (conn, result) = op(conn).await;
             match result {
                 Ok(v) => {
+                    breaker.record_success();
                     self.release(Checkout {
                         conn,
                         permit,
@@ -288,6 +398,8 @@ impl NntpPool {
                     return Ok(v);
                 }
                 Err(NntpError::ArticleNotFound(s)) => {
+                    // Missing articles are a normal outcome — not a provider
+                    // health signal. Leave the breaker state alone.
                     self.release(Checkout {
                         conn,
                         permit,
@@ -307,6 +419,7 @@ impl NntpPool {
                         error = %e,
                         "NNTP op failed; trying next provider"
                     );
+                    breaker.record_failure(&host);
                     last_err = Some(e);
                     continue;
                 }

@@ -50,6 +50,51 @@ pub fn is_video_file(filename: &str) -> bool {
     VALID_VIDEO_EXTENSIONS.contains(&ext.as_str())
 }
 
+/// Heuristic check for an obfuscated filename — random hash/blob stems with no
+/// release-name structure. Mirrors what SABnzbd, decypharr, and nzbdav apply
+/// when deciding whether to fall back to the NZB release title:
+///
+/// - long alphanumeric stems with no spaces, dots, dashes, or underscores
+///   between the first and last character (e.g. `VfYc6l3ibzTHwlPkvX1hocwymwUNt6yt`)
+/// - pure 32-char hex (`^[a-f0-9]{32}$`)
+/// - long dot-separated hex sequences (`^[a-f0-9.]{40,}$`)
+/// - `abc.xyz...` placeholder pattern emitted by some indexers
+///
+/// We're conservative: only flag when the stem is plausibly random. Real
+/// release names always have at least one separator (`.`, ` `, `-`, `_`), so
+/// excluding those handles every well-formed scene/p2p release.
+pub fn looks_obfuscated(filename: &str) -> bool {
+    let stem = match filename.rfind('.') {
+        Some(i) if i > 0 => &filename[..i],
+        _ => filename,
+    };
+    if stem.is_empty() {
+        return false;
+    }
+    if stem.starts_with("abc.xyz") {
+        return true;
+    }
+    let lower = stem.to_ascii_lowercase();
+    let is_hex = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_hexdigit());
+    if stem.len() == 32 && is_hex(&lower) {
+        return true;
+    }
+    if lower.len() >= 40 && lower.chars().all(|c| c.is_ascii_hexdigit() || c == '.') {
+        return true;
+    }
+    // Long, single-token stem with no separators — typical of obfuscated
+    // releases (e.g. `VfYc6l3ibzTHwlPkvX1hocwymwUNt6yt`). 24 chars is the
+    // shortest such name we want to catch without flagging real titles like
+    // `Movie.2024.mkv`.
+    if stem.len() >= 24
+        && !stem.contains(['.', ' ', '-', '_'])
+        && stem.chars().all(|c| c.is_ascii_alphanumeric())
+    {
+        return true;
+    }
+    false
+}
+
 pub fn episode_lookup_keys(season: i32, ep: i32, abs: Option<i32>) -> Vec<String> {
     let mut keys = Vec::with_capacity(2);
     if let Some(abs) = abs {

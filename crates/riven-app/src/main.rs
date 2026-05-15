@@ -206,6 +206,7 @@ async fn main() -> Result<()> {
             while let Some(req) = link_rx.recv().await {
                 let entry_id = req.entry_id;
                 let current_url = req.current_url;
+                let pinned_provider = req.provider.clone();
                 let event = RivenEvent::MediaItemStreamLinkRequested {
                     magnet: req.download_url,
                     info_hash: String::new(),
@@ -214,11 +215,13 @@ async fn main() -> Result<()> {
                 let results = link_registry.dispatch(&event).await;
 
                 let mut link = None;
+                let mut serving_provider = None;
                 let mut dead = false;
                 for (_, result) in results {
                     match result {
                         Ok(riven_core::events::HookResponse::StreamLink(sl)) => {
                             link = Some(sl.link);
+                            serving_provider = sl.provider;
                             break;
                         }
                         Ok(riven_core::events::HookResponse::StreamLinkDead) => dead = true,
@@ -241,8 +244,28 @@ async fn main() -> Result<()> {
                 let response = if is_dead { None } else { link };
                 drop(req.response_tx.send(response));
 
-                if is_dead && let Some(entry_id) = entry_id {
-                    handle_dead_link(&link_pool, &link_jq, entry_id).await;
+                if is_dead {
+                    if let Some(entry_id) = entry_id {
+                        handle_dead_link(&link_pool, &link_jq, entry_id).await;
+                    }
+                } else if let (Some(entry_id), Some(serving), Some(pinned)) =
+                    (entry_id, serving_provider.as_deref(), pinned_provider.as_deref())
+                    && serving != pinned
+                {
+                    // The originally-pinned store rejected this torrent but a
+                    // fallback store served the link. Re-pin so future refreshes
+                    // skip the known-dead store.
+                    tracing::info!(
+                        entry_id,
+                        from = pinned,
+                        to = serving,
+                        "stream-link fell back to a different store — re-pinning entry provider"
+                    );
+                    if let Err(error) =
+                        riven_db::repo::update_entry_provider(&link_pool, entry_id, serving).await
+                    {
+                        tracing::warn!(entry_id, %error, "failed to re-pin entry provider");
+                    }
                 }
             }
         }

@@ -466,7 +466,15 @@ impl Plugin for StremthruPlugin {
             .iter()
             .map(|(store, api_key)| (*store, api_key.as_str()))
             .collect();
+        // Prefer the originally-pinned store first; fall through to other
+        // configured stores if it returns Dead/Err. Beyond the pinned store,
+        // order by health score so historically-reliable stores are tried first.
         ordered_stores.sort_by(|(store_a, _), (store_b, _)| {
+            let pinned_a = provider.is_some_and(|p| *store_a == p);
+            let pinned_b = provider.is_some_and(|p| *store_b == p);
+            if pinned_a != pinned_b {
+                return pinned_b.cmp(&pinned_a);
+            }
             let score_a = score_map.get(*store_a).copied().unwrap_or_default();
             let score_b = score_map.get(*store_b).copied().unwrap_or_default();
             score_b.cmp(&score_a).then_with(|| store_a.cmp(store_b))
@@ -474,16 +482,14 @@ impl Plugin for StremthruPlugin {
 
         let mut saw_dead = false;
         for (store, api_key) in ordered_stores {
-            if let Some(p) = provider
-                && store != p
-            {
-                continue;
-            }
             let result = generate_link(&ctx.http, &base_url, store, api_key, magnet).await;
             match result {
                 Ok(GeneratedLink::Link(link)) => {
                     adjust_store_score(&ctx.redis, store, 1).await;
-                    return Ok(HookResponse::StreamLink(StreamLinkResponse { link }));
+                    return Ok(HookResponse::StreamLink(StreamLinkResponse {
+                        link,
+                        provider: Some(store.to_string()),
+                    }));
                 }
                 Ok(GeneratedLink::Dead) => {
                     adjust_store_score(&ctx.redis, store, -1).await;
@@ -495,9 +501,9 @@ impl Plugin for StremthruPlugin {
                 }
             }
         }
-        // No store produced a link. If at least one store reported the torrent
-        // is gone (and none merely errored transiently), surface that so the
-        // link-request consumer can blacklist the stream and re-download.
+        // Every configured store either reported the torrent permanently
+        // gone or errored. If at least one reported `Dead`, surface that so
+        // the link-request consumer can blacklist the stream and re-download.
         if saw_dead {
             return Ok(HookResponse::StreamLinkDead);
         }

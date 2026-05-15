@@ -748,6 +748,19 @@ pub async fn update_stream_url(pool: &PgPool, entry_id: i64, stream_url: &str) -
     Ok(())
 }
 
+/// Update the pinned `provider` for a media entry. Called when the
+/// link-request handler fell back to a different store after the originally
+/// pinned one reported the torrent dead — keeping `provider` in sync lets
+/// the next refresh prefer the live store first.
+pub async fn update_entry_provider(pool: &PgPool, entry_id: i64, provider: &str) -> Result<()> {
+    sqlx::query("UPDATE filesystem_entries SET provider = $2 WHERE id = $1")
+        .bind(entry_id)
+        .bind(provider)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
 pub async fn update_library_profiles(
     pool: &PgPool,
     entry_id: i64,

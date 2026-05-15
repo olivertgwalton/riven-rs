@@ -2,8 +2,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use redis::AsyncCommands;
+use reqwest::StatusCode;
 use riven_core::events::{EventType, HookResponse, ScrapeRequest};
-use riven_core::http::HttpServiceProfile;
+use riven_core::http::{HttpServiceProfile, RateLimitedError};
 use riven_core::plugin::{Plugin, PluginContext, SettingField};
 use riven_core::register_plugin;
 use riven_core::settings::PluginSettings;
@@ -148,6 +149,17 @@ fn build_query(
     }
 }
 
+/// Outcome of one indexer's scrape. Separates rate-limit (transient,
+/// retryable) from generic errors so the caller can promote an
+/// all-indexers-rate-limited outcome into `RateLimitedError`. Mirrors
+/// nzbdav's queue-level rateLimit + RateLimitError throw.
+#[derive(Debug)]
+enum ScrapeOutcome {
+    Ok(Vec<NewznabItem>),
+    RateLimited(String),
+    Failed(anyhow::Error),
+}
+
 /// Issue one scrape against one indexer and return its items. Errors are
 /// returned to the caller so the fan-out can log per-indexer failures
 /// without poisoning the rest.
@@ -157,7 +169,7 @@ async fn scrape_one(
     search_type: &'static str,
     base_params: &[(&'static str, String)],
     http: &riven_core::http::HttpClient,
-) -> anyhow::Result<Vec<NewznabItem>> {
+) -> ScrapeOutcome {
     let base_url = indexer.url.trim_end_matches('/');
     let url = format!("{base_url}/api");
 
@@ -176,18 +188,48 @@ async fn scrape_one(
         "requesting newznab"
     );
 
-    let resp = http
-        .send_data(PROFILE, Some(url.clone()), |client| {
+    // Dedupe key must reflect the actual query, not just the base URL —
+    // otherwise the in-flight deduper collapses every concurrent episode
+    // scrape onto whichever (season, ep) arrived first, and every other
+    // episode receives the wrong-episode results. Apikey is excluded for
+    // log hygiene (the key surfaces in error paths) and because it's
+    // invariant across one indexer's lifetime.
+    let dedupe_key = {
+        let mut key = String::with_capacity(url.len() + params.len() * 16);
+        key.push_str(&url);
+        let mut first = true;
+        for (k, v) in &params {
+            if k.eq_ignore_ascii_case("apikey") {
+                continue;
+            }
+            key.push(if first { '?' } else { '&' });
+            first = false;
+            key.push_str(k);
+            key.push('=');
+            key.push_str(v);
+        }
+        key
+    };
+
+    let resp = match http
+        .send_data(PROFILE, Some(dedupe_key), |client| {
             client.get(&url).query(&params)
         })
-        .await?;
+        .await
+    {
+        Ok(r) => r,
+        Err(error) => return ScrapeOutcome::Failed(error),
+    };
     let status = resp.status();
     if !status.is_success() {
         let body = resp.text().unwrap_or_default();
-        anyhow::bail!(
-            "newznab returned HTTP {status}: {}",
-            body.chars().take(200).collect::<String>()
-        );
+        let snippet = body.chars().take(200).collect::<String>();
+        if status == StatusCode::TOO_MANY_REQUESTS {
+            return ScrapeOutcome::RateLimited(snippet);
+        }
+        return ScrapeOutcome::Failed(anyhow::anyhow!(
+            "newznab returned HTTP {status}: {snippet}"
+        ));
     }
     let body = resp.text().unwrap_or_default();
     let items = parse_newznab_xml(&body);
@@ -214,7 +256,7 @@ async fn scrape_one(
             "newznab returned no items; response snippet",
         );
     }
-    Ok(items)
+    ScrapeOutcome::Ok(items)
 }
 
 #[async_trait]
@@ -294,9 +336,14 @@ impl Plugin for NewznabPlugin {
         let mut results = ScrapeResponse::new();
         let mut redis_conn = ctx.redis.clone();
         let mut per_indexer_counts: Vec<(String, usize)> = Vec::with_capacity(outcomes.len());
+        let mut indexer_count = 0usize;
+        let mut rate_limited_count = 0usize;
+        let mut ok_count = 0usize;
         for (indexer, outcome) in outcomes {
+            indexer_count += 1;
             match outcome {
-                Ok(items) => {
+                ScrapeOutcome::Ok(items) => {
+                    ok_count += 1;
                     let mut added = 0usize;
                     for item in items {
                         if item.title.is_empty() || item.nzb_url.is_empty() {
@@ -326,7 +373,18 @@ impl Plugin for NewznabPlugin {
                     }
                     per_indexer_counts.push((indexer.name.clone(), added));
                 }
-                Err(error) => {
+                ScrapeOutcome::RateLimited(snippet) => {
+                    rate_limited_count += 1;
+                    tracing::warn!(
+                        indexer = %indexer.name,
+                        imdb_id = request.imdb_id,
+                        tvdb_id = request.tvdb_id,
+                        snippet = %snippet,
+                        "newznab indexer rate-limited (429); skipping",
+                    );
+                    per_indexer_counts.push((indexer.name.clone(), 0));
+                }
+                ScrapeOutcome::Failed(error) => {
                     tracing::warn!(
                         indexer = %indexer.name,
                         %error,
@@ -337,6 +395,24 @@ impl Plugin for NewznabPlugin {
                     per_indexer_counts.push((indexer.name.clone(), 0));
                 }
             }
+        }
+
+        // Promote "every indexer rate-limited, no successes" into a
+        // RateLimitedError so the scrape framework schedules a delayed
+        // retry instead of recording a permanent "no streams" failure.
+        // Mirrors nzbdav's `queue.rateLimit(...) + throw RateLimitError()`
+        // when a 429 is hit. We require zero successful indexers to avoid
+        // failing the whole scrape when some indexers contributed results
+        // even if others 429'd.
+        if rate_limited_count > 0 && ok_count == 0 && indexer_count > 0 {
+            tracing::warn!(
+                rate_limited_count,
+                indexer_count,
+                imdb_id = request.imdb_id,
+                tvdb_id = request.tvdb_id,
+                "all newznab indexers rate-limited; deferring scrape",
+            );
+            return Err(RateLimitedError.into());
         }
 
         tracing::info!(
