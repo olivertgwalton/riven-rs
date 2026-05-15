@@ -141,7 +141,7 @@ impl UsenetStreamer {
     /// request. Otherwise we walk from the first segment with an unknown
     /// decoded size, which is slow on cold seeks but self-corrects via
     /// `DecodedSizes` memoization.
-    async fn read_decoded_range_within_part(
+    pub(super) async fn read_decoded_range_within_part(
         &self,
         part: &NzbRarPart,
         dec_start: u64,

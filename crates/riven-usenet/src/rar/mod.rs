@@ -88,21 +88,59 @@ impl RarVolumeFileEntry {
     }
 }
 
+/// Which RAR archive format a given volume uses. The two formats have
+/// incompatible block layouts so the streamer needs to dispatch on this
+/// when re-parsing block headers at arbitrary offsets (see `block_layout_at`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RarFormat {
+    V4,
+    V5,
+}
+
 /// Parser output for one volume's leading bytes.
 #[derive(Debug, Default)]
 pub struct RarVolumeHeader {
     pub is_volume: bool,
     pub files: Vec<RarVolumeFileEntry>,
+    /// `Some` when the volume's signature was recognised. Used by callers
+    /// that later need to parse a single block (not a whole volume) starting
+    /// at an arbitrary offset and need to know which dialect to apply.
+    pub format: Option<RarFormat>,
 }
 
 /// Parse the leading bytes of a RAR volume, sniffing RAR4 vs RAR5 from the
 /// signature and dispatching to the appropriate parser.
 pub fn parse_volume_header(bytes: &[u8]) -> Result<RarVolumeHeader, RarError> {
     if bytes.len() >= RAR5_SIGNATURE.len() && bytes.starts_with(&RAR5_SIGNATURE) {
-        return parse_volume_header_v5(bytes);
+        let mut h = parse_volume_header_v5(bytes)?;
+        h.format = Some(RarFormat::V5);
+        return Ok(h);
     }
     if bytes.len() >= RAR4_SIGNATURE.len() && bytes.starts_with(&RAR4_SIGNATURE) {
-        return parse_volume_header_v4(bytes);
+        let mut h = parse_volume_header_v4(bytes)?;
+        h.format = Some(RarFormat::V4);
+        return Ok(h);
     }
     Err(RarError::NotRar)
+}
+
+/// Given bytes positioned at a RAR block header (no volume signature
+/// required), return `(header_byte_count, data_byte_count)` for that block.
+///
+/// `header_byte_count` is the offset from the start of `bytes` to where
+/// the block's data area begins. `data_byte_count` is the size of that
+/// data area. The block's total footprint on the volume is the sum.
+///
+/// This exists so the ingest layer can repair synthesized slice positions:
+/// when the 32 KB front-of-volume probe didn't reach the next file's start
+/// header, the synthesizer initially uses `prev_data_end` as the new
+/// slice's `start_in_part` — but that points at the *header* of the next
+/// file, not at its data. Fetching ~512 bytes there and calling this
+/// function tells the synthesizer how many bytes to skip past so the
+/// stored offset lands on the file's actual first byte.
+pub fn block_layout_at(bytes: &[u8], format: RarFormat) -> Option<(u64, u64)> {
+    match format {
+        RarFormat::V5 => v5::block_layout_v5(bytes),
+        RarFormat::V4 => v4::block_layout_v4(bytes),
+    }
 }

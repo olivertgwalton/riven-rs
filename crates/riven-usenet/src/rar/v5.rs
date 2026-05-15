@@ -268,6 +268,38 @@ fn parse_rar5_encryption_record(bytes: &[u8], start: usize, end: usize) -> Optio
     })
 }
 
+/// Layout of one block at offset 0 of `bytes`: returns `(header_size,
+/// data_size)`. `header_size` includes the 4-byte CRC, the size vint, and
+/// the declared header-size payload (which already covers the block's
+/// extra area). `data_size` is the data area that follows the header,
+/// per the block's `data` flag — zero when the block carries no data.
+pub(super) fn block_layout_v5(bytes: &[u8]) -> Option<(u64, u64)> {
+    if bytes.len() < 5 {
+        return None;
+    }
+    let mut pos = 4; // skip CRC32
+    let size_vint_start = pos;
+    let header_size = read_vint(bytes, &mut pos)? as u64;
+    let header_total = pos as u64 + header_size;
+
+    // Walk far enough into the header to determine the data-area size.
+    // We don't need the type or flags themselves — just whether the
+    // optional `data_size` vint is present (head_flags bit 1) and what
+    // it says.
+    let _header_type = read_vint(bytes, &mut pos)?;
+    let head_flags = read_vint(bytes, &mut pos)?;
+    if head_flags & RAR5_HEAD_FLAG_EXTRA != 0 {
+        let _extra_size = read_vint(bytes, &mut pos)?;
+    }
+    let data_size = if head_flags & RAR5_HEAD_FLAG_DATA != 0 {
+        read_vint(bytes, &mut pos)?
+    } else {
+        0
+    };
+    let _ = size_vint_start;
+    Some((header_total, data_size))
+}
+
 /// Decode an RAR5 variable-length integer. 7 data bits per byte, low bits
 /// first, MSB is continuation. Returns the decoded value and advances `pos`.
 fn read_vint(bytes: &[u8], pos: &mut usize) -> Option<u64> {

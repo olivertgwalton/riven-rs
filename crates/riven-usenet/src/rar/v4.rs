@@ -161,6 +161,28 @@ fn read_file_head(
     }))
 }
 
+/// Layout of one block at offset 0 of `bytes`: returns `(header_size,
+/// data_size)`. RAR4's `head_size` field already covers the full block
+/// header; `data_size` is the optional `add_size` (present iff
+/// `FLAG_LONG_BLOCK` is set), which is what `FILE_HEAD` uses to declare
+/// its data-area length.
+pub(super) fn block_layout_v4(bytes: &[u8]) -> Option<(u64, u64)> {
+    if bytes.len() < 7 {
+        return None;
+    }
+    let mut cur = Cursor::new(bytes);
+    let _crc = read_u16(&mut cur)?;
+    let _head_type = read_u8(&mut cur)?;
+    let head_flags = read_u16(&mut cur)?;
+    let head_size = read_u16(&mut cur)? as u64;
+    let data_size = if (head_flags & FLAG_LONG_BLOCK) != 0 {
+        read_u32(&mut cur)? as u64
+    } else {
+        0
+    };
+    Some((head_size, data_size))
+}
+
 fn decode_filename(bytes: &[u8], _unicode_flag: bool) -> String {
     // For unicode-flagged names the layout is `ascii\0unicode-encoded` where
     // the second half uses a quirky compressed encoding. Most modern releases

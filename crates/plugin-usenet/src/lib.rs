@@ -26,6 +26,7 @@ use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
+mod availnzb;
 mod health_check;
 
 pub(crate) const PROVIDER: &str = "usenet";
@@ -42,7 +43,7 @@ fn nzb_body_cache() -> &'static Mutex<LruCache<String, Arc<String>>> {
 pub(crate) const PROFILE: HttpServiceProfile =
     HttpServiceProfile::new("usenet-nzb-fetch").with_rate_limit(30, Duration::from_secs(60));
 
-fn nzb_url_redis_key(info_hash: &str) -> String {
+pub(crate) fn nzb_url_redis_key(info_hash: &str) -> String {
     format!("riven:nzb:url:{info_hash}")
 }
 
@@ -159,7 +160,13 @@ impl Plugin for UsenetPlugin {
     async fn on_core_started(&self, ctx: &PluginContext) -> anyhow::Result<HookResponse> {
         if let Some(cfg) = nntp_config_from_settings(&ctx.settings) {
             let pool = NntpPool::new_multi(cfg.providers);
-            health_check::spawn(ctx.db_pool.clone(), ctx.redis.clone(), pool);
+            health_check::spawn(
+                ctx.db_pool.clone(),
+                ctx.redis.clone(),
+                pool,
+                ctx.http.clone(),
+                ctx.settings.clone(),
+            );
         }
         Ok(HookResponse::Empty)
     }
@@ -222,6 +229,28 @@ impl Plugin for UsenetPlugin {
                      address (http://127.0.0.1:<port>) so the VFS reaches /usenet/ from \
                      localhost and the route's loopback auth exemption applies.",
                 ),
+            SettingField::new("availnzbenabled", "Enable AvailNZB Pre-Filter", "boolean")
+                .with_default("false")
+                .with_description(
+                    "Consult AvailNZB (snzb.stream) during cache check to filter out \
+                     NZB releases the crowdsourced dataset has marked unavailable. \
+                     Releases AvailNZB has no data on are passed through unchanged. \
+                     Disable to keep the default behaviour of trusting every NZB \
+                     candidate as cached until the streamer's STAT sample says otherwise.",
+                ),
+            SettingField::new("availnzburl", "AvailNZB URL", "url")
+                .with_default(availnzb::DEFAULT_BASE_URL)
+                .with_placeholder(availnzb::DEFAULT_BASE_URL)
+                .with_description(
+                    "Base URL of the AvailNZB instance. Defaults to the public snzb.stream service.",
+                ),
+            SettingField::new("availnzbapikey", "AvailNZB API Key", "password")
+                .with_description(
+                    "API key used to report playback outcomes back to AvailNZB \
+                     (X-API-Key header). Optional. Required only to contribute \
+                     reports — the URL availability check works without one. \
+                     Obtain via POST /api/v1/keys/roll_key on the AvailNZB host.",
+                ),
         ]
     }
 
@@ -229,7 +258,7 @@ impl Plugin for UsenetPlugin {
         &self,
         hashes: &[String],
         provider: Option<&str>,
-        _ctx: &PluginContext,
+        ctx: &PluginContext,
     ) -> anyhow::Result<HookResponse> {
         if let Some(p) = provider
             && p != PROVIDER
@@ -242,14 +271,46 @@ impl Plugin for UsenetPlugin {
             return Ok(HookResponse::Empty);
         }
 
-        // Treat every NZB candidate as Cached without probing: each probe
-        // would cost a full NZB-XML download plus an NNTP STAT, and with
-        // dozens of candidates per item the indexer rate limit is exhausted
-        // before any actual download runs. The streamer's ingest step still
-        // STATs a sample of segments before exposing the file, so dead NZBs
-        // are caught there instead.
+        // Default policy: treat every NZB candidate as Cached without
+        // probing. Each probe would cost a full NZB-XML download plus an
+        // NNTP STAT, and with dozens of candidates per item the indexer
+        // rate limit is exhausted before any actual download runs. The
+        // streamer's ingest step still STATs a sample of segments before
+        // exposing the file, so dead NZBs are caught there instead.
+        //
+        // When AvailNZB is enabled, query the crowdsourced dataset by NZB
+        // URL and drop hashes it has *explicitly* marked unavailable from
+        // the result list. Hashes AvailNZB has no opinion on (or where
+        // the lookup fails) keep the default Cached status.
+        let availnzb_enabled = ctx.settings.get_or("availnzbenabled", "false") != "false";
+        let unavailable: std::collections::HashSet<String> = if availnzb_enabled {
+            let base_url = ctx
+                .settings
+                .get_or("availnzburl", availnzb::DEFAULT_BASE_URL)
+                .to_string();
+            let lookups = nzb_hashes.iter().map(|hash| {
+                let hash = (*hash).clone();
+                let base_url = base_url.clone();
+                async move {
+                    let nzb_url = nzb_url_for_hash(&hash, ctx).await?;
+                    let outcome =
+                        availnzb::check_url(&ctx.http, &ctx.redis, &base_url, &nzb_url).await;
+                    Some((hash, outcome))
+                }
+            });
+            futures::future::join_all(lookups)
+                .await
+                .into_iter()
+                .flatten()
+                .filter_map(|(h, o)| matches!(o, availnzb::Availability::Unavailable).then_some(h))
+                .collect()
+        } else {
+            std::collections::HashSet::new()
+        };
+
         let results: Vec<CacheCheckResult> = nzb_hashes
             .into_iter()
+            .filter(|h| !unavailable.contains(*h))
             .map(|h| CacheCheckResult {
                 hash: h.clone(),
                 store: PROVIDER.to_string(),
@@ -287,13 +348,36 @@ impl Plugin for UsenetPlugin {
 
         let streamer = UsenetStreamer::new(nntp_cfg, ctx.redis.clone());
         let password = ctx.settings.get("archivepassword");
+        let nzb_url_for_report = nzb_url_for_hash(info_hash, ctx).await;
         let meta = match streamer.ingest(info_hash, &xml_arc, password).await {
             Ok(m) => m,
             Err(e) => {
                 tracing::warn!(info_hash, error = %e, "usenet ingest failed");
+                // Ingest's STAT pass found the articles missing — feed that
+                // back to AvailNZB so other clients can skip this NZB.
+                if let Some(url) = nzb_url_for_report {
+                    availnzb::spawn_report_if_configured(
+                        ctx.http.clone(),
+                        &ctx.settings,
+                        url,
+                        false,
+                        None,
+                    );
+                }
                 return Ok(HookResponse::DownloadStreamUnavailable);
             }
         };
+
+        if let Some(url) = nzb_url_for_report {
+            let release_name = meta.files.first().map(|f| f.filename.clone());
+            availnzb::spawn_report_if_configured(
+                ctx.http.clone(),
+                &ctx.settings,
+                url,
+                true,
+                release_name,
+            );
+        }
 
         let files: Vec<DownloadFile> = meta
             .files
@@ -362,19 +446,19 @@ impl Plugin for UsenetPlugin {
     }
 }
 
+async fn nzb_url_for_hash(info_hash: &str, ctx: &PluginContext) -> Option<String> {
+    let mut redis = ctx.redis.clone();
+    AsyncCommands::get::<_, Option<String>>(&mut redis, nzb_url_redis_key(info_hash))
+        .await
+        .ok()
+        .flatten()
+}
+
 async fn fetch_nzb_xml(info_hash: &str, ctx: &PluginContext) -> Option<Arc<String>> {
     if let Some(hit) = nzb_body_cache().lock().unwrap().get(info_hash).cloned() {
         return Some(hit);
     }
-    let mut redis = ctx.redis.clone();
-    let nzb_url: Option<String> = AsyncCommands::get::<_, Option<String>>(
-        &mut redis,
-        nzb_url_redis_key(info_hash),
-    )
-    .await
-    .ok()
-    .flatten();
-    let nzb_url = nzb_url?;
+    let nzb_url = nzb_url_for_hash(info_hash, ctx).await?;
     let resp = ctx
         .http
         .send_data(PROFILE, Some(nzb_url.clone()), |client| client.get(&nzb_url))

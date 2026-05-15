@@ -405,6 +405,10 @@ impl UsenetStreamer {
 
         let mut volume_entries: Vec<Vec<RarVolumeFileEntry>> =
             Vec::with_capacity(parts.len());
+        // All volumes in one RAR set share a format. We capture it from
+        // whichever volume parses first and use it later when re-parsing
+        // synthesized block headers at arbitrary offsets in `parts[i]`.
+        let mut archive_format: Option<rar::RarFormat> = None;
 
         for (vol_idx, (part, fetch_result)) in
             parts.iter_mut().zip(header_results).enumerate()
@@ -443,6 +447,9 @@ impl UsenetStreamer {
                     return Ok(None);
                 }
             };
+            if archive_format.is_none() {
+                archive_format = parsed.format;
+            }
             let entries: Vec<RarVolumeFileEntry> =
                 parsed.files.into_iter().filter(|e| e.is_stored()).collect();
             if entries.is_empty() {
@@ -549,8 +556,7 @@ impl UsenetStreamer {
             let Some(prev_last) = volume_entries[prev_vol].last() else {
                 continue;
             };
-            let synth_start = prev_last.data_offset.saturating_add(prev_last.packed_size);
-            let synth_len = g.unpacked_size.saturating_sub(g.plaintext_sum);
+            let prev_data_end = prev_last.data_offset.saturating_add(prev_last.packed_size);
             // Encrypted RAR multi-file synthesis would need AES-block
             // alignment maths the observed slices already encode for us;
             // it's not in scope here. Drop those rather than risk emitting
@@ -562,6 +568,62 @@ impl UsenetStreamer {
                 );
                 continue;
             }
+
+            // `prev_data_end` lands on the start of the *next* file's RAR
+            // header, not on its data. The header itself can be 100+ bytes
+            // (filename string + flags + sizes), so naïvely treating
+            // `prev_data_end` as `start_in_part` would have the streamer
+            // serve those header bytes as the first bytes of the inner
+            // file — which is exactly the off-by-N that broke ffprobe on
+            // every season-pack episode after the first. Fetch a small
+            // probe at `prev_data_end`, parse the block at that offset,
+            // and skip past its header so `start_in_part` lands on the
+            // file's real first byte.
+            let part = &parts[prev_vol];
+            let Some(format) = archive_format else {
+                // Format wasn't captured (no volume parsed cleanly) —
+                // we'd rather not produce a slice we can't validate.
+                continue;
+            };
+            let probe_end = prev_data_end.saturating_add(1023);
+            let probe = match self
+                .read_decoded_range_within_part(part, prev_data_end, probe_end)
+                .await
+            {
+                Ok(p) => p,
+                Err(error) => {
+                    tracing::debug!(
+                        name = %g.name,
+                        prev_vol,
+                        prev_data_end,
+                        error = %error,
+                        "synthesis probe fetch failed; skipping this inner file"
+                    );
+                    continue;
+                }
+            };
+            let header_skip = match rar::block_layout_at(&probe, format) {
+                Some((header_size, _data_size)) => header_size,
+                None => {
+                    tracing::warn!(
+                        name = %g.name,
+                        prev_vol,
+                        prev_data_end,
+                        probe_len = probe.len(),
+                        "RAR block re-parse at synthesized start failed; \
+                         skipping this inner file rather than emitting a \
+                         slice that would serve header bytes as data"
+                    );
+                    continue;
+                }
+            };
+            let synth_start = prev_data_end.saturating_add(header_skip);
+            // `synth_len` is just the file's bytes that live in this
+            // volume — independent of the header we just skipped. The
+            // header lives outside the file's payload so it doesn't
+            // count toward the file's unpacked size.
+            let synth_len = g.unpacked_size.saturating_sub(g.plaintext_sum);
+
             let synth_slice = NzbRarSlice {
                 part_index: prev_vol,
                 start_in_part: synth_start,
@@ -574,6 +636,7 @@ impl UsenetStreamer {
                 prev_vol,
                 synth_start,
                 synth_len,
+                header_skip,
                 "synthesized missing first slice for RAR inner file"
             );
             let g = groups.get_mut(name).expect("group exists");

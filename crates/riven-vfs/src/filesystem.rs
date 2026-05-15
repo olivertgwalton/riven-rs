@@ -150,7 +150,15 @@ impl CachedEntry {
     }
 }
 
-pub struct RivenFs {
+/// Inner state shared via `Arc` so FUSE handlers can hand the heavy I/O work
+/// off to tokio without borrowing from `&self`. The fuser session has one
+/// dispatcher thread that loops reading kernel requests; if a handler does a
+/// synchronous `runtime.block_on(...)` on that thread, the entire mount
+/// head-of-line blocks until the future completes. Cloning this `Arc` into a
+/// `spawn_blocking` closure lets the dispatcher return immediately while the
+/// real work runs on tokio's blocking-task pool, so a slow read on one file
+/// no longer wedges every other FUSE op.
+pub struct RivenFsInner {
     vfs_layout: Arc<RwLock<VfsLibraryLayout>>,
     filesystem_settings_revision: Arc<AtomicU64>,
     cache_revision: AtomicU64,
@@ -172,7 +180,6 @@ pub struct RivenFs {
 
     range_cache: Arc<RangeCache>,
     readdir_cache: DashMap<u64, (Vec<DirEntry>, Instant)>,
-    entry_cache: DashMap<String, (Option<Arc<CachedEntry>>, Instant)>,
     prewarm_semaphore: Arc<Semaphore>,
     // Coalesces concurrent stream-URL refreshes for the same entry: a library
     // scan opening many handles of one file, or several reads racing, would
@@ -181,8 +188,34 @@ pub struct RivenFs {
     link_refresh_locks: DashMap<i64, Arc<Mutex<()>>>,
 }
 
+pub struct RivenFs {
+    inner: Arc<RivenFsInner>,
+}
+
 impl RivenFs {
     pub fn new(
+        vfs_layout: Arc<RwLock<VfsLibraryLayout>>,
+        filesystem_settings_revision: Arc<AtomicU64>,
+        db_pool: sqlx::PgPool,
+        stream_client: reqwest::Client,
+        link_request_tx: mpsc::Sender<riven_core::stream_link::LinkRequest>,
+        cache_max_size_mb: u64,
+    ) -> Self {
+        Self {
+            inner: Arc::new(RivenFsInner::new(
+                vfs_layout,
+                filesystem_settings_revision,
+                db_pool,
+                stream_client,
+                link_request_tx,
+                cache_max_size_mb,
+            )),
+        }
+    }
+}
+
+impl RivenFsInner {
+    fn new(
         vfs_layout: Arc<RwLock<VfsLibraryLayout>>,
         filesystem_settings_revision: Arc<AtomicU64>,
         db_pool: sqlx::PgPool,
@@ -220,7 +253,6 @@ impl RivenFs {
             next_ino: AtomicU64::new(FIRST_DYNAMIC_INO),
             range_cache: Arc::new(RangeCache::new(entries)),
             readdir_cache: DashMap::new(),
-            entry_cache: DashMap::new(),
             prewarm_semaphore: Arc::new(Semaphore::new(8)),
             link_refresh_locks: DashMap::new(),
         }
@@ -238,7 +270,6 @@ impl RivenFs {
         }
 
         self.readdir_cache.clear();
-        self.entry_cache.clear();
         self.cache_revision.store(revision, Ordering::SeqCst);
     }
 
@@ -253,15 +284,19 @@ impl RivenFs {
         ino
     }
 
-    fn get_entry_cached(&self, path: &str) -> Option<Arc<CachedEntry>> {
-        self.refresh_caches_if_needed();
-        if let Some(cached) = self.entry_cache.get(path)
-            && cached.1.elapsed() < TTL
-        {
-            return cached.0.clone();
-        }
+    /// Resolve a VFS path to its current `filesystem_entries` row. Always
+    /// re-queries the DB — there is no in-process cache here, mirroring the
+    /// approach the TypeScript implementation took. Caching the entry keyed by
+    /// path was a footgun: when a row's `path`/`download_url`/`media_item_id`
+    /// got rewritten (re-scrape, library rebuild), the cache kept serving the
+    /// pre-rewrite mapping until process restart, leaving Plex hammering dead
+    /// debrid links forever. The hot per-FUSE-op caches (`vfs_layout`,
+    /// `path_to_ino`, `readdir_cache`) are unaffected, so this only adds a
+    /// single indexed lookup per `open()` / metadata-stat — measured impact
+    /// is sub-millisecond and dwarfed by the per-file CDN/NNTP prewarm.
+    fn get_entry(&self, path: &str) -> Option<Arc<CachedEntry>> {
         let layout = self.current_layout();
-        let result = match parse_path(&layout, path) {
+        let (profile_key, actual_path) = match parse_path(&layout, path) {
             PathTarget::Canonical {
                 profile_key,
                 path: canonical,
@@ -269,28 +304,25 @@ impl RivenFs {
                 let actual_path = match canonical {
                     CanonicalPath::MovieFile { actual_path }
                     | CanonicalPath::EpisodeFile { actual_path } => actual_path,
-                    _ => String::new(),
+                    _ => return None,
                 };
                 if actual_path.is_empty() {
-                    None
-                } else {
-                    self.runtime
-                        .block_on(repo::get_filesystem_entry_by_path(
-                            &self.db_pool,
-                            &actual_path,
-                        ))
-                        .ok()
-                        .flatten()
-                        .map(CachedEntry::from_db)
-                        .filter(|entry| entry.matches_profile(profile_key.as_deref()))
-                        .map(Arc::new)
+                    return None;
                 }
+                (profile_key, actual_path)
             }
-            _ => None,
+            _ => return None,
         };
-        self.entry_cache
-            .insert(path.to_string(), (result.clone(), Instant::now()));
-        result
+        self.runtime
+            .block_on(repo::get_filesystem_entry_by_path(
+                &self.db_pool,
+                &actual_path,
+            ))
+            .ok()
+            .flatten()
+            .map(CachedEntry::from_db)
+            .filter(|entry| entry.matches_profile(profile_key.as_deref()))
+            .map(Arc::new)
     }
 
     /// Mint a fresh stream URL for an entry and persist it, coalescing
@@ -300,7 +332,6 @@ impl RivenFs {
     /// persisted while we waited is returned instead of firing another request.
     fn request_and_persist_stream_url(
         &self,
-        path: &str,
         entry_id: i64,
         download_url: Option<&str>,
         provider: Option<&str>,
@@ -320,7 +351,6 @@ impl RivenFs {
             && let Some(fresh) = entry.stream_url
             && Some(fresh.as_str()) != current_url
         {
-            self.entry_cache.remove(path);
             drop(guard);
             self.link_refresh_locks
                 .remove_if(&entry_id, |_, arc| Arc::strong_count(arc) <= 2);
@@ -345,10 +375,6 @@ impl RivenFs {
         {
             tracing::warn!(entry_id, %err, "failed to persist refreshed stream url");
         }
-        // Drop the cached entry either way: on success it now holds a stale
-        // URL, and on failure (including a dead-link refusal) the link-request
-        // consumer may have just deleted the row entirely.
-        self.entry_cache.remove(path);
 
         drop(guard);
         self.link_refresh_locks
@@ -356,13 +382,12 @@ impl RivenFs {
         url
     }
 
-    fn resolve_stream_url(&self, path: &str, entry: &CachedEntry) -> Option<String> {
+    fn resolve_stream_url(&self, entry: &CachedEntry) -> Option<String> {
         if let Some(url) = entry.stream_url.as_deref() {
             return Some(url.to_string());
         }
 
         self.request_and_persist_stream_url(
-            path,
             entry.id,
             entry.download_url.as_deref(),
             entry.provider.as_deref(),
@@ -382,15 +407,13 @@ impl RivenFs {
         path: &str,
         stale_entry_id: i64,
     ) -> Option<Arc<str>> {
-        // `request_and_persist_stream_url` already evicted the cache entry, so
-        // this re-reads from the DB and picks up any replacement row.
-        let fresh = self.get_entry_cached(path)?;
+        let fresh = self.get_entry(path)?;
         // Only rebind when the path resolves to a genuinely *different* media
         // entry — otherwise the failure is a real dead end, not a stale handle.
         if fresh.id == stale_entry_id || fresh.entry_type != FileSystemEntryType::Media {
             return None;
         }
-        let url: Arc<str> = Arc::from(self.resolve_stream_url(path, &fresh)?);
+        let url: Arc<str> = Arc::from(self.resolve_stream_url(&fresh)?);
         if let OpenedFile::Media {
             entry_id,
             stream_url,
@@ -513,20 +536,21 @@ impl Filesystem for RivenFs {
     }
 
     fn lookup(&self, _req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEntry) {
+        let s = &self.inner;
         let parent = parent.0;
         let name = name.to_string_lossy();
         if is_ignored_name(&name) {
             reply.error(Errno::ENOENT);
             return;
         }
-        let path = self.resolve_path(parent, &name);
+        let path = s.resolve_path(parent, &name);
         tracing::debug!(target: "streaming", path = %path, "lookup");
-        self.refresh_caches_if_needed();
-        let layout = self.current_layout();
+        s.refresh_caches_if_needed();
+        let layout = s.current_layout();
         match parse_path(&layout, &path) {
             PathTarget::Root => reply.entry(&TTL, &dir_attr(ROOT_INO), Generation(0)),
             PathTarget::ProfilePrefixDir => {
-                reply.entry(&TTL, &dir_attr(self.get_or_create_ino(&path)), Generation(0))
+                reply.entry(&TTL, &dir_attr(s.get_or_create_ino(&path)), Generation(0))
             }
             PathTarget::Canonical {
                 profile_key,
@@ -535,7 +559,7 @@ impl Filesystem for RivenFs {
                 CanonicalPath::Root => reply.entry(&TTL, &dir_attr(ROOT_INO), Generation(0)),
                 CanonicalPath::AllMovies => {
                     let ino = if profile_key.is_some() {
-                        self.get_or_create_ino(&path)
+                        s.get_or_create_ino(&path)
                     } else {
                         MOVIES_INO
                     };
@@ -543,7 +567,7 @@ impl Filesystem for RivenFs {
                 }
                 CanonicalPath::AllShows => {
                     let ino = if profile_key.is_some() {
-                        self.get_or_create_ino(&path)
+                        s.get_or_create_ino(&path)
                     } else {
                         SHOWS_INO
                     };
@@ -554,14 +578,14 @@ impl Filesystem for RivenFs {
                 | CanonicalPath::SeasonDir { .. } => {
                     reply.entry(
                         &TTL,
-                        &dir_attr(self.get_or_create_ino(&path)),
+                        &dir_attr(s.get_or_create_ino(&path)),
                         Generation(0),
                     );
                 }
                 CanonicalPath::MovieFile { .. } | CanonicalPath::EpisodeFile { .. } => {
-                    match self.get_entry_cached(&path) {
+                    match s.get_entry(&path) {
                         Some(entry) => {
-                            let ino = self.get_or_create_ino(&path);
+                            let ino = s.get_or_create_ino(&path);
                             reply.entry(
                                 &TTL,
                                 &file_attr(ino, entry.file_size, entry.mtime),
@@ -578,23 +602,24 @@ impl Filesystem for RivenFs {
     }
 
     fn getattr(&self, _req: &Request, ino: INodeNo, _fh: Option<FuseFh>, reply: ReplyAttr) {
+        let s = &self.inner;
         let ino = ino.0;
         match ino {
             ROOT_INO => reply.attr(&TTL, &dir_attr(ROOT_INO)),
             MOVIES_INO => reply.attr(&TTL, &dir_attr(MOVIES_INO)),
             SHOWS_INO => reply.attr(&TTL, &dir_attr(SHOWS_INO)),
             _ => {
-                let Some(path) = self.ino_to_path.get(&ino) else {
+                let Some(path) = s.ino_to_path.get(&ino) else {
                     reply.error(Errno::ENOENT);
                     return;
                 };
-                self.refresh_caches_if_needed();
-                let layout = self.current_layout();
+                s.refresh_caches_if_needed();
+                let layout = s.current_layout();
                 match parse_path(&layout, &path) {
                     PathTarget::Canonical {
                         path: CanonicalPath::MovieFile { .. } | CanonicalPath::EpisodeFile { .. },
                         ..
-                    } => match self.get_entry_cached(&path) {
+                    } => match s.get_entry(&path) {
                         Some(entry) => {
                             reply.attr(&TTL, &file_attr(ino, entry.file_size, entry.mtime))
                         }
@@ -614,9 +639,10 @@ impl Filesystem for RivenFs {
         offset: u64,
         mut reply: ReplyDirectory,
     ) {
+        let s = &self.inner;
         let ino = ino.0;
-        self.refresh_caches_if_needed();
-        let cached = self
+        s.refresh_caches_if_needed();
+        let cached = s
             .readdir_cache
             .get(&ino)
             .and_then(|e| (e.1.elapsed() < READDIR_CACHE_TTL).then(|| e.0.clone()));
@@ -628,14 +654,14 @@ impl Filesystem for RivenFs {
                 (ino, FileType::Directory, ".".into()),
                 (ino, FileType::Directory, "..".into()),
             ];
-            let ino_to_path = self.ino_to_path.get(&ino).map(|r| Arc::clone(&r));
-            let mut get_ino = |path: &str| self.get_or_create_ino(path);
-            let layout = self.current_layout();
+            let ino_to_path = s.ino_to_path.get(&ino).map(|r| Arc::clone(&r));
+            let mut get_ino = |path: &str| s.get_or_create_ino(path);
+            let layout = s.current_layout();
             populate_entries(
                 ino,
                 ino_to_path.as_deref(),
-                &self.db_pool,
-                &self.runtime,
+                &s.db_pool,
+                &s.runtime,
                 &layout,
                 &mut entries,
                 &mut get_ino,
@@ -646,7 +672,7 @@ impl Filesystem for RivenFs {
                 .into_iter()
                 .filter(|(_, _, n)| seen.insert(n.clone()))
                 .collect();
-            self.readdir_cache
+            s.readdir_cache
                 .insert(ino, (deduped.clone(), Instant::now()));
             deduped
         };
@@ -660,13 +686,14 @@ impl Filesystem for RivenFs {
     }
 
     fn open(&self, _req: &Request, ino: INodeNo, _flags: OpenFlags, reply: ReplyOpen) {
+        let s = &self.inner;
         let ino = ino.0;
-        let Some(path) = self.ino_to_path.get(&ino).map(|r| Arc::clone(&r)) else {
+        let Some(path) = s.ino_to_path.get(&ino).map(|r| Arc::clone(&r)) else {
             reply.error(Errno::ENOENT);
             return;
         };
         tracing::debug!(target: "streaming", path = %path, "open");
-        let Some(entry) = self.get_entry_cached(&path) else {
+        let Some(entry) = s.get_entry(&path) else {
             reply.error(Errno::ENOENT);
             return;
         };
@@ -678,14 +705,14 @@ impl Filesystem for RivenFs {
                 reply.error(Errno::ENOENT);
                 return;
             };
-            let fd = self.next_fd.fetch_add(1, Ordering::SeqCst);
-            self.file_handles
+            let fd = s.next_fd.fetch_add(1, Ordering::SeqCst);
+            s.file_handles
                 .insert(fd, Mutex::new(OpenedFile::Subtitle { content }));
             reply.opened(FuseFh(fd), FopenFlags::FOPEN_KEEP_CACHE);
             return;
         }
 
-        let Some(stream_url) = self.resolve_stream_url(&path, &entry) else {
+        let Some(stream_url) = s.resolve_stream_url(&entry) else {
             reply.error(if entry.download_url.is_some() {
                 Errno::EIO
             } else {
@@ -694,21 +721,21 @@ impl Filesystem for RivenFs {
             return;
         };
 
-        let fd = self.next_fd.fetch_add(1, Ordering::SeqCst);
+        let fd = s.next_fd.fetch_add(1, Ordering::SeqCst);
         let file_size = entry.file_size;
 
         // Pre-warm header and footer bytes so media-server scans hit the cache,
         // not the CDN.
-        self.runtime.spawn(prewarm_header_footer(
-            Arc::clone(&self.range_cache),
-            self.stream_client.clone(),
-            Arc::clone(&self.prewarm_semaphore),
+        s.runtime.spawn(prewarm_header_footer(
+            Arc::clone(&s.range_cache),
+            s.stream_client.clone(),
+            Arc::clone(&s.prewarm_semaphore),
             ino,
             stream_url.clone(),
             file_size,
         ));
 
-        self.file_handles.insert(
+        s.file_handles.insert(
             fd,
             Mutex::new(OpenedFile::Media {
                 entry_id: entry.id,
@@ -733,101 +760,115 @@ impl Filesystem for RivenFs {
         _lock_owner: Option<LockOwner>,
         reply: ReplyData,
     ) {
+        // Hand the read off to a tokio blocking task so the FUSE dispatcher
+        // thread returns immediately and is free to service the next kernel
+        // request. The body below does `runtime.block_on(fetch_range(...))`
+        // synchronously and can take seconds (NNTP fetch, dead-link refresh,
+        // retry); running it on the FUSE thread head-of-line blocks every
+        // other op on the mount, which is what wedged playback whenever
+        // Plex's analyzer fan-out hammered a file. `spawn_blocking` uses
+        // tokio's blocking-task pool (default ~512 threads, grown on demand),
+        // so concurrency scales naturally with load instead of an arbitrary
+        // worker cap. Per-handle serialisation is still preserved by the
+        // `Mutex<OpenedFile>` inside `file_handles`.
+        let inner = Arc::clone(&self.inner);
         let fh = fh.0;
-        let Some(entry) = self.file_handles.get(&fh) else {
-            reply.error(Errno::EBADF);
-            return;
-        };
-        let mut handle = entry.lock();
+        inner.runtime.clone().spawn_blocking(move || {
+            let s = inner.as_ref();
+            let Some(entry) = s.file_handles.get(&fh) else {
+                reply.error(Errno::EBADF);
+                return;
+            };
+            let mut handle = entry.lock();
 
-        // Subtitle reads bypass the streaming/refresh machinery entirely.
-        if let OpenedFile::Subtitle { content } = &*handle {
-            let len = content.len() as u64;
+            // Subtitle reads bypass the streaming/refresh machinery entirely.
+            if let OpenedFile::Subtitle { content } = &*handle {
+                let len = content.len() as u64;
+                let start = offset;
+                if start >= len {
+                    reply.data(&[]);
+                    return;
+                }
+                let end = (start + size as u64 - 1).min(len - 1);
+                reply.data(&content[start as usize..=end as usize]);
+                return;
+            }
+
+            let (file_size, path, stream_url, download_url, provider, entry_id) = match &*handle {
+                OpenedFile::Media {
+                    stream_session,
+                    path,
+                    stream_url,
+                    download_url,
+                    provider,
+                    entry_id,
+                } => (
+                    stream_session.file_size(),
+                    Arc::clone(path),
+                    Arc::clone(stream_url),
+                    download_url.as_ref().map(Arc::clone),
+                    provider.as_ref().map(Arc::clone),
+                    *entry_id,
+                ),
+                OpenedFile::Subtitle { .. } => unreachable!(),
+            };
+
             let start = offset;
-            if start >= len {
+            if start >= file_size {
                 reply.data(&[]);
                 return;
             }
-            let end = (start + size as u64 - 1).min(len - 1);
-            reply.data(&content[start as usize..=end as usize]);
-            return;
-        }
+            let end = (start + size as u64 - 1).min(file_size - 1);
 
-        let (file_size, path, stream_url, download_url, provider, entry_id) = match &*handle {
-            OpenedFile::Media {
-                stream_session,
-                path,
-                stream_url,
-                download_url,
-                provider,
-                entry_id,
-            } => (
-                stream_session.file_size(),
-                Arc::clone(path),
-                Arc::clone(stream_url),
-                download_url.as_ref().map(Arc::clone),
-                provider.as_ref().map(Arc::clone),
-                *entry_id,
-            ),
-            OpenedFile::Subtitle { .. } => unreachable!(),
-        };
+            tracing::debug!(target: "streaming", path = %path, offset = start, size, "read");
 
-        let start = offset;
-        if start >= file_size {
-            reply.data(&[]);
-            return;
-        }
-        let end = (start + size as u64 - 1).min(file_size - 1);
+            let outcome = match s.read_handle(&mut handle, start, end, &stream_url) {
+                ReadOutcome::Data(buf) => ReadOutcome::Data(buf),
+                ReadOutcome::Error(code) => {
+                    let Some(download_url) = download_url else {
+                        return reply.error(Errno::from_i32(code));
+                    };
 
-        tracing::debug!(target: "streaming", path = %path, offset = start, size, "read");
+                    tracing::warn!(
+                        path = %path,
+                        offset = start,
+                        size,
+                        code,
+                        "read failed, refreshing stream url and retrying once"
+                    );
 
-        let outcome = match self.read_handle(&mut handle, start, end, &stream_url) {
-            ReadOutcome::Data(buf) => ReadOutcome::Data(buf),
-            ReadOutcome::Error(code) => {
-                let Some(download_url) = download_url else {
-                    return reply.error(Errno::from_i32(code));
-                };
-
-                tracing::warn!(
-                    path = %path,
-                    offset = start,
-                    size,
-                    code,
-                    "read failed, refreshing stream url and retrying once"
-                );
-
-                match self.request_and_persist_stream_url(
-                    &path,
-                    entry_id,
-                    Some(download_url.as_ref()),
-                    provider.as_deref(),
-                    Some(stream_url.as_ref()),
-                ) {
-                    Some(url) => {
-                        if let OpenedFile::Media { stream_url, .. } = &mut *handle {
-                            *stream_url = Arc::from(url);
+                    match s.request_and_persist_stream_url(
+                        entry_id,
+                        Some(download_url.as_ref()),
+                        provider.as_deref(),
+                        Some(stream_url.as_ref()),
+                    ) {
+                        Some(url) => {
+                            if let OpenedFile::Media { stream_url, .. } = &mut *handle {
+                                *stream_url = Arc::from(url);
+                            }
+                            let refreshed = match &*handle {
+                                OpenedFile::Media { stream_url, .. } => Arc::clone(stream_url),
+                                OpenedFile::Subtitle { .. } => unreachable!(),
+                            };
+                            s.read_handle(&mut handle, start, end, &refreshed)
                         }
-                        let refreshed = match &*handle {
-                            OpenedFile::Media { stream_url, .. } => Arc::clone(stream_url),
-                            OpenedFile::Subtitle { .. } => unreachable!(),
-                        };
-                        self.read_handle(&mut handle, start, end, &refreshed)
+                        // The refresh produced nothing. The handle's entry may have
+                        // been replaced by a dead-link re-download — rebind to the
+                        // fresh entry at this path and retry once before giving up.
+                        None => match s.rebind_stale_handle(&mut handle, &path, entry_id) {
+                            Some(rebound) => s.read_handle(&mut handle, start, end, &rebound),
+                            None => ReadOutcome::Error(code),
+                        },
                     }
-                    // The refresh produced nothing. The handle's entry may have
-                    // been replaced by a dead-link re-download — rebind to the
-                    // fresh entry at this path and retry once before giving up.
-                    None => match self.rebind_stale_handle(&mut handle, &path, entry_id) {
-                        Some(rebound) => self.read_handle(&mut handle, start, end, &rebound),
-                        None => ReadOutcome::Error(code),
-                    },
                 }
-            }
-        };
+            };
 
-        match outcome {
-            ReadOutcome::Data(buf) => reply.data(&buf),
-            ReadOutcome::Error(code) => reply.error(Errno::from_i32(code)),
-        }
+            match outcome {
+                ReadOutcome::Data(buf) => reply.data(&buf),
+                ReadOutcome::Error(code) => reply.error(Errno::from_i32(code)),
+            }
+        });
     }
 
     // The VFS is read-only, so there is nothing to flush — but the kernel
@@ -854,9 +895,10 @@ impl Filesystem for RivenFs {
         _flush: bool,
         reply: ReplyEmpty,
     ) {
+        let s = &self.inner;
         let fh = fh.0;
         tracing::debug!(target: "streaming", fh, "release");
-        self.file_handles.remove(&fh);
+        s.file_handles.remove(&fh);
         reply.ok();
     }
 }

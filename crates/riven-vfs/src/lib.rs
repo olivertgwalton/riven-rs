@@ -116,7 +116,6 @@ pub fn mount(
         // this reduces block_on() call frequency ~32x for sequential playback.
         fuser::MountOption::CUSTOM("max_read=4194304".to_string()),
     ];
-
     let session = fuser::spawn_mount2(fs, mount_path, &config)?;
     tracing::info!(path = %mount_path.display(), "VFS mounted");
 

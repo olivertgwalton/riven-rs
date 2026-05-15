@@ -16,12 +16,14 @@ use std::time::Duration;
 
 use anyhow::Result;
 use redis::AsyncCommands;
+use riven_core::http::HttpClient;
+use riven_core::settings::PluginSettings;
 use riven_usenet::nntp::NntpPool;
 use riven_usenet::nzb::NzbSegment;
 use riven_usenet::streamer::{NzbMeta, NzbMetaSource};
 use sqlx::PgPool;
 
-use crate::PROVIDER;
+use crate::{PROVIDER, availnzb, nzb_url_redis_key};
 
 const HEALTH_CHECK_TICK: Duration = Duration::from_secs(24 * 60 * 60);
 const PER_ENTRY_INTERVAL: Duration = Duration::from_secs(7 * 24 * 60 * 60);
@@ -33,7 +35,13 @@ const FAILURE_THRESHOLD: f64 = 0.5;
 
 const BATCH_LIMIT: i64 = 100;
 
-pub fn spawn(db_pool: PgPool, redis: redis::aio::ConnectionManager, pool: Arc<NntpPool>) {
+pub fn spawn(
+    db_pool: PgPool,
+    redis: redis::aio::ConnectionManager,
+    pool: Arc<NntpPool>,
+    http: HttpClient,
+    settings: PluginSettings,
+) {
     use std::sync::OnceLock;
     static STARTED: OnceLock<()> = OnceLock::new();
     if STARTED.set(()).is_err() {
@@ -42,7 +50,7 @@ pub fn spawn(db_pool: PgPool, redis: redis::aio::ConnectionManager, pool: Arc<Nn
     tokio::spawn(async move {
         tokio::time::sleep(Duration::from_secs(30)).await;
         loop {
-            match run_once(&db_pool, &redis, &pool).await {
+            match run_once(&db_pool, &redis, &pool, &http, &settings).await {
                 Ok(summary) => {
                     if summary.checked > 0 {
                         tracing::info!(
@@ -73,6 +81,8 @@ async fn run_once(
     db_pool: &PgPool,
     redis_seed: &redis::aio::ConnectionManager,
     pool: &Arc<NntpPool>,
+    http: &HttpClient,
+    settings: &PluginSettings,
 ) -> Result<PassSummary> {
     let rows: Vec<(i64, String, i64)> = sqlx::query_as(
         "SELECT fe.id, COALESCE(s.info_hash, '') AS info_hash, fe.media_item_id \
@@ -132,6 +142,14 @@ async fn run_once(
         let (alive, total) = stat_sample(pool, &segments).await;
         let missing = total.saturating_sub(alive);
         let miss_rate = missing as f64 / total.max(1) as f64;
+        // Only feed AvailNZB when stat_sample produced a real verdict;
+        // total == 0 means the pool errored and we have no signal to report.
+        let report_signal = (total > 0).then(|| miss_rate < FAILURE_THRESHOLD);
+        let nzb_url: Option<String> =
+            AsyncCommands::get(&mut redis, nzb_url_redis_key(&info_hash))
+                .await
+                .unwrap_or(None);
+        let release_name = meta.files.first().map(|f| f.filename.clone());
         if miss_rate >= FAILURE_THRESHOLD {
             tracing::warn!(
                 entry_id,
@@ -160,6 +178,15 @@ async fn run_once(
                 PER_ENTRY_INTERVAL.as_secs(),
             )
             .await;
+            if let (Some(url), Some(false)) = (nzb_url.as_ref(), report_signal) {
+                availnzb::spawn_report_if_configured(
+                    http.clone(),
+                    settings,
+                    url.clone(),
+                    false,
+                    release_name.clone(),
+                );
+            }
         } else {
             let _: redis::RedisResult<()> = AsyncCommands::set_ex(
                 &mut redis,
@@ -168,6 +195,15 @@ async fn run_once(
                 PER_ENTRY_INTERVAL.as_secs(),
             )
             .await;
+            if let (Some(url), Some(true)) = (nzb_url.as_ref(), report_signal) {
+                availnzb::spawn_report_if_configured(
+                    http.clone(),
+                    settings,
+                    url.clone(),
+                    true,
+                    release_name.clone(),
+                );
+            }
         }
     }
 
