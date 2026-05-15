@@ -42,8 +42,7 @@ pub(crate) const RAR4_SIGNATURE: [u8; 7] = [0x52, 0x61, 0x72, 0x21, 0x1A, 0x07, 
 pub(crate) const RAR5_SIGNATURE: [u8; 8] = [0x52, 0x61, 0x72, 0x21, 0x1A, 0x07, 0x01, 0x00];
 
 /// A single file-header occurrence within one RAR volume. A contained file
-/// that spans N volumes appears as N entries (one per volume) with
-/// `split_before/split_after` set appropriately on the boundaries.
+/// that spans N volumes appears as N entries (one per volume).
 #[derive(Debug, Clone)]
 pub struct RarVolumeFileEntry {
     /// Filename as decoded from the FILE_HEAD. For multi-volume entries
@@ -61,8 +60,6 @@ pub struct RarVolumeFileEntry {
     /// multi-volume file.
     pub unpacked_size: u64,
     pub method: u8,
-    pub split_before: bool,
-    pub split_after: bool,
     /// Encryption record from the file header's extra area, if the file
     /// is encrypted. RAR5 only; RAR4 encryption isn't currently parsed.
     pub encryption: Option<RarEncryption>,

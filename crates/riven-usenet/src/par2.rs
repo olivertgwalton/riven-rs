@@ -66,8 +66,9 @@ pub fn parse_file_descriptors(par2: &[u8]) -> Result<Vec<Par2FileDesc>, Par2Erro
             cursor += 1;
             continue;
         }
-        let packet_length =
-            u64::from_le_bytes(par2[cursor + 8..cursor + 16].try_into().expect("8 bytes"));
+        let mut len_bytes = [0u8; 8];
+        len_bytes.copy_from_slice(&par2[cursor + 8..cursor + 16]);
+        let packet_length = u64::from_le_bytes(len_bytes);
         if packet_length < 64 {
             return Err(Par2Error::BadLength(packet_length));
         }
@@ -89,7 +90,9 @@ pub fn parse_file_descriptors(par2: &[u8]) -> Result<Vec<Par2FileDesc>, Par2Erro
             md5_full.copy_from_slice(&body[16..32]);
             let mut md5_16k = [0u8; 16];
             md5_16k.copy_from_slice(&body[32..48]);
-            let length = u64::from_le_bytes(body[48..56].try_into().expect("8 bytes"));
+            let mut len_bytes = [0u8; 8];
+            len_bytes.copy_from_slice(&body[48..56]);
+            let length = u64::from_le_bytes(len_bytes);
             // Filename: strip trailing NUL padding and decode as UTF-8 lossily
             // (some par2 producers historically emit Windows-1252; lossy is
             // good enough for our display/match use).

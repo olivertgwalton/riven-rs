@@ -7,7 +7,6 @@
 //! `=yend`. We only need to decode the payload; CRC validation is
 //! best-effort (logged on mismatch but not fatal).
 
-use std::collections::HashMap;
 
 #[derive(Debug, Clone, Default)]
 pub struct YencInfo {
@@ -149,28 +148,6 @@ fn parse_kv(line: &[u8], cb: &mut dyn FnMut(&str, &str)) {
             cb(k, v);
         }
     }
-}
-
-/// Convenience: ignore declared headers, just decode the payload.
-pub fn decode_payload(body: &[u8]) -> Result<Vec<u8>, YencError> {
-    decode(body).map(|(p, _)| p)
-}
-
-/// Extract the field map without decoding the body. Useful for sniffing
-/// `=ybegin size=` and `=ypart begin/end` from a small prefix.
-pub fn parse_headers_only(body: &[u8]) -> HashMap<String, String> {
-    let mut map = HashMap::new();
-    for line in split_lines(body) {
-        if line.starts_with(b"=ybegin") || line.starts_with(b"=ypart") || line.starts_with(b"=yend") {
-            parse_kv(line, &mut |k, v| {
-                map.insert(k.to_string(), v.to_string());
-            });
-            if line.starts_with(b"=yend") {
-                break;
-            }
-        }
-    }
-    map
 }
 
 #[cfg(test)]

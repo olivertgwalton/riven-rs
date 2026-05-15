@@ -257,16 +257,15 @@ pub fn parse_nzb_document(xml: &str) -> Result<NzbDocument, NzbError> {
 }
 
 /// Heuristic check for an obfuscated filename — random hash/blob stems with
-/// no release-name structure. Mirrors nzbdav's `ObfuscationUtil.IsProbablyObfuscated`
-/// + decypharr's structural detection: a real release name always has at
-/// least one separator (`.`, ` `, `-`, `_`).
+/// no release-name structure. A real release name always has at least one
+/// separator (`.`, ` `, `-`, `_`).
 ///
 /// Flags:
-///   - `abc.xyz...` placeholder prefix.
-///   - 32-char hex stem (md5/etag-like).
-///   - 40+ char hex/dot stems.
-///   - 24+ char alphanumeric stems with no separators (covers iVy/FLUX
-///     `VfYc6l3ibzTHwlPkvX1hocwymwUNt6yt`-style names).
+/// - `abc.xyz...` placeholder prefix.
+/// - 32-char hex stem (md5/etag-like).
+/// - 40+ char hex/dot stems.
+/// - 24+ char alphanumeric stems with no separators (covers iVy/FLUX
+///   `VfYc6l3ibzTHwlPkvX1hocwymwUNt6yt`-style names).
 pub fn looks_obfuscated(filename: &str) -> bool {
     let stem = match filename.rfind('.') {
         Some(i) if i > 0 => &filename[..i],
@@ -331,12 +330,12 @@ pub fn rar_volume_info(filename: &str) -> Option<(String, u32)> {
         let prefix = &lower[..rar_pos];
         if let Some(part_pos) = prefix.rfind(".part") {
             let num = &prefix[part_pos + 5..];
-            if !num.is_empty() && num.bytes().all(|b| b.is_ascii_digit()) {
-                if let Ok(n) = num.parse::<u32>()
-                    && n >= 1
-                {
-                    return Some((prefix[..part_pos].to_string(), n - 1));
-                }
+            if !num.is_empty()
+                && num.bytes().all(|b| b.is_ascii_digit())
+                && let Ok(n) = num.parse::<u32>()
+                && n >= 1
+            {
+                return Some((prefix[..part_pos].to_string(), n - 1));
             }
         }
         // Plain `.rar` (volume 0 of an `.rNN`-style continuation set).
@@ -361,19 +360,6 @@ pub fn rar_volume_info(filename: &str) -> Option<(String, u32)> {
     }
 
     None
-}
-
-/// Backwards-compatible single-volume index lookup. Prefer `rar_volume_info`
-/// when the base name is needed for grouping.
-pub fn rar_volume_index(filename: &str) -> Option<u32> {
-    rar_volume_info(filename).map(|(_, n)| n)
-}
-
-/// Find the indices of NZB files that form the (single) RAR archive, ordered
-/// by volume. Kept for legacy callers; new code should prefer
-/// [`detect_rar_volume_groups`] which handles multi-set NZBs (season packs).
-pub fn detect_rar_volume_set(files: &[NzbFile]) -> Option<Vec<usize>> {
-    detect_rar_volume_groups(files).into_iter().next()
 }
 
 /// Group NZB files into RAR archive sets by their normalised base name.
@@ -468,43 +454,6 @@ mod tests {
         assert!(looks_like_media(&f));
         f.subject = "movie.par2".into();
         assert!(!looks_like_media(&f));
-    }
-
-    #[test]
-    fn rar_volume_indices() {
-        assert_eq!(rar_volume_index("release.rar"), Some(0));
-        assert_eq!(rar_volume_index("release.r00"), Some(1));
-        assert_eq!(rar_volume_index("release.r34"), Some(35));
-        assert_eq!(rar_volume_index("release.part01.rar"), Some(0));
-        assert_eq!(rar_volume_index("release.part12.rar"), Some(11));
-        assert_eq!(rar_volume_index("not-a-rar.mkv"), None);
-        assert_eq!(rar_volume_index("release.par2"), None);
-    }
-
-    #[test]
-    fn detects_rar_set_in_order() {
-        let mk = |s: &str| NzbFile {
-            subject: format!(r#""{s}" yEnc"#),
-            poster: String::new(),
-            groups: vec![],
-            segments: vec![],
-        };
-        let files = vec![
-            mk("release.r05"),
-            mk("release.rar"),
-            mk("release.par2"),
-            mk("release.r00"),
-            mk("release.r10"),
-        ];
-        let indices = detect_rar_volume_set(&files).expect("should detect RAR set");
-        let names: Vec<&str> = indices
-            .iter()
-            .map(|&i| files[i].subject.as_str())
-            .collect();
-        assert!(names[0].contains("release.rar"));
-        assert!(names[1].contains("release.r00"));
-        assert!(names[2].contains("release.r05"));
-        assert!(names[3].contains("release.r10"));
     }
 
     #[test]

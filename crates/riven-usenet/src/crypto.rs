@@ -13,9 +13,11 @@
 
 use aes::Aes256;
 use cbc::Decryptor;
-use cbc::cipher::{Array, BlockModeDecrypt, KeyIvInit};
+use cbc::cipher::{Array, BlockModeDecrypt, BlockSizeUser, KeyIvInit};
 use hmac::Hmac;
 use sha2::Sha256;
+
+type AesBlock = Array<u8, <Aes256 as BlockSizeUser>::BlockSize>;
 
 /// AES-256 block size in bytes.
 pub const AES_BLOCK: usize = 16;
@@ -37,7 +39,7 @@ pub fn decrypt_blocks_in_place(
     iv: &[u8; 16],
     ciphertext: &mut [u8],
 ) -> Result<(), CryptoError> {
-    if ciphertext.len() % AES_BLOCK != 0 {
+    if !ciphertext.len().is_multiple_of(AES_BLOCK) {
         return Err(CryptoError::UnalignedCiphertext {
             len: ciphertext.len(),
         });
@@ -46,12 +48,10 @@ pub fn decrypt_blocks_in_place(
         return Ok(());
     }
     let mut dec = Decryptor::<Aes256>::new(key.into(), iv.into());
-    // Reinterpret &mut [u8] as &mut [Array<u8, U16>]. Layout is identical
-    // (Array is `#[repr(transparent)]` wrapping `[u8; N]`).
-    let block_count = ciphertext.len() / AES_BLOCK;
-    let blocks: &mut [Array<u8, _>] = unsafe {
-        std::slice::from_raw_parts_mut(ciphertext.as_mut_ptr().cast(), block_count)
-    };
+    // `slice_as_chunks_mut` is a safe API that splits `&mut [u8]` into
+    // `&mut [Array<u8, U16>]` (and a tail). The tail is empty because we
+    // verified the length is a multiple of `AES_BLOCK` above.
+    let (blocks, _tail) = AesBlock::slice_as_chunks_mut(ciphertext);
     dec.decrypt_blocks(blocks);
     Ok(())
 }
@@ -78,10 +78,7 @@ mod tests {
         let mut ct = plaintext.clone();
         {
             let mut enc = Encryptor::<Aes256>::new((&key).into(), (&iv).into());
-            let count = ct.len() / AES_BLOCK;
-            let blocks: &mut [Array<u8, _>] = unsafe {
-                std::slice::from_raw_parts_mut(ct.as_mut_ptr().cast(), count)
-            };
+            let (blocks, _tail) = AesBlock::slice_as_chunks_mut(&mut ct);
             enc.encrypt_blocks(blocks);
         }
         assert_ne!(ct, plaintext);

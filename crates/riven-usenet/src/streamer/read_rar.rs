@@ -1,13 +1,9 @@
-use std::sync::Arc;
-
 use futures::StreamExt;
-use futures::stream::FuturesOrdered;
+use futures::stream;
 
 use crate::rar;
 
-use super::{
-    FetchFuture, NzbRarPart, NzbRarSlice, READ_PREFETCH_WINDOW, StreamerError, UsenetStreamer,
-};
+use super::{NzbRarPart, NzbRarSlice, READ_PREFETCH_WINDOW, StreamerError, UsenetStreamer};
 
 impl UsenetStreamer {
     /// Read a byte range from a `Rar` source. RAR slice offsets are exact
@@ -182,32 +178,19 @@ impl UsenetStreamer {
             return Ok(out);
         }
 
-        let mut in_flight: FuturesOrdered<FetchFuture<(usize, Result<Arc<Vec<u8>>, StreamerError>)>> =
-            FuturesOrdered::new();
-        let mut next_to_launch = first_seg;
+        let streamer = self.clone();
+        let mids: Vec<(usize, String)> = (first_seg..=last_seg)
+            .map(|i| (i, part.segments[i].message_id.clone()))
+            .collect();
+        let mut stream = stream::iter(mids)
+            .map(move |(i, mid)| {
+                let s = streamer.clone();
+                async move { (i, s.fetch_decoded_cached(&mid).await) }
+            })
+            .buffered(READ_PREFETCH_WINDOW);
 
-        while in_flight.len() < READ_PREFETCH_WINDOW && next_to_launch <= last_seg {
-            let i = next_to_launch;
-            let mid = part.segments[i].message_id.clone();
-            let streamer = self.clone();
-            in_flight.push_back(Box::pin(async move {
-                (i, streamer.fetch_decoded_cached(&mid).await)
-            }));
-            next_to_launch += 1;
-        }
-
-        while let Some((idx, result)) = in_flight.next().await {
+        while let Some((idx, result)) = stream.next().await {
             let decoded = result?;
-            if next_to_launch <= last_seg {
-                let i = next_to_launch;
-                let mid = part.segments[i].message_id.clone();
-                let streamer = self.clone();
-                in_flight.push_back(Box::pin(async move {
-                    (i, streamer.fetch_decoded_cached(&mid).await)
-                }));
-                next_to_launch += 1;
-            }
-
             let seg_lo = (idx as u64) * seg_size;
             let dec_len_usize = decoded.len();
             // Last segment may be shorter than seg_size; otherwise the
@@ -246,7 +229,7 @@ impl UsenetStreamer {
 
         while next_to_launch < total_segs {
             let seg = &part.segments[next_to_launch];
-            let Some(size) = self.decoded_sizes.get(&seg.message_id) else {
+            let Some(size) = self.state.decoded_sizes.get(&seg.message_id) else {
                 break;
             };
             if decoded_cursor + size <= dec_start {
@@ -257,28 +240,19 @@ impl UsenetStreamer {
             }
         }
 
-        let mut in_flight: FuturesOrdered<FetchFuture<Result<Arc<Vec<u8>>, StreamerError>>> =
-            FuturesOrdered::new();
+        let streamer = self.clone();
+        let mids: Vec<String> = (next_to_launch..total_segs)
+            .map(|i| part.segments[i].message_id.clone())
+            .collect();
+        let mut stream = stream::iter(mids)
+            .map(move |mid| {
+                let s = streamer.clone();
+                async move { s.fetch_decoded_cached(&mid).await }
+            })
+            .buffered(READ_PREFETCH_WINDOW);
 
-        while in_flight.len() < READ_PREFETCH_WINDOW && next_to_launch < total_segs {
-            let mid = part.segments[next_to_launch].message_id.clone();
-            let streamer = self.clone();
-            in_flight
-                .push_back(Box::pin(async move { streamer.fetch_decoded_cached(&mid).await }));
-            next_to_launch += 1;
-        }
-
-        while let Some(result) = in_flight.next().await {
+        while let Some(result) = stream.next().await {
             let decoded = result?;
-            if next_to_launch < total_segs {
-                let mid = part.segments[next_to_launch].message_id.clone();
-                let streamer = self.clone();
-                in_flight.push_back(Box::pin(async move {
-                    streamer.fetch_decoded_cached(&mid).await
-                }));
-                next_to_launch += 1;
-            }
-
             let dec_len = decoded.len() as u64;
             let seg_lo = decoded_cursor;
             let seg_hi = decoded_cursor + dec_len;

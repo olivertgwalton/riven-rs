@@ -181,8 +181,6 @@ pub(super) fn parse_volume_header_v5(bytes: &[u8]) -> Result<RarVolumeHeader, Ra
                         packed_size: data_size,
                         unpacked_size,
                         method: if is_stored { METHOD_STORE } else { 0xFF },
-                        split_before: false,
-                        split_after: false,
                         encryption,
                     });
                 }
@@ -229,10 +227,7 @@ fn parse_rar5_file_extra(bytes: &[u8], start: usize, end: usize) -> Option<RarEn
             return None;
         }
         let inner_start = pos;
-        let record_type = match read_vint(bytes, &mut pos) {
-            Some(v) => v,
-            None => return None,
-        };
+        let record_type = read_vint(bytes, &mut pos)?;
         if record_type == RAR5_EXTRA_ENCRYPTION
             && let Some(enc) = parse_rar5_encryption_record(bytes, pos, record_end)
         {

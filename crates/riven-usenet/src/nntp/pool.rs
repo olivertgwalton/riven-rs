@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use parking_lot::Mutex;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
-use super::{NntpConnection, NntpError, NntpProvider, NntpServerConfig};
+use super::{NntpConnection, NntpError, NntpProvider};
 
 /// Drop an idle connection that has been sitting in the pool longer than
 /// this. Aggressive on purpose: several commercial NNTP providers silently
@@ -149,15 +149,6 @@ pub struct NntpPool {
 }
 
 impl NntpPool {
-    /// Build from a single legacy `NntpServerConfig` (back-compat).
-    pub fn new(cfg: NntpServerConfig) -> Arc<Self> {
-        Self::new_multi(vec![NntpProvider {
-            config: cfg,
-            priority: 0,
-            is_backup: false,
-        }])
-    }
-
     pub fn new_multi(mut providers: Vec<NntpProvider>) -> Arc<Self> {
         providers.sort_by(|a, b| {
             a.is_backup
@@ -249,16 +240,6 @@ impl NntpPool {
                 "NNTP pool prewarmed"
             );
         }
-    }
-
-    /// Legacy accessor — first configured provider's config. Use
-    /// `providers()` for full enumeration.
-    pub fn config(&self) -> &NntpServerConfig {
-        &self.slots[0].provider.config
-    }
-
-    pub fn providers(&self) -> impl Iterator<Item = &NntpProvider> {
-        self.slots.iter().map(|s| &s.provider)
     }
 
     async fn acquire(&self, slot_idx: usize) -> Result<Checkout, NntpError> {

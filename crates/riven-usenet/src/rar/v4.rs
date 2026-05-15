@@ -10,8 +10,6 @@ const ENDARC_HEAD: u8 = 0x7B;
 
 pub(super) const FLAG_LONG_BLOCK: u16 = 0x8000;
 
-const FILE_FLAG_SPLIT_BEFORE: u16 = 0x0001;
-const FILE_FLAG_SPLIT_AFTER: u16 = 0x0002;
 const FILE_FLAG_HIGH_SIZE: u16 = 0x0100;
 const FILE_FLAG_UNICODE: u16 = 0x0200;
 const FILE_FLAG_SALT: u16 = 0x0400;
@@ -151,8 +149,6 @@ fn read_file_head(
     }
 
     let data_offset = block_start + common.head_size as u64;
-    let split_before = (common.head_flags & FILE_FLAG_SPLIT_BEFORE) != 0;
-    let split_after = (common.head_flags & FILE_FLAG_SPLIT_AFTER) != 0;
 
     Ok(Some(RarVolumeFileEntry {
         name,
@@ -160,8 +156,6 @@ fn read_file_head(
         packed_size: pack_size,
         unpacked_size,
         method,
-        split_before,
-        split_after,
         // RAR4 encryption isn't parsed; modern encrypted releases use RAR5.
         encryption: None,
     }))

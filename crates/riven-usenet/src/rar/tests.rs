@@ -63,8 +63,6 @@ fn parses_single_volume_stored() {
     assert!(f.is_stored());
     assert_eq!(f.packed_size, payload.len() as u64);
     assert_eq!(f.unpacked_size, payload.len() as u64);
-    assert!(!f.split_before);
-    assert!(!f.split_after);
 
     let observed = &bytes[f.data_offset as usize..f.data_offset as usize + payload.len()];
     assert_eq!(observed, payload);

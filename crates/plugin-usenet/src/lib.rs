@@ -1,15 +1,12 @@
 //! Direct-streaming Usenet downloader plugin.
 //!
-//! Where `plugin-sabnzbd` hands an NZB off to SABnzbd to download to disk,
-//! this plugin treats the NZB as a streamable resource: it parses the NZB,
-//! persists segment metadata for the streamer in Redis, and returns a
-//! `stream_url` that points at riven-api's `/usenet/...` route. Bytes are
-//! pulled from NNTP on demand as the player requests them.
+//! Parses an NZB, persists segment metadata in Redis, and returns a
+//! `stream_url` pointing at riven-api's `/usenet/...` route. Bytes are pulled
+//! from NNTP on demand as the player requests them.
 //!
-//! This plugin owns the NNTP credentials. The streamer in `riven-api` reads
-//! them from this plugin's settings (via `PluginRegistry::get_plugin_settings_json`)
-//! at startup; from then on the plugin and the streamer communicate only
-//! through Redis-stored NZB metadata.
+//! This plugin owns the NNTP credentials; the streamer in `riven-api` reads
+//! them from this plugin's settings at startup and from then on the two
+//! communicate only through Redis-stored NZB metadata.
 
 use async_trait::async_trait;
 use lru::LruCache;
@@ -34,21 +31,14 @@ mod health_check;
 pub(crate) const PROVIDER: &str = "usenet";
 const NZB_INFO_HASH_PREFIX: &str = "nzb-";
 
-/// Process-wide cache of recently-fetched NZB XML bodies, keyed by info_hash.
-/// Consulted by `on_download_requested` so a re-attempt within one download
-/// flow doesn't re-fetch the XML. Bounded so a long-running session doesn't
-/// pin every NZB it has ever seen.
 fn nzb_body_cache() -> &'static Mutex<LruCache<String, Arc<String>>> {
     static C: OnceLock<Mutex<LruCache<String, Arc<String>>>> = OnceLock::new();
     C.get_or_init(|| Mutex::new(LruCache::new(NonZeroUsize::new(256).unwrap())))
 }
 
-/// Rate-limit NZB body fetches. Indexers (NZBgeek, DrunkenSlug, etc.) cap
-/// the download endpoint separately from the search API and start returning
-/// 429s well before the per-day quota — the season→episode cascade can fan
-/// out dozens of probes in a single tick, which trips the limit instantly.
-/// 30/min is conservative across the common indexers and aligns with the
-/// newznab plugin's API limit.
+// Indexer download endpoints rate-limit separately from search and start
+// returning 429s well before the per-day quota; 30/min stays under the
+// common indexer limits.
 pub(crate) const PROFILE: HttpServiceProfile =
     HttpServiceProfile::new("usenet-nzb-fetch").with_rate_limit(30, Duration::from_secs(60));
 
@@ -112,20 +102,13 @@ impl ProviderJson {
     }
 }
 
-/// Build the multi-provider NNTP config from this plugin's settings.
-///
-/// The settings store one `dictionary` field, `nntpproviders`, persisted
-/// as a JSON-encoded object `{ "<provider_name>": { host, port, ... }, ... }`.
-/// Returns `None` if the field is absent, blank, malformed, or empty.
 pub fn nntp_config_from_settings(settings: &PluginSettings) -> Option<NntpConfig> {
     let raw = settings.get("nntpproviders")?;
     parse_providers_str(raw)
 }
 
-/// Build NNTP config from a JSON object whose `nntpproviders` field is
-/// either a JSON object (canonical, when loaded from DB JSONB) or a
-/// JSON-encoded string holding the object (when loaded via the
-/// flattened settings store).
+// `nntpproviders` is stored as a JSON object when loaded from DB JSONB, or
+// as a JSON-encoded string when loaded via the flattened settings store.
 pub fn nntp_config_from_json_value(value: &serde_json::Value) -> Option<NntpConfig> {
     let raw_field = value.as_object()?.get("nntpproviders")?;
     match raw_field {
@@ -174,11 +157,6 @@ impl Plugin for UsenetPlugin {
     }
 
     async fn on_core_started(&self, ctx: &PluginContext) -> anyhow::Result<HookResponse> {
-        // Spawn the background health-check task. Idempotent — `health_check::spawn`
-        // uses a OnceLock guard so a re-validate / plugin reload doesn't
-        // double-spawn the task. Bails silently if the plugin isn't
-        // configured (no NNTP providers); the next CoreStarted after a
-        // settings save will pick it up.
         if let Some(cfg) = nntp_config_from_settings(&ctx.settings) {
             let pool = NntpPool::new_multi(cfg.providers);
             health_check::spawn(ctx.db_pool.clone(), ctx.redis.clone(), pool);
@@ -253,9 +231,6 @@ impl Plugin for UsenetPlugin {
         provider: Option<&str>,
         _ctx: &PluginContext,
     ) -> anyhow::Result<HookResponse> {
-        // Only respond when the caller is asking about our provider (or did
-        // not narrow). Other providers (realdebrid, alldebrid, …) get the
-        // empty answer so we don't pollute their cache map with NZB hashes.
         if let Some(p) = provider
             && p != PROVIDER
         {
@@ -267,20 +242,12 @@ impl Plugin for UsenetPlugin {
             return Ok(HookResponse::Empty);
         }
 
-        // Treat every NZB candidate as "Cached" without probing. Probing was
-        // structurally wrong for usenet: each probe cost one full NZB-XML
-        // download from the indexer plus one NNTP STAT, and with dozens of
-        // candidates per item the per-indexer rate limit (nzbgeek/drunkenslug
-        // ~25-30/min) is exhausted before any actual download is attempted —
-        // which turns *every* candidate into `Unknown` and starves the
-        // download loop.
-        //
-        // Mirrors decypharr's `Process`/`Manager.AddNZB` and nzbdav's queue
-        // pipeline: both projects skip per-candidate verification and let
-        // the real download path discover dead releases and fall through to
-        // the next ranked stream. The streamer's ingest step still STATs a
-        // sample of segments before exposing the file, so dead NZBs are
-        // still caught — just at ingest time rather than cache-check time.
+        // Treat every NZB candidate as Cached without probing: each probe
+        // would cost a full NZB-XML download plus an NNTP STAT, and with
+        // dozens of candidates per item the indexer rate limit is exhausted
+        // before any actual download runs. The streamer's ingest step still
+        // STATs a sample of segments before exposing the file, so dead NZBs
+        // are caught there instead.
         let results: Vec<CacheCheckResult> = nzb_hashes
             .into_iter()
             .map(|h| CacheCheckResult {
@@ -318,8 +285,6 @@ impl Plugin for UsenetPlugin {
             return Ok(HookResponse::DownloadStreamUnavailable);
         };
 
-        // `archivepassword` is consulted only when the archive's RAR file
-        // headers report encryption; passing it always is harmless.
         let streamer = UsenetStreamer::new(nntp_cfg, ctx.redis.clone());
         let password = ctx.settings.get("archivepassword");
         let meta = match streamer.ingest(info_hash, &xml_arc, password).await {
@@ -388,8 +353,8 @@ impl Plugin for UsenetPlugin {
         {
             return Ok(HookResponse::Empty);
         }
-        // The persisted stream_url already points at our /usenet/ route, so
-        // there is no separate "live link" to refresh.
+        // The persisted stream_url already points at /usenet/, so there's
+        // no live link to refresh.
         Ok(HookResponse::StreamLink(StreamLinkResponse {
             link: String::new(),
             provider: Some(PROVIDER.to_string()),
@@ -397,9 +362,6 @@ impl Plugin for UsenetPlugin {
     }
 }
 
-/// Fetch the NZB XML for `info_hash`, consulting (and populating) the
-/// process-wide body cache. Returns `None` if the NZB URL is no longer in
-/// Redis or the HTTP fetch failed.
 async fn fetch_nzb_xml(info_hash: &str, ctx: &PluginContext) -> Option<Arc<String>> {
     if let Some(hit) = nzb_body_cache().lock().unwrap().get(info_hash).cloned() {
         return Some(hit);
@@ -430,4 +392,3 @@ async fn fetch_nzb_xml(info_hash: &str, ctx: &PluginContext) -> Option<Arc<Strin
         .put(info_hash.to_string(), arc.clone());
     Some(arc)
 }
-

@@ -13,16 +13,17 @@
 //! (`plugin-usenet`, which parses an NZB and stores its metadata in Redis) and
 //! the serving path (riven-api's `/usenet/...` HTTP route).
 
-pub mod cache;
-pub mod crypto;
 pub mod nntp;
 pub mod nzb;
-pub mod par2;
-pub mod rar;
 pub mod state;
 pub mod streamer;
-pub mod yenc;
 
+pub(crate) mod cache;
+pub(crate) mod crypto;
+pub(crate) mod par2;
+pub(crate) mod rar;
+pub(crate) mod yenc;
+
+pub use nntp::NntpConfig;
 pub use nzb::{NzbDocument, NzbFile, NzbSegment, parse_nzb, parse_nzb_document};
-pub use par2::{Par2FileDesc, looks_like_par2, parse_file_descriptors};
-pub use streamer::{NntpConfig, NzbMeta, NzbMetaFile, UsenetStreamer, active_streams};
+pub use streamer::{NzbMeta, NzbMetaFile, NzbMetaSource, UsenetStreamer, active_streams};

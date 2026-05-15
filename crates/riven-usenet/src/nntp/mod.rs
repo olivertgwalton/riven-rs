@@ -160,8 +160,23 @@ pub struct NntpProvider {
     pub is_backup: bool,
 }
 
+/// Multi-provider configuration handed to `UsenetStreamer::new`.
+#[derive(Debug, Clone)]
+pub struct NntpConfig {
+    /// One or more NNTP providers ordered by intent. A single primary is the
+    /// common case. Order doesn't matter for ingest; the pool sorts internally
+    /// by `(is_backup, priority)`.
+    pub providers: Vec<NntpProvider>,
+}
+
+impl NntpConfig {
+    pub fn primary(&self) -> Option<&NntpServerConfig> {
+        self.providers.first().map(|p| &p.config)
+    }
+}
+
 /// Initialize rustls's default crypto provider exactly once. Safe to call
 /// multiple times. Idempotent. Must run before any TLS handshake.
-pub fn init_crypto() {
+pub(crate) fn init_crypto() {
     drop(rustls::crypto::ring::default_provider().install_default());
 }

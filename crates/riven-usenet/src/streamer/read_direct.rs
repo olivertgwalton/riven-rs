@@ -1,16 +1,15 @@
 use std::sync::Arc;
 
 use futures::StreamExt;
-use futures::stream::FuturesOrdered;
+use futures::stream;
 
 use crate::nntp::NntpError;
 use crate::nzb::NzbSegment;
-use crate::state::FetchEntry;
+use crate::state::{FetchEntry, PromiseSlot, StreamerState};
 use crate::yenc;
 
 use super::{
-    FetchFuture, NzbMetaSource, READ_PREFETCH_WINDOW, StreamerError, UsenetStreamer,
-    segments_overlapping,
+    NzbMetaSource, READ_PREFETCH_WINDOW, StreamerError, UsenetStreamer, segments_overlapping,
 };
 
 /// Max attempts when fetching an NNTP segment body. ArticleNotFound is
@@ -33,38 +32,33 @@ impl UsenetStreamer {
         message_id: &str,
     ) -> Result<Arc<Vec<u8>>, StreamerError> {
         loop {
-            if let Some(hit) = self.cache.get(message_id) {
+            if let Some(hit) = self.state.cache.get(message_id) {
                 return Ok(hit);
             }
-            if self.fails.is_dead(message_id) {
+            if self.state.fails.is_dead(message_id) {
                 return Err(StreamerError::Nntp(NntpError::ArticleNotFound(
                     "previously marked as missing".into(),
                 )));
             }
 
-            match self.in_flight.enter_or_wait(message_id) {
+            match self.state.in_flight.enter_or_wait(message_id) {
                 FetchEntry::Wait(slot) => {
-                    // Another task is fetching this segment. Park on
-                    // the promise slot; when it's marked done, recheck
-                    // the cache and the permanent-fail set in the next
-                    // loop iteration.
+                    // Another task is fetching this segment. Park on the
+                    // promise slot; when it's marked done, recheck the
+                    // cache and the permanent-fail set on the next loop.
                     slot.wait().await;
                     continue;
                 }
                 FetchEntry::Owner(slot) => {
                     // RAII guard: if this future is cancelled mid-fetch
-                    // (e.g. client disconnects, body stream dropped, our
-                    // outer FuturesOrdered gets aborted on an earlier
-                    // `?`), the await on `do_fetch_with_retry` never
-                    // returns and the explicit `finish` below would be
-                    // skipped. That would leave the slot in the in_flight
-                    // map with `done = false`, and any future Waiter for
-                    // this message-id would hang forever. The guard's
-                    // Drop impl runs even on cancellation, ensuring the
-                    // slot is always released.
+                    // the explicit `finish` below would be skipped, which
+                    // would leave the slot in the in_flight map with
+                    // `done = false` and hang any future waiter for this
+                    // message-id. The guard's Drop runs even on
+                    // cancellation, ensuring the slot is always released.
                     struct OwnerGuard {
-                        in_flight: Arc<crate::state::InFlight>,
-                        slot: Arc<crate::state::PromiseSlot>,
+                        state: Arc<StreamerState>,
+                        slot: Arc<PromiseSlot>,
                         message_id: String,
                         finished: bool,
                     }
@@ -75,27 +69,26 @@ impl UsenetStreamer {
                                     message_id = %self.message_id,
                                     "owner future cancelled mid-fetch; releasing slot"
                                 );
-                                self.in_flight.finish(&self.message_id, &self.slot);
+                                self.state.in_flight.finish(&self.message_id, &self.slot);
                             }
                         }
                     }
                     let mut guard = OwnerGuard {
-                        in_flight: self.in_flight.clone(),
+                        state: self.state.clone(),
                         slot: slot.clone(),
                         message_id: message_id.to_string(),
                         finished: false,
                     };
 
                     let result = self.do_fetch_with_retry(message_id).await;
-                    // Cache must be populated BEFORE marking the slot
-                    // done so waiters observe the hit on their next
-                    // loop iteration.
+                    // Cache must be populated BEFORE marking the slot done
+                    // so waiters observe the hit on their next loop.
                     if let Ok(arc) = &result {
                         let size = arc.len() as u64;
-                        self.cache.put(message_id.to_string(), arc.clone());
-                        self.decoded_sizes.put(message_id.to_string(), size);
+                        self.state.cache.put(message_id.to_string(), arc.clone());
+                        self.state.decoded_sizes.put(message_id.to_string(), size);
                     }
-                    self.in_flight.finish(message_id, &slot);
+                    self.state.in_flight.finish(message_id, &slot);
                     guard.finished = true;
                     return result;
                 }
@@ -141,7 +134,7 @@ impl UsenetStreamer {
                 }
                 Err(NntpError::ArticleNotFound(s)) => {
                     tracing::warn!(message_id, status = %s, "nntp article missing");
-                    self.fails.mark_dead(message_id.to_string());
+                    self.state.fails.mark_dead(message_id.to_string());
                     return Err(StreamerError::Nntp(NntpError::ArticleNotFound(s)));
                 }
                 Err(e) => {
@@ -228,27 +221,18 @@ impl UsenetStreamer {
             }
         };
 
-        let mut iter = mids.into_iter();
-        let mut in_flight: FuturesOrdered<FetchFuture<Result<Arc<Vec<u8>>, StreamerError>>> =
-            FuturesOrdered::new();
-        let push_next = |iter: &mut std::vec::IntoIter<String>,
-                         in_flight: &mut FuturesOrdered<
-            FetchFuture<Result<Arc<Vec<u8>>, StreamerError>>,
-        >,
-                         streamer: UsenetStreamer| {
-            while in_flight.len() < PREFETCH_CONCURRENCY {
-                let Some(mid) = iter.next() else { return };
-                if streamer.cache.get(&mid).is_some() {
-                    continue;
-                }
+        let streamer = self.clone();
+        let cold: Vec<String> = mids
+            .into_iter()
+            .filter(|mid| streamer.state.cache.get(mid).is_none())
+            .collect();
+        let mut stream = stream::iter(cold)
+            .map(move |mid| {
                 let s = streamer.clone();
-                in_flight.push_back(Box::pin(async move { s.fetch_decoded_cached(&mid).await }));
-            }
-        };
-        push_next(&mut iter, &mut in_flight, self.clone());
-        while let Some(_r) = in_flight.next().await {
-            push_next(&mut iter, &mut in_flight, self.clone());
-        }
+                async move { s.fetch_decoded_cached(&mid).await }
+            })
+            .buffer_unordered(PREFETCH_CONCURRENCY);
+        while stream.next().await.is_some() {}
     }
 
     /// Warm the segment cache for the head and tail of `file_index`.
@@ -259,7 +243,7 @@ impl UsenetStreamer {
         const PRECACHE_HEAD_BYTES: u64 = 4 * 1024 * 1024;
         const PRECACHE_TAIL_BYTES: u64 = 4 * 1024 * 1024;
 
-        if !self.precached.claim(info_hash, file_index) {
+        if !self.state.precached.claim(info_hash, file_index) {
             return;
         }
         let Ok(meta) = self.load_meta(info_hash).await else {
@@ -358,32 +342,20 @@ impl UsenetStreamer {
         }
 
         let mut decoded_concat = Vec::with_capacity((end_inclusive - start + 1) as usize);
-        let mut in_flight: FuturesOrdered<
-            FetchFuture<(usize, Result<Arc<Vec<u8>>, StreamerError>)>,
-        > = FuturesOrdered::new();
-        let mut idx_iter = first..=last;
-        let mut completed_idx = first;
 
-        while in_flight.len() < READ_PREFETCH_WINDOW {
-            let Some(i) = idx_iter.next() else { break };
-            let mid = segments[i].message_id.clone();
-            let streamer = self.clone();
-            in_flight.push_back(Box::pin(async move {
-                (i, streamer.fetch_decoded_cached(&mid).await)
-            }));
-        }
+        let streamer = self.clone();
+        let mids: Vec<(usize, String)> = (first..=last)
+            .map(|i| (i, segments[i].message_id.clone()))
+            .collect();
+        let mut stream = stream::iter(mids)
+            .map(move |(i, mid)| {
+                let s = streamer.clone();
+                async move { (i, s.fetch_decoded_cached(&mid).await) }
+            })
+            .buffered(READ_PREFETCH_WINDOW);
 
-        while let Some((idx, result)) = in_flight.next().await {
+        while let Some((idx, result)) = stream.next().await {
             let decoded = result?;
-
-            // Top up the in-flight set before CPU work.
-            if let Some(next_i) = idx_iter.next() {
-                let mid = segments[next_i].message_id.clone();
-                let streamer = self.clone();
-                in_flight.push_back(Box::pin(async move {
-                    (next_i, streamer.fetch_decoded_cached(&mid).await)
-                }));
-            }
 
             let seg_enc_start = offsets[idx];
             let seg_enc_end = offsets[idx + 1];
@@ -398,9 +370,7 @@ impl UsenetStreamer {
             if lo < hi {
                 decoded_concat.extend_from_slice(&decoded[lo..hi]);
             }
-            completed_idx = idx;
         }
-        let _ = completed_idx;
 
         Ok(decoded_concat)
     }

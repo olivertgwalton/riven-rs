@@ -1,10 +1,9 @@
 use std::sync::Arc;
 
 use futures::StreamExt;
-use futures::stream::FuturesOrdered;
+use futures::stream;
 use redis::AsyncCommands;
 
-use crate::nntp::NntpError;
 use crate::nzb::{
     NzbFile, NzbSegment, detect_rar_volume_groups, filename_from_subject, looks_like_media,
     looks_obfuscated, parse_nzb_document,
@@ -12,9 +11,10 @@ use crate::nzb::{
 use crate::par2::{Par2FileDesc, looks_like_par2, parse_file_descriptors};
 use crate::rar::{self, RarEncryption, RarVolumeFileEntry};
 
+use super::meta::{META_TTL_SECS, io_error, meta_key};
 use super::{
-    FetchFuture, META_TTL_SECS, NzbMeta, NzbMetaFile, NzbMetaSource, NzbRarPart, NzbRarSlice,
-    StreamerError, UsenetStreamer, io_error, meta_key,
+    NzbMeta, NzbMetaFile, NzbMetaSource, NzbRarPart, NzbRarSlice, StreamerError,
+    UsenetStreamer,
 };
 
 /// In-progress per-inner-file accumulator during multi-file RAR reconstruction.
@@ -73,14 +73,19 @@ impl UsenetStreamer {
         // Spread the sample across the file rather than concentrating at
         // the front: corrupted releases often have gaps anywhere.
         let step = segments.len().max(1) / n.max(1);
-        let mut probes: FuturesOrdered<FetchFuture<Result<bool, NntpError>>> =
-            FuturesOrdered::new();
-        for i in 0..n {
-            let idx = (i * step).min(segments.len() - 1);
-            let mid = segments[idx].message_id.clone();
-            let pool = self.pool.clone();
-            probes.push_back(Box::pin(async move { pool.stat(&mid).await }));
-        }
+        let mids: Vec<String> = (0..n)
+            .map(|i| {
+                let idx = (i * step).min(segments.len() - 1);
+                segments[idx].message_id.clone()
+            })
+            .collect();
+        let pool = self.pool.clone();
+        let mut probes = stream::iter(mids)
+            .map(move |mid| {
+                let pool = pool.clone();
+                async move { pool.stat(&mid).await }
+            })
+            .buffer_unordered(n);
         let mut missing = 0usize;
         let mut checked = 0usize;
         while let Some(result) = probes.next().await {
@@ -137,7 +142,7 @@ impl UsenetStreamer {
                 file_count = existing.files.len(),
                 "usenet ingest: reusing cached NZB meta (idempotent hit)"
             );
-            self.meta_cache
+            self.state.meta_cache
                 .put(info_hash.to_string(), Arc::new(existing.clone()));
             return Ok(existing);
         }
@@ -260,28 +265,25 @@ impl UsenetStreamer {
             .count();
         if playable_count == 1
             && let Some(release_title) = release_title.as_deref()
-        {
-            if let Some(file) = meta_files
+            && let Some(file) = meta_files
                 .iter_mut()
                 .find(|f| is_media_filename(&f.filename))
-            {
-                if looks_obfuscated(&file.filename) {
-                    let ext = file
-                        .filename
-                        .rsplit('.')
-                        .next()
-                        .filter(|s| !s.is_empty())
-                        .unwrap_or("mkv");
-                    let new_name = format!("{release_title}.{ext}");
-                    tracing::info!(
-                        info_hash,
-                        old = %file.filename,
-                        new = %new_name,
-                        "renamed obfuscated single-file NZB to release title"
-                    );
-                    file.filename = new_name;
-                }
-            }
+            && looks_obfuscated(&file.filename)
+        {
+            let ext = file
+                .filename
+                .rsplit('.')
+                .next()
+                .filter(|s| !s.is_empty())
+                .unwrap_or("mkv");
+            let new_name = format!("{release_title}.{ext}");
+            tracing::info!(
+                info_hash,
+                old = %file.filename,
+                new = %new_name,
+                "renamed obfuscated single-file NZB to release title"
+            );
+            file.filename = new_name;
         }
 
         let meta = NzbMeta {
@@ -298,7 +300,8 @@ impl UsenetStreamer {
             AsyncCommands::set_ex(&mut redis, meta_key(info_hash), json, META_TTL_SECS as u64)
                 .await?;
 
-        self.meta_cache
+        self.state
+            .meta_cache
             .put(info_hash.to_string(), Arc::new(meta.clone()));
 
         Ok(meta)
@@ -392,46 +395,21 @@ impl UsenetStreamer {
         }
 
         // Concurrency cap of 8 — well below typical per-account connection
-        // limits (Newshosting=100, EZNews=50) and high enough to make
-        // ingest of a 73-volume episode pack feel snappy.
-        //
-        // Uses `FuturesOrdered` with `streamer.clone()` (cheap — UsenetStreamer
-        // is a bag of Arcs) rather than `stream::buffered` with `&self`,
-        // matching the prefetch path in `read.rs`. `buffered` with `async
-        // move` closures over `&self` trips a higher-ranked-Send bound in
-        // async-trait-emitted future types (`Send is not general enough` at
-        // the method boundary).
+        // limits (Newshosting=100, EZNews=50) and high enough to make ingest
+        // of a 73-volume episode pack feel snappy.
         const HEADER_FETCH_CONCURRENCY: usize = 8;
-        let mut header_results: Vec<Result<Vec<u8>, StreamerError>> =
-            Vec::with_capacity(parts.len());
-        let mut pending: FuturesOrdered<FetchFuture<Result<Vec<u8>, StreamerError>>> =
-            FuturesOrdered::new();
-        let mut next_to_submit = 0usize;
-        while next_to_submit < parts.len()
-            && pending.len() < HEADER_FETCH_CONCURRENCY
-        {
-            let part = parts[next_to_submit].clone();
-            let streamer = self.clone();
-            pending.push_back(Box::pin(async move {
-                streamer
-                    .fetch_volume_header_bytes(&part, RAR_HEADER_PROBE_BYTES)
-                    .await
-            }));
-            next_to_submit += 1;
-        }
-        while let Some(result) = pending.next().await {
-            header_results.push(result);
-            if next_to_submit < parts.len() {
-                let part = parts[next_to_submit].clone();
-                let streamer = self.clone();
-                pending.push_back(Box::pin(async move {
-                    streamer
-                        .fetch_volume_header_bytes(&part, RAR_HEADER_PROBE_BYTES)
-                        .await
-                }));
-                next_to_submit += 1;
-            }
-        }
+        let streamer = self.clone();
+        let header_results: Vec<Result<Vec<u8>, StreamerError>> =
+            stream::iter(parts.clone())
+                .map(move |part| {
+                    let s = streamer.clone();
+                    async move {
+                        s.fetch_volume_header_bytes(&part, RAR_HEADER_PROBE_BYTES).await
+                    }
+                })
+                .buffered(HEADER_FETCH_CONCURRENCY)
+                .collect()
+                .await;
 
         let mut volume_entries: Vec<Vec<RarVolumeFileEntry>> =
             Vec::with_capacity(parts.len());
@@ -457,7 +435,7 @@ impl UsenetStreamer {
             // one as the part's uniform segment size so the read path can
             // map decoded positions to segments in O(1).
             if let Some(first_seg) = part.segments.first()
-                && let Some(size) = self.decoded_sizes.get(&first_seg.message_id)
+                && let Some(size) = self.state.decoded_sizes.get(&first_seg.message_id)
             {
                 part.decoded_seg_size = Some(size);
             }
@@ -679,10 +657,9 @@ impl UsenetStreamer {
     /// blob has no FileDesc packets, or every recovered name is itself
     /// obfuscated.
     ///
-    /// We pick the smallest par2 because:
-    ///   - the `*.par2` index packet is always the smallest in a set,
-    ///   - `*.volNN+NN.par2` slices duplicate the same FileDesc packets but
-    ///     are larger and contain unused recovery data.
+    /// We pick the smallest par2 because the `*.par2` index packet is always
+    /// the smallest in a set; `*.volNN+NN.par2` slices duplicate the same
+    /// FileDesc packets but are larger and contain unused recovery data.
     /// Fetching just the index keeps the NZB-download quota cost to one file.
     async fn recover_filenames_from_par2(&self, files: &[NzbFile]) -> Option<Vec<String>> {
         let smallest = files

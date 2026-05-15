@@ -8,10 +8,60 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use parking_lot::Mutex;
 use tokio::sync::Notify;
+
+use crate::cache::SegmentCache;
+
+/// Default decoded-segment cache budget. Overridable via env var.
+/// Size up linearly with concurrent stream count: each stream needs ~10-20 MB
+/// of warm segments. Default 256 MB ≈ 12 concurrent streams.
+const DEFAULT_CACHE_BYTES: u64 = 256 * 1024 * 1024;
+
+/// Aggregated process-wide state shared by every `UsenetStreamer`
+/// instance. Sharing means RAR header bytes fetched at ingest time stay
+/// hot for subsequent read-path serves, and a single in-flight fetch
+/// deduplicates across all concerns.
+pub struct StreamerState {
+    pub cache: SegmentCache,
+    pub meta_cache: MetaCache,
+    pub decoded_sizes: DecodedSizes,
+    pub fails: PermanentFails,
+    pub in_flight: InFlight,
+    pub precached: PrecachedFiles,
+    pub migrated: MigratedMetas,
+}
+
+impl StreamerState {
+    fn new() -> Self {
+        let cache_bytes = std::env::var("RIVEN_USENET_CACHE_BYTES")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(DEFAULT_CACHE_BYTES);
+        Self {
+            cache: SegmentCache::new(cache_bytes),
+            meta_cache: MetaCache::default(),
+            decoded_sizes: DecodedSizes::default(),
+            fails: PermanentFails::default(),
+            in_flight: InFlight::default(),
+            precached: PrecachedFiles::default(),
+            migrated: MigratedMetas::default(),
+        }
+    }
+
+    pub fn global() -> Arc<Self> {
+        static C: OnceLock<Arc<StreamerState>> = OnceLock::new();
+        C.get_or_init(|| Arc::new(Self::new())).clone()
+    }
+}
+
+pub fn global_active_streams() -> Arc<ActiveStreams> {
+    static C: OnceLock<Arc<ActiveStreams>> = OnceLock::new();
+    C.get_or_init(|| Arc::new(ActiveStreams::default())).clone()
+}
 
 /// Deserialized metadata cache. Eliminates a per-read Redis round-trip +
 /// JSON deserialization. Entries are dropped when the underlying Redis key
@@ -28,10 +78,6 @@ impl MetaCache {
 
     pub fn put(&self, info_hash: String, meta: Arc<crate::streamer::NzbMeta>) {
         self.inner.lock().insert(info_hash, meta);
-    }
-
-    pub fn invalidate(&self, info_hash: &str) {
-        self.inner.lock().remove(info_hash);
     }
 }
 
@@ -208,9 +254,5 @@ impl ActiveStreams {
 
     pub fn unregister(&self, key: &str) {
         self.inner.lock().remove(key);
-    }
-
-    pub fn snapshot(&self) -> Vec<ActiveStream> {
-        self.inner.lock().values().cloned().collect()
     }
 }
