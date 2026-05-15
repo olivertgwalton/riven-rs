@@ -118,6 +118,30 @@ impl UsenetStreamer {
         nzb_xml: &str,
         password: Option<&str>,
     ) -> Result<NzbMeta, StreamerError> {
+        // Idempotency check: the same NZB is frequently re-submitted across
+        // scrape cycles (e.g. a season-pack scrape and a per-episode scrape
+        // both surface the same release, or a cascade re-pushes after a
+        // transient failure). If we already ingested this info_hash and the
+        // meta is still alive in Redis, reuse it — re-fetching RAR headers
+        // is the most expensive step in this method (parallel volume probes
+        // + header parses) and there's nothing about a duplicate submission
+        // that could change the result. Mirrors nzbdav's
+        // duplicate-NZB-by-info-hash short-circuit in `QueueItemProcessor`.
+        let mut redis = self.redis.clone();
+        if let Ok(Some(json)) =
+            AsyncCommands::get::<_, Option<String>>(&mut redis, meta_key(info_hash)).await
+            && let Ok(existing) = serde_json::from_str::<NzbMeta>(&json)
+        {
+            tracing::debug!(
+                info_hash,
+                file_count = existing.files.len(),
+                "usenet ingest: reusing cached NZB meta (idempotent hit)"
+            );
+            self.meta_cache
+                .put(info_hash.to_string(), Arc::new(existing.clone()));
+            return Ok(existing);
+        }
+
         let document = parse_nzb_document(nzb_xml)?;
         let release_title = document.release_title();
         // Caller-supplied password wins; fall back to the NZB's `<meta>`

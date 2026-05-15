@@ -23,13 +23,15 @@ use riven_core::types::{
     CacheCheckResult, CachedStoreEntry, DownloadFile, DownloadResult, ProviderInfo,
     StreamLinkResponse, TorrentStatus,
 };
-use riven_usenet::nntp::{NntpProvider, NntpServerConfig};
+use riven_usenet::nntp::{NntpPool, NntpProvider, NntpServerConfig};
 use riven_usenet::{NntpConfig, UsenetStreamer};
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
-const PROVIDER: &str = "usenet";
+mod health_check;
+
+pub(crate) const PROVIDER: &str = "usenet";
 const NZB_INFO_HASH_PREFIX: &str = "nzb-";
 
 /// Process-wide cache of recently-fetched NZB XML bodies, keyed by info_hash.
@@ -163,11 +165,25 @@ impl Plugin for UsenetPlugin {
 
     fn subscribed_events(&self) -> &[EventType] {
         &[
+            EventType::CoreStarted,
             EventType::MediaItemDownloadRequested,
             EventType::MediaItemDownloadCacheCheckRequested,
             EventType::MediaItemDownloadProviderListRequested,
             EventType::MediaItemStreamLinkRequested,
         ]
+    }
+
+    async fn on_core_started(&self, ctx: &PluginContext) -> anyhow::Result<HookResponse> {
+        // Spawn the background health-check task. Idempotent — `health_check::spawn`
+        // uses a OnceLock guard so a re-validate / plugin reload doesn't
+        // double-spawn the task. Bails silently if the plugin isn't
+        // configured (no NNTP providers); the next CoreStarted after a
+        // settings save will pick it up.
+        if let Some(cfg) = nntp_config_from_settings(&ctx.settings) {
+            let pool = NntpPool::new_multi(cfg.providers);
+            health_check::spawn(ctx.db_pool.clone(), ctx.redis.clone(), pool);
+        }
+        Ok(HookResponse::Empty)
     }
 
     async fn validate(

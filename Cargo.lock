@@ -3206,9 +3206,12 @@ dependencies = [
  "redis",
  "reqwest 0.13.2",
  "riven-core",
+ "riven-db",
  "riven-usenet",
  "serde",
  "serde_json",
+ "sqlx",
+ "tokio",
  "tracing",
 ]
 

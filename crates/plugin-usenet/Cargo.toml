@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 riven-core = { path = "../riven-core" }
+riven-db = { path = "../riven-db" }
 riven-usenet = { path = "../riven-usenet" }
 reqwest = { workspace = true }
 serde = { workspace = true }
@@ -16,6 +17,8 @@ inventory = { workspace = true }
 redis = { workspace = true }
 futures = { workspace = true }
 lru = { workspace = true }
+sqlx = { workspace = true }
+tokio = { workspace = true }
 
 [lints]
 workspace = true
