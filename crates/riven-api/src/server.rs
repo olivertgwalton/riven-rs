@@ -96,18 +96,6 @@ pub async fn start_server(config: StartServerConfig) -> Result<()> {
         cancel,
     } = config;
 
-    // Refuse to start with the unsafe combination of no API key and no CORS
-    // allowlist: a malicious cross-origin page in a victim's browser could
-    // otherwise drive every endpoint as the trusted_api_key admin.
-    let api_key_empty = api_key.as_deref().is_none_or(str::is_empty);
-    if api_key_empty && cors_allowed_origins.is_empty() {
-        anyhow::bail!(
-            "refusing to start: both RIVEN_SETTING__API_KEY and \
-             RIVEN_SETTING__CORS_ALLOWED_ORIGINS are unset. Set at least one \
-             (an API key gates auth; an origins list constrains CORS)."
-        );
-    }
-
     let schema = build_schema(
         db_pool.clone(),
         registry,
@@ -156,8 +144,8 @@ pub async fn start_server(config: StartServerConfig) -> Result<()> {
 
     // `graphql`, `media`, `usenet` own their response shapes (WS upgrade,
     // range responses, structured GraphQL errors), so they perform their own
-    // per-handler API-key check. The outer `require_api_key` layer also
-    // applies, providing belt-and-suspenders defence in depth.
+    // per-handler API-key check. There is no global auth gate; the board UI,
+    // its API, the seerr webhook, and the static frontend are unauthenticated.
     let routes = Router::new()
         .route(
             "/graphql",
@@ -178,23 +166,9 @@ pub async fn start_server(config: StartServerConfig) -> Result<()> {
 
     // Layer order is outside-in for a request: the LAST `.layer()` is the
     // outermost. Build up:
-    //   request → cors → require_api_key → board_assets_middleware → router
-    //
-    // `require_api_key` MUST sit outside `board_assets_middleware`,
-    // otherwise the asset middleware would short-circuit auth: it intercepts
-    // any root-level path with a dot that exists in the embedded board UI
-    // bundle (including the bundle's `index.html`), so without an outer
-    // gate the apalis board's bootstrap HTML is reachable unauthenticated.
-    //
-    // When `api_key` is unset, `require_api_key` is a no-op (matching
-    // `check_api_key`'s behaviour); `start_server`'s "key or CORS list"
-    // invariant above keeps that LAN-trusted mode safe.
+    //   request → cors → board_assets_middleware → router
     let app = routes
         .layer(axum::middleware::from_fn(board::board_assets_middleware))
-        .layer(axum::middleware::from_fn_with_state(
-            state.clone(),
-            auth::require_api_key,
-        ))
         .layer(build_cors_layer(cors_allowed_origins))
         .with_state(state);
 
@@ -215,9 +189,6 @@ pub async fn start_server(config: StartServerConfig) -> Result<()> {
 
 fn build_cors_layer(allowed: Vec<String>) -> CorsLayer {
     if allowed.is_empty() {
-        // Reachable only when api_key is set (start_server bails on the
-        // empty-key + empty-origins combo). Permissive CORS is acceptable
-        // here because every privileged endpoint gates on the API key.
         tracing::warn!(
             "CORS is permissive — set RIVEN_SETTING__CORS_ALLOWED_ORIGINS to \
              constrain cross-origin browser access"
