@@ -53,48 +53,6 @@ fn build_streaming_http_client() -> Result<reqwest::Client> {
         .build()?)
 }
 
-/// Handle a debrid "torrent is dead" signal for a VFS entry: blacklist the
-/// entry's stream so the download flow won't pick it again, drop the stale
-/// filesystem entry (which demotes the item out of `Completed`), and queue a
-/// re-download from the next-best stream.
-async fn handle_dead_link(pool: &sqlx::PgPool, job_queue: &JobQueue, entry_id: i64) {
-    let entry = match riven_db::repo::get_media_entry_by_id(pool, entry_id).await {
-        Ok(Some(entry)) => entry,
-        Ok(None) => return,
-        Err(error) => {
-            tracing::warn!(entry_id, %error, "dead-link: failed to load entry");
-            return;
-        }
-    };
-    let media_item_id = entry.media_item_id;
-    tracing::warn!(
-        entry_id,
-        media_item_id,
-        path = %entry.path,
-        "debrid reports torrent is dead — blacklisting stream and re-downloading"
-    );
-
-    if let Some(stream_id) = entry.stream_id
-        && let Err(error) =
-            riven_db::repo::blacklist_stream_by_id(pool, media_item_id, stream_id).await
-    {
-        tracing::warn!(entry_id, media_item_id, %error, "dead-link: failed to blacklist stream");
-    }
-
-    // Removing the media entry clears `has_media_entry`, so the item's state
-    // recomputes out of `Completed` and becomes eligible for re-download.
-    if let Err(error) = riven_db::repo::delete_filesystem_entry(pool, entry_id).await {
-        tracing::warn!(entry_id, %error, "dead-link: failed to delete filesystem entry");
-    }
-
-    if !job_queue.push_download_from_best_stream(media_item_id).await {
-        tracing::warn!(
-            media_item_id,
-            "dead-link: no non-blacklisted stream remains — item needs re-scrape"
-        );
-    }
-}
-
 #[tokio::main]
 async fn main() -> Result<()> {
     let mut settings = riven_core::settings::RivenSettings::load()?;
@@ -200,13 +158,16 @@ async fn main() -> Result<()> {
 
     tokio::spawn({
         let link_registry = registry.clone();
-        let link_pool = db_pool.clone();
-        let link_jq = job_queue.clone();
         async move {
+            // Matches riven-ts open.ts: refresh the stream URL on demand and
+            // hand back whatever the plugin returns. On failure we send None,
+            // which surfaces as ENOENT to the VFS caller. We intentionally do
+            // NOT blacklist the stream, delete the entry, or regress item
+            // state — playback errors are transient and shouldn't tear down
+            // a Completed item (a single dead URL on one episode of a
+            // season pack would otherwise orphan that episode with no
+            // fallback stream of its own).
             while let Some(req) = link_rx.recv().await {
-                let entry_id = req.entry_id;
-                let current_url = req.current_url;
-                let pinned_provider = req.provider.clone();
                 let event = RivenEvent::MediaItemStreamLinkRequested {
                     magnet: req.download_url,
                     info_hash: String::new(),
@@ -215,58 +176,14 @@ async fn main() -> Result<()> {
                 let results = link_registry.dispatch(&event).await;
 
                 let mut link = None;
-                let mut serving_provider = None;
-                let mut dead = false;
                 for (_, result) in results {
-                    match result {
-                        Ok(riven_core::events::HookResponse::StreamLink(sl)) => {
-                            link = Some(sl.link);
-                            serving_provider = sl.provider;
-                            break;
-                        }
-                        Ok(riven_core::events::HookResponse::StreamLinkDead) => dead = true,
-                        _ => {}
+                    if let Ok(riven_core::events::HookResponse::StreamLink(sl)) = result {
+                        link = Some(sl.link);
+                        break;
                     }
                 }
 
-                // A refresh that hands back the exact URL the caller already
-                // knows is dead means the debrid service has nothing fresher —
-                // treat it as a dead link, same as an explicit 404.
-                let stale_repeat = matches!(
-                    (&link, &current_url),
-                    (Some(link), Some(current)) if link == current
-                );
-                // Dead: the store reported the torrent is gone, or every store
-                // could only re-offer the known-dead URL.
-                let is_dead = dead || stale_repeat;
-
-                // Never hand a known-dead URL back to the caller.
-                let response = if is_dead { None } else { link };
-                drop(req.response_tx.send(response));
-
-                if is_dead {
-                    if let Some(entry_id) = entry_id {
-                        handle_dead_link(&link_pool, &link_jq, entry_id).await;
-                    }
-                } else if let (Some(entry_id), Some(serving), Some(pinned)) =
-                    (entry_id, serving_provider.as_deref(), pinned_provider.as_deref())
-                    && serving != pinned
-                {
-                    // The originally-pinned store rejected this torrent but a
-                    // fallback store served the link. Re-pin so future refreshes
-                    // skip the known-dead store.
-                    tracing::info!(
-                        entry_id,
-                        from = pinned,
-                        to = serving,
-                        "stream-link fell back to a different store — re-pinning entry provider"
-                    );
-                    if let Err(error) =
-                        riven_db::repo::update_entry_provider(&link_pool, entry_id, serving).await
-                    {
-                        tracing::warn!(entry_id, %error, "failed to re-pin entry provider");
-                    }
-                }
+                drop(req.response_tx.send(link));
             }
         }
     });
@@ -349,38 +266,35 @@ async fn main() -> Result<()> {
             let mut redis_conn = jq.redis.clone();
             let queues = jq.queue_names();
             while !cancel.is_cancelled() {
+                // Unconditionally clears worker heartbeats so re-registration is
+                // not rejected by `register_worker.lua`'s "still active within
+                // threshold" check after a previous run died.
                 riven_queue::clear_worker_registrations(&mut redis_conn, &queues).await;
                 riven_queue::purge_orphaned_worker_sets(&mut redis_conn, &queues).await;
                 riven_queue::purge_orphaned_active_jobs(&mut redis_conn, &queues).await;
-                let signal = {
-                    let cancel = cancel.clone();
-                    async move {
-                        cancel.cancelled().await;
-                        Ok::<_, std::io::Error>(())
+
+                // `Monitor::run()` resolves as soon as all workers complete (e.g.
+                // a Redis blip on the shared `apalis_conn` errors every backend's
+                // poll stream in the same tick). `run_with_signal()` would have
+                // hung here forever because it `join!`s workers with an external
+                // signal that only fires on shutdown.
+                let monitor_handle = tokio::spawn({
+                    let jq = jq.clone();
+                    async move { riven_queue::start_workers(jq).run().await }
+                });
+                tokio::pin!(monitor_handle);
+                let result = tokio::select! {
+                    res = &mut monitor_handle => res,
+                    _ = cancel.cancelled() => {
+                        monitor_handle.abort();
+                        break;
                     }
                 };
-                let result = tokio::spawn(
-                    riven_queue::start_workers(jq.clone()).run_with_signal(signal),
-                )
-                .await;
-                if cancel.is_cancelled() {
-                    break;
-                }
                 match result {
                     Ok(Ok(())) => tracing::warn!("apalis monitor exited, restarting"),
-                    Ok(Err(e)) => {
-                        tracing::error!(error = %e, "apalis monitor error, restarting in 5s")
-                    }
-                    Err(e) if e.is_panic() => {
-                        tracing::error!("apalis monitor panicked, restarting in 5s")
-                    }
-                    Err(e) => {
-                        tracing::error!(error = ?e, "apalis monitor task failed, restarting in 5s")
-                    }
-                }
-                tokio::select! {
-                    _ = tokio::time::sleep(Duration::from_secs(5)) => {}
-                    _ = cancel.cancelled() => break,
+                    Ok(Err(e)) => tracing::error!(error = %e, "apalis monitor error, restarting"),
+                    Err(e) if e.is_panic() => tracing::error!("apalis monitor panicked, restarting"),
+                    Err(e) => tracing::error!(error = ?e, "apalis monitor task failed, restarting"),
                 }
             }
         }

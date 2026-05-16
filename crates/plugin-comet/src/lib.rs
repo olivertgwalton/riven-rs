@@ -3,7 +3,7 @@ use serde::Deserialize;
 use std::time::Duration;
 
 use riven_core::events::{EventType, HookResponse, ScrapeRequest};
-use riven_core::http::HttpServiceProfile;
+use riven_core::http::{HttpServiceProfile, RateLimitedError};
 use riven_core::plugin::{Plugin, PluginContext, SettingField};
 use riven_core::register_plugin;
 use riven_core::settings::PluginSettings;
@@ -96,10 +96,44 @@ impl Plugin for CometPlugin {
                 return Ok(HookResponse::Scrape(ScrapeResponse::new()));
             }
         };
+        let status = resp_data.status();
+        if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            // Defer to job-level retry instead of silently returning an empty
+            // ScrapeResponse — same pattern as plugin-newznab and HttpClient::get_json.
+            // The HTTP layer has already registered the Retry-After pause on the
+            // shared service state, so the next attempt will respect it.
+            tracing::warn!(
+                imdb_id,
+                title = request.title,
+                "comet rate limited (429); deferring to job-level retry"
+            );
+            return Err(RateLimitedError.into());
+        }
+        if !status.is_success() {
+            let body = resp_data.text().unwrap_or_default();
+            let body_preview: String = body.chars().take(200).collect();
+            tracing::warn!(
+                status = %status,
+                body_preview,
+                imdb_id,
+                title = request.title,
+                "comet returned error status"
+            );
+            return Ok(HookResponse::Scrape(ScrapeResponse::new()));
+        }
+
         let resp: CometResponse = match resp_data.json() {
             Ok(r) => r,
             Err(e) => {
-                tracing::warn!(error = %e, imdb_id, title = request.title, "comet response parse failed");
+                let body = resp_data.text().unwrap_or_default();
+                let body_preview: String = body.chars().take(200).collect();
+                tracing::warn!(
+                    error = %e,
+                    body_preview,
+                    imdb_id,
+                    title = request.title,
+                    "comet response parse failed"
+                );
                 return Ok(HookResponse::Scrape(ScrapeResponse::new()));
             }
         };
