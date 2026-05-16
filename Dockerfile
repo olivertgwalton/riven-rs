@@ -13,12 +13,6 @@ RUN cargo chef prepare --recipe-path recipe.json
 #    then compile the actual binary against the source tree.
 FROM chef AS builder
 COPY --from=planner /app/recipe.json recipe.json
-# `[patch.crates-io] apalis-redis = { path = "vendor/apalis-redis" }` in the
-# root Cargo.toml means cargo-chef's recipe references a path dep that has to
-# exist on disk during cook. Bring vendor/ in here (it's small) so the cook
-# step can resolve it; this only invalidates the cook-layer cache when vendor/
-# itself changes, which is rare.
-COPY vendor vendor
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/app/target \
