@@ -17,6 +17,21 @@ mod setup;
 
 const USER_AGENT: &str = concat!("riven-rs/", env!("CARGO_PKG_VERSION"));
 
+/// Single shared HTTP client for every outbound request in the process —
+/// plugins, the VFS streaming path, and ad-hoc fetches all share one
+/// connection pool, TLS session cache, and DNS cache.
+///
+/// Mirrors the riven-ts design (single global `undici.Agent` set via
+/// `setGlobalDispatcher`). Splitting plugins from streaming as we previously
+/// did gave two independent pools against the same debrid hosts: every
+/// playback URL refresh paid a cold TCP+TLS dial in one pool while the
+/// other had warm connections sitting idle.
+///
+/// Keep-alive matches the TS `keepAliveMaxTimeout` (60 s) so the bursty
+/// Plex scan pattern — "probe file, wait ~1 s, probe next file" — keeps
+/// reusing connections instead of redialing for every file. Per-host idle
+/// capacity is bumped to 32 to absorb scans of large libraries fanning out
+/// across many files in parallel.
 fn build_http_client() -> Result<reqwest::Client> {
     Ok(reqwest::Client::builder()
         .user_agent(USER_AGENT)
@@ -26,26 +41,10 @@ fn build_http_client() -> Result<reqwest::Client> {
         .timeout(Duration::from_secs(
             riven_core::config::vfs::ACTIVITY_TIMEOUT_SECS,
         ))
-        .pool_idle_timeout(Duration::from_secs(10))
-        .pool_max_idle_per_host(16)
-        .tcp_keepalive(Duration::from_secs(30))
-        .tcp_nodelay(true)
-        .http1_only()
-        .connection_verbose(false)
-        .build()?)
-}
-
-fn build_streaming_http_client() -> Result<reqwest::Client> {
-    Ok(reqwest::Client::builder()
-        .user_agent(USER_AGENT)
-        .connect_timeout(Duration::from_secs(
-            riven_core::config::vfs::CONNECT_TIMEOUT_SECS,
-        ))
-        .timeout(Duration::from_secs(
+        .pool_idle_timeout(Duration::from_secs(
             riven_core::config::vfs::ACTIVITY_TIMEOUT_SECS,
         ))
-        .pool_idle_timeout(Duration::from_secs(10))
-        .pool_max_idle_per_host(16)
+        .pool_max_idle_per_host(32)
         .tcp_keepalive(Duration::from_secs(30))
         .tcp_nodelay(true)
         .http1_only()
@@ -82,8 +81,9 @@ async fn main() -> Result<()> {
     let redis_conn = redis::aio::ConnectionManager::new(redis_client).await?;
     tracing::info!("redis connection established");
 
-    let http_client = riven_core::http::HttpClient::new(build_http_client()?);
-    let stream_http_client = build_streaming_http_client()?;
+    let reqwest_client = build_http_client()?;
+    let http_client = riven_core::http::HttpClient::new(reqwest_client.clone());
+    let stream_http_client = reqwest_client;
 
     let registry = setup::register_plugins(
         http_client.clone(),

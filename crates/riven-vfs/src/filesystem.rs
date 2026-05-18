@@ -223,11 +223,14 @@ impl RivenFsInner {
         link_request_tx: mpsc::Sender<riven_core::stream_link::LinkRequest>,
         cache_max_size_mb: u64,
     ) -> Self {
-        // Convert MB budget to entry count, assuming ~CHUNK_SIZE bytes per cached range.
-        let entries = if cache_max_size_mb == 0 {
-            256
+        // Sized by total resident bytes — chunk sizes vary (headers 256 KB,
+        // footers up to 10 MB, body chunks 1 MB), so a count-based budget
+        // would be deceptive. Default mirrors the riven-ts reference's
+        // 50 MB chunk-cache cap.
+        let cache_capacity_bytes = if cache_max_size_mb == 0 {
+            50 * 1024 * 1024
         } else {
-            ((cache_max_size_mb * 1024 * 1024) / CHUNK_SIZE) as usize
+            (cache_max_size_mb * 1024 * 1024) as usize
         };
         let path_to_ino = DashMap::new();
         let ino_to_path = DashMap::new();
@@ -251,7 +254,7 @@ impl RivenFsInner {
             path_to_ino,
             ino_to_path,
             next_ino: AtomicU64::new(FIRST_DYNAMIC_INO),
-            range_cache: Arc::new(RangeCache::new(entries)),
+            range_cache: Arc::new(RangeCache::new(cache_capacity_bytes)),
             readdir_cache: DashMap::new(),
             prewarm_semaphore: Arc::new(Semaphore::new(8)),
             link_refresh_locks: DashMap::new(),

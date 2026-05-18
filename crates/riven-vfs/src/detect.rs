@@ -68,7 +68,9 @@ mod tests {
     use bytes::Bytes;
 
     fn empty_cache() -> RangeCache {
-        RangeCache::new(16)
+        // RangeCache is byte-sized; give the tests enough room to hold a
+        // handful of small fixtures without forcing eviction.
+        RangeCache::new(1024 * 1024)
     }
 
     #[test]
