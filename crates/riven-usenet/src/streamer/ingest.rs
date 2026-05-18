@@ -275,6 +275,31 @@ impl UsenetStreamer {
             file.filename = new_name;
         }
 
+        // Rescale Direct sources from yEnc-encoded byte offsets to decoded
+        // byte offsets. The NZB lists per-segment *encoded* sizes, so the
+        // naive `direct_meta_file` returns a file whose `total_size` and
+        // segment offsets overstate the real decoded payload by the yEnc
+        // overhead (~3%). That mismatch surfaces as the `Content-Length`
+        // we promise to the HTTP client being larger than the bytes we
+        // can actually serve, producing the "body chunk SHORT" warning
+        // and endless player retries. Probing the first segment of each
+        // Direct file lets us recompute offsets in true decoded space —
+        // yEnc encodes uniformly within a single posting, so one sample
+        // is enough to scale the whole file. RAR sources are unaffected
+        // (their slice lengths are already exact decoded sizes from the
+        // RAR header).
+        for file in &mut meta_files {
+            if let Err(error) = self.rescale_direct_to_decoded(file).await {
+                tracing::debug!(
+                    info_hash,
+                    filename = %file.filename,
+                    error = %error,
+                    "could not rescale Direct offsets to decoded space; \
+                     leaving as encoded approximation"
+                );
+            }
+        }
+
         let meta = NzbMeta {
             info_hash: info_hash.to_string(),
             files: meta_files,
@@ -689,6 +714,52 @@ impl UsenetStreamer {
             }
         }
         Ok(buf)
+    }
+
+    /// Replace a Direct file's encoded-byte offsets with decoded-byte
+    /// offsets so the file we advertise to HTTP clients matches the bytes
+    /// we actually serve. We fetch the first segment to learn its
+    /// decoded/encoded ratio and then scale every segment in the file
+    /// uniformly — yEnc encoding is uniform within a single posting (same
+    /// poster settings, contiguous binary), so one sample is enough. Only
+    /// applies to `NzbMetaSource::Direct`; `Rar` sources are skipped
+    /// (their slice lengths are exact decoded byte counts from the RAR
+    /// header).
+    async fn rescale_direct_to_decoded(
+        &self,
+        file: &mut NzbMetaFile,
+    ) -> Result<(), StreamerError> {
+        let NzbMetaSource::Direct { offsets, segments } = &mut file.source else {
+            return Ok(());
+        };
+        let Some(first) = segments.first() else {
+            return Ok(());
+        };
+        if first.bytes == 0 {
+            return Ok(());
+        }
+        let decoded = self.fetch_decoded_cached(&first.message_id).await?;
+        let dec_first = decoded.len() as u64;
+        if dec_first == 0 {
+            return Ok(());
+        }
+        let mut new_offsets = Vec::with_capacity(segments.len() + 1);
+        let mut acc: u64 = 0;
+        new_offsets.push(0);
+        for seg in segments.iter() {
+            // Per-segment decoded estimate via the sampled ratio. Using
+            // u128 intermediates so a long file with many ~750 KB encoded
+            // segments doesn't overflow before the divide.
+            let seg_dec = (seg.bytes as u128)
+                .saturating_mul(dec_first as u128)
+                .checked_div(first.bytes as u128)
+                .unwrap_or(0) as u64;
+            acc = acc.saturating_add(seg_dec);
+            new_offsets.push(acc);
+        }
+        *offsets = new_offsets;
+        file.total_size = acc;
+        Ok(())
     }
 
     /// Fetch and parse the NZB's smallest PAR2 file, returning the media

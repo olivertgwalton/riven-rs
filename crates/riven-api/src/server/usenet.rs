@@ -159,13 +159,27 @@ pub async fn usenet_stream_handler(
         }
     };
 
+    // Headers shared by HEAD, buffered, and streamed responses.
+    //
+    // We compute `Content-Length` from the size of the body we'll actually
+    // emit, not from the requested range, because for `Direct` sources the
+    // requested range is in *encoded* byte space and the served bytes are
+    // *decoded* — even after `rescale_direct_to_decoded` at ingest, per-
+    // segment yEnc variance produces sub-percent drift, and the legacy
+    // pre-rescale meta entries are still ~3% off. Setting Content-Length to
+    // the requested range and then emitting fewer bytes caused hyper to
+    // close the connection with a framing error, which Plex/ffmpeg saw as
+    // a corrupt response and retried indefinitely.
+    //
+    // For HEAD and small (≤BUFFER_THRESHOLD) responses we know the exact
+    // body length up front and set Content-Length accordingly. For large
+    // streamed responses we omit Content-Length entirely — hyper falls
+    // back to chunked transfer-encoding, which has no length contract for
+    // the body to violate.
     let mut header_map = HeaderMap::new();
     header_map.insert(ACCEPT_RANGES, HeaderValue::from_static("bytes"));
     header_map.insert(CONTENT_TYPE, HeaderValue::from_static(content_type));
     let len = end - start + 1;
-    if let Ok(v) = HeaderValue::from_str(&len.to_string()) {
-        header_map.insert(CONTENT_LENGTH, v);
-    }
     if partial && let Ok(v) = HeaderValue::from_str(&format!("bytes {start}-{end}/{total}")) {
         header_map.insert(CONTENT_RANGE, v);
     }
@@ -176,6 +190,9 @@ pub async fn usenet_stream_handler(
         } else {
             StatusCode::OK
         };
+        if let Ok(v) = HeaderValue::from_str(&len.to_string()) {
+            header_map.insert(CONTENT_LENGTH, v);
+        }
         let mut resp = (status, "").into_response();
         *resp.headers_mut() = header_map;
         return resp;
@@ -195,9 +212,13 @@ pub async fn usenet_stream_handler(
             .await
         {
             Ok(bytes) => {
+                let mut response_headers = header_map;
+                if let Ok(v) = HeaderValue::from_str(&bytes.len().to_string()) {
+                    response_headers.insert(CONTENT_LENGTH, v);
+                }
                 let mut resp = Response::new(Body::from(bytes));
                 *resp.status_mut() = status;
-                *resp.headers_mut() = header_map;
+                *resp.headers_mut() = response_headers;
                 resp
             }
             Err(e) => {
@@ -320,7 +341,15 @@ pub async fn usenet_stream_handler(
                     let elapsed_ms = chunk_started.elapsed().as_millis();
                     let returned = bytes.len();
                     let requested = (chunk_end - state.pos + 1) as usize;
-                    if returned != requested {
+                    // Direct sources' offsets are estimated decoded sizes; a
+                    // small drift between requested and returned is expected
+                    // (yEnc per-segment variance after the ingest-time
+                    // rescale). Only warn when the gap is large enough to
+                    // suggest a real problem rather than addressing slop.
+                    let drift = requested.saturating_sub(returned);
+                    let drift_is_significant =
+                        drift * 20 > requested && drift > 4096;
+                    if drift_is_significant {
                         tracing::warn!(
                             pos = state.pos,
                             chunk_end,
@@ -333,6 +362,7 @@ pub async fn usenet_stream_handler(
                         tracing::debug!(
                             pos = state.pos,
                             returned,
+                            requested,
                             elapsed_ms,
                             "usenet body chunk ok"
                         );

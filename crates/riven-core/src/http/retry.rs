@@ -19,6 +19,19 @@ const JITTER: f64 = 0.5;
 /// 429s clear quickly.
 pub(super) const DEFAULT_429_PAUSE_SECS: u64 = 10;
 
+/// HTTP statuses that represent a *transient upstream failure* — the request
+/// reached the server (or a gateway in front of it) and bounced back with no
+/// useful application response. Treated the same as a transient socket error:
+/// worth one more attempt with backoff before bubbling up.
+///
+/// Matches the riven-ts retry surface: all 5xx (server-side problems that may
+/// clear momentarily) plus 408 Request Timeout. 429 is intentionally excluded
+/// because `parse_rate_limit_pause` handles it via `Retry-After` and the
+/// service-state pause window instead of inline retries.
+fn is_retryable_status(status: StatusCode) -> bool {
+    status.as_u16() == 408 || status.is_server_error()
+}
+
 /// Returns `true` for transient network errors that warrant a retry (connection
 /// failures, timeouts, stale keep-alive races producing `IncompleteMessage`).
 fn is_transient(e: &reqwest::Error) -> bool {
@@ -172,6 +185,19 @@ where
         }
 
         match make_request(client).send().await {
+            Ok(resp) if !is_last && is_retryable_status(resp.status()) => {
+                let delay = with_jitter(Duration::from_secs(BACKOFF_BASE_SECS * (1 << attempt)));
+                tracing::debug!(
+                    service = service.map(|s| s.profile.name.as_ref()),
+                    attempt = attempt + 1,
+                    delay_secs = delay.as_secs(),
+                    status = %resp.status(),
+                    "http request returned transient upstream status, retrying"
+                );
+                drop(resp);
+                sleep(delay).await;
+                attempt += 1;
+            }
             Ok(resp) => return Ok(resp),
             Err(e) if !is_last && is_transient(&e) => {
                 let delay = with_jitter(Duration::from_secs(BACKOFF_BASE_SECS * (1 << attempt)));
