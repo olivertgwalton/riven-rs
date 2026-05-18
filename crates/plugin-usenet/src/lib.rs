@@ -20,7 +20,7 @@ use riven_core::types::{
     CacheCheckResult, CachedStoreEntry, DownloadFile, DownloadResult, ProviderInfo,
     StreamLinkResponse, TorrentStatus,
 };
-use riven_usenet::nntp::{NntpPool, NntpProvider, NntpServerConfig};
+use riven_usenet::nntp::{NntpProvider, NntpServerConfig};
 use riven_usenet::{NntpConfig, UsenetStreamer};
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -159,11 +159,15 @@ impl Plugin for UsenetPlugin {
 
     async fn on_core_started(&self, ctx: &PluginContext) -> anyhow::Result<HookResponse> {
         if let Some(cfg) = nntp_config_from_settings(&ctx.settings) {
-            let pool = NntpPool::new_multi(cfg.providers);
+            // Build (or retrieve) the shared streamer so the playback path,
+            // ingest path, and this health-check task all share one
+            // `NntpPool` — and one `max_connections` budget — against the
+            // provider.
+            let streamer = UsenetStreamer::shared(cfg, ctx.redis.clone());
             health_check::spawn(
                 ctx.db_pool.clone(),
                 ctx.redis.clone(),
-                pool,
+                streamer.pool(),
                 ctx.http.clone(),
                 ctx.settings.clone(),
             );
@@ -346,7 +350,7 @@ impl Plugin for UsenetPlugin {
             return Ok(HookResponse::DownloadStreamUnavailable);
         };
 
-        let streamer = UsenetStreamer::new(nntp_cfg, ctx.redis.clone());
+        let streamer = UsenetStreamer::shared(nntp_cfg, ctx.redis.clone());
         let password = ctx.settings.get("archivepassword");
         let nzb_url_for_report = nzb_url_for_hash(info_hash, ctx).await;
         let meta = match streamer.ingest(info_hash, &xml_arc, password).await {

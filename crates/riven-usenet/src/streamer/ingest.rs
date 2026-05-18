@@ -13,8 +13,8 @@ use crate::rar::{self, RarEncryption, RarVolumeFileEntry};
 
 use super::meta::{META_TTL_SECS, io_error, meta_key};
 use super::{
-    NzbMeta, NzbMetaFile, NzbMetaSource, NzbRarPart, NzbRarSlice, StreamerError,
-    UsenetStreamer,
+    NzbMeta, NzbMetaFile, NzbMetaSource, NzbRarPart, NzbRarSlice, PREFETCH_FLOOR,
+    StreamerError, UsenetStreamer,
 };
 
 /// In-progress per-inner-file accumulator during multi-file RAR reconstruction.
@@ -386,10 +386,7 @@ impl UsenetStreamer {
             parts.push(build_rar_part(f));
         }
 
-        // Concurrency cap of 8 — well below typical per-account connection
-        // limits (Newshosting=100, EZNews=50) and high enough to make ingest
-        // of a 73-volume episode pack feel snappy.
-        const HEADER_FETCH_CONCURRENCY: usize = 8;
+        let header_fetch_concurrency = self.pool.total_capacity().max(PREFETCH_FLOOR);
         let streamer = self.clone();
         let header_results: Vec<Result<Vec<u8>, StreamerError>> =
             stream::iter(parts.clone())
@@ -399,7 +396,7 @@ impl UsenetStreamer {
                         s.fetch_volume_header_bytes(&part, RAR_HEADER_PROBE_BYTES).await
                     }
                 })
-                .buffered(HEADER_FETCH_CONCURRENCY)
+                .buffered(header_fetch_concurrency)
                 .collect()
                 .await;
 

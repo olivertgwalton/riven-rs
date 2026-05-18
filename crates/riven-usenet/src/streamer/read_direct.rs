@@ -9,7 +9,7 @@ use crate::state::{FetchEntry, PromiseSlot, StreamerState};
 use crate::yenc;
 
 use super::{
-    NzbMetaSource, READ_PREFETCH_WINDOW, StreamerError, UsenetStreamer, segments_overlapping,
+    NzbMetaSource, PREFETCH_FLOOR, StreamerError, UsenetStreamer, segments_overlapping,
 };
 
 /// Max attempts when fetching an NNTP segment body. ArticleNotFound is
@@ -162,9 +162,9 @@ impl UsenetStreamer {
 
     /// Background-warm the segment cache for the segments that overlap
     /// `[start, end_inclusive]` of `file_index`. Concurrency is sized to
-    /// match `READ_PREFETCH_WINDOW` so the prefetch can saturate the
-    /// NNTP pool ahead of the body stream's own reads; in-flight
-    /// deduplication via `fetch_decoded_cached` makes this safe —
+    /// the pool's configured `max_connections` so the prefetch saturates
+    /// the user's NNTP budget ahead of the body stream's own reads;
+    /// in-flight deduplication via `fetch_decoded_cached` makes this safe —
     /// overlapping segments share a single fetch instead of doubling up.
     pub async fn prefetch_range(
         &self,
@@ -173,7 +173,7 @@ impl UsenetStreamer {
         start: u64,
         end_inclusive: u64,
     ) {
-        const PREFETCH_CONCURRENCY: usize = READ_PREFETCH_WINDOW;
+        let prefetch_concurrency = self.pool.total_capacity().max(PREFETCH_FLOOR);
 
         let Ok(meta) = self.load_meta(info_hash).await else {
             return;
@@ -231,7 +231,7 @@ impl UsenetStreamer {
                 let s = streamer.clone();
                 async move { s.fetch_decoded_cached(&mid).await }
             })
-            .buffer_unordered(PREFETCH_CONCURRENCY);
+            .buffer_unordered(prefetch_concurrency);
         while stream.next().await.is_some() {}
     }
 
@@ -316,8 +316,9 @@ impl UsenetStreamer {
 
     /// Read a byte range from a `Direct` source: a single contiguous file
     /// composed of yEnc-encoded NNTP segments. Segments are fetched in
-    /// parallel (up to READ_PREFETCH_WINDOW concurrent) and consumed in
-    /// order — bounds NNTP round-trip latency for multi-segment reads.
+    /// parallel (up to the pool's configured `max_connections`) and
+    /// consumed in order — bounds NNTP round-trip latency for
+    /// multi-segment reads.
     async fn read_direct(
         &self,
         offsets: &[u64],
@@ -343,6 +344,7 @@ impl UsenetStreamer {
 
         let mut decoded_concat = Vec::with_capacity((end_inclusive - start + 1) as usize);
 
+        let read_concurrency = self.pool.total_capacity().max(PREFETCH_FLOOR);
         let streamer = self.clone();
         let mids: Vec<(usize, String)> = (first..=last)
             .map(|i| (i, segments[i].message_id.clone()))
@@ -352,7 +354,7 @@ impl UsenetStreamer {
                 let s = streamer.clone();
                 async move { (i, s.fetch_decoded_cached(&mid).await) }
             })
-            .buffered(READ_PREFETCH_WINDOW);
+            .buffered(read_concurrency);
 
         while let Some((idx, result)) = stream.next().await {
             let decoded = result?;

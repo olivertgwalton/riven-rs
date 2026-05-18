@@ -160,7 +160,7 @@ pub struct NntpProvider {
     pub is_backup: bool,
 }
 
-/// Multi-provider configuration handed to `UsenetStreamer::new`.
+/// Multi-provider configuration handed to `UsenetStreamer::shared`.
 #[derive(Debug, Clone)]
 pub struct NntpConfig {
     /// One or more NNTP providers ordered by intent. A single primary is the

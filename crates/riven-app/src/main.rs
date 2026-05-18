@@ -113,7 +113,15 @@ async fn main() -> Result<()> {
                 tls = primary.map(|c| c.use_tls).unwrap_or(true),
                 "usenet streaming enabled"
             );
-            Some(riven_usenet::UsenetStreamer::new(cfg, redis_conn_for_streamer))
+            // `shared` (not `new`) so playback, ingest, and the health-check
+            // task all use the same `NntpPool` — the user's configured
+            // `max_connections` is then the true ceiling against the
+            // provider rather than being multiplied by the number of
+            // construction sites.
+            Some(riven_usenet::UsenetStreamer::shared(
+                cfg,
+                redis_conn_for_streamer,
+            ))
         }
         None => {
             tracing::info!("usenet streaming disabled (plugin not configured)");

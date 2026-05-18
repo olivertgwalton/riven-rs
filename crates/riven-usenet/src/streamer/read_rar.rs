@@ -3,7 +3,7 @@ use futures::stream;
 
 use crate::rar;
 
-use super::{NzbRarPart, NzbRarSlice, READ_PREFETCH_WINDOW, StreamerError, UsenetStreamer};
+use super::{NzbRarPart, NzbRarSlice, PREFETCH_FLOOR, StreamerError, UsenetStreamer};
 
 impl UsenetStreamer {
     /// Read a byte range from a `Rar` source. RAR slice offsets are exact
@@ -178,6 +178,7 @@ impl UsenetStreamer {
             return Ok(out);
         }
 
+        let read_concurrency = self.pool.total_capacity().max(PREFETCH_FLOOR);
         let streamer = self.clone();
         let mids: Vec<(usize, String)> = (first_seg..=last_seg)
             .map(|i| (i, part.segments[i].message_id.clone()))
@@ -187,7 +188,7 @@ impl UsenetStreamer {
                 let s = streamer.clone();
                 async move { (i, s.fetch_decoded_cached(&mid).await) }
             })
-            .buffered(READ_PREFETCH_WINDOW);
+            .buffered(read_concurrency);
 
         while let Some((idx, result)) = stream.next().await {
             let decoded = result?;
@@ -240,6 +241,7 @@ impl UsenetStreamer {
             }
         }
 
+        let read_concurrency = self.pool.total_capacity().max(PREFETCH_FLOOR);
         let streamer = self.clone();
         let mids: Vec<String> = (next_to_launch..total_segs)
             .map(|i| part.segments[i].message_id.clone())
@@ -249,7 +251,7 @@ impl UsenetStreamer {
                 let s = streamer.clone();
                 async move { s.fetch_decoded_cached(&mid).await }
             })
-            .buffered(READ_PREFETCH_WINDOW);
+            .buffered(read_concurrency);
 
         while let Some(result) = stream.next().await {
             let decoded = result?;

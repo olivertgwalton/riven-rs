@@ -12,7 +12,7 @@
 //! players tolerate the few-byte boundary slop. RAR-contained sources use
 //! exact decoded-byte addressing.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use redis::AsyncCommands;
 
@@ -33,7 +33,11 @@ pub use meta::{NzbMeta, NzbMetaFile, NzbMetaSource, NzbRarPart, NzbRarSlice};
 
 pub(crate) use meta::{io_error, meta_key, segments_overlapping};
 
-pub(crate) const READ_PREFETCH_WINDOW: usize = 8;
+/// Floor on the prefetch fan-out. Most playback paths derive their
+/// concurrency from `NntpPool::total_capacity()` so the user's
+/// `max_connections` setting is the real ceiling; this floor protects the
+/// degenerate case of a single-connection misconfiguration.
+pub(crate) const PREFETCH_FLOOR: usize = 4;
 
 #[derive(Clone)]
 pub struct UsenetStreamer {
@@ -62,6 +66,25 @@ impl UsenetStreamer {
         }
     }
 
+    pub fn shared(cfg: NntpConfig, redis: redis::aio::ConnectionManager) -> Self {
+        static CELL: OnceLock<Mutex<Option<(u64, UsenetStreamer)>>> = OnceLock::new();
+        let cell = CELL.get_or_init(|| Mutex::new(None));
+        let fp = nntp_config_fingerprint(&cfg);
+        let mut guard = cell.lock().expect("UsenetStreamer::shared mutex poisoned");
+        if let Some((stored_fp, streamer)) = guard.as_ref()
+            && *stored_fp == fp
+        {
+            return streamer.clone();
+        }
+        let streamer = Self::new(cfg, redis);
+        *guard = Some((fp, streamer.clone()));
+        streamer
+    }
+
+    pub fn pool(&self) -> Arc<NntpPool> {
+        self.pool.clone()
+    }
+
     pub async fn load_meta(&self, info_hash: &str) -> Result<Arc<NzbMeta>, StreamerError> {
         if let Some(hit) = self.state.meta_cache.get(info_hash) {
             self.maybe_kick_backfill(&hit);
@@ -84,4 +107,25 @@ impl UsenetStreamer {
 /// body completes or is dropped.
 pub fn active_streams() -> Arc<crate::state::ActiveStreams> {
     crate::state::global_active_streams()
+}
+
+fn nntp_config_fingerprint(cfg: &NntpConfig) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut h = DefaultHasher::new();
+    let mut entries: Vec<&crate::nntp::NntpProvider> = cfg.providers.iter().collect();
+    entries.sort_by(|a, b| {
+        (a.config.host.as_str(), a.config.port).cmp(&(b.config.host.as_str(), b.config.port))
+    });
+    for p in entries {
+        p.config.host.hash(&mut h);
+        p.config.port.hash(&mut h);
+        p.config.user.hash(&mut h);
+        p.config.pass.hash(&mut h);
+        p.config.use_tls.hash(&mut h);
+        p.config.max_connections.hash(&mut h);
+        p.priority.hash(&mut h);
+        p.is_backup.hash(&mut h);
+    }
+    h.finish()
 }

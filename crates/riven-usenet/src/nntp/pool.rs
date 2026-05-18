@@ -424,6 +424,16 @@ impl NntpPool {
         .await
     }
 
+    pub fn total_capacity(&self) -> usize {
+        let cap: usize = self
+            .slots
+            .iter()
+            .filter(|s| !s.provider.is_backup)
+            .map(|s| s.provider.config.max_connections.max(1) as usize)
+            .sum();
+        cap.max(1)
+    }
+
     pub async fn stat(&self, message_id: &str) -> Result<bool, NntpError> {
         let mid = message_id.to_string();
         self.try_each(|mut conn| {
