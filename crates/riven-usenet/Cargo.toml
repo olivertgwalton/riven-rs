@@ -15,7 +15,7 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-redis = { workspace = true }
+sqlx = { workspace = true }
 bytes = { workspace = true }
 parking_lot = { workspace = true }
 crc32fast = "1"

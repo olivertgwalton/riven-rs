@@ -163,7 +163,7 @@ impl Plugin for UsenetPlugin {
             // ingest path, and this health-check task all share one
             // `NntpPool` — and one `max_connections` budget — against the
             // provider.
-            let streamer = UsenetStreamer::shared(cfg, ctx.redis.clone());
+            let streamer = UsenetStreamer::shared(cfg, ctx.db_pool.clone());
             health_check::spawn(
                 ctx.db_pool.clone(),
                 ctx.redis.clone(),
@@ -350,7 +350,7 @@ impl Plugin for UsenetPlugin {
             return Ok(HookResponse::DownloadStreamUnavailable);
         };
 
-        let streamer = UsenetStreamer::shared(nntp_cfg, ctx.redis.clone());
+        let streamer = UsenetStreamer::shared(nntp_cfg, ctx.db_pool.clone());
         let password = ctx.settings.get("archivepassword");
         let nzb_url_for_report = nzb_url_for_hash(info_hash, ctx).await;
         let meta = match streamer.ingest(info_hash, &xml_arc, password).await {

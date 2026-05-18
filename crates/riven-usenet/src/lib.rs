@@ -9,9 +9,10 @@
 //!      byte stream that supports approximate byte-range seeking.
 //!
 //! The public surface is `UsenetStreamer`. It is constructed once at process
-//! startup with NNTP credentials, and consumed by both the ingest path
-//! (`plugin-usenet`, which parses an NZB and stores its metadata in Redis) and
-//! the serving path (riven-api's `/usenet/...` HTTP route).
+//! startup with NNTP credentials and a `PgPool`, and consumed by both the
+//! ingest path (`plugin-usenet`, which parses an NZB and persists its
+//! segment map in Postgres) and the serving path (riven-api's `/usenet/...`
+//! HTTP route).
 
 pub mod nntp;
 pub mod nzb;

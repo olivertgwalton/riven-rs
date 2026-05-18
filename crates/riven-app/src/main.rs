@@ -85,7 +85,6 @@ async fn main() -> Result<()> {
     let http_client = riven_core::http::HttpClient::new(build_http_client()?);
     let stream_http_client = build_streaming_http_client()?;
 
-    let redis_conn_for_streamer = redis_conn.clone();
     let registry = setup::register_plugins(
         http_client.clone(),
         db_pool.clone(),
@@ -118,10 +117,7 @@ async fn main() -> Result<()> {
             // `max_connections` is then the true ceiling against the
             // provider rather than being multiplied by the number of
             // construction sites.
-            Some(riven_usenet::UsenetStreamer::shared(
-                cfg,
-                redis_conn_for_streamer,
-            ))
+            Some(riven_usenet::UsenetStreamer::shared(cfg, db_pool.clone()))
         }
         None => {
             tracing::info!("usenet streaming disabled (plugin not configured)");

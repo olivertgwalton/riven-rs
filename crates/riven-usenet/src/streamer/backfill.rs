@@ -7,9 +7,9 @@ use std::sync::Arc;
 
 use futures::StreamExt;
 use futures::stream;
-use redis::AsyncCommands;
 
-use super::meta::{META_TTL_SECS, NzbMeta, NzbMetaSource, io_error, meta_key};
+use super::meta::{NzbMeta, NzbMetaSource};
+use super::store;
 use super::{StreamerError, UsenetStreamer};
 
 const BACKFILL_CONCURRENCY: usize = 8;
@@ -88,17 +88,7 @@ impl UsenetStreamer {
             return Ok(());
         }
 
-        let json = serde_json::to_string(&meta).map_err(|e| {
-            StreamerError::Redis(redis::RedisError::from(io_error(e.to_string())))
-        })?;
-        let mut redis = self.redis.clone();
-        let _: () = redis::AsyncCommands::set_ex(
-            &mut redis,
-            meta_key(info_hash),
-            json,
-            META_TTL_SECS as u64,
-        )
-        .await?;
+        store::store(&self.db, info_hash, &meta).await?;
         let arc = Arc::new(meta);
         self.state.meta_cache.put(info_hash.to_string(), arc);
 
@@ -116,12 +106,9 @@ impl UsenetStreamer {
         if let Some(hit) = self.state.meta_cache.get(info_hash) {
             return Ok(hit);
         }
-        let mut redis = self.redis.clone();
-        let raw: Option<String> =
-            AsyncCommands::get(&mut redis, meta_key(info_hash)).await?;
-        let raw = raw.ok_or_else(|| StreamerError::NotIngested(info_hash.to_string()))?;
-        let meta: NzbMeta = serde_json::from_str(&raw)
-            .map_err(|e| StreamerError::Redis(redis::RedisError::from(io_error(e.to_string()))))?;
+        let meta = store::load(&self.db, info_hash)
+            .await?
+            .ok_or_else(|| StreamerError::NotIngested(info_hash.to_string()))?;
         Ok(Arc::new(meta))
     }
 }

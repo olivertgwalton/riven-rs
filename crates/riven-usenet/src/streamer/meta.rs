@@ -1,14 +1,12 @@
-//! Persisted-to-Redis NZB metadata and the helpers that read/index it.
+//! Persisted-to-Postgres NZB metadata and the helpers that read/index it.
+//!
+//! Storage rationale lives next to the [`028_usenet_meta`] migration; the
+//! short version is that NNTP message-ids don't expire upstream, so the
+//! segment map is permanent address-book data, not a refreshable cache.
 
 use serde::{Deserialize, Serialize};
 
 use crate::nzb::NzbSegment;
-
-pub(crate) const META_TTL_SECS: i64 = 60 * 60 * 24 * 7;
-
-pub(crate) fn meta_key(info_hash: &str) -> String {
-    format!("riven:nzb:meta:{info_hash}")
-}
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct NzbMeta {
@@ -86,10 +84,6 @@ pub struct NzbRarSlice {
     /// for unencrypted slices; rounded up to 16-byte alignment for encrypted.
     #[serde(default)]
     pub ciphertext_length: u64,
-}
-
-pub(crate) fn io_error(msg: String) -> std::io::Error {
-    std::io::Error::other(msg)
 }
 
 /// Indices of segments whose encoded-byte range overlaps `[lo, hi]`.

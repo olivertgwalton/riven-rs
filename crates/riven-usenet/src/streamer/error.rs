@@ -6,8 +6,8 @@ pub enum StreamerError {
     Nntp(#[from] crate::nntp::NntpError),
     #[error("yenc error: {0}")]
     Yenc(#[from] crate::yenc::YencError),
-    #[error("redis error: {0}")]
-    Redis(#[from] redis::RedisError),
+    #[error("database error: {0}")]
+    Db(#[from] sqlx::Error),
     #[error("metadata not found for info_hash {0}")]
     NotIngested(String),
     #[error("file index {0} out of range")]

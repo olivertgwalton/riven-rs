@@ -14,7 +14,7 @@
 
 use std::sync::{Arc, Mutex, OnceLock};
 
-use redis::AsyncCommands;
+use sqlx::PgPool;
 
 use crate::nntp::{NntpConfig, NntpPool};
 use crate::state::StreamerState;
@@ -25,13 +25,14 @@ mod ingest;
 mod meta;
 mod read_direct;
 mod read_rar;
+mod store;
 #[cfg(test)]
 mod tests;
 
 pub use error::StreamerError;
 pub use meta::{NzbMeta, NzbMetaFile, NzbMetaSource, NzbRarPart, NzbRarSlice};
 
-pub(crate) use meta::{io_error, meta_key, segments_overlapping};
+pub(crate) use meta::segments_overlapping;
 
 /// Floor on the prefetch fan-out. Most playback paths derive their
 /// concurrency from `NntpPool::total_capacity()` so the user's
@@ -43,11 +44,11 @@ pub(crate) const PREFETCH_FLOOR: usize = 4;
 pub struct UsenetStreamer {
     pub(crate) pool: Arc<NntpPool>,
     pub(crate) state: Arc<StreamerState>,
-    pub(crate) redis: redis::aio::ConnectionManager,
+    pub(crate) db: PgPool,
 }
 
 impl UsenetStreamer {
-    pub fn new(cfg: NntpConfig, redis: redis::aio::ConnectionManager) -> Self {
+    pub fn new(cfg: NntpConfig, db: PgPool) -> Self {
         crate::nntp::init_crypto();
         let pool = NntpPool::new_multi(cfg.providers);
         // Fire-and-forget: open a handful of authenticated NNTP sockets per
@@ -62,11 +63,16 @@ impl UsenetStreamer {
         Self {
             pool,
             state: StreamerState::global(),
-            redis,
+            db,
         }
     }
 
-    pub fn shared(cfg: NntpConfig, redis: redis::aio::ConnectionManager) -> Self {
+    /// Process-wide shared streamer keyed by NNTP config. Both ingest and
+    /// playback construct through this so they share one `NntpPool` and the
+    /// user's `max_connections` is the true ceiling against the provider.
+    /// Settings change → fingerprint flips → cached entry rebuilt
+    /// automatically, no restart needed.
+    pub fn shared(cfg: NntpConfig, db: PgPool) -> Self {
         static CELL: OnceLock<Mutex<Option<(u64, UsenetStreamer)>>> = OnceLock::new();
         let cell = CELL.get_or_init(|| Mutex::new(None));
         let fp = nntp_config_fingerprint(&cfg);
@@ -76,7 +82,7 @@ impl UsenetStreamer {
         {
             return streamer.clone();
         }
-        let streamer = Self::new(cfg, redis);
+        let streamer = Self::new(cfg, db);
         *guard = Some((fp, streamer.clone()));
         streamer
     }
@@ -85,16 +91,18 @@ impl UsenetStreamer {
         self.pool.clone()
     }
 
+    /// Load NZB meta for `info_hash`. Order: in-memory LRU → Postgres.
+    /// Postgres is the source of truth; the LRU just absorbs the hot path
+    /// during playback. There's no Redis layer and no TTL: as long as the
+    /// `usenet_meta` row exists, the file remains streamable.
     pub async fn load_meta(&self, info_hash: &str) -> Result<Arc<NzbMeta>, StreamerError> {
         if let Some(hit) = self.state.meta_cache.get(info_hash) {
             self.maybe_kick_backfill(&hit);
             return Ok(hit);
         }
-        let mut redis = self.redis.clone();
-        let raw: Option<String> = AsyncCommands::get(&mut redis, meta_key(info_hash)).await?;
-        let raw = raw.ok_or_else(|| StreamerError::NotIngested(info_hash.to_string()))?;
-        let meta: NzbMeta = serde_json::from_str(&raw)
-            .map_err(|e| StreamerError::Redis(redis::RedisError::from(io_error(e.to_string()))))?;
+        let meta = store::load(&self.db, info_hash)
+            .await?
+            .ok_or_else(|| StreamerError::NotIngested(info_hash.to_string()))?;
         let arc = Arc::new(meta);
         self.state.meta_cache.put(info_hash.to_string(), arc.clone());
         self.maybe_kick_backfill(&arc);

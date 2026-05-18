@@ -2,7 +2,6 @@ use std::sync::Arc;
 
 use futures::StreamExt;
 use futures::stream;
-use redis::AsyncCommands;
 
 use crate::nzb::{
     NzbFile, NzbSegment, detect_rar_volume_groups, filename_from_subject, looks_like_media,
@@ -11,7 +10,7 @@ use crate::nzb::{
 use crate::par2::{Par2FileDesc, looks_like_par2, parse_file_descriptors};
 use crate::rar::{self, RarEncryption, RarVolumeFileEntry};
 
-use super::meta::{META_TTL_SECS, io_error, meta_key};
+use super::store;
 use super::{
     NzbMeta, NzbMetaFile, NzbMetaSource, NzbRarPart, NzbRarSlice, PREFETCH_FLOOR,
     StreamerError, UsenetStreamer,
@@ -124,22 +123,18 @@ impl UsenetStreamer {
         // Idempotency check: the same NZB is frequently re-submitted across
         // scrape cycles (e.g. a season-pack scrape and a per-episode scrape
         // both surface the same release, or a cascade re-pushes after a
-        // transient failure). If we already ingested this info_hash and the
-        // meta is still alive in Redis, reuse it — re-fetching RAR headers
-        // is the most expensive step in this method (parallel volume probes
-        // + header parses) and there's nothing about a duplicate submission
-        // that could change the result.
-        let mut redis = self.redis.clone();
-        if let Ok(Some(json)) =
-            AsyncCommands::get::<_, Option<String>>(&mut redis, meta_key(info_hash)).await
-            && let Ok(existing) = serde_json::from_str::<NzbMeta>(&json)
-        {
+        // transient failure). If we already ingested this info_hash, reuse
+        // the persisted meta — re-fetching RAR headers is the most expensive
+        // step in this method (parallel volume probes + header parses) and
+        // a duplicate submission can't change the result.
+        if let Some(existing) = store::load(&self.db, info_hash).await? {
             tracing::debug!(
                 info_hash,
                 file_count = existing.files.len(),
-                "usenet ingest: reusing cached NZB meta (idempotent hit)"
+                "usenet ingest: reusing persisted NZB meta (idempotent hit)"
             );
-            self.state.meta_cache
+            self.state
+                .meta_cache
                 .put(info_hash.to_string(), Arc::new(existing.clone()));
             return Ok(existing);
         }
@@ -286,13 +281,7 @@ impl UsenetStreamer {
             password: file_password,
         };
 
-        let json = serde_json::to_string(&meta).map_err(|e| {
-            StreamerError::Redis(redis::RedisError::from(io_error(e.to_string())))
-        })?;
-        let mut redis = self.redis.clone();
-        let _: () =
-            AsyncCommands::set_ex(&mut redis, meta_key(info_hash), json, META_TTL_SECS as u64)
-                .await?;
+        store::store(&self.db, info_hash, &meta).await?;
 
         self.state
             .meta_cache
