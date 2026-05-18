@@ -135,7 +135,6 @@ async fn fetch_range_once(
     end: u64,
 ) -> Result<Bytes, StreamError> {
     let range = format!("bytes={start}-{end}");
-    let expected_len = (end - start + 1) as usize;
 
     let response = client
         .get(url)
@@ -160,18 +159,10 @@ async fn fetch_range_once(
 
     validate_content_range(&response, start, Some(end)).map_err(StreamError::transient)?;
 
-    let bytes = response
+    response
         .bytes()
         .await
-        .map_err(|e| StreamError::transient(e.into()))?;
-    if bytes.len() != expected_len {
-        return Err(StreamError::transient(anyhow::anyhow!(
-            "stream range request {range} returned {} bytes, expected {expected_len} for {url}",
-            bytes.len(),
-        )));
-    }
-
-    Ok(bytes)
+        .map_err(|e| StreamError::transient(e.into()))
 }
 
 fn validate_content_range(response: &Response, start: u64, end: Option<u64>) -> Result<()> {

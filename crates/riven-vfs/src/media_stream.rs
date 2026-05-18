@@ -419,6 +419,11 @@ enum BodyReadError {
 
 fn slice_request_bytes(full: &Bytes, start: u64, end: u64, base_start: u64) -> Option<Bytes> {
     let offset = start.checked_sub(base_start)? as usize;
-    let slice_len = (end - start + 1) as usize;
-    (offset + slice_len <= full.len()).then(|| full.slice(offset..offset + slice_len))
+    if offset >= full.len() {
+        return None;
+    }
+    let requested_len = (end - start + 1) as usize;
+    let available_len = full.len() - offset;
+    let slice_len = requested_len.min(available_len);
+    Some(full.slice(offset..offset + slice_len))
 }
