@@ -263,7 +263,7 @@ impl Plugin for UsenetPlugin {
             .with_default("2")
             .with_description(
                 "Number of back-to-back failed STAT samples required before the \
-                 library entry is deleted and re-scraped.
+                 library entry is deleted and re-scraped.",
             ),
         ]
     }
