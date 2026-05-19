@@ -1,44 +1,47 @@
 //! Background article-availability re-verification.
 //!
-//! Usenet articles age out of provider retention. A media item we ingested
-//! months ago may today be a phantom: the VFS still advertises it, the player
-//! still tries to open it, and only when the first NNTP `BODY` fails does
-//! anything notice. This task periodically STATs a sample of articles for
-//! each completed usenet-streamed file; when the majority of the sample is
-//! gone, the filesystem entry is removed and the stream is blacklisted, so
-//! the state recompute flips the item back to `Indexed` and re-scrapes.
-//!
-//! Cadence is tracked via a Redis key per entry (`riven:usenet:hc:{id}`) with
-//! the recheck interval as TTL — presence = recently checked, absence = due.
 
-use std::sync::Arc;
+
 use std::time::Duration;
 
 use anyhow::Result;
 use redis::AsyncCommands;
 use riven_core::http::HttpClient;
 use riven_core::settings::PluginSettings;
+use riven_usenet::UsenetStreamer;
 use riven_usenet::nntp::NntpPool;
 use riven_usenet::nzb::NzbSegment;
 use riven_usenet::streamer::{NzbMeta, NzbMetaSource};
+use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 
 use crate::{PROVIDER, availnzb, nzb_url_redis_key};
 
 const HEALTH_CHECK_TICK: Duration = Duration::from_secs(24 * 60 * 60);
 const PER_ENTRY_INTERVAL: Duration = Duration::from_secs(7 * 24 * 60 * 60);
-const HEALTH_CHECK_SAMPLE: usize = 4;
+const FAILURE_BACKOFF: Duration = Duration::from_secs(2 * 60 * 60);
+const BATCH_LIMIT: i64 = 100;
 
-// ≥2 of 4 sampled segments missing → mark the file dead. Avoids over-acting
-// on a single transient miss.
+const VERIFY_FIRST_N: usize = 3;
+const VERIFY_LAST_N: usize = 2;
+const MIDDLE_SAMPLE: usize = 6;
+
+/// ≥50% of the sample missing → mark the file dead for this pass. Combined
+/// with `max_failures` so a single bad sample doesn't trigger a delete.
 const FAILURE_THRESHOLD: f64 = 0.5;
 
-const BATCH_LIMIT: i64 = 100;
+const DEFAULT_MAX_FAILURES: u32 = 2;
+
+#[derive(Default, Serialize, Deserialize)]
+struct HcState {
+    #[serde(default)]
+    failures: u32,
+}
 
 pub fn spawn(
     db_pool: PgPool,
     redis: redis::aio::ConnectionManager,
-    pool: Arc<NntpPool>,
+    streamer: UsenetStreamer,
     http: HttpClient,
     settings: PluginSettings,
 ) {
@@ -47,16 +50,18 @@ pub fn spawn(
     if STARTED.set(()).is_err() {
         return;
     }
+    let max_failures = settings
+        .get_parsed_or::<u32>("healthcheckmaxfailures", DEFAULT_MAX_FAILURES)
+        .max(1);
     tokio::spawn(async move {
         tokio::time::sleep(Duration::from_secs(30)).await;
         loop {
-            match run_once(&db_pool, &redis, &pool, &http, &settings).await {
+            match run_once(&db_pool, &redis, &streamer, &http, &settings, max_failures).await {
                 Ok(summary) => {
                     if summary.checked > 0 {
                         tracing::info!(
                             checked = summary.checked,
                             removed = summary.removed,
-                            skipped_no_meta = summary.skipped_no_meta,
                             "usenet health check pass complete"
                         );
                     }
@@ -74,15 +79,15 @@ pub fn spawn(
 struct PassSummary {
     checked: usize,
     removed: usize,
-    skipped_no_meta: usize,
 }
 
 async fn run_once(
     db_pool: &PgPool,
     redis_seed: &redis::aio::ConnectionManager,
-    pool: &Arc<NntpPool>,
+    streamer: &UsenetStreamer,
     http: &HttpClient,
     settings: &PluginSettings,
+    max_failures: u32,
 ) -> Result<PassSummary> {
     let rows: Vec<(i64, String, i64)> = sqlx::query_as(
         "SELECT fe.id, COALESCE(s.info_hash, '') AS info_hash, fe.media_item_id \
@@ -104,60 +109,78 @@ async fn run_once(
         if info_hash.is_empty() {
             continue;
         }
-        let cooldown_key = format!("riven:usenet:hc:{entry_id}");
-        let already_checked: bool = AsyncCommands::exists(&mut redis, &cooldown_key)
-            .await
-            .unwrap_or(false);
-        if already_checked {
+        let key = format!("riven:usenet:hc:{entry_id}");
+        // Presence of a TTL means the cooldown is still active.
+        let ttl: i64 = AsyncCommands::ttl(&mut redis, &key).await.unwrap_or(-2);
+        if ttl > 0 {
             continue;
         }
-
-        // No cached meta means Redis TTL expired; we can't verify segments,
-        // but bump the cooldown anyway so we don't re-attempt every tick.
-        let meta_json: Option<String> =
-            AsyncCommands::get(&mut redis, format!("riven:nzb:meta:{info_hash}"))
-                .await
-                .unwrap_or(None);
-        let Some(meta_json) = meta_json else {
-            summary.skipped_no_meta += 1;
-            let _: redis::RedisResult<()> = AsyncCommands::set_ex(
-                &mut redis,
-                &cooldown_key,
-                "no-meta",
-                PER_ENTRY_INTERVAL.as_secs(),
-            )
-            .await;
-            continue;
+        let prior: HcState = match AsyncCommands::get::<_, Option<String>>(&mut redis, &key)
+            .await
+            .ok()
+            .flatten()
+        {
+            Some(s) => serde_json::from_str(&s).unwrap_or_default(),
+            None => HcState::default(),
         };
-        let meta: NzbMeta = match serde_json::from_str(&meta_json) {
+
+        // Postgres-backed meta load. (Previously read from a Redis key that
+        // ceased being populated when meta storage moved to Postgres.)
+        let meta = match streamer.load_meta(&info_hash).await {
             Ok(m) => m,
-            Err(_) => continue,
+            Err(error) => {
+                tracing::debug!(entry_id, %error, "health check: meta load failed; bumping cooldown");
+                set_state(&mut redis, &key, &prior, PER_ENTRY_INTERVAL).await;
+                continue;
+            }
         };
 
         let segments = sample_segments(&meta);
         if segments.is_empty() {
+            set_state(&mut redis, &key, &prior, PER_ENTRY_INTERVAL).await;
             continue;
         }
         summary.checked += 1;
-        let (alive, total) = stat_sample(pool, &segments).await;
-        let missing = total.saturating_sub(alive);
-        let miss_rate = missing as f64 / total.max(1) as f64;
-        // Only feed AvailNZB when stat_sample produced a real verdict;
-        // total == 0 means the pool errored and we have no signal to report.
-        let report_signal = (total > 0).then(|| miss_rate < FAILURE_THRESHOLD);
-        let nzb_url: Option<String> =
-            AsyncCommands::get(&mut redis, nzb_url_redis_key(&info_hash))
-                .await
-                .unwrap_or(None);
+        let pool = streamer.pool();
+        let (alive, total) = stat_sample(pool.as_ref(), &segments).await;
+        // total == 0 means the pool errored — no verdict, no state change,
+        // try again next tick.
+        if total == 0 {
+            set_state(&mut redis, &key, &prior, FAILURE_BACKOFF).await;
+            continue;
+        }
+        let miss_rate = (total - alive) as f64 / total as f64;
+        let healthy = miss_rate < FAILURE_THRESHOLD;
+
+        let nzb_url: Option<String> = AsyncCommands::get(&mut redis, nzb_url_redis_key(&info_hash))
+            .await
+            .unwrap_or(None);
         let release_name = meta.files.first().map(|f| f.filename.clone());
-        if miss_rate >= FAILURE_THRESHOLD {
+        if let Some(url) = nzb_url.as_ref() {
+            availnzb::spawn_report_if_configured(
+                http.clone(),
+                settings,
+                url.clone(),
+                healthy,
+                release_name.clone(),
+            );
+        }
+
+        if healthy {
+            set_state(&mut redis, &key, &HcState { failures: 0 }, PER_ENTRY_INTERVAL).await;
+            continue;
+        }
+
+        let new_failures = prior.failures.saturating_add(1);
+        if new_failures >= max_failures {
             tracing::warn!(
                 entry_id,
                 media_item_id,
                 info_hash = %info_hash,
                 alive,
                 total,
-                "usenet health check: majority articles missing; removing entry"
+                consecutive_failures = new_failures,
+                "usenet health check: failure threshold breached; removing entry"
             );
             if let Err(error) =
                 riven_db::repo::blacklist_stream_by_hash(db_pool, media_item_id, &info_hash).await
@@ -171,64 +194,81 @@ async fn run_once(
                     tracing::warn!(entry_id, %error, "health check: failed to delete entry");
                 }
             }
-            let _: redis::RedisResult<()> = AsyncCommands::set_ex(
-                &mut redis,
-                &cooldown_key,
-                "removed",
-                PER_ENTRY_INTERVAL.as_secs(),
-            )
-            .await;
-            if let (Some(url), Some(false)) = (nzb_url.as_ref(), report_signal) {
-                availnzb::spawn_report_if_configured(
-                    http.clone(),
-                    settings,
-                    url.clone(),
-                    false,
-                    release_name.clone(),
-                );
-            }
+            // Drop the cooldown key — entry's gone, no further state needed.
+            let _: redis::RedisResult<()> = AsyncCommands::del(&mut redis, &key).await;
         } else {
-            let _: redis::RedisResult<()> = AsyncCommands::set_ex(
+            tracing::debug!(
+                entry_id,
+                alive,
+                total,
+                consecutive_failures = new_failures,
+                "usenet health check: bad sample, will retry"
+            );
+            set_state(
                 &mut redis,
-                &cooldown_key,
-                "ok",
-                PER_ENTRY_INTERVAL.as_secs(),
+                &key,
+                &HcState {
+                    failures: new_failures,
+                },
+                FAILURE_BACKOFF,
             )
             .await;
-            if let (Some(url), Some(true)) = (nzb_url.as_ref(), report_signal) {
-                availnzb::spawn_report_if_configured(
-                    http.clone(),
-                    settings,
-                    url.clone(),
-                    true,
-                    release_name.clone(),
-                );
-            }
         }
     }
 
     Ok(summary)
 }
 
-// Spread-spaced sample so a release that lost only its tail is still caught.
+async fn set_state(
+    redis: &mut redis::aio::ConnectionManager,
+    key: &str,
+    state: &HcState,
+    ttl: Duration,
+) {
+    let value = serde_json::to_string(state).unwrap_or_else(|_| "{}".to_string());
+    let _: redis::RedisResult<()> =
+        AsyncCommands::set_ex(redis, key, value, ttl.as_secs()).await;
+}
+
+/// First N + last M + a handful of evenly-spaced middle segments. Inspired
+/// by altmount's strategic sample: the head catches DMCA takedowns that
+/// start at the release's first segment, the tail catches truncated
+/// uploads, and the middle catches generic retention loss.
 fn sample_segments(meta: &NzbMeta) -> Vec<NzbSegment> {
     let Some(first) = meta.files.first() else {
         return Vec::new();
     };
-    let all_segments: Vec<NzbSegment> = match &first.source {
+    let all: Vec<NzbSegment> = match &first.source {
         NzbMetaSource::Direct { segments, .. } => segments.clone(),
         NzbMetaSource::Rar { parts, .. } => parts
             .iter()
             .flat_map(|p| p.segments.iter().cloned())
             .collect(),
     };
-    if all_segments.len() <= HEALTH_CHECK_SAMPLE {
-        return all_segments;
+    if all.is_empty() {
+        return Vec::new();
     }
-    let step = all_segments.len() / HEALTH_CHECK_SAMPLE;
-    (0..HEALTH_CHECK_SAMPLE)
-        .map(|i| all_segments[(i * step).min(all_segments.len() - 1)].clone())
-        .collect()
+    let total = all.len();
+    if total <= VERIFY_FIRST_N + VERIFY_LAST_N + MIDDLE_SAMPLE {
+        return all;
+    }
+
+    let mut indices: Vec<usize> = (0..VERIFY_FIRST_N).collect();
+    indices.extend((total - VERIFY_LAST_N)..total);
+
+    let middle_start = VERIFY_FIRST_N;
+    let middle_end = total - VERIFY_LAST_N;
+    let middle_count = middle_end - middle_start;
+    let step = middle_count as f64 / MIDDLE_SAMPLE as f64;
+    for i in 0..MIDDLE_SAMPLE {
+        let idx = middle_start + ((i as f64 + 0.5) * step) as usize;
+        if idx < middle_end {
+            indices.push(idx);
+        }
+    }
+    indices.sort_unstable();
+    indices.dedup();
+    indices.into_iter().map(|i| all[i].clone()).collect()
 }
 
 async fn stat_sample(pool: &NntpPool, segments: &[NzbSegment]) -> (usize, usize) {

@@ -167,7 +167,7 @@ impl Plugin for UsenetPlugin {
             health_check::spawn(
                 ctx.db_pool.clone(),
                 ctx.redis.clone(),
-                streamer.pool(),
+                streamer,
                 ctx.http.clone(),
                 ctx.settings.clone(),
             );
@@ -255,6 +255,16 @@ impl Plugin for UsenetPlugin {
                      reports — the URL availability check works without one. \
                      Obtain via POST /api/v1/keys/roll_key on the AvailNZB host.",
                 ),
+            SettingField::new(
+                "healthcheckmaxfailures",
+                "Consecutive Failures Before Delete",
+                "number",
+            )
+            .with_default("2")
+            .with_description(
+                "Number of back-to-back failed STAT samples required before the \
+                 library entry is deleted and re-scraped.
+            ),
         ]
     }
 
