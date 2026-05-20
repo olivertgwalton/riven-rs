@@ -124,11 +124,16 @@ pub async fn persist_movie(
 
     let file = if let Some(first) = video_files.first() {
         first.0
-    } else if let Some(largest) = dl.files.iter().max_by_key(|f| f.file_size) {
+    } else if let Some(largest) = dl
+        .files
+        .iter()
+        .filter(|f| is_video_file(&f.filename))
+        .max_by_key(|f| f.file_size)
+    {
         tracing::warn!(
             id,
             info_hash,
-            "no movie file found in torrent; falling back to largest file"
+            "no movie-typed video file found; falling back to largest video file"
         );
         largest
     } else {

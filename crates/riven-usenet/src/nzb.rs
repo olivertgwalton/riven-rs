@@ -395,7 +395,7 @@ pub fn looks_like_media(file: &NzbFile) -> bool {
     const MEDIA_EXTS: &[&str] = &[
         ".mkv", ".mp4", ".avi", ".mov", ".m4v", ".webm", ".ts", ".m2ts", ".wmv",
     ];
-    const SKIP_EXTS: &[&str] = &[".par2", ".nfo", ".sfv", ".srr", ".nzb"];
+    const SKIP_EXTS: &[&str] = &[".par2", ".nfo", ".sfv", ".srr", ".nzb", ".7z", ".zip"];
     if SKIP_EXTS.iter().any(|e| lower.contains(e)) {
         return false;
     }
@@ -449,6 +449,10 @@ mod tests {
         };
         assert!(looks_like_media(&f));
         f.subject = "movie.par2".into();
+        assert!(!looks_like_media(&f));
+        f.subject = "CCal2PLGYYDFQNVyj.7z.041".into();
+        assert!(!looks_like_media(&f));
+        f.subject = "archive.zip".into();
         assert!(!looks_like_media(&f));
     }
 
