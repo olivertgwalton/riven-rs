@@ -42,11 +42,21 @@ fn is_media_filename(name: &str) -> bool {
     )
 }
 
-/// Sample size for the article-availability probe at ingest. Up to this
-/// many random segments from the candidate file are STAT-checked.
-const AVAILABILITY_SAMPLE_SIZE: usize = 12;
-/// Reject ingest if more than this fraction of probed segments is missing.
-const AVAILABILITY_MISSING_LIMIT: f64 = 0.10;
+/// Fraction of a candidate file's segments to STAT-probe at ingest, matching
+/// altmount's default `segment_sample_percentage` of 5%. A fixed tiny sample
+/// (the old 12 segments) is ~0.1% of a 10 GB REMUX, so sparsely-dead releases
+/// passed ingest and only failed mid-playback. 5% reliably surfaces gaps.
+const AVAILABILITY_SAMPLE_PERCENT: usize = 5;
+/// Floor/ceiling on the probe sample so small files still get a meaningful
+/// absolute check and huge files don't STAT thousands of segments per ingest.
+const AVAILABILITY_SAMPLE_MIN: usize = 20;
+const AVAILABILITY_SAMPLE_MAX: usize = 1000;
+/// Maximum fraction of probed segments allowed to error transiently (provider
+/// hiccup) before we treat the release as unverifiable. *Confirmed*-missing
+/// segments (STAT says not present) are zero-tolerance — the read path has no
+/// par2 data repair, so a single dead segment in the played range stalls
+/// playback (mirrors altmount's zero-missing health policy).
+const AVAILABILITY_ERROR_LIMIT: f64 = 0.5;
 /// Bytes from each volume's prefix to pull before attempting to parse the
 /// RAR archive header. One typical NNTP segment is ~750 KB encoded, which
 /// after yEnc decode is more than enough to cover MAIN_HEAD + FILE_HEAD.
@@ -63,7 +73,9 @@ impl UsenetStreamer {
         if segments.is_empty() {
             return Ok(());
         }
-        let n = segments.len().min(AVAILABILITY_SAMPLE_SIZE);
+        let n = ((segments.len() * AVAILABILITY_SAMPLE_PERCENT) / 100)
+            .clamp(AVAILABILITY_SAMPLE_MIN, AVAILABILITY_SAMPLE_MAX)
+            .min(segments.len());
         // Spread the sample across the file rather than concentrating at
         // the front: corrupted releases often have gaps anywhere.
         let step = segments.len().max(1) / n.max(1);
@@ -82,6 +94,7 @@ impl UsenetStreamer {
             })
             .buffer_unordered(probe_concurrency);
         let mut missing = 0usize;
+        let mut errors = 0usize;
         let mut checked = 0usize;
         while let Some(result) = probes.next().await {
             checked += 1;
@@ -89,23 +102,28 @@ impl UsenetStreamer {
                 Ok(true) => {}
                 Ok(false) => missing += 1,
                 Err(error) => {
-                    // Treat hard NNTP errors as missing so a flaky provider
-                    // doesn't pass an empty release through.
-                    tracing::debug!(error = %error, "availability probe error; counting as missing");
-                    missing += 1;
+                    // Transient/provider error — ambiguous, tracked separately
+                    // from a confirmed-missing STAT so a flaky provider doesn't
+                    // masquerade as a dead release (and vice versa).
+                    tracing::debug!(error = %error, "availability probe error");
+                    errors += 1;
                 }
             }
         }
-        let fraction = missing as f64 / checked.max(1) as f64;
-        if fraction > AVAILABILITY_MISSING_LIMIT {
+        // Zero tolerance for confirmed-missing segments: there's no par2 data
+        // repair on the read path, so even one dead segment in the file stalls
+        // playback when it's reached. Reject and let the caller try the next
+        // ranked candidate.
+        if missing > 0 {
             return Err(StreamerError::IncompleteRelease { missing, checked });
         }
-        if missing > 0 {
-            tracing::info!(
-                missing,
+        // Couldn't actually verify the release (provider unreachable for most
+        // of the sample) — don't pass it through blindly.
+        if errors as f64 / checked.max(1) as f64 > AVAILABILITY_ERROR_LIMIT {
+            return Err(StreamerError::IncompleteRelease {
+                missing: errors,
                 checked,
-                "release passed availability probe with some gaps"
-            );
+            });
         }
         Ok(())
     }
