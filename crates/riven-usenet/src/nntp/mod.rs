@@ -74,24 +74,43 @@ pub(crate) enum NntpStream {
 }
 
 impl NntpStream {
-    pub(crate) async fn read_line(&mut self, buf: &mut String) -> io::Result<usize> {
-        match self {
-            NntpStream::Plain(s) => s.read_line(buf).await,
-            NntpStream::Tls(s) => s.read_line(buf).await,
-        }
+    /// Read a single line, failing with `TimedOut` if no data arrives within
+    /// `timeout`. The deadline is per call, so it acts as an inactivity timeout
+    /// (matching nntppool's `SetReadDeadline`): a slow-but-progressing transfer
+    /// keeps resetting it, while a half-dead socket trips it.
+    pub(crate) async fn read_line(
+        &mut self,
+        buf: &mut String,
+        timeout: Duration,
+    ) -> io::Result<usize> {
+        tokio::time::timeout(timeout, async {
+            match self {
+                NntpStream::Plain(s) => s.read_line(buf).await,
+                NntpStream::Tls(s) => s.read_line(buf).await,
+            }
+        })
+        .await
+        .map_err(|_e| io::Error::new(io::ErrorKind::TimedOut, "nntp read timed out"))?
     }
 
-    pub(crate) async fn read_until_dot(&mut self) -> io::Result<Vec<u8>> {
+    /// Read a `.`-terminated multi-line response. `timeout` is applied per
+    /// line read (inactivity deadline), so a stalled socket fails fast and the
+    /// pool can recycle the connection instead of the read blocking forever.
+    pub(crate) async fn read_until_dot(&mut self, timeout: Duration) -> io::Result<Vec<u8>> {
         // RFC 3977: multi-line response terminated by a line containing only ".".
         // Lines beginning with "." are dot-stuffed (sender prepends an extra ".").
         let mut out = Vec::with_capacity(1 << 16);
         let mut line = Vec::with_capacity(1024);
         loop {
             line.clear();
-            let n = match self {
-                NntpStream::Plain(s) => s.read_until(b'\n', &mut line).await?,
-                NntpStream::Tls(s) => s.read_until(b'\n', &mut line).await?,
-            };
+            let n = tokio::time::timeout(timeout, async {
+                match self {
+                    NntpStream::Plain(s) => s.read_until(b'\n', &mut line).await,
+                    NntpStream::Tls(s) => s.read_until(b'\n', &mut line).await,
+                }
+            })
+            .await
+            .map_err(|_e| io::Error::new(io::ErrorKind::TimedOut, "nntp read timed out"))??;
             if n == 0 {
                 return Err(io::Error::new(
                     io::ErrorKind::UnexpectedEof,

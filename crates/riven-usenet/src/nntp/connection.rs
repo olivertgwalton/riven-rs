@@ -80,9 +80,7 @@ impl NntpConnection {
 
     async fn read_status(&mut self) -> Result<String, NntpError> {
         let mut s = String::new();
-        let n = tokio::time::timeout(self.read_timeout, self.stream.read_line(&mut s))
-            .await
-            .map_err(|_| NntpError::Timeout)??;
+        let n = self.stream.read_line(&mut s, self.read_timeout).await?;
         if n == 0 {
             return Err(NntpError::Protocol("EOF reading status"));
         }
@@ -106,9 +104,7 @@ impl NntpConnection {
         if !status.starts_with("222") {
             return Err(NntpError::ServerError(status));
         }
-        let body = tokio::time::timeout(self.read_timeout, self.stream.read_until_dot())
-            .await
-            .map_err(|_| NntpError::Timeout)??;
+        let body = self.stream.read_until_dot(self.read_timeout).await?;
         Ok(body)
     }
 
