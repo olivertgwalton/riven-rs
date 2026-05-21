@@ -47,10 +47,14 @@ fn is_media_filename(name: &str) -> bool {
 /// (the old 12 segments) is ~0.1% of a 10 GB REMUX, so sparsely-dead releases
 /// passed ingest and only failed mid-playback. 5% reliably surfaces gaps.
 const AVAILABILITY_SAMPLE_PERCENT: usize = 5;
-/// Floor/ceiling on the probe sample so small files still get a meaningful
-/// absolute check and huge files don't STAT thousands of segments per ingest.
+/// Floor/ceiling on the probe sample. The probe runs inline per candidate
+/// during download (unlike altmount's out-of-band health check with its own
+/// connection budget), and a download walks many candidates, so the ceiling
+/// has to stay modest or the STATs swamp the pool and stall throughput. 150
+/// segments spread across a file still reliably catches a meaningfully
+/// incomplete release while costing ~12× the old fixed-12 probe, not ~80×.
 const AVAILABILITY_SAMPLE_MIN: usize = 20;
-const AVAILABILITY_SAMPLE_MAX: usize = 1000;
+const AVAILABILITY_SAMPLE_MAX: usize = 150;
 /// Maximum fraction of probed segments allowed to error transiently (provider
 /// hiccup) before we treat the release as unverifiable. *Confirmed*-missing
 /// segments (STAT says not present) are zero-tolerance — the read path has no
