@@ -6,7 +6,6 @@ use std::time::Duration;
 
 use anyhow::Result;
 use redis::AsyncCommands;
-use riven_core::http::HttpClient;
 use riven_core::settings::PluginSettings;
 use riven_usenet::UsenetStreamer;
 use riven_usenet::nntp::NntpPool;
@@ -15,7 +14,7 @@ use riven_usenet::streamer::{NzbMeta, NzbMetaSource};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 
-use crate::{PROVIDER, availnzb, nzb_url_redis_key};
+use crate::PROVIDER;
 
 const HEALTH_CHECK_TICK: Duration = Duration::from_secs(24 * 60 * 60);
 const PER_ENTRY_INTERVAL: Duration = Duration::from_secs(7 * 24 * 60 * 60);
@@ -42,7 +41,6 @@ pub fn spawn(
     db_pool: PgPool,
     redis: redis::aio::ConnectionManager,
     streamer: UsenetStreamer,
-    http: HttpClient,
     settings: PluginSettings,
 ) {
     use std::sync::OnceLock;
@@ -56,7 +54,7 @@ pub fn spawn(
     tokio::spawn(async move {
         tokio::time::sleep(Duration::from_secs(30)).await;
         loop {
-            match run_once(&db_pool, &redis, &streamer, &http, &settings, max_failures).await {
+            match run_once(&db_pool, &redis, &streamer, max_failures).await {
                 Ok(summary) => {
                     if summary.checked > 0 {
                         tracing::info!(
@@ -85,8 +83,6 @@ async fn run_once(
     db_pool: &PgPool,
     redis_seed: &redis::aio::ConnectionManager,
     streamer: &UsenetStreamer,
-    http: &HttpClient,
-    settings: &PluginSettings,
     max_failures: u32,
 ) -> Result<PassSummary> {
     let rows: Vec<(i64, String, i64)> = sqlx::query_as(
@@ -151,20 +147,6 @@ async fn run_once(
         }
         let miss_rate = (total - alive) as f64 / total as f64;
         let healthy = miss_rate < FAILURE_THRESHOLD;
-
-        let nzb_url: Option<String> = AsyncCommands::get(&mut redis, nzb_url_redis_key(&info_hash))
-            .await
-            .unwrap_or(None);
-        let release_name = meta.files.first().map(|f| f.filename.clone());
-        if let Some(url) = nzb_url.as_ref() {
-            availnzb::spawn_report_if_configured(
-                http.clone(),
-                settings,
-                url.clone(),
-                healthy,
-                release_name.clone(),
-            );
-        }
 
         if healthy {
             set_state(&mut redis, &key, &HcState { failures: 0 }, PER_ENTRY_INTERVAL).await;
