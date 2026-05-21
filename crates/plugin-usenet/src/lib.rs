@@ -12,13 +12,14 @@ use async_trait::async_trait;
 use lru::LruCache;
 use redis::AsyncCommands;
 use riven_core::events::{EventType, HookResponse};
+use riven_core::types::StreamLinkResponse;
 use riven_core::http::HttpServiceProfile;
 use riven_core::plugin::{Plugin, PluginContext, SettingField};
 use riven_core::register_plugin;
 use riven_core::settings::PluginSettings;
 use riven_core::types::{
     CacheCheckResult, CachedStoreEntry, DownloadFile, DownloadResult, ProviderInfo,
-    StreamLinkResponse, TorrentStatus,
+    TorrentStatus,
 };
 use riven_usenet::nntp::{NntpProvider, NntpServerConfig};
 use riven_usenet::{NntpConfig, UsenetStreamer};
@@ -365,6 +366,10 @@ impl Plugin for UsenetPlugin {
         let nzb_url_for_report = nzb_url_for_hash(info_hash, ctx).await;
         let meta = match streamer.ingest(info_hash, &xml_arc, password).await {
             Ok(m) => m,
+            Err(riven_usenet::StreamerError::IngestQueueFull) => {
+                tracing::debug!(info_hash, "ingest queue full; will retry next cycle");
+                return Ok(HookResponse::DownloadStreamUnavailable);
+            }
             Err(e) => {
                 tracing::warn!(info_hash, error = %e, "usenet ingest failed");
                 // Ingest's STAT pass found the articles missing — feed that
@@ -423,6 +428,27 @@ impl Plugin for UsenetPlugin {
         })))
     }
 
+    async fn on_stream_link_requested(
+        &self,
+        magnet: &str,
+        _info_hash: &str,
+        _provider: Option<&str>,
+        _ctx: &PluginContext,
+    ) -> anyhow::Result<HookResponse> {
+        // The usenet stream URL is a permanent local HTTP URL
+        // (`http://127.0.0.1/usenet/{hash}/{index}`). It never expires, so
+        // when the VFS refreshes after a transient NNTP error we just return
+        // the same URL unchanged instead of letting StremThru try (and fail)
+        // to debrid-resolve a non-magnet URL.
+        if magnet.contains("/usenet/") {
+            return Ok(HookResponse::StreamLink(StreamLinkResponse {
+                link: magnet.to_string(),
+                provider: Some(PROVIDER.to_string()),
+            }));
+        }
+        Ok(HookResponse::Empty)
+    }
+
     async fn on_download_provider_list_requested(
         &self,
         ctx: &PluginContext,
@@ -436,28 +462,6 @@ impl Plugin for UsenetPlugin {
         }]))
     }
 
-    async fn on_stream_link_requested(
-        &self,
-        _magnet: &str,
-        info_hash: &str,
-        provider: Option<&str>,
-        _ctx: &PluginContext,
-    ) -> anyhow::Result<HookResponse> {
-        if !is_nzb_info_hash(info_hash) {
-            return Ok(HookResponse::Empty);
-        }
-        if let Some(p) = provider
-            && p != PROVIDER
-        {
-            return Ok(HookResponse::Empty);
-        }
-        // The persisted stream_url already points at /usenet/, so there's
-        // no live link to refresh.
-        Ok(HookResponse::StreamLink(StreamLinkResponse {
-            link: String::new(),
-            provider: Some(PROVIDER.to_string()),
-        }))
-    }
 }
 
 async fn nzb_url_for_hash(info_hash: &str, ctx: &PluginContext) -> Option<String> {

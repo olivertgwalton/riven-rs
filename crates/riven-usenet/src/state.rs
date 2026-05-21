@@ -7,9 +7,8 @@
 //! read path inside the same process.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock};
 
 use parking_lot::Mutex;
 use tokio::sync::Notify;
@@ -20,6 +19,30 @@ use crate::cache::SegmentCache;
 /// Size up linearly with concurrent stream count: each stream needs ~10-20 MB
 /// of warm segments. Default 256 MB ≈ 12 concurrent streams.
 const DEFAULT_CACHE_BYTES: u64 = 256 * 1024 * 1024;
+
+/// Floor for ingest concurrency when the connection budget is tiny or
+/// unknown — preserves the historical default so small setups behave as before.
+pub(crate) const MIN_INGEST_CONCURRENCY: usize = 4;
+
+/// Derive the number of NZBs that may ingest concurrently from the NNTP
+/// connection budget (`max_connections` summed across primary providers).
+///
+/// Ingest is gated separately from streaming so a backlog of new releases
+/// can't monopolise the provider and stall playback. Rather than a fixed
+/// cap (which left large connection allowances idle — 4 ingests against a
+/// 100-connection account), we take half the budget: enough to drain a
+/// scrape backlog quickly while leaving the other half as headroom for
+/// streaming, which already preempts ingest via NNTP `Priority`. The pool's
+/// own `PrioritizedSemaphore(max_connections)` stays the hard ceiling, so
+/// this can never oversubscribe the provider. `RIVEN_USENET_INGEST_CONCURRENCY`
+/// overrides the derived value for manual tuning.
+pub fn ingest_concurrency_for(total_capacity: usize) -> usize {
+    std::env::var("RIVEN_USENET_INGEST_CONCURRENCY")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or_else(|| (total_capacity / 2).max(MIN_INGEST_CONCURRENCY))
+}
 
 /// Aggregated process-wide state shared by every `UsenetStreamer`
 /// instance. Sharing means RAR header bytes fetched at ingest time stay
@@ -254,5 +277,9 @@ impl ActiveStreams {
 
     pub fn unregister(&self, key: &str) {
         self.inner.lock().remove(key);
+    }
+
+    pub fn has_any(&self) -> bool {
+        !self.inner.lock().is_empty()
     }
 }

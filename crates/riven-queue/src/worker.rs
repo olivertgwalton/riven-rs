@@ -6,6 +6,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::JobQueue;
 use crate::main_orchestrator::MainOrchestrator;
+use riven_db::repo;
 
 /// Periodic scheduler.
 pub struct Scheduler {
@@ -37,7 +38,10 @@ impl Scheduler {
                     tracing::info!("scheduler shutting down");
                     return;
                 }
-                _ = content_tick.tick()        => crate::flows::request_content::enqueue(&self.job_queue).await,
+                _ = content_tick.tick() => {
+                    crate::application::request_content::enqueue(&self.job_queue).await;
+                    self.transition_newly_aired().await;
+                }
                 _ = &mut retry_sleep           => {
                     self.retry_library().await;
                     let next_wait = Self::retry_wait_duration(
@@ -77,5 +81,13 @@ impl Scheduler {
         MainOrchestrator::new(Arc::clone(&self.job_queue))
             .retry_library()
             .await;
+    }
+
+    async fn transition_newly_aired(&self) {
+        match repo::transition_unreleased_aired(&self.job_queue.db_pool).await {
+            Ok(0) => {}
+            Ok(n) => tracing::info!(count = n, "transitioned unreleased items that have aired"),
+            Err(error) => tracing::error!(%error, "failed to transition unreleased aired items"),
+        }
     }
 }

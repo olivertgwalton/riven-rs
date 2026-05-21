@@ -10,10 +10,12 @@ use crate::nzb::{
 use crate::par2::{Par2FileDesc, looks_like_par2, parse_file_descriptors};
 use crate::rar::{self, RarEncryption, RarVolumeFileEntry};
 
+use crate::nntp::Priority;
+
 use super::store;
 use super::{
-    NzbMeta, NzbMetaFile, NzbMetaSource, NzbRarPart, NzbRarSlice, PREFETCH_FLOOR,
-    StreamerError, UsenetStreamer,
+    NzbMeta, NzbMetaFile, NzbMetaSource, NzbRarPart, NzbRarSlice, PREFETCH_FLOOR, StreamerError,
+    UsenetStreamer,
 };
 
 /// In-progress per-inner-file accumulator during multi-file RAR reconstruction.
@@ -33,11 +35,7 @@ struct RarFileGroup {
 /// `is_video_file`. Kept in sync intentionally: returning a virtual file
 /// whose extension the queue ignores wastes an ingest cycle.
 fn is_media_filename(name: &str) -> bool {
-    let ext = name
-        .rsplit('.')
-        .next()
-        .unwrap_or("")
-        .to_ascii_lowercase();
+    let ext = name.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
     matches!(
         ext.as_str(),
         "mp4" | "mkv" | "avi" | "mov" | "wmv" | "flv" | "webm"
@@ -61,10 +59,7 @@ impl UsenetStreamer {
     /// missing; the caller treats this as "release unusable, try the next
     /// ranked candidate." On a healthy release this is a few cheap STAT
     /// round-trips and a green light.
-    async fn probe_availability(
-        &self,
-        segments: &[NzbSegment],
-    ) -> Result<(), StreamerError> {
+    async fn probe_availability(&self, segments: &[NzbSegment]) -> Result<(), StreamerError> {
         if segments.is_empty() {
             return Ok(());
         }
@@ -78,13 +73,14 @@ impl UsenetStreamer {
                 segments[idx].message_id.clone()
             })
             .collect();
+        let probe_concurrency = self.pool.available_capacity().max(PREFETCH_FLOOR).min(n);
         let pool = self.pool.clone();
         let mut probes = stream::iter(mids)
             .map(move |mid| {
                 let pool = pool.clone();
-                async move { pool.stat(&mid).await }
+                async move { pool.stat(&mid, Priority::Low).await }
             })
-            .buffer_unordered(n);
+            .buffer_unordered(probe_concurrency);
         let mut missing = 0usize;
         let mut checked = 0usize;
         while let Some(result) = probes.next().await {
@@ -105,7 +101,11 @@ impl UsenetStreamer {
             return Err(StreamerError::IncompleteRelease { missing, checked });
         }
         if missing > 0 {
-            tracing::info!(missing, checked, "release passed availability probe with some gaps");
+            tracing::info!(
+                missing,
+                checked,
+                "release passed availability probe with some gaps"
+            );
         }
         Ok(())
     }
@@ -138,6 +138,12 @@ impl UsenetStreamer {
                 .put(info_hash.to_string(), Arc::new(existing.clone()));
             return Ok(existing);
         }
+
+        let _ingest_permit = self
+            .ingest_sem
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| StreamerError::IngestQueueFull)?;
 
         let document = parse_nzb_document(nzb_xml)?;
         let release_title = document.release_title();
@@ -194,7 +200,8 @@ impl UsenetStreamer {
                     (out, pw)
                 }
                 _ => {
-                    let mut ordered: Vec<NzbMetaFile> = files.iter().map(direct_meta_file).collect();
+                    let mut ordered: Vec<NzbMetaFile> =
+                        files.iter().map(direct_meta_file).collect();
                     if let Some(primary_idx) = pick_primary_media_index(&files) {
                         ordered.swap(0, primary_idx);
                     }
@@ -400,30 +407,27 @@ impl UsenetStreamer {
             parts.push(build_rar_part(f));
         }
 
-        let header_fetch_concurrency = self.pool.total_capacity().max(PREFETCH_FLOOR);
+        let header_fetch_concurrency = self.pool.available_capacity().max(PREFETCH_FLOOR);
         let streamer = self.clone();
-        let header_results: Vec<Result<Vec<u8>, StreamerError>> =
-            stream::iter(parts.clone())
-                .map(move |part| {
-                    let s = streamer.clone();
-                    async move {
-                        s.fetch_volume_header_bytes(&part, RAR_HEADER_PROBE_BYTES).await
-                    }
-                })
-                .buffered(header_fetch_concurrency)
-                .collect()
-                .await;
+        let header_results: Vec<Result<Vec<u8>, StreamerError>> = stream::iter(parts.clone())
+            .map(move |part| {
+                let s = streamer.clone();
+                async move {
+                    s.fetch_volume_header_bytes(&part, RAR_HEADER_PROBE_BYTES)
+                        .await
+                }
+            })
+            .buffered(header_fetch_concurrency)
+            .collect()
+            .await;
 
-        let mut volume_entries: Vec<Vec<RarVolumeFileEntry>> =
-            Vec::with_capacity(parts.len());
+        let mut volume_entries: Vec<Vec<RarVolumeFileEntry>> = Vec::with_capacity(parts.len());
         // All volumes in one RAR set share a format. We capture it from
         // whichever volume parses first and use it later when re-parsing
         // synthesized block headers at arbitrary offsets in `parts[i]`.
         let mut archive_format: Option<rar::RarFormat> = None;
 
-        for (vol_idx, (part, fetch_result)) in
-            parts.iter_mut().zip(header_results).enumerate()
-        {
+        for (vol_idx, (part, fetch_result)) in parts.iter_mut().zip(header_results).enumerate() {
             let header_bytes = match fetch_result {
                 Ok(b) => b,
                 Err(error) => {
@@ -464,10 +468,7 @@ impl UsenetStreamer {
             let entries: Vec<RarVolumeFileEntry> =
                 parsed.files.into_iter().filter(|e| e.is_stored()).collect();
             if entries.is_empty() {
-                tracing::debug!(
-                    vol_idx,
-                    "no stored file entry in this RAR volume; bailing"
-                );
+                tracing::debug!(vol_idx, "no stored file entry in this RAR volume; bailing");
                 return Ok(None);
             }
 
@@ -598,7 +599,7 @@ impl UsenetStreamer {
             };
             let probe_end = prev_data_end.saturating_add(1023);
             let probe = match self
-                .read_decoded_range_within_part(part, prev_data_end, probe_end)
+                .read_decoded_range_within_part(part, prev_data_end, probe_end, Priority::Low)
                 .await
             {
                 Ok(p) => p,
@@ -663,7 +664,9 @@ impl UsenetStreamer {
         // persist step downstream doesn't waste a slot on it.
         let mut out: Vec<NzbMetaFile> = Vec::new();
         for name in group_order {
-            let Some(g) = groups.remove(&name) else { continue };
+            let Some(g) = groups.remove(&name) else {
+                continue;
+            };
             if g.plaintext_sum != g.unpacked_size {
                 tracing::debug!(
                     name = %g.name,
@@ -707,7 +710,9 @@ impl UsenetStreamer {
     ) -> Result<Vec<u8>, StreamerError> {
         let mut buf: Vec<u8> = Vec::with_capacity(wanted as usize + 4096);
         for seg in &part.segments {
-            let decoded = self.fetch_decoded_cached(&seg.message_id).await?;
+            let decoded = self
+                .fetch_decoded_cached(&seg.message_id, Priority::Low)
+                .await?;
             buf.extend_from_slice(&decoded);
             if (buf.len() as u64) >= wanted {
                 break;
@@ -725,10 +730,7 @@ impl UsenetStreamer {
     /// applies to `NzbMetaSource::Direct`; `Rar` sources are skipped
     /// (their slice lengths are exact decoded byte counts from the RAR
     /// header).
-    async fn rescale_direct_to_decoded(
-        &self,
-        file: &mut NzbMetaFile,
-    ) -> Result<(), StreamerError> {
+    async fn rescale_direct_to_decoded(&self, file: &mut NzbMetaFile) -> Result<(), StreamerError> {
         let NzbMetaSource::Direct { offsets, segments } = &mut file.source else {
             return Ok(());
         };
@@ -738,7 +740,9 @@ impl UsenetStreamer {
         if first.bytes == 0 {
             return Ok(());
         }
-        let decoded = self.fetch_decoded_cached(&first.message_id).await?;
+        let decoded = self
+            .fetch_decoded_cached(&first.message_id, Priority::Low)
+            .await?;
         let dec_first = decoded.len() as u64;
         if dec_first == 0 {
             return Ok(());
@@ -787,7 +791,10 @@ impl UsenetStreamer {
         let total_bytes: u64 = smallest.segments.iter().map(|s| s.bytes).sum();
         let mut buf: Vec<u8> = Vec::with_capacity(total_bytes as usize);
         for seg in &smallest.segments {
-            match self.fetch_decoded_cached(&seg.message_id).await {
+            match self
+                .fetch_decoded_cached(&seg.message_id, Priority::Low)
+                .await
+            {
                 Ok(decoded) => buf.extend_from_slice(&decoded),
                 Err(error) => {
                     tracing::debug!(

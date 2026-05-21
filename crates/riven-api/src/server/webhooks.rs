@@ -1,5 +1,5 @@
 use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
-use riven_queue::orchestrator::LibraryOrchestrator;
+use riven_queue::lifecycle::LibraryOrchestrator;
 use serde::Deserialize;
 
 use super::ApiState;
@@ -20,7 +20,7 @@ pub(super) async fn seerr_webhook(
 ) -> impl IntoResponse {
     let Some(Json(body)) = body else {
         tracing::info!("seerr webhook received without body, triggering content service");
-        riven_queue::flows::request_content::enqueue(&state.job_queue).await;
+        riven_queue::application::request_content::enqueue(&state.job_queue).await;
         return StatusCode::OK;
     };
 
@@ -28,7 +28,7 @@ pub(super) async fn seerr_webhook(
         Ok(p) => p,
         Err(e) => {
             tracing::warn!(error = %e, "seerr webhook payload failed to parse, falling back to full refresh");
-            riven_queue::flows::request_content::enqueue(&state.job_queue).await;
+            riven_queue::application::request_content::enqueue(&state.job_queue).await;
             return StatusCode::OK;
         }
     };

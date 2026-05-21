@@ -88,8 +88,10 @@ impl PluginSettings {
         };
 
         for (key, value) in obj {
-            if let Some(value) = setting_value_to_string(value) {
-                self.values.insert(normalize_key(key), value);
+            let normalized = normalize_key(key);
+            match setting_value_to_string(value) {
+                Some(v) => { self.values.insert(normalized, v); }
+                None => { self.values.remove(&normalized); }
             }
         }
     }

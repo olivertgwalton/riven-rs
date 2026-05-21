@@ -12,11 +12,15 @@ pub struct RateLimit {
 }
 
 impl RateLimit {
-    /// Minimum gap between consecutive requests: `per / max`.
-    /// Jobs are spread evenly over the
-    /// window rather than bursting to the cap and then stalling.
-    fn min_interval(self) -> Duration {
-        self.per / self.max
+    /// Sustained refill rate in tokens per second: `max / per`.
+    fn refill_per_sec(self) -> f64 {
+        f64::from(self.max) / self.per.as_secs_f64()
+    }
+
+    /// Bucket capacity — the maximum burst allowed before the limiter starts
+    /// pacing. Equal to the window cap (`max`).
+    fn capacity(self) -> f64 {
+        f64::from(self.max)
     }
 }
 
@@ -49,10 +53,18 @@ impl ServiceState {
     }
 }
 
+/// Token-bucket limiter. Unlike a strict `min_interval` gate (one request every
+/// `per/max`, fully serial), the bucket lets up to `max` requests through in a
+/// burst and then refills continuously at `max/per`. This is what lets the many
+/// concurrent flow workers (e.g. every episode of a season fanned out at once)
+/// actually run in parallel within a service's budget instead of being pinned
+/// to one-at-a-time. The long-run average still tracks the configured rate.
 #[derive(Debug, Default)]
 struct LimiterState {
-    /// When the last request was allowed through.
-    last_sent: Option<Instant>,
+    /// Available tokens. `None` until the first request seeds a full bucket.
+    tokens: Option<f64>,
+    /// Last time `tokens` was refilled.
+    last_refill: Option<Instant>,
     /// Hard pause set by a `Retry-After` response header.
     paused_until: Option<Instant>,
 }
@@ -70,18 +82,28 @@ impl LimiterState {
         }
 
         let rate_limit = profile.rate_limit?;
-        let min_interval = rate_limit.min_interval();
+        let capacity = rate_limit.capacity();
+        let refill = rate_limit.refill_per_sec();
 
-        let elapsed = self
-            .last_sent
-            .map(|t| now.duration_since(t))
-            .unwrap_or(min_interval); // first request: always allowed immediately
+        // Refill: add tokens accrued since the last check, capped at capacity.
+        // First request seeds a full bucket so an idle service bursts freely.
+        let mut tokens = match (self.tokens, self.last_refill) {
+            (Some(t), Some(last)) => {
+                (t + now.duration_since(last).as_secs_f64() * refill).min(capacity)
+            }
+            _ => capacity,
+        };
+        self.last_refill = Some(now);
 
-        if elapsed >= min_interval {
-            self.last_sent = Some(now);
+        if tokens >= 1.0 {
+            tokens -= 1.0;
+            self.tokens = Some(tokens);
             None
         } else {
-            Some(min_interval.saturating_sub(elapsed))
+            // Not enough for a whole token yet — wait for the deficit to refill.
+            self.tokens = Some(tokens);
+            let deficit = 1.0 - tokens;
+            Some(Duration::from_secs_f64(deficit / refill))
         }
     }
 

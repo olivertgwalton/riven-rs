@@ -276,7 +276,7 @@ async fn stat_sample(pool: &NntpPool, segments: &[NzbSegment]) -> (usize, usize)
     let mut total = 0usize;
     for seg in segments {
         total += 1;
-        match pool.stat(&seg.message_id).await {
+        match pool.stat(&seg.message_id, riven_usenet::nntp::Priority::Low).await {
             Ok(true) => alive += 1,
             Ok(false) => {}
             Err(error) => {

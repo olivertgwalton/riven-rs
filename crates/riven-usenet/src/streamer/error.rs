@@ -22,4 +22,6 @@ pub enum StreamerError {
     MissingPassword,
     #[error("crypto error: {0}")]
     Crypto(#[from] crate::crypto::CryptoError),
+    #[error("ingest queue full")]
+    IngestQueueFull,
 }

@@ -27,4 +27,4 @@ pub(crate) mod yenc;
 
 pub use nntp::NntpConfig;
 pub use nzb::{NzbDocument, NzbFile, NzbSegment, parse_nzb, parse_nzb_document};
-pub use streamer::{NzbMeta, NzbMetaFile, NzbMetaSource, UsenetStreamer, active_streams};
+pub use streamer::{NzbMeta, NzbMetaFile, NzbMetaSource, StreamerError, UsenetStreamer, active_streams};

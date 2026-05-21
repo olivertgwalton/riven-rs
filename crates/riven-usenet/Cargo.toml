@@ -6,7 +6,7 @@ edition.workspace = true
 [dependencies]
 tokio = { workspace = true, features = ["io-util", "net", "sync", "time", "rt", "macros"] }
 tokio-rustls = "0.26"
-rustls = { version = "0.23", default-features = false, features = ["ring"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 webpki-roots = "1"
 quick-xml = "0.39"
 async-trait = { workspace = true }

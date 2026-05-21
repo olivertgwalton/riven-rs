@@ -4,8 +4,7 @@ use riven_core::types::*;
 use riven_db::repo;
 use riven_rank::rank::RankError;
 use riven_rank::{QualityProfile, RankSettings};
-
-use crate::flows::merge_builtin_profile_settings;
+use serde_json::Value;
 
 #[derive(Clone)]
 pub struct ParseContext {
@@ -331,5 +330,59 @@ pub async fn load_dubbed_anime_only(db_pool: &sqlx::PgPool) -> bool {
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(false),
         _ => false,
+    }
+}
+
+pub fn merge_builtin_profile_settings(
+    profile: QualityProfile,
+    override_settings: &Value,
+) -> serde_json::Result<RankSettings> {
+    let mut merged = serde_json::to_value(profile.base_settings())?;
+    merge_json_value(&mut merged, override_settings);
+    serde_json::from_value::<RankSettings>(merged).map(RankSettings::prepare)
+}
+
+fn merge_json_value(base: &mut Value, override_value: &Value) {
+    match (base, override_value) {
+        (Value::Object(base_obj), Value::Object(override_obj)) => {
+            for (key, value) in override_obj {
+                match base_obj.get_mut(key) {
+                    Some(existing) => merge_json_value(existing, value),
+                    None => {
+                        base_obj.insert(key.clone(), value.clone());
+                    }
+                }
+            }
+        }
+        (base_slot, replacement) => {
+            *base_slot = replacement.clone();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::merge_builtin_profile_settings;
+    use riven_rank::QualityProfile;
+    use serde_json::json;
+
+    #[test]
+    fn built_in_profile_overrides_are_merged_on_top_of_preset() {
+        let settings = merge_builtin_profile_settings(
+            QualityProfile::UltraHd,
+            &json!({
+                "resolutions": {
+                    "r1080p": true
+                }
+            }),
+        )
+        .expect("settings should parse");
+
+        assert!(settings.resolutions.high_definition.r2160p);
+        assert!(settings.resolutions.high_definition.r1080p);
+        assert!(!settings.resolutions.high_definition.r720p);
+        assert!(!settings.custom_ranks.quality.hdtv.fetch);
+        assert!(!settings.custom_ranks.rips.webrip.fetch);
+        assert!(!settings.custom_ranks.audio.mono.fetch);
     }
 }

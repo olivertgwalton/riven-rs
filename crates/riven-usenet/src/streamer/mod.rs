@@ -34,16 +34,17 @@ pub use meta::{NzbMeta, NzbMetaFile, NzbMetaSource, NzbRarPart, NzbRarSlice};
 
 pub(crate) use meta::segments_overlapping;
 
-/// Floor on the prefetch fan-out. Most playback paths derive their
-/// concurrency from `NntpPool::total_capacity()` so the user's
-/// `max_connections` setting is the real ceiling; this floor protects the
-/// degenerate case of a single-connection misconfiguration.
+/// Floor on the prefetch fan-out during ingest (background work).
 pub(crate) const PREFETCH_FLOOR: usize = 4;
 
 #[derive(Clone)]
 pub struct UsenetStreamer {
     pub(crate) pool: Arc<NntpPool>,
     pub(crate) state: Arc<StreamerState>,
+    /// Bounds concurrent NZB ingests. Sized from the NNTP connection budget
+    /// (`pool.total_capacity()`) so large accounts drain a scrape backlog fast
+    /// while small ones stay conservative — see `ingest_concurrency_for`.
+    pub(crate) ingest_sem: Arc<tokio::sync::Semaphore>,
     pub(crate) db: PgPool,
 }
 
@@ -51,6 +52,9 @@ impl UsenetStreamer {
     pub fn new(cfg: NntpConfig, db: PgPool) -> Self {
         crate::nntp::init_crypto();
         let pool = NntpPool::new_multi(cfg.providers);
+        let ingest_sem = Arc::new(tokio::sync::Semaphore::new(
+            crate::state::ingest_concurrency_for(pool.total_capacity()),
+        ));
         // Fire-and-forget: open a handful of authenticated NNTP sockets per
         // provider so the first stream request finds hot connections in the
         // pool instead of paying TCP + TLS + AUTHINFO latency.
@@ -63,6 +67,7 @@ impl UsenetStreamer {
         Self {
             pool,
             state: StreamerState::global(),
+            ingest_sem,
             db,
         }
     }

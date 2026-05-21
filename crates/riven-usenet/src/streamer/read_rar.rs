@@ -1,6 +1,7 @@
 use futures::StreamExt;
 use futures::stream;
 
+use crate::nntp::Priority;
 use crate::rar;
 
 use super::{NzbRarPart, NzbRarSlice, PREFETCH_FLOOR, StreamerError, UsenetStreamer};
@@ -20,6 +21,7 @@ impl UsenetStreamer {
         password: Option<&str>,
         start: u64,
         end_inclusive: u64,
+        priority: Priority,
     ) -> Result<Vec<u8>, StreamerError> {
         let mut out = Vec::with_capacity((end_inclusive - start + 1) as usize);
 
@@ -53,12 +55,12 @@ impl UsenetStreamer {
                 None => {
                     let part_byte_lo = slice.start_in_part + slice_plain_lo;
                     let part_byte_hi = slice.start_in_part + slice_plain_hi;
-                    self.read_decoded_range_within_part(part, part_byte_lo, part_byte_hi)
+                    self.read_decoded_range_within_part(part, part_byte_lo, part_byte_hi, priority)
                         .await?
                 }
                 Some(enc) => {
                     let pw = password.ok_or(StreamerError::MissingPassword)?;
-                    self.read_encrypted_slice(part, slice, enc, pw, slice_plain_lo, slice_plain_hi)
+                    self.read_encrypted_slice(part, slice, enc, pw, slice_plain_lo, slice_plain_hi, priority)
                         .await?
                 }
             };
@@ -69,13 +71,6 @@ impl UsenetStreamer {
     }
 
     /// Fetch + decrypt a plaintext range from one slice's CBC ciphertext.
-    ///
-    /// `slice_plain_lo..=slice_plain_hi` are byte offsets in this slice's
-    /// plaintext (which the contained file sees). The slice's ciphertext
-    /// is a single CBC stream beginning at `slice.start_in_part` of length
-    /// `slice.ciphertext_length`. The slice's IV is the chaining IV for
-    /// block 0; for any later block we use the preceding ciphertext block
-    /// as the chaining IV (standard CBC random-access pattern).
     async fn read_encrypted_slice(
         &self,
         part: &NzbRarPart,
@@ -84,6 +79,7 @@ impl UsenetStreamer {
         password: &str,
         slice_plain_lo: u64,
         slice_plain_hi: u64,
+        priority: Priority,
     ) -> Result<Vec<u8>, StreamerError> {
         use crate::crypto::{AES_BLOCK, decrypt_blocks_in_place, derive_key};
 
@@ -91,20 +87,16 @@ impl UsenetStreamer {
         let block_lo = slice_plain_lo / block;
         let block_hi = slice_plain_hi / block;
 
-        // Ciphertext byte range within the part (inclusive).
-        // Block K of the CBC stream lives at start_in_part + K*block.
         let mut cipher_lo_in_part = slice.start_in_part + block_lo * block;
         let cipher_hi_in_part = slice.start_in_part + (block_hi + 1) * block - 1;
 
-        // If we're not at block 0, fetch one extra preceding block to use
-        // as the CBC chaining IV.
         let need_predecessor = block_lo > 0;
         if need_predecessor {
             cipher_lo_in_part -= block;
         }
 
         let mut fetched = self
-            .read_decoded_range_within_part(part, cipher_lo_in_part, cipher_hi_in_part)
+            .read_decoded_range_within_part(part, cipher_lo_in_part, cipher_hi_in_part, priority)
             .await?;
         if fetched.len() < AES_BLOCK {
             return Err(StreamerError::BadRange);
@@ -122,7 +114,6 @@ impl UsenetStreamer {
         let ct_offset = if need_predecessor { AES_BLOCK } else { 0 };
         decrypt_blocks_in_place(&key, &iv, &mut fetched[ct_offset..])?;
 
-        // Slice out the requested plaintext window.
         let plain_offset_in_fetched = ct_offset + (slice_plain_lo - block_lo * block) as usize;
         let plain_len = (slice_plain_hi - slice_plain_lo + 1) as usize;
         let end = plain_offset_in_fetched + plain_len;
@@ -134,26 +125,20 @@ impl UsenetStreamer {
 
     /// Read decoded bytes `[dec_start, dec_end_inclusive]` from a single
     /// part's segment stream with exact decoded-byte addressing.
-    ///
-    /// When `part.decoded_seg_size` is known (populated at ingest from the
-    /// first segment's yEnc part size), we map decoded positions to
-    /// segments in O(1) and fetch only the segments that overlap the
-    /// request. Otherwise we walk from the first segment with an unknown
-    /// decoded size, which is slow on cold seeks but self-corrects via
-    /// `DecodedSizes` memoization.
     pub(super) async fn read_decoded_range_within_part(
         &self,
         part: &NzbRarPart,
         dec_start: u64,
         dec_end_inclusive: u64,
+        priority: Priority,
     ) -> Result<Vec<u8>, StreamerError> {
         match part.decoded_seg_size {
             Some(seg_size) if seg_size > 0 => {
-                self.read_decoded_range_uniform(part, seg_size, dec_start, dec_end_inclusive)
+                self.read_decoded_range_uniform(part, seg_size, dec_start, dec_end_inclusive, priority)
                     .await
             }
             _ => {
-                self.read_decoded_range_walk(part, dec_start, dec_end_inclusive)
+                self.read_decoded_range_walk(part, dec_start, dec_end_inclusive, priority)
                     .await
             }
         }
@@ -167,6 +152,7 @@ impl UsenetStreamer {
         seg_size: u64,
         dec_start: u64,
         dec_end_inclusive: u64,
+        priority: Priority,
     ) -> Result<Vec<u8>, StreamerError> {
         let want_len = (dec_end_inclusive - dec_start + 1) as usize;
         let mut out = Vec::with_capacity(want_len);
@@ -178,7 +164,7 @@ impl UsenetStreamer {
             return Ok(out);
         }
 
-        let read_concurrency = self.pool.total_capacity().max(PREFETCH_FLOOR);
+        let read_concurrency = self.pool.download_concurrency().max(PREFETCH_FLOOR);
         let streamer = self.clone();
         let mids: Vec<(usize, String)> = (first_seg..=last_seg)
             .map(|i| (i, part.segments[i].message_id.clone()))
@@ -186,7 +172,7 @@ impl UsenetStreamer {
         let mut stream = stream::iter(mids)
             .map(move |(i, mid)| {
                 let s = streamer.clone();
-                async move { (i, s.fetch_decoded_cached(&mid).await) }
+                async move { (i, s.fetch_decoded_cached(&mid, priority).await) }
             })
             .buffered(read_concurrency);
 
@@ -194,8 +180,6 @@ impl UsenetStreamer {
             let decoded = result?;
             let seg_lo = (idx as u64) * seg_size;
             let dec_len_usize = decoded.len();
-            // Last segment may be shorter than seg_size; otherwise the
-            // fetched length confirms our uniform assumption.
             let take_lo_u64 = dec_start.saturating_sub(seg_lo);
             let take_lo = (take_lo_u64 as usize).min(dec_len_usize);
             let take_hi_inclusive_u64 = dec_end_inclusive.saturating_sub(seg_lo);
@@ -220,6 +204,7 @@ impl UsenetStreamer {
         part: &NzbRarPart,
         dec_start: u64,
         dec_end_inclusive: u64,
+        priority: Priority,
     ) -> Result<Vec<u8>, StreamerError> {
         let want_len = (dec_end_inclusive - dec_start + 1) as usize;
         let mut out = Vec::with_capacity(want_len);
@@ -241,7 +226,7 @@ impl UsenetStreamer {
             }
         }
 
-        let read_concurrency = self.pool.total_capacity().max(PREFETCH_FLOOR);
+        let read_concurrency = self.pool.download_concurrency().max(PREFETCH_FLOOR);
         let streamer = self.clone();
         let mids: Vec<String> = (next_to_launch..total_segs)
             .map(|i| part.segments[i].message_id.clone())
@@ -249,7 +234,7 @@ impl UsenetStreamer {
         let mut stream = stream::iter(mids)
             .map(move |mid| {
                 let s = streamer.clone();
-                async move { s.fetch_decoded_cached(&mid).await }
+                async move { s.fetch_decoded_cached(&mid, priority).await }
             })
             .buffered(read_concurrency);
 

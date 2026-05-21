@@ -1,11 +1,11 @@
 use std::collections::VecDeque;
-use std::sync::{Arc, Weak};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
-use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
+use super::priority_semaphore::{OwnedPermit, PrioritizedSemaphore, Priority};
 use super::{NntpConnection, NntpError, NntpProvider};
 
 /// Drop an idle connection that has been sitting in the pool longer than
@@ -26,6 +26,7 @@ const REAPER_INTERVAL: Duration = Duration::from_secs(5);
 /// streamer doesn't consume the entire provider connection allowance
 /// before other consumers (ingest, scrape) can dial.
 const PREWARM_CAP: usize = 8;
+const MAX_DOWNLOAD_CONNECTIONS: usize = 15;
 /// Consecutive transient/connection failures before a provider is muted by
 /// its circuit breaker.
 const BREAKER_FAILURE_THRESHOLD: u32 = 3;
@@ -81,8 +82,10 @@ impl CircuitBreaker {
     fn record_success(&self) {
         self.consecutive_failures.store(0, Ordering::Relaxed);
         self.tripped_until_ms.store(0, Ordering::Relaxed);
-        self.current_cooldown_ms
-            .store(BREAKER_INITIAL_COOLDOWN.as_millis() as u64, Ordering::Relaxed);
+        self.current_cooldown_ms.store(
+            BREAKER_INITIAL_COOLDOWN.as_millis() as u64,
+            Ordering::Relaxed,
+        );
     }
 
     fn record_failure(&self, host: &str) {
@@ -95,7 +98,10 @@ impl CircuitBreaker {
             .saturating_add(1) as u32;
         if was_tripped || count >= BREAKER_FAILURE_THRESHOLD {
             let cooldown = if was_tripped {
-                let doubled = self.current_cooldown_ms.load(Ordering::Relaxed).saturating_mul(2);
+                let doubled = self
+                    .current_cooldown_ms
+                    .load(Ordering::Relaxed)
+                    .saturating_mul(2);
                 doubled.min(BREAKER_MAX_COOLDOWN.as_millis() as u64)
             } else {
                 self.current_cooldown_ms.load(Ordering::Relaxed)
@@ -118,13 +124,13 @@ struct Idle {
     /// Held while the conn sits idle so the semaphore reflects total
     /// open sockets, not in-flight ones. Dropping the permit (expiry,
     /// ping failure, op error) frees the slot for a new dial.
-    permit: OwnedSemaphorePermit,
+    permit: OwnedPermit,
     last_used: Instant,
 }
 
 struct ProviderSlot {
     provider: NntpProvider,
-    permits: Arc<Semaphore>,
+    permits: Arc<PrioritizedSemaphore>,
     /// LIFO: hottest conn at the back. Reaper sweeps the front (oldest)
     /// and can short-circuit at the first non-expired entry.
     idle: Arc<Mutex<VecDeque<Idle>>>,
@@ -133,16 +139,10 @@ struct ProviderSlot {
 
 struct Checkout {
     conn: NntpConnection,
-    permit: OwnedSemaphorePermit,
+    permit: OwnedPermit,
     slot_idx: usize,
 }
 
-/// Connection pool spanning one or more NNTP providers with failover.
-///
-/// Each provider has its own semaphore bound to `max_connections` and a
-/// LIFO stack of idle authenticated connections. Operations try providers
-/// in priority order; on `ArticleNotFound` from every primary, backups
-/// are consulted. Transient errors fall through to the next provider.
 pub struct NntpPool {
     /// Primaries (by priority asc), then backups (by priority asc).
     slots: Vec<ProviderSlot>,
@@ -158,7 +158,7 @@ impl NntpPool {
         let slots = providers
             .into_iter()
             .map(|p| {
-                let permits = Arc::new(Semaphore::new(p.config.max_connections.max(1) as usize));
+                let permits = PrioritizedSemaphore::new(p.config.max_connections.max(1) as usize);
                 ProviderSlot {
                     provider: p,
                     permits,
@@ -211,9 +211,7 @@ impl NntpPool {
                 let idle = slot.idle.clone();
                 let host = cfg.host.clone();
                 handles.push(tokio::spawn(async move {
-                    let Ok(permit) = permits.acquire_owned().await else {
-                        return;
-                    };
+                    let permit = permits.acquire_owned(Priority::Low).await;
                     match NntpConnection::connect(&cfg).await {
                         Ok(conn) => {
                             idle.lock().push_back(Idle {
@@ -242,14 +240,9 @@ impl NntpPool {
         }
     }
 
-    async fn acquire(&self, slot_idx: usize) -> Result<Checkout, NntpError> {
+    async fn acquire(&self, slot_idx: usize, priority: Priority) -> Result<Checkout, NntpError> {
         let slot = &self.slots[slot_idx];
-        let permit = slot
-            .permits
-            .clone()
-            .acquire_owned()
-            .await
-            .map_err(|_closed| NntpError::Protocol("pool closed"))?;
+        let permit = slot.permits.acquire_owned(priority).await;
 
         loop {
             let candidate = slot.idle.lock().pop_back();
@@ -318,7 +311,7 @@ impl NntpPool {
         });
     }
 
-    async fn try_each<F, Fut, T>(&self, op: F) -> Result<T, NntpError>
+    async fn try_each<F, Fut, T>(&self, priority: Priority, op: F) -> Result<T, NntpError>
     where
         F: Fn(NntpConnection) -> Fut,
         Fut: std::future::Future<Output = (NntpConnection, Result<T, NntpError>)>,
@@ -345,7 +338,7 @@ impl NntpPool {
             let host = self.slots[slot_idx].provider.config.host.clone();
             let is_backup = self.slots[slot_idx].provider.is_backup;
             let breaker = self.slots[slot_idx].breaker.clone();
-            let checkout = match self.acquire(slot_idx).await {
+            let checkout = match self.acquire(slot_idx, priority).await {
                 Ok(c) => c,
                 Err(e) => {
                     tracing::debug!(
@@ -412,9 +405,13 @@ impl NntpPool {
         Err(last_err.unwrap_or(NntpError::Protocol("no providers configured")))
     }
 
-    pub async fn fetch_body(&self, message_id: &str) -> Result<Vec<u8>, NntpError> {
+    pub async fn fetch_body(
+        &self,
+        message_id: &str,
+        priority: Priority,
+    ) -> Result<Vec<u8>, NntpError> {
         let mid = message_id.to_string();
-        self.try_each(|mut conn| {
+        self.try_each(priority, |mut conn| {
             let mid = mid.clone();
             async move {
                 let r = conn.fetch_body(&mid).await;
@@ -434,9 +431,27 @@ impl NntpPool {
         cap.max(1)
     }
 
-    pub async fn stat(&self, message_id: &str) -> Result<bool, NntpError> {
+    pub fn available_capacity(&self) -> usize {
+        let avail: usize = self
+            .slots
+            .iter()
+            .filter(|s| !s.provider.is_backup)
+            .map(|s| {
+                let idle = s.idle.lock().len();
+                let unallocated = s.permits.available_permits();
+                idle + unallocated
+            })
+            .sum();
+        avail.max(1)
+    }
+
+    pub fn download_concurrency(&self) -> usize {
+        self.total_capacity().min(MAX_DOWNLOAD_CONNECTIONS)
+    }
+
+    pub async fn stat(&self, message_id: &str, priority: Priority) -> Result<bool, NntpError> {
         let mid = message_id.to_string();
-        self.try_each(|mut conn| {
+        self.try_each(priority, |mut conn| {
             let mid = mid.clone();
             async move {
                 let r = conn.stat(&mid).await;

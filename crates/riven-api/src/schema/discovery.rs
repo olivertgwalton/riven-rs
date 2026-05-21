@@ -12,7 +12,7 @@ use riven_queue::discovery::{
     ParseContext, load_active_profiles, load_dubbed_anime_only, rank_streams,
 };
 use riven_queue::indexing::apply_indexed_media_item;
-use riven_queue::orchestrator::LibraryOrchestrator;
+use riven_queue::lifecycle::LibraryOrchestrator;
 
 use super::types::DiscoveredStream;
 

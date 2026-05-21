@@ -3,7 +3,7 @@ use std::sync::Arc;
 use futures::StreamExt;
 use futures::stream;
 
-use crate::nntp::NntpError;
+use crate::nntp::{NntpError, Priority};
 use crate::nzb::NzbSegment;
 use crate::state::{FetchEntry, PromiseSlot, StreamerState};
 use crate::yenc;
@@ -27,9 +27,13 @@ impl UsenetStreamer {
     /// body stream and an eager prefetch both want the same segment,
     /// only one NNTP `BODY` round-trip happens and both observers share
     /// the result via a `Notify` promise.
+    ///
+    /// `priority` is passed through to the NNTP pool: streaming reads
+    /// use `Priority::High`; background ingest uses `Priority::Low`.
     pub(crate) async fn fetch_decoded_cached(
         &self,
         message_id: &str,
+        priority: Priority,
     ) -> Result<Arc<Vec<u8>>, StreamerError> {
         loop {
             if let Some(hit) = self.state.cache.get(message_id) {
@@ -80,7 +84,7 @@ impl UsenetStreamer {
                         finished: false,
                     };
 
-                    let result = self.do_fetch_with_retry(message_id).await;
+                    let result = self.do_fetch_with_retry(message_id, priority).await;
                     // Cache must be populated BEFORE marking the slot done
                     // so waiters observe the hit on their next loop.
                     if let Ok(arc) = &result {
@@ -98,12 +102,16 @@ impl UsenetStreamer {
 
     /// Inner retry loop. Side effects (cache.put, fails.mark_dead) are
     /// the caller's responsibility — keeps this fn purely about fetching.
-    async fn do_fetch_with_retry(&self, message_id: &str) -> Result<Arc<Vec<u8>>, StreamerError> {
+    async fn do_fetch_with_retry(
+        &self,
+        message_id: &str,
+        priority: Priority,
+    ) -> Result<Arc<Vec<u8>>, StreamerError> {
         let mut last_err: Option<NntpError> = None;
         for attempt in 0..NNTP_FETCH_ATTEMPTS {
             tracing::debug!(attempt, message_id, "nntp fetch starting");
             let started = std::time::Instant::now();
-            match self.pool.fetch_body(message_id).await {
+            match self.pool.fetch_body(message_id, priority).await {
                 Ok(body) => {
                     let wire_ms = started.elapsed().as_millis();
                     let encoded_len = body.len();
@@ -161,11 +169,11 @@ impl UsenetStreamer {
     }
 
     /// Background-warm the segment cache for the segments that overlap
-    /// `[start, end_inclusive]` of `file_index`. Concurrency is sized to
-    /// the pool's configured `max_connections` so the prefetch saturates
-    /// the user's NNTP budget ahead of the body stream's own reads;
-    /// in-flight deduplication via `fetch_decoded_cached` makes this safe —
-    /// overlapping segments share a single fetch instead of doubling up.
+    /// `[start, end_inclusive]` of `file_index`. Concurrency is capped at
+    /// `pool.download_concurrency()` — `min(pool_size, 15)` matching nzbdav —
+    /// so a large pool (e.g. 100 connections) doesn't open 100 simultaneous
+    /// BODY downloads. Fetches use `Priority::High` — this runs on behalf of
+    /// a live stream.
     pub async fn prefetch_range(
         &self,
         info_hash: &str,
@@ -173,7 +181,7 @@ impl UsenetStreamer {
         start: u64,
         end_inclusive: u64,
     ) {
-        let prefetch_concurrency = self.pool.total_capacity().max(PREFETCH_FLOOR);
+        let prefetch_concurrency = self.pool.download_concurrency().max(PREFETCH_FLOOR);
 
         let Ok(meta) = self.load_meta(info_hash).await else {
             return;
@@ -229,7 +237,7 @@ impl UsenetStreamer {
         let mut stream = stream::iter(cold)
             .map(move |mid| {
                 let s = streamer.clone();
-                async move { s.fetch_decoded_cached(&mid).await }
+                async move { s.fetch_decoded_cached(&mid, Priority::High).await }
             })
             .buffer_unordered(prefetch_concurrency);
         while stream.next().await.is_some() {}
@@ -308,6 +316,7 @@ impl UsenetStreamer {
                     meta.password.as_deref(),
                     start,
                     end_inclusive,
+                    Priority::High,
                 )
                 .await
             }
@@ -316,9 +325,8 @@ impl UsenetStreamer {
 
     /// Read a byte range from a `Direct` source: a single contiguous file
     /// composed of yEnc-encoded NNTP segments. Segments are fetched in
-    /// parallel (up to the pool's configured `max_connections`) and
-    /// consumed in order — bounds NNTP round-trip latency for
-    /// multi-segment reads.
+    /// parallel (capped at `pool.download_concurrency()`) and consumed in
+    /// order — bounds NNTP round-trip latency for multi-segment reads.
     async fn read_direct(
         &self,
         offsets: &[u64],
@@ -344,7 +352,7 @@ impl UsenetStreamer {
 
         let mut decoded_concat = Vec::with_capacity((end_inclusive - start + 1) as usize);
 
-        let read_concurrency = self.pool.total_capacity().max(PREFETCH_FLOOR);
+        let read_concurrency = self.pool.download_concurrency().max(PREFETCH_FLOOR);
         let streamer = self.clone();
         let mids: Vec<(usize, String)> = (first..=last)
             .map(|i| (i, segments[i].message_id.clone()))
@@ -352,7 +360,7 @@ impl UsenetStreamer {
         let mut stream = stream::iter(mids)
             .map(move |(i, mid)| {
                 let s = streamer.clone();
-                async move { (i, s.fetch_decoded_cached(&mid).await) }
+                async move { (i, s.fetch_decoded_cached(&mid, Priority::High).await) }
             })
             .buffered(read_concurrency);
 

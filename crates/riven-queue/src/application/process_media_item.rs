@@ -41,10 +41,7 @@ pub async fn run(job: &ProcessMediaItemJob, queue: &JobQueue) {
     };
 
     // Hard-stop on terminal/sticky states.
-    if matches!(
-        item.state,
-        MediaItemState::Failed | MediaItemState::Paused
-    ) {
+    if matches!(item.state, MediaItemState::Failed | MediaItemState::Paused) {
         tracing::debug!(id, state = ?item.state, "process-media-item: terminal state, stopping");
         return;
     }
@@ -75,6 +72,15 @@ async fn handle_scrape(job: &ProcessMediaItemJob, item: &MediaItem, queue: &JobQ
     {
         tracing::debug!(id = item.id, run_at = %at, "deferring scrape until backoff expires");
         queue.push_process_media_item_at(job.clone(), at).await;
+        return;
+    }
+
+    if item.state == MediaItemState::Scraped && queue.push_download_from_best_stream(item.id).await
+    {
+        tracing::debug!(
+            id = item.id,
+            "already scraped with an available stream; downloading instead of re-scraping"
+        );
         return;
     }
 
@@ -146,9 +152,7 @@ async fn handle_validate(job: &ProcessMediaItemJob, item: &MediaItem, queue: &Jo
         MediaItemState::Failed | MediaItemState::Paused => {
             // Sticky state — no further action.
         }
-        MediaItemState::Scraped
-        | MediaItemState::Indexed
-        | MediaItemState::Unreleased => {
+        MediaItemState::Scraped | MediaItemState::Indexed | MediaItemState::Unreleased => {
             // Download didn't make this item Completed — schedule a re-scrape
             // 30 minutes from now.
             let at = Utc::now() + Duration::minutes(30);
@@ -182,9 +186,7 @@ pub(crate) async fn fan_out_to_children(parent: &MediaItem, queue: &JobQueue) {
             for season in seasons {
                 if matches!(
                     season.state,
-                    MediaItemState::Completed
-                        | MediaItemState::Failed
-                        | MediaItemState::Paused
+                    MediaItemState::Completed | MediaItemState::Failed | MediaItemState::Paused
                 ) {
                     continue;
                 }

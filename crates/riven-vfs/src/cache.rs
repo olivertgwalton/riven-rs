@@ -45,6 +45,16 @@ impl RangeCache {
         Some(hit)
     }
 
+    pub fn evict(&self, key: CacheKey) {
+        let mut inner = self.inner.lock().expect("range cache poisoned");
+        if let Some(existing) = inner.map.remove(&key) {
+            inner.bytes_used = inner.bytes_used.saturating_sub(existing.len());
+            if let Some(pos) = inner.order.iter().position(|k| k == &key) {
+                inner.order.remove(pos);
+            }
+        }
+    }
+
     pub fn put(&self, key: CacheKey, data: Bytes) {
         let mut inner = self.inner.lock().expect("range cache poisoned");
         if inner.bytes_capacity == 0 {
@@ -82,6 +92,10 @@ pub fn cache_get(cache: &RangeCache, key: CacheKey) -> Option<Bytes> {
 
 pub fn cache_put(cache: &RangeCache, key: CacheKey, data: Bytes) {
     cache.put(key, data);
+}
+
+pub fn cache_evict(cache: &RangeCache, key: CacheKey) {
+    cache.evict(key);
 }
 
 #[cfg(test)]

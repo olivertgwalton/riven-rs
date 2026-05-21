@@ -418,16 +418,17 @@ pub async fn update_scraped(pool: &PgPool, id: i64) -> Result<()> {
     Ok(())
 }
 
-/// Transition unreleased items whose air date has passed back into the
-/// derivation pipeline. Captures affected ids and runs a recompute so the
-/// state column lands on the truly-derived value (a just-aired episode with
-/// existing media entries should resolve to `Completed`, not `Indexed`).
+/// Feed unreleased items whose air date has passed through the state
+/// derivation pipeline. Like the TS MediaItemStateSubscriber, this does NOT
+/// manually set the state — it just identifies the candidates and lets
+/// `recompute` derive the correct state from first principles (so an episode
+/// with existing streams lands on `Scraped`, not just `Indexed`). The cascade
+/// inside `recompute` then propagates the change up to the season and show.
 pub async fn transition_unreleased_aired(pool: &PgPool) -> Result<u64> {
     let ids: Vec<i64> = sqlx::query_scalar!(
-        r#"UPDATE media_items SET state = 'indexed', updated_at = NOW()
+        r#"SELECT id FROM media_items
             WHERE state = 'unreleased' AND aired_at IS NOT NULL
-              AND aired_at <= CURRENT_DATE AND is_requested = true
-            RETURNING id"#,
+              AND aired_at <= CURRENT_DATE AND is_requested = true"#,
     )
     .fetch_all(pool)
     .await?;

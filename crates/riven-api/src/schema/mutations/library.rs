@@ -3,7 +3,7 @@ use riven_core::events::RivenEvent;
 use riven_core::types::MediaItemType;
 use riven_db::entities::MediaItem;
 use riven_db::repo;
-use riven_queue::orchestrator::LibraryOrchestrator;
+use riven_queue::lifecycle::LibraryOrchestrator;
 use riven_queue::{IndexJob, JobQueue};
 use sqlx::PgPool;
 use std::sync::Arc;

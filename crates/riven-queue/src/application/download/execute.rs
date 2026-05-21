@@ -8,9 +8,7 @@ use riven_db::repo;
 
 use crate::JobQueue;
 use crate::context::DownloadHierarchyContext;
-use crate::flows::download_item::persist::{
-    SeasonPersistOutcome, persist_episode, persist_movie, persist_season,
-};
+use super::persist::{SeasonPersistOutcome, persist_episode, persist_movie, persist_season};
 
 pub enum DownloadAttemptOutcome {
     Failed,

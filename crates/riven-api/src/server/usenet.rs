@@ -130,22 +130,9 @@ pub async fn usenet_stream_handler(
         });
     }
 
-    // Cap any single response at the same lookahead window the VFS uses
-    // for its sequential reader (32 MB). Mirrors debrid CDN behaviour:
-    // an open-ended Range request gets a bounded 206 Partial Content,
-    // and the client re-requests for the next window when needed. If we
-    // honoured `bytes=0-` literally for a 30 GB MKV the body stream
-    // would try to deliver the entire file in one HTTP response, which:
-    //   1. saturates the segment cache eagerly (LRU thrash),
-    //   2. queues tens of thousands of NNTP fetches up front,
-    //   3. trips reqwest's total-request timeout long before bytes flow.
-    const MAX_RESPONSE_WINDOW: u64 = 32 * 1024 * 1024;
     let range = parse_range(headers.get(RANGE), total);
     let (start, end, partial) = match range {
-        Some(Ok((s, e))) => {
-            let capped_end = e.min(s.saturating_add(MAX_RESPONSE_WINDOW - 1));
-            (s, capped_end, true)
-        }
+        Some(Ok((s, e))) => (s, e, true),
         Some(Err(())) => {
             let mut resp = (StatusCode::RANGE_NOT_SATISFIABLE, "").into_response();
             if let Ok(v) = HeaderValue::from_str(&format!("bytes */{}", total)) {
@@ -153,10 +140,7 @@ pub async fn usenet_stream_handler(
             }
             return resp;
         }
-        None => {
-            let end = MAX_RESPONSE_WINDOW.saturating_sub(1).min(total - 1);
-            (0, end, end + 1 < total)
-        }
+        None => (0, total - 1, false),
     };
 
     // Headers shared by HEAD, buffered, and streamed responses.
@@ -347,8 +331,7 @@ pub async fn usenet_stream_handler(
                     // rescale). Only warn when the gap is large enough to
                     // suggest a real problem rather than addressing slop.
                     let drift = requested.saturating_sub(returned);
-                    let drift_is_significant =
-                        drift * 20 > requested && drift > 4096;
+                    let drift_is_significant = drift * 20 > requested && drift > 4096;
                     if drift_is_significant {
                         tracing::warn!(
                             pos = state.pos,

@@ -15,11 +15,12 @@ use crate::context::{
 use crate::discovery::rank_streams;
 use crate::{JobQueue, ParseScrapeResultsJob, ScrapeJob};
 
-/// Backoff before the next attempt when every scraper deferred.
 fn rate_limit_backoff(prior_retries: u32) -> Duration {
     let secs = match prior_retries {
-        0 | 1 => 30 * 60,
-        2..=4 => 2 * 60 * 60,
+        0 => 2 * 60,
+        1 => 5 * 60,
+        2 => 15 * 60,
+        3 | 4 => 60 * 60,
         5..=9 => 6 * 60 * 60,
         _ => 24 * 60 * 60,
     };

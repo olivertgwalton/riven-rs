@@ -4,7 +4,7 @@ use riven_core::types::ContentServiceResponse;
 use riven_db::repo;
 
 use crate::JobQueue;
-use crate::orchestrator::LibraryOrchestrator;
+use crate::lifecycle::LibraryOrchestrator;
 
 /// Singleton flow scope for content-service polling. Only one content-service
 /// fan-in runs at a time (the scheduler's 120s tick is the sole producer plus

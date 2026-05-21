@@ -20,7 +20,7 @@ use riven_db::repo;
 
 use crate::application::process_media_item::fan_out_to_children;
 use crate::context;
-use crate::orchestrator::LibraryOrchestrator;
+use crate::lifecycle::LibraryOrchestrator;
 use crate::{IndexJob, JobQueue, ProcessMediaItemJob, ProcessStep};
 
 /// Owns the queue and dispatches events to typed actor calls.

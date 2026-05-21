@@ -11,8 +11,16 @@ use riven_core::settings::PluginSettings;
 use riven_core::types::{MediaItemType, ScrapeEntry, ScrapeResponse};
 use sha1::{Digest, Sha1};
 
-pub(crate) const PROFILE: HttpServiceProfile =
-    HttpServiceProfile::new("newznab").with_rate_limit(60, Duration::from_secs(60));
+/// Per-indexer rate-limit profile. Each configured indexer gets its own token
+/// bucket keyed by name, so N indexers provide N× the budget instead of all
+/// sharing one global "newznab" bucket (which funnelled the entire library
+/// through a single 60/min limiter and was the dominant scrape-throughput cap).
+/// Newznab indexers enforce limits per API key, so isolating them per indexer
+/// matches reality and lets throughput scale with indexer count.
+fn indexer_profile(indexer: &Indexer) -> HttpServiceProfile {
+    HttpServiceProfile::new_owned(format!("newznab:{}", indexer.name))
+        .with_rate_limit(60, Duration::from_secs(60))
+}
 
 const NZB_URL_TTL_SECS: u64 = 60 * 60 * 24 * 7;
 const NZB_INFO_HASH_PREFIX: &str = "nzb-";
@@ -211,7 +219,7 @@ async fn scrape_one(
     };
 
     let resp = match http
-        .send_data(PROFILE, Some(dedupe_key), |client| {
+        .send_data(indexer_profile(indexer), Some(dedupe_key), |client| {
             client.get(&url).query(&params)
         })
         .await

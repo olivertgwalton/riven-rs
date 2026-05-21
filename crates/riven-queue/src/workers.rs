@@ -224,7 +224,7 @@ async fn finalize_event(queue: &JobQueue, event: &RivenEvent, scope: i64) {
             crate::application::index::finalize(scope, queue).await;
         }
         RivenEvent::ContentServiceRequested => {
-            crate::flows::request_content::finalize(scope, queue).await;
+            crate::application::request_content::finalize(scope, queue).await;
         }
         _ => {
             tracing::error!(?event, "finalize_event called for non-fan-in event");

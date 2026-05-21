@@ -2,7 +2,7 @@ use async_graphql::*;
 use riven_db::entities::ItemRequest;
 use riven_db::repo::ItemRequestUpsertAction;
 use riven_queue::JobQueue;
-use riven_queue::orchestrator::LibraryOrchestrator;
+use riven_queue::lifecycle::LibraryOrchestrator;
 use std::collections::HashSet;
 use std::sync::Arc;
 

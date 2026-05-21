@@ -2,12 +2,11 @@ pub mod application;
 pub mod context;
 pub mod dedup;
 pub mod discovery;
-pub mod flows;
 pub mod indexing;
 pub mod jobs;
+pub mod lifecycle;
 pub mod main_orchestrator;
 pub mod maintenance;
-pub mod orchestrator;
 pub mod worker;
 pub mod workers;
 

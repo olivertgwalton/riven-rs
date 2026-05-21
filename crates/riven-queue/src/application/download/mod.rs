@@ -1,5 +1,7 @@
 mod candidates;
 mod execute;
+pub(crate) mod helpers;
+pub(crate) mod persist;
 
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
@@ -8,14 +10,15 @@ use riven_core::events::{EventType, HookResponse, RivenEvent};
 use riven_core::types::*;
 use riven_db::entities::{MediaItem, Stream};
 use riven_db::repo;
-use riven_rank::{QualityProfile, RankSettings};
+use riven_rank::RankSettings;
 use serde::Deserialize;
 
 use crate::context::{DownloadHierarchyContext, load_download_hierarchy_context};
-use crate::flows::download_item::helpers::load_item_or_err;
-use crate::flows::download_item::persist::{finalize_download_success, persist_supplied_download};
-use crate::flows::load_active_profiles;
+use crate::discovery::load_active_profiles;
 use crate::{DownloadJob, JobQueue, RankStreamsJob};
+
+use self::helpers::load_item_or_err;
+use self::persist::{finalize_download_success, persist_supplied_download};
 
 use self::candidates::rank_streams_for_profile;
 use self::execute::{DownloadAttemptOutcome, attempt_download};
@@ -243,14 +246,8 @@ pub async fn run(id: i64, job: &DownloadJob, queue: &JobQueue) {
         _ => None,
     };
 
-    let mut active_profiles: Vec<(String, RankSettings)> =
+    let active_profiles: Vec<(String, RankSettings)> =
         load_active_profiles(&queue.db_pool).await;
-    if active_profiles.is_empty() {
-        active_profiles.push((
-            "ultra_hd".to_string(),
-            QualityProfile::UltraHd.base_settings().prepare(),
-        ));
-    }
 
     let ranks = queue.resolution_ranks.read().await.clone();
     let all_streams = match repo::get_non_blacklisted_streams(&queue.db_pool, id, &ranks).await {

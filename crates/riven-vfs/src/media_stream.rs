@@ -5,7 +5,7 @@ use futures::{StreamExt, TryStreamExt, stream::BoxStream};
 use tokio::io::{AsyncReadExt, BufReader};
 use tokio_util::io::StreamReader;
 
-use crate::cache::{RangeCache, cache_get, cache_put};
+use crate::cache::{RangeCache, cache_evict, cache_get, cache_put};
 use crate::chunks::{ChunkRange, FileLayout};
 use crate::detect::{ReadType, detect_read_type};
 use crate::stream::{fetch_range, open_stream, response_body_end};
@@ -214,12 +214,19 @@ impl MediaStream {
             Ok(full) => match slice_request_bytes(&full, start, end, first.start) {
                 Some(slice) => ReadOutcome::Data(slice),
                 None => {
+                    // Poisoned cache entry: data is present but too short to
+                    // cover the requested range. Evict all chunks so the next
+                    // retry re-fetches from the origin instead of looping on
+                    // the same bad entry.
+                    for chunk in chunks {
+                        cache_evict(cache, (self.ino, chunk.start, chunk.end));
+                    }
                     tracing::error!(
                         ino = self.ino,
                         start,
                         end,
                         cached_len = full.len(),
-                        "cached chunk set shorter than requested range"
+                        "cached chunk set shorter than requested range; evicted"
                     );
                     ReadOutcome::Error(libc::EIO)
                 }
@@ -262,7 +269,10 @@ impl MediaStream {
                     chunk.end,
                 )) {
                     Ok(data) => {
-                        cache_put(ctx.cache, (self.ino, chunk.start, chunk.end), data.clone());
+                        let expected = (chunk.end - chunk.start + 1) as usize;
+                        if data.len() >= expected {
+                            cache_put(ctx.cache, (self.ino, chunk.start, chunk.end), data.clone());
+                        }
                         data
                     }
                     Err(error) => {

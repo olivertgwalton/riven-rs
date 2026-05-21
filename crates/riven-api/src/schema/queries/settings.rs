@@ -56,7 +56,7 @@ impl CoreSettingsQuery {
                         if is_empty {
                             return None;
                         }
-                        riven_queue::flows::merge_builtin_profile_settings(p, &row.settings)
+                        riven_queue::discovery::merge_builtin_profile_settings(p, &row.settings)
                             .ok()
                             .and_then(|s| serde_json::to_value(&s).ok())
                     })
