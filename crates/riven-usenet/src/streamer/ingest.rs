@@ -42,11 +42,12 @@ fn is_media_filename(name: &str) -> bool {
     )
 }
 
-/// Fraction of a candidate file's segments to STAT-probe at ingest, matching
-/// altmount's default `segment_sample_percentage` of 5%. A fixed tiny sample
-/// (the old 12 segments) is ~0.1% of a 10 GB REMUX, so sparsely-dead releases
-/// passed ingest and only failed mid-playback. 5% reliably surfaces gaps.
-const AVAILABILITY_SAMPLE_PERCENT: usize = 5;
+/// Default fraction of a candidate file's segments to STAT-probe at ingest,
+/// matching altmount's `segment_sample_percentage` default of 5%. A fixed tiny
+/// sample (the old 12 segments) is ~0.1% of a 10 GB REMUX, so sparsely-dead
+/// releases passed ingest and only failed mid-playback. 5% reliably surfaces
+/// gaps. Overridable per-install via the `availabilitysamplepercent` setting.
+pub const DEFAULT_AVAILABILITY_SAMPLE_PERCENT: usize = 5;
 /// Floor/ceiling on the probe sample. The probe runs inline per candidate
 /// during download (unlike altmount's out-of-band health check with its own
 /// connection budget), and a download walks many candidates, so the ceiling
@@ -73,11 +74,22 @@ impl UsenetStreamer {
     /// missing; the caller treats this as "release unusable, try the next
     /// ranked candidate." On a healthy release this is a few cheap STAT
     /// round-trips and a green light.
-    async fn probe_availability(&self, segments: &[NzbSegment]) -> Result<(), StreamerError> {
+    async fn probe_availability(
+        &self,
+        segments: &[NzbSegment],
+        sample_percent: usize,
+    ) -> Result<(), StreamerError> {
         if segments.is_empty() {
             return Ok(());
         }
-        let n = ((segments.len() * AVAILABILITY_SAMPLE_PERCENT) / 100)
+        // Invalid/zero values fall back to the default rather than disabling
+        // the probe (a 0% probe would let every dead release through).
+        let pct = if (1..=100).contains(&sample_percent) {
+            sample_percent
+        } else {
+            DEFAULT_AVAILABILITY_SAMPLE_PERCENT
+        };
+        let n = ((segments.len() * pct) / 100)
             .clamp(AVAILABILITY_SAMPLE_MIN, AVAILABILITY_SAMPLE_MAX)
             .min(segments.len());
         // Spread the sample across the file rather than concentrating at
@@ -141,6 +153,7 @@ impl UsenetStreamer {
         info_hash: &str,
         nzb_xml: &str,
         password: Option<&str>,
+        sample_percent: usize,
     ) -> Result<NzbMeta, StreamerError> {
         // Idempotency check: the same NZB is frequently re-submitted across
         // scrape cycles (e.g. a season-pack scrape and a per-episode scrape
@@ -205,7 +218,7 @@ impl UsenetStreamer {
                             .iter()
                             .flat_map(|p| p.segments.iter().cloned())
                             .collect();
-                        self.probe_availability(&probe_segments).await?;
+                        self.probe_availability(&probe_segments, sample_percent).await?;
                     }
                     let mut out = virtual_files;
                     // Keep the underlying RAR parts as additional entries so
@@ -230,7 +243,7 @@ impl UsenetStreamer {
                     if let Some(primary) = ordered.first()
                         && let NzbMetaSource::Direct { segments, .. } = &primary.source
                     {
-                        self.probe_availability(segments).await?;
+                        self.probe_availability(segments, sample_percent).await?;
                     }
                     (ordered, None)
                 }

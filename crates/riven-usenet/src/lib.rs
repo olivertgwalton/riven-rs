@@ -27,4 +27,7 @@ pub(crate) mod yenc;
 
 pub use nntp::{NntpConfig, recommended_download_workers};
 pub use nzb::{NzbDocument, NzbFile, NzbSegment, parse_nzb, parse_nzb_document};
-pub use streamer::{NzbMeta, NzbMetaFile, NzbMetaSource, StreamerError, UsenetStreamer, active_streams};
+pub use streamer::{
+    DEFAULT_AVAILABILITY_SAMPLE_PERCENT, NzbMeta, NzbMetaFile, NzbMetaSource, StreamerError,
+    UsenetStreamer, active_streams,
+};

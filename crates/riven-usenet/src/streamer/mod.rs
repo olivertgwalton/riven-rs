@@ -30,6 +30,7 @@ mod store;
 mod tests;
 
 pub use error::StreamerError;
+pub use ingest::DEFAULT_AVAILABILITY_SAMPLE_PERCENT;
 pub use meta::{NzbMeta, NzbMetaFile, NzbMetaSource, NzbRarPart, NzbRarSlice};
 
 pub(crate) use meta::segments_overlapping;

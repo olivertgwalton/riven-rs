@@ -242,6 +242,19 @@ impl Plugin for UsenetPlugin {
                 "Number of back-to-back failed STAT samples required before the \
                  library entry is deleted and re-scraped.",
             ),
+            SettingField::new(
+                "availabilitysamplepercent",
+                "Availability Sample %",
+                "number",
+            )
+            .with_default("5")
+            .with_description(
+                "Percentage of a release's segments to STAT-check at ingest before \
+                 accepting it (1-100, default 5, matching altmount). Higher = more \
+                 thorough dead-release detection but slower ingest; lower = faster \
+                 but more chance an incomplete release slips through and fails \
+                 mid-playback. Bounded to a sane absolute range internally.",
+            ),
         ]
     }
 
@@ -307,7 +320,14 @@ impl Plugin for UsenetPlugin {
 
         let streamer = UsenetStreamer::shared(nntp_cfg, ctx.db_pool.clone());
         let password = ctx.settings.get("archivepassword");
-        let meta = match streamer.ingest(info_hash, &xml_arc, password).await {
+        let sample_percent = ctx.settings.get_parsed_or::<usize>(
+            "availabilitysamplepercent",
+            riven_usenet::DEFAULT_AVAILABILITY_SAMPLE_PERCENT,
+        );
+        let meta = match streamer
+            .ingest(info_hash, &xml_arc, password, sample_percent)
+            .await
+        {
             Ok(m) => m,
             Err(riven_usenet::StreamerError::IngestQueueFull) => {
                 tracing::debug!(info_hash, "ingest queue full; will retry next cycle");
