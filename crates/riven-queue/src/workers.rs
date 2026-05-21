@@ -250,7 +250,11 @@ macro_rules! register_worker {
     }};
 }
 
-pub fn start_workers(queue: Arc<JobQueue>) -> Monitor {
+/// `usenet_connection_budget` is the sum of the configured NNTP providers'
+/// `max_connections` (the real ceiling enforced by the streamer's connection
+/// pool), or `None` when usenet isn't configured. It lets download-worker
+/// concurrency track the connection allowance instead of a fixed default.
+pub fn start_workers(queue: Arc<JobQueue>, usenet_connection_budget: Option<usize>) -> Monitor {
     let cpu_n = std::thread::available_parallelism().map_or(4, std::num::NonZeroUsize::get);
 
     // Orchestrators fan-out sub-jobs and return immediately — no IO, no blocking.
@@ -267,9 +271,19 @@ pub fn start_workers(queue: Arc<JobQueue>) -> Monitor {
     // Parse is CPU-bound (spawn_blocking stream ranking) then sequential DB writes.
     let parse_n = cpu_n.max(5);
 
-    // Download workers call the torrent-client API
-    // Higher values risk overwhelming the client with simultaneous requests.
-    let download_n = cpu_n.max(10);
+    // Download workers run usenet ingests or call the torrent-client API.
+    // For usenet, the binding resource is the NNTP connection budget: the
+    // streamer's pool semaphore is the true ceiling and the ingest semaphore is
+    // sized to half that budget, so we match it here (`budget / 2`) — otherwise
+    // a fixed worker count leaves most of a large connection allowance idle
+    // (the observed 100-connection account draining through ~10 downloads).
+    // When usenet isn't configured we keep the conservative torrent-client
+    // default so we don't overwhelm the debrid/torrent API with requests.
+    let cpu_default_n = cpu_n.max(10);
+    let download_n = match usenet_connection_budget {
+        Some(budget) if budget > 0 => (budget / 2).max(cpu_default_n),
+        _ => cpu_default_n,
+    };
 
     let m = Monitor::new();
     let m = register_worker!(

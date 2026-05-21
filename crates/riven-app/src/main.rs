@@ -97,6 +97,10 @@ async fn main() -> Result<()> {
     // If the `usenet` plugin is configured with NNTP credentials, build a
     // streamer that the /usenet/ route can serve from. Failure to build is
     // non-fatal — Usenet streaming is just disabled.
+    // NNTP connection budget (sum of primary providers' `max_connections`),
+    // used to size download-worker concurrency so it tracks the provider
+    // allowance instead of a fixed default. `None` when usenet isn't configured.
+    let mut usenet_connection_budget: Option<usize> = None;
     let usenet_streamer: Option<riven_usenet::UsenetStreamer> = match registry
         .get_plugin_settings_json("usenet")
         .await
@@ -112,6 +116,7 @@ async fn main() -> Result<()> {
                 tls = primary.map(|c| c.use_tls).unwrap_or(true),
                 "usenet streaming enabled"
             );
+            usenet_connection_budget = Some(cfg.total_max_connections());
             // `shared` (not `new`) so playback, ingest, and the health-check
             // task all use the same `NntpPool` — the user's configured
             // `max_connections` is then the true ceiling against the
@@ -284,7 +289,7 @@ async fn main() -> Result<()> {
                 // signal that only fires on shutdown.
                 let monitor_handle = tokio::spawn({
                     let jq = jq.clone();
-                    async move { riven_queue::start_workers(jq).run().await }
+                    async move { riven_queue::start_workers(jq, usenet_connection_budget).run().await }
                 });
                 tokio::pin!(monitor_handle);
                 let result = tokio::select! {
