@@ -207,12 +207,13 @@ pub async fn run_rank_streams(id: i64, job: &RankStreamsJob, queue: &JobQueue) {
         magnet: magnet_for_preferred.unwrap_or_default(),
         preferred_info_hash: preferred,
     };
-    // Clear any stale `download` dedup key before hand-off. The rank-streams
-    // dedup guard makes us the sole caller for this id, so a lingering key
-    // can only come from an earlier crash/restart (30-min safety TTL).
-    // Without this clear, `push_deduped` silently no-ops and the item stays
-    // at Scraped.
-    queue.release_dedup("download", id).await;
+    // Rely on `push_download`'s dedup (`set_nx`): if a download for this id is
+    // already queued or in flight its key is held, so the push no-ops and the
+    // per-cycle Scraped→Download redirect can't pile up duplicate download jobs
+    // for the same item (previously ~8 copies/item accumulated because we
+    // cleared the key here before every push). The worker's `DedupGuard`
+    // releases the key on completion — or the 30-min safety TTL clears it after
+    // a hard crash — at which point a genuine retry can re-queue.
     queue.push_download(download_job).await;
 }
 
