@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use tokio::io::BufReader;
 use tokio::net::TcpStream;
 use tokio_rustls::rustls::pki_types::ServerName;
@@ -7,6 +9,13 @@ use super::{NntpError, NntpServerConfig, NntpStream, build_tls_connector};
 /// One open + authenticated NNTP connection.
 pub struct NntpConnection {
     stream: NntpStream,
+    /// Per-read deadline. Without this a half-dead socket (provider idle-drop,
+    /// throttle, network blip) would block `read_status`/`read_until_dot`
+    /// forever — the connection stays checked out so the idle reaper never
+    /// touches it, wedging the worker permanently. On timeout we surface
+    /// `NntpError::Timeout`, which the pool treats as a transient failure:
+    /// the dead connection is dropped and the fetch retries on a fresh one.
+    read_timeout: Duration,
 }
 
 impl NntpConnection {
@@ -37,7 +46,10 @@ impl NntpConnection {
             .await
             .map_err(|_e| NntpError::Timeout)??;
 
-        let mut conn = NntpConnection { stream };
+        let mut conn = NntpConnection {
+            stream,
+            read_timeout: cfg.timeout,
+        };
         let greeting = conn.read_status().await?;
         if !(greeting.starts_with("200") || greeting.starts_with("201")) {
             return Err(NntpError::ServerError(greeting));
@@ -68,7 +80,9 @@ impl NntpConnection {
 
     async fn read_status(&mut self) -> Result<String, NntpError> {
         let mut s = String::new();
-        let n = self.stream.read_line(&mut s).await?;
+        let n = tokio::time::timeout(self.read_timeout, self.stream.read_line(&mut s))
+            .await
+            .map_err(|_| NntpError::Timeout)??;
         if n == 0 {
             return Err(NntpError::Protocol("EOF reading status"));
         }
@@ -92,7 +106,10 @@ impl NntpConnection {
         if !status.starts_with("222") {
             return Err(NntpError::ServerError(status));
         }
-        Ok(self.stream.read_until_dot().await?)
+        let body = tokio::time::timeout(self.read_timeout, self.stream.read_until_dot())
+            .await
+            .map_err(|_| NntpError::Timeout)??;
+        Ok(body)
     }
 
     /// RFC 3977 `DATE` — used as a cheap liveness ping before reusing
