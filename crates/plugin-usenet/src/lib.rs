@@ -242,6 +242,17 @@ impl Plugin for UsenetPlugin {
                 "Number of back-to-back failed STAT samples required before the \
                  library entry is deleted and re-scraped.",
             ),
+            SettingField::new("maxdownloadworkers", "Max Download Workers", "number")
+                .with_default("4")
+                .with_description(
+                    "How many NZBs ingest concurrently. Keep this low (default 4): on \
+                     usenet, total throughput is bounded by your connection, so more \
+                     concurrent downloads don't drain a backlog faster — they split \
+                     your bandwidth into slow trickles and starve playback/scanning \
+                     (segment fetches go from ~100ms to many seconds). Raise it only \
+                     if you have spare bandwidth and want faster backlog drain at the \
+                     cost of streaming responsiveness.",
+                ),
             SettingField::new(
                 "availabilitysamplepercent",
                 "Availability Sample %",

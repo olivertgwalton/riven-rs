@@ -207,14 +207,17 @@ impl NntpConfig {
     }
 }
 
-/// Recommended number of concurrent download/ingest workers for a given
-/// connection budget. Each ingest is capped to [`pool::INGEST_CONNECTIONS`], so
-/// `total ÷ INGEST_CONNECTIONS` workers can run without oversubscribing the
-/// provider — the altmount model (small fixed per-import budget, scale the
-/// worker pool). Floored at 2 so tiny accounts still make progress.
-pub fn recommended_download_workers(total_max_connections: usize) -> usize {
-    (total_max_connections / pool::INGEST_CONNECTIONS).max(2)
-}
+/// Default number of concurrent download/ingest workers. Deliberately small —
+/// not scaled to fill the connection pool. On usenet, total throughput is
+/// bounded by your line, so many concurrent ingests don't drain a backlog
+/// faster; they just split the pipe into slow trickles and starve
+/// playback/scanning of bandwidth (segment fetches collapsed from ~100 ms to
+/// ~23 s when ~16 ingests saturated the line). altmount keeps imports at ~2
+/// workers for exactly this reason and leaves the rest of the connections —
+/// and the bandwidth — for streaming. Overridable via the `maxdownloadworkers`
+/// setting for installs that want to trade streaming responsiveness for faster
+/// backlog drain.
+pub const DEFAULT_DOWNLOAD_WORKERS: usize = 4;
 
 /// Initialize rustls's default crypto provider exactly once. Safe to call
 /// multiple times. Idempotent. Must run before any TLS handshake.

@@ -97,14 +97,15 @@ async fn main() -> Result<()> {
     // If the `usenet` plugin is configured with NNTP credentials, build a
     // streamer that the /usenet/ route can serve from. Failure to build is
     // non-fatal — Usenet streaming is just disabled.
-    // Concurrent download workers to run when usenet is configured: derived
-    // from the NNTP connection budget so `workers × per-ingest-cap` fills the
-    // pool without oversubscribing it (altmount model). `None` => use the
-    // conservative torrent-client default.
+    // Concurrent usenet download workers. Kept small (default 4) rather than
+    // scaled to the pool: on usenet, total throughput is line-bound, so many
+    // concurrent ingests don't drain a backlog faster — they split the pipe
+    // and starve playback/scanning of bandwidth. Leaving most connections idle
+    // keeps streaming fast (altmount keeps imports at ~2 workers for this
+    // reason). Overridable via the `maxdownloadworkers` usenet setting.
     let mut usenet_download_workers: Option<usize> = None;
-    let usenet_streamer: Option<riven_usenet::UsenetStreamer> = match registry
-        .get_plugin_settings_json("usenet")
-        .await
+    let usenet_settings_json = registry.get_plugin_settings_json("usenet").await;
+    let usenet_streamer: Option<riven_usenet::UsenetStreamer> = match usenet_settings_json
         .as_ref()
         .and_then(plugin_usenet::nntp_config_from_json_value)
     {
@@ -117,8 +118,18 @@ async fn main() -> Result<()> {
                 tls = primary.map(|c| c.use_tls).unwrap_or(true),
                 "usenet streaming enabled"
             );
+            // Settings are stored as strings; accept a string or bare number.
+            let configured = usenet_settings_json
+                .as_ref()
+                .and_then(|v| v.get("maxdownloadworkers"))
+                .and_then(|v| {
+                    v.as_u64()
+                        .map(|n| n as usize)
+                        .or_else(|| v.as_str().and_then(|s| s.trim().parse::<usize>().ok()))
+                })
+                .filter(|&n| n > 0);
             usenet_download_workers =
-                Some(riven_usenet::recommended_download_workers(cfg.total_max_connections()));
+                Some(configured.unwrap_or(riven_usenet::DEFAULT_DOWNLOAD_WORKERS));
             // `shared` (not `new`) so playback, ingest, and the health-check
             // task all use the same `NntpPool` — the user's configured
             // `max_connections` is then the true ceiling against the
