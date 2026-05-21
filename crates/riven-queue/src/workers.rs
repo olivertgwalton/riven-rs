@@ -250,7 +250,11 @@ macro_rules! register_worker {
     }};
 }
 
-pub fn start_workers(queue: Arc<JobQueue>) -> Monitor {
+/// `usenet_download_workers` is the connection-budget-derived concurrency for
+/// the download/rank-streams workers when usenet is configured (each ingest is
+/// capped to a fixed per-job connection budget, so `pool ÷ cap` workers fill
+/// the pool without oversubscribing it). `None` => conservative default.
+pub fn start_workers(queue: Arc<JobQueue>, usenet_download_workers: Option<usize>) -> Monitor {
     let cpu_n = std::thread::available_parallelism().map_or(4, std::num::NonZeroUsize::get);
 
     // Orchestrators fan-out sub-jobs and return immediately — no IO, no blocking.
@@ -267,9 +271,13 @@ pub fn start_workers(queue: Arc<JobQueue>) -> Monitor {
     // Parse is CPU-bound (spawn_blocking stream ranking) then sequential DB writes.
     let parse_n = cpu_n.max(5);
 
-    // Download workers call the torrent-client API
-    // Higher values risk overwhelming the client with simultaneous requests.
-    let download_n = cpu_n.max(10);
+    // Download workers run usenet ingests or call the torrent-client API.
+    // For usenet the binding resource is NNTP connections: each ingest is
+    // capped to a fixed per-job budget, so we run `pool ÷ cap` workers to fill
+    // the pool without oversubscribing it (the altmount model — small fixed
+    // per-import budget, scale the worker pool). Falls back to the conservative
+    // torrent-client default when usenet isn't configured.
+    let download_n = usenet_download_workers.unwrap_or_else(|| cpu_n.max(10));
 
     let m = Monitor::new();
     let m = register_worker!(

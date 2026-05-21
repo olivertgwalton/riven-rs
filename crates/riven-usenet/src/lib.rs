@@ -25,6 +25,6 @@ pub(crate) mod par2;
 pub(crate) mod rar;
 pub(crate) mod yenc;
 
-pub use nntp::NntpConfig;
+pub use nntp::{NntpConfig, recommended_download_workers};
 pub use nzb::{NzbDocument, NzbFile, NzbSegment, parse_nzb, parse_nzb_document};
 pub use streamer::{NzbMeta, NzbMetaFile, NzbMetaSource, StreamerError, UsenetStreamer, active_streams};

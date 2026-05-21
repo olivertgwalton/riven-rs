@@ -194,6 +194,26 @@ impl NntpConfig {
     pub fn primary(&self) -> Option<&NntpServerConfig> {
         self.providers.first().map(|p| &p.config)
     }
+
+    /// Total primary (non-backup) connection budget summed across providers —
+    /// the real ceiling the pool enforces via its `PrioritizedSemaphore`.
+    pub fn total_max_connections(&self) -> usize {
+        self.providers
+            .iter()
+            .filter(|p| !p.is_backup)
+            .map(|p| p.config.max_connections.max(1) as usize)
+            .sum::<usize>()
+            .max(1)
+    }
+}
+
+/// Recommended number of concurrent download/ingest workers for a given
+/// connection budget. Each ingest is capped to [`pool::INGEST_CONNECTIONS`], so
+/// `total ÷ INGEST_CONNECTIONS` workers can run without oversubscribing the
+/// provider — the altmount model (small fixed per-import budget, scale the
+/// worker pool). Floored at 2 so tiny accounts still make progress.
+pub fn recommended_download_workers(total_max_connections: usize) -> usize {
+    (total_max_connections / pool::INGEST_CONNECTIONS).max(2)
 }
 
 /// Initialize rustls's default crypto provider exactly once. Safe to call

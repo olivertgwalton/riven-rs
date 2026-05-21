@@ -73,7 +73,7 @@ impl UsenetStreamer {
                 segments[idx].message_id.clone()
             })
             .collect();
-        let probe_concurrency = self.pool.available_capacity().max(PREFETCH_FLOOR).min(n);
+        let probe_concurrency = self.pool.ingest_concurrency().max(PREFETCH_FLOOR).min(n);
         let pool = self.pool.clone();
         let mut probes = stream::iter(mids)
             .map(move |mid| {
@@ -407,7 +407,7 @@ impl UsenetStreamer {
             parts.push(build_rar_part(f));
         }
 
-        let header_fetch_concurrency = self.pool.available_capacity().max(PREFETCH_FLOOR);
+        let header_fetch_concurrency = self.pool.ingest_concurrency().max(PREFETCH_FLOOR);
         let streamer = self.clone();
         let header_results: Vec<Result<Vec<u8>, StreamerError>> = stream::iter(parts.clone())
             .map(move |part| {
