@@ -775,24 +775,42 @@ impl UsenetStreamer {
         if first.bytes == 0 {
             return Ok(());
         }
-        let decoded = self
+        let dec_first = self
             .fetch_decoded_cached(&first.message_id, Priority::Low)
-            .await?;
-        let dec_first = decoded.len() as u64;
+            .await?
+            .len() as u64;
         if dec_first == 0 {
             return Ok(());
         }
-        let mut new_offsets = Vec::with_capacity(segments.len() + 1);
+        // Every *full* yEnc part in one posting decodes to the same size (the
+        // poster's part size); only the final part is a partial remainder. So
+        // the decoded offsets are exact multiples of `dec_first`, with the last
+        // part measured directly. The previous approach scaled each segment by
+        // its *encoded* byte count, but yEnc escaping makes encoded size vary
+        // with content, so that estimate drifted several MB over a multi-GB
+        // file — the advertised `total_size` ended up larger than the bytes we
+        // could serve, and end-of-file reads (player cue/index probes) fell
+        // into the phantom tail and looped on EIO. Measuring the uniform full
+        // part + the real last part removes the drift entirely.
+        let n = segments.len();
+        let dec_last = if n <= 1 {
+            dec_first
+        } else {
+            let last = &segments[n - 1];
+            let measured = if last.bytes == 0 {
+                dec_first
+            } else {
+                self.fetch_decoded_cached(&last.message_id, Priority::Low)
+                    .await?
+                    .len() as u64
+            };
+            if measured == 0 { dec_first } else { measured }
+        };
+        let mut new_offsets = Vec::with_capacity(n + 1);
         let mut acc: u64 = 0;
         new_offsets.push(0);
-        for seg in segments.iter() {
-            // Per-segment decoded estimate via the sampled ratio. Using
-            // u128 intermediates so a long file with many ~750 KB encoded
-            // segments doesn't overflow before the divide.
-            let seg_dec = (seg.bytes as u128)
-                .saturating_mul(dec_first as u128)
-                .checked_div(first.bytes as u128)
-                .unwrap_or(0) as u64;
+        for i in 0..n {
+            let seg_dec = if i + 1 == n { dec_last } else { dec_first };
             acc = acc.saturating_add(seg_dec);
             new_offsets.push(acc);
         }
