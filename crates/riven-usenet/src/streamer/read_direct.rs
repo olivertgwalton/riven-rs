@@ -1,7 +1,8 @@
 use std::sync::Arc;
 
+use bytes::{Bytes, BytesMut};
 use futures::StreamExt;
-use futures::stream;
+use futures::stream::{self, BoxStream};
 
 use crate::nntp::{NntpError, Priority};
 use crate::nzb::NzbSegment;
@@ -9,8 +10,13 @@ use crate::state::{FetchEntry, PromiseSlot, StreamerState};
 use crate::yenc;
 
 use super::{
-    NzbMetaSource, PREFETCH_FLOOR, StreamerError, UsenetStreamer, segments_overlapping,
+    NzbMeta, NzbMetaSource, PREFETCH_FLOOR, StreamerError, UsenetStreamer, segments_overlapping,
 };
+
+/// Chunk size for the RAR streaming pipeline. RAR slices are whole volumes
+/// (100 MB+), so a per-chunk read maps cleanly; 2 MB balances per-chunk
+/// overhead against pipeline granularity.
+const RAR_STREAM_CHUNK: u64 = 2 * 1024 * 1024;
 
 /// Max attempts when fetching an NNTP segment body. ArticleNotFound is
 /// permanent and never retried.
@@ -34,7 +40,7 @@ impl UsenetStreamer {
         &self,
         message_id: &str,
         priority: Priority,
-    ) -> Result<Arc<Vec<u8>>, StreamerError> {
+    ) -> Result<Bytes, StreamerError> {
         loop {
             if let Some(hit) = self.state.cache.get(message_id) {
                 return Ok(hit);
@@ -87,9 +93,9 @@ impl UsenetStreamer {
                     let result = self.do_fetch_with_retry(message_id, priority).await;
                     // Cache must be populated BEFORE marking the slot done
                     // so waiters observe the hit on their next loop.
-                    if let Ok(arc) = &result {
-                        let size = arc.len() as u64;
-                        self.state.cache.put(message_id.to_string(), arc.clone());
+                    if let Ok(bytes) = &result {
+                        let size = bytes.len() as u64;
+                        self.state.cache.put(message_id.to_string(), bytes.clone());
                         self.state.decoded_sizes.put(message_id.to_string(), size);
                     }
                     self.state.in_flight.finish(message_id, &slot);
@@ -106,7 +112,7 @@ impl UsenetStreamer {
         &self,
         message_id: &str,
         priority: Priority,
-    ) -> Result<Arc<Vec<u8>>, StreamerError> {
+    ) -> Result<Bytes, StreamerError> {
         let mut last_err: Option<NntpError> = None;
         for attempt in 0..NNTP_FETCH_ATTEMPTS {
             tracing::debug!(attempt, message_id, "nntp fetch starting");
@@ -138,7 +144,7 @@ impl UsenetStreamer {
                         decode_ms,
                         "nntp fetch ok"
                     );
-                    return Ok(Arc::new(decoded));
+                    return Ok(decoded);
                 }
                 Err(NntpError::ArticleNotFound(s)) => {
                     tracing::warn!(message_id, status = %s, "nntp article missing");
@@ -254,6 +260,13 @@ impl UsenetStreamer {
         if !self.state.precached.claim(info_hash, file_index) {
             return;
         }
+        // Bound concurrent precache pipelines so a library scan's burst of
+        // HEAD requests doesn't spawn hundreds of simultaneous 8 MB
+        // fetch+decode operations (a multi-GB allocation spike musl won't
+        // return). The permit is held for the duration of the fetch.
+        let Ok(_permit) = self.state.precache_sem.acquire().await else {
+            return;
+        };
         let Ok(meta) = self.load_meta(info_hash).await else {
             return;
         };
@@ -287,14 +300,48 @@ impl UsenetStreamer {
 
     /// Read `[start, end_inclusive]` from `file_index`. Walks the meta's
     /// `source` to find the segments that overlap the request, decodes them,
-    /// and returns a contiguous byte slice.
+    /// and returns a contiguous byte slice. Buffered (≤1 MB) HTTP responses
+    /// and the RAR encrypted-slice decrypt path need a single contiguous
+    /// buffer; the streaming body path should prefer `read_range_slices`
+    /// to skip the outer `BytesMut` concatenation.
     pub async fn read_range(
         &self,
         info_hash: &str,
         file_index: usize,
         start: u64,
         end_inclusive: u64,
-    ) -> Result<Vec<u8>, StreamerError> {
+    ) -> Result<Bytes, StreamerError> {
+        let slices = self
+            .read_range_slices(info_hash, file_index, start, end_inclusive)
+            .await?;
+        let mut buf = concat_slices(slices, start, end_inclusive);
+        // Never return more than the requested range. When a segment's actual
+        // decoded length differs slightly from its rescaled offset slot (yEnc
+        // per-segment variance), `slice_segment` falls back to the
+        // proportional estimate, which can over-shoot by a few bytes; clamp so
+        // a buffered HTTP response (which sets Content-Length from this) can't
+        // exceed the requested `bytes=start-end` window.
+        let want = (end_inclusive - start + 1) as usize;
+        if buf.len() > want {
+            buf.truncate(want);
+        }
+        Ok(buf)
+    }
+
+    /// Same as [`read_range`] but returns the per-segment decoded slices
+    /// directly instead of concatenating them. The HTTP body stream
+    /// emits each slice as its own response frame, avoiding the
+    /// per-chunk `BytesMut` allocation + memcpy on segment-boundary
+    /// chunks. Single-segment requests (the common 256 KB-inside-700 KB
+    /// case) yield a one-element Vec; the slice is sliced out of the
+    /// cached `Bytes` with zero copy.
+    pub async fn read_range_slices(
+        &self,
+        info_hash: &str,
+        file_index: usize,
+        start: u64,
+        end_inclusive: u64,
+    ) -> Result<Vec<Bytes>, StreamerError> {
         let meta = self.load_meta(info_hash).await?;
         let file = meta
             .files
@@ -310,17 +357,204 @@ impl UsenetStreamer {
                     .await
             }
             NzbMetaSource::Rar { parts, slices } => {
-                self.read_rar(
-                    parts,
-                    slices,
-                    meta.password.as_deref(),
-                    start,
-                    end_inclusive,
-                    Priority::High,
-                )
-                .await
+                // RAR-contained sources route through a single contiguous
+                // buffer because the encrypted-slice path needs in-place
+                // AES-CBC decrypt. The boundary cost only matters for
+                // Direct sources where 256 KB chunks straddle 720 KB
+                // segments; RAR slices are typically a whole volume long
+                // (100 MB+) so a body chunk almost always fits in one.
+                let buf = self
+                    .read_rar(
+                        parts,
+                        slices,
+                        meta.password.as_deref(),
+                        start,
+                        end_inclusive,
+                        Priority::High,
+                    )
+                    .await?;
+                Ok(if buf.is_empty() { Vec::new() } else { vec![buf] })
             }
         }
+    }
+
+    /// Build a pipelined byte stream for `[start, end_inclusive]` of
+    /// `file_index`, ready to feed an HTTP response body.
+    ///
+    /// This is the live-playback path. It replaces the original design of
+    /// "spawn one `prefetch_range(start, EOF)` task that races to the end of
+    /// the file + read the body one chunk at a time", which let the prefetch
+    /// front pull hundreds of segments ahead and evict the player's own read
+    /// position from the LRU cache — the cause of the "video freezes, audio
+    /// keeps playing, recovers" stutter.
+    ///
+    /// ## Why an eager producer rather than just `buffered`
+    ///
+    /// A plain `segment_stream.buffered(n)` only advances its in-flight
+    /// fetches when *polled by the consumer*. During live playback hyper
+    /// applies backpressure between the player's reads, so the pipeline
+    /// would stop fetching in the gaps and never build a real lead — it
+    /// stays reactive, and a single slow segment still stalls output.
+    ///
+    /// Instead we drive the ordered fetch pipeline from a **spawned producer
+    /// task** that runs on the runtime independent of consumer polling, and
+    /// hand results to the body through a **bounded channel**. The channel's
+    /// capacity is the read-ahead depth: the producer eagerly fills it (the
+    /// NNTP line is ~8× faster than playback bitrate), so by the time the
+    /// player reaches a segment it's already decoded and waiting. A slow
+    /// segment was fetched `readahead` positions earlier, so its latency is
+    /// absorbed by the buffer instead of stalling the video. The bounded
+    /// channel is also the backpressure + memory bound: the producer blocks
+    /// on a full channel, and the lead can never run away to evict the
+    /// cache. When the body is dropped (client disconnect) the channel
+    /// closes and the producer exits.
+    pub fn byte_stream(
+        &self,
+        meta: Arc<NzbMeta>,
+        file_index: usize,
+        start: u64,
+        end_inclusive: u64,
+    ) -> BoxStream<'static, Result<Bytes, StreamerError>> {
+        let Some(file) = meta.files.get(file_index) else {
+            return stream::once(async move { Err(StreamerError::BadFileIndex(file_index)) }).boxed();
+        };
+        if start > end_inclusive || end_inclusive >= file.total_size {
+            return stream::once(async move { Err(StreamerError::BadRange) }).boxed();
+        }
+
+        // Fetch parallelism for the ordered pipeline (bounded by the pool).
+        let fetch_concurrency = self.pool.download_concurrency().max(PREFETCH_FLOOR);
+        // Read-ahead depth (completed segments/chunks buffered ahead of the
+        // player). ~46 MB at 720 KB/segment by default — deep enough to ride
+        // out multi-second provider latency excursions, still a small
+        // fraction of the segment cache. Override with
+        // `RIVEN_USENET_STREAM_READAHEAD`.
+        const DEFAULT_READAHEAD: usize = 64;
+        let readahead = std::env::var("RIVEN_USENET_STREAM_READAHEAD")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .filter(|&n| n > 0)
+            .unwrap_or(DEFAULT_READAHEAD);
+
+        let inner = match &file.source {
+            NzbMetaSource::Direct { offsets, segments } => self.direct_byte_stream(
+                meta.clone(),
+                file_index,
+                offsets,
+                segments,
+                start,
+                end_inclusive,
+                fetch_concurrency,
+            ),
+            NzbMetaSource::Rar { .. } => self.rar_byte_stream(
+                meta.clone(),
+                file_index,
+                start,
+                end_inclusive,
+                fetch_concurrency,
+            ),
+        };
+
+        // Eager producer: drives `inner` on the runtime and pushes results
+        // into the bounded channel. `send` awaiting on a full channel is the
+        // backpressure that bounds the lead; `send` erroring (receiver
+        // dropped on client disconnect) is the exit signal.
+        let (tx, rx) = tokio::sync::mpsc::channel(readahead);
+        tokio::spawn(async move {
+            let mut inner = inner;
+            while let Some(item) = inner.next().await {
+                if tx.send(item).await.is_err() {
+                    break;
+                }
+            }
+        });
+
+        stream::unfold(rx, |mut rx| async move {
+            rx.recv().await.map(|item| (item, rx))
+        })
+        .boxed()
+    }
+
+    /// Segment-level pipeline for `Direct` sources: compute the overlapping
+    /// segment span once, then `buffered`-fetch each segment and slice out
+    /// the requested portion. Holds the `meta` Arc so the offset table stays
+    /// available for the stream's lifetime.
+    fn direct_byte_stream(
+        &self,
+        meta: Arc<NzbMeta>,
+        file_index: usize,
+        offsets: &[u64],
+        segments: &[NzbSegment],
+        start: u64,
+        end_inclusive: u64,
+        fetch_concurrency: usize,
+    ) -> BoxStream<'static, Result<Bytes, StreamerError>> {
+        let (first, last) = direct_segment_span(offsets, segments.len(), start, end_inclusive);
+
+        let streamer = self.clone();
+        let idxs: Vec<usize> = (first..=last).collect();
+        stream::iter(idxs)
+            .map(move |idx| {
+                let streamer = streamer.clone();
+                let meta = meta.clone();
+                async move {
+                    let NzbMetaSource::Direct { offsets, segments } =
+                        &meta.files[file_index].source
+                    else {
+                        return Err(StreamerError::BadRange);
+                    };
+                    let mid = &segments[idx].message_id;
+                    let decoded = streamer.fetch_decoded_cached(mid, Priority::High).await?;
+                    Ok(slice_segment(
+                        &decoded,
+                        offsets[idx],
+                        offsets[idx + 1],
+                        start,
+                        end_inclusive,
+                    ))
+                }
+            })
+            .buffered(fetch_concurrency)
+            .boxed()
+    }
+
+    /// Chunk-level pipeline for `Rar` sources. RAR reads route through the
+    /// contiguous `read_range` path (the encrypted-slice case needs in-place
+    /// decrypt), so we pipeline fixed-size chunks rather than raw segments.
+    /// RAR slices are whole volumes, so a chunk almost always lands in one.
+    fn rar_byte_stream(
+        &self,
+        meta: Arc<NzbMeta>,
+        file_index: usize,
+        start: u64,
+        end_inclusive: u64,
+        fetch_concurrency: usize,
+    ) -> BoxStream<'static, Result<Bytes, StreamerError>> {
+        let mut chunks: Vec<(u64, u64)> = Vec::new();
+        let mut pos = start;
+        while pos <= end_inclusive {
+            let chunk_end = pos.saturating_add(RAR_STREAM_CHUNK - 1).min(end_inclusive);
+            chunks.push((pos, chunk_end));
+            pos = chunk_end.saturating_add(1);
+        }
+
+        let streamer = self.clone();
+        stream::iter(chunks)
+            .map(move |(s, e)| {
+                let streamer = streamer.clone();
+                let meta = meta.clone();
+                async move {
+                    let NzbMetaSource::Rar { parts, slices } = &meta.files[file_index].source
+                    else {
+                        return Err(StreamerError::BadRange);
+                    };
+                    streamer
+                        .read_rar(parts, slices, meta.password.as_deref(), s, e, Priority::High)
+                        .await
+                }
+            })
+            .buffered(fetch_concurrency)
+            .boxed()
     }
 
     /// Read a byte range from a `Direct` source: a single contiguous file
@@ -333,24 +567,8 @@ impl UsenetStreamer {
         segments: &[NzbSegment],
         start: u64,
         end_inclusive: u64,
-    ) -> Result<Vec<u8>, StreamerError> {
-        let mut first = 0usize;
-        let mut last = segments.len() - 1;
-        for (i, win) in offsets.windows(2).enumerate() {
-            if win[1] > start {
-                first = i;
-                break;
-            }
-        }
-        for (i, win) in offsets.windows(2).enumerate() {
-            if win[0] > end_inclusive {
-                last = i.saturating_sub(1);
-                break;
-            }
-            last = i;
-        }
-
-        let mut decoded_concat = Vec::with_capacity((end_inclusive - start + 1) as usize);
+    ) -> Result<Vec<Bytes>, StreamerError> {
+        let (first, last) = direct_segment_span(offsets, segments.len(), start, end_inclusive);
 
         let read_concurrency = self.pool.download_concurrency().max(PREFETCH_FLOOR);
         let streamer = self.clone();
@@ -364,24 +582,150 @@ impl UsenetStreamer {
             })
             .buffered(read_concurrency);
 
+        // Collect zero-copy `Bytes` slices. For the common single-segment
+        // request (256 KB body chunk inside one ~700 KB segment), the
+        // returned Vec has one slice the caller can hand straight to
+        // hyper. Segment-boundary chunks return two slices; the body
+        // stream emits both as separate response frames, no concat.
+        let mut slices: Vec<Bytes> = Vec::new();
         while let Some((idx, result)) = stream.next().await {
             let decoded = result?;
-
-            let seg_enc_start = offsets[idx];
-            let seg_enc_end = offsets[idx + 1];
-            let enc_len = seg_enc_end - seg_enc_start;
-            let dec_len = decoded.len() as u64;
-
-            let req_lo_enc = start.max(seg_enc_start) - seg_enc_start;
-            let req_hi_enc = end_inclusive.min(seg_enc_end - 1) - seg_enc_start;
-            let lo = ((req_lo_enc as u128 * dec_len as u128) / enc_len as u128) as usize;
-            let hi = (((req_hi_enc as u128 + 1) * dec_len as u128) / enc_len as u128) as usize;
-            let hi = hi.min(decoded.len());
-            if lo < hi {
-                decoded_concat.extend_from_slice(&decoded[lo..hi]);
+            let slice = slice_segment(&decoded, offsets[idx], offsets[idx + 1], start, end_inclusive);
+            if !slice.is_empty() {
+                slices.push(slice);
             }
         }
 
-        Ok(decoded_concat)
+        Ok(slices)
+    }
+}
+
+/// Inclusive `[first, last]` segment indices whose cumulative byte ranges
+/// overlap the request `[start, end]`. Single binary-search-based helper
+/// shared by both the buffered (`read_direct`) and streaming
+/// (`direct_byte_stream`) assembly paths, so they can never disagree about
+/// which segments a range touches. `offsets` is sorted with length
+/// `n_segments + 1`; `offsets[i]..offsets[i+1]` is segment `i`'s byte span.
+fn direct_segment_span(offsets: &[u64], n_segments: usize, start: u64, end: u64) -> (usize, usize) {
+    let last_idx = n_segments.saturating_sub(1);
+    let first = offsets
+        .partition_point(|&o| o <= start)
+        .saturating_sub(1)
+        .min(last_idx);
+    let last = offsets
+        .partition_point(|&o| o <= end)
+        .saturating_sub(1)
+        .min(last_idx);
+    (first, last)
+}
+
+/// Slice the requested byte window out of one decoded segment.
+///
+/// `seg_start`/`seg_end` are the segment's cumulative byte boundaries from
+/// the meta's offset table. After `rescale_direct_to_decoded` these are
+/// exact decoded offsets, so when the segment's actual decoded length
+/// matches the offset delta we address bytes **exactly** — `decoded[(start
+/// − seg_start) .. (end + 1 − seg_start)]` — the same model as altmount's
+/// `SegmentData{start_offset,end_offset}`.
+///
+/// When the lengths disagree — a meta whose best-effort ingest rescale
+/// failed and still holds encoded offsets, or a rare non-uniform yEnc
+/// poster — we fall back to the proportional estimate so the read stays
+/// in-bounds and roughly aligned rather than slicing at a wrong absolute
+/// position.
+fn slice_segment(decoded: &Bytes, seg_start: u64, seg_end: u64, start: u64, end_inclusive: u64) -> Bytes {
+    let offset_len = seg_end.saturating_sub(seg_start);
+    if offset_len == 0 {
+        return Bytes::new();
+    }
+    let dec_len = decoded.len() as u64;
+    let req_lo = start.max(seg_start) - seg_start;
+    let req_hi = end_inclusive.min(seg_end - 1) - seg_start;
+
+    let (lo, hi) = if dec_len == offset_len {
+        // Exact: offsets are true decoded positions for this segment.
+        (req_lo as usize, (req_hi + 1) as usize)
+    } else {
+        // Approximate: scale the request into the segment's actual decoded
+        // span. Preserves the old behaviour for un-rescaled metas.
+        let lo = (req_lo as u128 * dec_len as u128 / offset_len as u128) as usize;
+        let hi = ((req_hi as u128 + 1) * dec_len as u128 / offset_len as u128) as usize;
+        (lo, hi)
+    };
+    let hi = hi.min(decoded.len());
+    let lo = lo.min(hi);
+    if lo < hi {
+        decoded.slice(lo..hi)
+    } else {
+        Bytes::new()
+    }
+}
+
+/// Concatenate decoded segment slices into one contiguous `Bytes`. Used
+/// by [`UsenetStreamer::read_range`] for callers that want a single
+/// buffer (HTTP buffered responses, RAR encrypted-slice decrypt). The
+/// streaming HTTP path uses the slice list directly and skips this.
+fn concat_slices(mut slices: Vec<Bytes>, start: u64, end_inclusive: u64) -> Bytes {
+    match slices.len() {
+        0 => Bytes::new(),
+        1 => slices.pop().unwrap_or_default(),
+        _ => {
+            let mut buf = BytesMut::with_capacity((end_inclusive - start + 1) as usize);
+            for s in slices {
+                buf.extend_from_slice(&s);
+            }
+            buf.freeze()
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn direct_segment_span_covers_request() {
+        // 3 segments: [0,100), [100,250), [250,400).
+        let offsets = [0u64, 100, 250, 400];
+        assert_eq!(direct_segment_span(&offsets, 3, 0, 0), (0, 0));
+        assert_eq!(direct_segment_span(&offsets, 3, 50, 99), (0, 0));
+        // Spans the first boundary.
+        assert_eq!(direct_segment_span(&offsets, 3, 50, 150), (0, 1));
+        // Starts mid-segment-1, ends in segment-2.
+        assert_eq!(direct_segment_span(&offsets, 3, 120, 300), (1, 2));
+        // Exactly on a boundary start.
+        assert_eq!(direct_segment_span(&offsets, 3, 100, 100), (1, 1));
+        // Whole file.
+        assert_eq!(direct_segment_span(&offsets, 3, 0, 399), (0, 2));
+    }
+
+    #[test]
+    fn slice_segment_exact_when_lengths_match() {
+        // Segment covers decoded bytes [1000, 1700); actual decoded len
+        // matches the offset delta (700), so addressing is exact.
+        let decoded = Bytes::from((0u8..255).cycle().take(700).collect::<Vec<u8>>());
+        // Request [1200, 1299] → bytes [200..300) within the segment.
+        let out = slice_segment(&decoded, 1000, 1700, 1200, 1299);
+        assert_eq!(out.len(), 100);
+        assert_eq!(out[..], decoded[200..300]);
+    }
+
+    #[test]
+    fn slice_segment_clamps_request_to_segment_bounds() {
+        let decoded = Bytes::from(vec![7u8; 700]);
+        // Request spans beyond this segment; only [500..700) belongs here.
+        let out = slice_segment(&decoded, 1000, 1700, 1500, 9999);
+        assert_eq!(out.len(), 200);
+    }
+
+    #[test]
+    fn slice_segment_falls_back_to_ratio_when_lengths_differ() {
+        // Offset delta says 700 but the segment actually decoded to 350
+        // (e.g. encoded offsets / non-uniform poster). The fallback scales
+        // the request into the real decoded span and stays in-bounds.
+        let decoded = Bytes::from(vec![1u8; 350]);
+        let out = slice_segment(&decoded, 1000, 1700, 1000, 1699);
+        assert!(out.len() <= 350);
+        assert!(!out.is_empty());
     }
 }

@@ -143,3 +143,36 @@ fn nntp_config_fingerprint(cfg: &NntpConfig) -> u64 {
     }
     h.finish()
 }
+
+#[async_trait::async_trait]
+impl riven_core::local_source::LocalByteSource for UsenetStreamer {
+    async fn read_range(
+        &self,
+        info_hash: &str,
+        file_index: usize,
+        start: u64,
+        end_inclusive: u64,
+    ) -> anyhow::Result<bytes::Bytes> {
+        // Inherent `read_range` loads meta + dispatches Direct/RAR.
+        Ok(UsenetStreamer::read_range(self, info_hash, file_index, start, end_inclusive).await?)
+    }
+
+    async fn open_stream(
+        &self,
+        info_hash: &str,
+        file_index: usize,
+        start: u64,
+    ) -> anyhow::Result<futures::stream::BoxStream<'static, std::io::Result<bytes::Bytes>>> {
+        use futures::StreamExt;
+        let meta = self.load_meta(info_hash).await?;
+        let file = meta
+            .files
+            .get(file_index)
+            .ok_or_else(|| anyhow::anyhow!("file index {file_index} out of range"))?;
+        let end = file.total_size.saturating_sub(1);
+        let stream = self
+            .byte_stream(meta.clone(), file_index, start, end)
+            .map(|r| r.map_err(std::io::Error::other));
+        Ok(stream.boxed())
+    }
+}

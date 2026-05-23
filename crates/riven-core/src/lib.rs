@@ -2,6 +2,7 @@ pub mod config;
 pub mod downloader;
 pub mod events;
 pub mod http;
+pub mod local_source;
 pub mod logging;
 pub mod plugin;
 pub mod reindex;

@@ -1,7 +1,9 @@
 use std::io;
+use std::sync::Arc;
 
 use bytes::{Bytes, BytesMut};
 use futures::{StreamExt, TryStreamExt, stream::BoxStream};
+use riven_core::local_source::LocalByteSource;
 use tokio::io::{AsyncReadExt, BufReader};
 use tokio_util::io::StreamReader;
 
@@ -69,6 +71,53 @@ impl SequentialReader {
             body_end_exclusive,
             reader,
         })
+    }
+
+    /// Build a reader from an already-opened byte stream (the in-process
+    /// usenet path — no HTTP, no window cap, so `body_end_exclusive` is the
+    /// full file size).
+    fn from_stream(
+        stream: BoxStream<'static, Result<Bytes, io::Error>>,
+        body_end_exclusive: u64,
+        start_pos: u64,
+    ) -> Self {
+        let reader = BufReader::with_capacity(
+            riven_core::config::vfs::CHUNK_SIZE as usize * 2,
+            StreamReader::new(stream),
+        );
+        Self {
+            read_pos: start_pos,
+            body_end_exclusive,
+            reader,
+        }
+    }
+
+    /// Read up to `size` bytes at `pos`, tolerating an early EOF by
+    /// returning the partial result (the last chunk of a file may be a few
+    /// bytes shorter than the advertised size). FUSE accepts short reads.
+    async fn read_upto_at(&mut self, pos: u64, size: usize) -> io::Result<Bytes> {
+        if pos < self.read_pos {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("cannot rewind active stream from {} to {}", self.read_pos, pos),
+            ));
+        }
+        if pos > self.read_pos {
+            self.discard(pos - self.read_pos).await?;
+            self.read_pos = pos;
+        }
+        let mut buf = vec![0u8; size];
+        let mut filled = 0;
+        while filled < size {
+            let n = self.reader.read(&mut buf[filled..]).await?;
+            if n == 0 {
+                break; // EOF — return what we have
+            }
+            filled += n;
+        }
+        buf.truncate(filled);
+        self.read_pos += filled as u64;
+        Ok(Bytes::from(buf))
     }
 
     /// Whether this reader's body still covers `[start, end_inclusive]`.
@@ -436,4 +485,104 @@ fn slice_request_bytes(full: &Bytes, start: u64, end: u64, base_start: u64) -> O
     let available_len = full.len() - offset;
     let slice_len = requested_len.min(available_len);
     Some(full.slice(offset..offset + slice_len))
+}
+
+/// In-process streaming session for usenet-backed files.
+///
+/// Replaces the FUSE → HTTP `/usenet/` → streamer hop with a direct call
+/// into the usenet streamer (`LocalByteSource`). Sequential reads pull from
+/// an eagerly-pipelined `open_stream` (so a slow segment is absorbed by the
+/// read-ahead buffer, not stalled on); a non-sequential seek reopens the
+/// stream at the new position. There's no separate range cache here — the
+/// streamer owns its own decoded-segment cache, so this avoids the
+/// double-buffering the HTTP path incurred.
+pub struct UsenetSession {
+    source: Arc<dyn LocalByteSource>,
+    info_hash: Arc<str>,
+    file_index: usize,
+    file_size: u64,
+    sequential: Option<SequentialReader>,
+}
+
+impl UsenetSession {
+    pub fn new(
+        source: Arc<dyn LocalByteSource>,
+        info_hash: Arc<str>,
+        file_index: usize,
+        file_size: u64,
+    ) -> Self {
+        Self {
+            source,
+            info_hash,
+            file_index,
+            file_size,
+            sequential: None,
+        }
+    }
+
+    pub fn file_size(&self) -> u64 {
+        self.file_size
+    }
+
+    pub fn read(&mut self, start: u64, end: u64, runtime: &tokio::runtime::Handle) -> ReadOutcome {
+        if start >= self.file_size {
+            return ReadOutcome::Data(Bytes::new());
+        }
+        let end = end.min(self.file_size - 1);
+
+        // Reopen the pipeline on first read, on a backward seek, or on a
+        // forward jump the current reader can't reach without discarding an
+        // unreasonable amount (handled implicitly: can_serve only checks
+        // start >= read_pos; large forward gaps still stream-and-discard,
+        // which the kernel's sequential read-ahead rarely triggers).
+        let need_open = self
+            .sequential
+            .as_ref()
+            .is_none_or(|r| !r.can_serve(start, end));
+        if need_open {
+            let opened = runtime.block_on(self.source.open_stream(
+                &self.info_hash,
+                self.file_index,
+                start,
+            ));
+            match opened {
+                Ok(stream) => {
+                    self.sequential =
+                        Some(SequentialReader::from_stream(stream, self.file_size, start));
+                }
+                Err(error) => {
+                    tracing::error!(
+                        target: "streaming",
+                        info_hash = %self.info_hash,
+                        file_index = self.file_index,
+                        error = %error,
+                        "usenet open_stream failed"
+                    );
+                    return ReadOutcome::Error(libc::EIO);
+                }
+            }
+        }
+
+        let size = (end - start + 1) as usize;
+        let reader = self
+            .sequential
+            .as_mut()
+            .expect("sequential reader set above");
+        match runtime.block_on(reader.read_upto_at(start, size)) {
+            Ok(data) => ReadOutcome::Data(data),
+            Err(error) => {
+                // Drop the reader so the next read reopens cleanly.
+                self.sequential = None;
+                tracing::warn!(
+                    target: "streaming",
+                    info_hash = %self.info_hash,
+                    file_index = self.file_index,
+                    offset = start,
+                    error = %error,
+                    "usenet sequential read failed"
+                );
+                ReadOutcome::Error(libc::EIO)
+            }
+        }
+    }
 }

@@ -9,9 +9,13 @@
 //! Bounded by total bytes, not entry count — segments are big (~700 KB
 //! decoded) and budgets are easier to reason about in bytes. Defaults to
 //! 256 MB, overridable via `RIVEN_USENET_CACHE_BYTES`.
+//!
+//! Cache values are `bytes::Bytes`: cheap to clone (Arc bump), and the
+//! read path slices ranges out with `Bytes::slice` which is zero-copy.
+//! That replaces the per-HTTP-chunk memcpy the previous `Arc<Vec<u8>>`
+//! layout required.
 
-use std::sync::Arc;
-
+use bytes::Bytes;
 use lru::LruCache;
 use parking_lot::Mutex;
 
@@ -22,7 +26,7 @@ pub struct SegmentCache {
 
 struct State {
     /// Unbounded entry count — we evict on byte budget.
-    lru: LruCache<String, Arc<Vec<u8>>>,
+    lru: LruCache<String, Bytes>,
     current_bytes: u64,
 }
 
@@ -37,12 +41,12 @@ impl SegmentCache {
         }
     }
 
-    pub fn get(&self, message_id: &str) -> Option<Arc<Vec<u8>>> {
+    pub fn get(&self, message_id: &str) -> Option<Bytes> {
         let mut state = self.state.lock();
         state.lru.get(message_id).cloned()
     }
 
-    pub fn put(&self, message_id: String, data: Arc<Vec<u8>>) {
+    pub fn put(&self, message_id: String, data: Bytes) {
         let mut state = self.state.lock();
         let new_bytes = data.len() as u64;
         if let Some(prev) = state.lru.put(message_id, data) {
@@ -72,8 +76,8 @@ mod tests {
     #[test]
     fn evicts_when_over_budget() {
         let cache = SegmentCache::new(100);
-        cache.put("a".into(), Arc::new(vec![0u8; 60]));
-        cache.put("b".into(), Arc::new(vec![0u8; 60]));
+        cache.put("a".into(), Bytes::from(vec![0u8; 60]));
+        cache.put("b".into(), Bytes::from(vec![0u8; 60]));
         // 60 + 60 = 120 > 100 → evict LRU ("a").
         assert!(cache.get("a").is_none());
         assert!(cache.get("b").is_some());
@@ -83,10 +87,10 @@ mod tests {
     #[test]
     fn get_promotes_to_mru() {
         let cache = SegmentCache::new(100);
-        cache.put("a".into(), Arc::new(vec![0u8; 40]));
-        cache.put("b".into(), Arc::new(vec![0u8; 40]));
+        cache.put("a".into(), Bytes::from(vec![0u8; 40]));
+        cache.put("b".into(), Bytes::from(vec![0u8; 40]));
         let _ = cache.get("a"); // a → MRU
-        cache.put("c".into(), Arc::new(vec![0u8; 40])); // 120 > 100 → evict LRU = b
+        cache.put("c".into(), Bytes::from(vec![0u8; 40])); // 120 > 100 → evict LRU = b
         assert!(cache.get("a").is_some());
         assert!(cache.get("b").is_none());
         assert!(cache.get("c").is_some());
@@ -95,9 +99,9 @@ mod tests {
     #[test]
     fn replacement_updates_byte_accounting() {
         let cache = SegmentCache::new(1000);
-        cache.put("a".into(), Arc::new(vec![0u8; 500]));
+        cache.put("a".into(), Bytes::from(vec![0u8; 500]));
         assert_eq!(cache.current_bytes(), 500);
-        cache.put("a".into(), Arc::new(vec![0u8; 300]));
+        cache.put("a".into(), Bytes::from(vec![0u8; 300]));
         assert_eq!(cache.current_bytes(), 300);
     }
 }

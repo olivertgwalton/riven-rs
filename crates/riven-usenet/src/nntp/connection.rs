@@ -4,7 +4,9 @@ use tokio::io::BufReader;
 use tokio::net::TcpStream;
 use tokio_rustls::rustls::pki_types::ServerName;
 
-use super::{NntpError, NntpServerConfig, NntpStream, build_tls_connector};
+use crate::bufpool::PooledBuf;
+
+use super::{ENCODED_BUF_POOL, NntpError, NntpServerConfig, NntpStream, build_tls_connector};
 
 /// One open + authenticated NNTP connection.
 pub struct NntpConnection {
@@ -88,8 +90,12 @@ impl NntpConnection {
     }
 
     /// Fetch the body of an article by message-id. Returns the raw, un-stuffed
-    /// body (CRLF line endings preserved) ready for the yEnc decoder.
-    pub async fn fetch_body(&mut self, message_id: &str) -> Result<Vec<u8>, NntpError> {
+    /// body (CRLF line endings preserved) ready for the yEnc decoder. The
+    /// buffer is checked out from the encoded-body pool — the caller
+    /// (typically `do_fetch_with_retry` consuming the `PooledBuf` inside its
+    /// `spawn_blocking` decode closure) returns the allocation to the pool
+    /// when the `PooledBuf` drops.
+    pub(crate) async fn fetch_body(&mut self, message_id: &str) -> Result<PooledBuf, NntpError> {
         // Some servers reject angle-less message-ids, so always wrap in <>.
         let id_wrapped = if message_id.starts_with('<') {
             message_id.to_string()
@@ -104,8 +110,13 @@ impl NntpConnection {
         if !status.starts_with("222") {
             return Err(NntpError::ServerError(status));
         }
-        let body = self.stream.read_until_dot(self.read_timeout).await?;
-        Ok(body)
+        // Pull a recycled buffer from the pool; ~1 MB matches the typical
+        // ~720 KB encoded segment with headroom for yEnc escape overhead.
+        let mut buf = PooledBuf::take(&ENCODED_BUF_POOL, 1 << 20);
+        self.stream
+            .read_until_dot(buf.as_mut_vec(), self.read_timeout)
+            .await?;
+        Ok(buf)
     }
 
     /// RFC 3977 `DATE` — used as a cheap liveness ping before reusing

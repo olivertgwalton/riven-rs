@@ -168,6 +168,12 @@ async fn main() -> Result<()> {
     let (link_tx, mut link_rx) = tokio::sync::mpsc::channel(64);
 
     let vfs_mount_path = settings.effective_vfs_mount_path().to_string();
+    // Usenet-backed VFS reads go in-process through the streamer instead of
+    // looping back over the loopback `/usenet/` HTTP route.
+    let usenet_local_source: Option<Arc<dyn riven_core::local_source::LocalByteSource>> =
+        usenet_streamer
+            .clone()
+            .map(|s| Arc::new(s) as Arc<dyn riven_core::local_source::LocalByteSource>);
     let vfs_mount_manager = Arc::new(riven_api::vfs_mount::VfsMountManager::new(
         &vfs_mount_path,
         job_queue.vfs_layout.clone(),
@@ -176,6 +182,7 @@ async fn main() -> Result<()> {
         stream_http_client.clone(),
         link_tx.clone(),
         settings.vfs_cache_max_size_mb,
+        usenet_local_source,
     )?);
 
     tokio::spawn({

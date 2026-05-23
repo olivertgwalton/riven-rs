@@ -33,6 +33,7 @@ impl FuseSession {
 /// Returns `Ok(None)` if `mount_path` does not exist — the caller treats this
 /// as "skip VFS for now" rather than auto-creating a directory that may be a
 /// host-managed bind mount not yet ready.
+#[expect(clippy::too_many_arguments, reason = "mount wiring threads several process-wide handles")]
 pub fn mount(
     mount_path: &str,
     vfs_layout: Arc<RwLock<VfsLibraryLayout>>,
@@ -41,6 +42,7 @@ pub fn mount(
     stream_client: reqwest::Client,
     link_request_tx: mpsc::Sender<riven_core::stream_link::LinkRequest>,
     cache_max_size_mb: u64,
+    local_source: Option<Arc<dyn riven_core::local_source::LocalByteSource>>,
 ) -> Result<Option<FuseSession>> {
     let mount_path = Path::new(mount_path);
 
@@ -101,6 +103,7 @@ pub fn mount(
         stream_client,
         link_request_tx,
         cache_max_size_mb,
+        local_source,
     );
 
     let mut config = fuser::Config::default();

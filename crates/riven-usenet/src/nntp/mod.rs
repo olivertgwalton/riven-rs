@@ -9,7 +9,7 @@ use std::io;
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
 use tokio_rustls::rustls::ClientConfig;
@@ -93,51 +93,83 @@ impl NntpStream {
         .map_err(|_e| io::Error::new(io::ErrorKind::TimedOut, "nntp read timed out"))?
     }
 
-    /// Read a `.`-terminated multi-line response. `timeout` is applied per
-    /// line read (inactivity deadline), so a stalled socket fails fast and the
-    /// pool can recycle the connection instead of the read blocking forever.
-    pub(crate) async fn read_until_dot(&mut self, timeout: Duration) -> io::Result<Vec<u8>> {
-        // RFC 3977: multi-line response terminated by a line containing only ".".
-        // Lines beginning with "." are dot-stuffed (sender prepends an extra ".").
-        let mut out = Vec::with_capacity(1 << 16);
-        let mut line = Vec::with_capacity(1024);
-        loop {
-            line.clear();
-            let n = tokio::time::timeout(timeout, async {
+    /// Read a `.`-terminated multi-line response into the caller-provided
+    /// `out`. `timeout` applies as an inactivity deadline shared across
+    /// every read in this call: a single `tokio::time::Sleep` is pinned
+    /// once outside the loop and `reset()` each time a read returns data,
+    /// rather than wrapping each read in a fresh `tokio::time::timeout()`
+    /// future. Profile showed ~0.5 % of CPU in `Timeout::poll`'s memset.
+    ///
+    /// `out` is cleared on entry; the caller threads it from the encoded
+    /// buffer pool (a `crate::bufpool::PooledBuf`) so the next BODY fetch
+    /// reuses its hot pages.
+    ///
+    /// Reads bulk chunks and scans for the `\r\n.\r\n` terminator with
+    /// `memmem` (replaces a previous per-line `read_until(b'\n', ...)`
+    /// loop — a ~700 KB body has ~5,500 lines, so the line loop did
+    /// ~5,500 memchr scans + extend_from_slice copies per article).
+    /// Dot-stuffing is undone in a single pass at the end; the common
+    /// case (no stuffed lines) skips that work entirely.
+    pub(crate) async fn read_until_dot(
+        &mut self,
+        out: &mut Vec<u8>,
+        timeout: Duration,
+    ) -> io::Result<()> {
+        // RFC 3977: multi-line response is terminated by `<CRLF>.<CRLF>`.
+        // Lines beginning with `.` are dot-stuffed (sender doubles the leading
+        // `.`). Strictly searching for `\r\n.\r\n` is unambiguous because
+        // a dot-stuffed line would be `\r\n..<more>`.
+        const TERMINATOR: &[u8] = b"\r\n.\r\n";
+
+        out.clear();
+        let mut scanned: usize = 0;
+
+        let sleep = tokio::time::sleep(timeout);
+        tokio::pin!(sleep);
+
+        let term_end = loop {
+            // Search only what we haven't seen yet, plus a 4-byte overlap so a
+            // terminator straddling the previous read boundary isn't missed.
+            let scan_from = scanned.saturating_sub(TERMINATOR.len() - 1);
+            if out.len() >= TERMINATOR.len()
+                && let Some(rel) = memchr::memmem::find(&out[scan_from..], TERMINATOR)
+            {
+                break scan_from + rel + TERMINATOR.len();
+            }
+            // Special case: the response is the terminator itself (empty body).
+            if out.len() >= 3 && &out[..3] == b".\r\n" {
+                break 3;
+            }
+            scanned = out.len();
+
+            let read_fut = async {
                 match self {
-                    NntpStream::Plain(s) => s.read_until(b'\n', &mut line).await,
-                    NntpStream::Tls(s) => s.read_until(b'\n', &mut line).await,
+                    NntpStream::Plain(s) => fill_into(s, out).await,
+                    NntpStream::Tls(s) => fill_into(s, out).await,
                 }
-            })
-            .await
-            .map_err(|_e| io::Error::new(io::ErrorKind::TimedOut, "nntp read timed out"))??;
-            if n == 0 {
-                return Err(io::Error::new(
-                    io::ErrorKind::UnexpectedEof,
-                    "EOF before terminating dot",
-                ));
-            }
-            let end = if line.ends_with(b"\r\n") {
-                line.len() - 2
-            } else if line.ends_with(b"\n") {
-                line.len() - 1
-            } else {
-                line.len()
             };
-            let content = &line[..end];
-            if content == b"." {
-                break;
-            }
-            // Un-stuff: a literal `.` at line start is sent as `..`.
-            let payload = if content.first() == Some(&b'.') {
-                &content[1..]
-            } else {
-                content
+            tokio::pin!(read_fut);
+            tokio::select! {
+                biased;
+                r = &mut read_fut => r?,
+                _ = &mut sleep => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "nntp read timed out",
+                    ));
+                }
             };
-            out.extend_from_slice(payload);
-            out.extend_from_slice(b"\r\n");
-        }
-        Ok(out)
+            // Extend the inactivity deadline: data made it through, so the
+            // socket is still alive even if the next read stalls briefly.
+            sleep.as_mut().reset(tokio::time::Instant::now() + timeout);
+        };
+
+        // Trim everything from the terminator's leading `\r\n` (inclusive of
+        // the trailing CRLF on the body's last line, which the caller's yEnc
+        // decoder expects) onward.
+        out.truncate(term_end - 3);
+        undot_stuff(out);
+        Ok(())
     }
 
     pub(crate) async fn write_all(&mut self, buf: &[u8]) -> io::Result<()> {
@@ -153,6 +185,68 @@ impl NntpStream {
             NntpStream::Tls(s) => s.get_mut().flush().await,
         }
     }
+}
+
+/// Read more bytes from `reader` into the tail of `buf`, growing the
+/// buffer's capacity if needed. Returns the number of bytes appended.
+/// Wraps `AsyncRead::read` rather than `read_until` so we can pull large
+/// chunks (typically a full BufReader fill, 512 KB at a time) instead of
+/// one line per call.
+async fn fill_into<R: tokio::io::AsyncRead + Unpin>(
+    reader: &mut R,
+    buf: &mut Vec<u8>,
+) -> io::Result<usize> {
+    const READ_CHUNK: usize = 64 * 1024;
+    let n = buf.len();
+    buf.resize(n + READ_CHUNK, 0);
+    let got = reader.read(&mut buf[n..]).await?;
+    buf.truncate(n + got);
+    if got == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "EOF before terminating dot",
+        ));
+    }
+    Ok(got)
+}
+
+/// Un-dot-stuff an NNTP article body in place. RFC 3977 §3.1.1: a line
+/// beginning with `.` is sent with the leading `.` doubled. We remove the
+/// extra dot. Most yEnc articles have ~20 stuffed lines per 700 KB
+/// segment (a yEnc-encoded byte happens to be `.`/0x2E ≈ 1/256 lines);
+/// the common case still pays one memmem scan + a tight rewrite. The
+/// no-stuffing case (cleaner NZB postings) skips the rewrite entirely.
+fn undot_stuff(buf: &mut Vec<u8>) {
+    let has_leading = buf.starts_with(b"..");
+    let has_interior = memchr::memmem::find(buf, b"\r\n..").is_some();
+    if !has_leading && !has_interior {
+        return;
+    }
+
+    // In-place compact: read from `r`, write to `w` (always `w <= r`).
+    // Skips the second `.` of every `..` that opens a line.
+    let len = buf.len();
+    let mut r = 0;
+    let mut w = 0;
+    let mut prev_was_cr = false;
+    let mut at_line_start = true;
+    while r < len {
+        let b = buf[r];
+        if at_line_start && b == b'.' && r + 1 < len && buf[r + 1] == b'.' {
+            buf[w] = b'.';
+            w += 1;
+            r += 2;
+            at_line_start = false;
+            prev_was_cr = false;
+            continue;
+        }
+        buf[w] = b;
+        w += 1;
+        r += 1;
+        at_line_start = prev_was_cr && b == b'\n';
+        prev_was_cr = b == b'\r';
+    }
+    buf.truncate(w);
 }
 
 pub(crate) fn build_tls_connector() -> Result<TlsConnector, NntpError> {
@@ -223,4 +317,165 @@ pub const DEFAULT_DOWNLOAD_WORKERS: usize = 4;
 /// multiple times. Idempotent. Must run before any TLS handshake.
 pub(crate) fn init_crypto() {
     drop(rustls::crypto::ring::default_provider().install_default());
+}
+
+/// Pool for encoded NNTP article bodies (input to the yEnc decoder).
+/// Encoded bodies run slightly larger than decoded ones (yEnc adds ~3 %
+/// plus CRLFs), so the same 2 MB cap covers them; 64 retained matches the
+/// decoded-side pool. The buffer recycles when `yenc::decode`'s
+/// `spawn_blocking` closure drops the `PooledBuf` it was handed.
+static ENCODED_BUF_POOL: crate::bufpool::BufPool = crate::bufpool::BufPool::new(64, 2 * 1024 * 1024);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn undot_stuff_noop_when_no_stuffing() {
+        let mut buf = b"=ybegin line=128\r\nfoo\r\nbar\r\n".to_vec();
+        let before = buf.clone();
+        undot_stuff(&mut buf);
+        assert_eq!(buf, before);
+    }
+
+    #[test]
+    fn undot_stuff_interior_lines() {
+        let mut buf = b"foo\r\n..stuffed\r\nbar\r\n".to_vec();
+        undot_stuff(&mut buf);
+        assert_eq!(buf, b"foo\r\n.stuffed\r\nbar\r\n");
+    }
+
+    #[test]
+    fn undot_stuff_multiple_interior() {
+        let mut buf = b"a\r\n..one\r\nb\r\n..two\r\nc\r\n".to_vec();
+        undot_stuff(&mut buf);
+        assert_eq!(buf, b"a\r\n.one\r\nb\r\n.two\r\nc\r\n");
+    }
+
+    #[test]
+    fn undot_stuff_leading_dot() {
+        // Body begins with a stuffed line (rare but legal): `..foo\r\n` → `.foo\r\n`.
+        let mut buf = b"..start\r\nbody\r\n".to_vec();
+        undot_stuff(&mut buf);
+        assert_eq!(buf, b".start\r\nbody\r\n");
+    }
+
+    #[test]
+    fn undot_stuff_does_not_touch_mid_line_double_dot() {
+        // `foo..bar` (no preceding CRLF) is content, not a stuffed line.
+        let mut buf = b"foo..bar\r\n".to_vec();
+        let before = buf.clone();
+        undot_stuff(&mut buf);
+        assert_eq!(buf, before);
+    }
+
+    // (Pool recycling/oversized behaviour is now covered by
+    // `crate::bufpool::tests` — the encoded body pool is just a `BufPool`
+    // instance.)
+
+    /// Helper that drives `read_until_dot`'s scanning logic against an
+    /// in-memory reader so we can exercise the terminator + un-stuff paths
+    /// without a real NNTP socket. We bypass the `NntpStream` enum (which
+    /// is fixed to TcpStream / TlsStream) by inlining the same loop.
+    async fn read_until_dot_in_memory(input: &[u8]) -> io::Result<Vec<u8>> {
+        const TERMINATOR: &[u8] = b"\r\n.\r\n";
+        let mut reader = Cursor::new(input.to_vec());
+        let mut buf: Vec<u8> = Vec::with_capacity(64);
+        let mut scanned: usize = 0;
+
+        let term_end = loop {
+            let scan_from = scanned.saturating_sub(TERMINATOR.len() - 1);
+            if buf.len() >= TERMINATOR.len()
+                && let Some(rel) = memchr::memmem::find(&buf[scan_from..], TERMINATOR)
+            {
+                break scan_from + rel + TERMINATOR.len();
+            }
+            if buf.len() >= 3 && &buf[..3] == b".\r\n" {
+                break 3;
+            }
+            scanned = buf.len();
+            fill_into(&mut reader, &mut buf).await?;
+        };
+
+        buf.truncate(term_end - 3);
+        undot_stuff(&mut buf);
+        Ok(buf)
+    }
+
+    #[tokio::test]
+    async fn read_until_dot_basic_body() {
+        let body = read_until_dot_in_memory(b"=ybegin\r\ndata\r\n=yend\r\n.\r\n")
+            .await
+            .unwrap();
+        assert_eq!(body, b"=ybegin\r\ndata\r\n=yend\r\n");
+    }
+
+    #[tokio::test]
+    async fn read_until_dot_empty_body() {
+        let body = read_until_dot_in_memory(b".\r\n").await.unwrap();
+        assert!(body.is_empty());
+    }
+
+    #[tokio::test]
+    async fn read_until_dot_unstuffs() {
+        let body = read_until_dot_in_memory(b"a\r\n..b\r\nc\r\n.\r\n")
+            .await
+            .unwrap();
+        assert_eq!(body, b"a\r\n.b\r\nc\r\n");
+    }
+
+    #[tokio::test]
+    async fn read_until_dot_terminator_at_buffer_boundary() {
+        // Force the terminator to straddle a read boundary by sourcing
+        // bytes from a reader that returns short chunks. `Cursor` returns
+        // the full slice in one read, so we wrap in a chunked reader.
+        struct ChunkedReader {
+            data: Vec<u8>,
+            pos: usize,
+            chunk: usize,
+        }
+        impl tokio::io::AsyncRead for ChunkedReader {
+            fn poll_read(
+                mut self: std::pin::Pin<&mut Self>,
+                _cx: &mut std::task::Context<'_>,
+                buf: &mut tokio::io::ReadBuf<'_>,
+            ) -> std::task::Poll<io::Result<()>> {
+                let remaining = self.data.len() - self.pos;
+                let n = remaining.min(self.chunk).min(buf.remaining());
+                if n == 0 {
+                    return std::task::Poll::Ready(Ok(()));
+                }
+                let start = self.pos;
+                buf.put_slice(&self.data[start..start + n]);
+                self.pos += n;
+                std::task::Poll::Ready(Ok(()))
+            }
+        }
+
+        let mut reader = ChunkedReader {
+            data: b"abc\r\n.\r\n".to_vec(),
+            pos: 0,
+            chunk: 1, // one byte per read; terminator straddles every boundary
+        };
+        let mut buf: Vec<u8> = Vec::new();
+        let mut scanned: usize = 0;
+        const TERMINATOR: &[u8] = b"\r\n.\r\n";
+        let term_end = loop {
+            let scan_from = scanned.saturating_sub(TERMINATOR.len() - 1);
+            if buf.len() >= TERMINATOR.len()
+                && let Some(rel) = memchr::memmem::find(&buf[scan_from..], TERMINATOR)
+            {
+                break scan_from + rel + TERMINATOR.len();
+            }
+            if buf.len() >= 3 && &buf[..3] == b".\r\n" {
+                break 3;
+            }
+            scanned = buf.len();
+            fill_into(&mut reader, &mut buf).await.unwrap();
+        };
+        buf.truncate(term_end - 3);
+        undot_stuff(&mut buf);
+        assert_eq!(buf, b"abc\r\n");
+    }
 }

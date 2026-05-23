@@ -19,6 +19,7 @@ pub mod nzb;
 pub mod state;
 pub mod streamer;
 
+pub(crate) mod bufpool;
 pub(crate) mod cache;
 pub(crate) mod crypto;
 pub(crate) mod par2;

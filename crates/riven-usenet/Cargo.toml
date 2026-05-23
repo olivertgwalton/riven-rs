@@ -4,6 +4,7 @@ version = "0.1.0"
 edition.workspace = true
 
 [dependencies]
+riven-core = { path = "../riven-core" }
 tokio = { workspace = true, features = ["io-util", "net", "sync", "time", "rt", "macros"] }
 tokio-rustls = "0.26"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
@@ -19,6 +20,7 @@ sqlx = { workspace = true }
 bytes = { workspace = true }
 parking_lot = { workspace = true }
 crc32fast = "1"
+memchr = "2"
 lru = { workspace = true }
 futures = { workspace = true }
 pbkdf2 = { workspace = true }

@@ -1,3 +1,4 @@
+use bytes::{Bytes, BytesMut};
 use futures::StreamExt;
 use futures::stream;
 
@@ -22,8 +23,11 @@ impl UsenetStreamer {
         start: u64,
         end_inclusive: u64,
         priority: Priority,
-    ) -> Result<Vec<u8>, StreamerError> {
-        let mut out = Vec::with_capacity((end_inclusive - start + 1) as usize);
+    ) -> Result<Bytes, StreamerError> {
+        // Most reads stay inside a single RAR slice; we collect zero-copy
+        // `Bytes` slices first and only concatenate when more than one
+        // contributes to the range.
+        let mut parts_out: Vec<Bytes> = Vec::new();
 
         let mut virtual_pos: u64 = 0;
         for slice in slices {
@@ -64,10 +68,12 @@ impl UsenetStreamer {
                         .await?
                 }
             };
-            out.extend_from_slice(&bytes);
+            if !bytes.is_empty() {
+                parts_out.push(bytes);
+            }
         }
 
-        Ok(out)
+        Ok(concat_slices(parts_out, start, end_inclusive))
     }
 
     /// Fetch + decrypt a plaintext range from one slice's CBC ciphertext.
@@ -80,7 +86,7 @@ impl UsenetStreamer {
         slice_plain_lo: u64,
         slice_plain_hi: u64,
         priority: Priority,
-    ) -> Result<Vec<u8>, StreamerError> {
+    ) -> Result<Bytes, StreamerError> {
         use crate::crypto::{AES_BLOCK, decrypt_blocks_in_place, derive_key};
 
         let block = AES_BLOCK as u64;
@@ -95,12 +101,16 @@ impl UsenetStreamer {
             cipher_lo_in_part -= block;
         }
 
-        let mut fetched = self
+        // Decrypt mutates in place, so materialise into an owned BytesMut.
+        // The extra copy here is unavoidable but the encrypted-RAR path is
+        // not the streaming hot path.
+        let fetched_bytes = self
             .read_decoded_range_within_part(part, cipher_lo_in_part, cipher_hi_in_part, priority)
             .await?;
-        if fetched.len() < AES_BLOCK {
+        if fetched_bytes.len() < AES_BLOCK {
             return Err(StreamerError::BadRange);
         }
+        let mut fetched: Vec<u8> = fetched_bytes.into();
 
         let key = derive_key(password, &enc.salt, enc.log2_count);
         let iv = if need_predecessor {
@@ -120,7 +130,11 @@ impl UsenetStreamer {
         if end > fetched.len() {
             return Err(StreamerError::BadRange);
         }
-        Ok(fetched[plain_offset_in_fetched..end].to_vec())
+        // Truncate to the plaintext window without re-allocating: drop the
+        // tail, then split off the leading padding into a throwaway prefix.
+        fetched.truncate(end);
+        let plain = fetched.split_off(plain_offset_in_fetched);
+        Ok(Bytes::from(plain))
     }
 
     /// Read decoded bytes `[dec_start, dec_end_inclusive]` from a single
@@ -131,7 +145,7 @@ impl UsenetStreamer {
         dec_start: u64,
         dec_end_inclusive: u64,
         priority: Priority,
-    ) -> Result<Vec<u8>, StreamerError> {
+    ) -> Result<Bytes, StreamerError> {
         match part.decoded_seg_size {
             Some(seg_size) if seg_size > 0 => {
                 self.read_decoded_range_uniform(part, seg_size, dec_start, dec_end_inclusive, priority)
@@ -153,15 +167,14 @@ impl UsenetStreamer {
         dec_start: u64,
         dec_end_inclusive: u64,
         priority: Priority,
-    ) -> Result<Vec<u8>, StreamerError> {
+    ) -> Result<Bytes, StreamerError> {
         let want_len = (dec_end_inclusive - dec_start + 1) as usize;
-        let mut out = Vec::with_capacity(want_len);
 
         let total_segs = part.segments.len();
         let first_seg = (dec_start / seg_size) as usize;
         let last_seg = ((dec_end_inclusive / seg_size) as usize).min(total_segs - 1);
         if first_seg >= total_segs {
-            return Ok(out);
+            return Ok(Bytes::new());
         }
 
         let read_concurrency = self.pool.download_concurrency().max(PREFETCH_FLOOR);
@@ -176,6 +189,8 @@ impl UsenetStreamer {
             })
             .buffered(read_concurrency);
 
+        let mut slices: Vec<Bytes> = Vec::new();
+        let mut accumulated: usize = 0;
         while let Some((idx, result)) = stream.next().await {
             let decoded = result?;
             let seg_lo = (idx as u64) * seg_size;
@@ -186,15 +201,17 @@ impl UsenetStreamer {
             let take_hi_inclusive =
                 (take_hi_inclusive_u64 as usize).min(dec_len_usize.saturating_sub(1));
             if take_lo <= take_hi_inclusive {
-                out.extend_from_slice(&decoded[take_lo..=take_hi_inclusive]);
+                let part = decoded.slice(take_lo..=take_hi_inclusive);
+                accumulated += part.len();
+                slices.push(part);
             }
 
-            if out.len() >= want_len {
+            if accumulated >= want_len {
                 break;
             }
         }
 
-        Ok(out)
+        Ok(concat_slices(slices, dec_start, dec_end_inclusive))
     }
 
     /// Slow fallback: no uniform size known. Walk segments from the first
@@ -205,9 +222,8 @@ impl UsenetStreamer {
         dec_start: u64,
         dec_end_inclusive: u64,
         priority: Priority,
-    ) -> Result<Vec<u8>, StreamerError> {
+    ) -> Result<Bytes, StreamerError> {
         let want_len = (dec_end_inclusive - dec_start + 1) as usize;
-        let mut out = Vec::with_capacity(want_len);
         let mut decoded_cursor: u64 = 0;
 
         let total_segs = part.segments.len();
@@ -238,6 +254,8 @@ impl UsenetStreamer {
             })
             .buffered(read_concurrency);
 
+        let mut slices: Vec<Bytes> = Vec::new();
+        let mut accumulated: usize = 0;
         while let Some(result) = stream.next().await {
             let decoded = result?;
             let dec_len = decoded.len() as u64;
@@ -258,17 +276,32 @@ impl UsenetStreamer {
             let take_lo = take_lo.min(dec_len_usize);
             let take_hi_inclusive = take_hi_inclusive.min(dec_len_usize.saturating_sub(1));
             if take_lo <= take_hi_inclusive {
-                let Some(slice) = decoded.get(take_lo..=take_hi_inclusive) else {
-                    return Err(StreamerError::BadRange);
-                };
-                out.extend_from_slice(slice);
+                let part = decoded.slice(take_lo..=take_hi_inclusive);
+                accumulated += part.len();
+                slices.push(part);
             }
 
-            if out.len() >= want_len {
+            if accumulated >= want_len {
                 break;
             }
         }
 
-        Ok(out)
+        Ok(concat_slices(slices, dec_start, dec_end_inclusive))
+    }
+}
+
+/// Same fast-path as the direct reader: single slice → zero-copy return;
+/// multi-slice → concat into a sized `BytesMut`.
+fn concat_slices(mut slices: Vec<Bytes>, start: u64, end_inclusive: u64) -> Bytes {
+    match slices.len() {
+        0 => Bytes::new(),
+        1 => slices.pop().unwrap_or_default(),
+        _ => {
+            let mut buf = BytesMut::with_capacity((end_inclusive - start + 1) as usize);
+            for s in slices {
+                buf.extend_from_slice(&s);
+            }
+            buf.freeze()
+        }
     }
 }

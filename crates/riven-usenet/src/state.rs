@@ -7,9 +7,11 @@
 //! read path inside the same process.
 
 use std::collections::{HashMap, HashSet};
+use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 
+use lru::LruCache;
 use parking_lot::Mutex;
 use tokio::sync::Notify;
 
@@ -19,6 +21,27 @@ use crate::cache::SegmentCache;
 /// Size up linearly with concurrent stream count: each stream needs ~10-20 MB
 /// of warm segments. Default 256 MB ≈ 12 concurrent streams.
 const DEFAULT_CACHE_BYTES: u64 = 256 * 1024 * 1024;
+
+/// Default budget for the deserialized-meta cache. Each `NzbMeta` holds the
+/// full per-segment address book (message-ids + offsets) for one file, so a
+/// big remux can be tens of MB while a TV episode is a few hundred KB. A
+/// library scan touches every ingested file, so without a bound the cache
+/// grew to hold *all* of them (observed ~2 GB resident with ~1,200 files).
+/// 256 MB keeps a healthy working set of recently-streamed files hot;
+/// cold ones re-load from Postgres on the next access. Override with
+/// `RIVEN_USENET_META_CACHE_BYTES`.
+const DEFAULT_META_CACHE_BYTES: u64 = 256 * 1024 * 1024;
+
+/// Default cap on the decoded-segment-size memo. One `(message_id, u64)`
+/// entry per RAR segment ever fetched; ~80 bytes each, so 500k entries is
+/// ~40 MB. Override with `RIVEN_USENET_DECODED_SIZES_ENTRIES`.
+const DEFAULT_DECODED_SIZES_ENTRIES: usize = 500_000;
+
+/// Default cap on concurrent head/tail precache operations. Each warms
+/// ~8 MB (head + tail) with internal prefetch fan-out, so a handful in
+/// flight is plenty to keep playback probes hot without letting a library
+/// scan spawn hundreds of simultaneous fetch+decode pipelines.
+const DEFAULT_PRECACHE_CONCURRENCY: usize = 4;
 
 /// Floor for ingest concurrency when the connection budget is tiny or
 /// unknown — preserves the historical default so small setups behave as before.
@@ -56,18 +79,37 @@ pub struct StreamerState {
     pub in_flight: InFlight,
     pub precached: PrecachedFiles,
     pub migrated: MigratedMetas,
+    /// Caps concurrent head/tail precache operations. A Plex/Jellyfin
+    /// library scan HEADs hundreds of files in a burst, each of which
+    /// fires a fire-and-forget `precache_head_tail`. Without a limit
+    /// that's hundreds of simultaneous 8 MB fetch+decode pipelines —
+    /// a multi-GB allocation spike that musl never returns to the OS
+    /// (RSS observed climbing to ~3.5 GB and holding). Bounding peak
+    /// precache concurrency caps that high-water mark; the trade-off is
+    /// only that head/tail warming during a mass scan happens a few
+    /// files at a time. `RIVEN_USENET_PRECACHE_CONCURRENCY` overrides.
+    pub precache_sem: tokio::sync::Semaphore,
 }
 
 impl StreamerState {
     fn new() -> Self {
-        let cache_bytes = std::env::var("RIVEN_USENET_CACHE_BYTES")
+        let cache_bytes = env_u64("RIVEN_USENET_CACHE_BYTES", DEFAULT_CACHE_BYTES);
+        let meta_cache_bytes = env_u64("RIVEN_USENET_META_CACHE_BYTES", DEFAULT_META_CACHE_BYTES);
+        let decoded_sizes_entries = std::env::var("RIVEN_USENET_DECODED_SIZES_ENTRIES")
             .ok()
-            .and_then(|s| s.parse::<u64>().ok())
-            .unwrap_or(DEFAULT_CACHE_BYTES);
+            .and_then(|s| s.parse::<usize>().ok())
+            .filter(|&n| n > 0)
+            .unwrap_or(DEFAULT_DECODED_SIZES_ENTRIES);
+        let precache_concurrency = std::env::var("RIVEN_USENET_PRECACHE_CONCURRENCY")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .filter(|&n| n > 0)
+            .unwrap_or(DEFAULT_PRECACHE_CONCURRENCY);
         Self {
             cache: SegmentCache::new(cache_bytes),
-            meta_cache: MetaCache::default(),
-            decoded_sizes: DecodedSizes::default(),
+            meta_cache: MetaCache::new(meta_cache_bytes),
+            decoded_sizes: DecodedSizes::new(decoded_sizes_entries),
+            precache_sem: tokio::sync::Semaphore::new(precache_concurrency),
             fails: PermanentFails::default(),
             in_flight: InFlight::default(),
             precached: PrecachedFiles::default(),
@@ -86,40 +128,138 @@ pub fn global_active_streams() -> Arc<ActiveStreams> {
     C.get_or_init(|| Arc::new(ActiveStreams::default())).clone()
 }
 
-/// Deserialized metadata cache. Eliminates a per-read Redis round-trip +
-/// JSON deserialization. Entries are dropped when the underlying Redis key
-/// expires (we re-fetch on miss).
-#[derive(Default)]
+/// Read a `u64` budget from an env var, falling back to `default` when
+/// unset or unparseable. Zero is treated as "use default" to avoid an
+/// accidental empty cache.
+fn env_u64(name: &str, default: u64) -> u64 {
+    std::env::var(name)
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(default)
+}
+
+/// Deserialized metadata cache. Eliminates a per-read Postgres round-trip +
+/// JSON deserialization on the streaming hot path. Bounded by an estimate
+/// of each entry's deserialized footprint (dominated by the per-segment
+/// message-id strings) and evicted LRU — a library scan that touches every
+/// ingested file can no longer pin all of them in memory at once. Cold
+/// files re-load from Postgres on the next access; an in-flight stream is
+/// unaffected because it holds its own `Arc<NzbMeta>` for the duration of
+/// each read.
 pub struct MetaCache {
-    inner: Mutex<HashMap<String, Arc<crate::streamer::NzbMeta>>>,
+    state: Mutex<MetaCacheState>,
+    max_bytes: u64,
+}
+
+struct MetaCacheState {
+    /// Value carries the entry's estimated weight so eviction accounting
+    /// doesn't have to re-walk a (potentially 200k-segment) meta.
+    lru: LruCache<String, (Arc<crate::streamer::NzbMeta>, u64)>,
+    current_bytes: u64,
 }
 
 impl MetaCache {
+    pub fn new(max_bytes: u64) -> Self {
+        Self {
+            state: Mutex::new(MetaCacheState {
+                lru: LruCache::unbounded(),
+                current_bytes: 0,
+            }),
+            max_bytes,
+        }
+    }
+
     pub fn get(&self, info_hash: &str) -> Option<Arc<crate::streamer::NzbMeta>> {
-        self.inner.lock().get(info_hash).cloned()
+        let mut state = self.state.lock();
+        state.lru.get(info_hash).map(|(meta, _)| meta.clone())
     }
 
     pub fn put(&self, info_hash: String, meta: Arc<crate::streamer::NzbMeta>) {
-        self.inner.lock().insert(info_hash, meta);
+        let weight = estimate_meta_bytes(&meta);
+        let mut state = self.state.lock();
+        if let Some((_, prev_weight)) = state.lru.put(info_hash, (meta, weight)) {
+            state.current_bytes = state.current_bytes.saturating_sub(prev_weight);
+        }
+        state.current_bytes = state.current_bytes.saturating_add(weight);
+
+        // Evict least-recently-used entries until under budget, but always
+        // keep at least the just-inserted entry — a single meta larger than
+        // the whole budget (e.g. a 40 MB remux address book) must still be
+        // cached for the stream that just requested it.
+        while state.current_bytes > self.max_bytes && state.lru.len() > 1 {
+            let Some((_, (_, popped_weight))) = state.lru.pop_lru() else {
+                break;
+            };
+            state.current_bytes = state.current_bytes.saturating_sub(popped_weight);
+        }
     }
+
+    #[cfg(test)]
+    pub fn current_bytes(&self) -> u64 {
+        self.state.lock().current_bytes
+    }
+
+    #[cfg(test)]
+    pub fn entry_count(&self) -> usize {
+        self.state.lock().lru.len()
+    }
+}
+
+/// Estimate the heap footprint of a deserialized `NzbMeta`. Dominated by
+/// the per-segment `message_id` strings plus the fixed-size segment/offset
+/// vectors. Walks every segment once — cheap relative to the deserialize
+/// that just produced the meta, and only runs on cache insert.
+fn estimate_meta_bytes(meta: &crate::streamer::NzbMeta) -> u64 {
+    use crate::streamer::NzbMetaSource;
+    let seg = std::mem::size_of::<crate::nzb::NzbSegment>();
+    let mut bytes = 0u64;
+    for file in &meta.files {
+        match &file.source {
+            NzbMetaSource::Direct { offsets, segments } => {
+                bytes += (offsets.len() * 8) as u64;
+                for s in segments {
+                    bytes += (seg + s.message_id.len()) as u64;
+                }
+            }
+            NzbMetaSource::Rar { parts, slices } => {
+                for p in parts {
+                    bytes += (p.offsets.len() * 8) as u64;
+                    for s in &p.segments {
+                        bytes += (seg + s.message_id.len()) as u64;
+                    }
+                }
+                bytes += (slices.len() * std::mem::size_of::<crate::streamer::NzbRarSlice>()) as u64;
+            }
+        }
+    }
+    bytes.max(1)
 }
 
 /// Memoized decoded size of NNTP segments keyed by message-id. Populated as
 /// segments are fetched. Lets us know "this segment is N decoded bytes"
 /// without re-fetching — required to binary-search into the middle of a
-/// part when serving a random seek.
-#[derive(Default)]
+/// part when serving a random seek. LRU-bounded so it can't grow without
+/// limit across many RAR files; an evicted entry just forces the read path
+/// to fall back to the segment walk (correct, slightly slower).
 pub struct DecodedSizes {
-    inner: Mutex<HashMap<String, u64>>,
+    inner: Mutex<LruCache<String, u64>>,
 }
 
 impl DecodedSizes {
+    pub fn new(max_entries: usize) -> Self {
+        let cap = NonZeroUsize::new(max_entries).unwrap_or(NonZeroUsize::MIN);
+        Self {
+            inner: Mutex::new(LruCache::new(cap)),
+        }
+    }
+
     pub fn get(&self, message_id: &str) -> Option<u64> {
         self.inner.lock().get(message_id).copied()
     }
 
     pub fn put(&self, message_id: String, size: u64) {
-        self.inner.lock().insert(message_id, size);
+        self.inner.lock().put(message_id, size);
     }
 }
 
@@ -281,5 +421,74 @@ impl ActiveStreams {
 
     pub fn has_any(&self) -> bool {
         !self.inner.lock().is_empty()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::nzb::NzbSegment;
+    use crate::streamer::{NzbMeta, NzbMetaFile, NzbMetaSource};
+
+    fn meta_with_segments(info_hash: &str, n: usize) -> Arc<NzbMeta> {
+        let segments: Vec<NzbSegment> = (0..n)
+            .map(|i| NzbSegment {
+                bytes: 700_000,
+                number: i as u32 + 1,
+                // ~40-char message-ids, like real usenet posts.
+                message_id: format!("{i:08}@news.example.invalid.padding.xx"),
+            })
+            .collect();
+        let offsets: Vec<u64> = (0..=n as u64).map(|i| i * 700_000).collect();
+        Arc::new(NzbMeta {
+            info_hash: info_hash.to_string(),
+            password: None,
+            files: vec![NzbMetaFile {
+                filename: format!("{info_hash}.mkv"),
+                total_size: (n as u64) * 700_000,
+                source: NzbMetaSource::Direct { offsets, segments },
+            }],
+        })
+    }
+
+    #[test]
+    fn meta_cache_evicts_lru_over_budget() {
+        // Budget for ~2 of these metas.
+        let one = estimate_meta_bytes(&meta_with_segments("probe", 1_000));
+        let cache = MetaCache::new(one * 2 + one / 2);
+
+        cache.put("a".into(), meta_with_segments("a", 1_000));
+        cache.put("b".into(), meta_with_segments("b", 1_000));
+        // Touch "a" so "b" becomes the LRU victim.
+        assert!(cache.get("a").is_some());
+        cache.put("c".into(), meta_with_segments("c", 1_000));
+
+        assert!(cache.get("a").is_some(), "recently-used survives");
+        assert!(cache.get("b").is_none(), "LRU evicted");
+        assert!(cache.get("c").is_some(), "newest survives");
+        assert!(cache.current_bytes() <= one * 2 + one / 2);
+    }
+
+    #[test]
+    fn meta_cache_keeps_oversized_single_entry() {
+        // A meta larger than the whole budget must still be cached for the
+        // stream that just asked for it.
+        let big = meta_with_segments("big", 50_000);
+        let cache = MetaCache::new(1024); // absurdly small
+        cache.put("big".into(), big);
+        assert!(cache.get("big").is_some());
+        assert_eq!(cache.entry_count(), 1);
+    }
+
+    #[test]
+    fn decoded_sizes_evicts_lru() {
+        let sizes = DecodedSizes::new(2);
+        sizes.put("a".into(), 1);
+        sizes.put("b".into(), 2);
+        let _ = sizes.get("a"); // a → MRU
+        sizes.put("c".into(), 3); // evicts b
+        assert_eq!(sizes.get("a"), Some(1));
+        assert_eq!(sizes.get("b"), None);
+        assert_eq!(sizes.get("c"), Some(3));
     }
 }

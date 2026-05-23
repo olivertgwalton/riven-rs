@@ -24,7 +24,8 @@ use riven_db::repo;
 
 use crate::cache::RangeCache;
 use crate::chunks::FileLayout;
-use crate::media_stream::{MediaStream, ReadOutcome};
+use crate::media_stream::{MediaStream, ReadOutcome, UsenetSession};
+use riven_core::local_source::parse_usenet_url;
 use crate::path_info::{CanonicalPath, PathTarget, parse_path};
 use crate::readdir::{DirEntry, populate_entries};
 use crate::stream::fetch_range;
@@ -94,6 +95,13 @@ enum OpenedFile {
         download_url: Option<Arc<str>>,
         provider: Option<Arc<str>>,
         stream_session: MediaStream,
+    },
+    /// Usenet-backed media read in-process via the streamer (no loopback
+    /// HTTP). The segment map is permanent, so there's no stream-URL refresh
+    /// dance — failures surface as EIO directly.
+    Usenet {
+        path: Arc<str>,
+        session: UsenetSession,
     },
     /// Subtitle entries are tiny and stored inline in the DB; we hold the full
     /// payload in the open handle and serve byte-range reads from memory.
@@ -186,6 +194,10 @@ pub struct RivenFsInner {
     // otherwise each fire their own link-resolver request. Whoever wins the
     // per-entry lock refreshes; the rest re-read the URL the winner persisted.
     link_refresh_locks: DashMap<i64, Arc<Mutex<()>>>,
+    // In-process usenet byte source. When set and a media entry's stream URL
+    // is a `/usenet/{info_hash}/{file_index}` route, reads go directly to the
+    // streamer instead of looping back over HTTP — see `OpenedFile::Usenet`.
+    local_source: Option<Arc<dyn riven_core::local_source::LocalByteSource>>,
 }
 
 pub struct RivenFs {
@@ -193,6 +205,7 @@ pub struct RivenFs {
 }
 
 impl RivenFs {
+    #[expect(clippy::too_many_arguments, reason = "constructor threads several process-wide handles")]
     pub fn new(
         vfs_layout: Arc<RwLock<VfsLibraryLayout>>,
         filesystem_settings_revision: Arc<AtomicU64>,
@@ -200,6 +213,7 @@ impl RivenFs {
         stream_client: reqwest::Client,
         link_request_tx: mpsc::Sender<riven_core::stream_link::LinkRequest>,
         cache_max_size_mb: u64,
+        local_source: Option<Arc<dyn riven_core::local_source::LocalByteSource>>,
     ) -> Self {
         Self {
             inner: Arc::new(RivenFsInner::new(
@@ -209,12 +223,14 @@ impl RivenFs {
                 stream_client,
                 link_request_tx,
                 cache_max_size_mb,
+                local_source,
             )),
         }
     }
 }
 
 impl RivenFsInner {
+    #[expect(clippy::too_many_arguments, reason = "constructor threads several process-wide handles")]
     fn new(
         vfs_layout: Arc<RwLock<VfsLibraryLayout>>,
         filesystem_settings_revision: Arc<AtomicU64>,
@@ -222,6 +238,7 @@ impl RivenFsInner {
         stream_client: reqwest::Client,
         link_request_tx: mpsc::Sender<riven_core::stream_link::LinkRequest>,
         cache_max_size_mb: u64,
+        local_source: Option<Arc<dyn riven_core::local_source::LocalByteSource>>,
     ) -> Self {
         // Sized by total resident bytes — chunk sizes vary (headers 256 KB,
         // footers up to 10 MB, body chunks 1 MB), so a count-based budget
@@ -258,6 +275,7 @@ impl RivenFsInner {
             readdir_cache: DashMap::new(),
             prewarm_semaphore: Arc::new(Semaphore::new(8)),
             link_refresh_locks: DashMap::new(),
+            local_source,
         }
     }
 
@@ -473,6 +491,9 @@ impl RivenFsInner {
                 &self.stream_client,
                 &self.runtime,
             ),
+            // Usenet reads are dispatched directly in `read()` and never
+            // reach `read_handle` (which exists for the HTTP refresh dance).
+            OpenedFile::Usenet { session, .. } => session.read(start, end, &self.runtime),
             OpenedFile::Subtitle { content } => {
                 let len = content.len() as u64;
                 if start >= len {
@@ -727,8 +748,30 @@ impl Filesystem for RivenFs {
         let fd = s.next_fd.fetch_add(1, Ordering::SeqCst);
         let file_size = entry.file_size;
 
+        // Usenet-backed entries read in-process via the streamer (no loopback
+        // HTTP, no duplicate range cache). Detected by the stream URL shape.
+        if let (Some(source), Some((info_hash, file_index))) =
+            (s.local_source.clone(), parse_usenet_url(&stream_url))
+        {
+            s.file_handles.insert(
+                fd,
+                Mutex::new(OpenedFile::Usenet {
+                    path,
+                    session: UsenetSession::new(
+                        source,
+                        Arc::from(info_hash.as_str()),
+                        file_index,
+                        file_size,
+                    ),
+                }),
+            );
+            reply.opened(FuseFh(fd), FopenFlags::FOPEN_KEEP_CACHE);
+            return;
+        }
+
         // Pre-warm header and footer bytes so media-server scans hit the cache,
-        // not the CDN.
+        // not the CDN. (HTTP-origin path only; the usenet streamer warms its
+        // own head/tail.)
         s.runtime.spawn(prewarm_header_footer(
             Arc::clone(&s.range_cache),
             s.stream_client.clone(),
@@ -797,6 +840,23 @@ impl Filesystem for RivenFs {
                 return;
             }
 
+            // Usenet reads go straight to the in-process session — no
+            // stream-URL refresh (the segment map is permanent).
+            if let OpenedFile::Usenet { path, session } = &mut *handle {
+                let start = offset;
+                if start >= session.file_size() {
+                    reply.data(&[]);
+                    return;
+                }
+                let end = (start + size as u64 - 1).min(session.file_size() - 1);
+                tracing::debug!(target: "streaming", path = %path, offset = start, size, "usenet read");
+                match session.read(start, end, &s.runtime) {
+                    ReadOutcome::Data(buf) => reply.data(&buf),
+                    ReadOutcome::Error(code) => reply.error(Errno::from_i32(code)),
+                }
+                return;
+            }
+
             let (file_size, path, stream_url, download_url, provider, entry_id) = match &*handle {
                 OpenedFile::Media {
                     stream_session,
@@ -813,7 +873,7 @@ impl Filesystem for RivenFs {
                     provider.as_ref().map(Arc::clone),
                     *entry_id,
                 ),
-                OpenedFile::Subtitle { .. } => unreachable!(),
+                OpenedFile::Subtitle { .. } | OpenedFile::Usenet { .. } => unreachable!(),
             };
 
             let start = offset;
@@ -852,7 +912,7 @@ impl Filesystem for RivenFs {
                             }
                             let refreshed = match &*handle {
                                 OpenedFile::Media { stream_url, .. } => Arc::clone(stream_url),
-                                OpenedFile::Subtitle { .. } => unreachable!(),
+                                OpenedFile::Subtitle { .. } | OpenedFile::Usenet { .. } => unreachable!(),
                             };
                             s.read_handle(&mut handle, start, end, &refreshed)
                         }

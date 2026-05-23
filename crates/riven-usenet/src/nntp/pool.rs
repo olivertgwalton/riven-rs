@@ -411,11 +411,11 @@ impl NntpPool {
         Err(last_err.unwrap_or(NntpError::Protocol("no providers configured")))
     }
 
-    pub async fn fetch_body(
+    pub(crate) async fn fetch_body(
         &self,
         message_id: &str,
         priority: Priority,
-    ) -> Result<Vec<u8>, NntpError> {
+    ) -> Result<crate::bufpool::PooledBuf, NntpError> {
         let mid = message_id.to_string();
         self.try_each(priority, |mut conn| {
             let mid = mid.clone();

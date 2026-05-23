@@ -183,7 +183,6 @@ pub async fn usenet_stream_handler(
     }
 
     const BUFFER_THRESHOLD: u64 = 1024 * 1024;
-    const STREAM_CHUNK_BYTES: u64 = 256 * 1024;
     let status = if partial {
         StatusCode::PARTIAL_CONTENT
     } else {
@@ -212,33 +211,6 @@ pub async fn usenet_stream_handler(
         };
     }
 
-    // Eager prefetch + cancellation. The prefetch task warms the segment
-    // cache for the requested range; the body stream's own reads hit the
-    // cache instead of NNTP. Because `fetch_decoded_cached` now
-    // deduplicates concurrent fetches via an in-flight promise map,
-    // the body and the prefetch coordinate transparently — if both want
-    // segment N at the same time, only one NNTP round-trip happens.
-    // The prefetch is also internally bounded to 4 concurrent fetches
-    // so it doesn't starve the NNTP connection pool.
-    //
-    // The cancellation token aborts the prefetch task when the body
-    // stream is dropped (client disconnect, completion) — no orphaned
-    // bandwidth.
-    let cancel = tokio_util::sync::CancellationToken::new();
-    {
-        let streamer = streamer.clone();
-        let info_hash = info_hash.clone();
-        let cancel = cancel.clone();
-        tokio::spawn(async move {
-            tokio::select! {
-                _ = streamer.prefetch_range(&info_hash, file_index, start, end) => {}
-                _ = cancel.cancelled() => {
-                    tracing::debug!(info_hash, "usenet prefetch cancelled");
-                }
-            }
-        });
-    }
-
     let client_ua = headers
         .get(axum::http::header::USER_AGENT)
         .and_then(|v| v.to_str().ok())
@@ -261,37 +233,6 @@ pub async fn usenet_stream_handler(
         },
     );
 
-    // Guard that lives inside the unfold's state. When the body stream
-    // is dropped (client disconnect, body completion, axum tearing
-    // things down), the guard's Drop runs: cancels the prefetch token
-    // and unregisters the active-streams entry. Without this both would
-    // leak past the stream's lifetime.
-    struct StreamGuard {
-        cancel: tokio_util::sync::CancellationToken,
-        key: String,
-    }
-    impl Drop for StreamGuard {
-        fn drop(&mut self) {
-            self.cancel.cancel();
-            riven_usenet::active_streams().unregister(&self.key);
-        }
-    }
-
-    struct UnfoldState {
-        pos: u64,
-        _guard: StreamGuard,
-    }
-
-    let initial = UnfoldState {
-        pos: start,
-        _guard: StreamGuard {
-            cancel: cancel.clone(),
-            key: stream_key.clone(),
-        },
-    };
-
-    let info_hash_owned = info_hash.clone();
-    let streamer = streamer.clone();
     tracing::info!(
         info_hash,
         file_index,
@@ -300,75 +241,66 @@ pub async fn usenet_stream_handler(
         len,
         "usenet body stream starting"
     );
-    let stream = futures::stream::unfold(initial, move |mut state| {
-        let info_hash = info_hash_owned.clone();
-        let streamer = streamer.clone();
-        let key = state._guard.key.clone();
-        async move {
-            if state.pos > end {
-                return None;
-            }
-            let chunk_end = state.pos.saturating_add(STREAM_CHUNK_BYTES - 1).min(end);
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs() as i64)
-                .unwrap_or(0);
-            riven_usenet::active_streams().touch(&key, now);
 
-            let chunk_started = std::time::Instant::now();
-            tracing::debug!(pos = state.pos, chunk_end, "usenet body chunk starting");
-            match streamer
-                .read_range(&info_hash, file_index, state.pos, chunk_end)
-                .await
-            {
-                Ok(bytes) => {
-                    let elapsed_ms = chunk_started.elapsed().as_millis();
-                    let returned = bytes.len();
-                    let requested = (chunk_end - state.pos + 1) as usize;
-                    // Direct sources' offsets are estimated decoded sizes; a
-                    // small drift between requested and returned is expected
-                    // (yEnc per-segment variance after the ingest-time
-                    // rescale). Only warn when the gap is large enough to
-                    // suggest a real problem rather than addressing slop.
-                    let drift = requested.saturating_sub(returned);
-                    let drift_is_significant = drift * 20 > requested && drift > 4096;
-                    if drift_is_significant {
-                        tracing::warn!(
-                            pos = state.pos,
-                            chunk_end,
-                            returned,
-                            requested,
-                            elapsed_ms,
-                            "usenet body chunk SHORT — emitting fewer bytes than requested"
-                        );
-                    } else {
-                        tracing::debug!(
-                            pos = state.pos,
-                            returned,
-                            requested,
-                            elapsed_ms,
-                            "usenet body chunk ok"
-                        );
+    // Bounded, self-pipelining body stream. `byte_stream` keeps a small
+    // number of segment fetches in flight ahead of the emit cursor and
+    // yields decoded slices in order — no separate race-to-EOF prefetch
+    // task (which used to evict the player's own read position from the
+    // cache and cause the video-freezes-while-audio-continues stutter).
+    // `buffered` backpressure bounds the read-ahead to the lookahead
+    // window, so it can't run away from playback.
+    //
+    // `BodyStream` wraps it to (a) map decode errors to `io::Error` for
+    // hyper, (b) unregister the active-streams entry when the body is
+    // dropped (client disconnect / completion), and (c) refresh the
+    // active-streams heartbeat every Nth frame without a per-frame clock
+    // read.
+    let inner = streamer.byte_stream(meta.clone(), file_index, start, end);
+
+    struct BodyStream {
+        inner: futures::stream::BoxStream<'static, Result<axum::body::Bytes, riven_usenet::StreamerError>>,
+        key: String,
+        frames: u32,
+    }
+    impl Drop for BodyStream {
+        fn drop(&mut self) {
+            riven_usenet::active_streams().unregister(&self.key);
+        }
+    }
+    impl futures::Stream for BodyStream {
+        type Item = Result<axum::body::Bytes, std::io::Error>;
+        fn poll_next(
+            self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Option<Self::Item>> {
+            const TOUCH_EVERY_N_FRAMES: u32 = 16;
+            let this = self.get_mut();
+            match this.inner.as_mut().poll_next(cx) {
+                std::task::Poll::Ready(Some(Ok(bytes))) => {
+                    this.frames = this.frames.wrapping_add(1);
+                    if this.frames.is_multiple_of(TOUCH_EVERY_N_FRAMES) {
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_secs() as i64)
+                            .unwrap_or(0);
+                        riven_usenet::active_streams().touch(&this.key, now);
                     }
-                    state.pos = chunk_end.saturating_add(1);
-                    let item: Result<axum::body::Bytes, std::io::Error> =
-                        Ok(axum::body::Bytes::from(bytes));
-                    Some((item, state))
+                    std::task::Poll::Ready(Some(Ok(bytes)))
                 }
-                Err(e) => {
-                    tracing::warn!(
-                        info_hash, file_index, pos = state.pos, error = %e,
-                        "usenet stream chunk failed"
-                    );
-                    let item: Result<axum::body::Bytes, std::io::Error> =
-                        Err(std::io::Error::other(format!("upstream: {e}")));
-                    state.pos = end.saturating_add(1);
-                    Some((item, state))
-                }
+                std::task::Poll::Ready(Some(Err(e))) => std::task::Poll::Ready(Some(Err(
+                    std::io::Error::other(format!("upstream: {e}")),
+                ))),
+                std::task::Poll::Ready(None) => std::task::Poll::Ready(None),
+                std::task::Poll::Pending => std::task::Poll::Pending,
             }
         }
+    }
+
+    let body = Body::from_stream(BodyStream {
+        inner,
+        key: stream_key,
+        frames: 0,
     });
-    let body = Body::from_stream(stream);
     let mut resp = Response::new(body);
     *resp.status_mut() = status;
     *resp.headers_mut() = header_map;
