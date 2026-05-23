@@ -49,35 +49,31 @@ impl Inner {
                     return;
                 }
                 (true, false) => {
-                    if let Some(tx) = self.high.pop_front() {
-                        if tx.send(()).is_ok() {
+                    if let Some(tx) = self.high.pop_front()
+                        && tx.send(()).is_ok() {
                             return;
                         }
                         // Receiver dropped — task was cancelled; try next.
-                    }
                 }
                 (false, true) => {
-                    if let Some(tx) = self.low.pop_front() {
-                        if tx.send(()).is_ok() {
+                    if let Some(tx) = self.low.pop_front()
+                        && tx.send(()).is_ok() {
                             return;
                         }
-                    }
                 }
                 (true, true) => {
                     self.accumulated += HIGH_ODDS;
                     let serve_high = self.accumulated >= 100;
                     if serve_high {
                         self.accumulated -= 100;
-                        if let Some(tx) = self.high.pop_front() {
-                            if tx.send(()).is_ok() {
+                        if let Some(tx) = self.high.pop_front()
+                            && tx.send(()).is_ok() {
                                 return;
                             }
-                        }
-                    } else if let Some(tx) = self.low.pop_front() {
-                        if tx.send(()).is_ok() {
+                    } else if let Some(tx) = self.low.pop_front()
+                        && tx.send(()).is_ok() {
                             return;
                         }
-                    }
                     // Chosen sender's receiver was dropped; loop to retry.
                 }
             }
@@ -122,8 +118,10 @@ impl PrioritizedSemaphore {
             }
             rx
         };
-        // Park until a release wakes us.
-        let _ = rx.await;
+        // Park until a release wakes us. A RecvError means the sender was
+        // dropped (shutdown); we hand out the permit and let the caller proceed
+        // either way.
+        let _woken = rx.await;
         OwnedPermit { sem: self.clone() }
     }
 

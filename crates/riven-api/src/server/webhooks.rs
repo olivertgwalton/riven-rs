@@ -36,11 +36,11 @@ pub(super) async fn seerr_webhook(
     match parsed {
         SeerrWebhookPayload::Test { .. } => {
             tracing::info!("seerr webhook test notification received");
-            return StatusCode::OK;
+            StatusCode::OK
         }
         SeerrWebhookPayload::Notification(n) => {
             handle_notification(&state, n).await;
-            return StatusCode::OK;
+            StatusCode::OK
         }
     }
 }

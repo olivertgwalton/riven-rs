@@ -11,8 +11,8 @@
 //! The public surface is `UsenetStreamer`. It is constructed once at process
 //! startup with NNTP credentials and a `PgPool`, and consumed by both the
 //! ingest path (`plugin-usenet`, which parses an NZB and persists its
-//! segment map in Postgres) and the serving path (riven-api's `/usenet/...`
-//! HTTP route).
+//! segment map in Postgres) and the serving path (riven-vfs reads it
+//! in-process via the `LocalByteSource` trait).
 
 pub mod nntp;
 pub mod nzb;

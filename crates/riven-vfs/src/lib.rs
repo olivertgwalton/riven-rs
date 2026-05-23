@@ -33,7 +33,6 @@ impl FuseSession {
 /// Returns `Ok(None)` if `mount_path` does not exist — the caller treats this
 /// as "skip VFS for now" rather than auto-creating a directory that may be a
 /// host-managed bind mount not yet ready.
-#[expect(clippy::too_many_arguments, reason = "mount wiring threads several process-wide handles")]
 pub fn mount(
     mount_path: &str,
     vfs_layout: Arc<RwLock<VfsLibraryLayout>>,

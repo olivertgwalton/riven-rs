@@ -189,18 +189,18 @@ impl NntpStream {
 
 /// Read more bytes from `reader` into the tail of `buf`, growing the
 /// buffer's capacity if needed. Returns the number of bytes appended.
-/// Wraps `AsyncRead::read` rather than `read_until` so we can pull large
-/// chunks (typically a full BufReader fill, 512 KB at a time) instead of
-/// one line per call.
+/// Uses `read_buf` so the read lands in `buf`'s **uninitialized** spare
+/// capacity (advancing the length by the amount read) — no `resize`-zero of
+/// the chunk before it's overwritten. A ~700 KB body would otherwise memset
+/// ~700 KB of scratch across its ~11 reads. Pulls large chunks (a full
+/// BufReader fill) rather than one line per call.
 async fn fill_into<R: tokio::io::AsyncRead + Unpin>(
     reader: &mut R,
     buf: &mut Vec<u8>,
 ) -> io::Result<usize> {
     const READ_CHUNK: usize = 64 * 1024;
-    let n = buf.len();
-    buf.resize(n + READ_CHUNK, 0);
-    let got = reader.read(&mut buf[n..]).await?;
-    buf.truncate(n + got);
+    buf.reserve(READ_CHUNK);
+    let got = reader.read_buf(buf).await?;
     if got == 0 {
         return Err(io::Error::new(
             io::ErrorKind::UnexpectedEof,

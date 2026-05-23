@@ -15,6 +15,8 @@
 //! That replaces the per-HTTP-chunk memcpy the previous `Arc<Vec<u8>>`
 //! layout required.
 
+use std::sync::Arc;
+
 use bytes::Bytes;
 use lru::LruCache;
 use parking_lot::Mutex;
@@ -25,8 +27,10 @@ pub struct SegmentCache {
 }
 
 struct State {
-    /// Unbounded entry count — we evict on byte budget.
-    lru: LruCache<String, Bytes>,
+    /// Unbounded entry count — we evict on byte budget. Keyed on `Arc<str>`
+    /// so the message-id allocation is shared with the in-flight map and the
+    /// decoded-size cache (one alloc per cold segment, not three).
+    lru: LruCache<Arc<str>, Bytes>,
     current_bytes: u64,
 }
 
@@ -46,7 +50,13 @@ impl SegmentCache {
         state.lru.get(message_id).cloned()
     }
 
-    pub fn put(&self, message_id: String, data: Bytes) {
+    /// Existence check that neither clones the value nor promotes LRU order.
+    /// Used by prefetch filtering to skip segments already cached.
+    pub fn contains(&self, message_id: &str) -> bool {
+        self.state.lock().lru.contains(message_id)
+    }
+
+    pub fn put(&self, message_id: Arc<str>, data: Bytes) {
         let mut state = self.state.lock();
         let new_bytes = data.len() as u64;
         if let Some(prev) = state.lru.put(message_id, data) {
@@ -82,6 +92,19 @@ mod tests {
         assert!(cache.get("a").is_none());
         assert!(cache.get("b").is_some());
         assert_eq!(cache.current_bytes(), 60);
+    }
+
+    #[test]
+    fn contains_does_not_promote_or_clone() {
+        let cache = SegmentCache::new(100);
+        cache.put("a".into(), Bytes::from(vec![0u8; 40]));
+        cache.put("b".into(), Bytes::from(vec![0u8; 40]));
+        // `contains` must NOT promote "a" to MRU.
+        assert!(cache.contains("a"));
+        assert!(!cache.contains("missing"));
+        cache.put("c".into(), Bytes::from(vec![0u8; 40])); // 120 > 100 → evict LRU = a
+        assert!(cache.get("a").is_none());
+        assert!(cache.get("b").is_some());
     }
 
     #[test]

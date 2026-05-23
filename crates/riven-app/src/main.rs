@@ -95,8 +95,8 @@ async fn main() -> Result<()> {
     .await;
 
     // If the `usenet` plugin is configured with NNTP credentials, build a
-    // streamer that the /usenet/ route can serve from. Failure to build is
-    // non-fatal — Usenet streaming is just disabled.
+    // streamer the VFS reads through in-process (as a `LocalByteSource`).
+    // Failure to build is non-fatal — Usenet streaming is just disabled.
     // Concurrent usenet download workers. Kept small (default 4) rather than
     // scaled to the pool: on usenet, total throughput is line-bound, so many
     // concurrent ingests don't drain a backlog faster — they split the pipe
@@ -168,8 +168,8 @@ async fn main() -> Result<()> {
     let (link_tx, mut link_rx) = tokio::sync::mpsc::channel(64);
 
     let vfs_mount_path = settings.effective_vfs_mount_path().to_string();
-    // Usenet-backed VFS reads go in-process through the streamer instead of
-    // looping back over the loopback `/usenet/` HTTP route.
+    // Usenet-backed VFS reads go in-process through the streamer (the old
+    // loopback HTTP route has been removed).
     let usenet_local_source: Option<Arc<dyn riven_core::local_source::LocalByteSource>> =
         usenet_streamer
             .clone()
@@ -255,7 +255,6 @@ async fn main() -> Result<()> {
         let notif_tx = notification_tx.clone();
         let log_control = log_control.clone();
         let vfs_mount_manager = vfs_mount_manager.clone();
-        let usenet_streamer = usenet_streamer.clone();
         let cancel = cancel.clone();
         async move {
             if let Err(e) = riven_api::start_server(riven_api::StartServerConfig {
@@ -276,7 +275,6 @@ async fn main() -> Result<()> {
                 link_request_tx: link_tx.clone(),
                 cors_allowed_origins,
                 vfs_mount_manager,
-                usenet_streamer,
                 cancel,
             })
             .await

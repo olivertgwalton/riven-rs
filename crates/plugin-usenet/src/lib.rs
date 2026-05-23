@@ -1,8 +1,8 @@
 //! Direct-streaming Usenet downloader plugin.
 //!
-//! Parses an NZB, persists segment metadata in Redis, and returns a
-//! `stream_url` pointing at riven-api's `/usenet/...` route. Bytes are pulled
-//! from NNTP on demand as the player requests them.
+//! Parses an NZB, persists segment metadata, and returns a `usenet://`
+//! `stream_url` that the VFS resolves to the in-process usenet streamer.
+//! Bytes are pulled from NNTP on demand as the player requests them.
 //!
 //! This plugin owns the NNTP credentials; the streamer in `riven-api` reads
 //! them from this plugin's settings at startup and from then on the two
@@ -223,15 +223,6 @@ impl Plugin for UsenetPlugin {
                     "Password for encrypted RAR archives. Applied to every encrypted \
                      archive encountered. Leave blank if your releases are not encrypted.",
                 ),
-            SettingField::new("publicbaseurl", "Public Base URL", "url")
-                .required()
-                .with_placeholder("http://riven.local:8080")
-                .with_description(
-                    "Base URL of this riven-api instance, used to construct stream URLs \
-                     that point back at the /usenet/ streaming route. Use a loopback \
-                     address (http://127.0.0.1:<port>) so the VFS reaches /usenet/ from \
-                     localhost and the route's loopback auth exemption applies.",
-                ),
             SettingField::new(
                 "healthcheckmaxfailures",
                 "Consecutive Failures Before Delete",
@@ -318,11 +309,6 @@ impl Plugin for UsenetPlugin {
         let Some(nntp_cfg) = nntp_config_from_settings(&ctx.settings) else {
             return Ok(HookResponse::Empty);
         };
-        let Some(public_base) = ctx.settings.get("publicbaseurl") else {
-            tracing::warn!("usenet plugin: publicbaseurl not configured");
-            return Ok(HookResponse::Empty);
-        };
-        let public_base = public_base.trim_end_matches('/').to_string();
 
         let Some(xml_arc) = fetch_nzb_xml(info_hash, ctx).await else {
             tracing::warn!(info_hash, "no NZB body available; cannot ingest");
@@ -355,12 +341,20 @@ impl Plugin for UsenetPlugin {
             .iter()
             .enumerate()
             .map(|(idx, f)| {
-                let url = format!("{public_base}/usenet/{info_hash}/{idx}");
+                // The VFS reads usenet files in-process and identifies them by
+                // the explicit (info_hash, file_index) below. The `usenet://`
+                // URI is a self-contained marker (no public base URL needed,
+                // nothing fetches it) that keeps the queue's "has a playable
+                // URL" check happy and is recognised by the stream-link
+                // refresh short-circuit.
+                let url = format!("usenet://{info_hash}/{idx}");
                 DownloadFile {
                     filename: f.filename.clone(),
                     file_size: f.total_size,
                     download_url: Some(url.clone()),
                     stream_url: Some(url),
+                    usenet_info_hash: Some(info_hash.to_string()),
+                    usenet_file_index: i32::try_from(idx).ok(),
                 }
             })
             .collect();
@@ -387,12 +381,11 @@ impl Plugin for UsenetPlugin {
         _provider: Option<&str>,
         _ctx: &PluginContext,
     ) -> anyhow::Result<HookResponse> {
-        // The usenet stream URL is a permanent local HTTP URL
-        // (`http://127.0.0.1/usenet/{hash}/{index}`). It never expires, so
-        // when the VFS refreshes after a transient NNTP error we just return
-        // the same URL unchanged instead of letting StremThru try (and fail)
-        // to debrid-resolve a non-magnet URL.
-        if magnet.contains("/usenet/") {
+        // The usenet stream marker is a permanent `usenet://{hash}/{index}`
+        // URI. It never expires, so when the VFS refreshes after a transient
+        // NNTP error we return it unchanged instead of letting StremThru try
+        // (and fail) to debrid-resolve a non-magnet URL.
+        if magnet.starts_with("usenet://") {
             return Ok(HookResponse::StreamLink(StreamLinkResponse {
                 link: magnet.to_string(),
                 provider: Some(PROVIDER.to_string()),

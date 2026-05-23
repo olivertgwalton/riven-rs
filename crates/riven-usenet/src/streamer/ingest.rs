@@ -178,7 +178,9 @@ impl UsenetStreamer {
             .ingest_sem
             .clone()
             .try_acquire_owned()
-            .map_err(|_| StreamerError::IngestQueueFull)?;
+            // Only ever `NoPermits` here (the semaphore is never closed), so
+            // the source carries no caller-actionable detail.
+            .map_err(|_e| StreamerError::IngestQueueFull)?;
 
         let document = parse_nzb_document(nzb_xml)?;
         let release_title = document.release_title();

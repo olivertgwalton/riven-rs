@@ -74,6 +74,8 @@ fn sample_entry(path: &str, original_filename: Option<&str>) -> FileSystemEntry 
         stream_id: None,
         resolution: None,
         ranking_profile_name: None,
+        usenet_info_hash: None,
+        usenet_file_index: None,
     }
 }
 

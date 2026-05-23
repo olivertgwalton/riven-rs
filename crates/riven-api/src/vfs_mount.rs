@@ -28,7 +28,6 @@ pub struct VfsMountManager {
 }
 
 impl VfsMountManager {
-    #[expect(clippy::too_many_arguments, reason = "constructor threads several process-wide handles")]
     pub fn new(
         initial_path: &str,
         vfs_layout: Arc<RwLock<VfsLibraryLayout>>,

@@ -460,7 +460,7 @@ impl NntpPool {
     /// Replaces the old greedy `available_capacity()` so one ingest can't take
     /// the whole pool — letting `pool ÷ INGEST_CONNECTIONS` ingests run at once.
     pub fn ingest_concurrency(&self) -> usize {
-        self.total_capacity().min(INGEST_CONNECTIONS).max(1)
+        self.total_capacity().clamp(1, INGEST_CONNECTIONS)
     }
 
     pub async fn stat(&self, message_id: &str, priority: Priority) -> Result<bool, NntpError> {

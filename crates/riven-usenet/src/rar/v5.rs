@@ -279,7 +279,7 @@ pub(super) fn block_layout_v5(bytes: &[u8]) -> Option<(u64, u64)> {
     }
     let mut pos = 4; // skip CRC32
     let size_vint_start = pos;
-    let header_size = read_vint(bytes, &mut pos)? as u64;
+    let header_size = read_vint(bytes, &mut pos)?;
     let header_total = pos as u64 + header_size;
 
     // Walk far enough into the header to determine the data-area size.

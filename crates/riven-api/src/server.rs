@@ -2,7 +2,6 @@ mod auth;
 mod board;
 mod graphql;
 mod media;
-mod usenet;
 mod webhooks;
 
 use std::sync::Arc;
@@ -44,7 +43,6 @@ pub struct StartServerConfig {
     pub link_request_tx: tokio::sync::mpsc::Sender<LinkRequest>,
     pub cors_allowed_origins: Vec<String>,
     pub vfs_mount_manager: Arc<VfsMountManager>,
-    pub usenet_streamer: Option<riven_usenet::UsenetStreamer>,
     pub cancel: tokio_util::sync::CancellationToken,
 }
 
@@ -69,7 +67,6 @@ mod state {
         pub stream_client: reqwest::Client,
         pub link_request_tx: tokio::sync::mpsc::Sender<LinkRequest>,
         pub runtime: tokio::runtime::Handle,
-        pub usenet_streamer: Option<riven_usenet::UsenetStreamer>,
     }
 }
 
@@ -92,7 +89,6 @@ pub async fn start_server(config: StartServerConfig) -> Result<()> {
         link_request_tx,
         cors_allowed_origins,
         vfs_mount_manager,
-        usenet_streamer,
         cancel,
     } = config;
 
@@ -139,11 +135,10 @@ pub async fn start_server(config: StartServerConfig) -> Result<()> {
         stream_client,
         link_request_tx,
         runtime: tokio::runtime::Handle::current(),
-        usenet_streamer,
     };
 
-    // `graphql`, `media`, `usenet` own their response shapes (WS upgrade,
-    // range responses, structured GraphQL errors), so they perform their own
+    // `graphql` and `media` own their response shapes (WS upgrade, range
+    // responses, structured GraphQL errors), so they perform their own
     // per-handler API-key check. There is no global auth gate; the board UI,
     // its API, the seerr webhook, and the static frontend are unauthenticated.
     let routes = Router::new()
@@ -154,10 +149,6 @@ pub async fn start_server(config: StartServerConfig) -> Result<()> {
         .route(
             "/media/{entry_id}",
             get(media::media_bridge_handler).head(media::media_bridge_handler),
-        )
-        .route(
-            "/usenet/{info_hash}/{file_index}",
-            get(usenet::usenet_stream_handler).head(usenet::usenet_stream_handler),
         )
         .nest("/api/v1", board_api.with_state(()))
         .route("/webhook/seerr", post(webhooks::seerr_webhook))
@@ -175,14 +166,9 @@ pub async fn start_server(config: StartServerConfig) -> Result<()> {
     let listener = tokio::net::TcpListener::bind(format!("{host}:{port}")).await?;
     tracing::info!(host = %host, port = port, "GraphQL server listening");
 
-    // `into_make_service_with_connect_info` so the `/usenet/` handler can
-    // extract the peer `SocketAddr` for its loopback auth exemption.
-    axum::serve(
-        listener,
-        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-    )
-    .with_graceful_shutdown(async move { cancel.cancelled().await })
-    .await?;
+    axum::serve(listener, app.into_make_service())
+        .with_graceful_shutdown(async move { cancel.cancelled().await })
+        .await?;
 
     Ok(())
 }

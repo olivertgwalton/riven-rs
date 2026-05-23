@@ -134,6 +134,8 @@ pub async fn persist_manual_download(
                 stream_url: file
                     .matched_media_item_id
                     .map(|episode_id| format!("matched:{episode_id}")),
+                usenet_info_hash: None,
+                usenet_file_index: None,
             })
             .collect(),
         provider: torrent.provider.clone(),
@@ -599,7 +601,7 @@ async fn run_downloads(
             // debrid round-trip + cache-check for streams that cannot pass.
             if let Some(size) = stream.file_size_bytes
                 && size >= 0
-                && !passes_size_bounds(size as u64, max_size_bytes, min_size_bytes)
+                && !passes_size_bounds(size.unsigned_abs(), max_size_bytes, min_size_bytes)
             {
                 tracing::debug!(
                     id,

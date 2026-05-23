@@ -175,6 +175,10 @@ pub struct FileSystemEntry {
     pub stream_id: Option<i64>,
     pub resolution: Option<String>,
     pub ranking_profile_name: Option<String>,
+    // Usenet identity: the article address for in-process VFS streaming.
+    // Set for usenet-backed media entries; NULL for debrid/subtitle.
+    pub usenet_info_hash: Option<String>,
+    pub usenet_file_index: Option<i32>,
 }
 
 #[derive(Debug, Clone, FromRow)]

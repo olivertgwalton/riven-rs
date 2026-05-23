@@ -243,7 +243,7 @@ fn estimate_meta_bytes(meta: &crate::streamer::NzbMeta) -> u64 {
 /// limit across many RAR files; an evicted entry just forces the read path
 /// to fall back to the segment walk (correct, slightly slower).
 pub struct DecodedSizes {
-    inner: Mutex<LruCache<String, u64>>,
+    inner: Mutex<LruCache<Arc<str>, u64>>,
 }
 
 impl DecodedSizes {
@@ -258,7 +258,7 @@ impl DecodedSizes {
         self.inner.lock().get(message_id).copied()
     }
 
-    pub fn put(&self, message_id: String, size: u64) {
+    pub fn put(&self, message_id: Arc<str>, size: u64) {
         self.inner.lock().put(message_id, size);
     }
 }
@@ -274,7 +274,7 @@ impl DecodedSizes {
 /// `Notified` future is registered via `enable()`.
 #[derive(Default)]
 pub struct InFlight {
-    inner: Mutex<HashMap<String, Arc<PromiseSlot>>>,
+    inner: Mutex<HashMap<Arc<str>, Arc<PromiseSlot>>>,
 }
 
 #[derive(Default)]
@@ -309,8 +309,10 @@ impl PromiseSlot {
 
 pub enum FetchEntry {
     /// You are the first caller — perform the fetch, then call
-    /// `finish(message_id, &slot)` to release waiters.
-    Owner(Arc<PromiseSlot>),
+    /// `finish(message_id, &slot)` to release waiters. The `Arc<str>` is the
+    /// shared message-id key: reuse it for `cache.put`/`decoded_sizes.put` so
+    /// the cold-fetch path allocates the id exactly once.
+    Owner(Arc<PromiseSlot>, Arc<str>),
     /// Another caller is already fetching this message-id. Await the
     /// slot, then re-check the segment cache.
     Wait(Arc<PromiseSlot>),
@@ -322,9 +324,10 @@ impl InFlight {
         if let Some(slot) = map.get(message_id) {
             FetchEntry::Wait(slot.clone())
         } else {
+            let key: Arc<str> = Arc::from(message_id);
             let slot = Arc::new(PromiseSlot::default());
-            map.insert(message_id.to_string(), slot.clone());
-            FetchEntry::Owner(slot)
+            map.insert(key.clone(), slot.clone());
+            FetchEntry::Owner(slot, key)
         }
     }
 
@@ -387,8 +390,8 @@ impl MigratedMetas {
     }
 }
 
-/// One active playback stream, as registered when a `/usenet/` body stream
-/// begins serving and removed when it ends.
+/// One active playback stream, as registered when a VFS usenet session
+/// begins serving and removed when its file handle is dropped.
 #[derive(Debug, Clone)]
 pub struct ActiveStream {
     pub info_hash: String,

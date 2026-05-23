@@ -41,4 +41,10 @@ pub struct DownloadFile {
     pub file_size: u64,
     pub download_url: Option<String>,
     pub stream_url: Option<String>,
+    /// Usenet article address, set by the usenet plugin so the VFS can read
+    /// the file in-process. `None` for debrid and other providers.
+    #[serde(default)]
+    pub usenet_info_hash: Option<String>,
+    #[serde(default)]
+    pub usenet_file_index: Option<i32>,
 }

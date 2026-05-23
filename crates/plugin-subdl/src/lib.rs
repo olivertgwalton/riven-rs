@@ -138,13 +138,11 @@ impl Plugin for SubdlPlugin {
         use std::collections::HashMap;
         let mut best_per_lang: HashMap<String, SubtitleEntry> = HashMap::new();
         for sub in results {
-            if let (Some(s), Some(e)) = (meta.season_number, meta.episode_number) {
-                if let (Some(ss), Some(ee)) = (sub.season, sub.episode) {
-                    if ss != s || ee != e {
+            if let (Some(s), Some(e)) = (meta.season_number, meta.episode_number)
+                && let (Some(ss), Some(ee)) = (sub.season, sub.episode)
+                    && (ss != s || ee != e) {
                         continue;
                     }
-                }
-            }
             let key = sub.lang.to_ascii_lowercase();
             best_per_lang.entry(key).or_insert(sub);
         }

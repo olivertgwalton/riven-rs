@@ -1,17 +1,10 @@
 //! In-process byte source for VFS streaming.
 //!
-//! The FUSE layer (`riven-vfs`) is origin-agnostic: it fetches byte ranges
-//! over HTTP from a stream URL. For debrid that URL is a remote CDN. For
-//! usenet it used to be the loopback `/usenet/{info_hash}/{file_index}`
-//! route on riven's own HTTP server — so a Plex read went FUSE → HTTP →
-//! the usenet streamer, two streaming layers with their own buffering on
-//! each side of a localhost socket.
-//!
-//! `LocalByteSource` lets the usenet streamer be called **in process**
-//! instead. `riven-vfs` recognises a usenet stream URL, looks up the
-//! injected source, and reads ranges directly — no loopback HTTP, no
-//! duplicate read-ahead. The trait lives in `riven-core` so `riven-vfs`
-//! depends only on the abstraction, not on `riven-usenet`.
+//! The FUSE layer (`riven-vfs`) is origin-agnostic: for debrid entries it
+//! fetches byte ranges over HTTP from a remote CDN. For usenet entries it
+//! calls the streamer **in process** through `LocalByteSource` — no loopback
+//! HTTP, no duplicate read-ahead. The trait lives in `riven-core` so
+//! `riven-vfs` depends only on the abstraction, not on `riven-usenet`.
 
 use bytes::Bytes;
 
@@ -40,13 +33,22 @@ pub trait LocalByteSource: Send + Sync {
         file_index: usize,
         start: u64,
     ) -> anyhow::Result<futures::stream::BoxStream<'static, std::io::Result<Bytes>>>;
+
+    /// Active-stream registry hooks, driving the dashboard's "now playing"
+    /// view. The VFS calls these as it serves a usenet handle. `key`
+    /// uniquely identifies an open handle (e.g. `"{info_hash}:{file_index}"`).
+    fn stream_register(&self, key: &str, info_hash: &str, filename: &str, file_size: u64);
+    fn stream_touch(&self, key: &str);
+    fn stream_unregister(&self, key: &str);
 }
 
-/// Parse a usenet stream URL of the shape `…/usenet/{info_hash}/{file_index}`
-/// into its components. Returns `None` for any other URL (e.g. a debrid CDN
-/// link), which routes the read through the normal HTTP path.
+/// Parse a `usenet://{info_hash}/{file_index}` stream marker into
+/// `(info_hash, file_index)`. Returns `None` for anything else (e.g. a debrid
+/// CDN link). This is only the fallback for rows whose explicit
+/// `usenet_info_hash`/`usenet_file_index` columns aren't populated; entries
+/// are normally identified by those columns directly.
 pub fn parse_usenet_url(url: &str) -> Option<(String, usize)> {
-    let rest = url.split("/usenet/").nth(1)?;
+    let rest = url.strip_prefix("usenet://")?;
     // Strip any query string / fragment.
     let rest = rest.split(['?', '#']).next().unwrap_or(rest);
     let mut parts = rest.split('/');
@@ -65,11 +67,11 @@ mod tests {
     #[test]
     fn parses_usenet_url() {
         assert_eq!(
-            parse_usenet_url("https://riven.example/usenet/nzb-abc123/0"),
+            parse_usenet_url("usenet://nzb-abc123/0"),
             Some(("nzb-abc123".to_string(), 0))
         );
         assert_eq!(
-            parse_usenet_url("http://127.0.0.1:8080/usenet/nzb-deadbeef/3?x=1"),
+            parse_usenet_url("usenet://nzb-deadbeef/3?x=1"),
             Some(("nzb-deadbeef".to_string(), 3))
         );
     }
@@ -77,8 +79,8 @@ mod tests {
     #[test]
     fn rejects_non_usenet_url() {
         assert_eq!(parse_usenet_url("https://debrid.example/dl/token/file.mkv"), None);
-        assert_eq!(parse_usenet_url("https://x/usenet/onlyhash"), None);
-        assert_eq!(parse_usenet_url("https://x/usenet/hash/0/extra"), None);
-        assert_eq!(parse_usenet_url("https://x/usenet/hash/notanumber"), None);
+        assert_eq!(parse_usenet_url("usenet://onlyhash"), None);
+        assert_eq!(parse_usenet_url("usenet://hash/0/extra"), None);
+        assert_eq!(parse_usenet_url("usenet://hash/notanumber"), None);
     }
 }

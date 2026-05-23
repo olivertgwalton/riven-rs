@@ -204,6 +204,8 @@ pub async fn persist_movie(
         resolution,
         profile_name,
         Some(&library_profiles_json),
+        file.usenet_info_hash.as_deref(),
+        file.usenet_file_index,
     )
     .await
     {
@@ -352,6 +354,8 @@ pub async fn persist_episode(
             resolution,
             profile_name,
             Some(&library_profiles_json),
+            file.usenet_info_hash.as_deref(),
+            file.usenet_file_index,
         )
         .await
         {
@@ -546,6 +550,8 @@ pub async fn persist_season(
                 None,
                 profile_name,
                 Some(&library_profiles_json),
+                file.usenet_info_hash.as_deref(),
+                file.usenet_file_index,
             )
             .await
             {
@@ -813,6 +819,8 @@ async fn persist_supplied_show_download(
             None,
             None,
             Some(&library_profiles),
+            file.usenet_info_hash.as_deref(),
+            file.usenet_file_index,
         )
         .await
         {

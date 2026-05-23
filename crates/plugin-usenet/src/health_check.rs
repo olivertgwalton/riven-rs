@@ -177,7 +177,7 @@ async fn run_once(
                 }
             }
             // Drop the cooldown key — entry's gone, no further state needed.
-            let _: redis::RedisResult<()> = AsyncCommands::del(&mut redis, &key).await;
+            let _del: redis::RedisResult<()> = AsyncCommands::del(&mut redis, &key).await;
         } else {
             tracing::debug!(
                 entry_id,
@@ -208,7 +208,7 @@ async fn set_state(
     ttl: Duration,
 ) {
     let value = serde_json::to_string(state).unwrap_or_else(|_| "{}".to_string());
-    let _: redis::RedisResult<()> =
+    let _set: redis::RedisResult<()> =
         AsyncCommands::set_ex(redis, key, value, ttl.as_secs()).await;
 }
 
@@ -241,9 +241,10 @@ fn sample_segments(meta: &NzbMeta) -> Vec<NzbSegment> {
     let middle_start = VERIFY_FIRST_N;
     let middle_end = total - VERIFY_LAST_N;
     let middle_count = middle_end - middle_start;
-    let step = middle_count as f64 / MIDDLE_SAMPLE as f64;
     for i in 0..MIDDLE_SAMPLE {
-        let idx = middle_start + ((i as f64 + 0.5) * step) as usize;
+        // Evenly-spaced midpoints: floor((i + 0.5) * middle_count / MIDDLE_SAMPLE)
+        // in exact integer arithmetic (no float, no sign-loss cast).
+        let idx = middle_start + ((2 * i + 1) * middle_count) / (2 * MIDDLE_SAMPLE);
         if idx < middle_end {
             indices.push(idx);
         }

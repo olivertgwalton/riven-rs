@@ -37,10 +37,11 @@ type ResponseReader = BufReader<StreamReader<HttpByteStream, Bytes>>;
 
 struct SequentialReader {
     read_pos: u64,
-    /// Exclusive end byte of the response body. Origin servers (debrid CDNs,
-    /// the local /usenet/ route) cap open-ended `bytes=start-` requests to a
-    /// bounded window, so the body ends well before EOF. Reading past this
-    /// returns early-EOF; we must reopen instead.
+    /// Exclusive end byte of the response body. Debrid CDN origins cap
+    /// open-ended `bytes=start-` requests to a bounded window, so the body
+    /// ends well before EOF. Reading past this returns early-EOF; we must
+    /// reopen instead. (The in-process usenet path is unbounded — see
+    /// `UsenetSession`, which sets this to the full file size.)
     body_end_exclusive: u64,
     reader: ResponseReader,
 }
@@ -71,53 +72,6 @@ impl SequentialReader {
             body_end_exclusive,
             reader,
         })
-    }
-
-    /// Build a reader from an already-opened byte stream (the in-process
-    /// usenet path — no HTTP, no window cap, so `body_end_exclusive` is the
-    /// full file size).
-    fn from_stream(
-        stream: BoxStream<'static, Result<Bytes, io::Error>>,
-        body_end_exclusive: u64,
-        start_pos: u64,
-    ) -> Self {
-        let reader = BufReader::with_capacity(
-            riven_core::config::vfs::CHUNK_SIZE as usize * 2,
-            StreamReader::new(stream),
-        );
-        Self {
-            read_pos: start_pos,
-            body_end_exclusive,
-            reader,
-        }
-    }
-
-    /// Read up to `size` bytes at `pos`, tolerating an early EOF by
-    /// returning the partial result (the last chunk of a file may be a few
-    /// bytes shorter than the advertised size). FUSE accepts short reads.
-    async fn read_upto_at(&mut self, pos: u64, size: usize) -> io::Result<Bytes> {
-        if pos < self.read_pos {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("cannot rewind active stream from {} to {}", self.read_pos, pos),
-            ));
-        }
-        if pos > self.read_pos {
-            self.discard(pos - self.read_pos).await?;
-            self.read_pos = pos;
-        }
-        let mut buf = vec![0u8; size];
-        let mut filled = 0;
-        while filled < size {
-            let n = self.reader.read(&mut buf[filled..]).await?;
-            if n == 0 {
-                break; // EOF — return what we have
-            }
-            filled += n;
-        }
-        buf.truncate(filled);
-        self.read_pos += filled as u64;
-        Ok(Bytes::from(buf))
     }
 
     /// Whether this reader's body still covers `[start, end_inclusive]`.
@@ -151,8 +105,22 @@ impl SequentialReader {
             self.read_pos = pos;
         }
 
-        let mut buf = vec![0; size];
-        self.reader.read_exact(&mut buf).await?;
+        // Read into uninitialized spare capacity via `read_buf` (no zero-fill
+        // of a buffer we immediately overwrite). `take(size)` caps the read at
+        // exactly `size` bytes so we never over-read the stream.
+        let mut buf = Vec::with_capacity(size);
+        let mut limited = (&mut self.reader).take(size as u64);
+        while buf.len() < size {
+            if limited.read_buf(&mut buf).await? == 0 {
+                break;
+            }
+        }
+        if buf.len() < size {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "stream ended before the requested chunk was filled",
+            ));
+        }
         self.read_pos += size as u64;
 
         Ok(Bytes::from(buf))
@@ -487,10 +455,130 @@ fn slice_request_bytes(full: &Bytes, start: u64, end: u64, base_start: u64) -> O
     Some(full.slice(offset..offset + slice_len))
 }
 
+/// Sequential reader over the usenet streamer's eagerly-pipelined byte
+/// stream, consuming the decoded `Bytes` frames directly.
+///
+/// Unlike [`SequentialReader`] (the HTTP path) this holds **no**
+/// `BufReader`/`StreamReader` and never copies through an intermediate
+/// buffer: a read either splits the requested bytes out of the leftover
+/// `carry` frame zero-copy (`Bytes::split_to`), or — when a read straddles
+/// frame boundaries — concatenates the minimum number of frames into one
+/// exactly-sized `BytesMut` (no zero-fill). The streamer already produces
+/// zero-copy slices out of its decoded-segment cache, so this removes the
+/// double buffering the old `FUSE → BufReader → Vec` path incurred.
+struct UsenetFrameReader {
+    stream: BoxStream<'static, Result<Bytes, io::Error>>,
+    read_pos: u64,
+    /// Full file size — the in-process stream has no HTTP window cap, so it
+    /// can always serve up to EOF from `read_pos` onward.
+    body_end_exclusive: u64,
+    /// Bytes pulled from the stream but not yet consumed by a read.
+    carry: Bytes,
+}
+
+impl UsenetFrameReader {
+    fn new(
+        stream: BoxStream<'static, Result<Bytes, io::Error>>,
+        body_end_exclusive: u64,
+        start_pos: u64,
+    ) -> Self {
+        Self {
+            stream,
+            read_pos: start_pos,
+            body_end_exclusive,
+            carry: Bytes::new(),
+        }
+    }
+
+    fn can_serve(&self, start: u64, end_inclusive: u64) -> bool {
+        start >= self.read_pos && end_inclusive < self.body_end_exclusive
+    }
+
+    /// Read up to `size` bytes at `pos`, tolerating an early EOF by returning
+    /// the partial result (the last segment may decode a few bytes short).
+    /// FUSE accepts short reads.
+    async fn read_upto_at(&mut self, pos: u64, size: usize) -> io::Result<Bytes> {
+        if pos < self.read_pos {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("cannot rewind active stream from {} to {}", self.read_pos, pos),
+            ));
+        }
+        if pos > self.read_pos {
+            self.discard(pos - self.read_pos).await?;
+            self.read_pos = pos;
+        }
+
+        // Fast path: the carry frame already covers the whole request — slice
+        // it out with zero copy.
+        if self.carry.len() >= size {
+            let out = self.carry.split_to(size);
+            self.read_pos += size as u64;
+            return Ok(out);
+        }
+
+        // Straddles frames: concatenate the minimum span into one buffer.
+        let mut buf = BytesMut::with_capacity(size);
+        if !self.carry.is_empty() {
+            let carry = std::mem::take(&mut self.carry);
+            buf.extend_from_slice(&carry);
+        }
+        while buf.len() < size {
+            match self.stream.next().await {
+                Some(Ok(frame)) => {
+                    let need = size - buf.len();
+                    if frame.len() <= need {
+                        buf.extend_from_slice(&frame);
+                    } else {
+                        buf.extend_from_slice(&frame[..need]);
+                        self.carry = frame.slice(need..);
+                    }
+                }
+                Some(Err(error)) => return Err(error),
+                None => break, // EOF — return what we have
+            }
+        }
+        self.read_pos += buf.len() as u64;
+        Ok(buf.freeze())
+    }
+
+    /// Skip `bytes` of stream data (a forward seek), dropping whole frames and
+    /// keeping any partial remainder in `carry`.
+    async fn discard(&mut self, bytes: u64) -> io::Result<()> {
+        let mut remaining = bytes;
+        let from_carry = (self.carry.len() as u64).min(remaining);
+        // `split_to` keeps the tail in `self.carry`, dropping the head.
+        let _head = self.carry.split_to(from_carry as usize);
+        remaining -= from_carry;
+
+        while remaining > 0 {
+            match self.stream.next().await {
+                Some(Ok(frame)) => {
+                    let flen = frame.len() as u64;
+                    if flen <= remaining {
+                        remaining -= flen;
+                    } else {
+                        self.carry = frame.slice(remaining as usize..);
+                        remaining = 0;
+                    }
+                }
+                Some(Err(error)) => return Err(error),
+                None => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        "stream ended during forward-seek discard",
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 /// In-process streaming session for usenet-backed files.
 ///
-/// Replaces the FUSE → HTTP `/usenet/` → streamer hop with a direct call
-/// into the usenet streamer (`LocalByteSource`). Sequential reads pull from
+/// Reads go directly into the usenet streamer via `LocalByteSource`.
+/// Sequential reads pull from
 /// an eagerly-pipelined `open_stream` (so a slow segment is absorbed by the
 /// read-ahead buffer, not stalled on); a non-sequential seek reopens the
 /// stream at the new position. There's no separate range cache here — the
@@ -501,7 +589,14 @@ pub struct UsenetSession {
     info_hash: Arc<str>,
     file_index: usize,
     file_size: u64,
-    sequential: Option<SequentialReader>,
+    sequential: Option<UsenetFrameReader>,
+    /// Active-streams registry key (`"{info_hash}:{file_index}"`). Registered
+    /// on first read, touched periodically, unregistered on drop — restoring
+    /// the dashboard "now playing" view for in-process FUSE playback.
+    stream_key: String,
+    filename: Arc<str>,
+    registered: bool,
+    reads_since_touch: u32,
 }
 
 impl UsenetSession {
@@ -510,13 +605,19 @@ impl UsenetSession {
         info_hash: Arc<str>,
         file_index: usize,
         file_size: u64,
+        filename: Arc<str>,
     ) -> Self {
+        let stream_key = format!("{info_hash}:{file_index}");
         Self {
             source,
             info_hash,
             file_index,
             file_size,
             sequential: None,
+            stream_key,
+            filename,
+            registered: false,
+            reads_since_touch: 0,
         }
     }
 
@@ -525,6 +626,25 @@ impl UsenetSession {
     }
 
     pub fn read(&mut self, start: u64, end: u64, runtime: &tokio::runtime::Handle) -> ReadOutcome {
+        // Register on the first read and refresh the heartbeat every ~16 reads
+        // (each up to 4 MB) — cheap, and well inside the idle-detection window.
+        const TOUCH_EVERY_N_READS: u32 = 16;
+        if !self.registered {
+            self.source.stream_register(
+                &self.stream_key,
+                &self.info_hash,
+                &self.filename,
+                self.file_size,
+            );
+            self.registered = true;
+            self.reads_since_touch = 0;
+        } else {
+            self.reads_since_touch = self.reads_since_touch.wrapping_add(1);
+            if self.reads_since_touch >= TOUCH_EVERY_N_READS {
+                self.source.stream_touch(&self.stream_key);
+                self.reads_since_touch = 0;
+            }
+        }
         if start >= self.file_size {
             return ReadOutcome::Data(Bytes::new());
         }
@@ -548,7 +668,7 @@ impl UsenetSession {
             match opened {
                 Ok(stream) => {
                     self.sequential =
-                        Some(SequentialReader::from_stream(stream, self.file_size, start));
+                        Some(UsenetFrameReader::new(stream, self.file_size, start));
                 }
                 Err(error) => {
                     tracing::error!(
@@ -584,5 +704,73 @@ impl UsenetSession {
                 ReadOutcome::Error(libc::EIO)
             }
         }
+    }
+}
+
+impl Drop for UsenetSession {
+    fn drop(&mut self) {
+        if self.registered {
+            self.source.stream_unregister(&self.stream_key);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::stream;
+
+    /// Build a frame reader over a fixed sequence of `Bytes` frames.
+    fn reader_from(frames: Vec<&[u8]>, file_size: u64, start: u64) -> UsenetFrameReader {
+        let items: Vec<Result<Bytes, io::Error>> =
+            frames.into_iter().map(|f| Ok(Bytes::copy_from_slice(f))).collect();
+        UsenetFrameReader::new(stream::iter(items).boxed(), file_size, start)
+    }
+
+    #[tokio::test]
+    async fn read_within_single_frame_is_zero_copy_carry() {
+        // One 10-byte frame; two sub-frame reads should both succeed and the
+        // second must come from the retained carry (no further stream pull).
+        let mut r = reader_from(vec![b"0123456789"], 10, 0);
+        let a = r.read_upto_at(0, 4).await.unwrap();
+        assert_eq!(&a[..], b"0123");
+        let b = r.read_upto_at(4, 6).await.unwrap();
+        assert_eq!(&b[..], b"456789");
+        assert_eq!(r.read_pos, 10);
+    }
+
+    #[tokio::test]
+    async fn read_straddling_frames_concatenates() {
+        let mut r = reader_from(vec![b"AAAA", b"BBBB", b"CCCC"], 12, 0);
+        // Spans the first two frames plus part of the third.
+        let out = r.read_upto_at(0, 10).await.unwrap();
+        assert_eq!(&out[..], b"AAAABBBBCC");
+        // Remaining two bytes come from the carry left over from frame 3.
+        let rest = r.read_upto_at(10, 2).await.unwrap();
+        assert_eq!(&rest[..], b"CC");
+    }
+
+    #[tokio::test]
+    async fn read_tolerates_short_read_at_eof() {
+        let mut r = reader_from(vec![b"AAAA"], 4, 0);
+        // Ask for more than exists; should return only what's available.
+        let out = r.read_upto_at(0, 16).await.unwrap();
+        assert_eq!(&out[..], b"AAAA");
+    }
+
+    #[tokio::test]
+    async fn forward_seek_discards_then_reads() {
+        let mut r = reader_from(vec![b"AAAA", b"BBBB", b"CCCC"], 12, 0);
+        // Seek to byte 6 (mid frame 2), then read 4 bytes spanning into frame 3.
+        let out = r.read_upto_at(6, 4).await.unwrap();
+        assert_eq!(&out[..], b"BBCC");
+        assert_eq!(r.read_pos, 10);
+    }
+
+    #[tokio::test]
+    async fn rewind_is_rejected() {
+        let mut r = reader_from(vec![b"AAAA"], 4, 0);
+        let _ = r.read_upto_at(0, 2).await.unwrap();
+        assert!(r.read_upto_at(0, 2).await.is_err());
     }
 }

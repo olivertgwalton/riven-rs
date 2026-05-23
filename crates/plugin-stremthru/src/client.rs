@@ -313,6 +313,8 @@ pub fn download_result_from_newz(
                 Some(f.link)
             },
             stream_url: None,
+            usenet_info_hash: None,
+            usenet_file_index: None,
         })
         .collect();
 
@@ -555,6 +557,8 @@ pub fn download_result_from_torz(
                 Some(f.link)
             },
             stream_url: None,
+            usenet_info_hash: None,
+            usenet_file_index: None,
         })
         .collect();
 

@@ -116,9 +116,9 @@ impl UsenetStreamer {
     }
 }
 
-/// Public accessor: registry of currently-streaming items. The `/usenet/`
-/// handler registers a stream on body-stream start and removes it when the
-/// body completes or is dropped.
+/// Public accessor: registry of currently-streaming items. The VFS
+/// `UsenetSession` registers a stream on first read and removes it when the
+/// file handle is dropped (via the `LocalByteSource` stream hooks).
 pub fn active_streams() -> Arc<crate::state::ActiveStreams> {
     crate::state::global_active_streams()
 }
@@ -174,5 +174,35 @@ impl riven_core::local_source::LocalByteSource for UsenetStreamer {
             .byte_stream(meta.clone(), file_index, start, end)
             .map(|r| r.map_err(std::io::Error::other));
         Ok(stream.boxed())
+    }
+
+    fn stream_register(&self, key: &str, info_hash: &str, filename: &str, file_size: u64) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        active_streams().register(
+            key.to_string(),
+            crate::state::ActiveStream {
+                info_hash: info_hash.to_string(),
+                filename: filename.to_string(),
+                file_size,
+                started_at: now,
+                last_active: now,
+                client: "vfs".to_string(),
+            },
+        );
+    }
+
+    fn stream_touch(&self, key: &str) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        active_streams().touch(key, now);
+    }
+
+    fn stream_unregister(&self, key: &str) {
+        active_streams().unregister(key);
     }
 }

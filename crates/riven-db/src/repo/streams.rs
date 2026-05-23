@@ -488,6 +488,7 @@ pub async fn get_downloaded_profile_names_for_season(
 ///
 /// Requires the partial unique index `idx_fs_entries_media_path_unique` on
 /// `(media_item_id, path) WHERE entry_type = 'media'` (migration 011).
+#[expect(clippy::too_many_arguments, reason = "wide upsert mirroring the entry columns")]
 pub async fn create_media_entry(
     pool: &PgPool,
     media_item_id: i64,
@@ -502,14 +503,17 @@ pub async fn create_media_entry(
     resolution: Option<&str>,
     ranking_profile_name: Option<&str>,
     library_profiles: Option<&serde_json::Value>,
+    usenet_info_hash: Option<&str>,
+    usenet_file_index: Option<i32>,
 ) -> Result<FileSystemEntry> {
     let media_metadata = parse_filename_metadata(original_filename);
 
     let entry = sqlx::query_as::<_, FileSystemEntry>(
         "INSERT INTO filesystem_entries \
          (media_item_id, entry_type, path, file_size, original_filename, download_url, stream_url, \
-          plugin, provider, media_metadata, stream_id, resolution, ranking_profile_name, library_profiles) \
-         VALUES ($1, 'media', $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) \
+          plugin, provider, media_metadata, stream_id, resolution, ranking_profile_name, library_profiles, \
+          usenet_info_hash, usenet_file_index) \
+         VALUES ($1, 'media', $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15) \
          ON CONFLICT (media_item_id, path) WHERE entry_type = 'media' \
          DO UPDATE SET \
              file_size             = EXCLUDED.file_size, \
@@ -523,6 +527,8 @@ pub async fn create_media_entry(
              resolution            = COALESCE(EXCLUDED.resolution, filesystem_entries.resolution), \
              ranking_profile_name  = COALESCE(EXCLUDED.ranking_profile_name, filesystem_entries.ranking_profile_name), \
              library_profiles      = EXCLUDED.library_profiles, \
+             usenet_info_hash      = COALESCE(EXCLUDED.usenet_info_hash, filesystem_entries.usenet_info_hash), \
+             usenet_file_index     = COALESCE(EXCLUDED.usenet_file_index, filesystem_entries.usenet_file_index), \
              updated_at            = NOW() \
          RETURNING *",
     )
@@ -539,6 +545,8 @@ pub async fn create_media_entry(
     .bind(resolution)
     .bind(ranking_profile_name)
     .bind(library_profiles)
+    .bind(usenet_info_hash)
+    .bind(usenet_file_index)
     .fetch_one(pool)
     .await?;
 

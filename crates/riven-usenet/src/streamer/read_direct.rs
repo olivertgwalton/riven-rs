@@ -59,17 +59,18 @@ impl UsenetStreamer {
                     slot.wait().await;
                     continue;
                 }
-                FetchEntry::Owner(slot) => {
+                FetchEntry::Owner(slot, mid) => {
                     // RAII guard: if this future is cancelled mid-fetch
                     // the explicit `finish` below would be skipped, which
                     // would leave the slot in the in_flight map with
                     // `done = false` and hang any future waiter for this
                     // message-id. The guard's Drop runs even on
                     // cancellation, ensuring the slot is always released.
+                    // `mid` is the one shared `Arc<str>` key for this fetch.
                     struct OwnerGuard {
                         state: Arc<StreamerState>,
                         slot: Arc<PromiseSlot>,
-                        message_id: String,
+                        message_id: Arc<str>,
                         finished: bool,
                     }
                     impl Drop for OwnerGuard {
@@ -86,19 +87,20 @@ impl UsenetStreamer {
                     let mut guard = OwnerGuard {
                         state: self.state.clone(),
                         slot: slot.clone(),
-                        message_id: message_id.to_string(),
+                        message_id: mid.clone(),
                         finished: false,
                     };
 
                     let result = self.do_fetch_with_retry(message_id, priority).await;
                     // Cache must be populated BEFORE marking the slot done
-                    // so waiters observe the hit on their next loop.
+                    // so waiters observe the hit on their next loop. Reuse the
+                    // shared `Arc<str>` for both inserts — no extra allocation.
                     if let Ok(bytes) = &result {
                         let size = bytes.len() as u64;
-                        self.state.cache.put(message_id.to_string(), bytes.clone());
-                        self.state.decoded_sizes.put(message_id.to_string(), size);
+                        self.state.cache.put(mid.clone(), bytes.clone());
+                        self.state.decoded_sizes.put(mid.clone(), size);
                     }
-                    self.state.in_flight.finish(message_id, &slot);
+                    self.state.in_flight.finish(&mid, &slot);
                     guard.finished = true;
                     return result;
                 }
@@ -238,7 +240,7 @@ impl UsenetStreamer {
         let streamer = self.clone();
         let cold: Vec<String> = mids
             .into_iter()
-            .filter(|mid| streamer.state.cache.get(mid).is_none())
+            .filter(|mid| !streamer.state.cache.contains(mid))
             .collect();
         let mut stream = stream::iter(cold)
             .map(move |mid| {
@@ -572,13 +574,16 @@ impl UsenetStreamer {
 
         let read_concurrency = self.pool.download_concurrency().max(PREFETCH_FLOOR);
         let streamer = self.clone();
-        let mids: Vec<(usize, String)> = (first..=last)
-            .map(|i| (i, segments[i].message_id.clone()))
-            .collect();
-        let mut stream = stream::iter(mids)
-            .map(move |(i, mid)| {
+        // Index `segments` inside each future rather than cloning every
+        // message-id into a temp Vec — the stream is consumed in place here,
+        // so the borrow of `segments` outlives all in-flight fetches.
+        let mut stream = stream::iter(first..=last)
+            .map(move |i| {
                 let s = streamer.clone();
-                async move { (i, s.fetch_decoded_cached(&mid, Priority::High).await) }
+                async move {
+                    let mid = &segments[i].message_id;
+                    (i, s.fetch_decoded_cached(mid, Priority::High).await)
+                }
             })
             .buffered(read_concurrency);
 
