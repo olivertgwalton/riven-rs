@@ -316,7 +316,7 @@ pub const DEFAULT_DOWNLOAD_WORKERS: usize = 4;
 /// Initialize rustls's default crypto provider exactly once. Safe to call
 /// multiple times. Idempotent. Must run before any TLS handshake.
 pub(crate) fn init_crypto() {
-    drop(rustls::crypto::ring::default_provider().install_default());
+    drop(rustls::crypto::aws_lc_rs::default_provider().install_default());
 }
 
 /// Pool for encoded NNTP article bodies (input to the yEnc decoder).
