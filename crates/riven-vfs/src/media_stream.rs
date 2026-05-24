@@ -573,7 +573,31 @@ impl UsenetSession {
             start,
             end,
         )) {
-            Ok(data) => ReadOutcome::Data(data),
+            Ok(data) => {
+                // Guard against a mid-file short read ever reaching the kernel.
+                // The Linux FUSE client treats a read that returns fewer bytes
+                // than requested as EOF and *permanently truncates* the file's
+                // cached size to `offset + returned` — which makes playback die
+                // after the first such read (everything past it returns EOF).
+                // `read_range` fills the whole window except at the true end of
+                // the file; if it ever comes up short anywhere else, surface a
+                // (retryable) EIO rather than corrupting the kernel's view of
+                // the file size.
+                let want = (end - start + 1) as usize;
+                if data.len() < want && end < self.file_size - 1 {
+                    tracing::warn!(
+                        target: "streaming",
+                        info_hash = %self.info_hash,
+                        file_index = self.file_index,
+                        offset = start,
+                        want,
+                        got = data.len(),
+                        "usenet read_range returned a mid-file short read; failing EIO to protect the FUSE size"
+                    );
+                    return ReadOutcome::Error(libc::EIO);
+                }
+                ReadOutcome::Data(data)
+            }
             Err(error) => {
                 tracing::warn!(
                     target: "streaming",

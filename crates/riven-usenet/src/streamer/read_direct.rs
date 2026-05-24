@@ -312,12 +312,10 @@ impl UsenetStreamer {
             .read_range_slices(info_hash, file_index, start, end_inclusive)
             .await?;
         let mut buf = concat_slices(slices, start, end_inclusive);
-        // Never return more than the requested range. When a segment's actual
-        // decoded length differs slightly from its rescaled offset slot (yEnc
-        // per-segment variance), `slice_segment` falls back to the
-        // proportional estimate, which can over-shoot by a few bytes; clamp so
-        // a buffered HTTP response (which sets Content-Length from this) can't
-        // exceed the requested `bytes=start-end` window.
+        // `read_direct` already returns exactly the requested window (short
+        // only at the true end of the file); this clamp is a cheap safety net
+        // so a buffered HTTP response can't set a Content-Length past the
+        // requested `bytes=start-end` range.
         let want = (end_inclusive - start + 1) as usize;
         if buf.len() > want {
             buf.truncate(want);
@@ -379,6 +377,22 @@ impl UsenetStreamer {
     /// composed of yEnc-encoded NNTP segments. Segments are fetched in
     /// parallel (capped at `pool.download_concurrency()`) and consumed in
     /// order — bounds NNTP round-trip latency for multi-segment reads.
+    ///
+    /// Assembly is anchored at the segment whose offset-table slot contains
+    /// `start`, then walks forward accumulating each segment's **actual
+    /// decoded length** until the requested byte count is satisfied. The
+    /// offset table is used only to pick the starting segment and the
+    /// in-segment skip — never to size the per-segment slice. This is
+    /// deliberate: the table is a cumulative-decoded map that may be slightly
+    /// approximate (e.g. metas ingested before exact-offset rescaling), and
+    /// sizing slices from it drops or short-changes bytes whenever a segment
+    /// decodes to a different length than its slot. A short return is
+    /// catastrophic for the FUSE layer — the Linux kernel treats a read that
+    /// returns fewer bytes than requested as EOF and truncates the file's
+    /// cached size — so we always return exactly `[start, end]` worth of
+    /// bytes (small boundary slop from an approximate anchor is tolerated by
+    /// players; dropping bytes is not). The only legitimate short return is
+    /// at the true end of the file, where we run out of segments.
     async fn read_direct(
         &self,
         offsets: &[u64],
@@ -386,35 +400,71 @@ impl UsenetStreamer {
         start: u64,
         end_inclusive: u64,
     ) -> Result<Vec<Bytes>, StreamerError> {
+        let want = (end_inclusive - start + 1) as usize;
+        if want == 0 || segments.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Segment whose offset-table slot contains `start`, and how far into
+        // that segment's decoded data the request begins.
         let (first, last) = direct_segment_span(offsets, segments.len(), start, end_inclusive);
-
+        let mut skip = start.saturating_sub(offsets[first]) as usize;
         let read_concurrency = self.pool.download_concurrency().max(PREFETCH_FLOOR);
-        let streamer = self.clone();
-        // Index `segments` inside each future rather than cloning every
-        // message-id into a temp Vec — the stream is consumed in place here,
-        // so the borrow of `segments` outlives all in-flight fetches.
-        let mut stream = stream::iter(first..=last)
-            .map(move |i| {
-                let s = streamer.clone();
-                async move {
-                    let mid = &segments[i].message_id;
-                    (i, s.fetch_decoded_cached(mid, Priority::High).await)
-                }
-            })
-            .buffered(read_concurrency);
 
-        // Collect zero-copy `Bytes` slices. For the common single-segment
-        // request (256 KB body chunk inside one ~700 KB segment), the
-        // returned Vec has one slice the caller can hand straight to
-        // hyper. Segment-boundary chunks return two slices; the body
-        // stream emits both as separate response frames, no concat.
+        // Zero-copy `Bytes` slices, consumed in order. The common
+        // single-segment request yields one slice the caller hands straight to
+        // hyper; multi-segment requests yield one slice per segment.
         let mut slices: Vec<Bytes> = Vec::new();
-        while let Some((idx, result)) = stream.next().await {
-            let decoded = result?;
-            let slice = slice_segment(&decoded, offsets[idx], offsets[idx + 1], start, end_inclusive);
-            if !slice.is_empty() {
-                slices.push(slice);
+        let mut produced: usize = 0;
+
+        // Fetch in **bounded, fully-drained batches**. The offset-table span
+        // `[first, last]` covers the request; a small margin absorbs ordinary
+        // per-segment decode/offset slop so one batch almost always suffices.
+        // If slop still leaves us short, we fetch the next batch — never an
+        // unbounded stream with an early break. Draining every batch in full is
+        // essential: cancelling an in-flight fetch (by dropping a `buffered`
+        // stream mid-flight) leaves the pooled NNTP connection with a half-read
+        // BODY response, which makes the next user of that socket time out and
+        // cascades into the provider's circuit breaker.
+        let mut batch_start = first;
+        let mut batch_last = (last + 2).min(segments.len() - 1);
+        loop {
+            let streamer = self.clone();
+            let mut stream = stream::iter(batch_start..=batch_last)
+                .map(move |i| {
+                    let s = streamer.clone();
+                    async move {
+                        let mid = &segments[i].message_id;
+                        s.fetch_decoded_cached(mid, Priority::High).await
+                    }
+                })
+                .buffered(read_concurrency);
+
+            while let Some(result) = stream.next().await {
+                let decoded = result?;
+                if produced >= want {
+                    // Request already satisfied; keep draining so no fetch in
+                    // this batch is cancelled, but don't accumulate more.
+                    continue;
+                }
+                if skip >= decoded.len() {
+                    // Anchor skip spans past this whole segment (start sits in a
+                    // later segment than the table's slot suggested).
+                    skip -= decoded.len();
+                    continue;
+                }
+                let take = (want - produced).min(decoded.len() - skip);
+                slices.push(decoded.slice(skip..skip + take));
+                produced += take;
+                skip = 0;
             }
+
+            if produced >= want || batch_last + 1 >= segments.len() {
+                // Filled, or ran out of segments (legitimate only at true EOF).
+                break;
+            }
+            batch_start = batch_last + 1;
+            batch_last = (batch_last + read_concurrency).min(segments.len() - 1);
         }
 
         Ok(slices)
@@ -438,48 +488,6 @@ fn direct_segment_span(offsets: &[u64], n_segments: usize, start: u64, end: u64)
         .saturating_sub(1)
         .min(last_idx);
     (first, last)
-}
-
-/// Slice the requested byte window out of one decoded segment.
-///
-/// `seg_start`/`seg_end` are the segment's cumulative byte boundaries from
-/// the meta's offset table. After `rescale_direct_to_decoded` these are
-/// exact decoded offsets, so when the segment's actual decoded length
-/// matches the offset delta we address bytes **exactly** — `decoded[(start
-/// − seg_start) .. (end + 1 − seg_start)]` — the same model as altmount's
-/// `SegmentData{start_offset,end_offset}`.
-///
-/// When the lengths disagree — a meta whose best-effort ingest rescale
-/// failed and still holds encoded offsets, or a rare non-uniform yEnc
-/// poster — we fall back to the proportional estimate so the read stays
-/// in-bounds and roughly aligned rather than slicing at a wrong absolute
-/// position.
-fn slice_segment(decoded: &Bytes, seg_start: u64, seg_end: u64, start: u64, end_inclusive: u64) -> Bytes {
-    let offset_len = seg_end.saturating_sub(seg_start);
-    if offset_len == 0 {
-        return Bytes::new();
-    }
-    let dec_len = decoded.len() as u64;
-    let req_lo = start.max(seg_start) - seg_start;
-    let req_hi = end_inclusive.min(seg_end - 1) - seg_start;
-
-    let (lo, hi) = if dec_len == offset_len {
-        // Exact: offsets are true decoded positions for this segment.
-        (req_lo as usize, (req_hi + 1) as usize)
-    } else {
-        // Approximate: scale the request into the segment's actual decoded
-        // span. Preserves the old behaviour for un-rescaled metas.
-        let lo = (req_lo as u128 * dec_len as u128 / offset_len as u128) as usize;
-        let hi = ((req_hi as u128 + 1) * dec_len as u128 / offset_len as u128) as usize;
-        (lo, hi)
-    };
-    let hi = hi.min(decoded.len());
-    let lo = lo.min(hi);
-    if lo < hi {
-        decoded.slice(lo..hi)
-    } else {
-        Bytes::new()
-    }
 }
 
 /// Concatenate decoded segment slices into one contiguous `Bytes`. Used
@@ -518,35 +526,5 @@ mod tests {
         assert_eq!(direct_segment_span(&offsets, 3, 100, 100), (1, 1));
         // Whole file.
         assert_eq!(direct_segment_span(&offsets, 3, 0, 399), (0, 2));
-    }
-
-    #[test]
-    fn slice_segment_exact_when_lengths_match() {
-        // Segment covers decoded bytes [1000, 1700); actual decoded len
-        // matches the offset delta (700), so addressing is exact.
-        let decoded = Bytes::from((0u8..255).cycle().take(700).collect::<Vec<u8>>());
-        // Request [1200, 1299] → bytes [200..300) within the segment.
-        let out = slice_segment(&decoded, 1000, 1700, 1200, 1299);
-        assert_eq!(out.len(), 100);
-        assert_eq!(out[..], decoded[200..300]);
-    }
-
-    #[test]
-    fn slice_segment_clamps_request_to_segment_bounds() {
-        let decoded = Bytes::from(vec![7u8; 700]);
-        // Request spans beyond this segment; only [500..700) belongs here.
-        let out = slice_segment(&decoded, 1000, 1700, 1500, 9999);
-        assert_eq!(out.len(), 200);
-    }
-
-    #[test]
-    fn slice_segment_falls_back_to_ratio_when_lengths_differ() {
-        // Offset delta says 700 but the segment actually decoded to 350
-        // (e.g. encoded offsets / non-uniform poster). The fallback scales
-        // the request into the real decoded span and stays in-bounds.
-        let decoded = Bytes::from(vec![1u8; 350]);
-        let out = slice_segment(&decoded, 1000, 1700, 1000, 1699);
-        assert!(out.len() <= 350);
-        assert!(!out.is_empty());
     }
 }

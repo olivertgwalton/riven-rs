@@ -767,7 +767,10 @@ impl UsenetStreamer {
     /// applies to `NzbMetaSource::Direct`; `Rar` sources are skipped
     /// (their slice lengths are exact decoded byte counts from the RAR
     /// header).
-    async fn rescale_direct_to_decoded(&self, file: &mut NzbMetaFile) -> Result<(), StreamerError> {
+    pub(super) async fn rescale_direct_to_decoded(
+        &self,
+        file: &mut NzbMetaFile,
+    ) -> Result<(), StreamerError> {
         let NzbMetaSource::Direct { offsets, segments } = &mut file.source else {
             return Ok(());
         };

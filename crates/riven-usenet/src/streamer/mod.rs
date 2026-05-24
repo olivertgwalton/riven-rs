@@ -106,14 +106,83 @@ impl UsenetStreamer {
             self.maybe_kick_backfill(&hit);
             return Ok(hit);
         }
-        let meta = store::load(&self.db, info_hash)
+        let mut meta = store::load(&self.db, info_hash)
             .await?
             .ok_or_else(|| StreamerError::NotIngested(info_hash.to_string()))?;
+
+        // Auto-heal Direct metas whose offset table predates exact-offset
+        // rescaling. Those tables hold encoded-byte *estimates* (each segment's
+        // slot drifts from its true decoded length), which misaligns the
+        // stateless random-access read path and corrupts playback. Detection is
+        // a pure check on the stored array — no I/O — so already-exact metas
+        // pass straight through. When a table looks approximate we re-run the
+        // same rescale a fresh ingest would (cheap: it fetches only the first +
+        // last segment) and persist the result, so it's a one-time cost per
+        // title that survives restarts and cache eviction.
+        let mut healed = false;
+        for file in &mut meta.files {
+            let approximate = matches!(
+                &file.source,
+                NzbMetaSource::Direct { offsets, .. } if direct_offsets_look_approximate(offsets)
+            );
+            if approximate {
+                match self.rescale_direct_to_decoded(file).await {
+                    Ok(()) => healed = true,
+                    Err(error) => tracing::warn!(
+                        info_hash,
+                        %error,
+                        "usenet meta auto-heal: rescale failed; serving stored offsets"
+                    ),
+                }
+            }
+        }
+        if healed {
+            match store::store(&self.db, info_hash, &meta).await {
+                Ok(()) => tracing::info!(
+                    info_hash,
+                    "usenet meta auto-heal: rescaled Direct offsets to exact decoded space"
+                ),
+                Err(error) => tracing::warn!(
+                    info_hash,
+                    %error,
+                    "usenet meta auto-heal: persist failed; healed in memory only"
+                ),
+            }
+        }
+
         let arc = Arc::new(meta);
         self.state.meta_cache.put(info_hash.to_string(), arc.clone());
         self.maybe_kick_backfill(&arc);
         Ok(arc)
     }
+}
+
+/// Heuristic (no I/O): does a `Direct` offset table look like a pre-exact-offset
+/// estimate rather than the uniform-part decoded map the current ingest emits?
+///
+/// The exact-offset rescale makes every *full* segment the same decoded size
+/// (`dec_first`), so all interior steps are identical and only the final
+/// (partial) segment differs. The old encoded-byte estimate varied each
+/// segment's slot, so its interior steps differ from the first one onward.
+/// Comparing the first few full-part steps catches the estimate immediately
+/// (S5E3, for instance, drifts at the very second segment) while leaving a
+/// genuinely uniform table untouched.
+fn direct_offsets_look_approximate(offsets: &[u64]) -> bool {
+    // `offsets` has `n_segments + 1` entries. The final step
+    // (`offsets[len-2]..offsets[len-1]`) is the partial last segment and is
+    // excluded; full-part steps are indices `0..len-2`. Need at least two of
+    // them to compare.
+    let full_steps = offsets.len().saturating_sub(2);
+    if full_steps < 2 {
+        return false;
+    }
+    let step0 = offsets[1] - offsets[0];
+    for i in 1..full_steps.min(4) {
+        if offsets[i + 1] - offsets[i] != step0 {
+            return true;
+        }
+    }
+    false
 }
 
 /// Public accessor: registry of currently-streaming items. The VFS
