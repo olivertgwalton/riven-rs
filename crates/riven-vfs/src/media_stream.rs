@@ -454,142 +454,30 @@ fn slice_request_bytes(full: &Bytes, start: u64, end: u64, base_start: u64) -> O
     let slice_len = requested_len.min(available_len);
     Some(full.slice(offset..offset + slice_len))
 }
-
-/// Sequential reader over the usenet streamer's eagerly-pipelined byte
-/// stream, consuming the decoded `Bytes` frames directly.
-///
-/// Unlike [`SequentialReader`] (the HTTP path) this holds **no**
-/// `BufReader`/`StreamReader` and never copies through an intermediate
-/// buffer: a read either splits the requested bytes out of the leftover
-/// `carry` frame zero-copy (`Bytes::split_to`), or — when a read straddles
-/// frame boundaries — concatenates the minimum number of frames into one
-/// exactly-sized `BytesMut` (no zero-fill). The streamer already produces
-/// zero-copy slices out of its decoded-segment cache, so this removes the
-/// double buffering the old `FUSE → BufReader → Vec` path incurred.
-struct UsenetFrameReader {
-    stream: BoxStream<'static, Result<Bytes, io::Error>>,
-    read_pos: u64,
-    /// Full file size — the in-process stream has no HTTP window cap, so it
-    /// can always serve up to EOF from `read_pos` onward.
-    body_end_exclusive: u64,
-    /// Bytes pulled from the stream but not yet consumed by a read.
-    carry: Bytes,
-}
-
-impl UsenetFrameReader {
-    fn new(
-        stream: BoxStream<'static, Result<Bytes, io::Error>>,
-        body_end_exclusive: u64,
-        start_pos: u64,
-    ) -> Self {
-        Self {
-            stream,
-            read_pos: start_pos,
-            body_end_exclusive,
-            carry: Bytes::new(),
-        }
-    }
-
-    fn can_serve(&self, start: u64, end_inclusive: u64) -> bool {
-        start >= self.read_pos && end_inclusive < self.body_end_exclusive
-    }
-
-    /// Read up to `size` bytes at `pos`, tolerating an early EOF by returning
-    /// the partial result (the last segment may decode a few bytes short).
-    /// FUSE accepts short reads.
-    async fn read_upto_at(&mut self, pos: u64, size: usize) -> io::Result<Bytes> {
-        if pos < self.read_pos {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("cannot rewind active stream from {} to {}", self.read_pos, pos),
-            ));
-        }
-        if pos > self.read_pos {
-            self.discard(pos - self.read_pos).await?;
-            self.read_pos = pos;
-        }
-
-        // Fast path: the carry frame already covers the whole request — slice
-        // it out with zero copy.
-        if self.carry.len() >= size {
-            let out = self.carry.split_to(size);
-            self.read_pos += size as u64;
-            return Ok(out);
-        }
-
-        // Straddles frames: concatenate the minimum span into one buffer.
-        let mut buf = BytesMut::with_capacity(size);
-        if !self.carry.is_empty() {
-            let carry = std::mem::take(&mut self.carry);
-            buf.extend_from_slice(&carry);
-        }
-        while buf.len() < size {
-            match self.stream.next().await {
-                Some(Ok(frame)) => {
-                    let need = size - buf.len();
-                    if frame.len() <= need {
-                        buf.extend_from_slice(&frame);
-                    } else {
-                        buf.extend_from_slice(&frame[..need]);
-                        self.carry = frame.slice(need..);
-                    }
-                }
-                Some(Err(error)) => return Err(error),
-                None => break, // EOF — return what we have
-            }
-        }
-        self.read_pos += buf.len() as u64;
-        Ok(buf.freeze())
-    }
-
-    /// Skip `bytes` of stream data (a forward seek), dropping whole frames and
-    /// keeping any partial remainder in `carry`.
-    async fn discard(&mut self, bytes: u64) -> io::Result<()> {
-        let mut remaining = bytes;
-        let from_carry = (self.carry.len() as u64).min(remaining);
-        // `split_to` keeps the tail in `self.carry`, dropping the head.
-        let _head = self.carry.split_to(from_carry as usize);
-        remaining -= from_carry;
-
-        while remaining > 0 {
-            match self.stream.next().await {
-                Some(Ok(frame)) => {
-                    let flen = frame.len() as u64;
-                    if flen <= remaining {
-                        remaining -= flen;
-                    } else {
-                        self.carry = frame.slice(remaining as usize..);
-                        remaining = 0;
-                    }
-                }
-                Some(Err(error)) => return Err(error),
-                None => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::UnexpectedEof,
-                        "stream ended during forward-seek discard",
-                    ));
-                }
-            }
-        }
-        Ok(())
-    }
-}
-
 /// In-process streaming session for usenet-backed files.
 ///
-/// Reads go directly into the usenet streamer via `LocalByteSource`.
-/// Sequential reads pull from
-/// an eagerly-pipelined `open_stream` (so a slow segment is absorbed by the
-/// read-ahead buffer, not stalled on); a non-sequential seek reopens the
-/// stream at the new position. There's no separate range cache here — the
-/// streamer owns its own decoded-segment cache, so this avoids the
-/// double-buffering the HTTP path incurred.
+/// Each FUSE read is served directly by the streamer's `read_range`
+/// (`LocalByteSource`), which fetches exactly the overlapping segments from
+/// its decoded-segment cache (or de-duplicated cold fetch) and always runs to
+/// completion — so there is no stateful forward-only reader to thrash. The
+/// kernel issues reads for one handle in arbitrary order (large read-ahead,
+/// 4 MB `max_read`), but order no longer matters: an out-of-order or backward
+/// read just hits the cache instead of forcing a stream reopen.
+///
+/// The read-ahead *lead* that keeps a slow segment from stalling playback is
+/// built by a separate fire-and-forget `prefetch`: each read warms a
+/// `PREFETCH_LEAD`-byte window ahead of `start`, advancing a monotonic
+/// `prefetch_frontier` so the warm work runs ahead of the read position
+/// independent of the per-handle read serialization, and never re-warms or
+/// runs backward.
 pub struct UsenetSession {
     source: Arc<dyn LocalByteSource>,
     info_hash: Arc<str>,
     file_index: usize,
     file_size: u64,
-    sequential: Option<UsenetFrameReader>,
+    /// Highest offset the look-ahead prefetch has already been scheduled up
+    /// to. Monotonic: forward reads extend it, backward reads leave it alone.
+    prefetch_frontier: u64,
     /// Active-streams registry key (`"{info_hash}:{file_index}"`). Registered
     /// on first read, touched periodically, unregistered on drop — restoring
     /// the dashboard "now playing" view for in-process FUSE playback.
@@ -613,7 +501,7 @@ impl UsenetSession {
             info_hash,
             file_index,
             file_size,
-            sequential: None,
+            prefetch_frontier: 0,
             stream_key,
             filename,
             registered: false,
@@ -650,56 +538,50 @@ impl UsenetSession {
         }
         let end = end.min(self.file_size - 1);
 
-        // Reopen the pipeline on first read, on a backward seek, or on a
-        // forward jump the current reader can't reach without discarding an
-        // unreasonable amount (handled implicitly: can_serve only checks
-        // start >= read_pos; large forward gaps still stream-and-discard,
-        // which the kernel's sequential read-ahead rarely triggers).
-        let need_open = self
-            .sequential
-            .as_ref()
-            .is_none_or(|r| !r.can_serve(start, end));
-        if need_open {
-            let opened = runtime.block_on(self.source.open_stream(
-                &self.info_hash,
-                self.file_index,
-                start,
-            ));
-            match opened {
-                Ok(stream) => {
-                    self.sequential =
-                        Some(UsenetFrameReader::new(stream, self.file_size, start));
-                }
-                Err(error) => {
-                    tracing::error!(
-                        target: "streaming",
-                        info_hash = %self.info_hash,
-                        file_index = self.file_index,
-                        error = %error,
-                        "usenet open_stream failed"
-                    );
-                    return ReadOutcome::Error(libc::EIO);
-                }
-            }
+        // Warm a look-ahead window so the next sequential reads land in cache.
+        // Bytes ahead of the current read to keep pre-fetched. ~46 MB matches
+        // the old eager-producer read-ahead depth; deep enough to ride out a
+        // multi-second provider latency excursion. Override with
+        // `RIVEN_USENET_STREAM_READAHEAD_BYTES`.
+        const DEFAULT_PREFETCH_LEAD: u64 = 46 * 1024 * 1024;
+        let lead = std::env::var("RIVEN_USENET_STREAM_READAHEAD_BYTES")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .filter(|&n| n > 0)
+            .unwrap_or(DEFAULT_PREFETCH_LEAD);
+        let want_through = (start + lead).min(self.file_size - 1);
+        if want_through > self.prefetch_frontier {
+            // Cover the gap between what's already scheduled and the new
+            // frontier (or from `start` on the first read / a forward seek
+            // past the frontier). De-dup + concurrency bounding live in the
+            // streamer, so a fire-and-forget overlapping window is cheap.
+            let from = self.prefetch_frontier.max(start);
+            self.prefetch_frontier = want_through;
+            let source = Arc::clone(&self.source);
+            let info_hash = Arc::clone(&self.info_hash);
+            let file_index = self.file_index;
+            runtime.spawn(async move {
+                source
+                    .prefetch(&info_hash, file_index, from, want_through)
+                    .await;
+            });
         }
 
-        let size = (end - start + 1) as usize;
-        let reader = self
-            .sequential
-            .as_mut()
-            .expect("sequential reader set above");
-        match runtime.block_on(reader.read_upto_at(start, size)) {
+        match runtime.block_on(self.source.read_range(
+            &self.info_hash,
+            self.file_index,
+            start,
+            end,
+        )) {
             Ok(data) => ReadOutcome::Data(data),
             Err(error) => {
-                // Drop the reader so the next read reopens cleanly.
-                self.sequential = None;
                 tracing::warn!(
                     target: "streaming",
                     info_hash = %self.info_hash,
                     file_index = self.file_index,
                     offset = start,
                     error = %error,
-                    "usenet sequential read failed"
+                    "usenet read_range failed"
                 );
                 ReadOutcome::Error(libc::EIO)
             }
@@ -712,65 +594,5 @@ impl Drop for UsenetSession {
         if self.registered {
             self.source.stream_unregister(&self.stream_key);
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use futures::stream;
-
-    /// Build a frame reader over a fixed sequence of `Bytes` frames.
-    fn reader_from(frames: Vec<&[u8]>, file_size: u64, start: u64) -> UsenetFrameReader {
-        let items: Vec<Result<Bytes, io::Error>> =
-            frames.into_iter().map(|f| Ok(Bytes::copy_from_slice(f))).collect();
-        UsenetFrameReader::new(stream::iter(items).boxed(), file_size, start)
-    }
-
-    #[tokio::test]
-    async fn read_within_single_frame_is_zero_copy_carry() {
-        // One 10-byte frame; two sub-frame reads should both succeed and the
-        // second must come from the retained carry (no further stream pull).
-        let mut r = reader_from(vec![b"0123456789"], 10, 0);
-        let a = r.read_upto_at(0, 4).await.unwrap();
-        assert_eq!(&a[..], b"0123");
-        let b = r.read_upto_at(4, 6).await.unwrap();
-        assert_eq!(&b[..], b"456789");
-        assert_eq!(r.read_pos, 10);
-    }
-
-    #[tokio::test]
-    async fn read_straddling_frames_concatenates() {
-        let mut r = reader_from(vec![b"AAAA", b"BBBB", b"CCCC"], 12, 0);
-        // Spans the first two frames plus part of the third.
-        let out = r.read_upto_at(0, 10).await.unwrap();
-        assert_eq!(&out[..], b"AAAABBBBCC");
-        // Remaining two bytes come from the carry left over from frame 3.
-        let rest = r.read_upto_at(10, 2).await.unwrap();
-        assert_eq!(&rest[..], b"CC");
-    }
-
-    #[tokio::test]
-    async fn read_tolerates_short_read_at_eof() {
-        let mut r = reader_from(vec![b"AAAA"], 4, 0);
-        // Ask for more than exists; should return only what's available.
-        let out = r.read_upto_at(0, 16).await.unwrap();
-        assert_eq!(&out[..], b"AAAA");
-    }
-
-    #[tokio::test]
-    async fn forward_seek_discards_then_reads() {
-        let mut r = reader_from(vec![b"AAAA", b"BBBB", b"CCCC"], 12, 0);
-        // Seek to byte 6 (mid frame 2), then read 4 bytes spanning into frame 3.
-        let out = r.read_upto_at(6, 4).await.unwrap();
-        assert_eq!(&out[..], b"BBCC");
-        assert_eq!(r.read_pos, 10);
-    }
-
-    #[tokio::test]
-    async fn rewind_is_rejected() {
-        let mut r = reader_from(vec![b"AAAA"], 4, 0);
-        let _ = r.read_upto_at(0, 2).await.unwrap();
-        assert!(r.read_upto_at(0, 2).await.is_err());
     }
 }

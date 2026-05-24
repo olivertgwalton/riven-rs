@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use bytes::{Bytes, BytesMut};
 use futures::StreamExt;
-use futures::stream::{self, BoxStream};
+use futures::stream;
 
 use crate::nntp::{NntpError, Priority};
 use crate::nzb::NzbSegment;
@@ -10,13 +10,8 @@ use crate::state::{FetchEntry, PromiseSlot, StreamerState};
 use crate::yenc;
 
 use super::{
-    NzbMeta, NzbMetaSource, PREFETCH_FLOOR, StreamerError, UsenetStreamer, segments_overlapping,
+    NzbMetaSource, PREFETCH_FLOOR, StreamerError, UsenetStreamer, segments_overlapping,
 };
-
-/// Chunk size for the RAR streaming pipeline. RAR slices are whole volumes
-/// (100 MB+), so a per-chunk read maps cleanly; 2 MB balances per-chunk
-/// overhead against pipeline granularity.
-const RAR_STREAM_CHUNK: u64 = 2 * 1024 * 1024;
 
 /// Max attempts when fetching an NNTP segment body. ArticleNotFound is
 /// permanent and never retried.
@@ -378,185 +373,6 @@ impl UsenetStreamer {
                 Ok(if buf.is_empty() { Vec::new() } else { vec![buf] })
             }
         }
-    }
-
-    /// Build a pipelined byte stream for `[start, end_inclusive]` of
-    /// `file_index`, ready to feed an HTTP response body.
-    ///
-    /// This is the live-playback path. It replaces the original design of
-    /// "spawn one `prefetch_range(start, EOF)` task that races to the end of
-    /// the file + read the body one chunk at a time", which let the prefetch
-    /// front pull hundreds of segments ahead and evict the player's own read
-    /// position from the LRU cache — the cause of the "video freezes, audio
-    /// keeps playing, recovers" stutter.
-    ///
-    /// ## Why an eager producer rather than just `buffered`
-    ///
-    /// A plain `segment_stream.buffered(n)` only advances its in-flight
-    /// fetches when *polled by the consumer*. During live playback hyper
-    /// applies backpressure between the player's reads, so the pipeline
-    /// would stop fetching in the gaps and never build a real lead — it
-    /// stays reactive, and a single slow segment still stalls output.
-    ///
-    /// Instead we drive the ordered fetch pipeline from a **spawned producer
-    /// task** that runs on the runtime independent of consumer polling, and
-    /// hand results to the body through a **bounded channel**. The channel's
-    /// capacity is the read-ahead depth: the producer eagerly fills it (the
-    /// NNTP line is ~8× faster than playback bitrate), so by the time the
-    /// player reaches a segment it's already decoded and waiting. A slow
-    /// segment was fetched `readahead` positions earlier, so its latency is
-    /// absorbed by the buffer instead of stalling the video. The bounded
-    /// channel is also the backpressure + memory bound: the producer blocks
-    /// on a full channel, and the lead can never run away to evict the
-    /// cache. When the body is dropped (client disconnect) the channel
-    /// closes and the producer exits.
-    pub fn byte_stream(
-        &self,
-        meta: Arc<NzbMeta>,
-        file_index: usize,
-        start: u64,
-        end_inclusive: u64,
-    ) -> BoxStream<'static, Result<Bytes, StreamerError>> {
-        let Some(file) = meta.files.get(file_index) else {
-            return stream::once(async move { Err(StreamerError::BadFileIndex(file_index)) }).boxed();
-        };
-        if start > end_inclusive || end_inclusive >= file.total_size {
-            return stream::once(async move { Err(StreamerError::BadRange) }).boxed();
-        }
-
-        // Fetch parallelism for the ordered pipeline (bounded by the pool).
-        let fetch_concurrency = self.pool.download_concurrency().max(PREFETCH_FLOOR);
-        // Read-ahead depth (completed segments/chunks buffered ahead of the
-        // player). ~46 MB at 720 KB/segment by default — deep enough to ride
-        // out multi-second provider latency excursions, still a small
-        // fraction of the segment cache. Override with
-        // `RIVEN_USENET_STREAM_READAHEAD`.
-        const DEFAULT_READAHEAD: usize = 64;
-        let readahead = std::env::var("RIVEN_USENET_STREAM_READAHEAD")
-            .ok()
-            .and_then(|s| s.parse::<usize>().ok())
-            .filter(|&n| n > 0)
-            .unwrap_or(DEFAULT_READAHEAD);
-
-        let inner = match &file.source {
-            NzbMetaSource::Direct { offsets, segments } => self.direct_byte_stream(
-                meta.clone(),
-                file_index,
-                offsets,
-                segments,
-                start,
-                end_inclusive,
-                fetch_concurrency,
-            ),
-            NzbMetaSource::Rar { .. } => self.rar_byte_stream(
-                meta.clone(),
-                file_index,
-                start,
-                end_inclusive,
-                fetch_concurrency,
-            ),
-        };
-
-        // Eager producer: drives `inner` on the runtime and pushes results
-        // into the bounded channel. `send` awaiting on a full channel is the
-        // backpressure that bounds the lead; `send` erroring (receiver
-        // dropped on client disconnect) is the exit signal.
-        let (tx, rx) = tokio::sync::mpsc::channel(readahead);
-        tokio::spawn(async move {
-            let mut inner = inner;
-            while let Some(item) = inner.next().await {
-                if tx.send(item).await.is_err() {
-                    break;
-                }
-            }
-        });
-
-        stream::unfold(rx, |mut rx| async move {
-            rx.recv().await.map(|item| (item, rx))
-        })
-        .boxed()
-    }
-
-    /// Segment-level pipeline for `Direct` sources: compute the overlapping
-    /// segment span once, then `buffered`-fetch each segment and slice out
-    /// the requested portion. Holds the `meta` Arc so the offset table stays
-    /// available for the stream's lifetime.
-    fn direct_byte_stream(
-        &self,
-        meta: Arc<NzbMeta>,
-        file_index: usize,
-        offsets: &[u64],
-        segments: &[NzbSegment],
-        start: u64,
-        end_inclusive: u64,
-        fetch_concurrency: usize,
-    ) -> BoxStream<'static, Result<Bytes, StreamerError>> {
-        let (first, last) = direct_segment_span(offsets, segments.len(), start, end_inclusive);
-
-        let streamer = self.clone();
-        let idxs: Vec<usize> = (first..=last).collect();
-        stream::iter(idxs)
-            .map(move |idx| {
-                let streamer = streamer.clone();
-                let meta = meta.clone();
-                async move {
-                    let NzbMetaSource::Direct { offsets, segments } =
-                        &meta.files[file_index].source
-                    else {
-                        return Err(StreamerError::BadRange);
-                    };
-                    let mid = &segments[idx].message_id;
-                    let decoded = streamer.fetch_decoded_cached(mid, Priority::High).await?;
-                    Ok(slice_segment(
-                        &decoded,
-                        offsets[idx],
-                        offsets[idx + 1],
-                        start,
-                        end_inclusive,
-                    ))
-                }
-            })
-            .buffered(fetch_concurrency)
-            .boxed()
-    }
-
-    /// Chunk-level pipeline for `Rar` sources. RAR reads route through the
-    /// contiguous `read_range` path (the encrypted-slice case needs in-place
-    /// decrypt), so we pipeline fixed-size chunks rather than raw segments.
-    /// RAR slices are whole volumes, so a chunk almost always lands in one.
-    fn rar_byte_stream(
-        &self,
-        meta: Arc<NzbMeta>,
-        file_index: usize,
-        start: u64,
-        end_inclusive: u64,
-        fetch_concurrency: usize,
-    ) -> BoxStream<'static, Result<Bytes, StreamerError>> {
-        let mut chunks: Vec<(u64, u64)> = Vec::new();
-        let mut pos = start;
-        while pos <= end_inclusive {
-            let chunk_end = pos.saturating_add(RAR_STREAM_CHUNK - 1).min(end_inclusive);
-            chunks.push((pos, chunk_end));
-            pos = chunk_end.saturating_add(1);
-        }
-
-        let streamer = self.clone();
-        stream::iter(chunks)
-            .map(move |(s, e)| {
-                let streamer = streamer.clone();
-                let meta = meta.clone();
-                async move {
-                    let NzbMetaSource::Rar { parts, slices } = &meta.files[file_index].source
-                    else {
-                        return Err(StreamerError::BadRange);
-                    };
-                    streamer
-                        .read_rar(parts, slices, meta.password.as_deref(), s, e, Priority::High)
-                        .await
-                }
-            })
-            .buffered(fetch_concurrency)
-            .boxed()
     }
 
     /// Read a byte range from a `Direct` source: a single contiguous file

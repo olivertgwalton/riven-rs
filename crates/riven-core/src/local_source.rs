@@ -24,15 +24,15 @@ pub trait LocalByteSource: Send + Sync {
         end_inclusive: u64,
     ) -> anyhow::Result<Bytes>;
 
-    /// Open a contiguous byte stream from `start` to EOF, eagerly
-    /// pipelined. Used for sequential playback so a single slow segment is
-    /// absorbed by the read-ahead buffer rather than stalling the reader.
-    async fn open_stream(
-        &self,
-        info_hash: &str,
-        file_index: usize,
-        start: u64,
-    ) -> anyhow::Result<futures::stream::BoxStream<'static, std::io::Result<Bytes>>>;
+    /// Warm the segment cache for the inclusive range `[start, end]` ahead of
+    /// the live read position. Fire-and-forget from the caller's side: the
+    /// implementation bounds its own concurrency and deduplicates against
+    /// in-flight and already-cached segments, so calling it on every read with
+    /// an overlapping look-ahead window is cheap. This is how sequential
+    /// playback builds a read-ahead lead — independent of the per-handle read
+    /// serialization — so a slow segment is fetched well before the player
+    /// reaches it rather than stalling the read.
+    async fn prefetch(&self, info_hash: &str, file_index: usize, start: u64, end_inclusive: u64);
 
     /// Active-stream registry hooks, driving the dashboard's "now playing"
     /// view. The VFS calls these as it serves a usenet handle. `key`
