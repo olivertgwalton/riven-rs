@@ -132,14 +132,45 @@ fn build_stream_query(ranks: &ResolutionRanks, limit_one: bool) -> String {
 }
 
 pub async fn clear_blacklisted_streams(pool: &PgPool, media_item_id: i64) -> Result<()> {
-    sqlx::query!(
-        "DELETE FROM media_item_blacklisted_streams WHERE media_item_id = $1",
-        media_item_id
+    // Preserve permanent blacklists (releases confirmed broken by the health
+    // check) — only the transient, per-scrape entries are cleared.
+    sqlx::query(
+        "DELETE FROM media_item_blacklisted_streams \
+         WHERE media_item_id = $1 AND permanent = false",
     )
+    .bind(media_item_id)
     .execute(pool)
     .await?;
     super::state::recompute(pool, &[media_item_id]).await?;
     Ok(())
+}
+
+/// Permanently blacklist a stream (by usenet/release info hash) for an item, so
+/// it survives the scrape-time blacklist clear. Used when the health check
+/// confirms a release is broken. Returns `false` if no matching stream row.
+pub async fn blacklist_stream_permanent_by_hash(
+    pool: &PgPool,
+    media_item_id: i64,
+    info_hash: &str,
+) -> Result<bool> {
+    let stream_id: Option<i64> =
+        sqlx::query_scalar::<_, i64>("SELECT id FROM streams WHERE info_hash = $1")
+            .bind(info_hash)
+            .fetch_optional(pool)
+            .await?;
+    let Some(stream_id) = stream_id else {
+        return Ok(false);
+    };
+    sqlx::query(
+        "INSERT INTO media_item_blacklisted_streams (media_item_id, stream_id, permanent) \
+         VALUES ($1, $2, true) \
+         ON CONFLICT (media_item_id, stream_id) DO UPDATE SET permanent = true",
+    )
+    .bind(media_item_id)
+    .bind(stream_id)
+    .execute(pool)
+    .await?;
+    Ok(true)
 }
 
 /// Load resolution ranks from the `rank_settings` DB key.

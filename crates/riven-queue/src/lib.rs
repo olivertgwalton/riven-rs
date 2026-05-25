@@ -307,14 +307,33 @@ impl JobQueue {
     /// any incomplete/dead release, so a complete one is picked. Shared by the
     /// manual "Re-grab" mutation and the usenet auto-repair worker.
     pub async fn regrab_media_item(&self, media_item_id: i64) -> anyhow::Result<()> {
-        let entry_ids: Vec<i64> = sqlx::query_scalar::<_, i64>(
-            "SELECT id FROM filesystem_entries WHERE media_item_id = $1 AND entry_type = 'media'",
+        let entries: Vec<(i64, Option<String>)> = sqlx::query_as::<_, (i64, Option<String>)>(
+            "SELECT id, usenet_info_hash FROM filesystem_entries \
+             WHERE media_item_id = $1 AND entry_type = 'media'",
         )
         .bind(media_item_id)
         .fetch_all(&self.db_pool)
         .await?;
 
-        for id in &entry_ids {
+        // Permanently blacklist the current (broken) release(s) so the re-scrape
+        // can't re-pick the same one — otherwise a release whose gaps slip past
+        // the ingest probe gets re-grabbed endlessly.
+        for (_, info_hash) in &entries {
+            if let Some(info_hash) = info_hash
+                && let Err(error) = riven_db::repo::blacklist_stream_permanent_by_hash(
+                    &self.db_pool,
+                    media_item_id,
+                    info_hash,
+                )
+                .await
+            {
+                tracing::warn!(%error, info_hash, "regrab: failed to blacklist release");
+            }
+        }
+
+        // Delete the media entries so the item is no longer "completed", then
+        // recompute and re-process to scrape + ingest a different release.
+        for (id, _) in &entries {
             if let Err(error) = riven_db::repo::delete_filesystem_entry(&self.db_pool, *id).await {
                 tracing::warn!(%error, entry_id = *id, "regrab: failed to delete filesystem entry");
             }
