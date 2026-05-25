@@ -4,6 +4,8 @@ pub mod requests;
 pub mod state;
 pub mod stats;
 pub mod streams;
+pub mod usenet_health;
+pub mod usenet_traffic;
 
 pub use hierarchy::*;
 pub use media::*;
@@ -11,6 +13,8 @@ pub use requests::*;
 pub use state::*;
 pub use stats::*;
 pub use streams::*;
+pub use usenet_health::*;
+pub use usenet_traffic::*;
 
 use anyhow::Result;
 use sqlx::PgPool;

@@ -1,5 +1,11 @@
-use std::time::Duration;
+use std::collections::HashMap;
+use std::net::SocketAddr;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
+use hickory_resolver::TokioResolver;
+use hickory_resolver::config::ResolverConfig;
+use hickory_resolver::name_server::TokioConnectionProvider;
 use tokio::io::BufReader;
 use tokio::net::TcpStream;
 use tokio_rustls::rustls::pki_types::ServerName;
@@ -7,6 +13,121 @@ use tokio_rustls::rustls::pki_types::ServerName;
 use crate::bufpool::PooledBuf;
 
 use super::{ENCODED_BUF_POOL, NntpError, NntpServerConfig, NntpStream, build_tls_connector};
+
+/// How long a resolved provider address is reused before re-resolving.
+const DNS_CACHE_TTL: Duration = Duration::from_secs(300);
+
+/// Process-wide async DNS resolver (hickory). Replaces musl's blocking
+/// `getaddrinfo`, which returns `EAI_AGAIN` under the concurrency our dialer
+/// generates in Docker/OrbStack. Built once from the system resolver config
+/// (`/etc/resolv.conf`); falls back to a default config if that's unreadable.
+fn resolver() -> &'static TokioResolver {
+    static RESOLVER: OnceLock<TokioResolver> = OnceLock::new();
+    RESOLVER.get_or_init(|| match TokioResolver::builder_tokio() {
+        Ok(builder) => builder.build(),
+        Err(error) => {
+            tracing::warn!(%error, "hickory: system resolver config unavailable; using defaults");
+            TokioResolver::builder_with_config(
+                ResolverConfig::default(),
+                TokioConnectionProvider::default(),
+            )
+            .build()
+        }
+    })
+}
+
+struct CachedAddrs {
+    addrs: Vec<SocketAddr>,
+    resolved_at: Instant,
+}
+
+fn dns_cache() -> &'static Mutex<HashMap<String, CachedAddrs>> {
+    static CACHE: OnceLock<Mutex<HashMap<String, CachedAddrs>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Resolve `host:port` with a cache that **serves stale entries when the
+/// resolver fails**. Usenet providers' addresses are stable, and a musl/Docker
+/// resolver returns `EAI_AGAIN` under the concurrency our dialer generates —
+/// re-resolving on every connect turned a transient DNS blip into a storm that
+/// failed every dial and tripped the circuit breaker. Resolving once per host
+/// per TTL (and falling back to the last good address on failure) removes that
+/// failure mode entirely while still picking up real address changes.
+async fn resolve_cached(host: &str, port: u16) -> Result<Vec<SocketAddr>, NntpError> {
+    let key = format!("{host}:{port}");
+
+    // Fresh cache hit — skip the resolver completely.
+    if let Some(entry) = dns_cache().lock().expect("dns cache poisoned").get(&key)
+        && entry.resolved_at.elapsed() < DNS_CACHE_TTL
+    {
+        return Ok(entry.addrs.clone());
+    }
+
+    match resolver().lookup_ip(host).await {
+        Ok(lookup) => {
+            let addrs: Vec<SocketAddr> =
+                lookup.iter().map(|ip| SocketAddr::new(ip, port)).collect();
+            if !addrs.is_empty() {
+                dns_cache().lock().expect("dns cache poisoned").insert(
+                    key,
+                    CachedAddrs {
+                        addrs: addrs.clone(),
+                        resolved_at: Instant::now(),
+                    },
+                );
+                return Ok(addrs);
+            }
+        }
+        Err(error) => {
+            // Resolver failed — reuse the last good address rather than failing
+            // the dial. This is what keeps a flaky resolver from wedging us.
+            if let Some(entry) = dns_cache().lock().expect("dns cache poisoned").get(&key) {
+                tracing::debug!(host, %error, "DNS resolve failed; using cached address");
+                return Ok(entry.addrs.clone());
+            }
+            return Err(NntpError::Io(std::io::Error::other(error.to_string())));
+        }
+    }
+
+    // Empty (but non-erroring) result — fall back to stale if we have it.
+    if let Some(entry) = dns_cache().lock().expect("dns cache poisoned").get(&key) {
+        return Ok(entry.addrs.clone());
+    }
+    Err(NntpError::Io(std::io::Error::other(format!(
+        "no addresses resolved for {host}"
+    ))))
+}
+
+/// Populate the DNS cache for a host with a single low-concurrency resolve,
+/// before a burst of concurrent dials. Without this, a cold cache lets every
+/// prewarm dial call the resolver at once — the exact storm the cache exists to
+/// avoid. Errors are swallowed: the dials will retry resolution themselves.
+pub(crate) async fn warm_dns(host: &str, port: u16) {
+    drop(resolve_cached(host, port).await);
+}
+
+/// Drop a host's cached address so the next dial re-resolves — used when a
+/// cached address fails to connect (e.g. the provider rotated IPs).
+fn invalidate_dns(host: &str, port: u16) {
+    dns_cache()
+        .lock()
+        .expect("dns cache poisoned")
+        .remove(&format!("{host}:{port}"));
+}
+
+/// Connect to the first reachable address, returning the last error if none work.
+async fn connect_first(addrs: &[SocketAddr]) -> Result<TcpStream, NntpError> {
+    let mut last_err: Option<std::io::Error> = None;
+    for addr in addrs {
+        match TcpStream::connect(addr).await {
+            Ok(stream) => return Ok(stream),
+            Err(error) => last_err = Some(error),
+        }
+    }
+    Err(last_err
+        .unwrap_or_else(|| std::io::Error::other("no addresses to connect"))
+        .into())
+}
 
 /// One open + authenticated NNTP connection.
 pub struct NntpConnection {
@@ -27,7 +148,17 @@ impl NntpConnection {
         const NNTP_READ_BUF: usize = 512 * 1024;
 
         let connect_fut = async {
-            let tcp = TcpStream::connect((cfg.host.as_str(), cfg.port)).await?;
+            // Dial a cached/resolved IP (TLS still verifies against `cfg.host`
+            // below, so the SNI/cert path is unaffected). On connect failure,
+            // drop the cached address so the next attempt re-resolves.
+            let addrs = resolve_cached(&cfg.host, cfg.port).await?;
+            let tcp = match connect_first(&addrs).await {
+                Ok(tcp) => tcp,
+                Err(error) => {
+                    invalidate_dns(&cfg.host, cfg.port);
+                    return Err(error);
+                }
+            };
             drop(tcp.set_nodelay(true));
             let stream = if cfg.use_tls {
                 let connector = build_tls_connector()?;

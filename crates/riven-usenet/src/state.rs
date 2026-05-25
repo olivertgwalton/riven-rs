@@ -79,6 +79,9 @@ pub struct StreamerState {
     pub in_flight: InFlight,
     pub precached: PrecachedFiles,
     pub migrated: MigratedMetas,
+    /// Cumulative NNTP fetch counters (cache misses that hit the wire),
+    /// driving the API's usenet-streaming health view.
+    pub fetch_metrics: FetchMetrics,
     /// Caps concurrent head/tail precache operations. A Plex/Jellyfin
     /// library scan HEADs hundreds of files in a burst, each of which
     /// fires a fire-and-forget `precache_head_tail`. Without a limit
@@ -114,12 +117,48 @@ impl StreamerState {
             in_flight: InFlight::default(),
             precached: PrecachedFiles::default(),
             migrated: MigratedMetas::default(),
+            fetch_metrics: FetchMetrics::default(),
         }
     }
 
     pub fn global() -> Arc<Self> {
         static C: OnceLock<Arc<StreamerState>> = OnceLock::new();
         C.get_or_init(|| Arc::new(Self::new())).clone()
+    }
+}
+
+/// Cumulative counters for NNTP segment fetches that actually hit the wire
+/// (i.e. cache misses). Atomic + lock-free; the API reads them to derive a
+/// fetch success rate and decode throughput by sampling deltas over time.
+#[derive(Default)]
+pub struct FetchMetrics {
+    ok: std::sync::atomic::AtomicU64,
+    failed: std::sync::atomic::AtomicU64,
+    bytes_decoded: std::sync::atomic::AtomicU64,
+}
+
+impl FetchMetrics {
+    pub fn record_ok(&self, decoded_bytes: u64) {
+        use std::sync::atomic::Ordering::Relaxed;
+        self.ok.fetch_add(1, Relaxed);
+        self.bytes_decoded.fetch_add(decoded_bytes, Relaxed);
+    }
+
+    pub fn record_failed(&self) {
+        self.failed
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn ok(&self) -> u64 {
+        self.ok.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub fn failed(&self) -> u64 {
+        self.failed.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub fn bytes_decoded(&self) -> u64 {
+        self.bytes_decoded.load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 
@@ -337,6 +376,15 @@ impl InFlight {
         slot.mark_done();
         self.inner.lock().remove(message_id);
     }
+
+    /// Segments currently being fetched + decoded (de-dup in flight).
+    pub fn len(&self) -> usize {
+        self.inner.lock().len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.inner.lock().is_empty()
+    }
 }
 
 /// Tracks segments that we know are permanently missing on the provider
@@ -354,6 +402,15 @@ impl PermanentFails {
 
     pub fn mark_dead(&self, message_id: String) {
         self.inner.lock().insert(message_id, ());
+    }
+
+    /// Segments known to be permanently missing on every provider.
+    pub fn len(&self) -> usize {
+        self.inner.lock().len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.inner.lock().is_empty()
     }
 }
 
@@ -424,6 +481,11 @@ impl ActiveStreams {
 
     pub fn has_any(&self) -> bool {
         !self.inner.lock().is_empty()
+    }
+
+    /// Number of usenet file handles the VFS is currently serving.
+    pub fn count(&self) -> usize {
+        self.inner.lock().len()
     }
 }
 

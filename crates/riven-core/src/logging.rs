@@ -215,7 +215,16 @@ fn log_max_level(settings: &LogSettings) -> LevelFilter {
 fn build_level_filter(settings: &LogSettings) -> anyhow::Result<EnvFilter> {
     let filter = EnvFilter::try_from_default_env()
         .or_else(|_| EnvFilter::try_new(&settings.level))
-        .map(|filter| filter.add_directive("apalis_core=info".parse().unwrap()))
+        .map(|filter| {
+            // The hickory DNS resolver and hyper emit a block of per-request
+            // DEBUG traces on every lookup/connection — pure noise for a user.
+            // Cap them at info unconditionally (independent of VFS debug logging).
+            filter
+                .add_directive("apalis_core=info".parse().unwrap())
+                .add_directive("hickory_resolver=info".parse().unwrap())
+                .add_directive("hickory_proto=info".parse().unwrap())
+                .add_directive("hyper_util=info".parse().unwrap())
+        })
         .map_err(|error| anyhow::anyhow!("invalid log level '{}': {error}", settings.level))?;
 
     // When VFS debug logging is off, silence the noisy targets without

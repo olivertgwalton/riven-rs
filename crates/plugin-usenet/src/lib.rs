@@ -257,6 +257,22 @@ impl Plugin for UsenetPlugin {
                  but more chance an incomplete release slips through and fails \
                  mid-playback. Bounded to a sane absolute range internally.",
             ),
+            SettingField::new("autorepair", "Auto-Repair Unhealthy Titles", "boolean")
+                .with_default("false")
+                .with_description(
+                    "Automatically re-grab titles the health scanner finds to have \
+                     missing data or no segment map: the broken release is dropped \
+                     and re-scraped for a complete one. Uses exponential backoff and \
+                     gives up after the retry cap below. Titles that merely couldn't \
+                     be verified (provider unreachable) are never auto-repaired.",
+                ),
+            SettingField::new("repairmaxretries", "Auto-Repair Max Retries", "number")
+                .with_default("3")
+                .with_description(
+                    "How many automatic re-grab attempts a broken title gets before \
+                     it's left alone. Backoff doubles between attempts (1h, 2h, 4h …) \
+                     up to a 24h cap.",
+                ),
         ]
     }
 

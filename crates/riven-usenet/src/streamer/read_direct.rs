@@ -132,6 +132,7 @@ impl UsenetStreamer {
                         }
                     };
                     let decode_ms = decode_started.elapsed().as_millis();
+                    self.state.fetch_metrics.record_ok(decoded.len() as u64);
                     tracing::debug!(
                         attempt,
                         message_id,
@@ -146,6 +147,7 @@ impl UsenetStreamer {
                 Err(NntpError::ArticleNotFound(s)) => {
                     tracing::warn!(message_id, status = %s, "nntp article missing");
                     self.state.fails.mark_dead(message_id.to_string());
+                    self.state.fetch_metrics.record_failed();
                     return Err(StreamerError::Nntp(NntpError::ArticleNotFound(s)));
                 }
                 Err(e) => {
@@ -166,6 +168,7 @@ impl UsenetStreamer {
             }
         }
         tracing::error!(message_id, "nntp fetch exhausted retries");
+        self.state.fetch_metrics.record_failed();
         Err(StreamerError::Nntp(last_err.unwrap_or(
             NntpError::Protocol("retry exhausted without error"),
         )))

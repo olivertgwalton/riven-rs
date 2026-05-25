@@ -6,6 +6,7 @@ mod movie;
 mod settings;
 mod show;
 mod streams;
+mod usenet_health;
 
 use async_graphql::{Enum, MergedObject};
 
@@ -30,4 +31,5 @@ pub struct MutationRoot(
     settings::SettingsMutations,
     library::LibraryMutations,
     streams::StreamsMutations,
+    usenet_health::UsenetHealthMutations,
 );

@@ -85,6 +85,13 @@ impl CircuitBreaker {
         until != 0 && Self::now_ms() < until
     }
 
+    /// Seconds until the breaker re-allows this provider (0 if not tripped).
+    fn cooldown_remaining_secs(&self) -> u64 {
+        let until = self.tripped_until_ms.load(Ordering::Relaxed);
+        let now = Self::now_ms();
+        if until > now { (until - now) / 1000 } else { 0 }
+    }
+
     fn record_success(&self) {
         self.consecutive_failures.store(0, Ordering::Relaxed);
         self.tripped_until_ms.store(0, Ordering::Relaxed);
@@ -141,12 +148,50 @@ struct ProviderSlot {
     /// and can short-circuit at the first non-expired entry.
     idle: Arc<Mutex<VecDeque<Idle>>>,
     breaker: Arc<CircuitBreaker>,
+    /// Wire bytes (encoded article bodies) downloaded from this provider this
+    /// process, and the number of article bodies served. Session counters; a
+    /// flusher persists deltas to the DB for lifetime totals + usage trends.
+    bytes_downloaded: AtomicU64,
+    articles_downloaded: AtomicU64,
 }
 
 struct Checkout {
     conn: NntpConnection,
     permit: OwnedPermit,
     slot_idx: usize,
+}
+
+/// Read-only health snapshot of one provider slot, for the API's
+/// provider-health view. Carries no credentials.
+#[derive(Debug, Clone)]
+pub struct ProviderHealth {
+    pub host: String,
+    pub port: u16,
+    pub priority: i32,
+    pub is_backup: bool,
+    /// Connection ceiling (the user's `max_connections`).
+    pub max_connections: u32,
+    /// Open sockets right now (idle + in-flight).
+    pub open_connections: u32,
+    /// Open sockets sitting idle in the pool.
+    pub idle_connections: u32,
+    /// Open sockets currently servicing a fetch.
+    pub active_connections: u32,
+    /// Circuit breaker is muting this provider.
+    pub breaker_tripped: bool,
+    /// Seconds until the breaker re-allows the provider (0 if not tripped).
+    pub cooldown_seconds_remaining: u64,
+    /// Consecutive transient failures recorded since the last success.
+    pub consecutive_failures: u64,
+}
+
+/// Per-provider session download counters (since process start). A flusher
+/// persists the deltas to the DB for lifetime totals and daily usage trends.
+#[derive(Debug, Clone)]
+pub struct ProviderTraffic {
+    pub host: String,
+    pub bytes_downloaded: u64,
+    pub articles_downloaded: u64,
 }
 
 pub struct NntpPool {
@@ -170,12 +215,45 @@ impl NntpPool {
                     permits,
                     idle: Arc::new(Mutex::new(VecDeque::new())),
                     breaker: Arc::new(CircuitBreaker::new()),
+                    bytes_downloaded: AtomicU64::new(0),
+                    articles_downloaded: AtomicU64::new(0),
                 }
             })
             .collect();
         let pool = Arc::new(Self { slots });
         Self::spawn_reaper(Arc::downgrade(&pool));
         pool
+    }
+
+    /// Per-provider health snapshot in pool order (primaries first, then
+    /// backups). Cheap and lock-light — used by the API's provider-health view.
+    pub fn health(&self) -> Vec<ProviderHealth> {
+        self.slots
+            .iter()
+            .map(|slot| {
+                let max = slot.provider.config.max_connections;
+                let available = slot.permits.available_permits() as u32;
+                let open = max.saturating_sub(available);
+                let idle = slot.idle.lock().len() as u32;
+                let active = open.saturating_sub(idle);
+                ProviderHealth {
+                    host: slot.provider.config.host.clone(),
+                    port: slot.provider.config.port,
+                    priority: slot.provider.priority,
+                    is_backup: slot.provider.is_backup,
+                    max_connections: max,
+                    open_connections: open,
+                    idle_connections: idle,
+                    active_connections: active,
+                    breaker_tripped: slot.breaker.is_tripped(),
+                    cooldown_seconds_remaining: slot.breaker.cooldown_remaining_secs(),
+                    consecutive_failures: slot
+                        .breaker
+                        .consecutive_failures
+                        .load(Ordering::Relaxed),
+                }
+            })
+            .collect()
     }
 
     /// Weak ref so the task exits cleanly when the pool is dropped.
@@ -209,6 +287,10 @@ impl NntpPool {
     /// Failures are logged and skipped; callers dial on demand instead.
     pub async fn prewarm(&self) {
         for slot in &self.slots {
+            // Warm the DNS cache once (low concurrency) before fanning out the
+            // concurrent dials below, so they all hit the cache instead of
+            // hammering the resolver simultaneously.
+            super::connection::warm_dns(&slot.provider.config.host, slot.provider.config.port).await;
             let target = (slot.provider.config.max_connections as usize).min(PREWARM_CAP);
             let mut handles = Vec::with_capacity(target);
             for _ in 0..target {
@@ -317,7 +399,10 @@ impl NntpPool {
         });
     }
 
-    async fn try_each<F, Fut, T>(&self, priority: Priority, op: F) -> Result<T, NntpError>
+    /// Runs `op` against providers in health/priority order, returning the
+    /// value and the index of the slot that served it (so callers can attribute
+    /// per-provider traffic).
+    async fn try_each<F, Fut, T>(&self, priority: Priority, op: F) -> Result<(T, usize), NntpError>
     where
         F: Fn(NntpConnection) -> Fut,
         Fut: std::future::Future<Output = (NntpConnection, Result<T, NntpError>)>,
@@ -372,7 +457,7 @@ impl NntpPool {
                         permit,
                         slot_idx,
                     });
-                    return Ok(v);
+                    return Ok((v, slot_idx));
                 }
                 Err(NntpError::ArticleNotFound(s)) => {
                     // Missing articles are a normal outcome — not a provider
@@ -417,14 +502,35 @@ impl NntpPool {
         priority: Priority,
     ) -> Result<crate::bufpool::PooledBuf, NntpError> {
         let mid = message_id.to_string();
-        self.try_each(priority, |mut conn| {
-            let mid = mid.clone();
-            async move {
-                let r = conn.fetch_body(&mid).await;
-                (conn, r)
-            }
-        })
-        .await
+        let (buf, slot_idx) = self
+            .try_each(priority, |mut conn| {
+                let mid = mid.clone();
+                async move {
+                    let r = conn.fetch_body(&mid).await;
+                    (conn, r)
+                }
+            })
+            .await?;
+        // Attribute the downloaded (encoded) wire bytes + this article to the
+        // provider that served it.
+        let slot = &self.slots[slot_idx];
+        slot.bytes_downloaded
+            .fetch_add(buf.len() as u64, Ordering::Relaxed);
+        slot.articles_downloaded.fetch_add(1, Ordering::Relaxed);
+        Ok(buf)
+    }
+
+    /// Per-provider session traffic counters (encoded bytes + article bodies
+    /// downloaded since process start), in pool order.
+    pub fn traffic_snapshot(&self) -> Vec<ProviderTraffic> {
+        self.slots
+            .iter()
+            .map(|slot| ProviderTraffic {
+                host: slot.provider.config.host.clone(),
+                bytes_downloaded: slot.bytes_downloaded.load(Ordering::Relaxed),
+                articles_downloaded: slot.articles_downloaded.load(Ordering::Relaxed),
+            })
+            .collect()
     }
 
     pub fn total_capacity(&self) -> usize {
@@ -465,13 +571,16 @@ impl NntpPool {
 
     pub async fn stat(&self, message_id: &str, priority: Priority) -> Result<bool, NntpError> {
         let mid = message_id.to_string();
-        self.try_each(priority, |mut conn| {
-            let mid = mid.clone();
-            async move {
-                let r = conn.stat(&mid).await;
-                (conn, r)
-            }
-        })
-        .await
+        // STAT is a check, not a download, so it doesn't count toward traffic.
+        let (exists, _slot_idx) = self
+            .try_each(priority, |mut conn| {
+                let mid = mid.clone();
+                async move {
+                    let r = conn.stat(&mid).await;
+                    (conn, r)
+                }
+            })
+            .await?;
+        Ok(exists)
     }
 }

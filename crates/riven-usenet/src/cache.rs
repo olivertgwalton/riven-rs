@@ -16,6 +16,7 @@
 //! layout required.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use bytes::Bytes;
 use lru::LruCache;
@@ -24,6 +25,8 @@ use parking_lot::Mutex;
 pub struct SegmentCache {
     state: Mutex<State>,
     max_bytes: u64,
+    hits: AtomicU64,
+    misses: AtomicU64,
 }
 
 struct State {
@@ -42,12 +45,23 @@ impl SegmentCache {
                 current_bytes: 0,
             }),
             max_bytes,
+            hits: AtomicU64::new(0),
+            misses: AtomicU64::new(0),
         }
     }
 
     pub fn get(&self, message_id: &str) -> Option<Bytes> {
         let mut state = self.state.lock();
-        state.lru.get(message_id).cloned()
+        match state.lru.get(message_id).cloned() {
+            Some(bytes) => {
+                self.hits.fetch_add(1, Ordering::Relaxed);
+                Some(bytes)
+            }
+            None => {
+                self.misses.fetch_add(1, Ordering::Relaxed);
+                None
+            }
+        }
     }
 
     /// Existence check that neither clones the value nor promotes LRU order.
@@ -73,9 +87,28 @@ impl SegmentCache {
         }
     }
 
-    #[cfg(test)]
     pub fn current_bytes(&self) -> u64 {
         self.state.lock().current_bytes
+    }
+
+    /// Configured byte budget (eviction ceiling).
+    pub fn max_bytes(&self) -> u64 {
+        self.max_bytes
+    }
+
+    /// Number of decoded segments currently held.
+    pub fn entry_count(&self) -> usize {
+        self.state.lock().lru.len()
+    }
+
+    /// Cumulative cache hits / misses since process start. Lets the API
+    /// report a hit rate without per-request bookkeeping.
+    pub fn hits(&self) -> u64 {
+        self.hits.load(Ordering::Relaxed)
+    }
+
+    pub fn misses(&self) -> u64 {
+        self.misses.load(Ordering::Relaxed)
     }
 }
 

@@ -7,6 +7,7 @@ mod settings;
 mod tmdb;
 mod trakt;
 mod tvdb;
+mod usenet_health;
 
 use async_graphql::MergedObject;
 
@@ -19,6 +20,7 @@ pub use settings::CoreSettingsQuery;
 pub use tmdb::CoreTmdbQuery;
 pub use trakt::CoreTraktQuery;
 pub use tvdb::CoreTvdbQuery;
+pub use usenet_health::UsenetHealthQuery;
 
 #[derive(MergedObject, Default)]
 pub struct CoreQuery(
@@ -31,4 +33,5 @@ pub struct CoreQuery(
     CoreTraktQuery,
     CoreTvdbQuery,
     LogsQuery,
+    UsenetHealthQuery,
 );

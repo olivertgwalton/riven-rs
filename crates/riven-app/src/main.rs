@@ -185,6 +185,256 @@ async fn main() -> Result<()> {
         usenet_local_source,
     )?);
 
+    // Background usenet availability scanner: periodically STAT-samples each
+    // usenet-backed file's segments and records per-title health, powering the
+    // dashboard's "Usenet Health" view. Low-priority STATs in small batches so
+    // it never competes with live playback. Tunable via
+    // `RIVEN_USENET_HEALTH_SCAN_INTERVAL_SECS` / `_BATCH`.
+    if let Some(streamer) = usenet_streamer.clone() {
+        let db = db_pool.clone();
+        let repair_queue = job_queue.clone();
+        let sample_percent = usenet_settings_json
+            .as_ref()
+            .and_then(|v| v.get("availabilitysamplepercent"))
+            .and_then(|v| {
+                v.as_u64()
+                    .map(|n| n as usize)
+                    .or_else(|| v.as_str().and_then(|s| s.trim().parse::<usize>().ok()))
+            })
+            .filter(|&n| (1..=100).contains(&n))
+            .unwrap_or(riven_usenet::DEFAULT_AVAILABILITY_SAMPLE_PERCENT);
+        let interval_secs = std::env::var("RIVEN_USENET_HEALTH_SCAN_INTERVAL_SECS")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .filter(|&n| n > 0)
+            .unwrap_or(300);
+        let batch = std::env::var("RIVEN_USENET_HEALTH_SCAN_BATCH")
+            .ok()
+            .and_then(|s| s.parse::<i64>().ok())
+            .filter(|&n| n > 0)
+            .unwrap_or(5);
+        // altmount-style auto-repair. Enabled via the usenet plugin's
+        // "Auto-Repair" UI toggle (read per-tick below so it takes effect
+        // without a restart); `RIVEN_USENET_AUTO_REPAIR` is a force-on override
+        // for headless setups. Backoff timing is env-tunable (sensible defaults).
+        let auto_repair_forced = std::env::var("RIVEN_USENET_AUTO_REPAIR")
+            .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+            .unwrap_or(false);
+        let repair_base_secs = std::env::var("RIVEN_USENET_REPAIR_BASE_INTERVAL_SECS")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .filter(|&n| n > 0)
+            .unwrap_or(3600);
+        let repair_max_cooldown_secs = std::env::var("RIVEN_USENET_REPAIR_MAX_COOLDOWN_SECS")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .filter(|&n| n > 0)
+            .unwrap_or(86_400);
+        let scanner_registry = registry.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tick.tick().await;
+
+                // Drop health rows for usenet files that no longer exist (e.g.
+                // a re-grab moved the title onto a different/non-usenet release),
+                // so stale "not ingested"/"missing data" rows don't linger.
+                match riven_db::repo::prune_orphaned_usenet_health(&db).await {
+                    Ok(n) if n > 0 => {
+                        tracing::debug!(removed = n, "usenet health: pruned orphaned rows")
+                    }
+                    Err(error) => tracing::debug!(%error, "usenet health: prune failed"),
+                    _ => {}
+                }
+
+                // Read the auto-repair toggle + retry cap from settings each tick
+                // so the UI toggle is live. Env force-on wins when set.
+                let usenet_cfg = scanner_registry.get_plugin_settings_json("usenet").await;
+                let auto_repair = auto_repair_forced
+                    || usenet_cfg
+                        .as_ref()
+                        .and_then(|v| v.get("autorepair"))
+                        .map(|v| {
+                            v.as_bool().unwrap_or_else(|| {
+                                matches!(
+                                    v.as_str().map(|s| s.trim().to_ascii_lowercase()).as_deref(),
+                                    Some("1" | "true" | "yes" | "on")
+                                )
+                            })
+                        })
+                        .unwrap_or(false);
+                let repair_max_retries = usenet_cfg
+                    .as_ref()
+                    .and_then(|v| v.get("repairmaxretries"))
+                    .and_then(|v| {
+                        v.as_i64()
+                            .or_else(|| v.as_str().and_then(|s| s.trim().parse::<i64>().ok()))
+                    })
+                    .filter(|&n| n > 0)
+                    .map(|n| n as i32)
+                    .unwrap_or(3);
+
+                let due = match riven_db::repo::usenet_files_due_for_check(&db, batch).await {
+                    Ok(due) => due,
+                    Err(error) => {
+                        tracing::debug!(%error, "usenet health: due-for-check query failed");
+                        continue;
+                    }
+                };
+                for file in due {
+                    let file_index = usize::try_from(file.file_index).unwrap_or(0);
+                    let (status, total, sampled, missing, errors) = match streamer
+                        .scan_availability(&file.info_hash, file_index, sample_percent)
+                        .await
+                    {
+                        Ok(scan) => (
+                            scan.status(),
+                            scan.total_segments as i32,
+                            scan.sampled_segments as i32,
+                            scan.missing_segments as i32,
+                            scan.error_segments as i32,
+                        ),
+                        // No segment map for this release — it was never
+                        // ingested (or the meta is gone), so it isn't
+                        // streamable. Distinct from "couldn't reach provider".
+                        Err(riven_usenet::StreamerError::NotIngested(_)) => {
+                            ("not_ingested", 0, 0, 0, 0)
+                        }
+                        Err(error) => {
+                            tracing::debug!(info_hash = %file.info_hash, %error, "usenet health: scan failed");
+                            ("unknown", 0, 0, 0, 0)
+                        }
+                    };
+                    if let Err(error) = riven_db::repo::upsert_usenet_file_health(
+                        &db,
+                        riven_db::repo::UsenetHealthUpdate {
+                            info_hash: &file.info_hash,
+                            file_index: file.file_index,
+                            media_item_id: file.media_item_id,
+                            status,
+                            total_segments: total,
+                            sampled_segments: sampled,
+                            missing_segments: missing,
+                            error_segments: errors,
+                        },
+                    )
+                    .await
+                    {
+                        tracing::debug!(%error, "usenet health: upsert failed");
+                    }
+
+                    if !auto_repair {
+                        continue;
+                    }
+                    match status {
+                        // Healthy again → clear repair bookkeeping (resolve).
+                        "healthy" => {
+                            if let Err(error) = riven_db::repo::clear_usenet_repair_state(
+                                &db,
+                                &file.info_hash,
+                                file.file_index,
+                            )
+                            .await
+                            {
+                                tracing::debug!(%error, "usenet auto-repair: clear state failed");
+                            }
+                        }
+                        // Confirmed broken / never ingested → auto re-grab if due
+                        // and under the retry cap (exponential backoff between).
+                        "unhealthy" | "not_ingested" => {
+                            let Some(media_item_id) = file.media_item_id else {
+                                continue;
+                            };
+                            match riven_db::repo::usenet_repair_due(
+                                &db,
+                                &file.info_hash,
+                                file.file_index,
+                                repair_max_retries,
+                            )
+                            .await
+                            {
+                                Ok(Some(attempts)) => {
+                                    let shift = u32::try_from(attempts.clamp(0, 16)).unwrap_or(0);
+                                    let backoff = repair_base_secs
+                                        .saturating_mul(1u64 << shift)
+                                        .min(repair_max_cooldown_secs)
+                                        as i64;
+                                    tracing::info!(
+                                        info_hash = %file.info_hash,
+                                        attempt = attempts + 1,
+                                        max = repair_max_retries,
+                                        status,
+                                        "usenet auto-repair: re-grabbing"
+                                    );
+                                    if let Err(error) =
+                                        repair_queue.regrab_media_item(media_item_id).await
+                                    {
+                                        tracing::warn!(%error, "usenet auto-repair: regrab failed");
+                                    }
+                                    if let Err(error) = riven_db::repo::record_usenet_repair_attempt(
+                                        &db,
+                                        &file.info_hash,
+                                        file.file_index,
+                                        backoff,
+                                    )
+                                    .await
+                                    {
+                                        tracing::debug!(%error, "usenet auto-repair: record attempt failed");
+                                    }
+                                }
+                                // Not due / retries exhausted.
+                                Ok(None) => {}
+                                Err(error) => {
+                                    tracing::debug!(%error, "usenet auto-repair: due check failed")
+                                }
+                            }
+                        }
+                        // "unknown"/unverified is transient — don't auto-repair.
+                        _ => {}
+                    }
+                }
+            }
+        });
+    }
+
+    // Persist per-provider download traffic. The pool counts encoded wire
+    // bytes + article bodies per provider in memory; this flusher writes the
+    // deltas to the DB every minute so lifetime totals survive restarts and
+    // daily buckets accumulate for the usage-trend chart.
+    if let Some(streamer) = usenet_streamer.clone() {
+        let db = db_pool.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let mut last: std::collections::HashMap<String, (u64, u64)> =
+                std::collections::HashMap::new();
+            loop {
+                tick.tick().await;
+                for t in streamer.pool().traffic_snapshot() {
+                    let (last_bytes, last_articles) =
+                        last.get(&t.host).copied().unwrap_or((0, 0));
+                    let bytes_delta = t.bytes_downloaded.saturating_sub(last_bytes);
+                    let articles_delta = t.articles_downloaded.saturating_sub(last_articles);
+                    if (bytes_delta > 0 || articles_delta > 0)
+                        && let Err(error) = riven_db::repo::add_provider_traffic(
+                            &db,
+                            &t.host,
+                            bytes_delta as i64,
+                            articles_delta as i64,
+                        )
+                        .await
+                    {
+                        tracing::debug!(%error, host = %t.host, "usenet traffic flush failed");
+                        // Don't advance the baseline — retry the delta next tick.
+                        continue;
+                    }
+                    last.insert(t.host, (t.bytes_downloaded, t.articles_downloaded));
+                }
+            }
+        });
+    }
+
     tokio::spawn({
         let link_registry = registry.clone();
         async move {

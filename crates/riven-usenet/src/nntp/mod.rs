@@ -19,7 +19,7 @@ mod pool;
 mod priority_semaphore;
 
 pub use connection::NntpConnection;
-pub use pool::NntpPool;
+pub use pool::{NntpPool, ProviderHealth, ProviderTraffic};
 pub use priority_semaphore::Priority;
 
 #[derive(Clone)]

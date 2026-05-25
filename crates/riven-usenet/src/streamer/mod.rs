@@ -14,9 +14,11 @@
 
 use std::sync::{Arc, Mutex, OnceLock};
 
+use futures::StreamExt;
+use futures::stream;
 use sqlx::PgPool;
 
-use crate::nntp::{NntpConfig, NntpPool};
+use crate::nntp::{NntpConfig, NntpPool, Priority};
 use crate::state::StreamerState;
 
 mod backfill;
@@ -79,10 +81,10 @@ impl UsenetStreamer {
     /// Settings change → fingerprint flips → cached entry rebuilt
     /// automatically, no restart needed.
     pub fn shared(cfg: NntpConfig, db: PgPool) -> Self {
-        static CELL: OnceLock<Mutex<Option<(u64, UsenetStreamer)>>> = OnceLock::new();
-        let cell = CELL.get_or_init(|| Mutex::new(None));
         let fp = nntp_config_fingerprint(&cfg);
-        let mut guard = cell.lock().expect("UsenetStreamer::shared mutex poisoned");
+        let mut guard = shared_cell()
+            .lock()
+            .expect("UsenetStreamer::shared mutex poisoned");
         if let Some((stored_fp, streamer)) = guard.as_ref()
             && *stored_fp == fp
         {
@@ -91,6 +93,17 @@ impl UsenetStreamer {
         let streamer = Self::new(cfg, db);
         *guard = Some((fp, streamer.clone()));
         streamer
+    }
+
+    /// The already-constructed shared streamer, if one exists — without
+    /// creating (and prewarming) a new pool as a side effect. Read-only
+    /// callers like the API's provider-health view use this so a health query
+    /// never spins up NNTP connections on its own.
+    pub fn existing_shared() -> Option<Self> {
+        shared_cell()
+            .lock()
+            .ok()
+            .and_then(|guard| guard.as_ref().map(|(_, streamer)| streamer.clone()))
     }
 
     pub fn pool(&self) -> Arc<NntpPool> {
@@ -155,6 +168,110 @@ impl UsenetStreamer {
         self.maybe_kick_backfill(&arc);
         Ok(arc)
     }
+
+    /// STAT-sample a file's segments across providers to gauge availability,
+    /// returning counts (not a verdict). Mirrors the ingest probe's sampling
+    /// but reports missing/error counts so the health view can show *how*
+    /// degraded a title is. Uses `Priority::Low` so it never competes with
+    /// live playback.
+    pub async fn scan_availability(
+        &self,
+        info_hash: &str,
+        file_index: usize,
+        sample_percent: usize,
+    ) -> Result<AvailabilityScan, StreamerError> {
+        let meta = self.load_meta(info_hash).await?;
+        let file = meta
+            .files
+            .get(file_index)
+            .ok_or(StreamerError::BadFileIndex(file_index))?;
+
+        let message_ids: Vec<String> = match &file.source {
+            NzbMetaSource::Direct { segments, .. } => {
+                segments.iter().map(|s| s.message_id.clone()).collect()
+            }
+            NzbMetaSource::Rar { parts, .. } => parts
+                .iter()
+                .flat_map(|p| p.segments.iter())
+                .map(|s| s.message_id.clone())
+                .collect(),
+        };
+
+        let total = message_ids.len();
+        if total == 0 {
+            return Ok(AvailabilityScan::default());
+        }
+
+        // Sample size: `sample_percent` of segments, clamped to a sane range,
+        // spread evenly across the file (gaps can be anywhere).
+        const SAMPLE_MIN: usize = 20;
+        const SAMPLE_MAX: usize = 150;
+        let pct = if (1..=100).contains(&sample_percent) {
+            sample_percent
+        } else {
+            DEFAULT_AVAILABILITY_SAMPLE_PERCENT
+        };
+        let n = ((total * pct) / 100).clamp(SAMPLE_MIN, SAMPLE_MAX).min(total);
+        let step = total.max(1) / n.max(1);
+        let sample: Vec<String> = (0..n)
+            .map(|i| message_ids[(i * step).min(total - 1)].clone())
+            .collect();
+
+        let concurrency = self.pool.ingest_concurrency().max(PREFETCH_FLOOR).min(n);
+        let pool = self.pool.clone();
+        let mut probes = stream::iter(sample)
+            .map(move |mid| {
+                let pool = pool.clone();
+                async move { pool.stat(&mid, Priority::Low).await }
+            })
+            .buffer_unordered(concurrency);
+
+        let mut scan = AvailabilityScan {
+            total_segments: total,
+            ..AvailabilityScan::default()
+        };
+        while let Some(result) = probes.next().await {
+            scan.sampled_segments += 1;
+            match result {
+                Ok(true) => {}
+                Ok(false) => scan.missing_segments += 1,
+                Err(_) => scan.error_segments += 1,
+            }
+        }
+        Ok(scan)
+    }
+}
+
+/// Result of [`UsenetStreamer::scan_availability`] — raw counts over a sampled
+/// subset of a file's segments.
+#[derive(Debug, Clone, Default)]
+pub struct AvailabilityScan {
+    pub total_segments: usize,
+    pub sampled_segments: usize,
+    pub missing_segments: usize,
+    pub error_segments: usize,
+}
+
+impl AvailabilityScan {
+    /// Health verdict, shared by the background scanner and the on-demand
+    /// re-check so they classify identically:
+    /// - `unhealthy` — at least one sampled segment was confirmed missing.
+    /// - `unknown` — nothing to check, or over half the probes errored (the
+    ///   provider was unreachable, so availability couldn't be confirmed).
+    /// - `healthy` — every sampled segment was confirmed present.
+    pub fn status(&self) -> &'static str {
+        if self.total_segments == 0 {
+            "unknown"
+        } else if self.missing_segments > 0 {
+            "unhealthy"
+        } else if self.sampled_segments > 0
+            && (self.error_segments as f64 / self.sampled_segments as f64) > 0.5
+        {
+            "unknown"
+        } else {
+            "healthy"
+        }
+    }
 }
 
 /// Heuristic (no I/O): does a `Direct` offset table look like a pre-exact-offset
@@ -190,6 +307,50 @@ fn direct_offsets_look_approximate(offsets: &[u64]) -> bool {
 /// file handle is dropped (via the `LocalByteSource` stream hooks).
 pub fn active_streams() -> Arc<crate::state::ActiveStreams> {
     crate::state::global_active_streams()
+}
+
+/// Process-wide cache of the shared streamer keyed by NNTP config fingerprint.
+/// Lifted to module scope so [`UsenetStreamer::existing_shared`] can peek it
+/// without the create-on-miss side effect of [`UsenetStreamer::shared`].
+fn shared_cell() -> &'static Mutex<Option<(u64, UsenetStreamer)>> {
+    static CELL: OnceLock<Mutex<Option<(u64, UsenetStreamer)>>> = OnceLock::new();
+    CELL.get_or_init(|| Mutex::new(None))
+}
+
+/// Point-in-time health of the in-process usenet streaming engine (segment
+/// cache, NNTP fetch counters, in-flight work). Counters are cumulative since
+/// process start; the API derives rates by sampling deltas.
+#[derive(Debug, Clone)]
+pub struct StreamingHealth {
+    pub cache_bytes_used: u64,
+    pub cache_bytes_max: u64,
+    pub cache_entries: u64,
+    pub cache_hits: u64,
+    pub cache_misses: u64,
+    pub fetches_ok: u64,
+    pub fetches_failed: u64,
+    pub bytes_decoded: u64,
+    pub in_flight: u64,
+    pub dead_segments: u64,
+    pub active_streams: u64,
+}
+
+/// Snapshot the process-global streaming state for the API's health view.
+pub fn streaming_health() -> StreamingHealth {
+    let state = crate::state::StreamerState::global();
+    StreamingHealth {
+        cache_bytes_used: state.cache.current_bytes(),
+        cache_bytes_max: state.cache.max_bytes(),
+        cache_entries: state.cache.entry_count() as u64,
+        cache_hits: state.cache.hits(),
+        cache_misses: state.cache.misses(),
+        fetches_ok: state.fetch_metrics.ok(),
+        fetches_failed: state.fetch_metrics.failed(),
+        bytes_decoded: state.fetch_metrics.bytes_decoded(),
+        in_flight: state.in_flight.len() as u64,
+        dead_segments: state.fails.len() as u64,
+        active_streams: active_streams().count() as u64,
+    }
 }
 
 fn nntp_config_fingerprint(cfg: &NntpConfig) -> u64 {

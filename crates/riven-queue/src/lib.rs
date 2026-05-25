@@ -301,6 +301,31 @@ impl JobQueue {
         }
     }
 
+    /// Re-acquire a media item: delete its media filesystem entries so it is no
+    /// longer "completed" (state is derived from having a media entry), recompute
+    /// state, then re-process. The re-scrape's ingest availability probe skips
+    /// any incomplete/dead release, so a complete one is picked. Shared by the
+    /// manual "Re-grab" mutation and the usenet auto-repair worker.
+    pub async fn regrab_media_item(&self, media_item_id: i64) -> anyhow::Result<()> {
+        let entry_ids: Vec<i64> = sqlx::query_scalar::<_, i64>(
+            "SELECT id FROM filesystem_entries WHERE media_item_id = $1 AND entry_type = 'media'",
+        )
+        .bind(media_item_id)
+        .fetch_all(&self.db_pool)
+        .await?;
+
+        for id in &entry_ids {
+            if let Err(error) = riven_db::repo::delete_filesystem_entry(&self.db_pool, *id).await {
+                tracing::warn!(%error, entry_id = *id, "regrab: failed to delete filesystem entry");
+            }
+        }
+
+        riven_db::repo::recompute(&self.db_pool, &[media_item_id]).await?;
+        self.push_process_media_item(ProcessMediaItemJob::new(media_item_id))
+            .await;
+        Ok(())
+    }
+
     /// Re-push a `ProcessMediaItemJob` with a future `run_at`. Used by the
     /// `Scrape` step when `next_scrape_attempt_at` is in the future.
     pub async fn push_process_media_item_at(
