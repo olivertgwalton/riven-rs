@@ -7,7 +7,7 @@ use riven_core::local_source::LocalByteSource;
 use tokio::io::{AsyncReadExt, BufReader};
 use tokio_util::io::StreamReader;
 
-use crate::cache::{RangeCache, cache_evict, cache_get, cache_put};
+use crate::cache::RangeCache;
 use crate::chunks::{ChunkRange, FileLayout};
 use crate::detect::{ReadType, detect_read_type};
 use crate::stream::{fetch_range, open_stream, response_body_end};
@@ -59,8 +59,7 @@ impl SequentialReader {
             .block_on(open_stream(&client, &url, start_pos))
             .ok()?;
         let body_end_exclusive = response_body_end(&response)
-            .map(|end_inclusive| end_inclusive.saturating_add(1))
-            .unwrap_or(u64::MAX);
+            .map_or(u64::MAX, |end_inclusive| end_inclusive.saturating_add(1));
         let stream = response.bytes_stream().map_err(io::Error::other).boxed();
         let reader = BufReader::with_capacity(
             riven_core::config::vfs::CHUNK_SIZE as usize * 2,
@@ -236,7 +235,7 @@ impl MediaStream {
                     // retry re-fetches from the origin instead of looping on
                     // the same bad entry.
                     for chunk in chunks {
-                        cache_evict(cache, (self.ino, chunk.start, chunk.end));
+                        cache.evict((self.ino, chunk.start, chunk.end));
                     }
                     tracing::error!(
                         ino = self.ino,
@@ -257,7 +256,7 @@ impl MediaStream {
         let mut full = BytesMut::with_capacity(total_len);
 
         for chunk in chunks {
-            let Some(data) = cache_get(cache, (self.ino, chunk.start, chunk.end)) else {
+            let Some(data) = cache.get((self.ino, chunk.start, chunk.end)) else {
                 return Err(());
             };
             full.extend_from_slice(&data);
@@ -277,7 +276,7 @@ impl MediaStream {
         self.sequential = None;
 
         let full = if should_cache {
-            match cache_get(ctx.cache, (self.ino, chunk.start, chunk.end)) {
+            match ctx.cache.get((self.ino, chunk.start, chunk.end)) {
                 Some(data) => data,
                 None => match ctx.runtime.block_on(fetch_range(
                     ctx.client,
@@ -288,7 +287,7 @@ impl MediaStream {
                     Ok(data) => {
                         let expected = (chunk.end - chunk.start + 1) as usize;
                         if data.len() >= expected {
-                            cache_put(ctx.cache, (self.ino, chunk.start, chunk.end), data.clone());
+                            ctx.cache.put((self.ino, chunk.start, chunk.end), data.clone());
                         }
                         data
                     }
@@ -341,7 +340,7 @@ impl MediaStream {
     ) -> ReadOutcome {
         let all_cached = chunks
             .iter()
-            .all(|chunk| cache_get(ctx.cache, (self.ino, chunk.start, chunk.end)).is_some());
+            .all(|chunk| ctx.cache.get((self.ino, chunk.start, chunk.end)).is_some());
         if all_cached {
             return self.read_cached_chunks(start, end, chunks, ctx.cache);
         }
@@ -350,7 +349,7 @@ impl MediaStream {
             let mut failed = false;
 
             for chunk in chunks {
-                if cache_get(ctx.cache, (self.ino, chunk.start, chunk.end)).is_some() {
+                if ctx.cache.get((self.ino, chunk.start, chunk.end)).is_some() {
                     continue;
                 }
 
@@ -360,7 +359,7 @@ impl MediaStream {
                 }
 
                 match self.read_body_chunk(*chunk, ctx, attempt) {
-                    Ok(data) => cache_put(ctx.cache, (self.ino, chunk.start, chunk.end), data),
+                    Ok(data) => ctx.cache.put((self.ino, chunk.start, chunk.end), data),
                     Err(BodyReadError::Retryable) => {
                         failed = true;
                         break;

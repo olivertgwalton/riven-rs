@@ -107,7 +107,7 @@ pub async fn resolve_tmdb_to_tvdb_id(ctx: &Context<'_>, tmdb_id: &str) -> Result
             items.iter().find_map(|item| {
                 item.get("series")
                     .and_then(|series| series.get("id"))
-                    .and_then(|id| id.as_i64())
+                    .and_then(serde_json::Value::as_i64)
             })
         })
     {
@@ -119,7 +119,7 @@ pub async fn resolve_tmdb_to_tvdb_id(ctx: &Context<'_>, tmdb_id: &str) -> Result
         Ok(value) => Ok(value
             .get("data")
             .and_then(|item| item.get("id"))
-            .and_then(|id| id.as_i64())),
+            .and_then(serde_json::Value::as_i64)),
         Err(_) => Ok(None),
     }
 }
@@ -141,7 +141,7 @@ async fn fetch_tmdb_external_tvdb_id(ctx: &Context<'_>, tmdb_id: &str) -> Result
         Err(_) => return Ok(None),
     };
 
-    Ok(value.get("tvdb_id").and_then(|id| id.as_i64()))
+    Ok(value.get("tvdb_id").and_then(serde_json::Value::as_i64))
 }
 
 async fn get_tvdb_token(ctx: &Context<'_>) -> Result<String> {

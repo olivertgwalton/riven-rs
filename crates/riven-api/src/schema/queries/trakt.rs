@@ -93,9 +93,7 @@ impl CoreTraktQuery {
                         .map(normalize_image_url),
                     media_type: normalized_media_type.to_string(),
                     year: item
-                        .year
-                        .map(|year| year.to_string())
-                        .unwrap_or_else(|| "N/A".to_string()),
+                        .year.map_or_else(|| "N/A".to_string(), |year| year.to_string()),
                     indexer: "tmdb".to_string(),
                 })
             })

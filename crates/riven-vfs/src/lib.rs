@@ -59,7 +59,7 @@ pub fn mount(
         // rshared bind mount), which would break mount propagation to the host.
         let path_str = mount_path.to_str().unwrap_or_default();
         let is_fuse_mounted = std::fs::read_to_string("/proc/self/mounts")
-            .map(|m| {
+            .is_ok_and(|m| {
                 m.lines().any(|line| {
                     let mut parts = line.splitn(4, ' ');
                     let _ = parts.next(); // device
@@ -67,8 +67,7 @@ pub fn mount(
                     let fstype = parts.next().unwrap_or("");
                     mountpoint == path_str && fstype.starts_with("fuse")
                 })
-            })
-            .unwrap_or(false);
+            });
 
         if is_fuse_mounted {
             let ok = std::process::Command::new("fusermount")
@@ -76,8 +75,7 @@ pub fn mount(
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
                 .status()
-                .map(|s| s.success())
-                .unwrap_or(false);
+                .is_ok_and(|s| s.success());
             if !ok {
                 drop(
                     std::process::Command::new("umount")

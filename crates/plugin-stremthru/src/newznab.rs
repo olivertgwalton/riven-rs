@@ -176,11 +176,11 @@ fn parse_newznab_xml(body: &str) -> Vec<NewznabItem> {
                             match attr.key.as_ref() {
                                 b"name" => {
                                     name_val =
-                                        attr.unescape_value().ok().map(|v| v.into_owned());
+                                        attr.unescape_value().ok().map(std::borrow::Cow::into_owned);
                                 }
                                 b"value" => {
                                     value_val =
-                                        attr.unescape_value().ok().map(|v| v.into_owned());
+                                        attr.unescape_value().ok().map(std::borrow::Cow::into_owned);
                                 }
                                 _ => {}
                             }

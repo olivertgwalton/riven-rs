@@ -208,13 +208,11 @@ pub async fn load_download_hierarchy_context(
         .then(|| item.imdb_id.clone())
         .flatten();
 
-    let default_season_id = (item.item_type == MediaItemType::Season)
-        .then_some(item.id)
-        .or(if item.item_type == MediaItemType::Episode {
-            item.parent_id
-        } else {
-            None
-        });
+    let default_season_id = match item.item_type {
+        MediaItemType::Season => Some(item.id),
+        MediaItemType::Episode => item.parent_id,
+        _ => None,
+    };
 
     let default_season_number = match item.item_type {
         MediaItemType::Season | MediaItemType::Episode => item.season_number,

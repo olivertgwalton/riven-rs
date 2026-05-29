@@ -49,14 +49,16 @@ pub struct StremthruTorz {
     pub id: String,
     pub status: String,
     #[serde(default)]
-    pub files: Vec<StremthruTorzFile>,
+    pub files: Vec<StremthruFile>,
 }
 
+/// A file entry as returned by both the torz and newz store endpoints.
 #[derive(Deserialize)]
-pub struct StremthruTorzFile {
+pub struct StremthruFile {
     pub name: String,
     #[serde(default)]
     pub path: String,
+    #[serde(default)]
     pub size: i64,
     #[serde(default)]
     pub link: String,
@@ -77,18 +79,7 @@ pub struct StremthruNewz {
     #[serde(default)]
     pub status: String,
     #[serde(default)]
-    pub files: Vec<StremthruNewzFile>,
-}
-
-#[derive(Deserialize)]
-pub struct StremthruNewzFile {
-    pub name: String,
-    #[serde(default)]
-    pub path: String,
-    #[serde(default)]
-    pub size: i64,
-    #[serde(default)]
-    pub link: String,
+    pub files: Vec<StremthruFile>,
 }
 
 #[derive(Deserialize)]

@@ -112,18 +112,18 @@ pub fn transform_item(item: &serde_json::Value, default_type: &str) -> TmdbListI
     let genre_ids = item
         .get("genre_ids")
         .and_then(|v| v.as_array())
-        .map(|arr| arr.iter().filter_map(|v| v.as_i64()).collect())
+        .map(|arr| arr.iter().filter_map(serde_json::Value::as_i64).collect())
         .unwrap_or_default();
 
     TmdbListItem {
-        id: item.get("id").and_then(|v| v.as_i64()).unwrap_or(0),
+        id: item.get("id").and_then(serde_json::Value::as_i64).unwrap_or(0),
         title,
         poster_path,
         media_type,
         year,
-        vote_average: item.get("vote_average").and_then(|v| v.as_f64()),
-        vote_count: item.get("vote_count").and_then(|v| v.as_i64()),
-        popularity: item.get("popularity").and_then(|v| v.as_f64()),
+        vote_average: item.get("vote_average").and_then(serde_json::Value::as_f64),
+        vote_count: item.get("vote_count").and_then(serde_json::Value::as_i64),
+        popularity: item.get("popularity").and_then(serde_json::Value::as_f64),
         overview: item
             .get("overview")
             .and_then(|v| v.as_str())
@@ -164,7 +164,7 @@ pub fn transform_collection(data: &serde_json::Value) -> TmdbCollectionDetails {
                         .unwrap_or_default()
                         .to_owned();
                     TmdbCollectionPart {
-                        id: movie.get("id").and_then(|v| v.as_i64()).unwrap_or_default(),
+                        id: movie.get("id").and_then(serde_json::Value::as_i64).unwrap_or_default(),
                         title,
                         overview: movie
                             .get("overview")
@@ -194,7 +194,7 @@ pub fn transform_collection(data: &serde_json::Value) -> TmdbCollectionDetails {
     parts.sort_by(|a, b| a.release_date.cmp(&b.release_date));
 
     TmdbCollectionDetails {
-        id: data.get("id").and_then(|v| v.as_i64()).unwrap_or_default(),
+        id: data.get("id").and_then(serde_json::Value::as_i64).unwrap_or_default(),
         name: data
             .get("name")
             .and_then(|v| v.as_str())

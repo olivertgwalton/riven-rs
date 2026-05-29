@@ -2,7 +2,6 @@ mod fetch;
 pub mod scores;
 
 use std::collections::HashMap;
-use std::hash::BuildHasher;
 use std::sync::LazyLock;
 
 use thiserror::Error;
@@ -69,20 +68,18 @@ fn lev_ratio(a: &str, b: &str) -> f64 {
     (total_len - distance) / total_len
 }
 
-/// Full ranking pipeline for a single torrent.
+/// Shared front half of the ranking pipeline: validates the hash, parses the
+/// title, filters adult content, and computes the best title-similarity ratio
+/// (rejecting below the configured threshold).
 ///
-/// # Errors
-///
-/// Returns [`RankError`] when the torrent hash is invalid, the parsed content
-/// is filtered, title similarity falls below the configured threshold, fetch
-/// checks fail, or the final rank is below the configured minimum.
-pub fn rank_torrent<S: BuildHasher>(
+/// Returns the parsed data and similarity ratio on success.
+fn prepare_torrent(
     raw_title: &str,
     hash: &str,
     correct_title: &str,
-    aliases: &HashMap<String, Vec<String>, S>,
+    aliases: &HashMap<String, Vec<String>>,
     settings: &RankSettings,
-) -> Result<RankedTorrent, RankError> {
+) -> Result<(ParsedData, f64), RankError> {
     if !is_valid_info_hash(hash) {
         return Err(RankError::InvalidHash);
     }
@@ -93,41 +90,36 @@ pub fn rank_torrent<S: BuildHasher>(
         return Err(RankError::AdultContent);
     }
 
-    let best_ratio = if correct_title.is_empty() {
-        0.0
-    } else {
-        let normalized_query = crate::parse::normalize_title(correct_title);
-        let mut best_ratio = lev_ratio(&data.normalized_title, &normalized_query);
-        for alias_list in aliases.values() {
-            for alias in alias_list {
-                let normalized_alias = crate::parse::normalize_title(alias);
-                let r = lev_ratio(&data.normalized_title, &normalized_alias);
-                if r > best_ratio {
-                    best_ratio = r;
-                }
-            }
-        }
+    if correct_title.is_empty() {
+        return Ok((data, 0.0));
+    }
 
-        if best_ratio < settings.options.title_similarity {
-            tracing::info!(
-                parsed = %data.normalized_title,
-                query = %normalized_query,
-                ratio = best_ratio,
-                threshold = settings.options.title_similarity,
-                "stream rejected: similarity too low"
-            );
-            return Err(RankError::TitleSimilarity {
-                ratio: best_ratio,
-                threshold: settings.options.title_similarity,
-            });
-        }
+    let normalized_query = crate::parse::normalize_title(correct_title);
+    let mut best_ratio = lev_ratio(&data.normalized_title, &normalized_query);
+    for alias in aliases.values().flatten() {
+        let normalized_alias = crate::parse::normalize_title(alias);
+        best_ratio = best_ratio.max(lev_ratio(&data.normalized_title, &normalized_alias));
+    }
 
-        best_ratio
-    };
+    if best_ratio < settings.options.title_similarity {
+        return Err(RankError::TitleSimilarity {
+            ratio: best_ratio,
+            threshold: settings.options.title_similarity,
+        });
+    }
 
-    let (total_score, score_parts) = get_rank(&data, settings, &DEFAULT_MODEL);
+    Ok((data, best_ratio))
+}
 
-    let (fetch, failed_checks) = check_fetch(&data, settings);
+/// Shared back half of the pipeline: runs fetch checks and the rank threshold.
+///
+/// Returns the fetch outcome and the failed-check list on success.
+fn finalize_torrent(
+    data: &ParsedData,
+    total_score: i64,
+    settings: &RankSettings,
+) -> Result<(bool, Vec<String>), RankError> {
+    let (fetch, failed_checks) = check_fetch(data, settings);
 
     if !fetch {
         return Err(RankError::FetchChecksFailed {
@@ -141,6 +133,28 @@ pub fn rank_torrent<S: BuildHasher>(
             threshold: settings.options.remove_ranks_under,
         });
     }
+
+    Ok((fetch, failed_checks))
+}
+
+/// Full ranking pipeline for a single torrent, including the per-category score
+/// breakdown ([`RankedTorrent::score_parts`]).
+///
+/// # Errors
+///
+/// Returns [`RankError`] when the torrent hash is invalid, the parsed content
+/// is filtered, title similarity falls below the configured threshold, fetch
+/// checks fail, or the final rank is below the configured minimum.
+pub fn rank_torrent(
+    raw_title: &str,
+    hash: &str,
+    correct_title: &str,
+    aliases: &HashMap<String, Vec<String>>,
+    settings: &RankSettings,
+) -> Result<RankedTorrent, RankError> {
+    let (data, lev_ratio) = prepare_torrent(raw_title, hash, correct_title, aliases, settings)?;
+    let (total_score, score_parts) = get_rank(&data, settings, &DEFAULT_MODEL);
+    let (fetch, failed_checks) = finalize_torrent(&data, total_score, settings)?;
 
     Ok(RankedTorrent {
         data,
@@ -149,7 +163,7 @@ pub fn rank_torrent<S: BuildHasher>(
         fetch,
         failed_checks,
         score_parts,
-        lev_ratio: best_ratio,
+        lev_ratio,
     })
 }
 
@@ -157,72 +171,29 @@ pub fn rank_torrent<S: BuildHasher>(
 ///
 /// This is intended for internal hot paths that only need the final rank and
 /// fetch outcome, not the per-category score breakdown.
-pub fn rank_torrent_fast<S: BuildHasher>(
+///
+/// # Errors
+///
+/// Same conditions as [`rank_torrent`].
+pub fn rank_torrent_fast(
     raw_title: &str,
     hash: &str,
     correct_title: &str,
-    aliases: &HashMap<String, Vec<String>, S>,
+    aliases: &HashMap<String, Vec<String>>,
     settings: &RankSettings,
 ) -> Result<RankedTorrent, RankError> {
-    if !is_valid_info_hash(hash) {
-        return Err(RankError::InvalidHash);
-    }
-
-    let data = parse(raw_title);
-
-    if settings.options.content.remove_adult_content && data.adult {
-        return Err(RankError::AdultContent);
-    }
-
-    let best_ratio = if correct_title.is_empty() {
-        0.0
-    } else {
-        let normalized_query = crate::parse::normalize_title(correct_title);
-        let mut best_ratio = lev_ratio(&data.normalized_title, &normalized_query);
-        for alias_list in aliases.values() {
-            for alias in alias_list {
-                let normalized_alias = crate::parse::normalize_title(alias);
-                let r = lev_ratio(&data.normalized_title, &normalized_alias);
-                if r > best_ratio {
-                    best_ratio = r;
-                }
-            }
-        }
-
-        if best_ratio < settings.options.title_similarity {
-            return Err(RankError::TitleSimilarity {
-                ratio: best_ratio,
-                threshold: settings.options.title_similarity,
-            });
-        }
-
-        best_ratio
-    };
-
+    let (data, lev_ratio) = prepare_torrent(raw_title, hash, correct_title, aliases, settings)?;
     let total_score = get_rank_total(&data, settings, &DEFAULT_MODEL);
-    let (fetch, failed_checks) = check_fetch(&data, settings);
-
-    if !fetch {
-        return Err(RankError::FetchChecksFailed {
-            checks: failed_checks,
-        });
-    }
-
-    if total_score < settings.options.remove_ranks_under {
-        return Err(RankError::RankUnderThreshold {
-            rank: total_score,
-            threshold: settings.options.remove_ranks_under,
-        });
-    }
+    finalize_torrent(&data, total_score, settings)?;
 
     Ok(RankedTorrent {
         data,
         hash: hash.to_lowercase(),
         rank: total_score,
-        fetch,
+        fetch: true,
         failed_checks: Vec::new(),
         score_parts: HashMap::new(),
-        lev_ratio: best_ratio,
+        lev_ratio,
     })
 }
 

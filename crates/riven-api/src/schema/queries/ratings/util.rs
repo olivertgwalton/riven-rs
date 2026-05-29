@@ -1,29 +1,10 @@
-use async_graphql::{Context, Error, Result};
+use async_graphql::Context;
 use riven_core::http::HttpClient;
 
 use super::RatingScore;
 
-pub(super) fn key(value: &str) -> String {
-    value.trim().to_ascii_lowercase()
-}
-
-pub(super) fn required_media_type(value: Option<&str>) -> Result<&'static str> {
-    match value.map(key).as_deref() {
-        Some("movie") => Ok("movie"),
-        Some("tv") => Ok("tv"),
-        Some(other) => Err(Error::new(format!("Unsupported mediaType: {other}"))),
-        None => Err(Error::new("mediaType is required")),
-    }
-}
-
-pub(super) fn parse_id<T>(id: &str, label: &str) -> Result<T>
-where
-    T: std::str::FromStr,
-{
-    id.trim()
-        .parse()
-        .map_err(|_e| Error::new(format!("{label} ID must be numeric")))
-}
+// Shared with `external_ids`; defined once in `crate::schema::helpers`.
+pub(super) use crate::schema::helpers::{key, parse_id, required_media_type};
 
 pub(super) fn optional_http(ctx: &Context<'_>, operation: &str) -> Option<HttpClient> {
     match ctx.data::<HttpClient>() {

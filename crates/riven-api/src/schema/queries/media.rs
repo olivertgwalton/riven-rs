@@ -26,6 +26,36 @@ where
     groups
 }
 
+/// Load a show's seasons together with its episodes grouped per season.
+///
+/// Fetches the show's seasons, then all their episodes in one query
+/// (ordered by `parent_id` so a linear group-by yields contiguous buckets).
+/// Returns the seasons and a `Vec<(season_id, episodes)>` keyed by parent id.
+async fn load_show_tree(
+    pool: &sqlx::PgPool,
+    show_id: i64,
+) -> async_graphql::Result<(Vec<MediaItem>, Vec<(i64, Vec<MediaItem>)>)> {
+    let seasons = repo::list_seasons(pool, show_id).await?;
+    let season_ids: Vec<i64> = seasons.iter().map(|s| s.id).collect();
+    let episodes = if season_ids.is_empty() {
+        Vec::new()
+    } else {
+        sqlx::query_as::<_, MediaItem>(
+            "SELECT * FROM media_items \
+             WHERE item_type = 'episode' AND parent_id = ANY($1) \
+             ORDER BY parent_id, episode_number",
+        )
+        .bind(&season_ids)
+        .fetch_all(pool)
+        .await?
+    };
+
+    // Episodes arrive sorted by parent_id (see ORDER BY above), so
+    // a linear group-by produces contiguous buckets without a HashMap.
+    let episodes_by_season = group_sorted_by_key(episodes, |e| e.parent_id.unwrap_or_default());
+    Ok((seasons, episodes_by_season))
+}
+
 #[derive(Default)]
 pub struct MediaQuery;
 
@@ -81,10 +111,8 @@ impl MediaQuery {
         tmdb_id: String,
     ) -> Result<Option<MediaItemFull>> {
         let pool = ctx.data::<sqlx::PgPool>()?;
-        let Some(item) = repo::get_media_item_by_tmdb(pool, &tmdb_id).await? else {
-            return Ok(None);
-        };
-        self.media_item_full_inner(pool, item).await.map(Some)
+        let item = repo::get_media_item_by_tmdb(pool, &tmdb_id).await?;
+        self.media_item_full_for(pool, item).await
     }
 
     async fn media_item_full_by_tvdb(
@@ -93,10 +121,8 @@ impl MediaQuery {
         tvdb_id: String,
     ) -> Result<Option<MediaItemFull>> {
         let pool = ctx.data::<sqlx::PgPool>()?;
-        let Some(item) = repo::get_media_item_by_tvdb(pool, &tvdb_id).await? else {
-            return Ok(None);
-        };
-        self.media_item_full_inner(pool, item).await.map(Some)
+        let item = repo::get_media_item_by_tvdb(pool, &tvdb_id).await?;
+        self.media_item_full_for(pool, item).await
     }
 
     async fn media_item_full(&self, ctx: &Context<'_>, id: i64) -> Result<Option<MediaItemFull>> {
@@ -113,10 +139,8 @@ impl MediaQuery {
         tmdb_id: String,
     ) -> Result<Option<MediaItemStateTree>> {
         let pool = ctx.data::<sqlx::PgPool>()?;
-        let Some(item) = repo::get_media_item_by_tmdb(pool, &tmdb_id).await? else {
-            return Ok(None);
-        };
-        self.media_item_state_tree_inner(pool, item).await.map(Some)
+        let item = repo::get_media_item_by_tmdb(pool, &tmdb_id).await?;
+        self.media_item_state_for(pool, item).await
     }
 
     async fn media_item_state_by_tvdb(
@@ -125,10 +149,8 @@ impl MediaQuery {
         tvdb_id: String,
     ) -> Result<Option<MediaItemStateTree>> {
         let pool = ctx.data::<sqlx::PgPool>()?;
-        let Some(item) = repo::get_media_item_by_tvdb(pool, &tvdb_id).await? else {
-            return Ok(None);
-        };
-        self.media_item_state_tree_inner(pool, item).await.map(Some)
+        let item = repo::get_media_item_by_tvdb(pool, &tvdb_id).await?;
+        self.media_item_state_for(pool, item).await
     }
 
     async fn movies(&self, ctx: &Context<'_>) -> Result<Vec<MediaItem>> {
@@ -262,31 +284,39 @@ impl MediaQuery {
 // ── Non-GraphQL helpers ───────────────────────────────────────────────────────
 
 impl MediaQuery {
+    /// Build a `MediaItemFull` from an already-resolved lookup result,
+    /// short-circuiting to `None` when the item was not found.
+    async fn media_item_full_for(
+        &self,
+        pool: &sqlx::PgPool,
+        item: Option<MediaItem>,
+    ) -> Result<Option<MediaItemFull>> {
+        let Some(item) = item else {
+            return Ok(None);
+        };
+        self.media_item_full_inner(pool, item).await.map(Some)
+    }
+
+    /// Build a `MediaItemStateTree` from an already-resolved lookup result,
+    /// short-circuiting to `None` when the item was not found.
+    async fn media_item_state_for(
+        &self,
+        pool: &sqlx::PgPool,
+        item: Option<MediaItem>,
+    ) -> Result<Option<MediaItemStateTree>> {
+        let Some(item) = item else {
+            return Ok(None);
+        };
+        self.media_item_state_tree_inner(pool, item).await.map(Some)
+    }
+
     pub(crate) async fn media_item_state_tree_inner(
         &self,
         pool: &sqlx::PgPool,
         item: MediaItem,
     ) -> async_graphql::Result<MediaItemStateTree> {
         let (seasons, expected_file_count) = if item.item_type == MediaItemType::Show {
-            let seasons = repo::list_seasons(pool, item.id).await?;
-            let season_ids: Vec<i64> = seasons.iter().map(|s| s.id).collect();
-            let episodes = if season_ids.is_empty() {
-                Vec::new()
-            } else {
-                sqlx::query_as::<_, MediaItem>(
-                    "SELECT * FROM media_items \
-                     WHERE item_type = 'episode' AND parent_id = ANY($1) \
-                     ORDER BY parent_id, episode_number",
-                )
-                .bind(&season_ids)
-                .fetch_all(pool)
-                .await?
-            };
-
-            // Episodes arrive sorted by parent_id (see ORDER BY above), so
-            // a linear group-by produces contiguous buckets without a HashMap.
-            let mut episodes_by_season =
-                group_sorted_by_key(episodes, |e| e.parent_id.unwrap_or_default());
+            let (seasons, mut episodes_by_season) = load_show_tree(pool, item.id).await?;
 
             let show_expected: i64 = {
                 let qualifying: Vec<&MediaItem> = seasons
@@ -384,21 +414,11 @@ impl MediaQuery {
         let filesystem_entries = media_entries;
 
         let seasons = if item.item_type == MediaItemType::Show {
-            let seasons = repo::list_seasons(pool, item.id).await?;
-            let season_ids: Vec<i64> = seasons.iter().map(|s| s.id).collect();
-            let episodes = if season_ids.is_empty() {
-                Vec::new()
-            } else {
-                sqlx::query_as::<_, MediaItem>(
-                    "SELECT * FROM media_items \
-                     WHERE item_type = 'episode' AND parent_id = ANY($1) \
-                     ORDER BY parent_id, episode_number",
-                )
-                .bind(&season_ids)
-                .fetch_all(pool)
-                .await?
-            };
-            let episode_ids: Vec<i64> = episodes.iter().map(|e| e.id).collect();
+            let (seasons, mut episodes_by_season) = load_show_tree(pool, item.id).await?;
+            let episode_ids: Vec<i64> = episodes_by_season
+                .iter()
+                .flat_map(|(_, eps)| eps.iter().map(|e| e.id))
+                .collect();
             let mut episode_entries = if episode_ids.is_empty() {
                 Vec::new()
             } else {
@@ -411,11 +431,9 @@ impl MediaQuery {
                 .await?
             };
 
-            // Episodes come sorted by parent_id; sort entries by media_item_id
-            // so both can be grouped with a single linear pass.
+            // Episode entries sorted by media_item_id so they can be grouped
+            // with a single linear pass (episodes already grouped by parent_id).
             episode_entries.sort_by_key(|e| e.media_item_id);
-            let mut episodes_by_season =
-                group_sorted_by_key(episodes, |e| e.parent_id.unwrap_or_default());
             let mut entries_by_episode = group_sorted_by_key(
                 episode_entries.into_iter().map(with_metadata),
                 |e| e.media_item_id,

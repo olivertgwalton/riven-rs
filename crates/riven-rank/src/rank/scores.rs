@@ -142,7 +142,6 @@ fn compute_rank(
     model: &RankingModel,
     mut parts: Option<&mut HashMap<String, i64>>,
 ) -> i64 {
-    let model = settings.compiled_model.as_ref().unwrap_or(model);
     let mut rank: i64 = 0;
 
     let categories: &[(&str, i64)] = &[

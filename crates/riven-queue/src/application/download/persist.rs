@@ -18,7 +18,7 @@ fn is_item_deleted_fk_error(err: &anyhow::Error) -> bool {
 
 use super::helpers::{
     episode_vfs_path, handle_bitrate_failure, is_video_file, looks_obfuscated,
-    matches_episode_lookup, parse_file_path, select_episode_files,
+    matches_episode_lookup, parse_file_path, select_episode_files, stream_resolution,
 };
 use crate::JobQueue;
 
@@ -80,15 +80,14 @@ pub(crate) fn pretty_show_name(ctx: &DownloadHierarchyContext, fallback_title: &
     format!("{title}{year_str}{id_str}")
 }
 
-pub(crate) fn selected_stream_resolution(stream: &Stream) -> Option<&str> {
-    Some(
-        stream
-            .parsed_data
-            .as_ref()
-            .and_then(|parsed| parsed.get("resolution"))
-            .and_then(|value| value.as_str())
-            .unwrap_or("unknown"),
-    )
+/// Blacklist the stream behind `info_hash` for this media item (best-effort;
+/// a non-empty hash is required and failures are logged, not propagated).
+async fn blacklist_stream(queue: &JobQueue, id: i64, info_hash: &str) {
+    if !info_hash.is_empty()
+        && let Err(err) = repo::blacklist_stream_by_hash(&queue.db_pool, id, info_hash).await
+    {
+        tracing::warn!(id, info_hash, %err, "failed to blacklist stream");
+    }
 }
 
 /// Persist a movie download result. Returns `true` on success.
@@ -138,11 +137,7 @@ pub async fn persist_movie(
         largest
     } else {
         tracing::warn!(id, info_hash = %info_hash, "torrent has no files — blacklisting stream");
-        if !info_hash.is_empty()
-            && let Err(err) = repo::blacklist_stream_by_hash(&queue.db_pool, id, info_hash).await
-        {
-            tracing::warn!(id, info_hash, %err, "failed to blacklist stream");
-        }
+        blacklist_stream(queue, id, info_hash).await;
         queue
             .notify(RivenEvent::MediaItemDownloadPartialSuccess { id })
             .await;
@@ -162,11 +157,7 @@ pub async fn persist_movie(
             id, info_hash = %info_hash, filename = %file.filename,
             "matched movie file has no playable URL — blacklisting stream"
         );
-        if !info_hash.is_empty()
-            && let Err(err) = repo::blacklist_stream_by_hash(&queue.db_pool, id, info_hash).await
-        {
-            tracing::warn!(id, info_hash, %err, "failed to blacklist stream");
-        }
+        blacklist_stream(queue, id, info_hash).await;
         queue
             .notify(RivenEvent::MediaItemDownloadPartialSuccess { id })
             .await;
@@ -177,8 +168,7 @@ pub async fn persist_movie(
         .filename
         .rfind('.')
         .filter(|&i| i > 0)
-        .map(|i| &file.filename[i + 1..])
-        .unwrap_or("mkv");
+        .map_or("mkv", |i| &file.filename[i + 1..]);
     let tag_suffix = path_tag.map(|t| format!(" [{t}]")).unwrap_or_default();
     let base_name = item.pretty_name();
     let vfs_name = format!("{base_name}{tag_suffix}.{ext}");
@@ -309,11 +299,7 @@ pub async fn persist_episode(
             info_hash = %info_hash,
             "no playable torrent file matched episode — blacklisting stream"
         );
-        if !info_hash.is_empty()
-            && let Err(err) = repo::blacklist_stream_by_hash(&queue.db_pool, id, info_hash).await
-        {
-            tracing::warn!(id, info_hash, %err, "failed to blacklist stream");
-        }
+        blacklist_stream(queue, id, info_hash).await;
         queue
             .notify(RivenEvent::MediaItemDownloadPartialSuccess { id })
             .await;
@@ -518,8 +504,7 @@ pub async fn persist_season(
         }
         let example = ordered
             .first()
-            .map(|(f, _)| f.filename.as_str())
-            .unwrap_or("");
+            .map_or("", |(f, _)| f.filename.as_str());
         tracing::info!(
             id, season = season_number, info_hash = %info_hash,
             file_count = parsed_video_files.len(),
@@ -574,11 +559,7 @@ pub async fn persist_season(
             id, season = season_number, info_hash = %info_hash,
             "season pack matched episodes but no entries were persisted — blacklisting stream"
         );
-        if !info_hash.is_empty()
-            && let Err(err) = repo::blacklist_stream_by_hash(&queue.db_pool, id, info_hash).await
-        {
-            tracing::warn!(id, info_hash, %err, "failed to blacklist stream");
-        }
+        blacklist_stream(queue, id, info_hash).await;
         return SeasonPersistOutcome::Failed;
     }
 
@@ -648,7 +629,7 @@ pub async fn persist_supplied_download(
                 &info_hash,
                 queue,
                 Some(stream.id),
-                selected_stream_resolution(stream),
+                Some(stream_resolution(stream)),
                 None,
                 None,
                 true,
@@ -677,7 +658,7 @@ pub async fn persist_supplied_download(
                 queue,
                 &hierarchy,
                 Some(stream.id),
-                selected_stream_resolution(stream),
+                Some(stream_resolution(stream)),
                 None,
                 None,
                 true,

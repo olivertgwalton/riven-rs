@@ -1,11 +1,22 @@
 use std::collections::BTreeMap;
 
 use riven_core::types::DownloadFile;
-use riven_db::entities::MediaItem;
+use riven_db::entities::{MediaItem, Stream};
 use riven_db::repo;
 
 use crate::JobQueue;
 use crate::context::load_media_item_or_download_error;
+
+/// The parsed resolution of a stream, falling back to `"unknown"` when the
+/// `parsed_data` is missing or has no `resolution` field.
+pub(crate) fn stream_resolution(stream: &Stream) -> &str {
+    stream
+        .parsed_data
+        .as_ref()
+        .and_then(|parsed| parsed.get("resolution"))
+        .and_then(|value| value.as_str())
+        .unwrap_or("unknown")
+}
 
 /// Load a media item by id, or send a `MediaItemDownloadError` event and return `None`.
 pub async fn load_item_or_err(id: i64, queue: &JobQueue, error_msg: &str) -> Option<MediaItem> {

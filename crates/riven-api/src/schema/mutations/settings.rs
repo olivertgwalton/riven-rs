@@ -26,6 +26,36 @@ fn coerce_json_bool(value: &serde_json::Value) -> Option<bool> {
     }
 }
 
+/// Build a [`LogSettings`] from a settings JSON object. The `enabled` flag is
+/// supplied by the caller because different mutations source it differently
+/// (an explicit toggle vs. the `logging_enabled` field); the remaining fields
+/// are read uniformly from `settings`.
+fn log_settings_from_json(settings: &serde_json::Value, enabled: bool) -> LogSettings {
+    LogSettings {
+        enabled,
+        level: settings
+            .get("log_level")
+            .and_then(|value| value.as_str())
+            .unwrap_or("info")
+            .to_string(),
+        rotation: settings
+            .get("log_rotation")
+            .and_then(|value| value.as_str())
+            .unwrap_or("hourly")
+            .to_string(),
+        max_files: settings
+            .get("log_max_files")
+            .and_then(serde_json::Value::as_u64)
+            .map(|value| value as usize)
+            .filter(|value| *value > 0)
+            .unwrap_or(5),
+        vfs_debug_logging: settings
+            .get("vfs_debug_logging")
+            .and_then(coerce_json_bool)
+            .unwrap_or(false),
+    }
+}
+
 pub(super) async fn rematch_filesystem_library_profiles_inner(
     pool: &PgPool,
     filesystem_settings: &FilesystemSettings,
@@ -221,29 +251,7 @@ impl SettingsMutations {
 
         if plugin == "logs" {
             let log_control = ctx.data::<Arc<LogControl>>()?;
-            let log_settings = LogSettings {
-                enabled,
-                level: settings
-                    .get("log_level")
-                    .and_then(|value| value.as_str())
-                    .unwrap_or("info")
-                    .to_string(),
-                rotation: settings
-                    .get("log_rotation")
-                    .and_then(|value| value.as_str())
-                    .unwrap_or("hourly")
-                    .to_string(),
-                max_files: settings
-                    .get("log_max_files")
-                    .and_then(|value| value.as_u64())
-                    .map(|value| value as usize)
-                    .filter(|value| *value > 0)
-                    .unwrap_or(5),
-                vfs_debug_logging: settings
-                    .get("vfs_debug_logging")
-                    .and_then(coerce_json_bool)
-                    .unwrap_or(false),
-            };
+            let log_settings = log_settings_from_json(&settings, enabled);
 
             log_control
                 .apply(&log_settings)
@@ -267,44 +275,23 @@ impl SettingsMutations {
         repo::set_setting(pool, "general", settings.clone()).await?;
 
         let log_control = ctx.data::<Arc<LogControl>>()?;
-        let log_settings = LogSettings {
-            enabled: settings
-                .get("logging_enabled")
-                .and_then(coerce_json_bool)
-                .unwrap_or(true),
-            level: settings
-                .get("log_level")
-                .and_then(|value| value.as_str())
-                .unwrap_or("info")
-                .to_string(),
-            rotation: settings
-                .get("log_rotation")
-                .and_then(|value| value.as_str())
-                .unwrap_or("hourly")
-                .to_string(),
-            max_files: settings
-                .get("log_max_files")
-                .and_then(|value| value.as_u64())
-                .map(|value| value as usize)
-                .filter(|value| *value > 0)
-                .unwrap_or(5),
-            vfs_debug_logging: settings
-                .get("vfs_debug_logging")
-                .and_then(coerce_json_bool)
-                .unwrap_or(false),
-        };
+        let enabled = settings
+            .get("logging_enabled")
+            .and_then(coerce_json_bool)
+            .unwrap_or(true);
+        let log_settings = log_settings_from_json(&settings, enabled);
         log_control
             .apply(&log_settings)
             .map_err(|error| Error::new(error.to_string()))?;
 
         let cfg = ctx.data::<Arc<RwLock<DownloaderConfig>>>()?;
         let mut cfg = cfg.write().await;
-        let mbps = |key: &str| settings.get(key).and_then(|v| v.as_u64()).map(|v| v as u32);
+        let mbps = |key: &str| settings.get(key).and_then(serde_json::Value::as_u64).map(|v| v as u32);
         cfg.minimum_average_bitrate_movies = mbps("minimum_average_bitrate_movies");
         cfg.minimum_average_bitrate_episodes = mbps("minimum_average_bitrate_episodes");
         cfg.maximum_average_bitrate_movies = mbps("maximum_average_bitrate_movies");
         cfg.maximum_average_bitrate_episodes = mbps("maximum_average_bitrate_episodes");
-        if let Some(v) = settings.get("attempt_unknown_downloads").and_then(|v| v.as_bool()) {
+        if let Some(v) = settings.get("attempt_unknown_downloads").and_then(serde_json::Value::as_bool) {
             cfg.attempt_unknown_downloads = v;
         }
 
@@ -312,25 +299,24 @@ impl SettingsMutations {
         let mut reindex_cfg = queue.reindex_config.write().await;
         reindex_cfg.schedule_offset_minutes = settings
             .get("schedule_offset_minutes")
-            .and_then(|v| v.as_u64())
+            .and_then(serde_json::Value::as_u64)
             .unwrap_or(reindex_cfg.schedule_offset_minutes);
         reindex_cfg.unknown_air_date_offset_days = settings
             .get("unknown_air_date_offset_days")
-            .and_then(|v| v.as_u64())
+            .and_then(serde_json::Value::as_u64)
             .unwrap_or(reindex_cfg.unknown_air_date_offset_days);
         queue.retry_interval_secs.store(
             settings
                 .get("retry_interval_secs")
-                .and_then(|v| v.as_u64())
+                .and_then(serde_json::Value::as_u64)
                 .unwrap_or(queue.retry_interval_secs.load(Ordering::SeqCst)),
             Ordering::SeqCst,
         );
         queue.maximum_scrape_attempts.store(
             settings
                 .get("maximum_scrape_attempts")
-                .and_then(|v| v.as_u64())
-                .map(|v| v as u32)
-                .unwrap_or(queue.maximum_scrape_attempts.load(Ordering::SeqCst)),
+                .and_then(serde_json::Value::as_u64)
+                .map_or(queue.maximum_scrape_attempts.load(Ordering::SeqCst), |v| v as u32),
             Ordering::SeqCst,
         );
 

@@ -29,8 +29,7 @@ const PREWARM_CAP: usize = 8;
 const MAX_DOWNLOAD_CONNECTIONS: usize = 15;
 /// Fixed per-ingest NNTP fan-out budget. A single ingest never grabs more than
 /// this many connections, so many ingests run concurrently under the shared
-/// semaphore instead of one monopolising the whole pool (the old behaviour,
-/// which used `available_capacity` and made download-worker tuning impossible).
+/// semaphore instead of one monopolising the whole pool.
 /// Modelled on altmount's `MaxImportConnections` (default 5).
 pub const INGEST_CONNECTIONS: usize = 6;
 /// Consecutive transient/connection failures before a provider is muted by
@@ -543,28 +542,14 @@ impl NntpPool {
         cap.max(1)
     }
 
-    pub fn available_capacity(&self) -> usize {
-        let avail: usize = self
-            .slots
-            .iter()
-            .filter(|s| !s.provider.is_backup)
-            .map(|s| {
-                let idle = s.idle.lock().len();
-                let unallocated = s.permits.available_permits();
-                idle + unallocated
-            })
-            .sum();
-        avail.max(1)
-    }
-
     pub fn download_concurrency(&self) -> usize {
         self.total_capacity().min(MAX_DOWNLOAD_CONNECTIONS)
     }
 
     /// Fixed per-ingest fan-out cap (see [`INGEST_CONNECTIONS`]), bounded by the
     /// pool's own capacity so a tiny account never asks for more than it has.
-    /// Replaces the old greedy `available_capacity()` so one ingest can't take
-    /// the whole pool — letting `pool ÷ INGEST_CONNECTIONS` ingests run at once.
+    /// One ingest can't take the whole pool — letting `pool ÷ INGEST_CONNECTIONS`
+    /// ingests run at once.
     pub fn ingest_concurrency(&self) -> usize {
         self.total_capacity().clamp(1, INGEST_CONNECTIONS)
     }

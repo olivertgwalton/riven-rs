@@ -20,6 +20,16 @@ async fn load_streams(
     Ok(streams)
 }
 
+/// Shared body for the `streams` resolver on every typed media item.
+async fn load_streams_for(
+    item: &MediaItem,
+    ctx: &Context<'_>,
+    info_hashes: Option<Vec<String>>,
+) -> Result<Vec<Stream>> {
+    let pool = ctx.data::<PgPool>()?;
+    load_streams(pool, item.id, info_hashes).await
+}
+
 // ── Movie ──────────────────────────────────────────────────────────────────
 
 pub struct Movie {
@@ -38,8 +48,7 @@ impl Movie {
         ctx: &Context<'_>,
         info_hashes: Option<Vec<String>>,
     ) -> Result<Vec<Stream>> {
-        let pool = ctx.data::<PgPool>()?;
-        load_streams(pool, self.item.id, info_hashes).await
+        load_streams_for(&self.item, ctx, info_hashes).await
     }
 
     /// Always 1 — a movie has exactly one expected media file.
@@ -66,8 +75,7 @@ impl Show {
         ctx: &Context<'_>,
         info_hashes: Option<Vec<String>>,
     ) -> Result<Vec<Stream>> {
-        let pool = ctx.data::<PgPool>()?;
-        load_streams(pool, self.item.id, info_hashes).await
+        load_streams_for(&self.item, ctx, info_hashes).await
     }
 
     /// Seasons for this show. Excludes season 0 (specials) by default.
@@ -111,8 +119,7 @@ impl Season {
         ctx: &Context<'_>,
         info_hashes: Option<Vec<String>>,
     ) -> Result<Vec<Stream>> {
-        let pool = ctx.data::<PgPool>()?;
-        load_streams(pool, self.item.id, info_hashes).await
+        load_streams_for(&self.item, ctx, info_hashes).await
     }
 
     /// The parent show for this season.
@@ -166,8 +173,7 @@ impl Episode {
         ctx: &Context<'_>,
         info_hashes: Option<Vec<String>>,
     ) -> Result<Vec<Stream>> {
-        let pool = ctx.data::<PgPool>()?;
-        load_streams(pool, self.item.id, info_hashes).await
+        load_streams_for(&self.item, ctx, info_hashes).await
     }
 
     /// The parent season for this episode.

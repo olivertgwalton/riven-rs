@@ -58,8 +58,7 @@ impl LogsQuery {
                 .filter(|p| {
                     p.file_name()
                         .and_then(|n| n.to_str())
-                        .map(|n| n.starts_with("riven.log"))
-                        .unwrap_or(false)
+                        .is_some_and(|n| n.starts_with("riven.log"))
                 })
                 .collect();
 
@@ -90,7 +89,7 @@ impl LogsQuery {
                 .iter()
                 .filter_map(|line| {
                     let v: serde_json::Value = serde_json::from_str(line).ok()?;
-                    let entry_level = v["level"].as_str().map(|s| s.to_uppercase());
+                    let entry_level = v["level"].as_str().map(str::to_uppercase);
                     if let Some(ref filter) = level_filter
                         && entry_level.as_deref() != Some(filter.as_str())
                     {

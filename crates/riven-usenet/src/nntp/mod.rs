@@ -288,17 +288,6 @@ impl NntpConfig {
     pub fn primary(&self) -> Option<&NntpServerConfig> {
         self.providers.first().map(|p| &p.config)
     }
-
-    /// Total primary (non-backup) connection budget summed across providers —
-    /// the real ceiling the pool enforces via its `PrioritizedSemaphore`.
-    pub fn total_max_connections(&self) -> usize {
-        self.providers
-            .iter()
-            .filter(|p| !p.is_backup)
-            .map(|p| p.config.max_connections.max(1) as usize)
-            .sum::<usize>()
-            .max(1)
-    }
 }
 
 /// Default number of concurrent download/ingest workers. Deliberately small —

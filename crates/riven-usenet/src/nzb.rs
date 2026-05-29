@@ -58,7 +58,7 @@ impl NzbDocument {
     pub fn password(&self) -> Option<&str> {
         self.meta
             .get("password")
-            .map(|s| s.as_str())
+            .map(std::string::String::as_str)
             .filter(|s| !s.is_empty())
     }
 }
@@ -116,7 +116,7 @@ pub fn parse_nzb_document(xml: &str) -> Result<NzbDocument, NzbError> {
                         segments: Vec::new(),
                     };
                     for attr in e.attributes().flatten() {
-                        let val = attr.unescape_value().ok().map(|v| v.into_owned());
+                        let val = attr.unescape_value().ok().map(std::borrow::Cow::into_owned);
                         match (attr.key.as_ref(), val) {
                             (b"subject", Some(v)) => f.subject = v,
                             (b"poster", Some(v)) => f.poster = v,
@@ -132,7 +132,7 @@ pub fn parse_nzb_document(xml: &str) -> Result<NzbDocument, NzbError> {
                         message_id: String::new(),
                     };
                     for attr in e.attributes().flatten() {
-                        let val = attr.unescape_value().ok().map(|v| v.into_owned());
+                        let val = attr.unescape_value().ok().map(std::borrow::Cow::into_owned);
                         match (attr.key.as_ref(), val) {
                             (b"bytes", Some(v)) => s.bytes = v.parse().unwrap_or(0),
                             (b"number", Some(v)) => s.number = v.parse().unwrap_or(0),

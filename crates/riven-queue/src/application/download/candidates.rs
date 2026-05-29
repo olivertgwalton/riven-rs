@@ -1,6 +1,8 @@
 use riven_db::entities::{MediaItem, Stream};
 use riven_rank::{ParsedData, RankSettings};
 
+use super::helpers::stream_resolution;
+
 /// Returns the streams that pass the profile's fetch checks, sorted
 /// best-first. Cache state is no longer consulted here — the download loop
 /// asks each `(plugin, provider)` for cache hits per-stream.
@@ -139,15 +141,6 @@ fn pack_preference(item: &MediaItem, parsed: &ParsedData) -> i64 {
         (_, true, _, true) => 1,
         _ => 0,
     }
-}
-
-fn stream_resolution(stream: &Stream) -> &str {
-    stream
-        .parsed_data
-        .as_ref()
-        .and_then(|parsed| parsed.get("resolution"))
-        .and_then(|value| value.as_str())
-        .unwrap_or("unknown")
 }
 
 #[cfg(test)]

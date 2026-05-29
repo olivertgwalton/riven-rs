@@ -628,17 +628,6 @@ impl JobQueue {
         remaining == 0
     }
 
-    pub async fn flow_load_results<T: DeserializeOwned>(&self, prefix: &str, id: i64) -> Vec<T> {
-        let key = flow_results_key(prefix, id);
-        let mut conn = self.redis.clone();
-        let raw: Vec<String> = redis::cmd("HVALS")
-            .arg(&key)
-            .query_async(&mut conn)
-            .await
-            .unwrap_or_default();
-        deserialize_flow_results(prefix, id, raw)
-    }
-
     /// Atomically read and clear the flow results hash. Use this when the
     /// caller is the sole consumer of the results and should not leave the
     /// key behind on bail-out paths.
@@ -660,14 +649,6 @@ impl JobQueue {
         let mut conn = self.redis.clone();
         let _result: Result<(), _> = redis::cmd("DEL")
             .arg(flow_pending_key(prefix, id))
-            .query_async(&mut conn)
-            .await;
-    }
-
-    pub async fn clear_flow_results(&self, prefix: &str, id: i64) {
-        let mut conn = self.redis.clone();
-        let _result: Result<(), _> = redis::cmd("DEL")
-            .arg(flow_results_key(prefix, id))
             .query_async(&mut conn)
             .await;
     }
@@ -887,7 +868,7 @@ impl JobQueue {
             value
                 .get("event")
                 .and_then(|e| e.get("id"))
-                .and_then(|v| v.as_i64())
+                .and_then(serde_json::Value::as_i64)
         })
         .await
     }
@@ -898,7 +879,7 @@ impl JobQueue {
         ids: &std::collections::HashSet<i64>,
     ) -> redis::RedisResult<()> {
         self.purge_queue_with_id_extractor(config, ids, |value| {
-            value.get("id").and_then(|v| v.as_i64())
+            value.get("id").and_then(serde_json::Value::as_i64)
         })
         .await
     }

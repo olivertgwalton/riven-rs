@@ -3,7 +3,6 @@ use std::collections::HashSet;
 use fuser::FileType;
 use riven_core::settings::LibraryProfileMembership;
 use riven_core::vfs_layout::VfsLibraryLayout;
-use riven_db::entities::{VfsDirName, VfsFileName};
 use riven_db::repo;
 
 use crate::path_info::{CanonicalPath, PathTarget, parse_path};
@@ -143,7 +142,8 @@ fn push_item_dirs(
     };
     let mut seen = HashSet::new();
     for entry in paths {
-        if !matches_dir_profile(&entry, profile_key, exclusive_keys) {
+        let membership = LibraryProfileMembership::from_json(entry.library_profiles.as_ref());
+        if !profile_visible(&membership, profile_key, exclusive_keys) {
             continue;
         }
         let Some(name) = entry.name.as_deref() else {
@@ -169,7 +169,8 @@ fn push_file_entries(
         return;
     };
     for entry in paths {
-        if !matches_file_profile(&entry, profile_key, exclusive_keys) {
+        let membership = LibraryProfileMembership::from_json(entry.library_profiles.as_ref());
+        if !profile_visible(&membership, profile_key, exclusive_keys) {
             continue;
         }
         let Some(name) = entry.name.as_deref() else {
@@ -179,24 +180,14 @@ fn push_file_entries(
     }
 }
 
-fn matches_dir_profile(
-    entry: &VfsDirName,
+/// Whether an entry with the given profile `membership` is visible under the
+/// active profile: members of `profile_key` when set, otherwise entries not
+/// claimed exclusively by any other profile in `exclusive_keys`.
+fn profile_visible(
+    membership: &LibraryProfileMembership,
     profile_key: Option<&str>,
     exclusive_keys: &[&str],
 ) -> bool {
-    let membership = LibraryProfileMembership::from_json(entry.library_profiles.as_ref());
-    match profile_key {
-        Some(key) => membership.contains(key),
-        None => !exclusive_keys.iter().any(|k| membership.contains(k)),
-    }
-}
-
-fn matches_file_profile(
-    entry: &VfsFileName,
-    profile_key: Option<&str>,
-    exclusive_keys: &[&str],
-) -> bool {
-    let membership = LibraryProfileMembership::from_json(entry.library_profiles.as_ref());
     match profile_key {
         Some(key) => membership.contains(key),
         None => !exclusive_keys.iter().any(|k| membership.contains(k)),

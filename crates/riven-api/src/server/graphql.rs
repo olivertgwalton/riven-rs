@@ -84,8 +84,7 @@ pub(super) async fn graphql_get_handler(
         .headers()
         .get("upgrade")
         .and_then(|v| v.to_str().ok())
-        .map(|v| v.eq_ignore_ascii_case("websocket"))
-        .unwrap_or(false);
+        .is_some_and(|v| v.eq_ignore_ascii_case("websocket"));
 
     if is_ws {
         let auth = match authorize_request(&state, req.headers()) {

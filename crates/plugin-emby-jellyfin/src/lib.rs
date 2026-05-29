@@ -281,8 +281,7 @@ async fn get_active_sessions(
             let playback_method = session
                 .play_state
                 .as_ref()
-                .map(map_media_server_playback_method)
-                .unwrap_or(PlaybackMethod::Unknown);
+                .map_or(PlaybackMethod::Unknown, map_media_server_playback_method);
 
             Some(ActivePlaybackSession {
                 server: server.to_string(),
@@ -295,8 +294,7 @@ async fn get_active_sessions(
                 playback_state: session
                     .play_state
                     .as_ref()
-                    .map(map_media_server_playback_state)
-                    .unwrap_or(PlaybackState::Unknown),
+                    .map_or(PlaybackState::Unknown, map_media_server_playback_state),
                 playback_method,
                 position_seconds: position.and_then(|v| u64::try_from(v / 10_000_000).ok()),
                 duration_seconds: duration.and_then(|v| u64::try_from(v / 10_000_000).ok()),

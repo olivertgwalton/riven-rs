@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use futures::StreamExt;
 use futures::stream;
 
@@ -10,7 +10,8 @@ use crate::state::{FetchEntry, PromiseSlot, StreamerState};
 use crate::yenc;
 
 use super::{
-    NzbMetaSource, PREFETCH_FLOOR, StreamerError, UsenetStreamer, segments_overlapping,
+    NzbMetaSource, PREFETCH_FLOOR, StreamerError, UsenetStreamer, concat_slices,
+    segments_overlapping,
 };
 
 /// Max attempts when fetching an NNTP segment body. ArticleNotFound is
@@ -491,24 +492,6 @@ fn direct_segment_span(offsets: &[u64], n_segments: usize, start: u64, end: u64)
         .saturating_sub(1)
         .min(last_idx);
     (first, last)
-}
-
-/// Concatenate decoded segment slices into one contiguous `Bytes`. Used
-/// by [`UsenetStreamer::read_range`] for callers that want a single
-/// buffer (HTTP buffered responses, RAR encrypted-slice decrypt). The
-/// streaming HTTP path uses the slice list directly and skips this.
-fn concat_slices(mut slices: Vec<Bytes>, start: u64, end_inclusive: u64) -> Bytes {
-    match slices.len() {
-        0 => Bytes::new(),
-        1 => slices.pop().unwrap_or_default(),
-        _ => {
-            let mut buf = BytesMut::with_capacity((end_inclusive - start + 1) as usize);
-            for s in slices {
-                buf.extend_from_slice(&s);
-            }
-            buf.freeze()
-        }
-    }
 }
 
 #[cfg(test)]

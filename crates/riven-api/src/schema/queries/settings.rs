@@ -329,7 +329,7 @@ fn strip_zero_ranks(json: &mut serde_json::Value) {
         if let Some(fields) = cat.as_object_mut() {
             for entry in fields.values_mut() {
                 if let Some(obj) = entry.as_object_mut()
-                    && obj.get("rank").and_then(|v| v.as_i64()) == Some(0)
+                    && obj.get("rank").and_then(serde_json::Value::as_i64) == Some(0)
                 {
                     obj.remove("rank");
                 }

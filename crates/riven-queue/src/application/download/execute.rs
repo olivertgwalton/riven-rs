@@ -8,6 +8,7 @@ use riven_db::repo;
 
 use crate::JobQueue;
 use crate::context::DownloadHierarchyContext;
+use super::helpers::stream_resolution;
 use super::persist::{SeasonPersistOutcome, persist_episode, persist_movie, persist_season};
 
 pub enum DownloadAttemptOutcome {
@@ -238,15 +239,6 @@ pub async fn attempt_download(
         }
         _ => DownloadAttemptOutcome::Failed,
     }
-}
-
-fn stream_resolution(stream: &Stream) -> &str {
-    stream
-        .parsed_data
-        .as_ref()
-        .and_then(|parsed| parsed.get("resolution"))
-        .and_then(|value| value.as_str())
-        .unwrap_or("unknown")
 }
 
 async fn clear_stremthru_cache_check_keys(queue: &JobQueue, info_hash: &str) -> Result<()> {

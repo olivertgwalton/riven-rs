@@ -21,7 +21,7 @@ pub struct RequestedItemOutcome {
 
 impl RequestedItemOutcome {
     pub fn lifecycle_event(&self, requested_seasons: Option<&[i32]>) -> Option<RivenEvent> {
-        let requested_seasons = requested_seasons.map(|seasons| seasons.to_vec());
+        let requested_seasons = requested_seasons.map(<[i32]>::to_vec);
         match self.action {
             ItemRequestUpsertAction::Created => Some(RivenEvent::ItemRequestCreated {
                 request_id: self.request.id,

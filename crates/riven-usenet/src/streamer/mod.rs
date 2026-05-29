@@ -35,7 +35,7 @@ pub use error::StreamerError;
 pub use ingest::DEFAULT_AVAILABILITY_SAMPLE_PERCENT;
 pub use meta::{NzbMeta, NzbMetaFile, NzbMetaSource, NzbRarPart, NzbRarSlice};
 
-pub(crate) use meta::segments_overlapping;
+pub(crate) use meta::{concat_slices, segments_overlapping};
 
 /// Floor on the prefetch fan-out during ingest (background work).
 pub(crate) const PREFETCH_FLOOR: usize = 4;
@@ -395,8 +395,7 @@ impl riven_core::local_source::LocalByteSource for UsenetStreamer {
     fn stream_register(&self, key: &str, info_hash: &str, filename: &str, file_size: u64) {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
+            .map_or(0, |d| d.as_secs() as i64);
         active_streams().register(
             key.to_string(),
             crate::state::ActiveStream {
@@ -413,8 +412,7 @@ impl riven_core::local_source::LocalByteSource for UsenetStreamer {
     fn stream_touch(&self, key: &str) {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
+            .map_or(0, |d| d.as_secs() as i64);
         active_streams().touch(key, now);
     }
 

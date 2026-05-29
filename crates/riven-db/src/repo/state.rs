@@ -14,9 +14,8 @@ async fn read_max_attempts(pool: &PgPool) -> Result<i32> {
     Ok(value
         .as_ref()
         .and_then(|v| v.get("maximum_scrape_attempts"))
-        .and_then(|v| v.as_i64())
-        .map(|n| n as i32)
-        .unwrap_or(0))
+        .and_then(serde_json::Value::as_i64)
+        .map_or(0, |n| n as i32))
 }
 
 /// Parent-from-children rollup. `None` means the rollup didn't decide and the

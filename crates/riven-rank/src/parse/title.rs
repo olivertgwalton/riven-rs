@@ -43,6 +43,77 @@ fn should_strip_non_english_prefix(s: &str) -> bool {
     RE_BRACKET_ALIAS_TITLE.is_match(s) || RE_SLASH_ALIAS_TITLE.is_match(s)
 }
 
+/// A bracketed token that looks like a release-group tag (`[GROUP]`,
+/// `[Some-Group]`) rather than a real title.
+fn looks_like_group(inner: &str) -> bool {
+    !inner.contains(' ')
+        && !inner.contains('/')
+        && !inner.contains('×')
+        && (inner.contains('-')
+            || inner
+                .chars()
+                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || "._".contains(c)))
+}
+
+/// A bracketed token that looks like technical metadata (`[1080p]`, `[AVC]`,
+/// `[Multiple Subtitle]`) rather than a real title.
+fn looks_like_metadata(inner: &str) -> bool {
+    inner
+        .chars()
+        .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || " -_.+[]()".contains(c))
+        || matches!(
+            inner.to_ascii_lowercase().as_str(),
+            "multiple subtitle" | "movie" | "avc" | "hevc" | "gb"
+        )
+}
+
+/// Strip leading `[...]` bracket groups (e.g. anime fan-sub prefixes), promoting
+/// a bracketed alias to the title when the bracket holds the only real name.
+fn strip_leading_brackets(cleaned: String) -> String {
+    static RE_LEADING_BRACKET: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"^\s*\[([^\]]*)\]").unwrap());
+    let mut rest = cleaned.clone();
+    let mut bracket_title: Option<String> = None;
+
+    while let Some(caps) = RE_LEADING_BRACKET.captures(&rest) {
+        let full = caps.get(0).unwrap();
+        let inner = caps.get(1).unwrap().as_str().trim();
+
+        if inner.chars().any(|c| c.is_ascii_alphabetic())
+            && !looks_like_group(inner)
+            && !looks_like_metadata(inner)
+        {
+            if !inner.contains(' ')
+                && !inner.contains('/')
+                && !inner.contains('×')
+                && rest[full.end()..]
+                    .trim_start()
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_ascii_alphabetic())
+            {
+                rest = rest[full.end()..].to_string();
+                continue;
+            }
+            if !inner.contains(' ')
+                && !inner.contains('/')
+                && !inner.contains('×')
+                && has_richer_later_bracket(&rest[full.end()..])
+            {
+                rest = rest[full.end()..].to_string();
+                continue;
+            }
+            bracket_title = Some(normalize_bracket_candidate(inner));
+            rest = rest[full.end()..].to_string();
+            break;
+        }
+
+        rest = rest[full.end()..].to_string();
+    }
+
+    bracket_title.map_or(cleaned, |title| format!("{title} {rest}"))
+}
+
 /// Extract the human-readable title from a raw torrent name.
 pub(crate) fn extract_title(raw: &str) -> String {
     let original_raw = raw;
@@ -78,25 +149,11 @@ pub(crate) fn extract_title(raw: &str) -> String {
             let full = caps.get(0).unwrap();
             let inner = caps.get(1).unwrap().as_str().trim();
             let prefix = &cleaned[..full.start()];
-            let looks_like_group = !inner.contains(' ')
-                && !inner.contains('/')
-                && !inner.contains('×')
-                && (inner.contains('-')
-                    || inner
-                        .chars()
-                        .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || "._".contains(c)));
-            let looks_like_metadata = inner
-                .chars()
-                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || " -_.+[]()".contains(c))
-                || matches!(
-                    inner.to_ascii_lowercase().as_str(),
-                    "multiple subtitle" | "movie" | "avc" | "hevc" | "gb"
-                );
 
             if prefix.chars().all(|c| !c.is_ascii_alphabetic())
                 && inner.chars().any(|c| c.is_ascii_alphabetic())
-                && !looks_like_group
-                && !looks_like_metadata
+                && !looks_like_group(inner)
+                && !looks_like_metadata(inner)
             {
                 if !inner.contains(' ')
                     && !inner.contains('/')
@@ -127,65 +184,7 @@ pub(crate) fn extract_title(raw: &str) -> String {
 
     // Step 2: Remove bracket groups at the start (e.g., [SubGroup]) before
     // stripping non-Latin prefixes so anime group prefixes stay intact.
-    let cleaned = {
-        static RE_LEADING_BRACKET: LazyLock<Regex> =
-            LazyLock::new(|| Regex::new(r"^\s*\[([^\]]*)\]").unwrap());
-        let mut rest = cleaned.clone();
-        let mut bracket_title: Option<String> = None;
-
-        while let Some(caps) = RE_LEADING_BRACKET.captures(&rest) {
-            let full = caps.get(0).unwrap();
-            let inner = caps.get(1).unwrap().as_str().trim();
-
-            let looks_like_group = !inner.contains(' ')
-                && !inner.contains('/')
-                && !inner.contains('×')
-                && (inner.contains('-')
-                    || inner
-                        .chars()
-                        .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || "._".contains(c)));
-            let looks_like_metadata = inner
-                .chars()
-                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || " -_.+[]()".contains(c))
-                || matches!(
-                    inner.to_ascii_lowercase().as_str(),
-                    "multiple subtitle" | "movie" | "avc" | "hevc" | "gb"
-                );
-
-            if inner.chars().any(|c| c.is_ascii_alphabetic())
-                && !looks_like_group
-                && !looks_like_metadata
-            {
-                if !inner.contains(' ')
-                    && !inner.contains('/')
-                    && !inner.contains('×')
-                    && rest[full.end()..]
-                        .trim_start()
-                        .chars()
-                        .next()
-                        .is_some_and(|c| c.is_ascii_alphabetic())
-                {
-                    rest = rest[full.end()..].to_string();
-                    continue;
-                }
-                if !inner.contains(' ')
-                    && !inner.contains('/')
-                    && !inner.contains('×')
-                    && has_richer_later_bracket(&rest[full.end()..])
-                {
-                    rest = rest[full.end()..].to_string();
-                    continue;
-                }
-                bracket_title = Some(normalize_bracket_candidate(inner));
-                rest = rest[full.end()..].to_string();
-                break;
-            }
-
-            rest = rest[full.end()..].to_string();
-        }
-
-        bracket_title.map_or(cleaned, |title| format!("{title} {rest}"))
-    };
+    let cleaned = strip_leading_brackets(cleaned);
     let cleaned = {
         static RE_BRACKET_START: LazyLock<Regex> =
             LazyLock::new(|| Regex::new(r"^\s*\[[^\]]*\]\s*").unwrap());
@@ -198,65 +197,7 @@ pub(crate) fn extract_title(raw: &str) -> String {
     } else {
         cleaned
     };
-    let cleaned = {
-        static RE_LEADING_BRACKET: LazyLock<Regex> =
-            LazyLock::new(|| Regex::new(r"^\s*\[([^\]]*)\]").unwrap());
-        let mut rest = cleaned.clone();
-        let mut bracket_title: Option<String> = None;
-
-        while let Some(caps) = RE_LEADING_BRACKET.captures(&rest) {
-            let full = caps.get(0).unwrap();
-            let inner = caps.get(1).unwrap().as_str().trim();
-
-            let looks_like_group = !inner.contains(' ')
-                && !inner.contains('/')
-                && !inner.contains('×')
-                && (inner.contains('-')
-                    || inner
-                        .chars()
-                        .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || "._".contains(c)));
-            let looks_like_metadata = inner
-                .chars()
-                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || " -_.+[]()".contains(c))
-                || matches!(
-                    inner.to_ascii_lowercase().as_str(),
-                    "multiple subtitle" | "movie" | "avc" | "hevc" | "gb"
-                );
-
-            if inner.chars().any(|c| c.is_ascii_alphabetic())
-                && !looks_like_group
-                && !looks_like_metadata
-            {
-                if !inner.contains(' ')
-                    && !inner.contains('/')
-                    && !inner.contains('×')
-                    && rest[full.end()..]
-                        .trim_start()
-                        .chars()
-                        .next()
-                        .is_some_and(|c| c.is_ascii_alphabetic())
-                {
-                    rest = rest[full.end()..].to_string();
-                    continue;
-                }
-                if !inner.contains(' ')
-                    && !inner.contains('/')
-                    && !inner.contains('×')
-                    && has_richer_later_bracket(&rest[full.end()..])
-                {
-                    rest = rest[full.end()..].to_string();
-                    continue;
-                }
-                bracket_title = Some(normalize_bracket_candidate(inner));
-                rest = rest[full.end()..].to_string();
-                break;
-            }
-
-            rest = rest[full.end()..].to_string();
-        }
-
-        bracket_title.map_or(cleaned, |title| format!("{title} {rest}"))
-    };
+    let cleaned = strip_leading_brackets(cleaned);
     let cleaned = {
         static RE_BROKEN_GROUP_PREFIX: LazyLock<Regex> =
             LazyLock::new(|| Regex::new(r"^\s*[^\s\]]+\]\s*").unwrap());

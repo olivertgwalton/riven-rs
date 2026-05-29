@@ -6,6 +6,7 @@ use crate::profiles::TMDB;
 use serde::Deserialize;
 use std::sync::Arc;
 
+use crate::schema::helpers::{key, parse_id, required_media_type};
 use crate::schema::metadata::{TMDB_API_BASE, get_tmdb_api_key};
 
 use super::anilist::fetch_anilist_mappings;
@@ -120,28 +121,6 @@ async fn riven_external_id(ctx: &Context<'_>, id: &str, field: &str) -> Result<O
 
 fn resolution(id: String, resolved: bool) -> IdResolution {
     IdResolution { id, resolved }
-}
-
-fn key(value: &str) -> String {
-    value.trim().to_ascii_lowercase()
-}
-
-fn required_media_type(value: Option<&str>) -> Result<&'static str> {
-    match value.map(key).as_deref() {
-        Some("movie") => Ok("movie"),
-        Some("tv") => Ok("tv"),
-        Some(other) => Err(Error::new(format!("Unsupported mediaType: {other}"))),
-        None => Err(Error::new("mediaType is required")),
-    }
-}
-
-fn parse_id<T>(id: &str, label: &str) -> Result<T>
-where
-    T: std::str::FromStr,
-{
-    id.trim()
-        .parse()
-        .map_err(|_e| Error::new(format!("{label} ID must be numeric")))
 }
 
 #[derive(Deserialize)]

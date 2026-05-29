@@ -74,9 +74,7 @@ impl Plugin for NotificationsPlugin {
             event: "riven.media-item.download.success".to_string(),
             title: info.title.to_string(),
             full_title: info
-                .full_title
-                .map(str::to_string)
-                .unwrap_or_else(|| info.title.to_string()),
+                .full_title.map_or_else(|| info.title.to_string(), str::to_string),
             item_type: info.item_type,
             year: info.year,
             imdb_id: info.imdb_id.map(str::to_string),
@@ -159,8 +157,7 @@ async fn rewrite_for_request_root(
         .unwrap_or_else(Utc::now)
         .signed_duration_since(request.created_at)
         .to_std()
-        .map(|duration| duration.as_secs_f64())
-        .unwrap_or(payload.duration_seconds);
+        .map_or(payload.duration_seconds, |duration| duration.as_secs_f64());
     Ok(true)
 }
 

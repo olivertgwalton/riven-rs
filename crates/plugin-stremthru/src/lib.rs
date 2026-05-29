@@ -27,19 +27,13 @@ const NEWZ_POLL_TIMEOUT_SECS: u64 = 1800;
 pub(crate) const PROFILE: HttpServiceProfile =
     HttpServiceProfile::new("stremthru").with_rate_limit(1, Duration::from_secs(1));
 
-pub(crate) const REALDEBRID_PROFILE: HttpServiceProfile = HttpServiceProfile::new("realdebrid");
-pub(crate) const TORBOX_PROFILE: HttpServiceProfile = HttpServiceProfile::new("torbox");
-pub(crate) const ALLDEBRID_PROFILE: HttpServiceProfile = HttpServiceProfile::new("alldebrid");
-pub(crate) const DEBRIDLINK_PROFILE: HttpServiceProfile = HttpServiceProfile::new("debridlink");
-pub(crate) const PREMIUMIZE_PROFILE: HttpServiceProfile = HttpServiceProfile::new("premiumize");
-
 pub(crate) fn debrid_service(store: &str) -> HttpServiceProfile {
     match store {
-        "realdebrid" => REALDEBRID_PROFILE,
-        "torbox" => TORBOX_PROFILE,
-        "alldebrid" => ALLDEBRID_PROFILE,
-        "debridlink" => DEBRIDLINK_PROFILE,
-        "premiumize" => PREMIUMIZE_PROFILE,
+        "realdebrid" => HttpServiceProfile::new("realdebrid"),
+        "torbox" => HttpServiceProfile::new("torbox"),
+        "alldebrid" => HttpServiceProfile::new("alldebrid"),
+        "debridlink" => HttpServiceProfile::new("debridlink"),
+        "premiumize" => HttpServiceProfile::new("premiumize"),
         _ => HttpServiceProfile::new_owned(store.to_owned()),
     }
 }
@@ -310,8 +304,7 @@ impl Plugin for StremthruPlugin {
                             }
                             Err(error) => {
                                 if error.downcast_ref::<reqwest::Error>()
-                                    .map(|e| e.is_connect() || e.is_timeout() || e.is_request())
-                                    .unwrap_or(false)
+                                    .is_some_and(|e| e.is_connect() || e.is_timeout() || e.is_request())
                                 {
                                     any_network_error = true;
                                 }
@@ -361,8 +354,7 @@ impl Plugin for StremthruPlugin {
                             adjust_store_score(&ctx.redis, attempt.store, -1).await;
                             if error
                                 .downcast_ref::<reqwest::Error>()
-                                .map(|e| e.is_connect() || e.is_timeout() || e.is_request())
-                                .unwrap_or(false)
+                                .is_some_and(|e| e.is_connect() || e.is_timeout() || e.is_request())
                             {
                                 any_network_error = true;
                             }
@@ -575,8 +567,7 @@ async fn handle_newz_download(
                 adjust_store_score(&ctx.redis, store, -1).await;
                 if error
                     .downcast_ref::<reqwest::Error>()
-                    .map(|e| e.is_connect() || e.is_timeout() || e.is_request())
-                    .unwrap_or(false)
+                    .is_some_and(|e| e.is_connect() || e.is_timeout() || e.is_request())
                 {
                     any_network_error = true;
                 }

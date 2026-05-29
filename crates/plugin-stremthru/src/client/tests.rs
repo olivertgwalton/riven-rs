@@ -1,5 +1,5 @@
 use super::*;
-use crate::models::{StremthruTorz, StremthruTorzFile};
+use crate::models::{StremthruTorz, StremthruFile};
 
 #[test]
 fn download_result_prefers_file_path_and_clamps_negative_sizes() {
@@ -7,13 +7,13 @@ fn download_result_prefers_file_path_and_clamps_negative_sizes() {
         id: "torz-1".to_string(),
         status: "downloaded".to_string(),
         files: vec![
-            StremthruTorzFile {
+            StremthruFile {
                 name: "file.mkv".to_string(),
                 path: "Season 01/file.mkv".to_string(),
                 size: 1024,
                 link: "https://example.test/file.mkv".to_string(),
             },
-            StremthruTorzFile {
+            StremthruFile {
                 name: "broken.mkv".to_string(),
                 path: String::new(),
                 size: -1,
@@ -65,7 +65,7 @@ fn add_torrent_accepts_cached_status_for_torbox_instant_downloads() {
     let torz_cached = StremthruTorz {
         id: "torz-2".to_string(),
         status: "cached".to_string(),
-        files: vec![StremthruTorzFile {
+        files: vec![StremthruFile {
             name: "movie.mkv".to_string(),
             path: String::new(),
             size: 2048,

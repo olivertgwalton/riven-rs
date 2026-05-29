@@ -378,12 +378,10 @@ impl InFlight {
     }
 
     /// Segments currently being fetched + decoded (de-dup in flight).
+    /// Telemetry-only; no `is_empty` companion is needed.
+    #[expect(clippy::len_without_is_empty, reason = "telemetry-only counter; emptiness is never queried")]
     pub fn len(&self) -> usize {
         self.inner.lock().len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.inner.lock().is_empty()
     }
 }
 
@@ -392,25 +390,23 @@ impl InFlight {
 /// re-spending the round-trip.
 #[derive(Default)]
 pub struct PermanentFails {
-    inner: Mutex<HashMap<String, ()>>,
+    inner: Mutex<HashSet<String>>,
 }
 
 impl PermanentFails {
     pub fn is_dead(&self, message_id: &str) -> bool {
-        self.inner.lock().contains_key(message_id)
+        self.inner.lock().contains(message_id)
     }
 
     pub fn mark_dead(&self, message_id: String) {
-        self.inner.lock().insert(message_id, ());
+        self.inner.lock().insert(message_id);
     }
 
     /// Segments known to be permanently missing on every provider.
+    /// Telemetry-only; no `is_empty` companion is needed.
+    #[expect(clippy::len_without_is_empty, reason = "telemetry-only counter; emptiness is never queried")]
     pub fn len(&self) -> usize {
         self.inner.lock().len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.inner.lock().is_empty()
     }
 }
 

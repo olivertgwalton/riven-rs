@@ -86,61 +86,49 @@ impl RangeCache {
     }
 }
 
-pub fn cache_get(cache: &RangeCache, key: CacheKey) -> Option<Bytes> {
-    cache.get(key)
-}
-
-pub fn cache_put(cache: &RangeCache, key: CacheKey, data: Bytes) {
-    cache.put(key, data);
-}
-
-pub fn cache_evict(cache: &RangeCache, key: CacheKey) {
-    cache.evict(key);
-}
-
 #[cfg(test)]
 mod tests {
     use bytes::Bytes;
 
-    use super::{RangeCache, cache_get, cache_put};
+    use super::RangeCache;
 
     #[test]
     fn stores_and_reads_cached_ranges() {
         let cache = RangeCache::new(1024);
         let key = (1, 0, 9);
 
-        assert!(cache_get(&cache, key).is_none());
+        assert!(cache.get(key).is_none());
 
-        cache_put(&cache, key, Bytes::from_static(b"1234567890"));
+        cache.put(key, Bytes::from_static(b"1234567890"));
 
-        assert_eq!(cache_get(&cache, key).unwrap().len(), 10);
+        assert_eq!(cache.get(key).unwrap().len(), 10);
     }
 
     #[test]
     fn evicts_lru_when_over_byte_budget() {
         let cache = RangeCache::new(20);
 
-        cache_put(&cache, (1, 0, 9), Bytes::from_static(b"1234567890"));
-        cache_put(&cache, (1, 10, 19), Bytes::from_static(b"abcdefghij"));
+        cache.put((1, 0, 9), Bytes::from_static(b"1234567890"));
+        cache.put((1, 10, 19), Bytes::from_static(b"abcdefghij"));
         // (1, 0, 9) is LRU; this push should evict it.
-        cache_put(&cache, (1, 20, 29), Bytes::from_static(b"!@#$%^&*()"));
+        cache.put((1, 20, 29), Bytes::from_static(b"!@#$%^&*()"));
 
-        assert!(cache_get(&cache, (1, 0, 9)).is_none());
-        assert!(cache_get(&cache, (1, 10, 19)).is_some());
-        assert!(cache_get(&cache, (1, 20, 29)).is_some());
+        assert!(cache.get((1, 0, 9)).is_none());
+        assert!(cache.get((1, 10, 19)).is_some());
+        assert!(cache.get((1, 20, 29)).is_some());
     }
 
     #[test]
     fn disabled_capacity_skips_inserts() {
         let cache = RangeCache::new(0);
-        cache_put(&cache, (1, 0, 9), Bytes::from_static(b"1234567890"));
-        assert!(cache_get(&cache, (1, 0, 9)).is_none());
+        cache.put((1, 0, 9), Bytes::from_static(b"1234567890"));
+        assert!(cache.get((1, 0, 9)).is_none());
     }
 
     #[test]
     fn skips_entries_larger_than_capacity() {
         let cache = RangeCache::new(8);
-        cache_put(&cache, (1, 0, 9), Bytes::from_static(b"1234567890"));
-        assert!(cache_get(&cache, (1, 0, 9)).is_none());
+        cache.put((1, 0, 9), Bytes::from_static(b"1234567890"));
+        assert!(cache.get((1, 0, 9)).is_none());
     }
 }

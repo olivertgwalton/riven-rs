@@ -8,11 +8,26 @@ use riven_core::types::{
 
 use crate::{PROFILE, debrid_service};
 use crate::models::{
-    StremthruCacheCheck, StremthruLink, StremthruNewz, StremthruNewzAdd, StremthruResponse,
-    StremthruTorz, StremthruTorznabResponse, StremthruUser, parse_torrent_status,
+    StremthruCacheCheck, StremthruFile, StremthruLink, StremthruNewz, StremthruNewzAdd,
+    StremthruResponse, StremthruTorz, StremthruTorznabResponse, StremthruUser, parse_torrent_status,
 };
 
 pub const CACHE_CHECK_TTL_SECS: u64 = 60 * 60 * 24;
+
+/// Attach StremThru's per-store routing headers (`x-stremthru-store-name` and
+/// the `Bearer` authorization) to a request builder.
+trait StoreHeaders {
+    fn store_headers(self, store: &str, api_key: &str) -> Self;
+}
+
+impl StoreHeaders for reqwest::RequestBuilder {
+    fn store_headers(self, store: &str, api_key: &str) -> Self {
+        self.header("x-stremthru-store-name", store).header(
+            "x-stremthru-store-authorization",
+            format!("Bearer {api_key}"),
+        )
+    }
+}
 const CACHE_CHECK_BATCH_SIZE: usize = 500;
 
 fn file_name_or_path(name: String, path: String) -> String {
@@ -140,11 +155,7 @@ pub async fn add_torrent(
         .send(PROFILE, |client| {
             client
                 .post(&url)
-                .header("x-stremthru-store-name", store)
-                .header(
-                    "x-stremthru-store-authorization",
-                    format!("Bearer {api_key}"),
-                )
+                .store_headers(store, api_key)
                 .json(&serde_json::json!({ "link": magnet }))
         })
         .await?;
@@ -209,11 +220,7 @@ pub async fn add_newz(
         .send(PROFILE, |client| {
             client
                 .post(&url)
-                .header("x-stremthru-store-name", store)
-                .header(
-                    "x-stremthru-store-authorization",
-                    format!("Bearer {api_key}"),
-                )
+                .store_headers(store, api_key)
                 .json(&serde_json::json!({ "link": nzb_url }))
         })
         .await?;
@@ -250,11 +257,7 @@ async fn poll_newz(
             .send(PROFILE, |client| {
                 client
                     .get(&url)
-                    .header("x-stremthru-store-name", store)
-                    .header(
-                        "x-stremthru-store-authorization",
-                        format!("Bearer {api_key}"),
-                    )
+                    .store_headers(store, api_key)
             })
             .await?;
 
@@ -301,8 +304,17 @@ pub fn download_result_from_newz(
     info_hash: &str,
     newz: StremthruNewz,
 ) -> DownloadResult {
-    let files = newz
-        .files
+    download_result_from_files(store, info_hash, newz.files)
+}
+
+/// Build a `DownloadResult` from the file list shared by the torz and newz
+/// store endpoints.
+fn download_result_from_files(
+    store: &str,
+    info_hash: &str,
+    files: Vec<StremthruFile>,
+) -> DownloadResult {
+    let files = files
         .into_iter()
         .map(|f| DownloadFile {
             filename: file_name_or_path(f.name, f.path),
@@ -348,11 +360,7 @@ async fn fetch_cache_check(
                 client
                     .get(&url)
                     .query(&[("hash", hash_str.as_str())])
-                    .header("x-stremthru-store-name", store)
-                    .header(
-                        "x-stremthru-store-authorization",
-                        format!("Bearer {api_key}"),
-                    )
+                    .store_headers(store, api_key)
             },
         )
         .await?;
@@ -418,11 +426,7 @@ async fn delete_torrent(
         .send(PROFILE, |client| {
             client
                 .delete(&url)
-                .header("x-stremthru-store-name", store)
-                .header(
-                    "x-stremthru-store-authorization",
-                    format!("Bearer {api_key}"),
-                )
+                .store_headers(store, api_key)
         })
         .await?;
 
@@ -545,29 +549,7 @@ pub fn download_result_from_torz(
     info_hash: &str,
     torz: StremthruTorz,
 ) -> DownloadResult {
-    let files = torz
-        .files
-        .into_iter()
-        .map(|f| DownloadFile {
-            filename: file_name_or_path(f.name, f.path),
-            file_size: f.size.max(0).cast_unsigned(),
-            download_url: if f.link.is_empty() {
-                None
-            } else {
-                Some(f.link)
-            },
-            stream_url: None,
-            usenet_info_hash: None,
-            usenet_file_index: None,
-        })
-        .collect();
-
-    DownloadResult {
-        info_hash: info_hash.to_string(),
-        files,
-        provider: Some(store.to_string()),
-        plugin_name: "stremthru".to_string(),
-    }
+    download_result_from_files(store, info_hash, torz.files)
 }
 
 /// Outcome of a stream-link generation attempt against a single store.
@@ -596,11 +578,7 @@ pub async fn generate_link(
         .send(PROFILE, |client| {
             client
                 .post(&url)
-                .header("x-stremthru-store-name", store)
-                .header(
-                    "x-stremthru-store-authorization",
-                    format!("Bearer {api_key}"),
-                )
+                .store_headers(store, api_key)
                 .json(&serde_json::json!({ "link": magnet }))
         })
         .await?;
@@ -663,11 +641,7 @@ pub async fn fetch_user_info(
         .get_json(PROFILE, format!("{store}:{url}"), |client| {
             client
                 .get(&url)
-                .header("x-stremthru-store-name", store)
-                .header(
-                    "x-stremthru-store-authorization",
-                    format!("Bearer {api_key}"),
-                )
+                .store_headers(store, api_key)
         })
         .await?;
     let user = resp

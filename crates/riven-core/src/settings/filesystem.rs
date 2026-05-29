@@ -167,7 +167,7 @@ fn matches_content_rating_filter(rating: Option<ContentRating>, filters: &[Strin
 fn matches_token_filter(values: &[&str], filters: &[String]) -> bool {
     let mut any_inclusion = false;
     let mut inclusion_hit = false;
-    for filter in filters.iter() {
+    for filter in filters {
         let filter = filter.trim();
         if filter.is_empty() {
             continue;

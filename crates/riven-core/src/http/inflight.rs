@@ -23,7 +23,7 @@ impl InFlightRequest {
 
     pub(super) async fn wait(&self) -> Result<Arc<HttpResponseData>, String> {
         let mut rx = self.tx.subscribe();
-        rx.wait_for(|v| v.is_some())
+        rx.wait_for(std::option::Option::is_some)
             .await
             .map_err(|_e| "inflight leader cancelled before completing request".to_string())?
             .clone()

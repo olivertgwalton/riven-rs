@@ -131,7 +131,7 @@ fn parse_providers_str(raw: &str) -> Option<NntpConfig> {
 fn parse_providers_value(v: &serde_json::Value) -> Option<NntpConfig> {
     let map = v.as_object()?;
     let mut providers: Vec<NntpProvider> = Vec::with_capacity(map.len());
-    for (_name, entry) in map.iter() {
+    for (_name, entry) in map {
         let parsed: ProviderJson = serde_json::from_value(entry.clone()).ok()?;
         providers.push(parsed.into_provider());
     }

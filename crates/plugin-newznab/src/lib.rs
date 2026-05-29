@@ -76,7 +76,7 @@ fn parse_indexers_str(raw: &str) -> Option<Vec<Indexer>> {
     let v: serde_json::Value = serde_json::from_str(trimmed).ok()?;
     let map = v.as_object()?;
     let mut indexers = Vec::with_capacity(map.len());
-    for (name, entry) in map.iter() {
+    for (name, entry) in map {
         let obj = match entry.as_object() {
             Some(o) => o,
             None => continue,
@@ -495,11 +495,11 @@ fn parse_newznab_xml(body: &str) -> Vec<NewznabItem> {
                             match attr.key.as_ref() {
                                 b"name" => {
                                     name_val =
-                                        attr.unescape_value().ok().map(|v| v.into_owned());
+                                        attr.unescape_value().ok().map(std::borrow::Cow::into_owned);
                                 }
                                 b"value" => {
                                     value_val =
-                                        attr.unescape_value().ok().map(|v| v.into_owned());
+                                        attr.unescape_value().ok().map(std::borrow::Cow::into_owned);
                                 }
                                 _ => {}
                             }

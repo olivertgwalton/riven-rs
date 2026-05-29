@@ -348,7 +348,7 @@ fn subtitle_path_from(media_path: &str, language: &str) -> String {
         Some((d, f)) => (d, f),
         None => ("", media_path),
     };
-    let stem = file.rsplit_once('.').map(|(s, _)| s).unwrap_or(file);
+    let stem = file.rsplit_once('.').map_or(file, |(s, _)| s);
     if dir.is_empty() {
         format!("{stem}.{language}.srt")
     } else {

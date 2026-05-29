@@ -1,11 +1,13 @@
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use futures::StreamExt;
 use futures::stream;
 
 use crate::nntp::Priority;
 use crate::rar;
 
-use super::{NzbRarPart, NzbRarSlice, PREFETCH_FLOOR, StreamerError, UsenetStreamer};
+use super::{
+    NzbRarPart, NzbRarSlice, PREFETCH_FLOOR, StreamerError, UsenetStreamer, concat_slices,
+};
 
 impl UsenetStreamer {
     /// Read a byte range from a `Rar` source. RAR slice offsets are exact
@@ -290,18 +292,3 @@ impl UsenetStreamer {
     }
 }
 
-/// Same fast-path as the direct reader: single slice → zero-copy return;
-/// multi-slice → concat into a sized `BytesMut`.
-fn concat_slices(mut slices: Vec<Bytes>, start: u64, end_inclusive: u64) -> Bytes {
-    match slices.len() {
-        0 => Bytes::new(),
-        1 => slices.pop().unwrap_or_default(),
-        _ => {
-            let mut buf = BytesMut::with_capacity((end_inclusive - start + 1) as usize);
-            for s in slices {
-                buf.extend_from_slice(&s);
-            }
-            buf.freeze()
-        }
-    }
-}

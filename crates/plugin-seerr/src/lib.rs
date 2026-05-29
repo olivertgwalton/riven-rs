@@ -250,14 +250,7 @@ async fn fetch_content(
 ) -> anyhow::Result<HookResponse> {
     let filter = ctx.settings.get_or("filter", DEFAULT_FILTER);
     let content = fetch_seerr_content(&ctx.http, api_key, base_url, &filter).await?;
-    let mut collection = ContentCollection::default();
-    for m in content.movies {
-        collection.insert_movie(m);
-    }
-    for s in content.shows {
-        collection.insert_show(s);
-    }
-    Ok(collection.into_hook_response())
+    Ok(HookResponse::ContentService(Box::new(content)))
 }
 
 #[derive(Deserialize)]

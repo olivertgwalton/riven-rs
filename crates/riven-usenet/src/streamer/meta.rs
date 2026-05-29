@@ -4,6 +4,7 @@
 //! short version is that NNTP message-ids don't expire upstream, so the
 //! segment map is permanent address-book data, not a refreshable cache.
 
+use bytes::{Bytes, BytesMut};
 use serde::{Deserialize, Serialize};
 
 use crate::nzb::NzbSegment;
@@ -96,22 +97,83 @@ pub(crate) fn segments_overlapping(
     if segments.is_empty() {
         return Vec::new();
     }
-    let mut first = 0usize;
-    let mut last = segments.len() - 1;
-    for (i, win) in offsets.windows(2).enumerate() {
-        if win[1] > lo {
-            first = i;
-            break;
-        }
-    }
-    for (i, win) in offsets.windows(2).enumerate() {
-        if win[0] > hi {
-            last = i.saturating_sub(1);
-            break;
-        }
-        last = i;
-    }
+    let n = segments.len();
+    // `offsets[i]..offsets[i+1]` is segment `i`'s encoded-byte span (offsets is
+    // sorted, length `n + 1`). Binary-search the boundaries instead of the
+    // previous two linear `windows(2)` scans.
+    //
+    // first = smallest `i` with `offsets[i + 1] > lo`. `partition_point`
+    // returns the count of offsets `<= lo`, so the first offset index strictly
+    // greater than `lo` is that count; the matching window start is one less.
+    // Falls back to 0 (the old loop's default) when nothing exceeds `lo`.
+    let first = if offsets.last().is_some_and(|&end| end > lo) {
+        offsets.partition_point(|&o| o <= lo).saturating_sub(1)
+    } else {
+        0
+    };
+    // last = largest `i` reached before `offsets[i] > hi`; defaults to `n - 1`.
+    // `partition_point` over the first `n` offsets returns the first index where
+    // `offsets[i] > hi` (or `n` when none do), matching the old loop's `i - 1`.
+    let last = offsets[..n].partition_point(|&o| o <= hi).saturating_sub(1);
     (first..=last)
         .map(|i| segments[i].message_id.clone())
         .collect()
+}
+
+/// Concatenate decoded segment slices into one contiguous `Bytes`. Used by the
+/// direct and RAR readers for callers that want a single buffer (HTTP buffered
+/// responses, RAR encrypted-slice decrypt). Single slice → zero-copy return;
+/// multi-slice → concat into a sized `BytesMut`. The streaming HTTP path uses
+/// the slice list directly and skips this.
+pub(crate) fn concat_slices(mut slices: Vec<Bytes>, start: u64, end_inclusive: u64) -> Bytes {
+    match slices.len() {
+        0 => Bytes::new(),
+        1 => slices.pop().unwrap_or_default(),
+        _ => {
+            let mut buf = BytesMut::with_capacity((end_inclusive - start + 1) as usize);
+            for s in slices {
+                buf.extend_from_slice(&s);
+            }
+            buf.freeze()
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn seg(id: &str) -> NzbSegment {
+        NzbSegment {
+            bytes: 0,
+            number: 0,
+            message_id: id.to_string(),
+        }
+    }
+
+    #[test]
+    fn segments_overlapping_picks_touched_segments() {
+        // 3 segments: [0,100), [100,250), [250,400).
+        let offsets = [0u64, 100, 250, 400];
+        let segments = [seg("a"), seg("b"), seg("c")];
+
+        let ids = |lo, hi| segments_overlapping(&offsets, &segments, lo, hi);
+
+        // Inside the first segment.
+        assert_eq!(ids(0, 0), vec!["a"]);
+        assert_eq!(ids(50, 99), vec!["a"]);
+        // Spans the first boundary.
+        assert_eq!(ids(50, 150), vec!["a", "b"]);
+        // Starts mid-segment-1, ends in segment-2.
+        assert_eq!(ids(120, 300), vec!["b", "c"]);
+        // Exactly on a boundary start picks the later segment.
+        assert_eq!(ids(100, 100), vec!["b"]);
+        // Whole file.
+        assert_eq!(ids(0, 399), vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn segments_overlapping_empty_is_empty() {
+        assert!(segments_overlapping(&[0], &[], 0, 10).is_empty());
+    }
 }

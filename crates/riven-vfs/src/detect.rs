@@ -1,6 +1,6 @@
 use riven_core::config::vfs::*;
 
-use crate::cache::{RangeCache, cache_get};
+use crate::cache::RangeCache;
 use crate::chunks::{ChunkRange, FileLayout};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -16,7 +16,7 @@ pub enum ReadType {
 fn request_fully_cached(cache: &RangeCache, ino: u64, chunks: &[ChunkRange]) -> bool {
     chunks
         .iter()
-        .all(|chunk| cache_get(cache, (ino, chunk.start, chunk.end)).is_some())
+        .all(|chunk| cache.get((ino, chunk.start, chunk.end)).is_some())
 }
 
 pub fn detect_read_type(
@@ -63,7 +63,7 @@ pub fn detect_read_type(
 #[cfg(test)]
 mod tests {
     use super::{ReadType, detect_read_type};
-    use crate::cache::{RangeCache, cache_put};
+    use crate::cache::RangeCache;
     use crate::chunks::FileLayout;
     use bytes::Bytes;
 
@@ -79,11 +79,7 @@ mod tests {
         let chunks = layout.request_chunks(0, 1024);
         let cache = empty_cache();
         for chunk in &chunks {
-            cache_put(
-                &cache,
-                (1, chunk.start, chunk.end),
-                Bytes::from_static(b"x"),
-            );
+            cache.put((1, chunk.start, chunk.end), Bytes::from_static(b"x"));
         }
 
         let read_type = detect_read_type(1, 0, 1024, 1025, None, &layout, &chunks, &cache);
