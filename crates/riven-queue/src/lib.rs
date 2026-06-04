@@ -46,6 +46,27 @@ pub use workers::start_workers;
 
 // ── JobQueue ──────────────────────────────────────────────────────────────────
 
+/// Per-command response timeout for every Redis connection. The socket itself
+/// is reconnected by `ConnectionManager` in the background; this bounds the
+/// wait for a *reply* so a command in flight across a blip fails fast instead
+/// of hanging indefinitely.
+const REDIS_RESPONSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+/// Bound on establishing/re-establishing the connection itself.
+const REDIS_CONNECTION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Build a `ConnectionManager` with production timeouts. Used for both the
+/// apalis storage connection and the maintenance connection so neither can hang
+/// forever on a lost reply after a Redis blip. `ConnectionManager` is the same
+/// type `apalis_redis::connect` returns, so the apalis `RedisStorage` backends
+/// accept it unchanged.
+pub async fn connect_managed(redis_url: &str) -> Result<redis::aio::ConnectionManager> {
+    let client = redis::Client::open(redis_url)?;
+    let config = redis::aio::ConnectionManagerConfig::new()
+        .set_connection_timeout(Some(REDIS_CONNECTION_TIMEOUT))
+        .set_response_timeout(Some(REDIS_RESPONSE_TIMEOUT));
+    Ok(redis::aio::ConnectionManager::new_with_config(client, config).await?)
+}
+
 pub struct JobQueue {
     pub index_storage: RedisStorage<IndexJob>,
     pub scrape_storage: RedisStorage<ScrapeJob>,
@@ -84,7 +105,16 @@ impl JobQueue {
         retry_interval_secs: u64,
         maximum_scrape_attempts: u32,
     ) -> Result<Self> {
-        let apalis_conn = apalis_redis::connect(redis_url).await?;
+        // Both the apalis worker/storage connection and the maintenance
+        // connection are built with an explicit `response_timeout`. A bare
+        // `ConnectionManager` reconnects its socket in the background, but with
+        // no response timeout a command already in flight when Redis blips
+        // awaits a reply that never arrives and hangs forever — which silently
+        // wedges the worker-pool restart loop in `riven-app` (it issues Redis
+        // commands with no timeout of its own). A bounded response timeout
+        // turns that hang into an error so the loop can recover without a
+        // process restart.
+        let apalis_conn = connect_managed(redis_url).await?;
 
         let index_storage =
             RedisStorage::new_with_config(apalis_conn.clone(), RedisConfig::new("riven:index"));
@@ -117,8 +147,7 @@ impl JobQueue {
             plugin_hook_storages.insert((plugin_name, event_type), storage);
         }
 
-        let redis_client = redis::Client::open(redis_url)?;
-        let redis = redis::aio::ConnectionManager::new(redis_client).await?;
+        let redis = connect_managed(redis_url).await?;
 
         let resolution_ranks = riven_db::repo::load_resolution_ranks(&db_pool).await;
         let (event_tx, _) = broadcast::channel(4096);

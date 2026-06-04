@@ -424,7 +424,7 @@ pub async fn update_scraped(pool: &PgPool, id: i64) -> Result<()> {
 /// `recompute` derive the correct state from first principles (so an episode
 /// with existing streams lands on `Scraped`, not just `Indexed`). The cascade
 /// inside `recompute` then propagates the change up to the season and show.
-pub async fn transition_unreleased_aired(pool: &PgPool) -> Result<u64> {
+pub async fn transition_unreleased_aired(pool: &PgPool) -> Result<Vec<i64>> {
     let ids: Vec<i64> = sqlx::query_scalar!(
         r#"SELECT id FROM media_items
             WHERE state = 'unreleased' AND aired_at IS NOT NULL
@@ -432,9 +432,8 @@ pub async fn transition_unreleased_aired(pool: &PgPool) -> Result<u64> {
     )
     .fetch_all(pool)
     .await?;
-    let count = ids.len() as u64;
     super::state::recompute(pool, &ids).await?;
-    Ok(count)
+    Ok(ids)
 }
 
 pub async fn blacklist_stream_by_hash(
