@@ -291,6 +291,25 @@ impl MainOrchestrator {
         }
     }
 
+    pub async fn transition_newly_aired(&self) {
+        let ids = match repo::transition_unreleased_aired(&self.queue.db_pool).await {
+            Ok(ids) => ids,
+            Err(error) => {
+                tracing::error!(%error, "failed to transition unreleased aired items");
+                return;
+            }
+        };
+        if ids.is_empty() {
+            return;
+        }
+        tracing::info!(count = ids.len(), "transitioned unreleased items that have aired");
+        for id in ids {
+            if let Some(item) = self.load_item(id).await {
+                self.process_media_item(&item).await;
+            }
+        }
+    }
+
     async fn load_item(&self, id: i64) -> Option<MediaItem> {
         context::load_media_item_or_log(&self.queue.db_pool, id, "main_orchestrator").await
     }

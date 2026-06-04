@@ -77,8 +77,10 @@ async fn main() -> Result<()> {
         riven_db::run_migrations(&db_pool).await?;
     }
 
-    let redis_client = redis::Client::open(settings.redis_url.as_str())?;
-    let redis_conn = redis::aio::ConnectionManager::new(redis_client).await?;
+    // Shared with every plugin (dedup guards, dashboard, …). Built with the
+    // same bounded-timeout connection as the job-queue connections so no Redis
+    // command can hang indefinitely after a connection blip.
+    let redis_conn = riven_queue::connect_managed(settings.redis_url.as_str()).await?;
     tracing::info!("redis connection established");
 
     let reqwest_client = build_http_client()?;
@@ -542,13 +544,36 @@ async fn main() -> Result<()> {
         async move {
             let mut redis_conn = jq.redis.clone();
             let queues = jq.queue_names();
+            // Hard ceiling on the pre-start maintenance phase. The Redis
+            // connection already has a per-command `response_timeout`, but a
+            // blip can stall each of many per-queue commands; without an outer
+            // bound the restart loop could still sit for minutes before
+            // spawning workers. If maintenance overruns we proceed to
+            // `start_workers` anyway and let the next iteration retry — a
+            // wedged restart loop (workers never come back until the process
+            // is restarted) is far worse than skipping one orphan purge.
+            const MAINTENANCE_TIMEOUT: Duration = Duration::from_secs(60);
+            // Backoff between restart attempts so a connection that is fully
+            // down (every `start_workers().run()` returning immediately) cannot
+            // turn into a hot loop hammering Redis.
+            const RESTART_BACKOFF: Duration = Duration::from_secs(5);
             while !cancel.is_cancelled() {
                 // Unconditionally clears worker heartbeats so re-registration is
                 // not rejected by `register_worker.lua`'s "still active within
                 // threshold" check after a previous run died.
-                riven_queue::clear_worker_registrations(&mut redis_conn, &queues).await;
-                riven_queue::purge_orphaned_worker_sets(&mut redis_conn, &queues).await;
-                riven_queue::purge_orphaned_active_jobs(&mut redis_conn, &queues).await;
+                let maintenance = async {
+                    riven_queue::clear_worker_registrations(&mut redis_conn, &queues).await;
+                    riven_queue::purge_orphaned_worker_sets(&mut redis_conn, &queues).await;
+                    riven_queue::purge_orphaned_active_jobs(&mut redis_conn, &queues).await;
+                };
+                if tokio::time::timeout(MAINTENANCE_TIMEOUT, maintenance)
+                    .await
+                    .is_err()
+                {
+                    tracing::warn!(
+                        "pre-start Redis maintenance timed out; starting workers anyway"
+                    );
+                }
 
                 // `Monitor::run()` resolves as soon as all workers complete (e.g.
                 // a Redis blip on the shared `apalis_conn` errors every backend's
@@ -572,6 +597,13 @@ async fn main() -> Result<()> {
                     Ok(Err(e)) => tracing::error!(error = %e, "apalis monitor error, restarting"),
                     Err(e) if e.is_panic() => tracing::error!("apalis monitor panicked, restarting"),
                     Err(e) => tracing::error!(error = ?e, "apalis monitor task failed, restarting"),
+                }
+                // Brief pause before re-registering. Guards against a hot
+                // restart loop when Redis is down hard and every attempt fails
+                // immediately; harmless in the normal (rare) restart case.
+                tokio::select! {
+                    _ = tokio::time::sleep(RESTART_BACKOFF) => {}
+                    _ = cancel.cancelled() => break,
                 }
             }
         }
