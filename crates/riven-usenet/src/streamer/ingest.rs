@@ -15,7 +15,7 @@ use crate::nntp::Priority;
 use super::store;
 use super::{
     NzbMeta, NzbMetaFile, NzbMetaSource, NzbRarPart, NzbRarSlice, PREFETCH_FLOOR, StreamerError,
-    UsenetStreamer,
+    UsenetStreamer, select_validation_indices,
 };
 
 /// In-progress per-inner-file accumulator during multi-file RAR reconstruction.
@@ -48,14 +48,6 @@ fn is_media_filename(name: &str) -> bool {
 /// releases passed ingest and only failed mid-playback. 5% reliably surfaces
 /// gaps. Overridable per-install via the `availabilitysamplepercent` setting.
 pub const DEFAULT_AVAILABILITY_SAMPLE_PERCENT: usize = 5;
-/// Floor/ceiling on the probe sample. The probe runs inline per candidate
-/// during download (unlike altmount's out-of-band health check with its own
-/// connection budget), and a download walks many candidates, so the ceiling
-/// has to stay modest or the STATs swamp the pool and stall throughput. 150
-/// segments spread across a file still reliably catches a meaningfully
-/// incomplete release while costing ~12× the old fixed-12 probe, not ~80×.
-const AVAILABILITY_SAMPLE_MIN: usize = 20;
-const AVAILABILITY_SAMPLE_MAX: usize = 150;
 /// Maximum fraction of probed segments allowed to error transiently (provider
 /// hiccup) before we treat the release as unverifiable. *Confirmed*-missing
 /// segments (STAT says not present) are zero-tolerance — the read path has no
@@ -82,25 +74,16 @@ impl UsenetStreamer {
         if segments.is_empty() {
             return Ok(());
         }
-        // Invalid/zero values fall back to the default rather than disabling
-        // the probe (a 0% probe would let every dead release through).
-        let pct = if (1..=100).contains(&sample_percent) {
-            sample_percent
-        } else {
-            DEFAULT_AVAILABILITY_SAMPLE_PERCENT
-        };
-        let n = ((segments.len() * pct) / 100)
-            .clamp(AVAILABILITY_SAMPLE_MIN, AVAILABILITY_SAMPLE_MAX)
-            .min(segments.len());
-        // Spread the sample across the file rather than concentrating at
-        // the front: corrupted releases often have gaps anywhere.
-        let step = segments.len().max(1) / n.max(1);
-        let mids: Vec<String> = (0..n)
-            .map(|i| {
-                let idx = (i * step).min(segments.len() - 1);
-                segments[idx].message_id.clone()
-            })
+        // Strategic sample (first-N / last-N / spread middle), or every segment
+        // when `sample_percent >= 100`. See `select_validation_indices`.
+        let mids: Vec<String> = select_validation_indices(segments.len(), sample_percent)
+            .into_iter()
+            .map(|i| segments[i].message_id.clone())
             .collect();
+        let n = mids.len();
+        if n == 0 {
+            return Ok(());
+        }
         let probe_concurrency = self.pool.ingest_concurrency().max(PREFETCH_FLOOR).min(n);
         let pool = self.pool.clone();
         let mut probes = stream::iter(mids)

@@ -276,6 +276,23 @@ async fn main() -> Result<()> {
                     .filter(|&n| n > 0)
                     .map(|n| n as i32)
                     .unwrap_or(3);
+                // When "Full Segment Verification" is on, the background scanner
+                // STAT-checks every segment (percent = 100) so a single post-grab
+                // article death is actually detected — sampling almost always
+                // misses one. Read per-tick so the toggle is live.
+                let check_all_segments = usenet_cfg
+                    .as_ref()
+                    .and_then(|v| v.get("checkallsegments"))
+                    .map(|v| {
+                        v.as_bool().unwrap_or_else(|| {
+                            matches!(
+                                v.as_str().map(|s| s.trim().to_ascii_lowercase()).as_deref(),
+                                Some("1" | "true" | "yes" | "on")
+                            )
+                        })
+                    })
+                    .unwrap_or(false);
+                let effective_sample_percent = if check_all_segments { 100 } else { sample_percent };
 
                 let due = match riven_db::repo::usenet_files_due_for_check(&db, batch).await {
                     Ok(due) => due,
@@ -287,7 +304,7 @@ async fn main() -> Result<()> {
                 for file in due {
                     let file_index = usize::try_from(file.file_index).unwrap_or(0);
                     let (status, total, sampled, missing, errors) = match streamer
-                        .scan_availability(&file.info_hash, file_index, sample_percent)
+                        .scan_availability(&file.info_hash, file_index, effective_sample_percent)
                         .await
                     {
                         Ok(scan) => (

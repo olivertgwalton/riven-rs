@@ -160,8 +160,16 @@ impl UsenetStreamer {
         }
     }
 
-    /// Fast path: uniform segment size known, jump directly to the segment
-    /// containing `dec_start` and fetch just the overlapping segments.
+    /// Fast path: uniform segment size known. The uniform size is used ONLY
+    /// to jump to the anchor segment (the one whose slot contains `dec_start`)
+    /// and the in-segment skip — never to size the per-segment slice, which
+    /// always comes from each segment's ACTUAL decoded length. yEnc posters
+    /// usually use a fixed `=ypart` size, but not always: a non-last segment
+    /// can decode shorter than `seg_size`. Sizing slices from `idx * seg_size`
+    /// (the old behaviour) then drifts every following segment and returns a
+    /// mid-file short read — which the FUSE layer turns into EOF/EIO and the
+    /// player stops. So we instead accumulate decoded bytes forward, in
+    /// bounded fully-drained batches, until the requested window is filled.
     async fn read_decoded_range_uniform(
         &self,
         part: &NzbRarPart,
@@ -170,54 +178,27 @@ impl UsenetStreamer {
         dec_end_inclusive: u64,
         priority: Priority,
     ) -> Result<Bytes, StreamerError> {
-        let want_len = (dec_end_inclusive - dec_start + 1) as usize;
-
         let total_segs = part.segments.len();
+        // Anchor: floor-divide picks the segment whose uniform slot contains
+        // `dec_start`. `skip` is always in `[0, seg_size)`, so it can't
+        // underflow even when actual sizes drift from `seg_size`.
         let first_seg = (dec_start / seg_size) as usize;
-        let last_seg = ((dec_end_inclusive / seg_size) as usize).min(total_segs - 1);
         if first_seg >= total_segs {
             return Ok(Bytes::new());
         }
+        let skip = (dec_start - (first_seg as u64) * seg_size) as usize;
+        // First batch generously covers the request so it almost always
+        // suffices in one pass; `+2` absorbs ordinary per-segment slop.
+        let last_hint = ((dec_end_inclusive / seg_size) as usize).min(total_segs - 1);
+        let batch_last = (last_hint + 2).min(total_segs - 1);
 
-        let read_concurrency = self.pool.download_concurrency().max(PREFETCH_FLOOR);
-        let streamer = self.clone();
-        let mids: Vec<(usize, String)> = (first_seg..=last_seg)
-            .map(|i| (i, part.segments[i].message_id.clone()))
-            .collect();
-        let mut stream = stream::iter(mids)
-            .map(move |(i, mid)| {
-                let s = streamer.clone();
-                async move { (i, s.fetch_decoded_cached(&mid, priority).await) }
-            })
-            .buffered(read_concurrency);
-
-        let mut slices: Vec<Bytes> = Vec::new();
-        let mut accumulated: usize = 0;
-        while let Some((idx, result)) = stream.next().await {
-            let decoded = result?;
-            let seg_lo = (idx as u64) * seg_size;
-            let dec_len_usize = decoded.len();
-            let take_lo_u64 = dec_start.saturating_sub(seg_lo);
-            let take_lo = (take_lo_u64 as usize).min(dec_len_usize);
-            let take_hi_inclusive_u64 = dec_end_inclusive.saturating_sub(seg_lo);
-            let take_hi_inclusive =
-                (take_hi_inclusive_u64 as usize).min(dec_len_usize.saturating_sub(1));
-            if take_lo <= take_hi_inclusive {
-                let part = decoded.slice(take_lo..=take_hi_inclusive);
-                accumulated += part.len();
-                slices.push(part);
-            }
-
-            if accumulated >= want_len {
-                break;
-            }
-        }
-
-        Ok(concat_slices(slices, dec_start, dec_end_inclusive))
+        self.assemble_decoded_forward(part, dec_start, dec_end_inclusive, first_seg, batch_last, skip, priority)
+            .await
     }
 
-    /// Slow fallback: no uniform size known. Walk segments from the first
-    /// non-memoized one to build the decoded cursor exactly.
+    /// Slow fallback: no uniform size known. Advance past leading segments
+    /// whose ACTUAL decoded size is already memoized and which end before
+    /// `dec_start`, then assemble forward from there.
     async fn read_decoded_range_walk(
         &self,
         part: &NzbRarPart,
@@ -225,67 +206,106 @@ impl UsenetStreamer {
         dec_end_inclusive: u64,
         priority: Priority,
     ) -> Result<Bytes, StreamerError> {
-        let want_len = (dec_end_inclusive - dec_start + 1) as usize;
-        let mut decoded_cursor: u64 = 0;
-
         let total_segs = part.segments.len();
-        let mut next_to_launch = 0usize;
 
-        while next_to_launch < total_segs {
-            let seg = &part.segments[next_to_launch];
+        let mut decoded_cursor: u64 = 0;
+        let mut first_seg = 0usize;
+        while first_seg < total_segs {
+            let seg = &part.segments[first_seg];
             let Some(size) = self.state.decoded_sizes.get(&seg.message_id) else {
                 break;
             };
             if decoded_cursor + size <= dec_start {
                 decoded_cursor += size;
-                next_to_launch += 1;
+                first_seg += 1;
             } else {
                 break;
             }
         }
+        if first_seg >= total_segs {
+            return Ok(Bytes::new());
+        }
+        let skip = dec_start.saturating_sub(decoded_cursor) as usize;
+        let read_concurrency = self.pool.download_concurrency().max(PREFETCH_FLOOR);
+        let batch_last = (first_seg + read_concurrency - 1).min(total_segs - 1);
+
+        self.assemble_decoded_forward(part, dec_start, dec_end_inclusive, first_seg, batch_last, skip, priority)
+            .await
+    }
+
+    /// Assemble `[dec_start, dec_end_inclusive]` by fetching a part's segments
+    /// forward from `first_seg`, accumulating each segment's ACTUAL decoded
+    /// length (never a slot-derived size) until the requested window is full.
+    ///
+    /// Mirrors `read_direct`'s assembly invariants:
+    ///   - **Bounded, fully-drained batches.** Never break a `buffered` stream
+    ///     early: dropping an in-flight `fetch_decoded_cached` cancels its BODY
+    ///     mid-read, poisoning the pooled NNTP connection so the next user
+    ///     times out and trips the provider circuit breaker. We drain each
+    ///     batch in full, only growing to a new batch if still short.
+    ///   - **Never short except at true end-of-part.** A mid-file short read is
+    ///     catastrophic (FUSE truncates the cached size to EOF), so we keep
+    ///     fetching later segments to cover any per-segment decode slop. A
+    ///     slightly-off anchor only shifts content by a few bytes (tolerated by
+    ///     players); dropping bytes is not tolerated.
+    async fn assemble_decoded_forward(
+        &self,
+        part: &NzbRarPart,
+        dec_start: u64,
+        dec_end_inclusive: u64,
+        first_seg: usize,
+        first_batch_last: usize,
+        mut skip: usize,
+        priority: Priority,
+    ) -> Result<Bytes, StreamerError> {
+        let want = (dec_end_inclusive - dec_start + 1) as usize;
+        let total_segs = part.segments.len();
+        if want == 0 || total_segs == 0 {
+            return Ok(Bytes::new());
+        }
 
         let read_concurrency = self.pool.download_concurrency().max(PREFETCH_FLOOR);
-        let streamer = self.clone();
-        let mids: Vec<String> = (next_to_launch..total_segs)
-            .map(|i| part.segments[i].message_id.clone())
-            .collect();
-        let mut stream = stream::iter(mids)
-            .map(move |mid| {
-                let s = streamer.clone();
-                async move { s.fetch_decoded_cached(&mid, priority).await }
-            })
-            .buffered(read_concurrency);
-
+        let segments = part.segments.as_slice();
         let mut slices: Vec<Bytes> = Vec::new();
-        let mut accumulated: usize = 0;
-        while let Some(result) = stream.next().await {
-            let decoded = result?;
-            let dec_len = decoded.len() as u64;
-            let seg_lo = decoded_cursor;
-            let seg_hi = decoded_cursor + dec_len;
-            decoded_cursor = seg_hi;
+        let mut produced: usize = 0;
 
-            if seg_hi <= dec_start {
-                continue;
+        let mut batch_start = first_seg;
+        let mut batch_last = first_batch_last.max(first_seg).min(total_segs - 1);
+        loop {
+            let streamer = self.clone();
+            let mut stream = stream::iter(batch_start..=batch_last)
+                .map(move |i| {
+                    let s = streamer.clone();
+                    async move { s.fetch_decoded_cached(&segments[i].message_id, priority).await }
+                })
+                .buffered(read_concurrency);
+
+            while let Some(result) = stream.next().await {
+                let decoded = result?;
+                if produced >= want {
+                    // Request satisfied; keep draining so no in-flight fetch in
+                    // this batch is cancelled, but stop accumulating.
+                    continue;
+                }
+                if skip >= decoded.len() {
+                    // Anchor skip spans past this whole segment (decode slop put
+                    // `dec_start` in a later segment than the slot suggested).
+                    skip -= decoded.len();
+                    continue;
+                }
+                let take = (want - produced).min(decoded.len() - skip);
+                slices.push(decoded.slice(skip..skip + take));
+                produced += take;
+                skip = 0;
             }
-            if seg_lo > dec_end_inclusive {
+
+            if produced >= want || batch_last + 1 >= total_segs {
+                // Filled, or ran out of segments (legitimate only at true
+                // end-of-part — the outer guard fails EIO if it was mid-file).
                 break;
             }
-
-            let dec_len_usize = decoded.len();
-            let take_lo = (dec_start.max(seg_lo) - seg_lo) as usize;
-            let take_hi_inclusive = (dec_end_inclusive.min(seg_hi - 1) - seg_lo) as usize;
-            let take_lo = take_lo.min(dec_len_usize);
-            let take_hi_inclusive = take_hi_inclusive.min(dec_len_usize.saturating_sub(1));
-            if take_lo <= take_hi_inclusive {
-                let part = decoded.slice(take_lo..=take_hi_inclusive);
-                accumulated += part.len();
-                slices.push(part);
-            }
-
-            if accumulated >= want_len {
-                break;
-            }
+            batch_start = batch_last + 1;
+            batch_last = (batch_last + read_concurrency).min(total_segs - 1);
         }
 
         Ok(concat_slices(slices, dec_start, dec_end_inclusive))

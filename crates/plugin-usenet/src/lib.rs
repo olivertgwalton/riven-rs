@@ -252,10 +252,37 @@ impl Plugin for UsenetPlugin {
             .with_default("5")
             .with_description(
                 "Percentage of a release's segments to STAT-check at ingest before \
-                 accepting it (1-100, default 5, matching altmount). Higher = more \
-                 thorough dead-release detection but slower ingest; lower = faster \
-                 but more chance an incomplete release slips through and fails \
-                 mid-playback. Bounded to a sane absolute range internally.",
+                 accepting it (1-100, default 5, matching altmount). The sample is \
+                 strategic — always the first/last few segments (DMCA takedowns and \
+                 truncated uploads) plus a spread middle. Higher = more thorough \
+                 dead-release detection but slower ingest; lower = faster but more \
+                 chance an incomplete release slips through. Bounded to a sane \
+                 absolute range internally. NOTE: sampling at any percent can miss a \
+                 lone dead segment — enable \"Full Segment Verification\" to catch those.",
+            ),
+            SettingField::new("checkallsegments", "Full Segment Verification", "boolean")
+                .with_default("false")
+                .with_description(
+                    "STAT-check 100% of the selected release's segments before \
+                     committing to it — the only check that reliably catches a single \
+                     dead article (sampling almost always misses one). Runs once on the \
+                     winning candidate (not every candidate), so it costs one full STAT \
+                     sweep per download. Also makes the background health scanner verify \
+                     every segment. Recommended after provider changes or if titles keep \
+                     stalling mid-playback; leave off to rely on the faster sample.",
+                ),
+            SettingField::new(
+                "acceptablemissingpercent",
+                "Acceptable Missing Segments %",
+                "number",
+            )
+            .with_default("0")
+            .with_description(
+                "Maximum fraction of segments allowed missing before full \
+                 verification rejects a release (0-50, default 0 = altmount's \
+                 zero-tolerance). Keep at 0: the read path has no par2 repair, so any \
+                 missing segment in the played range stalls playback. Raise only if \
+                 you knowingly accept gaps.",
             ),
             SettingField::new("autorepair", "Auto-Repair Unhealthy Titles", "boolean")
                 .with_default("false")
@@ -351,6 +378,32 @@ impl Plugin for UsenetPlugin {
                 return Ok(HookResponse::DownloadStreamUnavailable);
             }
         };
+
+        // Full-verify the *winner* before committing. The ingest probe above is
+        // a cheap strategic sample (it runs per candidate); it catches grossly
+        // incomplete releases but can miss a lone dead article. When enabled,
+        // STAT every segment of this selected release once so a single-segment
+        // gap (which stalls playback at a fixed runtime point) is caught here
+        // and the download loop falls through to the next ranked candidate.
+        let check_all = ctx.settings.get_bool("checkallsegments");
+        if check_all {
+            let acceptable_missing = ctx
+                .settings
+                .get_parsed_or::<f64>("acceptablemissingpercent", 0.0)
+                .clamp(0.0, 50.0);
+            if let Err(e) = streamer
+                .verify_release_complete(info_hash, acceptable_missing)
+                .await
+            {
+                tracing::warn!(
+                    info_hash,
+                    error = %e,
+                    "usenet full segment verification failed; rejecting candidate"
+                );
+                return Ok(HookResponse::DownloadStreamUnavailable);
+            }
+            tracing::debug!(info_hash, "usenet full segment verification passed");
+        }
 
         let files: Vec<DownloadFile> = meta
             .files

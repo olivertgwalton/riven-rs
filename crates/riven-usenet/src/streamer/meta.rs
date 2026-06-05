@@ -7,6 +7,7 @@
 use bytes::{Bytes, BytesMut};
 use serde::{Deserialize, Serialize};
 
+use super::DEFAULT_AVAILABILITY_SAMPLE_PERCENT;
 use crate::nzb::NzbSegment;
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -120,6 +121,62 @@ pub(crate) fn segments_overlapping(
         .collect()
 }
 
+/// Pick which segment indices to STAT-probe for availability. A
+/// `sample_percent` of 100 or more returns every index — full verification,
+/// the only mode that reliably catches a *single* dead article in a large
+/// file. Otherwise it returns a strategic sample (mirroring altmount and the
+/// background health
+/// scanner): the first `FIRST_N` segments catch DMCA takedowns (which nuke a
+/// release's head), the last `LAST_N` catch truncated uploads, and an
+/// evenly-spaced middle catches general retention loss. Strictly better
+/// coverage than the old uniform stride for the same STAT budget. Returned
+/// indices are sorted and de-duplicated.
+pub(crate) fn select_validation_indices(total: usize, sample_percent: usize) -> Vec<usize> {
+    if total == 0 {
+        return Vec::new();
+    }
+    if sample_percent >= 100 {
+        return (0..total).collect();
+    }
+    // Strategic-sample shape and bounds. The ceiling keeps the inline
+    // per-candidate ingest probe cheap (it runs while walking many ranked
+    // candidates); reliable single-segment detection is the job of the
+    // `sample_percent >= 100` full-verify path, not a bigger sample.
+    const FIRST_N: usize = 3;
+    const LAST_N: usize = 2;
+    const SAMPLE_MIN: usize = 20;
+    const SAMPLE_MAX: usize = 150;
+
+    let pct = if (1..=100).contains(&sample_percent) {
+        sample_percent
+    } else {
+        DEFAULT_AVAILABILITY_SAMPLE_PERCENT
+    };
+    let n = ((total * pct) / 100).clamp(SAMPLE_MIN, SAMPLE_MAX).min(total);
+    if n >= total || total <= FIRST_N + LAST_N {
+        return (0..total).collect();
+    }
+
+    let mut indices: Vec<usize> = (0..FIRST_N).collect();
+    indices.extend((total - LAST_N)..total);
+
+    let middle_start = FIRST_N;
+    let middle_end = total - LAST_N;
+    let middle_range = middle_end - middle_start;
+    let middle_count = n.saturating_sub(FIRST_N + LAST_N);
+    for i in 0..middle_count {
+        // Evenly-spaced midpoints: floor((i + 0.5) * middle_range / middle_count)
+        // in exact integer arithmetic (no float, no sign-loss cast).
+        let idx = middle_start + ((2 * i + 1) * middle_range) / (2 * middle_count.max(1));
+        if idx < middle_end {
+            indices.push(idx);
+        }
+    }
+    indices.sort_unstable();
+    indices.dedup();
+    indices
+}
+
 /// Concatenate decoded segment slices into one contiguous `Bytes`. Used by the
 /// direct and RAR readers for callers that want a single buffer (HTTP buffered
 /// responses, RAR encrypted-slice decrypt). Single slice → zero-copy return;
@@ -149,6 +206,42 @@ mod tests {
             number: 0,
             message_id: id.to_string(),
         }
+    }
+
+    #[test]
+    fn validation_full_coverage_at_100_percent() {
+        // 100% (or more) must return every index — the only mode that catches a
+        // single dead article.
+        let got = select_validation_indices(36_526, 100);
+        assert_eq!(got.len(), 36_526);
+        assert_eq!(got.first(), Some(&0));
+        assert_eq!(got.last(), Some(&36_525));
+
+        let over = select_validation_indices(10, 250);
+        assert_eq!(over, (0..10).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn validation_sample_includes_head_tail_and_is_bounded() {
+        let total = 36_526;
+        let got = select_validation_indices(total, 5);
+        // Strategic shape: always probe the first 3 and last 2 (DMCA / truncation).
+        for i in 0..3 {
+            assert!(got.contains(&i), "missing head index {i}");
+        }
+        assert!(got.contains(&(total - 1)));
+        assert!(got.contains(&(total - 2)));
+        // Sorted, de-duplicated, and capped well under the file size.
+        assert!(got.windows(2).all(|w| w[0] < w[1]), "not sorted/unique");
+        assert!(got.len() <= 150, "sample exceeded the cap: {}", got.len());
+        assert!(got.iter().all(|&i| i < total));
+    }
+
+    #[test]
+    fn validation_small_file_probes_everything() {
+        // Below the first+last+min thresholds, just check the whole file.
+        assert_eq!(select_validation_indices(4, 5), vec![0, 1, 2, 3]);
+        assert_eq!(select_validation_indices(0, 5), Vec::<usize>::new());
     }
 
     #[test]

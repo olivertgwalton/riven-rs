@@ -35,7 +35,7 @@ pub use error::StreamerError;
 pub use ingest::DEFAULT_AVAILABILITY_SAMPLE_PERCENT;
 pub use meta::{NzbMeta, NzbMetaFile, NzbMetaSource, NzbRarPart, NzbRarSlice};
 
-pub(crate) use meta::{concat_slices, segments_overlapping};
+pub(crate) use meta::{concat_slices, segments_overlapping, select_validation_indices};
 
 /// Floor on the prefetch fan-out during ingest (background work).
 pub(crate) const PREFETCH_FLOOR: usize = 4;
@@ -202,20 +202,18 @@ impl UsenetStreamer {
             return Ok(AvailabilityScan::default());
         }
 
-        // Sample size: `sample_percent` of segments, clamped to a sane range,
-        // spread evenly across the file (gaps can be anywhere).
-        const SAMPLE_MIN: usize = 20;
-        const SAMPLE_MAX: usize = 150;
-        let pct = if (1..=100).contains(&sample_percent) {
-            sample_percent
-        } else {
-            DEFAULT_AVAILABILITY_SAMPLE_PERCENT
-        };
-        let n = ((total * pct) / 100).clamp(SAMPLE_MIN, SAMPLE_MAX).min(total);
-        let step = total.max(1) / n.max(1);
-        let sample: Vec<String> = (0..n)
-            .map(|i| message_ids[(i * step).min(total - 1)].clone())
+        // Strategic sample (first-N / last-N / spread middle), or every segment
+        // when `sample_percent >= 100`. Full coverage is the only mode that
+        // catches a single dead article — set it for the background scanner via
+        // the "check all segments" toggle.
+        let sample: Vec<String> = select_validation_indices(total, sample_percent)
+            .into_iter()
+            .map(|i| message_ids[i].clone())
             .collect();
+        let n = sample.len();
+        if n == 0 {
+            return Ok(AvailabilityScan::default());
+        }
 
         let concurrency = self.pool.ingest_concurrency().max(PREFETCH_FLOOR).min(n);
         let pool = self.pool.clone();
@@ -239,6 +237,79 @@ impl UsenetStreamer {
             }
         }
         Ok(scan)
+    }
+
+    /// Full STAT verification of **every** segment across **all** files in a
+    /// release — the only check that reliably catches a single dead article,
+    /// where sampling almost always misses it. Meant to run once on the
+    /// *selected* candidate at download time (not per candidate walked), gated
+    /// by the "check all segments" setting.
+    ///
+    /// Returns `Err(IncompleteRelease)` when the confirmed-missing fraction
+    /// exceeds `acceptable_missing_pct` (0.0 = altmount's zero-tolerance
+    /// default; the read path has no par2 repair, so any gap in the played
+    /// range stalls playback), or when the provider was unreachable for over
+    /// half the sweep (can't confirm completeness — don't pass it through).
+    pub async fn verify_release_complete(
+        &self,
+        info_hash: &str,
+        acceptable_missing_pct: f64,
+    ) -> Result<(), StreamerError> {
+        let meta = self.load_meta(info_hash).await?;
+        let mut message_ids: Vec<String> = Vec::new();
+        for file in &meta.files {
+            match &file.source {
+                NzbMetaSource::Direct { segments, .. } => {
+                    message_ids.extend(segments.iter().map(|s| s.message_id.clone()));
+                }
+                NzbMetaSource::Rar { parts, .. } => {
+                    for p in parts {
+                        message_ids.extend(p.segments.iter().map(|s| s.message_id.clone()));
+                    }
+                }
+            }
+        }
+        // RAR parts can be shared across contained files — de-dup so a segment
+        // is STAT'd once.
+        message_ids.sort_unstable();
+        message_ids.dedup();
+        let total = message_ids.len();
+        if total == 0 {
+            return Ok(());
+        }
+
+        let concurrency = self.pool.ingest_concurrency().max(PREFETCH_FLOOR).min(total);
+        let pool = self.pool.clone();
+        let mut probes = stream::iter(message_ids)
+            .map(move |mid| {
+                let pool = pool.clone();
+                async move { pool.stat(&mid, Priority::Low).await }
+            })
+            .buffer_unordered(concurrency);
+
+        let mut missing = 0usize;
+        let mut errors = 0usize;
+        let mut checked = 0usize;
+        while let Some(result) = probes.next().await {
+            checked += 1;
+            match result {
+                Ok(true) => {}
+                Ok(false) => missing += 1,
+                Err(_) => errors += 1,
+            }
+        }
+
+        let checked_f = checked.max(1) as f64;
+        if (missing as f64 / checked_f) * 100.0 > acceptable_missing_pct {
+            return Err(StreamerError::IncompleteRelease { missing, checked });
+        }
+        if errors as f64 / checked_f > 0.5 {
+            return Err(StreamerError::IncompleteRelease {
+                missing: errors,
+                checked,
+            });
+        }
+        Ok(())
     }
 }
 
