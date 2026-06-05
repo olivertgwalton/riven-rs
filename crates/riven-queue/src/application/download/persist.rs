@@ -613,6 +613,165 @@ pub async fn persist_season(
     SeasonPersistOutcome::Complete
 }
 
+/// Persist a multi-season pack against a show.
+///
+/// Generalises [`persist_season`] across every requested (non-special) season:
+/// each playable file in the download is matched to an episode by normal S/E
+/// numbering and the matching episodes are filled. Multi-season packs are
+/// always labelled `SxxExx`, so the obfuscated index-order fallback used by
+/// `persist_season` is intentionally not applied here. Emits the success event
+/// itself when at least one episode is persisted, so the caller should return
+/// immediately after.
+pub async fn persist_show(
+    item: &MediaItem,
+    dl: DownloadResult,
+    info_hash: &str,
+    queue: &JobQueue,
+    hierarchy: &crate::context::DownloadHierarchyContext,
+    start_time: Instant,
+    stream_id: Option<i64>,
+    path_tag: Option<&str>,
+    profile_name: Option<&str>,
+) -> SeasonPersistOutcome {
+    let id = item.id;
+
+    let seasons = match repo::list_seasons_excluding_specials(&queue.db_pool, id).await {
+        Ok(seasons) => seasons,
+        Err(e) => {
+            queue
+                .notify(RivenEvent::MediaItemDownloadError {
+                    id,
+                    title: item.title.clone(),
+                    error: e.to_string(),
+                })
+                .await;
+            return SeasonPersistOutcome::Failed;
+        }
+    };
+
+    let show_name = item.pretty_name();
+    let metadata = metadata_from_show_context(hierarchy);
+    let filesystem_settings = queue.filesystem_settings.read().await;
+    let library_profiles =
+        filesystem_settings.matching_profile_keys(&metadata, FilesystemContentType::Show);
+    let library_profiles_json = library_profiles.into_json();
+    drop(filesystem_settings);
+
+    // Pre-parse all playable video files once — reused across every episode.
+    let parsed_video_files: Vec<(&DownloadFile, riven_rank::ParsedData)> = dl
+        .files
+        .iter()
+        .filter(|f| is_video_file(&f.filename))
+        .filter(|f| has_playable_url(f))
+        .map(|f| (f, parse_file_path(&f.filename)))
+        .collect();
+
+    let mut completed_episode_ids: Vec<i64> = Vec::new();
+
+    for season in &seasons {
+        let season_number = season.season_number.unwrap_or(1);
+        let episodes = match repo::list_episodes(&queue.db_pool, season.id).await {
+            Ok(eps) => eps,
+            Err(e) => {
+                tracing::error!(id, season_id = season.id, error = %e, "failed to load episodes for season");
+                continue;
+            }
+        };
+
+        for ep in &episodes {
+            let episode_number = ep.episode_number.unwrap_or(1);
+            let matched: Vec<(&DownloadFile, riven_rank::ParsedData)> = parsed_video_files
+                .iter()
+                .filter(|(_, p)| {
+                    matches_episode_lookup(p, season_number, episode_number, ep.absolute_number)
+                })
+                .map(|(f, p)| (*f, p.clone()))
+                .collect();
+            if matched.is_empty() {
+                continue;
+            }
+
+            for (file, part) in select_episode_files(&matched) {
+                let path =
+                    episode_vfs_path(&show_name, season_number, episode_number, part, path_tag);
+                match repo::create_media_entry(
+                    &queue.db_pool,
+                    ep.id,
+                    &path,
+                    file.file_size as i64,
+                    &file.filename,
+                    file.download_url.as_deref(),
+                    file.stream_url.as_deref(),
+                    &dl.plugin_name,
+                    dl.provider.as_deref(),
+                    stream_id,
+                    None,
+                    profile_name,
+                    Some(&library_profiles_json),
+                    file.usenet_info_hash.as_deref(),
+                    file.usenet_file_index,
+                )
+                .await
+                {
+                    Ok(_) => completed_episode_ids.push(ep.id),
+                    Err(e) => {
+                        if is_item_deleted_fk_error(&e) {
+                            tracing::info!(ep_id = ep.id, "episode was deleted mid-persist, skipping");
+                        } else {
+                            tracing::error!(error = %e, ep_id = ep.id, "failed to create media entry for episode");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if completed_episode_ids.is_empty() {
+        tracing::info!(
+            id, info_hash = %info_hash,
+            "show pack matched no episodes — blacklisting stream"
+        );
+        blacklist_stream(queue, id, info_hash).await;
+        queue
+            .notify(RivenEvent::MediaItemDownloadPartialSuccess { id })
+            .await;
+        return SeasonPersistOutcome::Failed;
+    }
+
+    // The filesystem_entries inserts above already cascaded state recomputes up
+    // through each season to the show. Sync the request state and emit success.
+    LibraryOrchestrator::new(queue)
+        .sync_item_request_state(item)
+        .await;
+    queue
+        .filesystem_settings_revision
+        .fetch_add(1, Ordering::SeqCst);
+
+    let duration = start_time.elapsed();
+    queue
+        .notify(RivenEvent::MediaItemDownloadSuccess {
+            id,
+            title: item.title.clone(),
+            full_title: item.full_title.clone(),
+            item_type: item.item_type,
+            year: item.year,
+            imdb_id: item.imdb_id.clone(),
+            tmdb_id: item.tmdb_id.clone(),
+            poster_path: item.poster_path.clone(),
+            plugin_name: dl.plugin_name,
+            provider: dl.provider,
+            duration_seconds: duration.as_secs_f64(),
+        })
+        .await;
+    tracing::info!(
+        id,
+        episodes = completed_episode_ids.len(),
+        duration_secs = duration.as_secs_f64(),
+        "show pack download flow completed"
+    );
+    SeasonPersistOutcome::Complete
+}
+
 pub async fn persist_supplied_download(
     item: &MediaItem,
     stream: &Stream,

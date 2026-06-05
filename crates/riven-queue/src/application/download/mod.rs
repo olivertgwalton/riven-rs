@@ -243,7 +243,7 @@ pub async fn run(id: i64, job: &DownloadJob, queue: &JobQueue) {
     }
 
     let hierarchy = match item.item_type {
-        MediaItemType::Episode | MediaItemType::Season => {
+        MediaItemType::Episode | MediaItemType::Season | MediaItemType::Show => {
             Some(load_download_hierarchy_context(&queue.db_pool, &item).await)
         }
         _ => None,

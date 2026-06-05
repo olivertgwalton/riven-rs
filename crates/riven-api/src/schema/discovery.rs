@@ -323,6 +323,92 @@ async fn apply_cache_status(registry: &PluginRegistry, streams: &mut [Discovered
     }
 }
 
+/// Work out which seasons a manually-selected stream should fill.
+///
+/// A release's own parsed metadata is authoritative — a "Complete S01-S05"
+/// pack reports `seasons: [1,2,3,4,5]` and must fill all five regardless of
+/// which season tile the user clicked it under. When the release carries no
+/// parsed seasons (e.g. an explicitly-pasted hash), fall back to the seasons
+/// the user selected in the UI, then to the single `season_number`.
+pub fn resolve_pack_seasons(
+    parsed_data: Option<&serde_json::Value>,
+    selected_seasons: Option<&[i32]>,
+    season_number: Option<i32>,
+) -> Vec<i32> {
+    let from_parsed = parsed_data
+        .and_then(|value| value.get("seasons"))
+        .and_then(|value| value.as_array())
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(serde_json::Value::as_i64)
+                .map(|n| n as i32)
+                .collect::<Vec<_>>()
+        })
+        .filter(|seasons| !seasons.is_empty());
+
+    let mut seasons = from_parsed
+        .or_else(|| selected_seasons.map(<[i32]>::to_vec))
+        .or_else(|| season_number.map(|n| vec![n]))
+        .unwrap_or_default();
+
+    seasons.retain(|&n| n > 0);
+    seasons.sort_unstable();
+    seasons.dedup();
+    seasons
+}
+
+/// Prepare a show item for a multi-season pack download: upsert the show with
+/// every contained season requested, index any season whose episodes are
+/// missing, and return the show `MediaItem` to link the stream against.
+pub async fn ensure_show_target(
+    pool: &sqlx::PgPool,
+    registry: &PluginRegistry,
+    queue: &Arc<JobQueue>,
+    title: &str,
+    imdb_id: Option<&str>,
+    tvdb_id: Option<&str>,
+    seasons: &[i32],
+) -> Result<MediaItem> {
+    if seasons.is_empty() {
+        return Err(Error::new("At least one season is required"));
+    }
+
+    let orchestrator = LibraryOrchestrator::new(queue.as_ref());
+    let outcome = orchestrator
+        .upsert_requested_show(title, imdb_id, tvdb_id, None, None, Some(seasons))
+        .await
+        .map_err(Error::from)?;
+
+    let existing_seasons = repo::list_seasons(pool, outcome.item.id).await?;
+    let mut needs_index = outcome.item.imdb_id.is_none();
+    for &season_number in seasons {
+        match existing_seasons
+            .iter()
+            .find(|season| season.season_number == Some(season_number))
+        {
+            None => needs_index = true,
+            Some(season) => {
+                if repo::list_episodes(pool, season.id).await?.is_empty() {
+                    needs_index = true;
+                }
+            }
+        }
+    }
+
+    if needs_index {
+        let indexed =
+            run_index_discovery(registry, MediaItemType::Show, imdb_id, None, tvdb_id).await?;
+        apply_indexed_media_item(pool, &outcome.item, &indexed, Some(seasons))
+            .await
+            .map_err(Error::from)?;
+    }
+
+    repo::get_media_item(pool, outcome.item.id)
+        .await?
+        .ok_or_else(|| Error::new("Show not found after preparation"))
+}
+
 pub async fn ensure_download_target(
     pool: &sqlx::PgPool,
     registry: &PluginRegistry,

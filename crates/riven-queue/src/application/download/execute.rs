@@ -9,7 +9,9 @@ use riven_db::repo;
 use crate::JobQueue;
 use crate::context::DownloadHierarchyContext;
 use super::helpers::stream_resolution;
-use super::persist::{SeasonPersistOutcome, persist_episode, persist_movie, persist_season};
+use super::persist::{
+    SeasonPersistOutcome, persist_episode, persist_movie, persist_season, persist_show,
+};
 
 pub enum DownloadAttemptOutcome {
     Failed,
@@ -237,7 +239,30 @@ pub async fn attempt_download(
                 }
             }
         }
-        _ => DownloadAttemptOutcome::Failed,
+        MediaItemType::Show => {
+            match persist_show(
+                item,
+                download,
+                info_hash,
+                queue,
+                hierarchy.expect("show downloads require hierarchy context"),
+                start_time,
+                stream_id,
+                path_tag,
+                profile_name,
+            )
+            .await
+            {
+                SeasonPersistOutcome::Complete | SeasonPersistOutcome::Partial => {
+                    tracing::debug!(id, info_hash, "show pack download handled during persist");
+                    DownloadAttemptOutcome::TerminalHandled
+                }
+                SeasonPersistOutcome::Failed => {
+                    tracing::debug!(id, info_hash, "show pack download rejected during persist");
+                    DownloadAttemptOutcome::Failed
+                }
+            }
+        }
     }
 }
 
