@@ -17,7 +17,7 @@
 - [REST Endpoints](#-rest-endpoints)
 - [Webhooks](#-webhooks)
 - [Data Types & Objects](#-data-types--objects)
-- [Error Handling](#-error-handling)
+- [Error Handling](#%E2%9A%A0%EF%B8%8F-error-handling)
 - [Best Practices](#-best-practices)
 - [Code Examples](#-code-examples)
 
@@ -80,7 +80,7 @@ RIVEN_SETTING__FRONTEND_AUTH_SIGNING_SECRET="your-secret"
 ```
 
 **Header Format:**
-```
+```text
 X-Riven-Auth: <signed-token>
 ```
 
@@ -110,7 +110,7 @@ RIVEN_SETTING__CORS_ALLOWED_ORIGINS="https://example.com,https://app.example.com
 ## 🔌 API Fundamentals
 
 ### Base URL
-```
+```text
 http://localhost:8080
 ```
 
@@ -915,7 +915,7 @@ query SearchLibrary {
 ```
 
 **Sorting Options:**
-```
+```text
 created_at     → Newest first
 updated_at     → Recently modified first
 title          → Alphabetically
@@ -1586,6 +1586,7 @@ mutation {
 ```
 
 **Status Codes:**
+
 | Code | Meaning |
 |------|---------|
 | OK | Success |
@@ -1738,7 +1739,7 @@ Add a media item to the library.
 mutation {
   addItem(
     title: "Breaking Bad"
-    tmdbId: "1396"
+    tmdbId: "1399"
     itemType: SHOW
   ) {
     success
@@ -2231,7 +2232,7 @@ curl http://localhost:8080/media/501 \
 | 416 | Invalid range |
 
 **Response Headers:**
-```
+```text
 Content-Type: video/x-matroska
 Content-Length: 2147483648
 Accept-Ranges: bytes
@@ -2317,7 +2318,7 @@ Receive requests from Seerr service.
 ### Seerr Integration
 
 Configure Seerr to send notifications to:
-```
+```text
 http://your-riven-server:8080/webhook/seerr
 ```
 
@@ -2358,12 +2359,12 @@ enum MediaItemState {
 #### MutationStatusText
 ```graphql
 enum MutationStatusText {
-  Ok
-  Created
-  BadRequest
-  NotFound
-  Conflict
-  InternalServerError
+  OK
+  CREATED
+  BAD_REQUEST
+  NOT_FOUND
+  CONFLICT
+  INTERNAL_SERVER_ERROR
 }
 ```
 
