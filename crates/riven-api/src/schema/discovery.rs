@@ -243,7 +243,10 @@ pub async fn discover_streams(
             info_hash: candidate.info_hash,
             parsed_data: candidate.parsed_data,
             rank: candidate.rank,
-            file_size_bytes: None,
+            // Indexer-reported size (e.g. torznab `size` attr for usenet). Left
+            // as-is by `apply_cache_status`, which only fills `None` entries
+            // from the debrid cache-check.
+            file_size_bytes: candidate.file_size_bytes.map(|v| v as i64),
             is_cached: false,
             item_type: target.item_type,
             season_number: target.season_number,

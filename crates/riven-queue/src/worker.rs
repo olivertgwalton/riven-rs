@@ -72,6 +72,14 @@ impl Scheduler {
         let mut redis = self.job_queue.redis.clone();
         let queues = self.job_queue.queue_names();
         crate::prune_queue_history(&mut redis, &queues).await;
+
+        // GC orphan streams (stale cached scrape results referenced by nothing).
+        // Recoverable — they are recreated on the next scrape.
+        match riven_db::repo::delete_orphan_streams(&self.job_queue.db_pool).await {
+            Ok(0) => {}
+            Ok(removed) => tracing::info!(removed, "pruned orphan streams"),
+            Err(error) => tracing::error!(%error, "failed to prune orphan streams"),
+        }
     }
 
     /// Retry-library actor. Delegated to `MainOrchestrator`, which is the

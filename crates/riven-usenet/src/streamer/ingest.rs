@@ -315,7 +315,23 @@ impl UsenetStreamer {
         // is enough to scale the whole file. RAR sources are unaffected
         // (their slice lengths are already exact decoded sizes from the
         // RAR header).
-        for file in &mut meta_files {
+        // Rescaling only matters for files we actually serve as video over HTTP
+        // — it corrects the Content-Length we promise the client (see
+        // `rescale_direct_to_decoded`). The sidecars kept for debugging (the raw
+        // RAR volumes pushed above, plus par2/nfo/sfv) are never streamed as
+        // video, and the real episodes are Rar sources that rescale no-ops on, so
+        // restricting to playable media is what keeps a multi-hundred-volume
+        // REMUX season pack from triggering thousands of needless first/last
+        // -segment fetches here. Each surviving file still costs two article
+        // fetches, so run them concurrently instead of serially — same cap as the
+        // RAR header-fetch fan-out above.
+        let rescale_concurrency = self.pool.ingest_concurrency().max(PREFETCH_FLOOR);
+        stream::iter(
+            meta_files
+                .iter_mut()
+                .filter(|f| is_media_filename(&f.filename)),
+        )
+        .for_each_concurrent(rescale_concurrency, |file| async move {
             if let Err(error) = self.rescale_direct_to_decoded(file).await {
                 tracing::debug!(
                     info_hash,
@@ -325,7 +341,8 @@ impl UsenetStreamer {
                      leaving as encoded approximation"
                 );
             }
-        }
+        })
+        .await;
 
         let meta = NzbMeta {
             info_hash: info_hash.to_string(),
