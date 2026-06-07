@@ -40,6 +40,24 @@ pub async fn upsert_stream(
     Ok(stream)
 }
 
+/// Delete streams referenced by nothing — not a candidate list, not a
+/// blacklist, not any item's active_stream, and not a filesystem entry. These
+/// are stale cached scrape results that accumulate over time; they are
+/// recreated on the next scrape, so deletion is fully recoverable. Run
+/// periodically by the queue Scheduler. Returns the number of rows removed.
+pub async fn delete_orphan_streams(pool: &PgPool) -> Result<u64> {
+    let result = sqlx::query(
+        "DELETE FROM streams s \
+         WHERE NOT EXISTS (SELECT 1 FROM media_item_streams m WHERE m.stream_id = s.id) \
+           AND NOT EXISTS (SELECT 1 FROM media_item_blacklisted_streams b WHERE b.stream_id = s.id) \
+           AND NOT EXISTS (SELECT 1 FROM media_items i WHERE i.active_stream_id = s.id) \
+           AND NOT EXISTS (SELECT 1 FROM filesystem_entries f WHERE f.stream_id = s.id)",
+    )
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected())
+}
+
 /// Record the actual file size for a stream (learned from a download attempt).
 pub async fn update_stream_file_size(
     pool: &PgPool,
