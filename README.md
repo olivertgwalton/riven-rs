@@ -1,7 +1,7 @@
 # Riven RS
 
-Riven-rs is a Rust implementation of the [Riven Media] (https://riven.tv) tool.
-THIS IS AN ALTERNATIVE, RIVEN-RS IS THE MAIN DEVELOPMENT EFFORT
+Riven-rs is a Rust implementation of the [Riven Media](https://riven.tv) tool.
+THIS IS AN ALTERNATIVE, RIVEN-TS IS THE MAIN DEVELOPMENT EFFORT
 
 ## Architecture
 
