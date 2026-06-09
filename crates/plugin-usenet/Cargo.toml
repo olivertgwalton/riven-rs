@@ -17,7 +17,6 @@ inventory = { workspace = true }
 redis = { workspace = true }
 futures = { workspace = true }
 lru = { workspace = true }
-sha1 = "0.10"
 sqlx = { workspace = true }
 tokio = { workspace = true }
 

@@ -32,6 +32,9 @@ log = "0.4"
 figment = { workspace = true }
 inventory = { workspace = true }
 parking_lot = { workspace = true }
+sha1 = "0.10"
+hex = { workspace = true }
+quick-xml = "0.39"
 dashmap = { workspace = true }
 bytes = { workspace = true }
 redis = { workspace = true }

@@ -5,6 +5,7 @@ pub mod events;
 pub mod http;
 pub mod local_source;
 pub mod logging;
+pub mod nzb;
 pub mod plugin;
 pub mod reindex;
 pub mod settings;

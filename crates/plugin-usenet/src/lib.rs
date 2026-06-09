@@ -30,7 +30,6 @@ use std::time::Duration;
 mod health_check;
 
 pub(crate) const PROVIDER: &str = "usenet";
-const NZB_INFO_HASH_PREFIX: &str = "nzb-";
 
 fn nzb_body_cache() -> &'static Mutex<LruCache<String, Arc<String>>> {
     static C: OnceLock<Mutex<LruCache<String, Arc<String>>>> = OnceLock::new();
@@ -43,13 +42,7 @@ fn nzb_body_cache() -> &'static Mutex<LruCache<String, Arc<String>>> {
 pub(crate) const PROFILE: HttpServiceProfile =
     HttpServiceProfile::new("usenet-nzb-fetch").with_rate_limit(30, Duration::from_secs(60));
 
-pub(crate) fn nzb_url_redis_key(info_hash: &str) -> String {
-    format!("riven:nzb:url:{info_hash}")
-}
-
-fn is_nzb_info_hash(info_hash: &str) -> bool {
-    info_hash.starts_with(NZB_INFO_HASH_PREFIX)
-}
+pub(crate) use riven_core::nzb::{is_nzb_info_hash, nzb_url_redis_key};
 
 #[derive(Default)]
 pub struct UsenetPlugin;
