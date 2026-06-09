@@ -1,11 +1,5 @@
 # 🎬 Riven-rs API Documentation
 
-> Complete, production-ready API reference for Riven-rs — a powerful Rust-based media management and streaming orchestration platform.
-
-**Version:** 1.0.0 | **Last Updated:** June 2026 | **Status:** Stable
-
----
-
 ## 📋 Table of Contents
 
 - [Quick Start](#-quick-start)
@@ -17,7 +11,7 @@
 - [REST Endpoints](#-rest-endpoints)
 - [Webhooks](#-webhooks)
 - [Data Types & Objects](#-data-types--objects)
-- [Error Handling](#%E2%9A%A0%EF%B8%8F-error-handling)
+- [Error Handling](#-error-handling)
 - [Best Practices](#-best-practices)
 - [Code Examples](#-code-examples)
 
