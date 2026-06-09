@@ -890,17 +890,24 @@ impl UsenetStreamer {
     }
 }
 
-pub(crate) fn direct_meta_file(f: &NzbFile) -> NzbMetaFile {
-    let mut offsets = Vec::with_capacity(f.segments.len() + 1);
+/// Cumulative byte offsets of a file's segments: `offsets[i]` is where
+/// segment `i` starts; the final entry is the total size.
+fn segment_offsets(segments: &[NzbSegment]) -> Vec<u64> {
+    let mut offsets = Vec::with_capacity(segments.len() + 1);
     let mut acc: u64 = 0;
     offsets.push(0);
-    for seg in &f.segments {
+    for seg in segments {
         acc += seg.bytes;
         offsets.push(acc);
     }
+    offsets
+}
+
+pub(crate) fn direct_meta_file(f: &NzbFile) -> NzbMetaFile {
+    let offsets = segment_offsets(&f.segments);
     NzbMetaFile {
         filename: filename_from_subject(&f.subject),
-        total_size: acc,
+        total_size: *offsets.last().unwrap_or(&0),
         source: NzbMetaSource::Direct {
             offsets,
             segments: f.segments.clone(),
@@ -909,16 +916,10 @@ pub(crate) fn direct_meta_file(f: &NzbFile) -> NzbMetaFile {
 }
 
 fn build_rar_part(f: &NzbFile) -> NzbRarPart {
-    let mut offsets = Vec::with_capacity(f.segments.len() + 1);
-    let mut acc: u64 = 0;
-    offsets.push(0);
-    for seg in &f.segments {
-        acc += seg.bytes;
-        offsets.push(acc);
-    }
+    let offsets = segment_offsets(&f.segments);
     NzbRarPart {
         filename: filename_from_subject(&f.subject),
-        total_size: acc,
+        total_size: *offsets.last().unwrap_or(&0),
         offsets,
         segments: f.segments.clone(),
         decoded_seg_size: None,

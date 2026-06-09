@@ -60,11 +60,10 @@ pub(crate) const MIN_INGEST_CONCURRENCY: usize = 4;
 /// this can never oversubscribe the provider. `RIVEN_USENET_INGEST_CONCURRENCY`
 /// overrides the derived value for manual tuning.
 pub fn ingest_concurrency_for(total_capacity: usize) -> usize {
-    std::env::var("RIVEN_USENET_INGEST_CONCURRENCY")
-        .ok()
-        .and_then(|s| s.parse::<usize>().ok())
-        .filter(|&n| n > 0)
-        .unwrap_or_else(|| (total_capacity / 2).max(MIN_INGEST_CONCURRENCY))
+    env_positive(
+        "RIVEN_USENET_INGEST_CONCURRENCY",
+        (total_capacity / 2).max(MIN_INGEST_CONCURRENCY),
+    )
 }
 
 /// Aggregated process-wide state shared by every `UsenetStreamer`
@@ -96,18 +95,17 @@ pub struct StreamerState {
 
 impl StreamerState {
     fn new() -> Self {
-        let cache_bytes = env_u64("RIVEN_USENET_CACHE_BYTES", DEFAULT_CACHE_BYTES);
-        let meta_cache_bytes = env_u64("RIVEN_USENET_META_CACHE_BYTES", DEFAULT_META_CACHE_BYTES);
-        let decoded_sizes_entries = std::env::var("RIVEN_USENET_DECODED_SIZES_ENTRIES")
-            .ok()
-            .and_then(|s| s.parse::<usize>().ok())
-            .filter(|&n| n > 0)
-            .unwrap_or(DEFAULT_DECODED_SIZES_ENTRIES);
-        let precache_concurrency = std::env::var("RIVEN_USENET_PRECACHE_CONCURRENCY")
-            .ok()
-            .and_then(|s| s.parse::<usize>().ok())
-            .filter(|&n| n > 0)
-            .unwrap_or(DEFAULT_PRECACHE_CONCURRENCY);
+        let cache_bytes = env_positive("RIVEN_USENET_CACHE_BYTES", DEFAULT_CACHE_BYTES);
+        let meta_cache_bytes =
+            env_positive("RIVEN_USENET_META_CACHE_BYTES", DEFAULT_META_CACHE_BYTES);
+        let decoded_sizes_entries = env_positive(
+            "RIVEN_USENET_DECODED_SIZES_ENTRIES",
+            DEFAULT_DECODED_SIZES_ENTRIES,
+        );
+        let precache_concurrency = env_positive(
+            "RIVEN_USENET_PRECACHE_CONCURRENCY",
+            DEFAULT_PRECACHE_CONCURRENCY,
+        );
         Self {
             cache: SegmentCache::new(cache_bytes),
             meta_cache: MetaCache::new(meta_cache_bytes),
@@ -167,14 +165,14 @@ pub fn global_active_streams() -> Arc<ActiveStreams> {
     C.get_or_init(|| Arc::new(ActiveStreams::default())).clone()
 }
 
-/// Read a `u64` budget from an env var, falling back to `default` when
+/// Read a positive number from an env var, falling back to `default` when
 /// unset or unparseable. Zero is treated as "use default" to avoid an
-/// accidental empty cache.
-fn env_u64(name: &str, default: u64) -> u64 {
+/// accidental empty cache or zero concurrency.
+fn env_positive<T: std::str::FromStr + Default + PartialOrd>(name: &str, default: T) -> T {
     std::env::var(name)
         .ok()
-        .and_then(|s| s.parse::<u64>().ok())
-        .filter(|&n| n > 0)
+        .and_then(|s| s.parse::<T>().ok())
+        .filter(|n| *n > T::default())
         .unwrap_or(default)
 }
 

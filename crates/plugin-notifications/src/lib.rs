@@ -282,12 +282,10 @@ fn parse_notification_url(url: &str) -> Option<NotificationService> {
         Some(NotificationService::Json {
             url: format!("http://{rest}"),
         })
-    } else if let Some(rest) = url.strip_prefix("jsons://") {
-        Some(NotificationService::Json {
+    } else {
+        url.strip_prefix("jsons://").map(|rest| NotificationService::Json {
             url: format!("https://{rest}"),
         })
-    } else {
-        None
     }
 }
 
