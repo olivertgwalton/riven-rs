@@ -426,60 +426,52 @@ fn detect_codec(raw: &str) -> Option<String> {
     None
 }
 
+/// Run a `(regex, name, unless)` detection table: push `name` when the regex
+/// matches, unless the better sibling named by `unless` was already detected
+/// (e.g. plain "DTS Lossy" is skipped when "DTS Lossless" is present).
+fn detect_table(raw: &str, out: &mut Vec<String>, checks: &[(&Regex, &str, Option<&str>)]) {
+    for (re, name, unless) in checks {
+        if re.is_match(raw) && unless.is_none_or(|u| !out.iter().any(|v| v == u)) {
+            push_unique(out, name);
+        }
+    }
+}
+
 /// Detect audio formats from raw title string.
 fn detect_audio(raw: &str, audio: &mut Vec<String>) {
-    if RE_AUDIO_HQ_CLEAN.is_match(raw) {
-        push_unique(audio, "HQ Clean Audio");
-    }
-    if RE_AUDIO_DTS_LOSSLESS.is_match(raw) {
-        push_unique(audio, "DTS Lossless");
-    }
-    if RE_AUDIO_DTS_LOSSY.is_match(raw) && !audio.iter().any(|a| a == "DTS Lossless") {
-        push_unique(audio, "DTS Lossy");
-    }
-    if RE_AUDIO_ATMOS.is_match(raw) {
-        push_unique(audio, "Atmos");
-    }
-    if RE_AUDIO_TRUEHD.is_match(raw) || RE_AUDIO_TRUEHD_BARE.is_match(raw) {
-        push_unique(audio, "TrueHD");
-    }
-    if RE_AUDIO_FLAC.is_match(raw) {
-        push_unique(audio, "FLAC");
-    }
-    if RE_AUDIO_DD_PLUS.is_match(raw) {
-        push_unique(audio, "Dolby Digital Plus");
-    }
-    if RE_AUDIO_DD.is_match(raw) && !audio.iter().any(|a| a == "Dolby Digital Plus") {
-        push_unique(audio, "Dolby Digital");
-    }
-    if RE_AUDIO_AAC.is_match(raw) {
-        push_unique(audio, "AAC");
-    }
-    if RE_AUDIO_PCM.is_match(raw) {
-        push_unique(audio, "PCM");
-    }
-    if RE_AUDIO_OPUS.is_match(raw) {
-        push_unique(audio, "OPUS");
-    }
-    if RE_AUDIO_MP3.is_match(raw) {
-        push_unique(audio, "MP3");
-    }
+    detect_table(
+        raw,
+        audio,
+        &[
+            (&RE_AUDIO_HQ_CLEAN, "HQ Clean Audio", None),
+            (&RE_AUDIO_DTS_LOSSLESS, "DTS Lossless", None),
+            (&RE_AUDIO_DTS_LOSSY, "DTS Lossy", Some("DTS Lossless")),
+            (&RE_AUDIO_ATMOS, "Atmos", None),
+            (&RE_AUDIO_TRUEHD, "TrueHD", None),
+            (&RE_AUDIO_TRUEHD_BARE, "TrueHD", None),
+            (&RE_AUDIO_FLAC, "FLAC", None),
+            (&RE_AUDIO_DD_PLUS, "Dolby Digital Plus", None),
+            (&RE_AUDIO_DD, "Dolby Digital", Some("Dolby Digital Plus")),
+            (&RE_AUDIO_AAC, "AAC", None),
+            (&RE_AUDIO_PCM, "PCM", None),
+            (&RE_AUDIO_OPUS, "OPUS", None),
+            (&RE_AUDIO_MP3, "MP3", None),
+        ],
+    );
 }
 
 /// Detect HDR formats from raw title string.
 fn detect_hdr(raw: &str, hdr: &mut Vec<String>) {
-    if RE_HDR_DV.is_match(raw) {
-        push_unique(hdr, "DV");
-    }
-    if RE_HDR_HDR10PLUS.is_match(raw) {
-        push_unique(hdr, "HDR10+");
-    }
-    if RE_HDR_HDR.is_match(raw) && !hdr.iter().any(|h| h == "HDR10+") {
-        push_unique(hdr, "HDR");
-    }
-    if RE_HDR_SDR.is_match(raw) {
-        push_unique(hdr, "SDR");
-    }
+    detect_table(
+        raw,
+        hdr,
+        &[
+            (&RE_HDR_DV, "DV", None),
+            (&RE_HDR_HDR10PLUS, "HDR10+", None),
+            (&RE_HDR_HDR, "HDR", Some("HDR10+")),
+            (&RE_HDR_SDR, "SDR", None),
+        ],
+    );
 }
 
 /// Detect channels from raw title string.

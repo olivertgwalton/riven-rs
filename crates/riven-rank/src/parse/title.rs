@@ -3,6 +3,15 @@ use std::sync::LazyLock;
 
 use super::patterns::*;
 
+/// Earliest match start of any of `regexes` in `text`.
+fn min_match_start(text: &str, regexes: &[&Regex]) -> Option<usize> {
+    regexes
+        .iter()
+        .filter_map(|re| re.find(text))
+        .map(|m| m.start())
+        .min()
+}
+
 static RE_ANY_BRACKET_TITLE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\[([^\]]*)\]").unwrap());
 static RE_BRACKET_ALIAS_TITLE: LazyLock<Regex> =
@@ -204,34 +213,33 @@ pub(crate) fn extract_title(raw: &str) -> String {
         RE_BROKEN_GROUP_PREFIX.replace(&cleaned, "").to_string()
     };
     let cleaned = if let Some(first_ascii_alpha) = cleaned.find(|c: char| c.is_ascii_alphabetic()) {
-        let mut first_metadata = cleaned.len();
-        for re in [
-            &*RE_YEAR,
-            &*RE_YEAR_RANGE,
-            &*RE_RES_3840,
-            &*RE_RES_1920,
-            &*RE_RES_1280,
-            &*RE_RES_QHD,
-            &*RE_RES_FHD,
-            &*RE_RES_PREFIXED_2160,
-            &*RE_RES_PREFIXED_1080,
-            &*RE_RES_PREFIXED_720,
-            &*RE_RES_PREFIXED_480,
-            &*RE_RES_GENERIC,
-            &*RE_TITLE_QUALITY,
-            &*RE_CODEC_AVC,
-            &*RE_CODEC_HEVC,
-            &*RE_CODEC_XVID,
-            &*RE_CODEC_AV1,
-            &*RE_AUDIO_DTS_LOSSLESS,
-            &*RE_AUDIO_DD_PLUS,
-            &*RE_AUDIO_DD,
-            &*RE_AUDIO_AAC,
-        ] {
-            if let Some(m) = re.find(&cleaned) {
-                first_metadata = first_metadata.min(m.start());
-            }
-        }
+        let first_metadata = min_match_start(
+            &cleaned,
+            &[
+                &RE_YEAR,
+                &RE_YEAR_RANGE,
+                &RE_RES_3840,
+                &RE_RES_1920,
+                &RE_RES_1280,
+                &RE_RES_QHD,
+                &RE_RES_FHD,
+                &RE_RES_PREFIXED_2160,
+                &RE_RES_PREFIXED_1080,
+                &RE_RES_PREFIXED_720,
+                &RE_RES_PREFIXED_480,
+                &RE_RES_GENERIC,
+                &RE_TITLE_QUALITY,
+                &RE_CODEC_AVC,
+                &RE_CODEC_HEVC,
+                &RE_CODEC_XVID,
+                &RE_CODEC_AV1,
+                &RE_AUDIO_DTS_LOSSLESS,
+                &RE_AUDIO_DD_PLUS,
+                &RE_AUDIO_DD,
+                &RE_AUDIO_AAC,
+            ],
+        )
+        .unwrap_or(cleaned.len());
 
         if first_ascii_alpha > 0
             && first_ascii_alpha < first_metadata
@@ -269,84 +277,48 @@ pub(crate) fn extract_title(raw: &str) -> String {
         }
     }
 
-    // Check year range
-    if let Some(m) = RE_YEAR_RANGE.find(&cleaned) {
-        end = end.min(m.start());
-    }
-    {
-        static RE_TITLE_INFO_PAREN: LazyLock<Regex> =
-            LazyLock::new(|| Regex::new(r"\([^)]*/[^)]*\)\s*(?:\[|$)").unwrap());
-        if let Some(m) = RE_TITLE_INFO_PAREN.find(&cleaned) {
-            end = end.min(m.start());
-        }
-    }
+    static RE_TITLE_INFO_PAREN: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"\([^)]*/[^)]*\)\s*(?:\[|$)").unwrap());
+    static RE_EPISODE_RANGE_BRACKET: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"\[\d{1,3}\s*-\s*\d{1,3}\]").unwrap());
+    static RE_EPISODE_SINGLE_BRACKET: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"\[\d{1,3}\]").unwrap());
 
-    // Check resolution patterns
-    for re in [
-        &*RE_RES_3840,
-        &*RE_RES_1920,
-        &*RE_RES_1280,
-        &*RE_RES_QHD,
-        &*RE_RES_FHD,
-        &*RE_RES_PREFIXED_2160,
-        &*RE_RES_PREFIXED_1080,
-        &*RE_RES_PREFIXED_720,
-        &*RE_RES_PREFIXED_480,
-        &*RE_RES_GENERIC,
-        &*RE_RES_DIGITS,
-    ] {
-        if let Some(m) = re.find(&cleaned) {
-            end = end.min(m.start());
-        }
-    }
-
-    // Check season indicators
-    for re in [
-        &*RE_SEASON_SE,
-        &*RE_SEASON_FULL,
-        &*RE_SEASON_RANGE,
-        &*RE_SEASON_ORDINAL,
-        &*RE_SEASON_TR,
-    ] {
-        if let Some(m) = re.find(&cleaned) {
-            end = end.min(m.start());
-        }
-    }
-
-    // Check episode indicators (standalone E##)
-    if let Some(m) = RE_EPISODE_STANDALONE.find(&cleaned) {
-        end = end.min(m.start());
-    }
-    if let Some(m) = RE_EPISODE_FULL.find(&cleaned) {
-        end = end.min(m.start());
-    }
-    if let Some(m) = RE_EPISODE_TR.find(&cleaned) {
-        end = end.min(m.start());
-    }
-    if let Some(m) = RE_EPISODE_RANGE_BARE.find(&cleaned) {
-        end = end.min(m.start());
-    }
-    if let Some(m) = RE_EPISODE_RANGE_PAREN.find(&cleaned) {
-        end = end.min(m.start());
-    }
-    {
-        static RE_EPISODE_RANGE_BRACKET: LazyLock<Regex> =
-            LazyLock::new(|| Regex::new(r"\[\d{1,3}\s*-\s*\d{1,3}\]").unwrap());
-        if let Some(m) = RE_EPISODE_RANGE_BRACKET.find(&cleaned) {
-            end = end.min(m.start());
-        }
-    }
-    {
-        static RE_EPISODE_SINGLE_BRACKET: LazyLock<Regex> =
-            LazyLock::new(|| Regex::new(r"\[\d{1,3}\]").unwrap());
-        if let Some(m) = RE_EPISODE_SINGLE_BRACKET.find(&cleaned) {
-            end = end.min(m.start());
-        }
-    }
-
-    // Check #x## format
-    if let Some(m) = RE_EPISODE_CROSSREF.find(&cleaned) {
-        end = end.min(m.start());
+    // Year range, info parens, resolution, season/episode indicators, codec,
+    // audio, edition flags, collection markers, and embedded extensions all
+    // unconditionally mark the end of the title — take the earliest.
+    if let Some(start) = min_match_start(
+        &cleaned,
+        &[
+            &RE_YEAR_RANGE,
+            &RE_TITLE_INFO_PAREN,
+            &RE_RES_3840,
+            &RE_RES_1920,
+            &RE_RES_1280,
+            &RE_RES_QHD,
+            &RE_RES_FHD,
+            &RE_RES_PREFIXED_2160,
+            &RE_RES_PREFIXED_1080,
+            &RE_RES_PREFIXED_720,
+            &RE_RES_PREFIXED_480,
+            &RE_RES_GENERIC,
+            &RE_RES_DIGITS,
+            &RE_SEASON_SE,
+            &RE_SEASON_FULL,
+            &RE_SEASON_RANGE,
+            &RE_SEASON_ORDINAL,
+            &RE_SEASON_TR,
+            &RE_EPISODE_STANDALONE,
+            &RE_EPISODE_FULL,
+            &RE_EPISODE_TR,
+            &RE_EPISODE_RANGE_BARE,
+            &RE_EPISODE_RANGE_PAREN,
+            &RE_EPISODE_RANGE_BRACKET,
+            &RE_EPISODE_SINGLE_BRACKET,
+            &RE_EPISODE_CROSSREF,
+        ],
+    ) {
+        end = end.min(start);
     }
 
     // Check quality markers
@@ -366,24 +338,14 @@ pub(crate) fn extract_title(raw: &str) -> String {
         static RE_TITLE_METADATA_BRACKET: LazyLock<Regex> = LazyLock::new(|| {
             Regex::new(r"(?i)\[(?:movie|multiple subtitle|avc|hevc|aac|dual(?:[- ]audio)?|sub(?:title)?s?)\]").unwrap()
         });
-        if let Some(m) = RE_TITLE_METADATA_BRACKET.find(&cleaned) {
-            end = end.min(m.start());
-        }
-    }
-
-    // Check complete-collection markers that should not remain in the title.
-    for re in [&*RE_COMPLETE] {
-        if let Some(m) = re.find(&cleaned) {
-            end = end.min(m.start());
-        }
-    }
-
-    // Anime and scene names often use "Title - 05" for bare episode numbers.
-    {
+        // Anime and scene names often use "Title - 05" for bare episode numbers.
         static RE_TITLE_DASH_EPISODE: LazyLock<Regex> =
             LazyLock::new(|| Regex::new(r"\s-\s\d{1,3}\b").unwrap());
-        if let Some(m) = RE_TITLE_DASH_EPISODE.find(&cleaned) {
-            end = end.min(m.start());
+        if let Some(start) = min_match_start(
+            &cleaned,
+            &[&RE_TITLE_METADATA_BRACKET, &RE_COMPLETE, &RE_TITLE_DASH_EPISODE],
+        ) {
+            end = end.min(start);
         }
     }
 
@@ -402,56 +364,40 @@ pub(crate) fn extract_title(raw: &str) -> String {
         }
     }
 
-    // Check edition/flag markers — these mark the end of the title
-    for re in [
-        &*RE_EDITION,
-        &*RE_UNRATED,
-        &*RE_UNCENSORED,
-        &*RE_EXTENDED,
-        &*RE_REMASTERED,
-        &*RE_PROPER,
-        &*RE_REPACK,
-        &*RE_DUBBED,
-        &*RE_HARDCODED,
-    ] {
-        if let Some(m) = re.find(&cleaned) {
-            end = end.min(m.start());
-        }
+    // Edition/flag, codec, audio, and embedded-extension markers all mark
+    // the end of the title unconditionally.
+    if let Some(start) = min_match_start(
+        &cleaned,
+        &[
+            &RE_EDITION,
+            &RE_UNRATED,
+            &RE_UNCENSORED,
+            &RE_EXTENDED,
+            &RE_REMASTERED,
+            &RE_PROPER,
+            &RE_REPACK,
+            &RE_DUBBED,
+            &RE_HARDCODED,
+            &RE_CODEC_AVC,
+            &RE_CODEC_HEVC,
+            &RE_CODEC_XVID,
+            &RE_CODEC_AV1,
+            &RE_AUDIO_DTS_LOSSLESS,
+            &RE_AUDIO_DD_PLUS,
+            &RE_AUDIO_DD,
+            &RE_AUDIO_AAC,
+            &RE_EXTENSION,
+        ],
+    ) {
+        end = end.min(start);
     }
+    // "Documentary" ends the title unless it's part of a phrase like
+    // "Documentary in ...".
     if let Some(m) = RE_DOCUMENTARY.find(&cleaned) {
         let tail = cleaned[m.end()..].trim_start().to_ascii_lowercase();
         if !tail.starts_with("in ") {
             end = end.min(m.start());
         }
-    }
-
-    // Check codec markers
-    for re in [
-        &*RE_CODEC_AVC,
-        &*RE_CODEC_HEVC,
-        &*RE_CODEC_XVID,
-        &*RE_CODEC_AV1,
-    ] {
-        if let Some(m) = re.find(&cleaned) {
-            end = end.min(m.start());
-        }
-    }
-
-    // Check audio markers
-    for re in [
-        &*RE_AUDIO_DTS_LOSSLESS,
-        &*RE_AUDIO_DD_PLUS,
-        &*RE_AUDIO_DD,
-        &*RE_AUDIO_AAC,
-    ] {
-        if let Some(m) = re.find(&cleaned) {
-            end = end.min(m.start());
-        }
-    }
-
-    // Check extension markers if they are still embedded in the candidate title.
-    if let Some(m) = RE_EXTENSION.find(&cleaned) {
-        end = end.min(m.start());
     }
 
     // Step 6: Extract and clean up
@@ -578,34 +524,31 @@ pub(crate) fn normalize_edition(edition: &str) -> String {
 
 /// Remove accents / diacritics via manual mapping of common characters.
 pub(crate) fn remove_accents(s: &str) -> String {
-    s.chars()
-        .flat_map(|c| match c {
-            'á' | 'à' | 'â' | 'ä' | 'ã' | 'å' | 'ą' => vec!['a'],
-            'Á' | 'À' | 'Â' | 'Ä' | 'Ã' | 'Å' | 'Ą' => vec!['a'],
-            'é' | 'è' | 'ê' | 'ë' | 'ę' => vec!['e'],
-            'É' | 'È' | 'Ê' | 'Ë' | 'Ę' => vec!['e'],
-            'í' | 'ì' | 'î' | 'ï' => vec!['i'],
-            'Í' | 'Ì' | 'Î' | 'Ï' => vec!['i'],
-            'ó' | 'ò' | 'ô' | 'ö' | 'õ' | 'ø' => vec!['o'],
-            'Ó' | 'Ò' | 'Ô' | 'Ö' | 'Õ' | 'Ø' => vec!['o'],
-            'ú' | 'ù' | 'û' | 'ü' => vec!['u'],
-            'Ú' | 'Ù' | 'Û' | 'Ü' => vec!['u'],
-            'ý' | 'ÿ' => vec!['y'],
-            'Ý' | 'Ÿ' => vec!['y'],
-            'ñ' | 'Ñ' => vec!['n'],
-            'ç' | 'Ç' | 'ć' | 'Ć' | 'č' | 'Č' => vec!['c'],
-            'ð' | 'Ð' => vec!['d'],
-            'ß' => vec!['s', 's'],
-            'ś' | 'Ś' | 'š' | 'Š' => vec!['s'],
-            'ł' | 'Ł' => vec!['l'],
-            'ž' | 'Ž' | 'ź' | 'Ź' | 'ż' | 'Ż' => vec!['z'],
-            'ř' | 'Ř' => vec!['r'],
-            'ť' | 'Ť' => vec!['t'],
-            'ň' | 'Ň' => vec!['n'],
-            'đ' | 'Đ' => vec!['d'],
-            'æ' | 'Æ' => vec!['a', 'e'],
-            'þ' | 'Þ' => vec!['t', 'h'],
-            _ => vec![c],
-        })
-        .collect()
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            'á' | 'à' | 'â' | 'ä' | 'ã' | 'å' | 'ą' | 'Á' | 'À' | 'Â' | 'Ä' | 'Ã' | 'Å'
+            | 'Ą' => out.push('a'),
+            'æ' | 'Æ' => out.push_str("ae"),
+            'é' | 'è' | 'ê' | 'ë' | 'ę' | 'É' | 'È' | 'Ê' | 'Ë' | 'Ę' => out.push('e'),
+            'í' | 'ì' | 'î' | 'ï' | 'Í' | 'Ì' | 'Î' | 'Ï' => out.push('i'),
+            'ó' | 'ò' | 'ô' | 'ö' | 'õ' | 'ø' | 'Ó' | 'Ò' | 'Ô' | 'Ö' | 'Õ' | 'Ø' => {
+                out.push('o');
+            }
+            'ú' | 'ù' | 'û' | 'ü' | 'Ú' | 'Ù' | 'Û' | 'Ü' => out.push('u'),
+            'ý' | 'ÿ' | 'Ý' | 'Ÿ' => out.push('y'),
+            'ñ' | 'Ñ' | 'ň' | 'Ň' => out.push('n'),
+            'ç' | 'Ç' | 'ć' | 'Ć' | 'č' | 'Č' => out.push('c'),
+            'ð' | 'Ð' | 'đ' | 'Đ' => out.push('d'),
+            'ß' => out.push_str("ss"),
+            'ś' | 'Ś' | 'š' | 'Š' => out.push('s'),
+            'ł' | 'Ł' => out.push('l'),
+            'ž' | 'Ž' | 'ź' | 'Ź' | 'ż' | 'Ż' => out.push('z'),
+            'ř' | 'Ř' => out.push('r'),
+            'ť' | 'Ť' => out.push('t'),
+            'þ' | 'Þ' => out.push_str("th"),
+            _ => out.push(c),
+        }
+    }
+    out
 }
