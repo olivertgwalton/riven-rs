@@ -92,26 +92,45 @@ impl CoreTvdbQuery {
     }
 }
 
+#[derive(Default)]
+struct TmdbExternalIds {
+    tvdb_id: Option<i64>,
+    imdb_id: Option<String>,
+}
+
 pub async fn resolve_tmdb_to_tvdb_id(ctx: &Context<'_>, tmdb_id: &str) -> Result<Option<i64>> {
-    if let Some(tvdb_id) = fetch_tmdb_external_tvdb_id(ctx, tmdb_id).await? {
+    let externals = fetch_tmdb_external_ids(ctx, tmdb_id).await?;
+    if let Some(tvdb_id) = externals.tvdb_id {
         return Ok(Some(tvdb_id));
     }
 
     let token = get_tvdb_token(ctx).await?;
-    let remote_lookup =
-        tvdb_get_value(ctx, &token, &format!("/search/remoteid/{tmdb_id}"), None).await?;
-    if let Some(series_id) = remote_lookup
-        .get("data")
-        .and_then(|value| value.as_array())
-        .and_then(|items| {
-            items.iter().find_map(|item| {
-                item.get("series")
-                    .and_then(|series| series.get("id"))
-                    .and_then(serde_json::Value::as_i64)
+
+    // TMDB often carries no direct tvdb mapping (e.g. sports series like
+    // Formula 1, whose `external_ids.tvdb_id` is null) but still exposes an
+    // IMDB id. TVDB's remote-id search resolves reliably by IMDB id, so try
+    // that first, then fall back to the raw TMDB id.
+    let remote_ids = externals
+        .imdb_id
+        .iter()
+        .map(String::as_str)
+        .chain(std::iter::once(tmdb_id));
+    for remote_id in remote_ids {
+        let remote_lookup =
+            tvdb_get_value(ctx, &token, &format!("/search/remoteid/{remote_id}"), None).await?;
+        if let Some(series_id) = remote_lookup
+            .get("data")
+            .and_then(|value| value.as_array())
+            .and_then(|items| {
+                items.iter().find_map(|item| {
+                    item.get("series")
+                        .and_then(|series| series.get("id"))
+                        .and_then(serde_json::Value::as_i64)
+                })
             })
-        })
-    {
-        return Ok(Some(series_id));
+        {
+            return Ok(Some(series_id));
+        }
     }
 
     let direct_series = tvdb_get_value(ctx, &token, &format!("/series/{tmdb_id}"), None).await;
@@ -124,7 +143,7 @@ pub async fn resolve_tmdb_to_tvdb_id(ctx: &Context<'_>, tmdb_id: &str) -> Result
     }
 }
 
-async fn fetch_tmdb_external_tvdb_id(ctx: &Context<'_>, tmdb_id: &str) -> Result<Option<i64>> {
+async fn fetch_tmdb_external_ids(ctx: &Context<'_>, tmdb_id: &str) -> Result<TmdbExternalIds> {
     let registry = ctx.data::<Arc<PluginRegistry>>()?;
     let http = ctx.data::<HttpClient>()?;
     let api_key = get_tmdb_api_key(registry).await?;
@@ -138,10 +157,18 @@ async fn fetch_tmdb_external_tvdb_id(ctx: &Context<'_>, tmdb_id: &str) -> Result
         .await
     {
         Ok(value) => value,
-        Err(_) => return Ok(None),
+        Err(_) => return Ok(TmdbExternalIds::default()),
     };
 
-    Ok(value.get("tvdb_id").and_then(serde_json::Value::as_i64))
+    Ok(TmdbExternalIds {
+        tvdb_id: value.get("tvdb_id").and_then(serde_json::Value::as_i64),
+        imdb_id: value
+            .get("imdb_id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned),
+    })
 }
 
 async fn get_tvdb_token(ctx: &Context<'_>) -> Result<String> {

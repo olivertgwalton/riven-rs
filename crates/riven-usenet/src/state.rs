@@ -13,7 +13,7 @@ use std::sync::{Arc, OnceLock};
 
 use lru::LruCache;
 use parking_lot::Mutex;
-use tokio::sync::Notify;
+use tokio::sync::{Notify, mpsc};
 
 use crate::cache::SegmentCache;
 
@@ -408,6 +408,48 @@ impl PermanentFails {
     pub fn len(&self) -> usize {
         self.inner.lock().len()
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct DeadSegmentEvent {
+    pub info_hash: String,
+    pub file_index: usize,
+    pub detail: String,
+}
+
+struct DeadSegmentChannel {
+    tx: mpsc::UnboundedSender<DeadSegmentEvent>,
+    rx: Mutex<Option<mpsc::UnboundedReceiver<DeadSegmentEvent>>>,
+    claimed: Mutex<HashSet<String>>,
+}
+
+fn dead_segment_channel() -> &'static DeadSegmentChannel {
+    static C: OnceLock<DeadSegmentChannel> = OnceLock::new();
+    C.get_or_init(|| {
+        let (tx, rx) = mpsc::unbounded_channel();
+        DeadSegmentChannel {
+            tx,
+            rx: Mutex::new(Some(rx)),
+            claimed: Mutex::new(HashSet::new()),
+        }
+    })
+}
+
+pub fn report_dead_segment(info_hash: &str, file_index: usize, detail: &str) {
+    let ch = dead_segment_channel();
+    let key = format!("{info_hash}:{file_index}");
+    if !ch.claimed.lock().insert(key) {
+        return;
+    }
+    drop(ch.tx.send(DeadSegmentEvent {
+        info_hash: info_hash.to_string(),
+        file_index,
+        detail: detail.to_string(),
+    }));
+}
+
+pub fn take_dead_segment_receiver() -> Option<mpsc::UnboundedReceiver<DeadSegmentEvent>> {
+    dead_segment_channel().rx.lock().take()
 }
 
 /// Tracks files for which the head+tail precache has already been

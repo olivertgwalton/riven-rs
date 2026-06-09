@@ -1,9 +1,10 @@
+use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::Result;
 use axum::{
     body::Body,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{
         HeaderMap, HeaderName, HeaderValue, Method, StatusCode,
         header::{
@@ -13,7 +14,9 @@ use axum::{
     },
     response::{IntoResponse, Response},
 };
+use riven_core::local_source::LocalByteSource;
 use riven_core::stream_link::request_stream_url;
+use riven_usenet::UsenetStreamer;
 
 use super::ApiState;
 use super::auth::check_api_key;
@@ -278,9 +281,198 @@ async fn load_media_entry(
     riven_db::repo::get_media_entry_by_id(&state.db_pool, entry_id).await
 }
 
+/// Query string for the media bridge. `?download=1` (any value) flips the
+/// response to a forced browser download (`Content-Disposition: attachment`)
+/// instead of inline playback.
+#[derive(Debug, Default, serde::Deserialize)]
+pub(super) struct MediaQuery {
+    download: Option<String>,
+}
+
+/// Resolve the in-process usenet target `(info_hash, file_index)` for an entry,
+/// preferring the explicit columns and falling back to parsing a `usenet://`
+/// stream URL (mirrors the VFS open path).
+fn usenet_target(entry: &riven_db::entities::FileSystemEntry) -> Option<(String, usize)> {
+    if let (Some(info_hash), Some(idx)) =
+        (entry.usenet_info_hash.as_deref(), entry.usenet_file_index)
+    {
+        return Some((info_hash.to_string(), usize::try_from(idx).unwrap_or(0)));
+    }
+    let candidate = entry.stream_url.as_deref().or(entry.download_url.as_deref())?;
+    parse_usenet_url(candidate)
+}
+
+fn parse_usenet_url(url: &str) -> Option<(String, usize)> {
+    let rest = url.strip_prefix("usenet://")?;
+    let (hash, idx) = rest.split_once('/')?;
+    if hash.is_empty() {
+        return None;
+    }
+    Some((hash.to_string(), idx.parse().ok()?))
+}
+
+/// Build a `Content-Disposition: attachment` header that names the saved file
+/// after the entry's original filename (sanitised to header-safe ASCII).
+fn attachment_disposition(entry: &riven_db::entities::FileSystemEntry) -> Option<HeaderValue> {
+    let name = entry
+        .original_filename
+        .clone()
+        .or_else(|| {
+            entry
+                .path
+                .rsplit('/')
+                .next()
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| format!("download-{}", entry.id));
+    let sanitized: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii() && !c.is_control() && c != '"' && c != '\\' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    HeaderValue::from_str(&format!("attachment; filename=\"{sanitized}\"")).ok()
+}
+
+/// Resolve a requested byte range against a known file size into a concrete,
+/// satisfiable `(start, end_inclusive, is_partial)` triple.
+fn resolve_concrete_range(range: Option<RequestedRange>, file_size: u64) -> (u64, u64, bool) {
+    match range {
+        Some(r) => {
+            let (start, end) = match (r.start, r.end) {
+                (Some(start), Some(end)) => (start, end.min(file_size - 1)),
+                (Some(start), None) => (start, file_size - 1),
+                (None, Some(suffix)) => (file_size.saturating_sub(suffix), file_size - 1),
+                (None, None) => (0, file_size - 1),
+            };
+            (start, end, true)
+        }
+        None => (0, file_size - 1, false),
+    }
+}
+
+/// Stream a usenet-backed entry directly from the in-process streamer. Usenet
+/// entries have no HTTP origin, so the debrid proxy path cannot serve them;
+/// instead we read the requested byte range in chunks via `LocalByteSource`.
+async fn serve_usenet_media(
+    entry: &riven_db::entities::FileSystemEntry,
+    info_hash: String,
+    file_index: usize,
+    method: Method,
+    headers: &HeaderMap,
+    want_download: bool,
+) -> Response {
+    let file_size = u64::try_from(entry.file_size).unwrap_or(0);
+    if file_size == 0 {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+
+    let requested_range = match parse_requested_range(headers.get(RANGE), file_size) {
+        Ok(range) => range,
+        Err(error) => return range_error_response(error, file_size),
+    };
+    let (start, end_inclusive, is_partial) = resolve_concrete_range(requested_range, file_size);
+
+    let Some(streamer) = UsenetStreamer::existing_shared() else {
+        tracing::warn!(entry_id = entry.id, "usenet streamer unavailable for media download");
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+
+    let content_length = end_inclusive - start + 1;
+    let status = if is_partial {
+        StatusCode::PARTIAL_CONTENT
+    } else {
+        StatusCode::OK
+    };
+
+    let mut builder = Response::builder().status(status);
+    if let Some(out) = builder.headers_mut() {
+        out.insert(ACCEPT_RANGES, HeaderValue::from_static("bytes"));
+        out.insert(
+            CONTENT_TYPE,
+            HeaderValue::from_static("application/octet-stream"),
+        );
+        if let Ok(value) = HeaderValue::from_str(&content_length.to_string()) {
+            out.insert(CONTENT_LENGTH, value);
+        }
+        if is_partial
+            && let Ok(value) =
+                HeaderValue::from_str(&format!("bytes {start}-{end_inclusive}/{file_size}"))
+        {
+            out.insert(CONTENT_RANGE, value);
+        }
+        if want_download && let Some(disposition) = attachment_disposition(entry) {
+            out.insert(CONTENT_DISPOSITION, disposition);
+        }
+    }
+
+    tracing::info!(
+        entry_id = entry.id,
+        method = %method,
+        range = ?requested_range,
+        want_download,
+        "usenet media bridge serving"
+    );
+
+    if method == Method::HEAD {
+        return builder
+            .body(Body::empty())
+            .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
+    }
+
+    const CHUNK: u64 = 8 * 1024 * 1024;
+    let info_hash: Arc<str> = Arc::from(info_hash.as_str());
+    let body_stream = futures::stream::unfold(
+        (streamer, info_hash, file_index, start, end_inclusive),
+        move |(streamer, info_hash, file_index, pos, end)| async move {
+            if pos > end {
+                return None;
+            }
+            let chunk_end = end.min(pos + CHUNK - 1);
+            match LocalByteSource::read_range(&streamer, &info_hash, file_index, pos, chunk_end)
+                .await
+            {
+                Ok(bytes) if !bytes.is_empty() => {
+                    let next = pos + bytes.len() as u64;
+                    Some((
+                        Ok::<bytes::Bytes, std::io::Error>(bytes),
+                        (streamer, info_hash, file_index, next, end),
+                    ))
+                }
+                // A truly empty read at EOF: stop cleanly.
+                Ok(_) => None,
+                Err(error) => {
+                    tracing::warn!(
+                        info_hash = %info_hash,
+                        file_index,
+                        pos,
+                        error = %error,
+                        "usenet download read failed"
+                    );
+                    Some((
+                        Err(std::io::Error::other("usenet read failed")),
+                        // Advance past `end` so the next poll terminates the stream.
+                        (streamer, info_hash, file_index, end + 1, end),
+                    ))
+                }
+            }
+        },
+    );
+
+    builder
+        .body(Body::from_stream(body_stream))
+        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+}
+
 pub(super) async fn media_bridge_handler(
     State(state): State<ApiState>,
     Path(entry_id): Path<i64>,
+    Query(query): Query<MediaQuery>,
     method: Method,
     headers: HeaderMap,
 ) -> Response {
@@ -299,7 +491,15 @@ pub(super) async fn media_bridge_handler(
         }
     };
 
+    let want_download = query.download.is_some();
+
+    // Usenet-backed entries have no HTTP origin to proxy; serve them directly
+    // from the in-process streamer instead.
     if entry.download_url.is_none() {
+        if let Some((info_hash, file_index)) = usenet_target(&entry) {
+            return serve_usenet_media(&entry, info_hash, file_index, method, &headers, want_download)
+                .await;
+        }
         return StatusCode::NOT_FOUND.into_response();
     }
 
@@ -381,6 +581,9 @@ pub(super) async fn media_bridge_handler(
         headers_out
             .entry(ACCEPT_RANGES)
             .or_insert(HeaderValue::from_static("bytes"));
+        if want_download && let Some(disposition) = attachment_disposition(&entry) {
+            headers_out.insert(CONTENT_DISPOSITION, disposition);
+        }
     }
 
     tracing::info!(
@@ -483,6 +686,42 @@ mod tests {
             start: None,
             end: Some(2048),
         })));
+    }
+
+    #[test]
+    fn parses_usenet_stream_url() {
+        assert_eq!(
+            parse_usenet_url("usenet://abc123/4"),
+            Some(("abc123".to_string(), 4))
+        );
+        assert_eq!(parse_usenet_url("usenet://abc123/"), None);
+        assert_eq!(parse_usenet_url("usenet:///4"), None);
+        assert_eq!(parse_usenet_url("https://cdn.example/file.mkv"), None);
+    }
+
+    #[test]
+    fn resolves_full_range_when_unspecified() {
+        assert_eq!(resolve_concrete_range(None, 1000), (0, 999, false));
+    }
+
+    #[test]
+    fn resolves_open_ended_and_suffix_ranges() {
+        assert_eq!(
+            resolve_concrete_range(Some(RequestedRange { start: Some(100), end: None }), 1000),
+            (100, 999, true)
+        );
+        assert_eq!(
+            resolve_concrete_range(Some(RequestedRange { start: None, end: Some(50) }), 1000),
+            (950, 999, true)
+        );
+        // Explicit end past EOF is clamped to the last byte.
+        assert_eq!(
+            resolve_concrete_range(
+                Some(RequestedRange { start: Some(10), end: Some(5000) }),
+                1000
+            ),
+            (10, 999, true)
+        );
     }
 
     #[test]

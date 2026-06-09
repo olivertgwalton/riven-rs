@@ -10,6 +10,11 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 reqwest = { workspace = true }
 hyper = { workspace = true }
+# Async DNS resolver shared by the HTTP client and the NNTP dialer — replaces
+# musl's fragile getaddrinfo (EAI_AGAIN under concurrency in Docker/OrbStack).
+# Pinned to 0.25 to share the single version reqwest's `hickory-dns` feature
+# already pulls (reqwest requires ^0.25).
+hickory-resolver = "0.25"
 async-trait = { workspace = true }
 async-graphql = { workspace = true }
 chrono = { workspace = true }

@@ -300,6 +300,21 @@ impl Plugin for UsenetPlugin {
                      it's left alone. Backoff doubles between attempts (1h, 2h, 4h …) \
                      up to a 24h cap.",
                 ),
+            SettingField::new(
+                "blacklistonreadfailure",
+                "Blacklist On Read Failure",
+                "boolean",
+            )
+            .with_default("false")
+            .with_description(
+                "When a dead segment (missing on every provider) is hit during live \
+                 playback, immediately blacklist the broken release and re-scrape for \
+                 a replacement — instead of waiting for the background health scan to \
+                 catch it. The blacklist is permanent so the same broken release \
+                 can't be re-picked. Fires once per file (a player retrying the same \
+                 byte range won't trigger repeated re-grabs). Independent of \
+                 Auto-Repair, which covers the background scan.",
+            ),
         ]
     }
 

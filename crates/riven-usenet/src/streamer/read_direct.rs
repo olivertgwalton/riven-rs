@@ -350,7 +350,7 @@ impl UsenetStreamer {
             return Err(StreamerError::BadRange);
         }
 
-        match &file.source {
+        let result = match &file.source {
             NzbMetaSource::Direct { offsets, segments } => {
                 self.read_direct(offsets, segments, start, end_inclusive)
                     .await
@@ -362,19 +362,23 @@ impl UsenetStreamer {
                 // Direct sources where 256 KB chunks straddle 720 KB
                 // segments; RAR slices are typically a whole volume long
                 // (100 MB+) so a body chunk almost always fits in one.
-                let buf = self
-                    .read_rar(
-                        parts,
-                        slices,
-                        meta.password.as_deref(),
-                        start,
-                        end_inclusive,
-                        Priority::High,
-                    )
-                    .await?;
-                Ok(if buf.is_empty() { Vec::new() } else { vec![buf] })
+                self.read_rar(
+                    parts,
+                    slices,
+                    meta.password.as_deref(),
+                    start,
+                    end_inclusive,
+                    Priority::High,
+                )
+                .await
+                .map(|buf| if buf.is_empty() { Vec::new() } else { vec![buf] })
             }
+        };
+
+        if let Err(StreamerError::Nntp(NntpError::ArticleNotFound(status))) = &result {
+            crate::state::report_dead_segment(info_hash, file_index, status);
         }
+        result
     }
 
     /// Read a byte range from a `Direct` source: a single contiguous file

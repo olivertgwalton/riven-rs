@@ -8,10 +8,6 @@ riven-core = { path = "../riven-core" }
 tokio = { workspace = true, features = ["io-util", "net", "sync", "time", "rt", "macros"] }
 tokio-rustls = "0.26"
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std"] }
-# Async DNS resolver — replaces musl's fragile getaddrinfo on the NNTP dial
-# path. Pinned to 0.25 to share the single version reqwest's `hickory-dns`
-# feature already pulls (reqwest requires ^0.25).
-hickory-resolver = "0.25"
 webpki-roots = "1"
 quick-xml = "0.39"
 async-trait = { workspace = true }

@@ -1,4 +1,5 @@
 pub mod config;
+pub mod dns;
 pub mod downloader;
 pub mod events;
 pub mod http;

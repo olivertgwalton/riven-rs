@@ -35,6 +35,10 @@ const USER_AGENT: &str = concat!("riven-rs/", env!("CARGO_PKG_VERSION"));
 fn build_http_client() -> Result<reqwest::Client> {
     Ok(reqwest::Client::builder()
         .user_agent(USER_AGENT)
+        // Resolve through the same serve-stale hickory cache as the NNTP dialer
+        // (see `riven_core::dns`). Its `Ipv4thenIpv6` strategy also keeps egress
+        // on IPv4 when the container advertises AAAA records it can't route.
+        .dns_resolver(riven_core::dns::CachedDnsResolver)
         .connect_timeout(Duration::from_secs(
             riven_core::config::vfs::CONNECT_TIMEOUT_SECS,
         ))
@@ -412,6 +416,63 @@ async fn main() -> Result<()> {
                         // "unknown"/unverified is transient — don't auto-repair.
                         _ => {}
                     }
+                }
+            }
+        });
+    }
+
+    if usenet_streamer.is_some()
+        && let Some(mut dead_rx) = riven_usenet::state::take_dead_segment_receiver()
+    {
+        let db = db_pool.clone();
+        let repair_queue = job_queue.clone();
+        let reg = registry.clone();
+        tokio::spawn(async move {
+            while let Some(ev) = dead_rx.recv().await {
+                let enabled = reg
+                    .get_plugin_settings_json("usenet")
+                    .await
+                    .as_ref()
+                    .and_then(|v| v.get("blacklistonreadfailure"))
+                    .map(|v| {
+                        v.as_bool().unwrap_or_else(|| {
+                            matches!(
+                                v.as_str().map(|s| s.trim().to_ascii_lowercase()).as_deref(),
+                                Some("1" | "true" | "yes" | "on")
+                            )
+                        })
+                    })
+                    .unwrap_or(false);
+                if !enabled {
+                    continue;
+                }
+                let media_item_id: Option<i64> = sqlx::query_scalar(
+                    "SELECT media_item_id FROM filesystem_entries \
+                     WHERE usenet_info_hash = $1 AND usenet_file_index = $2 \
+                       AND entry_type = 'media' LIMIT 1",
+                )
+                .bind(&ev.info_hash)
+                .bind(ev.file_index as i32)
+                .fetch_optional(&db)
+                .await
+                .unwrap_or(None);
+                let Some(media_item_id) = media_item_id else {
+                    tracing::debug!(
+                        info_hash = %ev.info_hash,
+                        file_index = ev.file_index,
+                        "read-time repair: no media entry for dead stream; skipping"
+                    );
+                    continue;
+                };
+                tracing::warn!(
+                    info_hash = %ev.info_hash,
+                    file_index = ev.file_index,
+                    media_item_id,
+                    detail = %ev.detail,
+                    "read-time repair: dead segment hit during playback; blacklisting release and re-grabbing"
+                );
+                if let Err(error) = repair_queue.regrab_media_item(media_item_id).await {
+                    tracing::warn!(%error, media_item_id, "read-time repair: regrab failed");
                 }
             }
         });
