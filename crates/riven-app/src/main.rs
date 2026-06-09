@@ -56,6 +56,30 @@ fn build_http_client() -> Result<reqwest::Client> {
         .build()?)
 }
 
+/// Plugin settings are stored as strings; accept a string or a bare number.
+fn setting_u64(json: &Option<serde_json::Value>, key: &str) -> Option<u64> {
+    let v = json.as_ref()?.get(key)?;
+    v.as_u64()
+        .or_else(|| v.as_str().and_then(|s| s.trim().parse().ok()))
+}
+
+/// Truthy plugin-settings flag: a JSON bool or a "1"/"true"/"yes"/"on" string.
+fn setting_flag(json: &Option<serde_json::Value>, key: &str) -> bool {
+    json.as_ref().and_then(|j| j.get(key)).is_some_and(|v| {
+        v.as_bool().unwrap_or_else(|| {
+            matches!(
+                v.as_str().map(|s| s.trim().to_ascii_lowercase()).as_deref(),
+                Some("1" | "true" | "yes" | "on")
+            )
+        })
+    })
+}
+
+/// Parse an env var, treating unset/unparseable as `None`.
+fn env_parsed<T: std::str::FromStr>(name: &str) -> Option<T> {
+    std::env::var(name).ok().and_then(|s| s.trim().parse().ok())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let mut settings = riven_core::settings::RivenSettings::load()?;
@@ -124,15 +148,8 @@ async fn main() -> Result<()> {
                 tls = primary.map(|c| c.use_tls).unwrap_or(true),
                 "usenet streaming enabled"
             );
-            // Settings are stored as strings; accept a string or bare number.
-            let configured = usenet_settings_json
-                .as_ref()
-                .and_then(|v| v.get("maxdownloadworkers"))
-                .and_then(|v| {
-                    v.as_u64()
-                        .map(|n| n as usize)
-                        .or_else(|| v.as_str().and_then(|s| s.trim().parse::<usize>().ok()))
-                })
+            let configured = setting_u64(&usenet_settings_json, "maxdownloadworkers")
+                .map(|n| n as usize)
                 .filter(|&n| n > 0);
             usenet_download_workers =
                 Some(configured.unwrap_or(riven_usenet::DEFAULT_DOWNLOAD_WORKERS));
@@ -199,24 +216,14 @@ async fn main() -> Result<()> {
     if let Some(streamer) = usenet_streamer.clone() {
         let db = db_pool.clone();
         let repair_queue = job_queue.clone();
-        let sample_percent = usenet_settings_json
-            .as_ref()
-            .and_then(|v| v.get("availabilitysamplepercent"))
-            .and_then(|v| {
-                v.as_u64()
-                    .map(|n| n as usize)
-                    .or_else(|| v.as_str().and_then(|s| s.trim().parse::<usize>().ok()))
-            })
+        let sample_percent = setting_u64(&usenet_settings_json, "availabilitysamplepercent")
+            .map(|n| n as usize)
             .filter(|&n| (1..=100).contains(&n))
             .unwrap_or(riven_usenet::DEFAULT_AVAILABILITY_SAMPLE_PERCENT);
-        let interval_secs = std::env::var("RIVEN_USENET_HEALTH_SCAN_INTERVAL_SECS")
-            .ok()
-            .and_then(|s| s.parse::<u64>().ok())
+        let interval_secs = env_parsed::<u64>("RIVEN_USENET_HEALTH_SCAN_INTERVAL_SECS")
             .filter(|&n| n > 0)
             .unwrap_or(300);
-        let batch = std::env::var("RIVEN_USENET_HEALTH_SCAN_BATCH")
-            .ok()
-            .and_then(|s| s.parse::<i64>().ok())
+        let batch = env_parsed::<i64>("RIVEN_USENET_HEALTH_SCAN_BATCH")
             .filter(|&n| n > 0)
             .unwrap_or(5);
         // altmount-style auto-repair. Enabled via the usenet plugin's
@@ -226,14 +233,10 @@ async fn main() -> Result<()> {
         let auto_repair_forced = std::env::var("RIVEN_USENET_AUTO_REPAIR")
             .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
             .unwrap_or(false);
-        let repair_base_secs = std::env::var("RIVEN_USENET_REPAIR_BASE_INTERVAL_SECS")
-            .ok()
-            .and_then(|s| s.parse::<u64>().ok())
+        let repair_base_secs = env_parsed::<u64>("RIVEN_USENET_REPAIR_BASE_INTERVAL_SECS")
             .filter(|&n| n > 0)
             .unwrap_or(3600);
-        let repair_max_cooldown_secs = std::env::var("RIVEN_USENET_REPAIR_MAX_COOLDOWN_SECS")
-            .ok()
-            .and_then(|s| s.parse::<u64>().ok())
+        let repair_max_cooldown_secs = env_parsed::<u64>("RIVEN_USENET_REPAIR_MAX_COOLDOWN_SECS")
             .filter(|&n| n > 0)
             .unwrap_or(86_400);
         let scanner_registry = registry.clone();
@@ -257,26 +260,8 @@ async fn main() -> Result<()> {
                 // Read the auto-repair toggle + retry cap from settings each tick
                 // so the UI toggle is live. Env force-on wins when set.
                 let usenet_cfg = scanner_registry.get_plugin_settings_json("usenet").await;
-                let auto_repair = auto_repair_forced
-                    || usenet_cfg
-                        .as_ref()
-                        .and_then(|v| v.get("autorepair"))
-                        .map(|v| {
-                            v.as_bool().unwrap_or_else(|| {
-                                matches!(
-                                    v.as_str().map(|s| s.trim().to_ascii_lowercase()).as_deref(),
-                                    Some("1" | "true" | "yes" | "on")
-                                )
-                            })
-                        })
-                        .unwrap_or(false);
-                let repair_max_retries = usenet_cfg
-                    .as_ref()
-                    .and_then(|v| v.get("repairmaxretries"))
-                    .and_then(|v| {
-                        v.as_i64()
-                            .or_else(|| v.as_str().and_then(|s| s.trim().parse::<i64>().ok()))
-                    })
+                let auto_repair = auto_repair_forced || setting_flag(&usenet_cfg, "autorepair");
+                let repair_max_retries = setting_u64(&usenet_cfg, "repairmaxretries")
                     .filter(|&n| n > 0)
                     .map(|n| n as i32)
                     .unwrap_or(3);
@@ -284,18 +269,7 @@ async fn main() -> Result<()> {
                 // STAT-checks every segment (percent = 100) so a single post-grab
                 // article death is actually detected — sampling almost always
                 // misses one. Read per-tick so the toggle is live.
-                let check_all_segments = usenet_cfg
-                    .as_ref()
-                    .and_then(|v| v.get("checkallsegments"))
-                    .map(|v| {
-                        v.as_bool().unwrap_or_else(|| {
-                            matches!(
-                                v.as_str().map(|s| s.trim().to_ascii_lowercase()).as_deref(),
-                                Some("1" | "true" | "yes" | "on")
-                            )
-                        })
-                    })
-                    .unwrap_or(false);
+                let check_all_segments = setting_flag(&usenet_cfg, "checkallsegments");
                 let effective_sample_percent = if check_all_segments { 100 } else { sample_percent };
 
                 let due = match riven_db::repo::usenet_files_due_for_check(&db, batch).await {
@@ -429,20 +403,10 @@ async fn main() -> Result<()> {
         let reg = registry.clone();
         tokio::spawn(async move {
             while let Some(ev) = dead_rx.recv().await {
-                let enabled = reg
-                    .get_plugin_settings_json("usenet")
-                    .await
-                    .as_ref()
-                    .and_then(|v| v.get("blacklistonreadfailure"))
-                    .map(|v| {
-                        v.as_bool().unwrap_or_else(|| {
-                            matches!(
-                                v.as_str().map(|s| s.trim().to_ascii_lowercase()).as_deref(),
-                                Some("1" | "true" | "yes" | "on")
-                            )
-                        })
-                    })
-                    .unwrap_or(false);
+                let enabled = setting_flag(
+                    &reg.get_plugin_settings_json("usenet").await,
+                    "blacklistonreadfailure",
+                );
                 if !enabled {
                     continue;
                 }
