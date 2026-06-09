@@ -48,45 +48,38 @@ fn indexers_from_settings(settings: &PluginSettings) -> Vec<Indexer> {
         .unwrap_or_default()
 }
 
+/// Raw shape of one dictionary entry. Half-configured entries (the user is
+/// mid-edit) deserialize fine but are filtered out below rather than failing
+/// the whole dictionary.
+#[derive(serde::Deserialize)]
+struct IndexerJson {
+    #[serde(default)]
+    url: String,
+    #[serde(default)]
+    apikey: String,
+    #[serde(default)]
+    categories: Option<String>,
+}
+
 fn parse_indexers_str(raw: &str) -> Option<Vec<Indexer>> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    let v: serde_json::Value = serde_json::from_str(trimmed).ok()?;
-    let map = v.as_object()?;
-    let mut indexers = Vec::with_capacity(map.len());
-    for (name, entry) in map {
-        let obj = match entry.as_object() {
-            Some(o) => o,
-            None => continue,
-        };
-        let url = obj
-            .get("url")
-            .and_then(|v| v.as_str())
-            .map(|s| s.trim().to_string())
-            .unwrap_or_default();
-        let apikey = obj
-            .get("apikey")
-            .and_then(|v| v.as_str())
-            .map(|s| s.trim().to_string())
-            .unwrap_or_default();
-        if url.is_empty() || apikey.is_empty() {
-            continue;
-        }
-        let categories = obj
-            .get("categories")
-            .and_then(|v| v.as_str())
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| "2000,5000".to_string());
-        indexers.push(Indexer {
-            name: name.to_string(),
-            url,
-            apikey,
-            categories,
-        });
-    }
+    let map: std::collections::BTreeMap<String, IndexerJson> =
+        serde_json::from_str(raw.trim()).ok()?;
+    let indexers: Vec<Indexer> = map
+        .into_iter()
+        .filter_map(|(name, entry)| {
+            let url = entry.url.trim().to_string();
+            let apikey = entry.apikey.trim().to_string();
+            if url.is_empty() || apikey.is_empty() {
+                return None;
+            }
+            let categories = entry
+                .categories
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "2000,5000".to_string());
+            Some(Indexer { name, url, apikey, categories })
+        })
+        .collect();
     (!indexers.is_empty()).then_some(indexers)
 }
 

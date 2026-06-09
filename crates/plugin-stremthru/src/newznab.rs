@@ -63,14 +63,8 @@ pub async fn scrape_newznab(
             client.get(&url).query(&params)
         })
         .await?;
-    let status = resp.status();
-    if !status.is_success() {
-        let body = resp.text().unwrap_or_default();
-        anyhow::bail!(
-            "stremthru newznab returned HTTP {status}: {}",
-            body.chars().take(200).collect::<String>()
-        );
-    }
+    resp.error_for_status_ref()
+        .map_err(|e| e.context("stremthru newznab"))?;
     let body = resp.text().unwrap_or_default();
     let items = parse_newznab_xml(&body);
 
