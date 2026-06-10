@@ -63,11 +63,13 @@ impl Plugin for WebhooksPlugin {
                 .required()
                 .with_placeholder("https://example.com/hook, https://ntfy.sh/riven")
                 .with_description("Comma-separated URLs. Each receives a POST request when an event fires."),
-            SettingField::new("events", "Event Filter", "textarea")
-                .with_placeholder(
-                    "riven.media-item.download.success, riven.media-item.download.error",
-                )
-                .with_description("Which events to send. Leave empty to send all events (downloads, scrapes, errors, etc.)."),
+            {
+                let slugs: Vec<&'static str> =
+                    EventType::NOTABLE.iter().map(|e| e.slug()).collect();
+                SettingField::new("events", "Event Filter", "string_array")
+                    .with_options(&slugs)
+                    .with_description("Which events to send. Leave empty to send all events.")
+            },
             SettingField::new("secret", "Signing Secret", "password").with_description(
                 "Optional secret key. When set, each request includes a signature header so you can verify it came from Riven.",
             ),
