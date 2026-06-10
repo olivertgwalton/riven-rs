@@ -25,6 +25,7 @@ plugin-listrr = { path = "../plugin-listrr" }
 plugin-mdblist = { path = "../plugin-mdblist" }
 plugin-subdl = { path = "../plugin-subdl" }
 plugin-notifications = { path = "../plugin-notifications" }
+plugin-webhooks = { path = "../plugin-webhooks" }
 plugin-emby-jellyfin = { path = "../plugin-emby-jellyfin" }
 plugin-calendar = { path = "../plugin-calendar" }
 plugin-trakt = { path = "../plugin-trakt" }

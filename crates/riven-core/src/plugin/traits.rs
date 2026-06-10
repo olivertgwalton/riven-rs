@@ -54,6 +54,19 @@ pub trait Plugin: Send + Sync + 'static {
 
     // ── Per-event hooks (override what you care about) ────────────────────────
 
+    /// Catch-all invoked for every subscribed event before typed routing, with
+    /// the raw `RivenEvent`. Override this when a plugin wants the whole event
+    /// stream rather than one shape (e.g. an outbound webhook bus). Returning
+    /// anything other than `Empty` short-circuits typed routing; the default
+    /// returns `Empty` so existing plugins are unaffected.
+    async fn on_event(
+        &self,
+        _event: &RivenEvent,
+        _ctx: &PluginContext,
+    ) -> anyhow::Result<HookResponse> {
+        Ok(HookResponse::Empty)
+    }
+
     async fn on_core_started(&self, _ctx: &PluginContext) -> anyhow::Result<HookResponse> {
         Ok(HookResponse::Empty)
     }
@@ -171,6 +184,13 @@ pub trait Plugin: Send + Sync + 'static {
         event: &RivenEvent,
         ctx: &PluginContext,
     ) -> anyhow::Result<HookResponse> {
+        // Raw-event observers (e.g. webhook bus) run first. A non-`Empty`
+        // response short-circuits typed routing; the default `Empty` falls
+        // through so plugins that only implement typed hooks are unaffected.
+        match self.on_event(event, ctx).await? {
+            HookResponse::Empty => {}
+            response => return Ok(response),
+        }
         match event {
             RivenEvent::CoreStarted => self.on_core_started(ctx).await,
             RivenEvent::CoreShutdown => Ok(HookResponse::Empty),

@@ -3310,6 +3310,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "plugin-webhooks"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "hex",
+ "hmac 0.13.0",
+ "inventory",
+ "redis",
+ "reqwest 0.13.2",
+ "riven-core",
+ "riven-db",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tracing",
+ "ulid",
+]
+
+[[package]]
 name = "polling"
 version = "3.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3835,6 +3856,7 @@ dependencies = [
  "plugin-trakt",
  "plugin-tvdb",
  "plugin-usenet",
+ "plugin-webhooks",
  "redis",
  "reqwest 0.13.2",
  "riven-api",

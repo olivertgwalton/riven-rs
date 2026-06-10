@@ -20,6 +20,7 @@ members = [
     "crates/plugin-mdblist",
     "crates/plugin-subdl",
     "crates/plugin-notifications",
+    "crates/plugin-webhooks",
     "crates/plugin-emby-jellyfin",
     "crates/plugin-calendar",
     "crates/plugin-trakt",
