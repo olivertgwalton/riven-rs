@@ -49,7 +49,9 @@ impl Plugin for SubdlPlugin {
             _ => return Ok(false),
         };
         // SubDL has no /me endpoint; ping a known TMDB id with a tiny page size.
-        let url = format!("{DEFAULT_BASE_URL}subtitles?api_key={api_key}&tmdb_id=27205&type=movie&subs_per_page=1");
+        let url = format!(
+            "{DEFAULT_BASE_URL}subtitles?api_key={api_key}&tmdb_id=27205&type=movie&subs_per_page=1"
+        );
         let resp: SearchResponse = match http
             .get_json(PROFILE, url.clone(), |client| client.get(&url))
             .await
@@ -102,7 +104,10 @@ impl Plugin for SubdlPlugin {
         };
 
         if meta.tmdb_id.is_none() && meta.imdb_id.is_none() {
-            tracing::debug!(item_id = info.id, "subdl: item has no TMDB/IMDB id, skipping");
+            tracing::debug!(
+                item_id = info.id,
+                "subdl: item has no TMDB/IMDB id, skipping"
+            );
             return Ok(HookResponse::Empty);
         }
 
@@ -110,18 +115,20 @@ impl Plugin for SubdlPlugin {
         // subtitle file. Without it, the subtitle has nowhere to live in the
         // VFS — the show might have multiple recently-downloaded episodes
         // racing through this hook, so we look up the specific item.
-        let media_entry =
-            match find_media_entry(&ctx.db_pool, info.id).await {
-                Ok(Some(e)) => e,
-                Ok(None) => {
-                    tracing::debug!(item_id = info.id, "subdl: no media filesystem entry yet, skipping");
-                    return Ok(HookResponse::Empty);
-                }
-                Err(e) => {
-                    tracing::warn!(item_id = info.id, error = %e, "subdl: failed to look up media entry");
-                    return Ok(HookResponse::Empty);
-                }
-            };
+        let media_entry = match find_media_entry(&ctx.db_pool, info.id).await {
+            Ok(Some(e)) => e,
+            Ok(None) => {
+                tracing::debug!(
+                    item_id = info.id,
+                    "subdl: no media filesystem entry yet, skipping"
+                );
+                return Ok(HookResponse::Empty);
+            }
+            Err(e) => {
+                tracing::warn!(item_id = info.id, error = %e, "subdl: failed to look up media entry");
+                return Ok(HookResponse::Empty);
+            }
+        };
 
         let results = match search_subtitles(&ctx.http, &api_key, &meta, &languages).await {
             Ok(r) => r,
@@ -140,9 +147,10 @@ impl Plugin for SubdlPlugin {
         for sub in results {
             if let (Some(s), Some(e)) = (meta.season_number, meta.episode_number)
                 && let (Some(ss), Some(ee)) = (sub.season, sub.episode)
-                    && (ss != s || ee != e) {
-                        continue;
-                    }
+                && (ss != s || ee != e)
+            {
+                continue;
+            }
             let key = sub.lang.to_ascii_lowercase();
             best_per_lang.entry(key).or_insert(sub);
         }
@@ -292,7 +300,8 @@ async fn search_subtitles(
 
     if !resp.status {
         return Err(anyhow::anyhow!(
-            resp.error.unwrap_or_else(|| "subdl: unknown error".to_string())
+            resp.error
+                .unwrap_or_else(|| "subdl: unknown error".to_string())
         ));
     }
     Ok(resp.subtitles.unwrap_or_default())

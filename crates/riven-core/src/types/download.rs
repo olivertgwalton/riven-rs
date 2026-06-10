@@ -12,11 +12,17 @@ pub struct ScrapeEntry {
 
 impl ScrapeEntry {
     pub fn new(title: impl Into<String>) -> Self {
-        Self { title: title.into(), file_size_bytes: None }
+        Self {
+            title: title.into(),
+            file_size_bytes: None,
+        }
     }
 
     pub fn with_size(title: impl Into<String>, size: u64) -> Self {
-        Self { title: title.into(), file_size_bytes: Some(size) }
+        Self {
+            title: title.into(),
+            file_size_bytes: Some(size),
+        }
     }
 }
 

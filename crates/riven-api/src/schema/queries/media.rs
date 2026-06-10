@@ -434,10 +434,10 @@ impl MediaQuery {
             // Episode entries sorted by media_item_id so they can be grouped
             // with a single linear pass (episodes already grouped by parent_id).
             episode_entries.sort_by_key(|e| e.media_item_id);
-            let mut entries_by_episode = group_sorted_by_key(
-                episode_entries.into_iter().map(with_metadata),
-                |e| e.media_item_id,
-            );
+            let mut entries_by_episode =
+                group_sorted_by_key(episode_entries.into_iter().map(with_metadata), |e| {
+                    e.media_item_id
+                });
 
             let mut season_fulls = Vec::with_capacity(seasons.len());
             for season in seasons {

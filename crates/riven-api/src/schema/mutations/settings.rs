@@ -286,12 +286,20 @@ impl SettingsMutations {
 
         let cfg = ctx.data::<Arc<RwLock<DownloaderConfig>>>()?;
         let mut cfg = cfg.write().await;
-        let mbps = |key: &str| settings.get(key).and_then(serde_json::Value::as_u64).map(|v| v as u32);
+        let mbps = |key: &str| {
+            settings
+                .get(key)
+                .and_then(serde_json::Value::as_u64)
+                .map(|v| v as u32)
+        };
         cfg.minimum_average_bitrate_movies = mbps("minimum_average_bitrate_movies");
         cfg.minimum_average_bitrate_episodes = mbps("minimum_average_bitrate_episodes");
         cfg.maximum_average_bitrate_movies = mbps("maximum_average_bitrate_movies");
         cfg.maximum_average_bitrate_episodes = mbps("maximum_average_bitrate_episodes");
-        if let Some(v) = settings.get("attempt_unknown_downloads").and_then(serde_json::Value::as_bool) {
+        if let Some(v) = settings
+            .get("attempt_unknown_downloads")
+            .and_then(serde_json::Value::as_bool)
+        {
             cfg.attempt_unknown_downloads = v;
         }
 
@@ -316,7 +324,9 @@ impl SettingsMutations {
             settings
                 .get("maximum_scrape_attempts")
                 .and_then(serde_json::Value::as_u64)
-                .map_or(queue.maximum_scrape_attempts.load(Ordering::SeqCst), |v| v as u32),
+                .map_or(queue.maximum_scrape_attempts.load(Ordering::SeqCst), |v| {
+                    v as u32
+                }),
             Ordering::SeqCst,
         );
 

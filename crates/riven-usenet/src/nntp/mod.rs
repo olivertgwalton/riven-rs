@@ -313,7 +313,8 @@ pub(crate) fn init_crypto() {
 /// plus CRLFs), so the same 2 MB cap covers them; 64 retained matches the
 /// decoded-side pool. The buffer recycles when `yenc::decode`'s
 /// `spawn_blocking` closure drops the `PooledBuf` it was handed.
-static ENCODED_BUF_POOL: crate::bufpool::BufPool = crate::bufpool::BufPool::new(64, 2 * 1024 * 1024);
+static ENCODED_BUF_POOL: crate::bufpool::BufPool =
+    crate::bufpool::BufPool::new(64, 2 * 1024 * 1024);
 
 #[cfg(test)]
 mod tests {

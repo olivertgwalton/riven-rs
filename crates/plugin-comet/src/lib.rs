@@ -85,9 +85,7 @@ impl Plugin for CometPlugin {
 
         let resp_data = match ctx
             .http
-            .send_data(PROFILE, Some(url.clone()), |client| {
-                client.get(&url)
-            })
+            .send_data(PROFILE, Some(url.clone()), |client| client.get(&url))
             .await
         {
             Ok(resp) => resp,

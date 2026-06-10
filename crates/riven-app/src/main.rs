@@ -231,7 +231,12 @@ async fn main() -> Result<()> {
         // without a restart); `RIVEN_USENET_AUTO_REPAIR` is a force-on override
         // for headless setups. Backoff timing is env-tunable (sensible defaults).
         let auto_repair_forced = std::env::var("RIVEN_USENET_AUTO_REPAIR")
-            .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+            .map(|v| {
+                matches!(
+                    v.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            })
             .unwrap_or(false);
         let repair_base_secs = env_parsed::<u64>("RIVEN_USENET_REPAIR_BASE_INTERVAL_SECS")
             .filter(|&n| n > 0)
@@ -270,7 +275,11 @@ async fn main() -> Result<()> {
                 // article death is actually detected — sampling almost always
                 // misses one. Read per-tick so the toggle is live.
                 let check_all_segments = setting_flag(&usenet_cfg, "checkallsegments");
-                let effective_sample_percent = if check_all_segments { 100 } else { sample_percent };
+                let effective_sample_percent = if check_all_segments {
+                    100
+                } else {
+                    sample_percent
+                };
 
                 let due = match riven_db::repo::usenet_files_due_for_check(&db, batch).await {
                     Ok(due) => due,
@@ -369,13 +378,14 @@ async fn main() -> Result<()> {
                                     {
                                         tracing::warn!(%error, "usenet auto-repair: regrab failed");
                                     }
-                                    if let Err(error) = riven_db::repo::record_usenet_repair_attempt(
-                                        &db,
-                                        &file.info_hash,
-                                        file.file_index,
-                                        backoff,
-                                    )
-                                    .await
+                                    if let Err(error) =
+                                        riven_db::repo::record_usenet_repair_attempt(
+                                            &db,
+                                            &file.info_hash,
+                                            file.file_index,
+                                            backoff,
+                                        )
+                                        .await
                                     {
                                         tracing::debug!(%error, "usenet auto-repair: record attempt failed");
                                     }
@@ -456,8 +466,7 @@ async fn main() -> Result<()> {
             loop {
                 tick.tick().await;
                 for t in streamer.pool().traffic_snapshot() {
-                    let (last_bytes, last_articles) =
-                        last.get(&t.host).copied().unwrap_or((0, 0));
+                    let (last_bytes, last_articles) = last.get(&t.host).copied().unwrap_or((0, 0));
                     let bytes_delta = t.bytes_downloaded.saturating_sub(last_bytes);
                     let articles_delta = t.articles_downloaded.saturating_sub(last_articles);
                     if (bytes_delta > 0 || articles_delta > 0)
@@ -624,7 +633,11 @@ async fn main() -> Result<()> {
                 // signal that only fires on shutdown.
                 let monitor_handle = tokio::spawn({
                     let jq = jq.clone();
-                    async move { riven_queue::start_workers(jq, usenet_download_workers).run().await }
+                    async move {
+                        riven_queue::start_workers(jq, usenet_download_workers)
+                            .run()
+                            .await
+                    }
                 });
                 tokio::pin!(monitor_handle);
                 let result = tokio::select! {
@@ -637,7 +650,9 @@ async fn main() -> Result<()> {
                 match result {
                     Ok(Ok(())) => tracing::warn!("apalis monitor exited, restarting"),
                     Ok(Err(e)) => tracing::error!(error = %e, "apalis monitor error, restarting"),
-                    Err(e) if e.is_panic() => tracing::error!("apalis monitor panicked, restarting"),
+                    Err(e) if e.is_panic() => {
+                        tracing::error!("apalis monitor panicked, restarting")
+                    }
                     Err(e) => tracing::error!(error = ?e, "apalis monitor task failed, restarting"),
                 }
                 // Brief pause before re-registering. Guards against a hot
@@ -710,7 +725,10 @@ async fn main() -> Result<()> {
             tracing::error!(error = ?e, "scheduler task ended with error during drain");
         }
     };
-    if tokio::time::timeout(Duration::from_secs(30), drain).await.is_err() {
+    if tokio::time::timeout(Duration::from_secs(30), drain)
+        .await
+        .is_err()
+    {
         tracing::warn!("drain timed out after 30s; proceeding to unmount");
     }
 

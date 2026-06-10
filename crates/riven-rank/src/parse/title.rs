@@ -343,7 +343,11 @@ pub(crate) fn extract_title(raw: &str) -> String {
             LazyLock::new(|| Regex::new(r"\s-\s\d{1,3}\b").unwrap());
         if let Some(start) = min_match_start(
             &cleaned,
-            &[&RE_TITLE_METADATA_BRACKET, &RE_COMPLETE, &RE_TITLE_DASH_EPISODE],
+            &[
+                &RE_TITLE_METADATA_BRACKET,
+                &RE_COMPLETE,
+                &RE_TITLE_DASH_EPISODE,
+            ],
         ) {
             end = end.min(start);
         }
@@ -527,8 +531,9 @@ pub(crate) fn remove_accents(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
         match c {
-            'á' | 'à' | 'â' | 'ä' | 'ã' | 'å' | 'ą' | 'Á' | 'À' | 'Â' | 'Ä' | 'Ã' | 'Å'
-            | 'Ą' => out.push('a'),
+            'á' | 'à' | 'â' | 'ä' | 'ã' | 'å' | 'ą' | 'Á' | 'À' | 'Â' | 'Ä' | 'Ã' | 'Å' | 'Ą' => {
+                out.push('a')
+            }
             'æ' | 'Æ' => out.push_str("ae"),
             'é' | 'è' | 'ê' | 'ë' | 'ę' | 'É' | 'È' | 'Ê' | 'Ë' | 'Ę' => out.push('e'),
             'í' | 'ì' | 'î' | 'ï' | 'Í' | 'Ì' | 'Î' | 'Ï' => out.push('i'),

@@ -68,9 +68,7 @@ impl Plugin for TorrentioPlugin {
         );
         let http_resp = ctx
             .http
-            .send_data(PROFILE, Some(url.clone()), |client| {
-                client.get(&url)
-            })
+            .send_data(PROFILE, Some(url.clone()), |client| client.get(&url))
             .await?;
         let status = http_resp.status();
         if !status.is_success() {
@@ -116,7 +114,6 @@ struct TorrentioStream {
     #[serde(rename = "infoHash")]
     info_hash: Option<String>,
 }
-
 
 fn is_deferred_status(status: StatusCode) -> bool {
     matches!(

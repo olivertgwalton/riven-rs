@@ -203,7 +203,8 @@ impl UsenetStreamer {
                             .iter()
                             .flat_map(|p| p.segments.iter().cloned())
                             .collect();
-                        self.probe_availability(&probe_segments, sample_percent).await?;
+                        self.probe_availability(&probe_segments, sample_percent)
+                            .await?;
                     }
                     let mut out = virtual_files;
                     // Keep the underlying RAR parts as additional entries so
@@ -502,8 +503,11 @@ impl UsenetStreamer {
             if archive_format.is_none() {
                 archive_format = parsed.format;
             }
-            let entries: Vec<RarVolumeFileEntry> =
-                parsed.files.into_iter().filter(super::super::rar::RarVolumeFileEntry::is_stored).collect();
+            let entries: Vec<RarVolumeFileEntry> = parsed
+                .files
+                .into_iter()
+                .filter(super::super::rar::RarVolumeFileEntry::is_stored)
+                .collect();
             if entries.is_empty() {
                 tracing::debug!(vol_idx, "no stored file entry in this RAR volume; bailing");
                 return Ok(None);

@@ -96,9 +96,9 @@ impl HttpClient {
             impl Drop for InflightGuard {
                 fn drop(&mut self) {
                     if !self.completed {
-                        self.state
-                            .finish(Err("inflight leader cancelled before completing request"
-                                .to_string()));
+                        self.state.finish(Err(
+                            "inflight leader cancelled before completing request".to_string(),
+                        ));
                     }
                     self.inflight.remove(&self.key);
                 }

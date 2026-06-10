@@ -6,11 +6,12 @@ use riven_core::types::{
     CacheCheckFile, CacheCheckResult, DownloadFile, DownloadResult, MediaItemType, build_magnet_uri,
 };
 
-use crate::{PROFILE, debrid_service};
 use crate::models::{
     StremthruCacheCheck, StremthruFile, StremthruLink, StremthruNewz, StremthruNewzAdd,
-    StremthruResponse, StremthruTorz, StremthruTorznabResponse, StremthruUser, parse_torrent_status,
+    StremthruResponse, StremthruTorz, StremthruTorznabResponse, StremthruUser,
+    parse_torrent_status,
 };
+use crate::{PROFILE, debrid_service};
 
 pub const CACHE_CHECK_TTL_SECS: u64 = 60 * 60 * 24;
 
@@ -255,9 +256,7 @@ async fn poll_newz(
     loop {
         let response = http
             .send(PROFILE, |client| {
-                client
-                    .get(&url)
-                    .store_headers(store, api_key)
+                client.get(&url).store_headers(store, api_key)
             })
             .await?;
 
@@ -424,9 +423,7 @@ async fn delete_torrent(
     let url = format!("{base_url}v0/store/torz/{torrent_id}");
     let response = http
         .send(PROFILE, |client| {
-            client
-                .delete(&url)
-                .store_headers(store, api_key)
+            client.delete(&url).store_headers(store, api_key)
         })
         .await?;
 
@@ -484,11 +481,9 @@ pub async fn scrape_torznab(
         .collect::<Vec<_>>()
         .join("&");
     let response = http
-        .send_data(
-            PROFILE,
-            Some(format!("{url}?{dedupe_params}")),
-            |client| client.get(&url).query(&params),
-        )
+        .send_data(PROFILE, Some(format!("{url}?{dedupe_params}")), |client| {
+            client.get(&url).query(&params)
+        })
         .await?;
 
     if !response.status().is_success() {
@@ -571,7 +566,11 @@ pub async fn generate_link(
     // The same /link/generate shape exists for both torz (torrents) and newz
     // (usenet). The link itself is the only signal we have to decide which
     // namespace it belongs to once we're past the initial download.
-    let kind = if magnet.contains("/store/newz/") { "newz" } else { "torz" };
+    let kind = if magnet.contains("/store/newz/") {
+        "newz"
+    } else {
+        "torz"
+    };
     let url = format!("{base_url}v0/store/{kind}/link/generate");
     tracing::debug!(store, kind, url = %url, "generating stremthru link");
     let response = http
@@ -639,9 +638,7 @@ pub async fn fetch_user_info(
     let url = format!("{base_url}v0/store/user");
     let resp: StremthruResponse<StremthruUser> = http
         .get_json(PROFILE, format!("{store}:{url}"), |client| {
-            client
-                .get(&url)
-                .store_headers(store, api_key)
+            client.get(&url).store_headers(store, api_key)
         })
         .await?;
     let user = resp
@@ -744,18 +741,14 @@ async fn fetch_debrid_extra(
     };
 
     let body: serde_json::Value = http
-        .get_json(
-            debrid_service(store),
-            format!("{store}:{url}"),
-            |client| {
-                let request = client.get(&url);
-                if let Some(token) = bearer.clone() {
-                    request.header("Authorization", token)
-                } else {
-                    request
-                }
-            },
-        )
+        .get_json(debrid_service(store), format!("{store}:{url}"), |client| {
+            let request = client.get(&url);
+            if let Some(token) = bearer.clone() {
+                request.header("Authorization", token)
+            } else {
+                request
+            }
+        })
         .await?;
 
     let premium_until = body.pointer(pointer).and_then(|v| {

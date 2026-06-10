@@ -298,7 +298,10 @@ fn usenet_target(entry: &riven_db::entities::FileSystemEntry) -> Option<(String,
     {
         return Some((info_hash.to_string(), usize::try_from(idx).unwrap_or(0)));
     }
-    let candidate = entry.stream_url.as_deref().or(entry.download_url.as_deref())?;
+    let candidate = entry
+        .stream_url
+        .as_deref()
+        .or(entry.download_url.as_deref())?;
     parse_usenet_url(candidate)
 }
 
@@ -379,7 +382,10 @@ async fn serve_usenet_media(
     let (start, end_inclusive, is_partial) = resolve_concrete_range(requested_range, file_size);
 
     let Some(streamer) = UsenetStreamer::existing_shared() else {
-        tracing::warn!(entry_id = entry.id, "usenet streamer unavailable for media download");
+        tracing::warn!(
+            entry_id = entry.id,
+            "usenet streamer unavailable for media download"
+        );
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
 
@@ -494,18 +500,36 @@ pub(super) async fn media_bridge_handler(
     let want_download = query.download.is_some();
 
     // Usenet-backed entries have no HTTP origin to proxy; serve them directly
-    // from the in-process streamer instead.
+    // from the in-process streamer instead. They carry a `usenet://` identifier
+    // in their download_url/stream_url columns rather than an HTTP origin, so
+    // they must be detected *before* the debrid proxy path — otherwise we'd try
+    // to issue an HTTP request against a `usenet://` URL, which fails to build
+    // and 502s. `usenet_target` returns `None` for real debrid entries (their
+    // http/magnet URLs don't parse as `usenet://`), so this never shadows them.
+    if let Some((info_hash, file_index)) = usenet_target(&entry) {
+        return serve_usenet_media(
+            &entry,
+            info_hash,
+            file_index,
+            method,
+            &headers,
+            want_download,
+        )
+        .await;
+    }
+
     if entry.download_url.is_none() {
-        if let Some((info_hash, file_index)) = usenet_target(&entry) {
-            return serve_usenet_media(&entry, info_hash, file_index, method, &headers, want_download)
-                .await;
-        }
         return StatusCode::NOT_FOUND.into_response();
     }
 
-    let requested_range = match parse_requested_range(headers.get(RANGE), u64::try_from(entry.file_size).unwrap_or(0)) {
+    let requested_range = match parse_requested_range(
+        headers.get(RANGE),
+        u64::try_from(entry.file_size).unwrap_or(0),
+    ) {
         Ok(range) => range,
-        Err(error) => return range_error_response(error, u64::try_from(entry.file_size).unwrap_or(0)),
+        Err(error) => {
+            return range_error_response(error, u64::try_from(entry.file_size).unwrap_or(0));
+        }
     };
 
     let mut refreshed_stream_url = false;
@@ -707,17 +731,32 @@ mod tests {
     #[test]
     fn resolves_open_ended_and_suffix_ranges() {
         assert_eq!(
-            resolve_concrete_range(Some(RequestedRange { start: Some(100), end: None }), 1000),
+            resolve_concrete_range(
+                Some(RequestedRange {
+                    start: Some(100),
+                    end: None
+                }),
+                1000
+            ),
             (100, 999, true)
         );
         assert_eq!(
-            resolve_concrete_range(Some(RequestedRange { start: None, end: Some(50) }), 1000),
+            resolve_concrete_range(
+                Some(RequestedRange {
+                    start: None,
+                    end: Some(50)
+                }),
+                1000
+            ),
             (950, 999, true)
         );
         // Explicit end past EOF is clamped to the last byte.
         assert_eq!(
             resolve_concrete_range(
-                Some(RequestedRange { start: Some(10), end: Some(5000) }),
+                Some(RequestedRange {
+                    start: Some(10),
+                    end: Some(5000)
+                }),
                 1000
             ),
             (10, 999, true)

@@ -1,4 +1,3 @@
-
 use reqwest::StatusCode;
 use riven_core::events::ScrapeRequest;
 use riven_core::http::HttpClient;

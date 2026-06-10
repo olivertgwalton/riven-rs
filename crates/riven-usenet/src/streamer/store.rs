@@ -9,10 +9,7 @@ use sqlx::PgPool;
 
 use super::{NzbMeta, StreamerError};
 
-pub(super) async fn load(
-    db: &PgPool,
-    info_hash: &str,
-) -> Result<Option<NzbMeta>, StreamerError> {
+pub(super) async fn load(db: &PgPool, info_hash: &str) -> Result<Option<NzbMeta>, StreamerError> {
     let row: Option<(sqlx::types::Json<NzbMeta>,)> =
         sqlx::query_as("SELECT meta FROM usenet_meta WHERE info_hash = $1")
             .bind(info_hash)

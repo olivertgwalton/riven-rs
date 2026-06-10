@@ -50,16 +50,18 @@ impl Inner {
                 }
                 (true, false) => {
                     if let Some(tx) = self.high.pop_front()
-                        && tx.send(()).is_ok() {
-                            return;
-                        }
-                        // Receiver dropped — task was cancelled; try next.
+                        && tx.send(()).is_ok()
+                    {
+                        return;
+                    }
+                    // Receiver dropped — task was cancelled; try next.
                 }
                 (false, true) => {
                     if let Some(tx) = self.low.pop_front()
-                        && tx.send(()).is_ok() {
-                            return;
-                        }
+                        && tx.send(()).is_ok()
+                    {
+                        return;
+                    }
                 }
                 (true, true) => {
                     self.accumulated += HIGH_ODDS;
@@ -67,13 +69,15 @@ impl Inner {
                     if serve_high {
                         self.accumulated -= 100;
                         if let Some(tx) = self.high.pop_front()
-                            && tx.send(()).is_ok() {
-                                return;
-                            }
-                    } else if let Some(tx) = self.low.pop_front()
-                        && tx.send(()).is_ok() {
+                            && tx.send(()).is_ok()
+                        {
                             return;
                         }
+                    } else if let Some(tx) = self.low.pop_front()
+                        && tx.send(()).is_ok()
+                    {
+                        return;
+                    }
                     // Chosen sender's receiver was dropped; loop to retry.
                 }
             }

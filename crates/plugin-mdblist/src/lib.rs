@@ -156,9 +156,7 @@ async fn fetch_list_items(
             format!("{MDBLIST_BASE_URL}lists/{list_name}/items?apikey={api_key}&offset={offset}");
 
         let resp = http
-            .send_data(PROFILE, Some(url.clone()), |client| {
-                client.get(&url)
-            })
+            .send_data(PROFILE, Some(url.clone()), |client| client.get(&url))
             .await?;
         let has_more = resp
             .headers()

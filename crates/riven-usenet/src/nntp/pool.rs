@@ -246,10 +246,7 @@ impl NntpPool {
                     active_connections: active,
                     breaker_tripped: slot.breaker.is_tripped(),
                     cooldown_seconds_remaining: slot.breaker.cooldown_remaining_secs(),
-                    consecutive_failures: slot
-                        .breaker
-                        .consecutive_failures
-                        .load(Ordering::Relaxed),
+                    consecutive_failures: slot.breaker.consecutive_failures.load(Ordering::Relaxed),
                 }
             })
             .collect()
@@ -289,7 +286,8 @@ impl NntpPool {
             // Warm the DNS cache once (low concurrency) before fanning out the
             // concurrent dials below, so they all hit the cache instead of
             // hammering the resolver simultaneously.
-            super::connection::warm_dns(&slot.provider.config.host, slot.provider.config.port).await;
+            super::connection::warm_dns(&slot.provider.config.host, slot.provider.config.port)
+                .await;
             let target = (slot.provider.config.max_connections as usize).min(PREWARM_CAP);
             let mut handles = Vec::with_capacity(target);
             for _ in 0..target {

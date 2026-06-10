@@ -134,9 +134,9 @@ pub fn init_logging(
     let sentry_layer = sentry_guard
         .as_ref()
         .map(|_| sentry::integrations::tracing::layer());
-    let otel_layer = otel_provider.as_ref().map(|provider| {
-        tracing_opentelemetry::layer().with_tracer(provider.tracer("riven"))
-    });
+    let otel_layer = otel_provider
+        .as_ref()
+        .map(|provider| tracing_opentelemetry::layer().with_tracer(provider.tracer("riven")));
 
     tracing_subscriber::registry()
         .with(filter_layer)
@@ -161,7 +161,9 @@ pub fn init_logging(
 }
 
 fn init_sentry() -> Option<ClientInitGuard> {
-    let dsn = std::env::var("SENTRY_DSN").ok().filter(|v| !v.trim().is_empty())?;
+    let dsn = std::env::var("SENTRY_DSN")
+        .ok()
+        .filter(|v| !v.trim().is_empty())?;
     let environment = std::env::var("SENTRY_ENVIRONMENT").ok().map(Into::into);
     let guard = sentry::init((
         dsn,

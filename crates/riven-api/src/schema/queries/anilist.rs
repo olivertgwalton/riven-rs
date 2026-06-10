@@ -99,7 +99,8 @@ impl CoreAnilistQuery {
                         poster_path: item.cover_image.and_then(|image| image.large),
                         media_type: item.format.unwrap_or_else(|| "ANIME".to_string()),
                         year: item
-                            .season_year.map_or_else(|| "N/A".to_string(), |year| year.to_string()),
+                            .season_year
+                            .map_or_else(|| "N/A".to_string(), |year| year.to_string()),
                     })
                     .collect()
             })

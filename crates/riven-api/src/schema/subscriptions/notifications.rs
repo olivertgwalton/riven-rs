@@ -30,11 +30,16 @@ fn notification_from_json(v: &serde_json::Value) -> Option<RivenNotification> {
         title: s("title"),
         full_title: s("full_title"),
         item_type: s("item_type"),
-        year: v.get("year").and_then(serde_json::Value::as_i64).map(|x| x as i32),
+        year: v
+            .get("year")
+            .and_then(serde_json::Value::as_i64)
+            .map(|x| x as i32),
         imdb_id: s("imdb_id"),
         tmdb_id: s("tmdb_id"),
         tvdb_id: s("tvdb_id"),
-        duration_seconds: v.get("duration_seconds").and_then(serde_json::Value::as_f64),
+        duration_seconds: v
+            .get("duration_seconds")
+            .and_then(serde_json::Value::as_f64),
         id: v.get("id").and_then(serde_json::Value::as_i64),
         stream_count: v.get("stream_count").and_then(serde_json::Value::as_i64),
         count: v.get("count").and_then(serde_json::Value::as_i64),

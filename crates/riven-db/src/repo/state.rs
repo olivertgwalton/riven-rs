@@ -289,4 +289,3 @@ pub async fn unpause_items(pool: &PgPool, ids: &[i64]) -> Result<()> {
 pub async fn force_recompute(pool: &PgPool, ids: &[i64]) -> Result<()> {
     recompute(pool, ids).await
 }
-

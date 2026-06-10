@@ -108,14 +108,9 @@ impl Plugin for PlexPlugin {
                 .map(|(dir, _)| dir)
                 .unwrap_or(&entry.path);
 
-            let profile_keys =
-                LibraryProfileMembership::from_json(entry.library_profiles.as_ref());
-            let vfs_dirs = entry_vfs_dirs(
-                dir_path,
-                &library_path,
-                &profile_keys,
-                fs_settings.as_ref(),
-            );
+            let profile_keys = LibraryProfileMembership::from_json(entry.library_profiles.as_ref());
+            let vfs_dirs =
+                entry_vfs_dirs(dir_path, &library_path, &profile_keys, fs_settings.as_ref());
 
             for full_path in &vfs_dirs {
                 for section in &sections {
@@ -139,8 +134,8 @@ impl Plugin for PlexPlugin {
             return Ok(HookResponse::Empty);
         }
 
-        let results = futures::future::join_all(refresh_tasks.into_iter().map(
-            |(section_key, path)| {
+        let results =
+            futures::future::join_all(refresh_tasks.into_iter().map(|(section_key, path)| {
                 let http = ctx.http.clone();
                 let token = plex_token.to_string();
                 let url = plex_url.to_string();
@@ -148,9 +143,8 @@ impl Plugin for PlexPlugin {
                     let result = refresh_section(&http, &url, &token, &section_key, &path).await;
                     (section_key, path, result)
                 }
-            },
-        ))
-        .await;
+            }))
+            .await;
 
         for (section_key, path, result) in results {
             match result {
@@ -229,10 +223,7 @@ fn entry_vfs_dirs(
             if let Some(profile) = settings.library_profiles.get(key)
                 && profile.enabled
             {
-                paths.push(format!(
-                    "{base}{}{canonical_dir}",
-                    profile.library_path
-                ));
+                paths.push(format!("{base}{}{canonical_dir}", profile.library_path));
                 if profile.exclusive {
                     any_exclusive = true;
                 }

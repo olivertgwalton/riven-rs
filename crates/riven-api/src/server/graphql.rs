@@ -1,7 +1,5 @@
 use async_graphql::Data;
-use async_graphql::http::{
-    ALL_WEBSOCKET_PROTOCOLS, GraphiQLSource, is_accept_multipart_mixed,
-};
+use async_graphql::http::{ALL_WEBSOCKET_PROTOCOLS, GraphiQLSource, is_accept_multipart_mixed};
 use async_graphql_axum::{
     GraphQLBatchRequest, GraphQLProtocol, GraphQLRequest, GraphQLResponse, GraphQLWebSocket,
     rejection::GraphQLRejection,
@@ -46,8 +44,7 @@ pub(super) async fn graphql_handler(
         };
         let stream = state.schema.execute_stream(req.into_inner().data(auth));
         let body = Body::from_stream(
-            apollo_multipart_stream(stream, Duration::from_secs(30))
-                .map(Ok::<_, std::io::Error>),
+            apollo_multipart_stream(stream, Duration::from_secs(30)).map(Ok::<_, std::io::Error>),
         );
 
         return Response::builder()

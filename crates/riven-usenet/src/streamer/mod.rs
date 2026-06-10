@@ -164,7 +164,9 @@ impl UsenetStreamer {
         }
 
         let arc = Arc::new(meta);
-        self.state.meta_cache.put(info_hash.to_string(), arc.clone());
+        self.state
+            .meta_cache
+            .put(info_hash.to_string(), arc.clone());
         self.maybe_kick_backfill(&arc);
         Ok(arc)
     }
@@ -278,7 +280,11 @@ impl UsenetStreamer {
             return Ok(());
         }
 
-        let concurrency = self.pool.ingest_concurrency().max(PREFETCH_FLOOR).min(total);
+        let concurrency = self
+            .pool
+            .ingest_concurrency()
+            .max(PREFETCH_FLOOR)
+            .min(total);
         let pool = self.pool.clone();
         let mut probes = stream::iter(message_ids)
             .map(move |mid| {

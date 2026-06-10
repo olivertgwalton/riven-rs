@@ -53,9 +53,7 @@ impl UsenetStreamer {
             let slice_plain_lo = req_v_lo - slice_start;
             let slice_plain_hi = req_v_hi - slice_start;
 
-            let part = parts
-                .get(slice.part_index)
-                .ok_or(StreamerError::BadRange)?;
+            let part = parts.get(slice.part_index).ok_or(StreamerError::BadRange)?;
 
             let bytes = match &slice.encryption {
                 None => {
@@ -66,8 +64,16 @@ impl UsenetStreamer {
                 }
                 Some(enc) => {
                     let pw = password.ok_or(StreamerError::MissingPassword)?;
-                    self.read_encrypted_slice(part, slice, enc, pw, slice_plain_lo, slice_plain_hi, priority)
-                        .await?
+                    self.read_encrypted_slice(
+                        part,
+                        slice,
+                        enc,
+                        pw,
+                        slice_plain_lo,
+                        slice_plain_hi,
+                        priority,
+                    )
+                    .await?
                 }
             };
             if !bytes.is_empty() {
@@ -150,8 +156,14 @@ impl UsenetStreamer {
     ) -> Result<Bytes, StreamerError> {
         match part.decoded_seg_size {
             Some(seg_size) if seg_size > 0 => {
-                self.read_decoded_range_uniform(part, seg_size, dec_start, dec_end_inclusive, priority)
-                    .await
+                self.read_decoded_range_uniform(
+                    part,
+                    seg_size,
+                    dec_start,
+                    dec_end_inclusive,
+                    priority,
+                )
+                .await
             }
             _ => {
                 self.read_decoded_range_walk(part, dec_start, dec_end_inclusive, priority)
@@ -192,8 +204,16 @@ impl UsenetStreamer {
         let last_hint = ((dec_end_inclusive / seg_size) as usize).min(total_segs - 1);
         let batch_last = (last_hint + 2).min(total_segs - 1);
 
-        self.assemble_decoded_forward(part, dec_start, dec_end_inclusive, first_seg, batch_last, skip, priority)
-            .await
+        self.assemble_decoded_forward(
+            part,
+            dec_start,
+            dec_end_inclusive,
+            first_seg,
+            batch_last,
+            skip,
+            priority,
+        )
+        .await
     }
 
     /// Slow fallback: no uniform size known. Advance past leading segments
@@ -229,8 +249,16 @@ impl UsenetStreamer {
         let read_concurrency = self.pool.download_concurrency().max(PREFETCH_FLOOR);
         let batch_last = (first_seg + read_concurrency - 1).min(total_segs - 1);
 
-        self.assemble_decoded_forward(part, dec_start, dec_end_inclusive, first_seg, batch_last, skip, priority)
-            .await
+        self.assemble_decoded_forward(
+            part,
+            dec_start,
+            dec_end_inclusive,
+            first_seg,
+            batch_last,
+            skip,
+            priority,
+        )
+        .await
     }
 
     /// Assemble `[dec_start, dec_end_inclusive]` by fetching a part's segments
@@ -276,7 +304,10 @@ impl UsenetStreamer {
             let mut stream = stream::iter(batch_start..=batch_last)
                 .map(move |i| {
                     let s = streamer.clone();
-                    async move { s.fetch_decoded_cached(&segments[i].message_id, priority).await }
+                    async move {
+                        s.fetch_decoded_cached(&segments[i].message_id, priority)
+                            .await
+                    }
                 })
                 .buffered(read_concurrency);
 
@@ -311,4 +342,3 @@ impl UsenetStreamer {
         Ok(concat_slices(slices, dec_start, dec_end_inclusive))
     }
 }
-

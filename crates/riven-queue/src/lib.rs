@@ -267,7 +267,10 @@ impl JobQueue {
     pub async fn fan_out_plugin_hook(&self, event: RivenEvent, scope: i64) -> usize {
         let event_type = event.event_type();
         let DispatchStrategy::FanIn { prefix } = event_type.dispatch_strategy() else {
-            tracing::error!(?event_type, "fan_out_plugin_hook called for non-FanIn event");
+            tracing::error!(
+                ?event_type,
+                "fan_out_plugin_hook called for non-FanIn event"
+            );
             return 0;
         };
         let subscribers = self.registry.subscriber_names(event_type).await;
@@ -288,12 +291,7 @@ impl JobQueue {
     /// the event to that single plugin and — for fan-in events — stores the
     /// response under the `scope` flow keys, then triggers finalize / signals
     /// the awaiting caller when the last sibling completes.
-    pub async fn push_plugin_hook(
-        &self,
-        plugin_name: &str,
-        event: RivenEvent,
-        scope: Option<i64>,
-    ) {
+    pub async fn push_plugin_hook(&self, plugin_name: &str, event: RivenEvent, scope: Option<i64>) {
         let event_type = event.event_type();
         let key = (plugin_name.to_string(), event_type);
         let Some(storage) = self.plugin_hook_storages.get(&key) else {
@@ -785,7 +783,6 @@ impl JobQueue {
             .query_async(&mut conn)
             .await;
     }
-
 
     // ── Queue cancellation ────────────────────────────────────────────────────
 

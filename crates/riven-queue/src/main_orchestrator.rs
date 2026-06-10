@@ -45,16 +45,24 @@ impl MainOrchestrator {
                 requested_seasons,
                 ..
             } => {
-                self.process_item_request(*item_id, repo::ItemRequestUpsertAction::Created,
-                    requested_seasons.as_deref()).await;
+                self.process_item_request(
+                    *item_id,
+                    repo::ItemRequestUpsertAction::Created,
+                    requested_seasons.as_deref(),
+                )
+                .await;
             }
             RivenEvent::ItemRequestUpdated {
                 item_id,
                 requested_seasons,
                 ..
             } => {
-                self.process_item_request(*item_id, repo::ItemRequestUpsertAction::Updated,
-                    requested_seasons.as_deref()).await;
+                self.process_item_request(
+                    *item_id,
+                    repo::ItemRequestUpsertAction::Updated,
+                    requested_seasons.as_deref(),
+                )
+                .await;
             }
 
             // ── Index ────────────────────────────────────────────────────────
@@ -192,15 +200,14 @@ impl MainOrchestrator {
         }
         match item.item_type {
             MediaItemType::Show => {
-                let seasons = repo::get_all_requested_seasons_for_show(&self.queue.db_pool, item.id)
-                    .await
-                    .unwrap_or_default();
+                let seasons =
+                    repo::get_all_requested_seasons_for_show(&self.queue.db_pool, item.id)
+                        .await
+                        .unwrap_or_default();
                 for season in seasons {
                     if matches!(
                         season.state,
-                        MediaItemState::Completed
-                            | MediaItemState::Failed
-                            | MediaItemState::Paused
+                        MediaItemState::Completed | MediaItemState::Failed | MediaItemState::Paused
                     ) {
                         continue;
                     }
@@ -302,7 +309,10 @@ impl MainOrchestrator {
         if ids.is_empty() {
             return;
         }
-        tracing::info!(count = ids.len(), "transitioned unreleased items that have aired");
+        tracing::info!(
+            count = ids.len(),
+            "transitioned unreleased items that have aired"
+        );
         for id in ids {
             if let Some(item) = self.load_item(id).await {
                 self.process_media_item(&item).await;

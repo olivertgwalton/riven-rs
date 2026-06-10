@@ -1,7 +1,6 @@
 //! Background article-availability re-verification.
 //!
 
-
 use std::time::Duration;
 
 use anyhow::Result;
@@ -149,7 +148,13 @@ async fn run_once(
         let healthy = miss_rate < FAILURE_THRESHOLD;
 
         if healthy {
-            set_state(&mut redis, &key, &HcState { failures: 0 }, PER_ENTRY_INTERVAL).await;
+            set_state(
+                &mut redis,
+                &key,
+                &HcState { failures: 0 },
+                PER_ENTRY_INTERVAL,
+            )
+            .await;
             continue;
         }
 
@@ -259,7 +264,10 @@ async fn stat_sample(pool: &NntpPool, segments: &[NzbSegment]) -> (usize, usize)
     let mut total = 0usize;
     for seg in segments {
         total += 1;
-        match pool.stat(&seg.message_id, riven_usenet::nntp::Priority::Low).await {
+        match pool
+            .stat(&seg.message_id, riven_usenet::nntp::Priority::Low)
+            .await
+        {
             Ok(true) => alive += 1,
             Ok(false) => {}
             Err(error) => {

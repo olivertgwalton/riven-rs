@@ -12,14 +12,13 @@ use async_trait::async_trait;
 use lru::LruCache;
 use redis::AsyncCommands;
 use riven_core::events::{EventType, HookResponse};
-use riven_core::types::StreamLinkResponse;
 use riven_core::http::HttpServiceProfile;
 use riven_core::plugin::{Plugin, PluginContext, SettingField};
 use riven_core::register_plugin;
 use riven_core::settings::PluginSettings;
+use riven_core::types::StreamLinkResponse;
 use riven_core::types::{
-    CacheCheckResult, CachedStoreEntry, DownloadFile, DownloadResult, ProviderInfo,
-    TorrentStatus,
+    CacheCheckResult, CachedStoreEntry, DownloadFile, DownloadResult, ProviderInfo, TorrentStatus,
 };
 use riven_usenet::nntp::{NntpProvider, NntpServerConfig};
 use riven_usenet::{NntpConfig, UsenetStreamer};
@@ -211,11 +210,10 @@ impl Plugin for UsenetPlugin {
                              Typical block-account or fill-provider setup.",
                         ),
                 ]),
-            SettingField::new("archivepassword", "Archive Password", "password")
-                .with_description(
-                    "Password for encrypted RAR archives. Applied to every encrypted \
+            SettingField::new("archivepassword", "Archive Password", "password").with_description(
+                "Password for encrypted RAR archives. Applied to every encrypted \
                      archive encountered. Leave blank if your releases are not encrypted.",
-                ),
+            ),
             SettingField::new(
                 "healthcheckmaxfailures",
                 "Consecutive Failures Before Delete",
@@ -483,7 +481,6 @@ impl Plugin for UsenetPlugin {
             store: PROVIDER.to_string(),
         }]))
     }
-
 }
 
 async fn nzb_url_for_hash(info_hash: &str, ctx: &PluginContext) -> Option<String> {
@@ -501,7 +498,9 @@ async fn fetch_nzb_xml(info_hash: &str, ctx: &PluginContext) -> Option<Arc<Strin
     let nzb_url = nzb_url_for_hash(info_hash, ctx).await?;
     let resp = ctx
         .http
-        .send_data(PROFILE, Some(nzb_url.clone()), |client| client.get(&nzb_url))
+        .send_data(PROFILE, Some(nzb_url.clone()), |client| {
+            client.get(&nzb_url)
+        })
         .await
         .ok()?;
     if !resp.status().is_success() {

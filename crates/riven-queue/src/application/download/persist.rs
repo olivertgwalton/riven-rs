@@ -18,7 +18,8 @@ fn is_item_deleted_fk_error(err: &anyhow::Error) -> bool {
 
 use super::helpers::{
     episode_vfs_path, handle_bitrate_failure, is_video_file, looks_obfuscated,
-    matches_episode_lookup, parse_file_path, select_episode_files, stream_resolution,
+    matches_episode_lookup, parse_file_path, select_episode_files, stream_raw_title,
+    stream_resolution,
 };
 use crate::JobQueue;
 
@@ -225,6 +226,7 @@ pub async fn persist_episode(
     queue: &JobQueue,
     hierarchy: &crate::context::DownloadHierarchyContext,
     stream_id: Option<i64>,
+    raw_title: &str,
     resolution: Option<&str>,
     path_tag: Option<&str>,
     profile_name: Option<&str>,
@@ -273,6 +275,34 @@ pub async fn persist_episode(
         })
         .map(|(f, p)| (*f, p.clone()))
         .collect();
+
+    // Event fallback for sports-style episodes: the release names the event
+    // (venue/session/date) rather than SxxExx, so verify it identifies THIS
+    // episode. Obfuscated inner names defer to the indexer release title.
+    if matched.is_empty() && super::event_match::parse_episode_event(&item.title).is_some() {
+        let single_playable = playable_videos.len() == 1;
+        for (file, parsed) in &playable_videos {
+            let candidate = if looks_obfuscated(&file.filename) {
+                if single_playable && !raw_title.is_empty() {
+                    raw_title
+                } else {
+                    continue;
+                }
+            } else {
+                file.filename.as_str()
+            };
+            if super::event_match::release_matches_episode(candidate, &item.title, item.aired_at) {
+                tracing::info!(
+                    id, season = season_number, episode = episode_number,
+                    info_hash = %info_hash,
+                    episode_title = %item.title,
+                    candidate = %candidate,
+                    "event-matched release to episode"
+                );
+                matched.push((*file, parsed.clone()));
+            }
+        }
+    }
 
     // Obfuscated-NZB fallback: when no inner filename parses to S/E but the
     // payload is a single video file with a random/hash name, trust the stream
@@ -375,6 +405,7 @@ pub async fn persist_season(
     hierarchy: &crate::context::DownloadHierarchyContext,
     start_time: Instant,
     stream_id: Option<i64>,
+    raw_title: &str,
     path_tag: Option<&str>,
     profile_name: Option<&str>,
 ) -> SeasonPersistOutcome {
@@ -472,6 +503,49 @@ pub async fn persist_season(
         episode_matches.push((ep, matched));
     }
 
+    // Event-based fallback for sports-style seasons (F1 and friends): the
+    // releases are named by venue/session/date with no SxxExx anywhere, so the
+    // normal lookup leaves every episode unmatched. Map each still-unmatched
+    // playable file onto an episode through its event identity. Obfuscated
+    // single-file payloads are matched via the indexer release title — for
+    // multi-file packs an obfuscated name identifies nothing, so those are
+    // left to the 1:1 sort-order fallback below.
+    let events = super::event_match::episode_events(&episodes);
+    if !events.is_empty() {
+        let single_playable = parsed_video_files.len() == 1;
+        let already_matched: std::collections::HashSet<&str> = episode_matches
+            .iter()
+            .flat_map(|(_, m)| m.iter().map(|(f, _)| f.filename.as_str()))
+            .collect();
+        for (file, parsed) in &parsed_video_files {
+            if already_matched.contains(file.filename.as_str()) {
+                continue;
+            }
+            let candidate = if looks_obfuscated(&file.filename) {
+                if single_playable && !raw_title.is_empty() {
+                    raw_title
+                } else {
+                    continue;
+                }
+            } else {
+                file.filename.as_str()
+            };
+            if let Some(idx) = super::event_match::match_release_to_episode(candidate, &events) {
+                let ep_id = episodes[idx].id;
+                tracing::info!(
+                    id, season = season_number, info_hash = %info_hash,
+                    episode = episodes[idx].episode_number,
+                    episode_title = %episodes[idx].title,
+                    candidate = %candidate,
+                    "event-matched release to episode"
+                );
+                if let Some((_, m)) = episode_matches.iter_mut().find(|(ep, _)| ep.id == ep_id) {
+                    m.push((*file, parsed.clone()));
+                }
+            }
+        }
+    }
+
     // Obfuscated-season-pack fallback: when no inner filename parses to a
     // recognisable S/E *and* the pack is exactly the right shape (one playable
     // video file per episode, all obfuscated), assign files to episodes in
@@ -500,11 +574,12 @@ pub async fn persist_season(
         let mut episodes_sorted = episodes.iter().collect::<Vec<_>>();
         episodes_sorted.sort_by_key(|e| e.episode_number.unwrap_or(0));
         for (idx, ep) in episodes_sorted.iter().enumerate() {
-            by_ep.push((*ep, vec![(ordered[idx].0, riven_rank::ParsedData::default())]));
+            by_ep.push((
+                *ep,
+                vec![(ordered[idx].0, riven_rank::ParsedData::default())],
+            ));
         }
-        let example = ordered
-            .first()
-            .map_or("", |(f, _)| f.filename.as_str());
+        let example = ordered.first().map_or("", |(f, _)| f.filename.as_str());
         tracing::info!(
             id, season = season_number, info_hash = %info_hash,
             file_count = parsed_video_files.len(),
@@ -716,7 +791,10 @@ pub async fn persist_show(
                     Ok(_) => completed_episode_ids.push(ep.id),
                     Err(e) => {
                         if is_item_deleted_fk_error(&e) {
-                            tracing::info!(ep_id = ep.id, "episode was deleted mid-persist, skipping");
+                            tracing::info!(
+                                ep_id = ep.id,
+                                "episode was deleted mid-persist, skipping"
+                            );
                         } else {
                             tracing::error!(error = %e, ep_id = ep.id, "failed to create media entry for episode");
                         }
@@ -817,6 +895,7 @@ pub async fn persist_supplied_download(
                 queue,
                 &hierarchy,
                 Some(stream.id),
+                stream_raw_title(stream),
                 Some(stream_resolution(stream)),
                 None,
                 None,
@@ -847,6 +926,7 @@ pub async fn persist_supplied_download(
                 &hierarchy,
                 start_time,
                 Some(stream.id),
+                stream_raw_title(stream),
                 None,
                 None,
             )

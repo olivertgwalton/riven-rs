@@ -243,7 +243,9 @@ pub async fn create_episode(
     let now = Utc::now();
     let default_title = format!("Episode {number:02}");
     let title_str = title.unwrap_or(&default_title);
-    let state = match aired_at_utc.or_else(|| aired_at.map(|d| d.and_hms_opt(0, 0, 0).expect("midnight is valid").and_utc())) {
+    let state = match aired_at_utc
+        .or_else(|| aired_at.map(|d| d.and_hms_opt(0, 0, 0).expect("midnight is valid").and_utc()))
+    {
         Some(dt) if dt > now => MediaItemState::Unreleased,
         _ => MediaItemState::Indexed,
     };

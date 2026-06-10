@@ -311,7 +311,10 @@ fn map_tmdb_page(data: serde_json::Value, media_type: &str) -> TmdbPage {
 
     TmdbPage {
         results,
-        page: data.get("page").and_then(serde_json::Value::as_i64).unwrap_or(1),
+        page: data
+            .get("page")
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or(1),
         total_pages: data
             .get("total_pages")
             .and_then(serde_json::Value::as_i64)

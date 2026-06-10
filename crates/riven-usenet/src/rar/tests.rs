@@ -1,6 +1,6 @@
-use super::*;
 use super::v4::{FILE_HEAD, FLAG_LONG_BLOCK, MAIN_HEAD};
-use super::v5::{RAR5_HEAD_FLAG_DATA};
+use super::v5::RAR5_HEAD_FLAG_DATA;
+use super::*;
 
 /// Build a minimal RAR4 byte stream:
 ///   MARK + MAIN + FILE("contained.mkv", method=store, pack=N, unp=N) + N data bytes
@@ -10,8 +10,7 @@ fn make_single_volume(name: &str, data: &[u8]) -> Vec<u8> {
 
     let main = [
         0x00, 0x00, // CRC
-        MAIN_HEAD,
-        0x00, 0x00, // FLAGS (no volume)
+        MAIN_HEAD, 0x00, 0x00, // FLAGS (no volume)
         0x0D, 0x00, // HEAD_SIZE = 13
         0x00, 0x00, // HighPosAv
         0x00, 0x00, 0x00, 0x00, // PosAv

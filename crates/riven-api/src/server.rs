@@ -8,8 +8,8 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use axum::{Router, routing::get, routing::post};
-use riven_core::logging::LogControl;
 use riven_core::http::HttpClient;
+use riven_core::logging::LogControl;
 use riven_core::plugin::PluginRegistry;
 use riven_core::stream_link::LinkRequest;
 use riven_queue::JobQueue;

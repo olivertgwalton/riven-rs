@@ -5,7 +5,10 @@ use redis::AsyncCommands;
 use reqwest::StatusCode;
 use riven_core::events::{EventType, HookResponse, ScrapeRequest};
 use riven_core::http::{HttpServiceProfile, RateLimitedError};
-use riven_core::nzb::{NZB_URL_TTL_SECS, NewznabItem, nzb_info_hash, nzb_url_redis_key, parse_newznab_xml};
+use riven_core::nzb::{
+    NZB_URL_TTL_SECS, NewznabItem, newznab_text_query, nzb_info_hash, nzb_url_redis_key,
+    parse_newznab_xml,
+};
 use riven_core::plugin::{Plugin, PluginContext, SettingField};
 use riven_core::register_plugin;
 use riven_core::settings::PluginSettings;
@@ -77,7 +80,12 @@ fn parse_indexers_str(raw: &str) -> Option<Vec<Indexer>> {
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
                 .unwrap_or_else(|| "2000,5000".to_string());
-            Some(Indexer { name, url, apikey, categories })
+            Some(Indexer {
+                name,
+                url,
+                apikey,
+                categories,
+            })
         })
         .collect();
     (!indexers.is_empty()).then_some(indexers)
@@ -86,9 +94,7 @@ fn parse_indexers_str(raw: &str) -> Option<Vec<Indexer>> {
 /// Build the (search_type, query_params) tuple for one scrape request. The
 /// returned params have NO indexer-specific bits (apikey, cat) so the same
 /// base can be reused across every indexer in the fan-out.
-fn build_query(
-    request: &ScrapeRequest<'_>,
-) -> Option<(&'static str, Vec<(&'static str, String)>)> {
+fn build_query(request: &ScrapeRequest<'_>) -> Option<(&'static str, Vec<(&'static str, String)>)> {
     let imdb_numeric = request.imdb_id.map(|s| s.trim_start_matches("tt"));
 
     // For TV searches prefer `tvdbid` — NZBGeek and most public newznab
@@ -207,9 +213,7 @@ async fn scrape_one(
         if status == StatusCode::TOO_MANY_REQUESTS {
             return ScrapeOutcome::RateLimited(snippet);
         }
-        return ScrapeOutcome::Failed(anyhow::anyhow!(
-            "newznab returned HTTP {status}: {snippet}"
-        ));
+        return ScrapeOutcome::Failed(anyhow::anyhow!("newznab returned HTTP {status}: {snippet}"));
     }
     let body = resp.text().unwrap_or_default();
     let items = parse_newznab_xml(&body);
@@ -292,8 +296,14 @@ impl Plugin for NewznabPlugin {
         if indexers.is_empty() {
             return Ok(HookResponse::Empty);
         }
-        let Some((search_type, base_params)) = build_query(request) else {
-            return Ok(HookResponse::Empty);
+        // ID-based search is preferred. The text (`q=`) query is the primary
+        // when the item has no usable IDs, and a per-indexer fallback when an
+        // indexer returns zero items for the IDs — sports/yearly content is
+        // frequently not ID-mapped on indexers and only reachable by title.
+        let text_query = newznab_text_query(request);
+        let ((search_type, base_params), fallback_query) = match build_query(request) {
+            Some(id_query) => (id_query, Some(text_query)),
+            None => (text_query, None),
         };
 
         // Fire every indexer in parallel. One indexer's failure (auth,
@@ -305,9 +315,22 @@ impl Plugin for NewznabPlugin {
         let http = &ctx.http;
         let scrape_futures = indexers.iter().map(|indexer| {
             let base_params = base_params.clone();
+            let fallback_query = fallback_query.clone();
             async move {
-                let result =
+                let mut result =
                     scrape_one(indexer, request, search_type, &base_params, http).await;
+                if let Some((fb_type, fb_params)) = &fallback_query
+                    && matches!(&result, ScrapeOutcome::Ok(items) if items.is_empty())
+                {
+                    tracing::debug!(
+                        indexer = %indexer.name,
+                        imdb_id = request.imdb_id,
+                        tvdb_id = request.tvdb_id,
+                        q = %fb_params.first().map(|(_, v)| v.as_str()).unwrap_or_default(),
+                        "ID search returned no items; retrying with text query",
+                    );
+                    result = scrape_one(indexer, request, fb_type, fb_params, http).await;
+                }
                 (indexer, result)
             }
         });
@@ -339,7 +362,11 @@ impl Plugin for NewznabPlugin {
                         // `info_hash` + opaque `magnet`; this sidecar
                         // bridges the indexer → downloader handoff.
                         let _result: Result<(), _> = redis_conn
-                            .set_ex(nzb_url_redis_key(&info_hash), &item.nzb_url, NZB_URL_TTL_SECS)
+                            .set_ex(
+                                nzb_url_redis_key(&info_hash),
+                                &item.nzb_url,
+                                NZB_URL_TTL_SECS,
+                            )
                             .await;
 
                         let mut entry = ScrapeEntry::new(item.title);

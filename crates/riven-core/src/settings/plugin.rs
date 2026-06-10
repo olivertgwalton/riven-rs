@@ -90,8 +90,12 @@ impl PluginSettings {
         for (key, value) in obj {
             let normalized = normalize_key(key);
             match setting_value_to_string(value) {
-                Some(v) => { self.values.insert(normalized, v); }
-                None => { self.values.remove(&normalized); }
+                Some(v) => {
+                    self.values.insert(normalized, v);
+                }
+                None => {
+                    self.values.remove(&normalized);
+                }
             }
         }
     }

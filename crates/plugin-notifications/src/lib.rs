@@ -56,9 +56,10 @@ impl Plugin for NotificationsPlugin {
             SettingField::new("detailed", "Detailed Embeds", "boolean").with_description(
                 "Show rich Discord embeds with overview, rating, and external links.",
             ),
-            SettingField::new("tmdb_api_key", "TMDB API Read Access Token", "password").with_description(
-                "Optional. Required for overview text in detailed Discord embeds.",
-            ),
+            SettingField::new("tmdb_api_key", "TMDB API Read Access Token", "password")
+                .with_description(
+                    "Optional. Required for overview text in detailed Discord embeds.",
+                ),
         ]
     }
 
@@ -74,7 +75,8 @@ impl Plugin for NotificationsPlugin {
             event: "riven.media-item.download.success".to_string(),
             title: info.title.to_string(),
             full_title: info
-                .full_title.map_or_else(|| info.title.to_string(), str::to_string),
+                .full_title
+                .map_or_else(|| info.title.to_string(), str::to_string),
             item_type: info.item_type,
             year: info.year,
             imdb_id: info.imdb_id.map(str::to_string),
@@ -283,9 +285,10 @@ fn parse_notification_url(url: &str) -> Option<NotificationService> {
             url: format!("http://{rest}"),
         })
     } else {
-        url.strip_prefix("jsons://").map(|rest| NotificationService::Json {
-            url: format!("https://{rest}"),
-        })
+        url.strip_prefix("jsons://")
+            .map(|rest| NotificationService::Json {
+                url: format!("https://{rest}"),
+            })
     }
 }
 

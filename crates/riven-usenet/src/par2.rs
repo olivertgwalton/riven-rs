@@ -175,10 +175,7 @@ mod tests {
 
     #[test]
     fn rejects_empty_input() {
-        assert!(matches!(
-            parse_file_descriptors(&[]),
-            Err(Par2Error::Empty)
-        ));
+        assert!(matches!(parse_file_descriptors(&[]), Err(Par2Error::Empty)));
     }
 
     #[test]

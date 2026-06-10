@@ -173,13 +173,18 @@ fn matches_token_filter(values: &[&str], filters: &[String]) -> bool {
             continue;
         }
         if let Some(exclusion) = filter.strip_prefix('!') {
-            if values.iter().any(|value| value.eq_ignore_ascii_case(exclusion)) {
+            if values
+                .iter()
+                .any(|value| value.eq_ignore_ascii_case(exclusion))
+            {
                 return false;
             }
         } else {
             any_inclusion = true;
             if !inclusion_hit
-                && values.iter().any(|value| value.eq_ignore_ascii_case(filter))
+                && values
+                    .iter()
+                    .any(|value| value.eq_ignore_ascii_case(filter))
             {
                 inclusion_hit = true;
             }

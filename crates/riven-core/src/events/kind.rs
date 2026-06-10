@@ -88,14 +88,18 @@ impl EventType {
             Self::MediaItemIndexRequested => "riven.media-item.index.requested",
             Self::MediaItemIndexSuccess => "riven.media-item.index.success",
             Self::MediaItemIndexError => "riven.media-item.index.error",
-            Self::MediaItemIndexErrorIncorrectState => "riven.media-item.index.error.incorrect-state",
+            Self::MediaItemIndexErrorIncorrectState => {
+                "riven.media-item.index.error.incorrect-state"
+            }
             Self::MediaItemScrapeRequested => "riven.media-item.scrape.requested",
             Self::MediaItemScrapeSuccess => "riven.media-item.scrape.success",
             Self::MediaItemScrapeError => "riven.media-item.scrape.error",
             Self::MediaItemScrapeErrorIncorrectState => {
                 "riven.media-item.scrape.error.incorrect-state"
             }
-            Self::MediaItemScrapeErrorNoNewStreams => "riven.media-item.scrape.error.no-new-streams",
+            Self::MediaItemScrapeErrorNoNewStreams => {
+                "riven.media-item.scrape.error.no-new-streams"
+            }
             Self::MediaItemDownloadRequested => "riven.media-item.download.requested",
             Self::MediaItemDownloadCacheCheckRequested => {
                 "riven.media-item.download.cache-check-requested"
@@ -180,5 +184,4 @@ impl EventType {
             | Self::MediaItemsDeleted => Broadcast,
         }
     }
-
 }

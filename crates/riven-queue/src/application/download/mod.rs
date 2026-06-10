@@ -1,4 +1,5 @@
 mod candidates;
+pub(crate) mod event_match;
 mod execute;
 pub(crate) mod helpers;
 pub(crate) mod persist;
@@ -249,8 +250,7 @@ pub async fn run(id: i64, job: &DownloadJob, queue: &JobQueue) {
         _ => None,
     };
 
-    let active_profiles: Vec<(String, RankSettings)> =
-        load_active_profiles(&queue.db_pool).await;
+    let active_profiles: Vec<(String, RankSettings)> = load_active_profiles(&queue.db_pool).await;
 
     let ranks = queue.resolution_ranks.read().await.clone();
     let all_streams = match repo::get_non_blacklisted_streams(&queue.db_pool, id, &ranks).await {
@@ -283,9 +283,7 @@ pub async fn run(id: i64, job: &DownloadJob, queue: &JobQueue) {
     // Cache memo keyed on (plugin, provider) so each cache check fires at
     // most once per item flow.
     let plugin_providers = build_plugin_provider_iterations(queue).await;
-    let mut cache = CacheMemo::new(
-        all_streams.iter().map(|s| s.info_hash.clone()).collect(),
-    );
+    let mut cache = CacheMemo::new(all_streams.iter().map(|s| s.info_hash.clone()).collect());
 
     if let Some(preferred_info_hash) = job.preferred_info_hash.as_ref() {
         let _ = run_preferred_stream(
@@ -374,7 +372,9 @@ impl CacheMemo {
     ) -> Option<Vec<CacheCheckFile>> {
         let key = (plugin_name.to_string(), provider.map(str::to_string));
         if !self.results.contains_key(&key) {
-            let map = fetch_provider_cache(queue, plugin_name, provider, &self.hashes, attempt_unknown).await;
+            let map =
+                fetch_provider_cache(queue, plugin_name, provider, &self.hashes, attempt_unknown)
+                    .await;
             self.results.insert(key.clone(), map);
         }
         let map = self.results.get(&key)?;
@@ -400,10 +400,7 @@ async fn fetch_provider_cache(
         hashes: hashes.to_vec(),
         provider: provider.map(str::to_string),
     };
-    let response = queue
-        .registry
-        .dispatch_to_plugin(plugin_name, &event)
-        .await;
+    let response = queue.registry.dispatch_to_plugin(plugin_name, &event).await;
     let mut out: HashMap<String, Vec<CacheCheckFile>> = HashMap::new();
     match response {
         Some(Ok(HookResponse::CacheCheck(results))) => {
@@ -507,14 +504,24 @@ async fn run_preferred_stream(
         return false;
     };
 
-    let attempt_unknown = queue.downloader_config.read().await.attempt_unknown_downloads;
+    let attempt_unknown = queue
+        .downloader_config
+        .read()
+        .await
+        .attempt_unknown_downloads;
 
     // The user explicitly picked this stream from the scrape UI, so we trust
     // its earlier "cached" verdict and let attempt_download fall back to a
     // direct add when no provider currently reports it cached.
     for (plugin, provider) in plugin_providers {
         let cached_files = cache
-            .lookup(queue, plugin, provider.as_deref(), &stream.info_hash, attempt_unknown)
+            .lookup(
+                queue,
+                plugin,
+                provider.as_deref(),
+                &stream.info_hash,
+                attempt_unknown,
+            )
             .await;
         let stores = stores_for_attempt(provider, cached_files);
 
@@ -563,7 +570,11 @@ async fn run_downloads(
     // (info_hash, plugin, provider) — we only skip exact retries; the same
     // hash can still be tried on a different provider that might have it.
     let mut attempted: HashSet<(String, String, Option<String>)> = HashSet::new();
-    let attempt_unknown = queue.downloader_config.read().await.attempt_unknown_downloads;
+    let attempt_unknown = queue
+        .downloader_config
+        .read()
+        .await
+        .attempt_unknown_downloads;
 
     for (profile_name, profile_settings) in profiles {
         if done_profiles.contains(profile_name.as_str()) {
@@ -577,11 +588,7 @@ async fn run_downloads(
 
         let ranked = rank_streams_for_profile(streams, item, profile_settings);
         if ranked.is_empty() {
-            tracing::debug!(
-                id,
-                profile = profile_name,
-                "no stream found for profile"
-            );
+            tracing::debug!(id, profile = profile_name, "no stream found for profile");
             continue;
         }
 
@@ -613,17 +620,19 @@ async fn run_downloads(
             }
 
             for (plugin, provider) in plugin_providers {
-                let key = (
-                    stream.info_hash.clone(),
-                    plugin.clone(),
-                    provider.clone(),
-                );
+                let key = (stream.info_hash.clone(), plugin.clone(), provider.clone());
                 if attempted.contains(&key) {
                     continue;
                 }
 
                 let cached_files = cache
-                    .lookup(queue, plugin, provider.as_deref(), &stream.info_hash, attempt_unknown)
+                    .lookup(
+                        queue,
+                        plugin,
+                        provider.as_deref(),
+                        &stream.info_hash,
+                        attempt_unknown,
+                    )
                     .await;
 
                 let is_cached = cached_files.is_some();

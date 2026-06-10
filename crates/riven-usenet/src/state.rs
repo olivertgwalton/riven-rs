@@ -156,7 +156,8 @@ impl FetchMetrics {
     }
 
     pub fn bytes_decoded(&self) -> u64 {
-        self.bytes_decoded.load(std::sync::atomic::Ordering::Relaxed)
+        self.bytes_decoded
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 
@@ -266,7 +267,8 @@ fn estimate_meta_bytes(meta: &crate::streamer::NzbMeta) -> u64 {
                         bytes += (seg + s.message_id.len()) as u64;
                     }
                 }
-                bytes += (slices.len() * std::mem::size_of::<crate::streamer::NzbRarSlice>()) as u64;
+                bytes +=
+                    (slices.len() * std::mem::size_of::<crate::streamer::NzbRarSlice>()) as u64;
             }
         }
     }
@@ -377,7 +379,10 @@ impl InFlight {
 
     /// Segments currently being fetched + decoded (de-dup in flight).
     /// Telemetry-only; no `is_empty` companion is needed.
-    #[expect(clippy::len_without_is_empty, reason = "telemetry-only counter; emptiness is never queried")]
+    #[expect(
+        clippy::len_without_is_empty,
+        reason = "telemetry-only counter; emptiness is never queried"
+    )]
     pub fn len(&self) -> usize {
         self.inner.lock().len()
     }
@@ -402,7 +407,10 @@ impl PermanentFails {
 
     /// Segments known to be permanently missing on every provider.
     /// Telemetry-only; no `is_empty` companion is needed.
-    #[expect(clippy::len_without_is_empty, reason = "telemetry-only counter; emptiness is never queried")]
+    #[expect(
+        clippy::len_without_is_empty,
+        reason = "telemetry-only counter; emptiness is never queried"
+    )]
     pub fn len(&self) -> usize {
         self.inner.lock().len()
     }

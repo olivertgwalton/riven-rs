@@ -70,109 +70,107 @@ impl Plugin for TraktPlugin {
         let client_id = ctx.require_setting("clientid")?;
         let access_token = ctx.settings.get("accesstoken");
         let mut content = ContentCollection::default();
-                let trending_count = ctx.settings.get_parsed_or("trendingcount", 10usize);
-                let popular_count = ctx.settings.get_parsed_or("popularcount", 10usize);
-                let watched_count = ctx.settings.get_parsed_or("watchedcount", 10usize);
-                let watched_period = ctx.settings.get_or("watchedperiod", "weekly");
+        let trending_count = ctx.settings.get_parsed_or("trendingcount", 10usize);
+        let popular_count = ctx.settings.get_parsed_or("popularcount", 10usize);
+        let watched_count = ctx.settings.get_parsed_or("watchedcount", 10usize);
+        let watched_period = ctx.settings.get_or("watchedperiod", "weekly");
 
-                // Watchlist (requires access token)
-                if ctx.settings.get_bool("watchlist") {
-                    if let Some(token) = access_token {
-                        collect_wrapped(
-                            fetch_watchlist(&ctx.http, client_id, token, "movies").await?,
-                            &mut content,
-                            true,
-                        );
-                        collect_wrapped(
-                            fetch_watchlist(&ctx.http, client_id, token, "shows").await?,
-                            &mut content,
-                            false,
-                        );
-                    } else {
-                        tracing::warn!("trakt watchlist enabled but accesstoken not set");
-                    }
-                }
-
-                // User lists
-                let user_lists = ctx.settings.get_list("userlists");
-                if let Some(token) = access_token {
-                    for list_slug in &user_lists {
-                        collect_wrapped(
-                            fetch_user_list(&ctx.http, client_id, token, list_slug, "movies")
-                                .await?,
-                            &mut content,
-                            true,
-                        );
-                        collect_wrapped(
-                            fetch_user_list(&ctx.http, client_id, token, list_slug, "shows")
-                                .await?,
-                            &mut content,
-                            false,
-                        );
-                    }
-                }
-
-                // Trending
-                if ctx.settings.get_bool("fetchtrending") {
-                    collect_wrapped(
-                        fetch_trending(&ctx.http, client_id, "movies", trending_count).await?,
-                        &mut content,
-                        true,
-                    );
-                    collect_wrapped(
-                        fetch_trending(&ctx.http, client_id, "shows", trending_count).await?,
-                        &mut content,
-                        false,
-                    );
-                }
-
-                // Popular
-                if ctx.settings.get_bool("fetchpopular") {
-                    collect_direct(
-                        fetch_popular(&ctx.http, client_id, "movies", popular_count).await?,
-                        &mut content,
-                        true,
-                    );
-                    collect_direct(
-                        fetch_popular(&ctx.http, client_id, "shows", popular_count).await?,
-                        &mut content,
-                        false,
-                    );
-                }
-
-                // Most watched
-                if ctx.settings.get_bool("fetchwatched") {
-                    collect_wrapped(
-                        fetch_watched(
-                            &ctx.http,
-                            client_id,
-                            "movies",
-                            &watched_period,
-                            watched_count,
-                        )
-                        .await?,
-                        &mut content,
-                        true,
-                    );
-                    collect_wrapped(
-                        fetch_watched(
-                            &ctx.http,
-                            client_id,
-                            "shows",
-                            &watched_period,
-                            watched_count,
-                        )
-                        .await?,
-                        &mut content,
-                        false,
-                    );
-                }
-
-                tracing::info!(
-                    movies = content.movie_count(),
-                    shows = content.show_count(),
-                    "trakt content service completed"
+        // Watchlist (requires access token)
+        if ctx.settings.get_bool("watchlist") {
+            if let Some(token) = access_token {
+                collect_wrapped(
+                    fetch_watchlist(&ctx.http, client_id, token, "movies").await?,
+                    &mut content,
+                    true,
                 );
+                collect_wrapped(
+                    fetch_watchlist(&ctx.http, client_id, token, "shows").await?,
+                    &mut content,
+                    false,
+                );
+            } else {
+                tracing::warn!("trakt watchlist enabled but accesstoken not set");
+            }
+        }
+
+        // User lists
+        let user_lists = ctx.settings.get_list("userlists");
+        if let Some(token) = access_token {
+            for list_slug in &user_lists {
+                collect_wrapped(
+                    fetch_user_list(&ctx.http, client_id, token, list_slug, "movies").await?,
+                    &mut content,
+                    true,
+                );
+                collect_wrapped(
+                    fetch_user_list(&ctx.http, client_id, token, list_slug, "shows").await?,
+                    &mut content,
+                    false,
+                );
+            }
+        }
+
+        // Trending
+        if ctx.settings.get_bool("fetchtrending") {
+            collect_wrapped(
+                fetch_trending(&ctx.http, client_id, "movies", trending_count).await?,
+                &mut content,
+                true,
+            );
+            collect_wrapped(
+                fetch_trending(&ctx.http, client_id, "shows", trending_count).await?,
+                &mut content,
+                false,
+            );
+        }
+
+        // Popular
+        if ctx.settings.get_bool("fetchpopular") {
+            collect_direct(
+                fetch_popular(&ctx.http, client_id, "movies", popular_count).await?,
+                &mut content,
+                true,
+            );
+            collect_direct(
+                fetch_popular(&ctx.http, client_id, "shows", popular_count).await?,
+                &mut content,
+                false,
+            );
+        }
+
+        // Most watched
+        if ctx.settings.get_bool("fetchwatched") {
+            collect_wrapped(
+                fetch_watched(
+                    &ctx.http,
+                    client_id,
+                    "movies",
+                    &watched_period,
+                    watched_count,
+                )
+                .await?,
+                &mut content,
+                true,
+            );
+            collect_wrapped(
+                fetch_watched(
+                    &ctx.http,
+                    client_id,
+                    "shows",
+                    &watched_period,
+                    watched_count,
+                )
+                .await?,
+                &mut content,
+                false,
+            );
+        }
+
+        tracing::info!(
+            movies = content.movie_count(),
+            shows = content.show_count(),
+            "trakt content service completed"
+        );
 
         Ok(content.into_hook_response())
     }

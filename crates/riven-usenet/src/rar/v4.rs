@@ -1,8 +1,6 @@
 use std::io::{Cursor, Read};
 
-use super::{
-    RAR4_SIGNATURE, RarError, RarVolumeFileEntry, RarVolumeHeader,
-};
+use super::{RAR4_SIGNATURE, RarError, RarVolumeFileEntry, RarVolumeHeader};
 
 pub(super) const MAIN_HEAD: u8 = 0x73;
 pub(super) const FILE_HEAD: u8 = 0x74;
@@ -44,9 +42,7 @@ pub(super) fn parse_volume_header_v4(bytes: &[u8]) -> Result<RarVolumeHeader, Ra
                 // Skip over this file's data payload to land at the next block,
                 // if it fits. If the data extends past our buffer, we're at
                 // the natural end of header-only parsing.
-                let data_end = entry
-                    .data_offset
-                    .saturating_add(entry.packed_size);
+                let data_end = entry.data_offset.saturating_add(entry.packed_size);
                 out.files.push(entry);
 
                 if data_end > bytes.len() as u64 {

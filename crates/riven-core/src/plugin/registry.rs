@@ -82,7 +82,13 @@ impl PluginRegistry {
             "validation failed, skipping",
         );
 
-        let context = Arc::new(PluginContext::new(settings, http, db_pool, redis, vfs_mount_path));
+        let context = Arc::new(PluginContext::new(
+            settings,
+            http,
+            db_pool,
+            redis,
+            vfs_mount_path,
+        ));
         self.plugins.write().await.push(ActivePlugin {
             plugin,
             context,
@@ -126,10 +132,22 @@ impl PluginRegistry {
         let Some(active) = plugins.iter_mut().find(|p| p.plugin.name() == name) else {
             return false;
         };
-        active.context = Arc::new(PluginContext::new(new_settings, http, db_pool, redis, vfs_mount_path));
+        active.context = Arc::new(PluginContext::new(
+            new_settings,
+            http,
+            db_pool,
+            redis,
+            vfs_mount_path,
+        ));
         active.enabled = enabled;
         active.valid = valid;
-        log_plugin_state(name, enabled, valid, "revalidated successfully", "revalidation failed");
+        log_plugin_state(
+            name,
+            enabled,
+            valid,
+            "revalidated successfully",
+            "revalidation failed",
+        );
         valid
     }
 
@@ -233,8 +251,6 @@ impl PluginRegistry {
             .find(|p| p.plugin.name() == name)
             .map(|p| p.context.settings.to_json())
     }
-
-
 
     pub async fn is_plugin_enabled(&self, name: &str) -> Option<bool> {
         self.plugins

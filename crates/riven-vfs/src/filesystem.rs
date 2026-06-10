@@ -11,8 +11,8 @@ use fuser::{
     ReplyEntry, ReplyOpen, Request,
 };
 use parking_lot::Mutex;
-use tokio::sync::{RwLock, Semaphore};
 use tokio::sync::mpsc;
+use tokio::sync::{RwLock, Semaphore};
 
 use riven_core::config::vfs::*;
 use riven_core::settings::LibraryProfileMembership;
@@ -25,10 +25,10 @@ use riven_db::repo;
 use crate::cache::RangeCache;
 use crate::chunks::FileLayout;
 use crate::media_stream::{MediaStream, ReadOutcome, UsenetSession};
-use riven_core::local_source::parse_usenet_url;
 use crate::path_info::{CanonicalPath, PathTarget, parse_path};
 use crate::readdir::{DirEntry, populate_entries};
 use crate::stream::fetch_range;
+use riven_core::local_source::parse_usenet_url;
 
 const TTL: Duration = Duration::from_secs(300);
 const READDIR_CACHE_TTL: Duration = Duration::from_secs(30);
@@ -152,7 +152,9 @@ impl CachedEntry {
             subtitle_content,
             library_profiles: LibraryProfileMembership::from_json(entry.library_profiles.as_ref()),
             usenet_info_hash: entry.usenet_info_hash.map(Arc::from),
-            usenet_file_index: entry.usenet_file_index.and_then(|i| usize::try_from(i).ok()),
+            usenet_file_index: entry
+                .usenet_file_index
+                .and_then(|i| usize::try_from(i).ok()),
         }
     }
 
@@ -370,10 +372,10 @@ impl RivenFsInner {
         let guard = lock.lock();
 
         // A peer that held the lock before us may have already refreshed it.
-        if let Ok(Some(entry)) = self
-            .runtime
-            .block_on(riven_db::repo::get_media_entry_by_id(&self.db_pool, entry_id))
-            && let Some(fresh) = entry.stream_url
+        if let Ok(Some(entry)) = self.runtime.block_on(riven_db::repo::get_media_entry_by_id(
+            &self.db_pool,
+            entry_id,
+        )) && let Some(fresh) = entry.stream_url
             && Some(fresh.as_str()) != current_url
         {
             drop(guard);
@@ -538,7 +540,9 @@ async fn prewarm_header_footer(
         if cache.get((ino, header.start, header.end)).is_none() {
             match fetch_range(&client, &stream_url, header.start, header.end).await {
                 Ok(data) => cache.put((ino, header.start, header.end), data),
-                Err(e) => tracing::debug!(target: "streaming", ino, error = %e, "pre-warm header failed"),
+                Err(e) => {
+                    tracing::debug!(target: "streaming", ino, error = %e, "pre-warm header failed")
+                }
             }
         }
     };
@@ -547,7 +551,9 @@ async fn prewarm_header_footer(
         if footer != header && cache.get((ino, footer.start, footer.end)).is_none() {
             match fetch_range(&client, &stream_url, footer.start, footer.end).await {
                 Ok(data) => cache.put((ino, footer.start, footer.end), data),
-                Err(e) => tracing::debug!(target: "streaming", ino, error = %e, "pre-warm footer failed"),
+                Err(e) => {
+                    tracing::debug!(target: "streaming", ino, error = %e, "pre-warm footer failed")
+                }
             }
         }
     };
@@ -604,11 +610,7 @@ impl Filesystem for RivenFs {
                 CanonicalPath::MovieDir { .. }
                 | CanonicalPath::ShowDir { .. }
                 | CanonicalPath::SeasonDir { .. } => {
-                    reply.entry(
-                        &TTL,
-                        &dir_attr(s.get_or_create_ino(&path)),
-                        Generation(0),
-                    );
+                    reply.entry(&TTL, &dir_attr(s.get_or_create_ino(&path)), Generation(0));
                 }
                 CanonicalPath::MovieFile { .. } | CanonicalPath::EpisodeFile { .. } => {
                     match s.get_entry(&path) {

@@ -1,5 +1,5 @@
 use super::*;
-use crate::models::{StremthruTorz, StremthruFile};
+use crate::models::{StremthruFile, StremthruTorz};
 
 #[test]
 fn download_result_prefers_file_path_and_clamps_negative_sizes() {

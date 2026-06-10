@@ -537,7 +537,10 @@ pub async fn get_downloaded_profile_names_for_season(
 ///
 /// Requires the partial unique index `idx_fs_entries_media_path_unique` on
 /// `(media_item_id, path) WHERE entry_type = 'media'` (migration 011).
-#[expect(clippy::too_many_arguments, reason = "wide upsert mirroring the entry columns")]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "wide upsert mirroring the entry columns"
+)]
 pub async fn create_media_entry(
     pool: &PgPool,
     media_item_id: i64,
@@ -778,10 +781,7 @@ pub async fn list_vfs_file_paths(pool: &PgPool, dir_path: &str) -> Result<Vec<St
 /// Returns `(was_deleted, owning_media_item_id)`. Losing a media entry can
 /// flip Completed → Scraped/Indexed, so the affected item is recomputed
 /// before returning.
-pub async fn delete_filesystem_entry(
-    pool: &PgPool,
-    entry_id: i64,
-) -> Result<(bool, Option<i64>)> {
+pub async fn delete_filesystem_entry(pool: &PgPool, entry_id: i64) -> Result<(bool, Option<i64>)> {
     let row: Option<(i64,)> = sqlx::query_as(
         "DELETE FROM filesystem_entries \
          WHERE id = $1 AND entry_type = 'media' \

@@ -52,7 +52,11 @@ impl UsenetHealthMutations {
 
         let idx = usize::try_from(file_index).unwrap_or(0);
         let (status, total, sampled, missing, errors) = match streamer
-            .scan_availability(&info_hash, idx, riven_usenet::DEFAULT_AVAILABILITY_SAMPLE_PERCENT)
+            .scan_availability(
+                &info_hash,
+                idx,
+                riven_usenet::DEFAULT_AVAILABILITY_SAMPLE_PERCENT,
+            )
             .await
         {
             Ok(scan) => (

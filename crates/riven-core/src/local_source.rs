@@ -78,7 +78,10 @@ mod tests {
 
     #[test]
     fn rejects_non_usenet_url() {
-        assert_eq!(parse_usenet_url("https://debrid.example/dl/token/file.mkv"), None);
+        assert_eq!(
+            parse_usenet_url("https://debrid.example/dl/token/file.mkv"),
+            None
+        );
         assert_eq!(parse_usenet_url("usenet://onlyhash"), None);
         assert_eq!(parse_usenet_url("usenet://hash/0/extra"), None);
         assert_eq!(parse_usenet_url("usenet://hash/notanumber"), None);

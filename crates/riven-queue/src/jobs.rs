@@ -185,4 +185,3 @@ pub struct RankStreamsJob {
 pub struct ParseScrapeResultsJob {
     pub id: i64,
 }
-

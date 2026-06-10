@@ -152,7 +152,9 @@ pub(crate) fn select_validation_indices(total: usize, sample_percent: usize) -> 
     } else {
         DEFAULT_AVAILABILITY_SAMPLE_PERCENT
     };
-    let n = ((total * pct) / 100).clamp(SAMPLE_MIN, SAMPLE_MAX).min(total);
+    let n = ((total * pct) / 100)
+        .clamp(SAMPLE_MIN, SAMPLE_MAX)
+        .min(total);
     if n >= total || total <= FIRST_N + LAST_N {
         return (0..total).collect();
     }

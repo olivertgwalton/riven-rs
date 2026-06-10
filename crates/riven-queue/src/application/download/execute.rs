@@ -6,12 +6,12 @@ use riven_core::types::{CachedStoreEntry, DownloadResult, MediaItemType};
 use riven_db::entities::{MediaItem, Stream};
 use riven_db::repo;
 
-use crate::JobQueue;
-use crate::context::DownloadHierarchyContext;
 use super::helpers::stream_resolution;
 use super::persist::{
     SeasonPersistOutcome, persist_episode, persist_movie, persist_season, persist_show,
 };
+use crate::JobQueue;
+use crate::context::DownloadHierarchyContext;
 
 pub enum DownloadAttemptOutcome {
     Failed,
@@ -201,6 +201,7 @@ pub async fn attempt_download(
                 queue,
                 hierarchy.expect("episode downloads require hierarchy context"),
                 stream_id,
+                raw_title,
                 resolution_ref,
                 path_tag,
                 profile_name,
@@ -224,6 +225,7 @@ pub async fn attempt_download(
                 hierarchy.expect("season downloads require hierarchy context"),
                 start_time,
                 stream_id,
+                raw_title,
                 path_tag,
                 profile_name,
             )

@@ -371,7 +371,13 @@ impl UsenetStreamer {
                     Priority::High,
                 )
                 .await
-                .map(|buf| if buf.is_empty() { Vec::new() } else { vec![buf] })
+                .map(|buf| {
+                    if buf.is_empty() {
+                        Vec::new()
+                    } else {
+                        vec![buf]
+                    }
+                })
             }
         };
 

@@ -26,7 +26,10 @@ impl VfsLibraryLayout {
                     return None;
                 }
                 let normalized = normalize_library_path(&profile.library_path)?;
-                let segments = split_path(&normalized).into_iter().map(String::from).collect();
+                let segments = split_path(&normalized)
+                    .into_iter()
+                    .map(String::from)
+                    .collect();
                 Some(ActiveLibraryProfile {
                     key,
                     exclusive: profile.exclusive,

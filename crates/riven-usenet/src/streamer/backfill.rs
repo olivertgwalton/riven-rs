@@ -64,7 +64,10 @@ impl UsenetStreamer {
             .map(move |(fi, pi, mid)| {
                 let s = streamer.clone();
                 async move {
-                    let r = s.fetch_decoded_cached(&mid, Priority::Low).await.map(|b| b.len() as u64);
+                    let r = s
+                        .fetch_decoded_cached(&mid, Priority::Low)
+                        .await
+                        .map(|b| b.len() as u64);
                     (fi, pi, r)
                 }
             })

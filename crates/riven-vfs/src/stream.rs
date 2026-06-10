@@ -99,9 +99,8 @@ async fn open_stream_once(client: &Client, url: &str, start: u64) -> Result<Resp
             Ok(response)
         }
         status => {
-            let error = anyhow::anyhow!(
-                "stream request {range} failed with status {status} for {url}"
-            );
+            let error =
+                anyhow::anyhow!("stream request {range} failed with status {status} for {url}");
             Err(if status_is_transient(status) {
                 StreamError::transient(error)
             } else {

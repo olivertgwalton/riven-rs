@@ -4,6 +4,9 @@
 
 use sha1::{Digest, Sha1};
 
+use crate::events::ScrapeRequest;
+use crate::types::MediaItemType;
+
 pub const NZB_INFO_HASH_PREFIX: &str = "nzb-";
 pub const NZB_URL_TTL_SECS: u64 = 60 * 60 * 24 * 7;
 
@@ -22,6 +25,61 @@ pub fn is_nzb_info_hash(info_hash: &str) -> bool {
 
 pub fn nzb_url_redis_key(info_hash: &str) -> String {
     format!("riven:nzb:url:{info_hash}")
+}
+
+/// Seasons numbered as calendar years (Formula 1 "Season 2020", daily shows).
+/// Indexers don't parse these releases into season/ep attributes, so a
+/// `season=2020` filter matches nothing server-side.
+fn is_year_season(season: i32) -> bool {
+    season >= 1900
+}
+
+/// Reduce a display title to a Newznab-friendly `q` term: apostrophes are
+/// dropped (releases write "Marvels", not "Marvel's"), all other punctuation
+/// becomes a space, and whitespace is collapsed.
+fn sanitize_query_title(title: &str) -> String {
+    let mut out = String::with_capacity(title.len());
+    for c in title.chars() {
+        if c == '\'' || c == '\u{2019}' {
+            continue;
+        }
+        if c.is_alphanumeric() {
+            out.push(c);
+        } else if !out.ends_with(' ') && !out.is_empty() {
+            out.push(' ');
+        }
+    }
+    out.trim_end().to_string()
+}
+
+/// Build the text (`q=`) search for a scrape request, as a fallback for when
+/// an ID-based search returns nothing. Sports and other non-episodic content
+/// frequently has no tvdbid/imdbid mapping on indexers and is only reachable
+/// by title — e.g. drunkenslug returns zero F1 items for any ID query but
+/// finds the season packs via `q=Formula 1 2020`.
+///
+/// Returns `(search_type, params)` with the same shape as the ID builders.
+/// For year-style seasons the year goes into the `q` term itself and the
+/// `season`/`ep` filters are omitted entirely: indexers can't tie those
+/// releases to season/ep attributes, so the filters only subtract results.
+pub fn newznab_text_query(req: &ScrapeRequest<'_>) -> (&'static str, Vec<(&'static str, String)>) {
+    let q = sanitize_query_title(req.title);
+    match req.item_type {
+        MediaItemType::Movie => ("movie", vec![("q", q)]),
+        MediaItemType::Show => ("tvsearch", vec![("q", q)]),
+        MediaItemType::Season | MediaItemType::Episode => {
+            let season = req.season_or_1();
+            if is_year_season(season) {
+                ("tvsearch", vec![("q", format!("{q} {season}"))])
+            } else {
+                let mut params = vec![("q", q), ("season", season.to_string())];
+                if req.item_type == MediaItemType::Episode {
+                    params.push(("ep", req.episode_or_1().to_string()));
+                }
+                ("tvsearch", params)
+            }
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -59,7 +117,9 @@ pub fn parse_newznab_xml(body: &str) -> Vec<NewznabItem> {
             Ok(Event::Empty(e)) => {
                 let name = e.name();
                 let local = name.as_ref();
-                let Some(item) = current.as_mut() else { continue };
+                let Some(item) = current.as_mut() else {
+                    continue;
+                };
                 match local {
                     b"enclosure" => {
                         for attr in e.attributes().flatten() {
@@ -87,12 +147,16 @@ pub fn parse_newznab_xml(body: &str) -> Vec<NewznabItem> {
                         for attr in e.attributes().flatten() {
                             match attr.key.as_ref() {
                                 b"name" => {
-                                    name_val =
-                                        attr.unescape_value().ok().map(std::borrow::Cow::into_owned);
+                                    name_val = attr
+                                        .unescape_value()
+                                        .ok()
+                                        .map(std::borrow::Cow::into_owned);
                                 }
                                 b"value" => {
-                                    value_val =
-                                        attr.unescape_value().ok().map(std::borrow::Cow::into_owned);
+                                    value_val = attr
+                                        .unescape_value()
+                                        .ok()
+                                        .map(std::borrow::Cow::into_owned);
                                 }
                                 _ => {}
                             }
@@ -156,6 +220,65 @@ mod tests {
         assert_eq!(items[0].title, "Example.Movie.2024.1080p.WEB.x264");
         assert_eq!(items[0].nzb_url, "https://idx.example/get/abc.nzb");
         assert_eq!(items[0].size, Some(2147483648));
+    }
+
+    fn request(
+        item_type: MediaItemType,
+        title: &'static str,
+        season: Option<i32>,
+        episode: Option<i32>,
+    ) -> ScrapeRequest<'static> {
+        ScrapeRequest {
+            id: 1,
+            item_type,
+            imdb_id: None,
+            tvdb_id: None,
+            title,
+            season,
+            episode,
+        }
+    }
+
+    #[test]
+    fn text_query_uses_season_and_ep_filters_for_normal_seasons() {
+        let req = request(MediaItemType::Episode, "Severance", Some(2), Some(3));
+        let (t, params) = newznab_text_query(&req);
+        assert_eq!(t, "tvsearch");
+        assert_eq!(
+            params,
+            vec![
+                ("q", "Severance".to_string()),
+                ("season", "2".to_string()),
+                ("ep", "3".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn text_query_embeds_year_style_seasons_in_q() {
+        let req = request(MediaItemType::Season, "Formula 1", Some(2020), None);
+        let (t, params) = newznab_text_query(&req);
+        assert_eq!(t, "tvsearch");
+        assert_eq!(params, vec![("q", "Formula 1 2020".to_string())]);
+
+        let req = request(MediaItemType::Episode, "Formula 1", Some(2020), Some(6));
+        let (_, params) = newznab_text_query(&req);
+        assert_eq!(params, vec![("q", "Formula 1 2020".to_string())]);
+    }
+
+    #[test]
+    fn text_query_sanitizes_punctuation() {
+        let req = request(
+            MediaItemType::Show,
+            "Marvel's Agents of S.H.I.E.L.D.",
+            None,
+            None,
+        );
+        let (_, params) = newznab_text_query(&req);
+        assert_eq!(
+            params,
+            vec![("q", "Marvels Agents of S H I E L D".to_string())]
+        );
     }
 
     #[test]

@@ -141,7 +141,11 @@ async fn notify_download_success(
 
     let raw_paths = repo::get_media_entry_paths_for_items(&ctx.db_pool, &[info.id]).await?;
     if raw_paths.is_empty() {
-        tracing::warn!(id = info.id, title = info.title, "{plugin}: no filesystem entries");
+        tracing::warn!(
+            id = info.id,
+            title = info.title,
+            "{plugin}: no filesystem entries"
+        );
         return Ok(HookResponse::Empty);
     }
     let paths: Vec<String> = raw_paths

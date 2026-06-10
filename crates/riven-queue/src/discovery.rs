@@ -18,6 +18,10 @@ pub struct ParseContext {
     pub season_episodes: Vec<(i32, Option<i32>)>,
     pub show_season_numbers: Vec<i32>,
     pub show_status: Option<ShowStatus>,
+    /// The item's own (episode) title and air date, used to event-match
+    /// sports-style releases that carry no SxxExx numbering.
+    pub item_title: String,
+    pub item_aired_at: Option<chrono::NaiveDate>,
     pub correct_title: String,
     pub aliases: HashMap<String, Vec<String>>,
     pub profiles: Vec<(String, RankSettings)>,
@@ -116,6 +120,16 @@ fn validate(ctx: &ParseContext, parsed: &riven_rank::ParsedData) -> Option<Strin
         }
         MediaItemType::Episode => {
             if !has_episodes && !has_seasons {
+                // Sports-style releases ("Formula1.2020.Bahrein.GP.Qualifying")
+                // never parse to S/E; accept them when the venue/session/date
+                // identifies this exact episode.
+                if crate::application::download::event_match::release_matches_episode(
+                    &parsed.raw_title,
+                    &ctx.item_title,
+                    ctx.item_aired_at,
+                ) {
+                    return None;
+                }
                 return Some("no seasons or episodes for episode item".into());
             }
             if has_episodes {
@@ -222,7 +236,8 @@ pub fn rank_streams(
                 return None;
             }
 
-            let best = ctx.profiles
+            let best = ctx
+                .profiles
                 .iter()
                 .filter_map(|(profile_name, settings)| {
                     match riven_rank::rank_torrent_fast(
@@ -283,7 +298,10 @@ pub async fn load_active_profiles(db_pool: &sqlx::PgPool) -> Vec<(String, RankSe
         Ok(p) => p,
         Err(e) => {
             tracing::error!(error = %e, "failed to load enabled ranking profiles");
-            return vec![("ultra_hd".to_string(), QualityProfile::UltraHd.base_settings().prepare())];
+            return vec![(
+                "ultra_hd".to_string(),
+                QualityProfile::UltraHd.base_settings().prepare(),
+            )];
         }
     };
 
@@ -318,7 +336,10 @@ pub async fn load_active_profiles(db_pool: &sqlx::PgPool) -> Vec<(String, RankSe
         .collect();
 
     if result.is_empty() {
-        result.push(("ultra_hd".to_string(), QualityProfile::UltraHd.base_settings().prepare()));
+        result.push((
+            "ultra_hd".to_string(),
+            QualityProfile::UltraHd.base_settings().prepare(),
+        ));
     }
     result
 }

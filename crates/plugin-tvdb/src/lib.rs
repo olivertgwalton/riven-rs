@@ -100,7 +100,10 @@ impl Plugin for TvdbPlugin {
         let api_key = ctx.require_setting("apikey")?;
         let token = self.get_token(&ctx.http, api_key).await?;
 
-        let timezone = fetch_tvmaze_timezone(&ctx.http, tvdb_id).await.ok().flatten();
+        let timezone = fetch_tvmaze_timezone(&ctx.http, tvdb_id)
+            .await
+            .ok()
+            .flatten();
         let indexed = fetch_series(&ctx.http, &token, tvdb_id, timezone).await?;
         Ok(HookResponse::Index(Box::new(indexed)))
     }
@@ -114,7 +117,10 @@ async fn fetch_tvmaze_timezone(
     let resp: TvMazeLookupResponse = http
         .get_json(TVMAZE_PROFILE, url.clone(), |client| client.get(&url))
         .await?;
-    Ok(resp.network.and_then(|n| n.country).and_then(|c| c.timezone))
+    Ok(resp
+        .network
+        .and_then(|n| n.country)
+        .and_then(|c| c.timezone))
 }
 
 async fn fetch_series(

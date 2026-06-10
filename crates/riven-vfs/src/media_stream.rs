@@ -287,7 +287,8 @@ impl MediaStream {
                     Ok(data) => {
                         let expected = (chunk.end - chunk.start + 1) as usize;
                         if data.len() >= expected {
-                            ctx.cache.put((self.ino, chunk.start, chunk.end), data.clone());
+                            ctx.cache
+                                .put((self.ino, chunk.start, chunk.end), data.clone());
                         }
                         data
                     }
@@ -566,12 +567,10 @@ impl UsenetSession {
             });
         }
 
-        match runtime.block_on(self.source.read_range(
-            &self.info_hash,
-            self.file_index,
-            start,
-            end,
-        )) {
+        match runtime.block_on(
+            self.source
+                .read_range(&self.info_hash, self.file_index, start, end),
+        ) {
             Ok(data) => {
                 // Guard against a mid-file short read ever reaching the kernel.
                 // The Linux FUSE client treats a read that returns fewer bytes

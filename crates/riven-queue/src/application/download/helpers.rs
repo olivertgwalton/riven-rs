@@ -18,6 +18,17 @@ pub(crate) fn stream_resolution(stream: &Stream) -> &str {
         .unwrap_or("unknown")
 }
 
+/// The indexer release title of a stream, falling back to `""` when the
+/// `parsed_data` is missing or has no `raw_title` field.
+pub(crate) fn stream_raw_title(stream: &Stream) -> &str {
+    stream
+        .parsed_data
+        .as_ref()
+        .and_then(|parsed| parsed.get("raw_title"))
+        .and_then(|value| value.as_str())
+        .unwrap_or("")
+}
+
 /// Load a media item by id, or send a `MediaItemDownloadError` event and return `None`.
 pub async fn load_item_or_err(id: i64, queue: &JobQueue, error_msg: &str) -> Option<MediaItem> {
     load_media_item_or_download_error(queue, id, error_msg).await
@@ -47,7 +58,6 @@ pub async fn handle_bitrate_failure(
         tracing::warn!(info_hash, %err, "failed to update stream file size");
     }
 }
-
 
 const VALID_VIDEO_EXTENSIONS: &[&str] = &["mp4", "mkv", "avi", "mov", "wmv", "flv", "webm"];
 
@@ -177,7 +187,13 @@ pub fn episode_vfs_path(
 ) -> String {
     let safe_show: String = show
         .chars()
-        .map(|c| if c == '/' || c == '\\' || c == '\0' { '_' } else { c })
+        .map(|c| {
+            if c == '/' || c == '\\' || c == '\0' {
+                '_'
+            } else {
+                c
+            }
+        })
         .collect();
     let safe_show = safe_show.trim_start_matches('.');
     let part_suffix = part.map(|n| format!(".pt{n}")).unwrap_or_default();

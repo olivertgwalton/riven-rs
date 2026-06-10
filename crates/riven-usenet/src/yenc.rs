@@ -325,9 +325,8 @@ mod tests {
         }
         encoded.extend_from_slice(b"\r\n");
         let crc = crc32fast::hash(data);
-        encoded.extend_from_slice(
-            format!("=yend size=11 part=1 pcrc32={:08x}\r\n", crc).as_bytes(),
-        );
+        encoded
+            .extend_from_slice(format!("=yend size=11 part=1 pcrc32={:08x}\r\n", crc).as_bytes());
 
         let (decoded, info) = decode(&encoded).unwrap();
         assert_eq!(decoded.as_ref(), data.as_slice());

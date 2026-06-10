@@ -171,7 +171,10 @@ pub fn parse_nzb_document(xml: &str) -> Result<NzbDocument, NzbError> {
                 match text_target.take() {
                     Some("segment") => {
                         if let Some(seg) = cur_segment.as_mut() {
-                            seg.message_id = text.trim().trim_matches(|c| c == '<' || c == '>').to_string();
+                            seg.message_id = text
+                                .trim()
+                                .trim_matches(|c| c == '<' || c == '>')
+                                .to_string();
                         }
                     }
                     Some("group") if in_group => {

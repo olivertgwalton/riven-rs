@@ -85,7 +85,8 @@ mod tests {
         let profile = HttpServiceProfile::new("test-dedupe");
 
         let (first, second) = tokio::join!(
-            http.get_json::<serde_json::Value, _>(profile.clone(), url.clone(), |client| client.get(&url)),
+            http.get_json::<serde_json::Value, _>(profile.clone(), url.clone(), |client| client
+                .get(&url)),
             http.get_json::<serde_json::Value, _>(profile, url.clone(), |client| client.get(&url))
         );
 

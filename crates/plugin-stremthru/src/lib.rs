@@ -14,8 +14,8 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use crate::client::{
-    add_newz, add_torrent, check_cache, download_result_from_newz, download_result_from_torz,
-    GeneratedLink, fetch_user_info, generate_link, scrape_torznab,
+    GeneratedLink, add_newz, add_torrent, check_cache, download_result_from_newz,
+    download_result_from_torz, fetch_user_info, generate_link, scrape_torznab,
 };
 use crate::newznab::{is_nzb_info_hash, nzb_url_redis_key, scrape_newznab};
 
@@ -204,15 +204,7 @@ impl Plugin for StremthruPlugin {
                 .settings
                 .get_or("newznabcategories", "2000,5000")
                 .to_string();
-            match scrape_newznab(
-                &ctx.http,
-                &ctx.redis,
-                &base_url,
-                &apikey,
-                &categories,
-                req,
-            )
-            .await
+            match scrape_newznab(&ctx.http, &ctx.redis, &base_url, &apikey, &categories, req).await
             {
                 Ok(results) => combined.extend(results),
                 Err(error) => {
@@ -240,128 +232,152 @@ impl Plugin for StremthruPlugin {
         if is_nzb_info_hash(info_hash) {
             let newz_stores = get_newz_stores(&ctx.settings);
             let newz_scores = get_store_scores(&ctx.redis, &newz_stores).await;
-            return handle_newz_download(
-                info_hash,
-                &base_url,
-                &newz_stores,
-                &newz_scores,
-                ctx,
-            )
-            .await;
+            return handle_newz_download(info_hash, &base_url, &newz_stores, &newz_scores, ctx)
+                .await;
         }
 
-                // Priority: pre-checked stores from the bulk cache check > on-demand
-                // cache check > direct add (when checkdebridcache is disabled).
-                #[derive(Clone)]
-                struct StoreAttempt<'s> {
-                    store: &'s str,
-                    api_key: &'s str,
-                    file_count: usize,
-                }
+        // Priority: pre-checked stores from the bulk cache check > on-demand
+        // cache check > direct add (when checkdebridcache is disabled).
+        #[derive(Clone)]
+        struct StoreAttempt<'s> {
+            store: &'s str,
+            api_key: &'s str,
+            file_count: usize,
+        }
 
-                let attempts: Vec<StoreAttempt<'_>> = if !cached_stores.is_empty() {
-                    let mut v: Vec<StoreAttempt<'_>> = cached_stores
+        let attempts: Vec<StoreAttempt<'_>> = if !cached_stores.is_empty() {
+            let mut v: Vec<StoreAttempt<'_>> = cached_stores
+                .iter()
+                .filter_map(|entry| {
+                    stores
                         .iter()
-                        .filter_map(|entry| {
-                            stores
-                                .iter()
-                                .find(|(s, _)| s.eq_ignore_ascii_case(&entry.store))
-                                .map(|(s, k)| StoreAttempt {
-                                    store: s,
-                                    api_key: k.as_str(),
-                                    file_count: entry.files.len(),
-                                })
+                        .find(|(s, _)| s.eq_ignore_ascii_case(&entry.store))
+                        .map(|(s, k)| StoreAttempt {
+                            store: s,
+                            api_key: k.as_str(),
+                            file_count: entry.files.len(),
                         })
-                        .collect();
-                    v.sort_by(|a, b| {
-                        let sa = score_map.get(a.store).copied().unwrap_or_default();
-                        let sb = score_map.get(b.store).copied().unwrap_or_default();
-                        sb.cmp(&sa)
-                            .then_with(|| b.file_count.cmp(&a.file_count))
-                            .then_with(|| a.store.cmp(b.store))
-                    });
-                    v
-                } else if ctx.settings.get_or("checkdebridcache", "true") != "false" {
-                    let hashes = vec![info_hash.to_lowercase()];
-                    let checks = futures::future::join_all(stores.iter().map(|(s, k)| async {
-                        let r = check_cache(&ctx.http, &ctx.redis, &base_url, s, k, &hashes).await;
-                        (*s, k.as_str(), r)
-                    }))
-                    .await;
+                })
+                .collect();
+            v.sort_by(|a, b| {
+                let sa = score_map.get(a.store).copied().unwrap_or_default();
+                let sb = score_map.get(b.store).copied().unwrap_or_default();
+                sb.cmp(&sa)
+                    .then_with(|| b.file_count.cmp(&a.file_count))
+                    .then_with(|| a.store.cmp(b.store))
+            });
+            v
+        } else if ctx.settings.get_or("checkdebridcache", "true") != "false" {
+            let hashes = vec![info_hash.to_lowercase()];
+            let checks = futures::future::join_all(stores.iter().map(|(s, k)| async {
+                let r = check_cache(&ctx.http, &ctx.redis, &base_url, s, k, &hashes).await;
+                (*s, k.as_str(), r)
+            }))
+            .await;
 
-                    let mut v = Vec::new();
-                    for (store, api_key, result) in checks {
-                        match result {
-                            Ok(results) => {
-                                if let Some(r) = results.into_iter().find(|r| {
-                                    r.hash.eq_ignore_ascii_case(info_hash)
-                                        && matches!(r.status, TorrentStatus::Cached | TorrentStatus::Downloaded | TorrentStatus::Unknown)
-                                }) {
-                                    v.push(StoreAttempt { store, api_key, file_count: r.files.len() });
-                                } else {
-                                    tracing::debug!(store, info_hash, "torrent not cached in store; skipping");
-                                }
-                            }
-                            Err(error) => {
-                                if error.downcast_ref::<reqwest::Error>()
-                                    .is_some_and(|e| e.is_connect() || e.is_timeout() || e.is_request())
-                                {
-                                    any_network_error = true;
-                                }
-                                tracing::warn!(store, error = %error, "stremthru cache check failed");
-                            }
+            let mut v = Vec::new();
+            for (store, api_key, result) in checks {
+                match result {
+                    Ok(results) => {
+                        if let Some(r) = results.into_iter().find(|r| {
+                            r.hash.eq_ignore_ascii_case(info_hash)
+                                && matches!(
+                                    r.status,
+                                    TorrentStatus::Cached
+                                        | TorrentStatus::Downloaded
+                                        | TorrentStatus::Unknown
+                                )
+                        }) {
+                            v.push(StoreAttempt {
+                                store,
+                                api_key,
+                                file_count: r.files.len(),
+                            });
+                        } else {
+                            tracing::debug!(
+                                store,
+                                info_hash,
+                                "torrent not cached in store; skipping"
+                            );
                         }
                     }
-                    v.sort_by(|a, b| {
-                        let sa = score_map.get(a.store).copied().unwrap_or_default();
-                        let sb = score_map.get(b.store).copied().unwrap_or_default();
-                        sb.cmp(&sa)
-                            .then_with(|| b.file_count.cmp(&a.file_count))
-                            .then_with(|| a.store.cmp(b.store))
-                    });
-                    v
-                } else {
-                    let mut v: Vec<StoreAttempt<'_>> = stores
-                        .iter()
-                        .map(|(s, k)| StoreAttempt { store: s, api_key: k.as_str(), file_count: 0 })
-                        .collect();
-                    v.sort_by(|a, b| {
-                        let sa = score_map.get(a.store).copied().unwrap_or_default();
-                        let sb = score_map.get(b.store).copied().unwrap_or_default();
-                        sb.cmp(&sa).then_with(|| a.store.cmp(b.store))
-                    });
-                    v
-                };
-
-                for attempt in attempts {
-                    match add_torrent(&ctx.http, &base_url, attempt.store, attempt.api_key, info_hash).await {
-                        Ok(Some(torz)) => {
-                            adjust_store_score(&ctx.redis, attempt.store, 5).await;
-                            tracing::debug!(
-                                store = attempt.store,
-                                info_hash,
-                                files = torz.files.len(),
-                                "torrent added"
-                            );
-                            let download = download_result_from_torz(attempt.store, info_hash, torz);
-                            return Ok(HookResponse::Download(Box::new(download)));
+                    Err(error) => {
+                        if error
+                            .downcast_ref::<reqwest::Error>()
+                            .is_some_and(|e| e.is_connect() || e.is_timeout() || e.is_request())
+                        {
+                            any_network_error = true;
                         }
-                        Ok(None) => {
-                            adjust_store_score(&ctx.redis, attempt.store, -2).await;
-                            tracing::debug!(store = attempt.store, info_hash, "add_torrent returned unavailable");
-                        }
-                        Err(error) => {
-                            adjust_store_score(&ctx.redis, attempt.store, -1).await;
-                            if error
-                                .downcast_ref::<reqwest::Error>()
-                                .is_some_and(|e| e.is_connect() || e.is_timeout() || e.is_request())
-                            {
-                                any_network_error = true;
-                            }
-                            tracing::warn!(store = attempt.store, error = %error, "stremthru add_torrent failed");
-                        }
+                        tracing::warn!(store, error = %error, "stremthru cache check failed");
                     }
                 }
+            }
+            v.sort_by(|a, b| {
+                let sa = score_map.get(a.store).copied().unwrap_or_default();
+                let sb = score_map.get(b.store).copied().unwrap_or_default();
+                sb.cmp(&sa)
+                    .then_with(|| b.file_count.cmp(&a.file_count))
+                    .then_with(|| a.store.cmp(b.store))
+            });
+            v
+        } else {
+            let mut v: Vec<StoreAttempt<'_>> = stores
+                .iter()
+                .map(|(s, k)| StoreAttempt {
+                    store: s,
+                    api_key: k.as_str(),
+                    file_count: 0,
+                })
+                .collect();
+            v.sort_by(|a, b| {
+                let sa = score_map.get(a.store).copied().unwrap_or_default();
+                let sb = score_map.get(b.store).copied().unwrap_or_default();
+                sb.cmp(&sa).then_with(|| a.store.cmp(b.store))
+            });
+            v
+        };
+
+        for attempt in attempts {
+            match add_torrent(
+                &ctx.http,
+                &base_url,
+                attempt.store,
+                attempt.api_key,
+                info_hash,
+            )
+            .await
+            {
+                Ok(Some(torz)) => {
+                    adjust_store_score(&ctx.redis, attempt.store, 5).await;
+                    tracing::debug!(
+                        store = attempt.store,
+                        info_hash,
+                        files = torz.files.len(),
+                        "torrent added"
+                    );
+                    let download = download_result_from_torz(attempt.store, info_hash, torz);
+                    return Ok(HookResponse::Download(Box::new(download)));
+                }
+                Ok(None) => {
+                    adjust_store_score(&ctx.redis, attempt.store, -2).await;
+                    tracing::debug!(
+                        store = attempt.store,
+                        info_hash,
+                        "add_torrent returned unavailable"
+                    );
+                }
+                Err(error) => {
+                    adjust_store_score(&ctx.redis, attempt.store, -1).await;
+                    if error
+                        .downcast_ref::<reqwest::Error>()
+                        .is_some_and(|e| e.is_connect() || e.is_timeout() || e.is_request())
+                    {
+                        any_network_error = true;
+                    }
+                    tracing::warn!(store = attempt.store, error = %error, "stremthru add_torrent failed");
+                }
+            }
+        }
 
         if any_network_error {
             anyhow::bail!("network error contacting store");
@@ -535,7 +551,10 @@ async fn handle_newz_download(
             .ok()
             .flatten();
     let Some(nzb_url) = nzb_url else {
-        tracing::warn!(info_hash, "no NZB URL in Redis; cannot dispatch to stremthru newz");
+        tracing::warn!(
+            info_hash,
+            "no NZB URL in Redis; cannot dispatch to stremthru newz"
+        );
         return Ok(HookResponse::DownloadStreamUnavailable);
     };
 

@@ -173,6 +173,8 @@ pub async fn build_parse_item_context_with_hierarchy(
         season_episodes,
         show_season_numbers,
         show_status,
+        item_title: item.title.clone(),
+        item_aired_at: item.aired_at,
         correct_title,
         aliases,
         profiles,
