@@ -1,0 +1,86 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "WITH ongoing_season_ids AS (\n               SELECT id FROM media_items\n               WHERE item_type = 'season'\n               AND parent_id IN (\n                   SELECT id FROM media_items\n                   WHERE item_type = 'show' AND state = 'ongoing'\n               )\n           )\n           SELECT\n             COUNT(*) FILTER (WHERE item_type = 'movie' AND is_requested = true) AS \"total_movies!: i64\",\n             COUNT(*) FILTER (WHERE item_type = 'show' AND is_requested = true) AS \"total_shows!: i64\",\n             COUNT(*) FILTER (WHERE item_type = 'season' AND is_requested = true) AS \"total_seasons!: i64\",\n             COUNT(*) FILTER (WHERE item_type = 'episode' AND is_requested = true) AS \"total_episodes!: i64\",\n             -- State counts are strictly leaf-level (movies + episodes) so a single\n             -- completed show doesn't inflate a bucket by also counting its show and\n             -- season rows. 'ongoing'/'partially_completed' only ever exist on\n             -- shows/seasons, so the leaf-level filters below resolve them to upcoming\n             -- episodes / zero respectively.\n             COUNT(*) FILTER (WHERE is_requested = true AND state = 'completed'\n                 AND item_type IN ('movie', 'episode')) AS \"completed!: i64\",\n             COUNT(*) FILTER (WHERE is_requested = true AND state = 'scraped'\n                 AND item_type IN ('movie', 'episode')) AS \"scraped!: i64\",\n             COUNT(*) FILTER (WHERE is_requested = true AND state = 'indexed'\n                 AND item_type IN ('movie', 'episode')) AS \"indexed!: i64\",\n             COUNT(*) FILTER (WHERE is_requested = true AND state = 'failed'\n                 AND item_type IN ('movie', 'episode')) AS \"failed!: i64\",\n             COUNT(*) FILTER (WHERE is_requested = true AND state = 'paused'\n                 AND item_type IN ('movie', 'episode')) AS \"paused!: i64\",\n             -- Leaf-level \"ongoing\" = upcoming episodes under an ongoing show.\n             COUNT(*) FILTER (WHERE is_requested = true AND state = 'unreleased'\n                 AND item_type = 'episode'\n                 AND parent_id IN (SELECT id FROM ongoing_season_ids)) AS \"ongoing!: i64\",\n             -- No leaf item is ever 'partially_completed'; always 0, kept for API stability.\n             COUNT(*) FILTER (WHERE is_requested = true AND state = 'partially_completed'\n                 AND item_type IN ('movie', 'episode')) AS \"partially_completed!: i64\",\n             COUNT(*) FILTER (WHERE is_requested = true AND state = 'unreleased'\n                 AND item_type IN ('movie', 'episode')\n                 AND NOT (item_type = 'episode'\n                     AND parent_id IN (SELECT id FROM ongoing_season_ids))\n             ) AS \"unreleased!: i64\"\n           FROM media_items",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "total_movies!: i64",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "total_shows!: i64",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 2,
+        "name": "total_seasons!: i64",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 3,
+        "name": "total_episodes!: i64",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 4,
+        "name": "completed!: i64",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 5,
+        "name": "scraped!: i64",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 6,
+        "name": "indexed!: i64",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 7,
+        "name": "failed!: i64",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 8,
+        "name": "paused!: i64",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 9,
+        "name": "ongoing!: i64",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 10,
+        "name": "partially_completed!: i64",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 11,
+        "name": "unreleased!: i64",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "b177ff94a93219f835029c8399f53a6389c8c0bdd43180bd1778b64df1545583"
+}

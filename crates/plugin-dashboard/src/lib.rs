@@ -31,6 +31,9 @@ pub struct LibraryStats {
     pub total_shows: i64,
     pub total_seasons: i64,
     pub total_episodes: i64,
+    pub total_items: i64,
+    pub incomplete_items: i64,
+    pub completion_rate: f64,
     pub completed: i64,
     pub scraped: i64,
     pub indexed: i64,
@@ -109,11 +112,20 @@ impl DashboardQuery {
     async fn stats(&self, ctx: &Context<'_>) -> GqlResult<LibraryStats> {
         let pool = ctx.data::<sqlx::PgPool>()?;
         let s = repo::get_stats(pool).await?;
+        let total_items = s.total_movies + s.total_episodes;
+        let completion_rate = if total_items > 0 {
+            s.completed as f64 / total_items as f64 * 100.0
+        } else {
+            0.0
+        };
         Ok(LibraryStats {
             total_movies: s.total_movies,
             total_shows: s.total_shows,
             total_seasons: s.total_seasons,
             total_episodes: s.total_episodes,
+            total_items,
+            incomplete_items: total_items - s.completed,
+            completion_rate,
             completed: s.completed,
             scraped: s.scraped,
             indexed: s.indexed,

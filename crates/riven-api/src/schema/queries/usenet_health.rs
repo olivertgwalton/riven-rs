@@ -117,6 +117,25 @@ pub struct UsenetTitleHealth {
     pub media_type: Option<String>,
 }
 
+/// Title-health counts grouped by status, for the dashboard summary line.
+#[derive(SimpleObject)]
+pub struct UsenetTitleHealthSummary {
+    pub healthy: i64,
+    pub unhealthy: i64,
+    pub not_ingested: i64,
+    /// Catch-all for any other status (e.g. `checking`/`unknown`).
+    pub unknown: i64,
+    pub total: i64,
+}
+
+#[derive(sqlx::FromRow)]
+struct HealthSummaryRow {
+    healthy: i64,
+    unhealthy: i64,
+    not_ingested: i64,
+    total: i64,
+}
+
 #[derive(sqlx::FromRow)]
 struct HealthRow {
     info_hash: String,
@@ -279,6 +298,40 @@ impl UsenetHealthQuery {
                 }
             })
             .collect())
+    }
+
+    /// Title-health counts grouped by status. The `WHERE EXISTS` filter must
+    /// mirror `usenet_title_health` so the summary matches the listed rows.
+    async fn usenet_title_health_summary(
+        &self,
+        ctx: &Context<'_>,
+    ) -> Result<UsenetTitleHealthSummary> {
+        let pool = ctx.data::<PgPool>()?;
+        let row = sqlx::query_as::<_, HealthSummaryRow>(
+            r#"
+            SELECT
+                COUNT(*) FILTER (WHERE h.status = 'healthy')::bigint      AS healthy,
+                COUNT(*) FILTER (WHERE h.status = 'unhealthy')::bigint    AS unhealthy,
+                COUNT(*) FILTER (WHERE h.status = 'not_ingested')::bigint AS not_ingested,
+                COUNT(*)::bigint                                          AS total
+            FROM usenet_file_health h
+            WHERE EXISTS (
+                SELECT 1 FROM filesystem_entries fe
+                WHERE fe.usenet_info_hash = h.info_hash
+                  AND fe.usenet_file_index = h.file_index
+            )
+            "#,
+        )
+        .fetch_one(pool)
+        .await?;
+
+        Ok(UsenetTitleHealthSummary {
+            healthy: row.healthy,
+            unhealthy: row.unhealthy,
+            not_ingested: row.not_ingested,
+            unknown: row.total - row.healthy - row.unhealthy - row.not_ingested,
+            total: row.total,
+        })
     }
 
     /// Per-provider download traffic — lifetime totals + a daily series for

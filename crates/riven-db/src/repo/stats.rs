@@ -49,18 +49,30 @@ pub async fn get_stats(pool: &PgPool) -> Result<MediaStats> {
              COUNT(*) FILTER (WHERE item_type = 'show' AND is_requested = true) AS "total_shows!: i64",
              COUNT(*) FILTER (WHERE item_type = 'season' AND is_requested = true) AS "total_seasons!: i64",
              COUNT(*) FILTER (WHERE item_type = 'episode' AND is_requested = true) AS "total_episodes!: i64",
-             COUNT(*) FILTER (WHERE is_requested = true AND state = 'completed') AS "completed!: i64",
-             COUNT(*) FILTER (WHERE is_requested = true AND state = 'scraped') AS "scraped!: i64",
-             COUNT(*) FILTER (WHERE is_requested = true AND state = 'indexed') AS "indexed!: i64",
-             COUNT(*) FILTER (WHERE is_requested = true AND state = 'failed') AS "failed!: i64",
-             COUNT(*) FILTER (WHERE is_requested = true AND state = 'paused') AS "paused!: i64",
-             COUNT(*) FILTER (WHERE is_requested = true AND (
-                 state = 'ongoing'
-                 OR (state = 'unreleased' AND item_type = 'episode'
-                     AND parent_id IN (SELECT id FROM ongoing_season_ids))
-             )) AS "ongoing!: i64",
-             COUNT(*) FILTER (WHERE is_requested = true AND state = 'partially_completed') AS "partially_completed!: i64",
+             -- State counts are strictly leaf-level (movies + episodes) so a single
+             -- completed show doesn't inflate a bucket by also counting its show and
+             -- season rows. 'ongoing'/'partially_completed' only ever exist on
+             -- shows/seasons, so the leaf-level filters below resolve them to upcoming
+             -- episodes / zero respectively.
+             COUNT(*) FILTER (WHERE is_requested = true AND state = 'completed'
+                 AND item_type IN ('movie', 'episode')) AS "completed!: i64",
+             COUNT(*) FILTER (WHERE is_requested = true AND state = 'scraped'
+                 AND item_type IN ('movie', 'episode')) AS "scraped!: i64",
+             COUNT(*) FILTER (WHERE is_requested = true AND state = 'indexed'
+                 AND item_type IN ('movie', 'episode')) AS "indexed!: i64",
+             COUNT(*) FILTER (WHERE is_requested = true AND state = 'failed'
+                 AND item_type IN ('movie', 'episode')) AS "failed!: i64",
+             COUNT(*) FILTER (WHERE is_requested = true AND state = 'paused'
+                 AND item_type IN ('movie', 'episode')) AS "paused!: i64",
+             -- Leaf-level "ongoing" = upcoming episodes under an ongoing show.
              COUNT(*) FILTER (WHERE is_requested = true AND state = 'unreleased'
+                 AND item_type = 'episode'
+                 AND parent_id IN (SELECT id FROM ongoing_season_ids)) AS "ongoing!: i64",
+             -- No leaf item is ever 'partially_completed'; always 0, kept for API stability.
+             COUNT(*) FILTER (WHERE is_requested = true AND state = 'partially_completed'
+                 AND item_type IN ('movie', 'episode')) AS "partially_completed!: i64",
+             COUNT(*) FILTER (WHERE is_requested = true AND state = 'unreleased'
+                 AND item_type IN ('movie', 'episode')
                  AND NOT (item_type = 'episode'
                      AND parent_id IN (SELECT id FROM ongoing_season_ids))
              ) AS "unreleased!: i64"
