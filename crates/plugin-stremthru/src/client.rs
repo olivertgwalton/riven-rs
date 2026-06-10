@@ -1,14 +1,18 @@
+use std::sync::Arc;
+
 use redis::AsyncCommands;
 
 use riven_core::events::ScrapeRequest;
-use riven_core::http::HttpClient;
+use riven_core::http::{HttpClient, HttpResponseData};
 use riven_core::types::{
     CacheCheckFile, CacheCheckResult, DownloadFile, DownloadResult, MediaItemType, build_magnet_uri,
 };
 
+use std::time::Duration;
+
 use crate::models::{
-    StremthruCacheCheck, StremthruFile, StremthruLink, StremthruNewz, StremthruNewzAdd,
-    StremthruResponse, StremthruTorz, StremthruTorznabResponse, StremthruUser,
+    StremthruCacheCheck, StremthruErrorResponse, StremthruFile, StremthruLink, StremthruNewz,
+    StremthruNewzAdd, StremthruResponse, StremthruTorz, StremthruTorznabResponse, StremthruUser,
     parse_torrent_status,
 };
 use crate::{PROFILE, debrid_service};
@@ -93,7 +97,8 @@ pub async fn check_cache(
             batch_hashes = batch.len(),
             "requesting stremthru cache-check batch"
         );
-        fetched_results.extend(fetch_cache_check(http, base_url, store, api_key, batch).await?);
+        fetched_results
+            .extend(fetch_cache_check(http, redis, base_url, store, api_key, batch).await?);
     }
 
     for result in &fetched_results {
@@ -133,46 +138,263 @@ pub async fn check_cache(
     Ok(cached_results)
 }
 
+/// Default per-store cooldown when a 429 carries no parseable quota message.
+/// Longer than the HTTP layer's 10 s service pause because store 429s here are
+/// quota-style (e.g. TorBox's 60 adds/hour), not burst throttles.
+const DEFAULT_STORE_COOLDOWN_SECS: u64 = 60;
+
+fn store_cooldown_key(store: &str) -> String {
+    format!("plugin:stremthru:store-cooldown:{store}")
+}
+
+/// Pause a single store after it rate-limited us: only the throttled store
+/// sits out; the rest keep serving requests.
+async fn set_store_cooldown(
+    redis: &redis::aio::ConnectionManager,
+    store: &str,
+    duration: Duration,
+) {
+    let mut conn = redis.clone();
+    let _result: Result<(), _> = AsyncCommands::set_ex(
+        &mut conn,
+        store_cooldown_key(store),
+        1u8,
+        duration.as_secs().max(1),
+    )
+    .await;
+}
+
+/// Remaining cooldown for a store, if one is active.
+pub async fn store_cooldown_remaining(
+    redis: &redis::aio::ConnectionManager,
+    store: &str,
+) -> Option<u64> {
+    let mut conn = redis.clone();
+    let ttl: i64 = redis::cmd("TTL")
+        .arg(store_cooldown_key(store))
+        .query_async(&mut conn)
+        .await
+        .ok()?;
+    u64::try_from(ttl).ok().filter(|t| *t > 0)
+}
+
+/// A store-scoped request was withheld or rejected because the store is
+/// rate-limiting us. Not a store failure: callers should leave the store's
+/// health score alone and move on.
+#[derive(Debug)]
+pub struct StoreRateLimited {
+    pub retry_after: Duration,
+    /// True when this request triggered the cooldown (fresh 429); false when
+    /// an already-active cooldown short-circuited the request before sending.
+    pub fresh: bool,
+}
+
+impl std::fmt::Display for StoreRateLimited {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "store rate limited; retry in {}s",
+            self.retry_after.as_secs()
+        )
+    }
+}
+
+impl std::error::Error for StoreRateLimited {}
+
+/// A store-scoped response that cleared the rate-limit gate.
+enum StoreSend {
+    /// 2xx — body not yet consumed.
+    Ok(reqwest::Response),
+    /// Non-2xx, non-rate-limit; body already read for diagnostics.
+    Rejected {
+        status: reqwest::StatusCode,
+        body: String,
+    },
+}
+
+/// Detect a rate-limit rejection and compute its cooldown. Matches both a
+/// 429 status and the proxied `TOO_MANY_REQUESTS` error code, since StremThru
+/// relays the upstream store's envelope:
+/// `{"error":{"code":"TOO_MANY_REQUESTS","message":"60 per 1 hour"}}`.
+fn rate_limit_cooldown(status: reqwest::StatusCode, body: &str) -> Option<Duration> {
+    let error = StremthruErrorResponse::parse(body).error;
+    if status != reqwest::StatusCode::TOO_MANY_REQUESTS && error.code != "TOO_MANY_REQUESTS" {
+        return None;
+    }
+    Some(
+        parse_quota_interval(&error.message)
+            .unwrap_or(Duration::from_secs(DEFAULT_STORE_COOLDOWN_SECS)),
+    )
+}
+
+/// Gate every store-scoped request behind the per-store rate-limit cooldown:
+/// skip the call while the store is cooling down, and start a cooldown when
+/// the store answers with a quota rejection.
+async fn send_store<F>(
+    http: &HttpClient,
+    redis: &redis::aio::ConnectionManager,
+    store: &str,
+    make_request: F,
+) -> anyhow::Result<StoreSend>
+where
+    F: Fn(&reqwest::Client) -> reqwest::RequestBuilder,
+{
+    if let Some(remaining) = store_cooldown_remaining(redis, store).await {
+        return Err(StoreRateLimited {
+            retry_after: Duration::from_secs(remaining),
+            fresh: false,
+        }
+        .into());
+    }
+
+    let response = http.send(PROFILE, make_request).await?;
+    if response.status().is_success() {
+        return Ok(StoreSend::Ok(response));
+    }
+
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    if let Some(retry_after) = rate_limit_cooldown(status, &body) {
+        set_store_cooldown(redis, store, retry_after).await;
+        return Err(StoreRateLimited {
+            retry_after,
+            fresh: true,
+        }
+        .into());
+    }
+
+    Ok(StoreSend::Rejected { status, body })
+}
+
+/// Dedupe-keyed variant of [`send_store`] for cacheable GETs. Non-2xx,
+/// non-rate-limit responses are returned for the caller to interpret, same
+/// as before the gate existed.
+async fn send_store_data<F>(
+    http: &HttpClient,
+    redis: &redis::aio::ConnectionManager,
+    store: &str,
+    dedupe_key: String,
+    make_request: F,
+) -> anyhow::Result<Arc<HttpResponseData>>
+where
+    F: Fn(&reqwest::Client) -> reqwest::RequestBuilder,
+{
+    if let Some(remaining) = store_cooldown_remaining(redis, store).await {
+        return Err(StoreRateLimited {
+            retry_after: Duration::from_secs(remaining),
+            fresh: false,
+        }
+        .into());
+    }
+
+    let response = http.send_data(PROFILE, Some(dedupe_key), make_request).await?;
+    if !response.status().is_success()
+        && let Some(retry_after) =
+            rate_limit_cooldown(response.status(), &response.text().unwrap_or_default())
+    {
+        set_store_cooldown(redis, store, retry_after).await;
+        return Err(StoreRateLimited {
+            retry_after,
+            fresh: true,
+        }
+        .into());
+    }
+
+    Ok(response)
+}
+
+/// Outcome of an `add_torrent` attempt against a single store. Expected store
+/// responses are modeled as variants so the dispatch loop can react per class;
+/// `Err` is reserved for network/protocol failures and rate limits
+/// ([`StoreRateLimited`]).
+pub enum AddTorrentOutcome {
+    /// Files are present and ready for link generation.
+    Ready(StremthruTorz),
+    /// Store doesn't have the torrent in a ready state.
+    Unavailable,
+    /// A previous add already queued this hash at the store; it is being
+    /// fetched and isn't a failure (TorBox: HTTP 400 "Download already queued.").
+    AlreadyQueued,
+    /// Store rejected the request outright (e.g. Debrid-Link `notAddTorrent`).
+    Rejected { reason: String },
+}
+
+/// Classify a non-2xx torz add response (rate limits never reach here — the
+/// send gate converts them to [`StoreRateLimited`]).
+fn classify_add_torrent_rejection(status: reqwest::StatusCode, body: &str) -> AddTorrentOutcome {
+    let error = StremthruErrorResponse::parse(body).error;
+
+    if error.message.to_ascii_lowercase().contains("already queued") {
+        return AddTorrentOutcome::AlreadyQueued;
+    }
+
+    AddTorrentOutcome::Rejected {
+        reason: format!("HTTP {status} - {body}"),
+    }
+}
+
+/// Parse a quota message like "60 per 1 hour" into the average refill
+/// interval (period / limit) — the soonest a slot is likely to free up.
+fn parse_quota_interval(message: &str) -> Option<Duration> {
+    let mut parts = message.split_whitespace();
+    let limit: u64 = parts.next()?.parse().ok()?;
+    if parts.next()? != "per" {
+        return None;
+    }
+    let count: u64 = parts.next()?.parse().ok()?;
+    let unit_secs = match parts.next()?.trim_end_matches('s') {
+        "second" => 1,
+        "minute" => 60,
+        "hour" => 3600,
+        "day" => 86400,
+        _ => return None,
+    };
+    if limit == 0 {
+        return None;
+    }
+    Some(Duration::from_secs((count * unit_secs / limit).max(1)))
+}
+
 /// Adds a torrent to the store and returns the downloaded payload with file links.
 /// The torrent must report `downloaded` immediately or it is removed and treated as
 /// unavailable for this attempt.
 pub async fn add_torrent(
     http: &HttpClient,
+    redis: &redis::aio::ConnectionManager,
     base_url: &str,
     store: &str,
     api_key: &str,
     hash: &str,
-) -> anyhow::Result<Option<StremthruTorz>> {
+) -> anyhow::Result<AddTorrentOutcome> {
     let hash = hash.to_lowercase();
     if hash.is_empty() {
         tracing::warn!(store, "skipping add_torrent: empty info_hash");
-        return Ok(None);
+        return Ok(AddTorrentOutcome::Unavailable);
     }
     let magnet = build_magnet_uri(&hash);
     let url = format!("{base_url}v0/store/torz");
     tracing::debug!(store, url = %url, "adding torrent via stremthru torz endpoint");
 
-    let response = http
-        .send(PROFILE, |client| {
-            client
-                .post(&url)
-                .store_headers(store, api_key)
-                .json(&serde_json::json!({ "link": magnet }))
-        })
-        .await?;
-
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        anyhow::bail!("store torz request rejected: HTTP {} - {}", status, body);
-    }
+    let response = match send_store(http, redis, store, |client| {
+        client
+            .post(&url)
+            .store_headers(store, api_key)
+            .json(&serde_json::json!({ "link": magnet }))
+    })
+    .await?
+    {
+        StoreSend::Ok(response) => response,
+        StoreSend::Rejected { status, body } => {
+            return Ok(classify_add_torrent_rejection(status, &body));
+        }
+    };
 
     let text = response.text().await?;
     let resp: StremthruResponse<StremthruTorz> = serde_json::from_str(&text)
         .map_err(|e| anyhow::anyhow!("invalid torz response: {e}; body={text}"))?;
 
     let Some(data) = resp.data else {
-        return Ok(None);
+        return Ok(AddTorrentOutcome::Unavailable);
     };
 
     // "downloaded" = files present and ready (all stores).
@@ -189,13 +411,14 @@ pub async fn add_torrent(
             status = %data.status,
             "torrent not in ready state; deleting torz item"
         );
-        if let Err(error) = delete_torrent(http, base_url, store, api_key, &torrent_id).await {
+        if let Err(error) = delete_torrent(http, redis, base_url, store, api_key, &torrent_id).await
+        {
             tracing::warn!(store, hash, torrent_id, error = %error, "failed to delete torz item");
         }
-        return Ok(None);
+        return Ok(AddTorrentOutcome::Unavailable);
     }
 
-    Ok(Some(data))
+    Ok(AddTorrentOutcome::Ready(data))
 }
 
 /// Submits an NZB URL to a Newz-capable store via StremThru, polls until the
@@ -205,6 +428,7 @@ pub async fn add_torrent(
 /// path treats `add_torrent` failures.
 pub async fn add_newz(
     http: &HttpClient,
+    redis: &redis::aio::ConnectionManager,
     base_url: &str,
     store: &str,
     api_key: &str,
@@ -217,20 +441,19 @@ pub async fn add_newz(
     let url = format!("{base_url}v0/store/newz");
     tracing::debug!(store, url = %url, "adding newz via stremthru");
 
-    let response = http
-        .send(PROFILE, |client| {
-            client
-                .post(&url)
-                .store_headers(store, api_key)
-                .json(&serde_json::json!({ "link": nzb_url }))
-        })
-        .await?;
-
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        anyhow::bail!("store newz add rejected: HTTP {} - {}", status, body);
-    }
+    let response = match send_store(http, redis, store, |client| {
+        client
+            .post(&url)
+            .store_headers(store, api_key)
+            .json(&serde_json::json!({ "link": nzb_url }))
+    })
+    .await?
+    {
+        StoreSend::Ok(response) => response,
+        StoreSend::Rejected { status, body } => {
+            anyhow::bail!("store newz add rejected: HTTP {} - {}", status, body)
+        }
+    };
 
     let text = response.text().await?;
     let resp: StremthruResponse<StremthruNewzAdd> = serde_json::from_str(&text)
@@ -239,11 +462,12 @@ pub async fn add_newz(
         return Ok(None);
     };
 
-    poll_newz(http, base_url, store, api_key, &added.id, poll_timeout).await
+    poll_newz(http, redis, base_url, store, api_key, &added.id, poll_timeout).await
 }
 
 async fn poll_newz(
     http: &HttpClient,
+    redis: &redis::aio::ConnectionManager,
     base_url: &str,
     store: &str,
     api_key: &str,
@@ -254,17 +478,16 @@ async fn poll_newz(
     let started = std::time::Instant::now();
     let mut interval = std::time::Duration::from_secs(3);
     loop {
-        let response = http
-            .send(PROFILE, |client| {
-                client.get(&url).store_headers(store, api_key)
-            })
-            .await?;
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            anyhow::bail!("store newz get rejected: HTTP {} - {}", status, body);
-        }
+        let response = match send_store(http, redis, store, |client| {
+            client.get(&url).store_headers(store, api_key)
+        })
+        .await?
+        {
+            StoreSend::Ok(response) => response,
+            StoreSend::Rejected { status, body } => {
+                anyhow::bail!("store newz get rejected: HTTP {} - {}", status, body)
+            }
+        };
 
         let text = response.text().await?;
         let resp: StremthruResponse<StremthruNewz> = serde_json::from_str(&text)
@@ -339,6 +562,7 @@ fn download_result_from_files(
 
 async fn fetch_cache_check(
     http: &HttpClient,
+    redis: &redis::aio::ConnectionManager,
     base_url: &str,
     store: &str,
     api_key: &str,
@@ -351,18 +575,19 @@ async fn fetch_cache_check(
         .join(",");
     let url = format!("{base_url}v0/store/torz/check");
     tracing::debug!(store, url = %url, "requesting stremthru torz cache check");
-    let response = http
-        .send_data(
-            PROFILE,
-            Some(format!("{store}:{url}?hash={hash_str}")),
-            |client| {
-                client
-                    .get(&url)
-                    .query(&[("hash", hash_str.as_str())])
-                    .store_headers(store, api_key)
-            },
-        )
-        .await?;
+    let response = send_store_data(
+        http,
+        redis,
+        store,
+        format!("{store}:{url}?hash={hash_str}"),
+        |client| {
+            client
+                .get(&url)
+                .query(&[("hash", hash_str.as_str())])
+                .store_headers(store, api_key)
+        },
+    )
+    .await?;
 
     if !response.status().is_success() {
         let status = response.status();
@@ -415,24 +640,22 @@ async fn fetch_cache_check(
 
 async fn delete_torrent(
     http: &HttpClient,
+    redis: &redis::aio::ConnectionManager,
     base_url: &str,
     store: &str,
     api_key: &str,
     torrent_id: &str,
 ) -> anyhow::Result<()> {
     let url = format!("{base_url}v0/store/torz/{torrent_id}");
-    let response = http
-        .send(PROFILE, |client| {
-            client.delete(&url).store_headers(store, api_key)
-        })
-        .await?;
-
-    if response.status().is_success() {
-        Ok(())
-    } else {
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        anyhow::bail!("store torz delete rejected: HTTP {} - {}", status, body);
+    match send_store(http, redis, store, |client| {
+        client.delete(&url).store_headers(store, api_key)
+    })
+    .await?
+    {
+        StoreSend::Ok(_) => Ok(()),
+        StoreSend::Rejected { status, body } => {
+            anyhow::bail!("store torz delete rejected: HTTP {} - {}", status, body)
+        }
     }
 }
 
@@ -558,6 +781,7 @@ pub enum GeneratedLink {
 
 pub async fn generate_link(
     http: &HttpClient,
+    redis: &redis::aio::ConnectionManager,
     base_url: &str,
     store: &str,
     api_key: &str,
@@ -573,24 +797,23 @@ pub async fn generate_link(
     };
     let url = format!("{base_url}v0/store/{kind}/link/generate");
     tracing::debug!(store, kind, url = %url, "generating stremthru link");
-    let response = http
-        .send(PROFILE, |client| {
-            client
-                .post(&url)
-                .store_headers(store, api_key)
-                .json(&serde_json::json!({ "link": magnet }))
-        })
-        .await?;
-
-    if !response.status().is_success() {
-        let status = response.status();
-        if riven_core::stream_link::is_fatal_status_code(status.as_u16()) {
-            tracing::warn!(store, %status, "store reports torrent is dead");
-            return Ok(GeneratedLink::Dead);
+    let response = match send_store(http, redis, store, |client| {
+        client
+            .post(&url)
+            .store_headers(store, api_key)
+            .json(&serde_json::json!({ "link": magnet }))
+    })
+    .await?
+    {
+        StoreSend::Ok(response) => response,
+        StoreSend::Rejected { status, body } => {
+            if riven_core::stream_link::is_fatal_status_code(status.as_u16()) {
+                tracing::warn!(store, %status, "store reports torrent is dead");
+                return Ok(GeneratedLink::Dead);
+            }
+            anyhow::bail!("store rejected link generation: HTTP {} - {}", status, body);
         }
-        let body = response.text().await.unwrap_or_default();
-        anyhow::bail!("store rejected link generation: HTTP {} - {}", status, body);
-    }
+    };
 
     let text = response.text().await?;
     let resp: StremthruResponse<StremthruLink> = serde_json::from_str(&text)
@@ -631,16 +854,24 @@ mod tests;
 
 pub async fn fetch_user_info(
     http: &HttpClient,
+    redis: &redis::aio::ConnectionManager,
     base_url: &str,
     store: &str,
     api_key: &str,
 ) -> anyhow::Result<riven_core::types::DebridUserInfo> {
     let url = format!("{base_url}v0/store/user");
-    let resp: StremthruResponse<StremthruUser> = http
-        .get_json(PROFILE, format!("{store}:{url}"), |client| {
-            client.get(&url).store_headers(store, api_key)
-        })
-        .await?;
+    let response = send_store_data(http, redis, store, format!("{store}:{url}"), |client| {
+        client.get(&url).store_headers(store, api_key)
+    })
+    .await?;
+    if !response.status().is_success() {
+        anyhow::bail!(
+            "store user request rejected: HTTP {} - {}",
+            response.status(),
+            response.text().unwrap_or_default()
+        );
+    }
+    let resp: StremthruResponse<StremthruUser> = response.json()?;
     let user = resp
         .data
         .ok_or_else(|| anyhow::anyhow!("store returned no user data"))?;

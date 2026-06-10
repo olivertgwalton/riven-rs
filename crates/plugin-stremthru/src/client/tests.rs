@@ -58,6 +58,87 @@ fn cache_check_key_includes_store_and_hash() {
 }
 
 #[test]
+fn rate_limit_cooldown_uses_quota_refill_interval() {
+    // TorBox: HTTP 429 {"error":{"code":"TOO_MANY_REQUESTS","message":"60 per 1 hour"}}
+    // 60 per hour → one slot frees up about every 60 seconds.
+    let cooldown = rate_limit_cooldown(
+        reqwest::StatusCode::TOO_MANY_REQUESTS,
+        r#"{"error":{"code":"TOO_MANY_REQUESTS","message":"60 per 1 hour","errors":[]}}"#,
+    );
+    assert_eq!(cooldown, Some(Duration::from_secs(60)));
+}
+
+#[test]
+fn rate_limit_cooldown_defaults_when_quota_is_unparseable() {
+    let cooldown = rate_limit_cooldown(reqwest::StatusCode::TOO_MANY_REQUESTS, "not json");
+    assert_eq!(
+        cooldown,
+        Some(Duration::from_secs(DEFAULT_STORE_COOLDOWN_SECS))
+    );
+}
+
+#[test]
+fn rate_limit_cooldown_matches_proxied_error_code_on_other_statuses() {
+    // Some stores surface quota errors through StremThru with a non-429
+    // status; the error code still identifies them.
+    let cooldown = rate_limit_cooldown(
+        reqwest::StatusCode::BAD_REQUEST,
+        r#"{"error":{"code":"TOO_MANY_REQUESTS","message":"10 per 1 minute","errors":[]}}"#,
+    );
+    assert_eq!(cooldown, Some(Duration::from_secs(6)));
+}
+
+#[test]
+fn rate_limit_cooldown_ignores_ordinary_rejections() {
+    let cooldown = rate_limit_cooldown(
+        reqwest::StatusCode::BAD_REQUEST,
+        r#"{"error":{"code":"BAD_REQUEST","message":"Debrid-Link Error Code: notAddTorrent","errors":[]}}"#,
+    );
+    assert_eq!(cooldown, None);
+}
+
+#[test]
+fn classifies_already_queued_as_in_progress() {
+    // TorBox: HTTP 400 {"error":{"code":"UNKNOWN","message":"Download already queued."}}
+    let outcome = classify_add_torrent_rejection(
+        reqwest::StatusCode::BAD_REQUEST,
+        r#"{"error":{"code":"UNKNOWN","message":"Download already queued.","errors":[]}}"#,
+    );
+    assert!(matches!(outcome, AddTorrentOutcome::AlreadyQueued));
+}
+
+#[test]
+fn classifies_store_error_codes_as_rejected() {
+    // Debrid-Link: HTTP 400 {"error":{"code":"BAD_REQUEST","message":"Debrid-Link Error Code: notAddTorrent"}}
+    let outcome = classify_add_torrent_rejection(
+        reqwest::StatusCode::BAD_REQUEST,
+        r#"{"error":{"code":"BAD_REQUEST","message":"Debrid-Link Error Code: notAddTorrent","errors":[]}}"#,
+    );
+    assert!(
+        matches!(outcome, AddTorrentOutcome::Rejected { reason } if reason.contains("notAddTorrent"))
+    );
+}
+
+#[test]
+fn parses_quota_messages_into_refill_intervals() {
+    assert_eq!(
+        parse_quota_interval("60 per 1 hour"),
+        Some(Duration::from_secs(60))
+    );
+    assert_eq!(
+        parse_quota_interval("10 per 1 minute"),
+        Some(Duration::from_secs(6))
+    );
+    assert_eq!(
+        parse_quota_interval("2 per 1 second"),
+        Some(Duration::from_secs(1))
+    );
+    assert_eq!(parse_quota_interval("garbage"), None);
+    assert_eq!(parse_quota_interval(""), None);
+    assert_eq!(parse_quota_interval("0 per 1 hour"), None);
+}
+
+#[test]
 fn add_torrent_accepts_cached_status_for_torbox_instant_downloads() {
     // TorBox items in the seeded pool may return "cached" on the initial ADD
     // response even though files are accessible (DownloadFinished/DownloadPresent

@@ -14,8 +14,9 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use crate::client::{
-    GeneratedLink, add_newz, add_torrent, check_cache, download_result_from_newz,
-    download_result_from_torz, fetch_user_info, generate_link, scrape_torznab,
+    AddTorrentOutcome, GeneratedLink, StoreRateLimited, add_newz, add_torrent, check_cache,
+    download_result_from_newz, download_result_from_torz, fetch_user_info, generate_link,
+    scrape_torznab, store_cooldown_remaining,
 };
 use crate::newznab::{is_nzb_info_hash, nzb_url_redis_key, scrape_newznab};
 
@@ -80,6 +81,30 @@ fn get_newz_stores(settings: &PluginSettings) -> Vec<(&'static str, String)> {
 
 fn store_score_key(store: &str) -> String {
     format!("plugin:stremthru:store-score:{store}")
+}
+
+/// True when `error` is the per-store rate-limit signal, in which case it is
+/// logged here (warn when this call started the cooldown, debug when an
+/// active cooldown skipped the call). A throttled store isn't an unhealthy
+/// store — callers should skip the health-score penalty when this returns true.
+fn handled_rate_limit(store: &str, error: &anyhow::Error) -> bool {
+    let Some(limited) = error.downcast_ref::<StoreRateLimited>() else {
+        return false;
+    };
+    if limited.fresh {
+        tracing::warn!(
+            store,
+            cooldown_secs = limited.retry_after.as_secs(),
+            "store rate limited; pausing store"
+        );
+    } else {
+        tracing::debug!(
+            store,
+            remaining_secs = limited.retry_after.as_secs(),
+            "store rate-limit cooldown active; skipping"
+        );
+    }
+    true
 }
 
 async fn get_store_scores(
@@ -302,6 +327,9 @@ impl Plugin for StremthruPlugin {
                         }
                     }
                     Err(error) => {
+                        if handled_rate_limit(store, &error) {
+                            continue;
+                        }
                         if error
                             .downcast_ref::<reqwest::Error>()
                             .is_some_and(|e| e.is_connect() || e.is_timeout() || e.is_request())
@@ -340,6 +368,7 @@ impl Plugin for StremthruPlugin {
         for attempt in attempts {
             match add_torrent(
                 &ctx.http,
+                &ctx.redis,
                 &base_url,
                 attempt.store,
                 attempt.api_key,
@@ -347,7 +376,7 @@ impl Plugin for StremthruPlugin {
             )
             .await
             {
-                Ok(Some(torz)) => {
+                Ok(AddTorrentOutcome::Ready(torz)) => {
                     adjust_store_score(&ctx.redis, attempt.store, 5).await;
                     tracing::debug!(
                         store = attempt.store,
@@ -358,7 +387,7 @@ impl Plugin for StremthruPlugin {
                     let download = download_result_from_torz(attempt.store, info_hash, torz);
                     return Ok(HookResponse::Download(Box::new(download)));
                 }
-                Ok(None) => {
+                Ok(AddTorrentOutcome::Unavailable) => {
                     adjust_store_score(&ctx.redis, attempt.store, -2).await;
                     tracing::debug!(
                         store = attempt.store,
@@ -366,7 +395,28 @@ impl Plugin for StremthruPlugin {
                         "add_torrent returned unavailable"
                     );
                 }
+                Ok(AddTorrentOutcome::AlreadyQueued) => {
+                    // The store is already fetching this hash from an earlier
+                    // add — in progress, not a failure. No score change.
+                    tracing::debug!(
+                        store = attempt.store,
+                        info_hash,
+                        "torrent already queued at store; treating as in progress"
+                    );
+                }
+                Ok(AddTorrentOutcome::Rejected { reason }) => {
+                    adjust_store_score(&ctx.redis, attempt.store, -1).await;
+                    tracing::warn!(
+                        store = attempt.store,
+                        info_hash,
+                        reason,
+                        "store rejected add_torrent"
+                    );
+                }
                 Err(error) => {
+                    if handled_rate_limit(attempt.store, &error) {
+                        continue;
+                    }
                     adjust_store_score(&ctx.redis, attempt.store, -1).await;
                     if error
                         .downcast_ref::<reqwest::Error>()
@@ -431,11 +481,14 @@ impl Plugin for StremthruPlugin {
 
         let results = futures::future::join_all(futures).await;
         let mut all_results = Vec::new();
-        for result in results {
+        for ((store, _), result) in stores.iter().zip(results) {
             match result {
                 Ok(items) => all_results.extend(items),
                 Err(error) => {
-                    tracing::warn!(error = %error, "cache check failed for a store")
+                    if handled_rate_limit(store, &error) {
+                        continue;
+                    }
+                    tracing::warn!(store, error = %error, "cache check failed for a store")
                 }
             }
         }
@@ -447,13 +500,23 @@ impl Plugin for StremthruPlugin {
         ctx: &PluginContext,
     ) -> anyhow::Result<HookResponse> {
         let stores = get_configured_stores(&ctx.settings);
-        let providers = stores
-            .iter()
-            .map(|(store, _)| ProviderInfo {
+        // Rate-limited stores sit out until their cooldown lapses so the
+        // core never dispatches to a store that would just reject the call.
+        let mut providers = Vec::with_capacity(stores.len());
+        for (store, _) in &stores {
+            if let Some(remaining) = store_cooldown_remaining(&ctx.redis, store).await {
+                tracing::debug!(
+                    store,
+                    remaining_secs = remaining,
+                    "store rate-limit cooldown active; omitting from provider list"
+                );
+                continue;
+            }
+            providers.push(ProviderInfo {
                 name: store.to_string(),
                 store: store.to_string(),
-            })
-            .collect();
+            });
+        }
         Ok(HookResponse::ProviderList(providers))
     }
 
@@ -490,7 +553,8 @@ impl Plugin for StremthruPlugin {
 
         let mut saw_dead = false;
         for (store, api_key) in ordered_stores {
-            let result = generate_link(&ctx.http, &base_url, store, api_key, magnet).await;
+            let result =
+                generate_link(&ctx.http, &ctx.redis, &base_url, store, api_key, magnet).await;
             match result {
                 Ok(GeneratedLink::Link(link)) => {
                     adjust_store_score(&ctx.redis, store, 1).await;
@@ -504,6 +568,9 @@ impl Plugin for StremthruPlugin {
                     saw_dead = true;
                 }
                 Err(error) => {
+                    if handled_rate_limit(store, &error) {
+                        continue;
+                    }
                     adjust_store_score(&ctx.redis, store, -1).await;
                     tracing::warn!(store, error = %error, "generate link failed");
                 }
@@ -526,9 +593,12 @@ impl Plugin for StremthruPlugin {
         let stores = get_configured_stores(&ctx.settings);
         let mut infos = Vec::new();
         for (store, api_key) in &stores {
-            match fetch_user_info(&ctx.http, &base_url, store, api_key).await {
+            match fetch_user_info(&ctx.http, &ctx.redis, &base_url, store, api_key).await {
                 Ok(info) => infos.push(info),
                 Err(error) => {
+                    if handled_rate_limit(store, &error) {
+                        continue;
+                    }
                     tracing::warn!(store, error = %error, "failed to fetch debrid user info");
                 }
             }
@@ -571,7 +641,17 @@ async fn handle_newz_download(
     let poll_timeout = Duration::from_secs(NEWZ_POLL_TIMEOUT_SECS);
     let mut any_network_error = false;
     for (store, api_key) in ordered {
-        match add_newz(&ctx.http, base_url, store, api_key, &nzb_url, poll_timeout).await {
+        match add_newz(
+            &ctx.http,
+            &ctx.redis,
+            base_url,
+            store,
+            api_key,
+            &nzb_url,
+            poll_timeout,
+        )
+        .await
+        {
             Ok(Some(newz)) => {
                 adjust_store_score(&ctx.redis, store, 5).await;
                 tracing::debug!(store, info_hash, files = newz.files.len(), "newz added");
@@ -583,6 +663,9 @@ async fn handle_newz_download(
                 tracing::debug!(store, info_hash, "add_newz returned unavailable");
             }
             Err(error) => {
+                if handled_rate_limit(store, &error) {
+                    continue;
+                }
                 adjust_store_score(&ctx.redis, store, -1).await;
                 if error
                     .downcast_ref::<reqwest::Error>()

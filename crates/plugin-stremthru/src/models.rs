@@ -21,6 +21,32 @@ pub struct StremthruResponse<T> {
     pub data: Option<T>,
 }
 
+/// Error envelope returned by StremThru and the upstream stores it proxies:
+/// `{"error":{"code":"TOO_MANY_REQUESTS","message":"60 per 1 hour"}}`. Parsed
+/// best-effort so the dispatch loop can tell a throttled store (cool it down)
+/// or an already-queued hash (in progress, not a failure) apart from a genuine
+/// rejection.
+#[derive(Deserialize, Default)]
+pub struct StremthruErrorResponse {
+    #[serde(default)]
+    pub error: StremthruError,
+}
+
+#[derive(Deserialize, Default)]
+pub struct StremthruError {
+    #[serde(default)]
+    pub code: String,
+    #[serde(default)]
+    pub message: String,
+}
+
+impl StremthruErrorResponse {
+    /// Parse an error body, falling back to an empty envelope on non-JSON input.
+    pub fn parse(body: &str) -> Self {
+        serde_json::from_str(body).unwrap_or_default()
+    }
+}
+
 #[derive(Deserialize)]
 pub struct StremthruCacheCheck {
     pub items: Vec<StremthruCacheItem>,
