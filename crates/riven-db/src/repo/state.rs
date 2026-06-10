@@ -58,19 +58,35 @@ pub fn aggregate_states(
         return Some(MediaItemState::Completed);
     }
 
+    // Ongoing means "waiting on future airings" and only wins when no child
+    // has actionable work left. An aired child in Indexed/Scraped/
+    // PartiallyCompleted still needs scraping or downloading, and `ongoing`
+    // is not a state `get_pending_items_for_retry` picks up — deriving
+    // Ongoing over it would orphan that work until a user intervenes.
+    let any_actionable = child_states.iter().any(|s| {
+        matches!(
+            s,
+            MediaItemState::Indexed | MediaItemState::Scraped | MediaItemState::PartiallyCompleted
+        )
+    });
     let any_ongoing_or_unreleased = child_states
         .iter()
         .any(|s| matches!(s, MediaItemState::Ongoing | MediaItemState::Unreleased));
-    if any_ongoing_or_unreleased
-        || (parent_type == MediaItemType::Show && show_status == Some(ShowStatus::Continuing))
+    if !any_actionable
+        && (any_ongoing_or_unreleased
+            || (parent_type == MediaItemType::Show && show_status == Some(ShowStatus::Continuing)))
     {
         return Some(MediaItemState::Ongoing);
     }
 
+    // An Ongoing child counts as partial progress: it only derives when some
+    // of its own children completed.
     if child_states.iter().any(|s| {
         matches!(
             s,
-            MediaItemState::Completed | MediaItemState::PartiallyCompleted
+            MediaItemState::Completed
+                | MediaItemState::PartiallyCompleted
+                | MediaItemState::Ongoing
         )
     }) {
         return Some(MediaItemState::PartiallyCompleted);

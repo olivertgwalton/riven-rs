@@ -102,31 +102,99 @@ fn all_completed_ended_show_is_completed() {
 }
 
 #[test]
-fn ongoing_child_makes_parent_ongoing() {
+fn ongoing_child_with_pending_sibling_is_partially_completed() {
+    // The Ongoing child carries completed work; the Indexed sibling still
+    // needs scraping, so the parent must stay in a retryable state.
     assert_eq!(
         agg(MediaItemType::Season, Indexed, None, &[Ongoing, Indexed]),
+        Some(PartiallyCompleted)
+    );
+}
+
+#[test]
+fn ongoing_child_without_pending_makes_parent_ongoing() {
+    assert_eq!(
+        agg(MediaItemType::Season, Indexed, None, &[Ongoing, Unreleased]),
         Some(Ongoing)
     );
 }
 
 #[test]
-fn unreleased_mixed_makes_parent_ongoing() {
-    // Mixed unreleased + indexed isn't all-unreleased, so it falls into
-    // the ongoing/unreleased "any" check.
+fn unreleased_mixed_with_pending_falls_through_to_leaf() {
+    // Premiere aired but unscraped + future episodes: the pending work
+    // outranks Ongoing and the parent derives from leaf rules (Indexed).
     assert_eq!(
         agg(MediaItemType::Season, Indexed, None, &[Unreleased, Indexed]),
+        None
+    );
+}
+
+#[test]
+fn completed_plus_unreleased_is_ongoing() {
+    // Steady state for an airing season: everything aired is done, the rest
+    // hasn't aired. Nothing actionable → Ongoing.
+    assert_eq!(
+        agg(
+            MediaItemType::Season,
+            Indexed,
+            None,
+            &[Completed, Unreleased]
+        ),
         Some(Ongoing)
     );
 }
 
 #[test]
-fn continuing_show_with_indexed_children_is_ongoing() {
+fn aired_pending_episode_outranks_ongoing() {
+    // Newly-aired episodes of an airing season stuck in Indexed must surface
+    // as PartiallyCompleted so the retry loop picks the chain up.
+    assert_eq!(
+        agg(
+            MediaItemType::Season,
+            Indexed,
+            None,
+            &[Completed, Indexed, Unreleased]
+        ),
+        Some(PartiallyCompleted)
+    );
+}
+
+#[test]
+fn continuing_show_with_indexed_children_falls_through() {
+    // Brand-new continuing show with nothing grabbed: actionable work
+    // outranks Ongoing; leaf rules derive Indexed (retryable).
     assert_eq!(
         agg(
             MediaItemType::Show,
             Indexed,
             Some(ShowStatus::Continuing),
             &[Indexed, Indexed]
+        ),
+        None
+    );
+}
+
+#[test]
+fn continuing_show_with_partially_completed_season_is_partially_completed() {
+    assert_eq!(
+        agg(
+            MediaItemType::Show,
+            Indexed,
+            Some(ShowStatus::Continuing),
+            &[Completed, PartiallyCompleted]
+        ),
+        Some(PartiallyCompleted)
+    );
+}
+
+#[test]
+fn continuing_show_with_ongoing_season_stays_ongoing() {
+    assert_eq!(
+        agg(
+            MediaItemType::Show,
+            Indexed,
+            Some(ShowStatus::Continuing),
+            &[Completed, Ongoing]
         ),
         Some(Ongoing)
     );

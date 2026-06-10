@@ -196,6 +196,19 @@ pub async fn get_pending_items_for_retry(
         .await?)
 }
 
+/// IDs of shows/seasons currently in `ongoing`. The retry scheduler re-derives
+/// these each cycle: rollup-rule changes and crash-window drift don't rewrite
+/// settled rows on their own, and a stale `ongoing` is invisible to
+/// [`get_pending_items_for_retry`].
+pub async fn get_ongoing_container_ids(pool: &PgPool) -> Result<Vec<i64>> {
+    Ok(sqlx::query_scalar(
+        "SELECT id FROM media_items
+         WHERE state = 'ongoing' AND item_type IN ('show', 'season')",
+    )
+    .fetch_all(pool)
+    .await?)
+}
+
 /// Fetch items stuck in Ongoing that haven't been updated in at least `min_age_minutes`.
 /// Used by the retry scheduler to recover items left in Ongoing after a crash or lost
 /// download session, without interfering with actively-downloading items.

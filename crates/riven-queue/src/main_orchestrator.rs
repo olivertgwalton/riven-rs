@@ -170,22 +170,29 @@ impl MainOrchestrator {
             .sync_item_request_state(&item)
             .await;
 
-        match item.state {
-            MediaItemState::Unreleased => {
-                self.schedule_reindex(&item).await;
+        // Reindexing tracks metadata facts, not derived state: keep the
+        // schedule while new episodes can still appear (continuing show) or
+        // a descendant has yet to air. A continuing show with un-grabbed
+        // aired episodes derives PartiallyCompleted — not Ongoing — and must
+        // keep reindexing all the same.
+        let needs_reindex = match item.item_type {
+            MediaItemType::Show => {
+                item.show_status == Some(ShowStatus::Continuing)
+                    || repo::get_next_unreleased_air_date_for_show(&self.queue.db_pool, item.id)
+                        .await
+                        .ok()
+                        .flatten()
+                        .is_some()
             }
-            MediaItemState::Ongoing => {
-                self.schedule_reindex(&item).await;
-                if item.is_requested {
-                    self.process_media_item(&item).await;
-                }
-            }
-            _ => {
-                self.queue.clear_scheduled_index(item.id).await;
-                if item.is_requested {
-                    self.process_media_item(&item).await;
-                }
-            }
+            _ => item.state == MediaItemState::Unreleased,
+        };
+        if needs_reindex {
+            self.schedule_reindex(&item).await;
+        } else {
+            self.queue.clear_scheduled_index(item.id).await;
+        }
+        if item.state != MediaItemState::Unreleased && item.is_requested {
+            self.process_media_item(&item).await;
         }
     }
 
@@ -262,6 +269,22 @@ impl MainOrchestrator {
     /// Retry-library actor. Periodically called by the worker to nudge items
     /// stuck in retryable states.
     pub async fn retry_library(&self) {
+        // Re-derive `ongoing` shows/seasons first: `ongoing` is not in the
+        // retryable-state query below, so a container settled there while
+        // holding actionable children (aired episodes still Indexed/Scraped)
+        // would never be picked up. Recompute flips those to a retryable
+        // state the query then sees.
+        match repo::get_ongoing_container_ids(&self.queue.db_pool).await {
+            Ok(ids) => {
+                if let Err(error) = repo::force_recompute(&self.queue.db_pool, &ids).await {
+                    tracing::error!(%error, "retry_library: failed to recompute ongoing items");
+                }
+            }
+            Err(error) => {
+                tracing::error!(%error, "retry_library: failed to fetch ongoing items");
+            }
+        }
+
         // Item requests in `failed`/`requested` → re-trigger index.
         let requests = match repo::get_retryable_item_requests(&self.queue.db_pool).await {
             Ok(r) => r,
