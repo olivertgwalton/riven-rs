@@ -183,19 +183,19 @@ impl CoreSettingsQuery {
             SettingField::new("dubbed_anime_only", "Dubbed anime only", "boolean")
                 .with_description("Only fetch dubbed versions of anime titles."),
             SettingField::new("attempt_unknown_downloads", "Attempt unknown downloads", "boolean")
-                .with_description("Attempt to download torrents whose cache status cannot be verified. Enabling this degrades performance but may help if plugins cannot confirm cache status for your items."),
+                .with_description("Try to download torrents even when cache status can't be confirmed. May help in some cases but slows things down."),
             SettingField::new("retry_interval_secs", "Retry interval (seconds)", "number")
                 .with_default("600")
-                .with_description("How often to retry stuck items. 0 = disabled. Default: 600 (10 m)."),
+                .with_description("How often (in seconds) to retry items that are stuck. 0 disables retries."),
             SettingField::new("maximum_scrape_attempts", "Max scrape attempts", "number")
                 .with_default("0")
-                .with_description("After this many consecutive scrape failures an item is marked Failed and excluded from further retries. 0 = unlimited."),
+                .with_description("Mark an item as failed after this many scrape attempts in a row. 0 = keep retrying forever."),
             SettingField::new("schedule_offset_minutes", "Re-index offset (minutes)", "number")
                 .with_default("30")
-                .with_description("How long after a known release/air date to wait before re-indexing an unreleased or ongoing item."),
+                .with_description("How long to wait after a release or air date before checking for it (in minutes)."),
             SettingField::new("unknown_air_date_offset_days", "Fallback re-index delay (days)", "number")
                 .with_default("7")
-                .with_description("Fallback delay used when an unreleased or ongoing item has no known future air date."),
+                .with_description("How many days to wait before rechecking an item with no known release date."),
             SettingField::new("minimum_average_bitrate_movies", "Min bitrate — movies (Mbps)", "number")
                 .with_placeholder("Disabled")
                 .with_description("Reject movie streams below this average bitrate. Leave blank to disable."),
@@ -204,13 +204,13 @@ impl CoreSettingsQuery {
                 .with_description("Reject episode streams below this average bitrate. Leave blank to disable."),
             SettingField::new("maximum_average_bitrate_movies", "Max bitrate — movies (Mbps)", "number")
                 .with_placeholder("Disabled")
-                .with_description("Reject movie streams above this average bitrate (e.g. 50 to avoid large REMUXes). Leave blank to disable."),
+                .with_description("Skip movies above this bitrate (e.g. 50 to avoid large REMUXes). Leave blank to disable."),
             SettingField::new("maximum_average_bitrate_episodes", "Max bitrate — episodes (Mbps)", "number")
                 .with_placeholder("Disabled")
                 .with_description("Reject episode streams above this average bitrate. Leave blank to disable."),
             SettingField::new("logging_enabled", "Application logging", "boolean")
                 .with_section("Logging")
-                .with_description("Enable or disable runtime logging output."),
+                .with_description("Turn application logging on or off."),
             SettingField::new("log_level", "Logging verbosity", "select")
                 .with_section("Logging")
                 .with_default("info")
@@ -227,15 +227,15 @@ impl CoreSettingsQuery {
                 .with_description("Maximum number of rotated log files to keep on disk. Takes effect after restart."),
             SettingField::new("vfs_debug_logging", "VFS debug logging", "boolean")
                 .with_section("Logging")
-                .with_description("Emit verbose virtual filesystem operation logs."),
+                .with_description("Log detailed virtual filesystem activity. Enable when troubleshooting file access issues."),
             SettingField::new("filesystem", "Filesystem", "object")
-                .with_description("Virtual filesystem mount settings and filtered library profile aliases.")
+                .with_description("Where to mount Riven's virtual filesystem and any custom library views.")
                 .with_fields(vec![
                     SettingField::new("mount_path", "Mount path", "string")
                         .with_placeholder("/mount")
                         .with_description("Where the virtual filesystem should be mounted."),
                     SettingField::new("library_profiles", "Library profiles", "dictionary")
-                        .with_description("Named filtered views that expose matching items under additional virtual paths.")
+                        .with_description("Custom library folders that show a filtered subset of your content.")
                         .with_key_placeholder("profile_key")
                         .with_add_label("Add profile")
                         .with_item_fields(vec![
@@ -249,23 +249,23 @@ impl CoreSettingsQuery {
                             SettingField::new("enabled", "Enabled", "boolean")
                                 .with_description("Disable a profile without deleting its rules."),
                             SettingField::new("exclusive", "Exclusive", "boolean")
-                                .with_description("Hide matched items from the default /movies and /shows paths so they only appear under this profile's path."),
+                                .with_description("Hide these items from the main library — only show them under this profile."),
                             SettingField::new("filter_rules", "Filter rules", "object")
-                                .with_description("Only items matching all configured rules will appear in this profile. Positive values inside token lists use OR matching; prefix a value with ! to exclude it.")
+                                .with_description("Only items matching these filters will appear in this profile. Prefix a value with ! to exclude it.")
                                 .with_fields(vec![
                                     SettingField::new("content_types", "Content types", "string_array")
                                         .with_options(&["movie", "show"])
                                         .with_description("Restrict the profile to movies, shows, or both."),
                                     SettingField::new("genres", "Genres", "string_array")
-                                        .with_description("Genre filters. Any positive value may match. Prefix a value with ! to exclude it."),
+                                        .with_description("Filter by genre. Prefix with ! to exclude."),
                                     SettingField::new("networks", "Networks", "string_array")
-                                        .with_description("Network filters. Any positive value may match. Prefix a value with ! to exclude it."),
+                                        .with_description("Filter by network. Prefix with ! to exclude."),
                                     SettingField::new("languages", "Languages", "string_array")
-                                        .with_description("Language filters. Any positive value may match. Prefix a value with ! to exclude it."),
+                                        .with_description("Filter by language. Prefix with ! to exclude."),
                                     SettingField::new("countries", "Countries", "string_array")
-                                        .with_description("Country filters. Any positive value may match. Prefix a value with ! to exclude it."),
+                                        .with_description("Filter by country. Prefix with ! to exclude."),
                                     SettingField::new("content_ratings", "Content ratings", "string_array")
-                                        .with_description("Content rating filters. Any positive value may match. Prefix a value with ! to exclude it."),
+                                        .with_description("Filter by content rating. Prefix with ! to exclude."),
                                     SettingField::new("min_year", "Min year", "number")
                                         .with_description("Minimum release year for matching items."),
                                     SettingField::new("max_year", "Max year", "number")

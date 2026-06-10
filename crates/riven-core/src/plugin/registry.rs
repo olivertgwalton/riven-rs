@@ -318,10 +318,7 @@ fn plugin_settings_schema(plugin: &dyn Plugin) -> Vec<SettingField> {
     let mut schema = Vec::with_capacity(plugin.settings_schema().len() + 1);
     schema.push(
         SettingField::new("enabled", "Enabled", "boolean")
-            .with_default("false")
-            .with_description(
-                "Enable this plugin without mixing activation state into its config.",
-            ),
+            .with_default("false"),
     );
     schema.extend(plugin.settings_schema());
     schema

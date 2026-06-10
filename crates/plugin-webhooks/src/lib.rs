@@ -62,26 +62,17 @@ impl Plugin for WebhooksPlugin {
             SettingField::new("urls", "Webhook URLs", "textarea")
                 .required()
                 .with_placeholder("https://example.com/hook, https://ntfy.sh/riven")
-                .with_description(
-                    "Comma-separated endpoints. Each receives a POST with the signed event \
-                     envelope as a JSON body.",
-                ),
+                .with_description("Comma-separated URLs. Each receives a POST request when an event fires."),
             SettingField::new("events", "Event Filter", "textarea")
                 .with_placeholder(
                     "riven.media-item.download.success, riven.media-item.download.error",
                 )
-                .with_description(
-                    "Optional comma-separated event slugs to deliver. Leave empty to send every \
-                     notable event (downloads, scrapes, index results, request changes).",
-                ),
+                .with_description("Which events to send. Leave empty to send all events (downloads, scrapes, errors, etc.)."),
             SettingField::new("secret", "Signing Secret", "password").with_description(
-                "Optional HMAC-SHA256 key. When set, each request carries an \
-                 `X-Riven-Signature: sha256=<hex>` header over the raw body so consumers can \
-                 verify authenticity.",
+                "Optional secret key. When set, each request includes a signature header so you can verify it came from Riven.",
             ),
             SettingField::new("enrich", "Enrich Payload", "boolean").with_description(
-                "Attach the full media item (title, artwork, IDs, rating, state) under `item`. \
-                 Adds a database lookup per delivery.",
+                "Include full item details (title, artwork, rating) in the payload.",
             ),
         ]
     }

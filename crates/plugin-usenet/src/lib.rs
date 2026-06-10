@@ -181,10 +181,8 @@ impl Plugin for UsenetPlugin {
                 .with_key_placeholder("provider_name")
                 .with_add_label("Add provider")
                 .with_description(
-                    "One or more NNTP providers. Each entry is named (any short label) \
-                     and configures one server. With multiple providers, primaries are \
-                     tried first by priority; backups are only consulted after every \
-                     primary returned article-not-found.",
+                    "Your Usenet server accounts. Add one per provider. \
+                     Primaries are tried first; backup servers are only used when every primary fails.",
                 )
                 .with_item_fields(vec![
                     SettingField::new("host", "Host", "text")
@@ -197,8 +195,7 @@ impl Plugin for UsenetPlugin {
                     SettingField::new("max_connections", "Max Connections", "number")
                         .with_default("8")
                         .with_description(
-                            "Concurrent NNTP connections. Should not exceed the \
-                             provider's per-account limit.",
+                            "How many simultaneous connections to open. Don't exceed your provider's account limit.",
                         ),
                     SettingField::new("priority", "Priority", "number")
                         .with_default("0")
@@ -206,13 +203,11 @@ impl Plugin for UsenetPlugin {
                     SettingField::new("backup", "Backup", "boolean")
                         .with_default("false")
                         .with_description(
-                            "Consult only after every primary returned article-not-found. \
-                             Typical block-account or fill-provider setup.",
+                            "Only use this server when all primary servers fail. Good for block accounts or fill providers.",
                         ),
                 ]),
             SettingField::new("archivepassword", "Archive Password", "password").with_description(
-                "Password for encrypted RAR archives. Applied to every encrypted \
-                     archive encountered. Leave blank if your releases are not encrypted.",
+                "Password for password-protected archives. Leave blank if your downloads aren't encrypted.",
             ),
             SettingField::new(
                 "healthcheckmaxfailures",
@@ -221,19 +216,13 @@ impl Plugin for UsenetPlugin {
             )
             .with_default("2")
             .with_description(
-                "Number of back-to-back failed STAT samples required before the \
-                 library entry is deleted and re-scraped.",
+                "How many health check failures in a row before a title is dropped and re-scraped.",
             ),
             SettingField::new("maxdownloadworkers", "Max Download Workers", "number")
                 .with_default("4")
                 .with_description(
-                    "How many NZBs ingest concurrently. Keep this low (default 4): on \
-                     usenet, total throughput is bounded by your connection, so more \
-                     concurrent downloads don't drain a backlog faster — they split \
-                     your bandwidth into slow trickles and starve playback/scanning \
-                     (segment fetches go from ~100ms to many seconds). Raise it only \
-                     if you have spare bandwidth and want faster backlog drain at the \
-                     cost of streaming responsiveness.",
+                    "How many downloads run at the same time. Keep this low — more parallel downloads \
+                     split your bandwidth and can slow down playback. Raise only if you have spare bandwidth.",
                 ),
             SettingField::new(
                 "availabilitysamplepercent",
@@ -242,25 +231,15 @@ impl Plugin for UsenetPlugin {
             )
             .with_default("5")
             .with_description(
-                "Percentage of a release's segments to STAT-check at ingest before \
-                 accepting it (1-100, default 5, matching altmount). The sample is \
-                 strategic — always the first/last few segments (DMCA takedowns and \
-                 truncated uploads) plus a spread middle. Higher = more thorough \
-                 dead-release detection but slower ingest; lower = faster but more \
-                 chance an incomplete release slips through. Bounded to a sane \
-                 absolute range internally. NOTE: sampling at any percent can miss a \
-                 lone dead segment — enable \"Full Segment Verification\" to catch those.",
+                "What percentage of a release's files to spot-check before accepting it. \
+                 Higher = more thorough but slower. Even at 100% a single bad file can slip through — \
+                 enable Full Segment Verification to catch those.",
             ),
             SettingField::new("checkallsegments", "Full Segment Verification", "boolean")
                 .with_default("false")
                 .with_description(
-                    "STAT-check 100% of the selected release's segments before \
-                     committing to it — the only check that reliably catches a single \
-                     dead article (sampling almost always misses one). Runs once on the \
-                     winning candidate (not every candidate), so it costs one full STAT \
-                     sweep per download. Also makes the background health scanner verify \
-                     every segment. Recommended after provider changes or if titles keep \
-                     stalling mid-playback; leave off to rely on the faster sample.",
+                    "Check every file in the release before committing to it. The only reliable way \
+                     to catch a single missing file. Slower, but recommended if titles keep stalling mid-playback.",
                 ),
             SettingField::new(
                 "acceptablemissingpercent",
@@ -269,27 +248,19 @@ impl Plugin for UsenetPlugin {
             )
             .with_default("0")
             .with_description(
-                "Maximum fraction of segments allowed missing before full \
-                 verification rejects a release (0-50, default 0 = altmount's \
-                 zero-tolerance). Keep at 0: the read path has no par2 repair, so any \
-                 missing segment in the played range stalls playback. Raise only if \
-                 you knowingly accept gaps.",
+                "How many missing files (%) to tolerate before rejecting a release. \
+                 Leave at 0 — any missing file can cause playback to stall.",
             ),
             SettingField::new("autorepair", "Auto-Repair Unhealthy Titles", "boolean")
                 .with_default("false")
                 .with_description(
-                    "Automatically re-grab titles the health scanner finds to have \
-                     missing data or no segment map: the broken release is dropped \
-                     and re-scraped for a complete one. Uses exponential backoff and \
-                     gives up after the retry cap below. Titles that merely couldn't \
-                     be verified (provider unreachable) are never auto-repaired.",
+                    "Automatically re-download titles the health scanner finds broken. \
+                     Drops the bad release and looks for a working one. Gives up after the retry limit below.",
                 ),
             SettingField::new("repairmaxretries", "Auto-Repair Max Retries", "number")
                 .with_default("3")
                 .with_description(
-                    "How many automatic re-grab attempts a broken title gets before \
-                     it's left alone. Backoff doubles between attempts (1h, 2h, 4h …) \
-                     up to a 24h cap.",
+                    "How many times to retry a broken title before giving up. Waits longer between each attempt (1h, 2h, 4h…).",
                 ),
             SettingField::new(
                 "blacklistonreadfailure",
@@ -298,13 +269,8 @@ impl Plugin for UsenetPlugin {
             )
             .with_default("false")
             .with_description(
-                "When a dead segment (missing on every provider) is hit during live \
-                 playback, immediately blacklist the broken release and re-scrape for \
-                 a replacement — instead of waiting for the background health scan to \
-                 catch it. The blacklist is permanent so the same broken release \
-                 can't be re-picked. Fires once per file (a player retrying the same \
-                 byte range won't trigger repeated re-grabs). Independent of \
-                 Auto-Repair, which covers the background scan.",
+                "When playback hits a missing file, immediately swap to a different release \
+                 instead of waiting for the background health check. The bad release is permanently blacklisted.",
             ),
         ]
     }

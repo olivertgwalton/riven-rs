@@ -267,11 +267,8 @@ impl Plugin for NewznabPlugin {
                 .with_key_placeholder("indexer_name")
                 .with_add_label("Add indexer")
                 .with_description(
-                    "One or more Newznab/Torznab-compatible indexers (NZBGeek, \
-                     NZBfinder, Prowlarr, NZBHydra2, etc.). Each entry is named \
-                     (any short label) and configures one indexer. Scrapes fan \
-                     out to every indexer in parallel and results are merged \
-                     by NZB URL — duplicates across indexers count once.",
+                    "Your NZB indexers (NZBGeek, NZBfinder, Prowlarr, etc.). \
+                     All indexers are searched at the same time and duplicate results are removed.",
                 )
                 .with_item_fields(vec![
                     SettingField::new("url", "Indexer URL", "url")

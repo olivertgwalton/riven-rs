@@ -148,19 +148,19 @@ impl Plugin for StremthruPlugin {
                 .with_placeholder(DEFAULT_URL),
             SettingField::new("scrapenabled", "Enable Torznab Scraper", "boolean")
                 .with_default("true")
-                .with_description("Scrape torrent results via the StremThru Torznab endpoint. Disable to use StremThru only for downloading and cache checks."),
+                .with_description("Search for torrents through StremThru. Disable if you only want to use StremThru for downloading."),
             SettingField::new("newznabenabled", "Enable Newznab (NZB) Scraper", "boolean")
                 .with_default("false")
-                .with_description("Scrape NZB results via the StremThru Newznab aggregator endpoint. Requires `stremthruauth`."),
+                .with_description("Search for NZBs through StremThru. Requires the Auth field below."),
             SettingField::new("stremthruauth", "StremThru Auth", "password")
                 .with_placeholder("username:apikey")
-                .with_description("STREMTHRU_AUTH credentials. Used as the `apikey` query parameter for /v0/newznab/api AND as the store authorization when dispatching NZBs to a self-hosted StremThru (NNTP + indexers configured in its dashboard)."),
+                .with_description("Your StremThru auth credentials. Used for both NZB searches and sending downloads to a self-hosted StremThru."),
             SettingField::new("newznabcategories", "Newznab Categories", "text")
                 .with_default("2000,5000")
                 .with_description("Comma-separated Newznab category IDs (2000 = Movies, 5000 = TV)."),
             SettingField::new("checkdebridcache", "Check Debrid Cache", "boolean")
                 .with_default("true")
-                .with_description("When enabled, queries /store/torz/check first and only attempts add_torrent on confirmed cached/downloaded hashes. When disabled, skips the cache check and calls add_torrent directly on each ranked stream."),
+                .with_description("Only download torrents already in your debrid cache. Disable to try all torrents without checking first."),
             SettingField::new("realdebridapikey", "Real-Debrid API Key", "password"),
             SettingField::new("alldebridapikey", "AllDebrid API Key", "password"),
             SettingField::new("debriderapikey", "Debrider API Key", "password"),

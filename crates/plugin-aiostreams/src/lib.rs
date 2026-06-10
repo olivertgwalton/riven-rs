@@ -60,10 +60,10 @@ impl Plugin for AioStreamsPlugin {
             SettingField::new("uuid", "User UUID", "text")
                 .required()
                 .with_placeholder("00000000-0000-0000-0000-000000000000")
-                .with_description("AIOStreams user UUID used for basic auth."),
+                .with_description("Your AIOStreams user ID."),
             SettingField::new("password", "Password", "password")
                 .required()
-                .with_description("AIOStreams user password used for basic auth."),
+                .with_description("Your AIOStreams password."),
         ]
     }
 
