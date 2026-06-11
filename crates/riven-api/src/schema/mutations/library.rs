@@ -8,7 +8,7 @@ use riven_queue::{IndexJob, JobQueue};
 use sqlx::PgPool;
 use std::sync::Arc;
 
-use crate::schema::auth::require_library_access;
+use crate::schema::auth::{require_library_access, require_settings_access};
 
 // ── Resolver ──
 
@@ -25,6 +25,12 @@ impl LibraryMutations {
         let pool = ctx.data::<PgPool>()?;
         let (deleted, _item_id) = repo::delete_filesystem_entry(pool, id).await?;
         Ok(deleted)
+    }
+
+    async fn reset_library(&self, ctx: &Context<'_>) -> Result<i64> {
+        require_settings_access(ctx)?;
+        let pool = ctx.data::<PgPool>()?;
+        Ok(repo::reset_library(pool).await? as i64)
     }
 
     /// Reset items to Indexed state and clear failed_attempts.

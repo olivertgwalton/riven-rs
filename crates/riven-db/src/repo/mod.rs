@@ -19,6 +19,21 @@ pub use usenet_traffic::*;
 use anyhow::Result;
 use sqlx::PgPool;
 
+pub async fn reset_library(pool: &PgPool) -> Result<u64> {
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM media_items")
+        .fetch_one(pool)
+        .await?;
+
+    sqlx::query(
+        "TRUNCATE TABLE media_items, streams, item_requests, usenet_meta \
+         RESTART IDENTITY CASCADE",
+    )
+    .execute(pool)
+    .await?;
+
+    Ok(count as u64)
+}
+
 pub async fn reset_items_by_ids(pool: &PgPool, ids: Vec<i64>) -> Result<u64> {
     if ids.is_empty() {
         return Ok(0);
