@@ -119,6 +119,7 @@ pub fn build_discovery_targets(
                 item_year: indexed.year,
                 parent_year: None,
                 item_country: indexed.country.clone(),
+                item_language: indexed.language.clone(),
                 season_episodes: vec![],
                 show_season_numbers: vec![],
                 show_status: indexed.status,
@@ -167,6 +168,7 @@ pub fn build_discovery_targets(
                         item_year: None,
                         parent_year: indexed.year,
                         item_country: indexed.country.clone(),
+                        item_language: indexed.language.clone(),
                         season_episodes: season
                             .episodes
                             .iter()

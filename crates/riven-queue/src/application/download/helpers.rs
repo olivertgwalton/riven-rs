@@ -71,6 +71,24 @@ pub fn is_video_file(filename: &str) -> bool {
     VALID_VIDEO_EXTENSIONS.contains(&ext.as_str())
 }
 
+/// Release samples ("movie.sample.mkv", "Sample/…") are short preview clips.
+/// Detected by a delimited "sample" token anywhere in the path so that titles
+/// merely containing the word (e.g. "Free.Samples.2012") don't match.
+pub fn is_sample_file(path: &str) -> bool {
+    path.to_ascii_lowercase()
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .any(|token| token == "sample")
+}
+
+/// Video files eligible for media persistence. Samples are excluded so a
+/// preview clip is never persisted as the item's media — even when the full
+/// file is missing from the payload (e.g. failed RAR assembly), in which case
+/// the stream should fail and be blacklisted rather than "succeed" with a
+/// 30-second clip.
+pub fn is_persistable_video_file(filename: &str) -> bool {
+    is_video_file(filename) && !is_sample_file(filename)
+}
+
 /// Heuristic check for an obfuscated filename — random hash/blob stems with no
 /// release-name structure. Used to decide whether to fall back to the NZB
 /// release title:
@@ -229,5 +247,27 @@ pub fn select_episode_files<'a>(
         by_part.into_iter().map(|(n, f)| (f, Some(n))).collect()
     } else {
         largest.map(|f| vec![(f, None)]).unwrap_or_default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_persistable_video_file, is_sample_file};
+
+    #[test]
+    fn sample_files_are_detected_and_excluded() {
+        assert!(is_sample_file(
+            "top.gear.s23e03.1080p.bluray.x264-ouija.sample.mkv"
+        ));
+        assert!(is_sample_file("Sample/top.gear.s23e03.1080p.mkv"));
+        assert!(!is_persistable_video_file(
+            "top.gear.s23e03.1080p.bluray.x264-ouija.sample.mkv"
+        ));
+
+        // The word inside a real title does not match the delimited token.
+        assert!(!is_sample_file("Free.Samples.2012.1080p.BluRay.mkv"));
+        assert!(is_persistable_video_file(
+            "top.gear.s23e03.1080p.bluray.x264-ouija.mkv"
+        ));
     }
 }

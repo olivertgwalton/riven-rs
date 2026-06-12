@@ -17,7 +17,7 @@ fn is_item_deleted_fk_error(err: &anyhow::Error) -> bool {
 }
 
 use super::helpers::{
-    episode_vfs_path, handle_bitrate_failure, is_video_file, looks_obfuscated,
+    episode_vfs_path, handle_bitrate_failure, is_persistable_video_file, looks_obfuscated,
     matches_episode_lookup, parse_file_path, select_episode_files, stream_raw_title,
     stream_resolution,
 };
@@ -115,7 +115,7 @@ pub async fn persist_movie(
     let mut video_files: Vec<(&DownloadFile, riven_rank::ParsedData)> = dl
         .files
         .iter()
-        .filter(|f| is_video_file(&f.filename))
+        .filter(|f| is_persistable_video_file(&f.filename))
         .map(|f| (f, parse_file_path(&f.filename)))
         .filter(|(_, parsed)| parsed.media_type() == "movie")
         .collect();
@@ -127,7 +127,7 @@ pub async fn persist_movie(
     } else if let Some(largest) = dl
         .files
         .iter()
-        .filter(|f| is_video_file(&f.filename))
+        .filter(|f| is_persistable_video_file(&f.filename))
         .max_by_key(|f| f.file_size)
     {
         tracing::warn!(
@@ -263,7 +263,7 @@ pub async fn persist_episode(
     let playable_videos: Vec<(&DownloadFile, riven_rank::ParsedData)> = dl
         .files
         .iter()
-        .filter(|f| is_video_file(&f.filename))
+        .filter(|f| is_persistable_video_file(&f.filename))
         .filter(|f| has_playable_url(f))
         .map(|f| (f, parse_file_path(&f.filename)))
         .collect();
@@ -484,7 +484,7 @@ pub async fn persist_season(
     let parsed_video_files: Vec<(&DownloadFile, riven_rank::ParsedData)> = dl
         .files
         .iter()
-        .filter(|f| is_video_file(&f.filename))
+        .filter(|f| is_persistable_video_file(&f.filename))
         .filter(|f| has_playable_url(f))
         .map(|f| (f, parse_file_path(&f.filename)))
         .collect();
@@ -736,7 +736,7 @@ pub async fn persist_show(
     let parsed_video_files: Vec<(&DownloadFile, riven_rank::ParsedData)> = dl
         .files
         .iter()
-        .filter(|f| is_video_file(&f.filename))
+        .filter(|f| is_persistable_video_file(&f.filename))
         .filter(|f| has_playable_url(f))
         .map(|f| (f, parse_file_path(&f.filename)))
         .collect();

@@ -68,6 +68,68 @@ fn lev_ratio(a: &str, b: &str) -> f64 {
     (total_len - distance) / total_len
 }
 
+/// If the last word of a normalized title is the (lowercased) country code
+/// `country`, return the title without it.
+fn strip_trailing_country(normalized_title: &str, country: &str) -> Option<String> {
+    let stripped = normalized_title
+        .strip_suffix(&country.to_ascii_lowercase())?
+        .trim_end();
+    (!stripped.is_empty()).then(|| stripped.to_string())
+}
+
+/// Best similarity ratio between a parsed release title and the correct
+/// title or any alias.
+///
+/// `item_country` is the item's metadata country. Same-named international
+/// versions are disambiguated by a country tag in the release name ("Top Gear
+/// UK"); when the tagged country IS the item's own country, similarity is also
+/// computed with the tag stripped so correctly-tagged releases pass, while
+/// releases tagged with another country still fail.
+fn best_title_ratio(
+    data: &ParsedData,
+    correct_title: &str,
+    item_country: Option<&str>,
+    aliases: &HashMap<String, Vec<String>>,
+) -> f64 {
+    let normalized_query = crate::parse::normalize_title(correct_title);
+    let mut best_ratio = lev_ratio(&data.normalized_title, &normalized_query);
+
+    if let (Some(parsed_country), Some(item_country)) = (data.country.as_deref(), item_country)
+        && crate::country::countries_match(parsed_country, item_country)
+        && let Some(stripped) = strip_trailing_country(&data.normalized_title, parsed_country)
+    {
+        best_ratio = best_ratio.max(lev_ratio(&stripped, &normalized_query));
+    }
+
+    for alias in aliases.values().flatten() {
+        let normalized_alias = crate::parse::normalize_title(alias);
+        best_ratio = best_ratio.max(lev_ratio(&data.normalized_title, &normalized_alias));
+    }
+
+    best_ratio
+}
+
+/// Whether an already-parsed release matches `correct_title` (or an alias)
+/// within the profile's similarity threshold.
+///
+/// This is the same check `rank_torrent` applies at scrape time; the download
+/// path re-runs it on persisted streams before selecting candidates so a
+/// stream linked to the wrong title can never be auto-downloaded.
+#[must_use]
+pub fn title_matches(
+    data: &ParsedData,
+    correct_title: &str,
+    item_country: Option<&str>,
+    aliases: &HashMap<String, Vec<String>>,
+    settings: &RankSettings,
+) -> bool {
+    if correct_title.is_empty() {
+        return true;
+    }
+    best_title_ratio(data, correct_title, item_country, aliases)
+        >= settings.options.title_similarity
+}
+
 /// Shared front half of the ranking pipeline: validates the hash, parses the
 /// title, filters adult content, and computes the best title-similarity ratio
 /// (rejecting below the configured threshold).
@@ -77,6 +139,7 @@ fn prepare_torrent(
     raw_title: &str,
     hash: &str,
     correct_title: &str,
+    item_country: Option<&str>,
     aliases: &HashMap<String, Vec<String>>,
     settings: &RankSettings,
 ) -> Result<(ParsedData, f64), RankError> {
@@ -94,12 +157,7 @@ fn prepare_torrent(
         return Ok((data, 0.0));
     }
 
-    let normalized_query = crate::parse::normalize_title(correct_title);
-    let mut best_ratio = lev_ratio(&data.normalized_title, &normalized_query);
-    for alias in aliases.values().flatten() {
-        let normalized_alias = crate::parse::normalize_title(alias);
-        best_ratio = best_ratio.max(lev_ratio(&data.normalized_title, &normalized_alias));
-    }
+    let best_ratio = best_title_ratio(&data, correct_title, item_country, aliases);
 
     if best_ratio < settings.options.title_similarity {
         return Err(RankError::TitleSimilarity {
@@ -149,10 +207,12 @@ pub fn rank_torrent(
     raw_title: &str,
     hash: &str,
     correct_title: &str,
+    item_country: Option<&str>,
     aliases: &HashMap<String, Vec<String>>,
     settings: &RankSettings,
 ) -> Result<RankedTorrent, RankError> {
-    let (data, lev_ratio) = prepare_torrent(raw_title, hash, correct_title, aliases, settings)?;
+    let (data, lev_ratio) =
+        prepare_torrent(raw_title, hash, correct_title, item_country, aliases, settings)?;
     let (total_score, score_parts) = get_rank(&data, settings, &DEFAULT_MODEL);
     let (fetch, failed_checks) = finalize_torrent(&data, total_score, settings)?;
 
@@ -179,10 +239,12 @@ pub fn rank_torrent_fast(
     raw_title: &str,
     hash: &str,
     correct_title: &str,
+    item_country: Option<&str>,
     aliases: &HashMap<String, Vec<String>>,
     settings: &RankSettings,
 ) -> Result<RankedTorrent, RankError> {
-    let (data, lev_ratio) = prepare_torrent(raw_title, hash, correct_title, aliases, settings)?;
+    let (data, lev_ratio) =
+        prepare_torrent(raw_title, hash, correct_title, item_country, aliases, settings)?;
     let total_score = get_rank_total(&data, settings, &DEFAULT_MODEL);
     finalize_torrent(&data, total_score, settings)?;
 

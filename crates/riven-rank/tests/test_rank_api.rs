@@ -11,12 +11,73 @@ fn test_rank_torrent_skips_similarity_when_correct_title_missing() {
         "Movie.Title.2023.1080p.BluRay.x264-GROUP",
         "c08a9ee8ce3a5c2c08865e2b05406273cabc97e7",
         "",
+        None,
         &HashMap::new(),
         &settings,
     )
     .expect("empty correct_title should not trigger similarity failure");
 
     assert_eq!(ranked.lev_ratio, 0.0);
+}
+
+#[test]
+fn test_rank_torrent_accepts_release_tagged_with_item_country() {
+    let settings = RankSettings::default().prepare();
+
+    // "Top Gear UK" scores 0.84 against "Top Gear" — below the 0.85
+    // threshold — but the UK tag matches the item's own country (TVDB
+    // alpha-3 "gbr"), so similarity is also computed with the tag stripped.
+    let ranked = rank_torrent(
+        "Top.Gear.UK.S05.1080p.WEB.H264-GROUP",
+        "c08a9ee8ce3a5c2c08865e2b05406273cabc97e7",
+        "Top Gear",
+        Some("gbr"),
+        &HashMap::new(),
+        &settings,
+    )
+    .expect("UK-tagged release should pass similarity for a GB item");
+
+    assert_eq!(ranked.lev_ratio, 1.0);
+}
+
+#[test]
+fn test_rank_torrent_rejects_release_tagged_with_other_country() {
+    let settings = RankSettings::default().prepare();
+
+    // The US tag does not match the GB item, so no stripping happens and
+    // "Top Gear US" fails similarity against "Top Gear".
+    let result = rank_torrent(
+        "Top.Gear.US.S05.1080p.WEB.H264-GROUP",
+        "c08a9ee8ce3a5c2c08865e2b05406273cabc97e7",
+        "Top Gear",
+        Some("gbr"),
+        &HashMap::new(),
+        &settings,
+    );
+
+    assert!(matches!(
+        result,
+        Err(riven_rank::rank::RankError::TitleSimilarity { .. })
+    ));
+}
+
+#[test]
+fn test_rank_torrent_without_item_country_keeps_strict_similarity() {
+    let settings = RankSettings::default().prepare();
+
+    let result = rank_torrent(
+        "Top.Gear.UK.S05.1080p.WEB.H264-GROUP",
+        "c08a9ee8ce3a5c2c08865e2b05406273cabc97e7",
+        "Top Gear",
+        None,
+        &HashMap::new(),
+        &settings,
+    );
+
+    assert!(matches!(
+        result,
+        Err(riven_rank::rank::RankError::TitleSimilarity { .. })
+    ));
 }
 
 #[test]

@@ -37,6 +37,7 @@ pub struct DownloadHierarchyContext {
     pub show_content_rating: Option<riven_core::types::ContentRating>,
     pub show_language: Option<String>,
     pub show_country: Option<String>,
+    pub show_aliases: Option<serde_json::Value>,
     pub show_is_anime: bool,
 }
 
@@ -169,7 +170,12 @@ pub async fn build_parse_item_context_with_hierarchy(
         absolute_number: item.absolute_number,
         item_year: item.year,
         parent_year,
-        item_country: item.country.clone(),
+        item_country: item.country.clone().or_else(|| {
+            hierarchy.and_then(|h| h.resolved_show_country.clone())
+        }),
+        item_language: item.language.clone().or_else(|| {
+            hierarchy.and_then(|h| h.resolved_show_language.clone())
+        }),
         season_episodes,
         show_season_numbers,
         show_status,
@@ -276,6 +282,10 @@ pub async fn load_download_hierarchy_context(
             .as_ref()
             .and_then(|h| h.resolved_show_country.clone())
             .or_else(|| item.country.clone()),
+        show_aliases: hierarchy
+            .as_ref()
+            .and_then(|h| h.resolved_show_aliases.clone())
+            .or_else(|| item.aliases.clone()),
         show_is_anime: hierarchy
             .as_ref()
             .and_then(|h| h.resolved_show_is_anime)

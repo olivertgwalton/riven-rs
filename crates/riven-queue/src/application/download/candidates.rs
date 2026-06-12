@@ -1,15 +1,52 @@
+use std::collections::HashMap;
+
 use riven_db::entities::{MediaItem, Stream};
 use riven_rank::{ParsedData, RankSettings};
 
 use super::helpers::stream_resolution;
 
-/// Returns the streams that pass the profile's fetch checks, sorted
-/// best-first. Cache state is no longer consulted here — the download loop
-/// asks each `(plugin, provider)` for cache hits per-stream.
+/// The item-side facts needed to re-validate a persisted stream's title
+/// against the item it is linked to.
+pub struct TitleMatchContext {
+    pub correct_title: String,
+    pub item_country: Option<String>,
+    pub aliases: HashMap<String, Vec<String>>,
+}
+
+impl TitleMatchContext {
+    /// Build from the item and its (optional) show hierarchy context: episodes
+    /// and seasons match against the show's title/aliases/country, movies and
+    /// shows against their own.
+    pub fn new(
+        item: &MediaItem,
+        hierarchy: Option<&crate::context::DownloadHierarchyContext>,
+    ) -> Self {
+        let aliases = hierarchy
+            .and_then(|h| h.show_aliases.clone())
+            .or_else(|| item.aliases.clone())
+            .and_then(|v| serde_json::from_value(v).ok())
+            .unwrap_or_default();
+
+        Self {
+            correct_title: hierarchy
+                .and_then(|h| h.show_title.clone())
+                .unwrap_or_else(|| item.title.clone()),
+            item_country: hierarchy
+                .and_then(|h| h.show_country.clone())
+                .or_else(|| item.country.clone()),
+            aliases,
+        }
+    }
+}
+
+/// Returns the streams that pass the title re-check and the profile's fetch
+/// checks, sorted best-first. Cache state is no longer consulted here — the
+/// download loop asks each `(plugin, provider)` for cache hits per-stream.
 pub fn rank_streams_for_profile<'a>(
     streams: &'a [Stream],
     item: &MediaItem,
     profile: &RankSettings,
+    title_ctx: &TitleMatchContext,
 ) -> Vec<&'a Stream> {
     let download_profile = build_download_candidate_profile(profile);
     let model = riven_rank::RankingModel::default();
@@ -36,6 +73,42 @@ pub fn rank_streams_for_profile<'a>(
                 );
                 return None;
             };
+
+            // Persisted streams can predate the scrape-time extras guard;
+            // never select a bonus-features disc as the item's content.
+            if riven_rank::is_extras_only_release(&parsed.raw_title) {
+                tracing::debug!(
+                    item_id = item.id,
+                    title = %item.title,
+                    info_hash = %stream.info_hash,
+                    raw_title = %parsed.raw_title,
+                    "stream rejected: extras-only release"
+                );
+                return None;
+            }
+
+            // Re-validate the release title against the item before selecting,
+            // mirroring the scrape-time similarity check. Persisted streams can
+            // be linked to the wrong title (different regional version of a
+            // same-named show), and the relaxed fetch checks below would
+            // otherwise let them through.
+            if !riven_rank::title_matches(
+                &parsed,
+                &title_ctx.correct_title,
+                title_ctx.item_country.as_deref(),
+                &title_ctx.aliases,
+                &download_profile,
+            ) {
+                tracing::debug!(
+                    item_id = item.id,
+                    title = %item.title,
+                    info_hash = %stream.info_hash,
+                    raw_title = %parsed.raw_title,
+                    correct_title = %title_ctx.correct_title,
+                    "stream rejected: title does not match item"
+                );
+                return None;
+            }
 
             let (fetch, failed_checks) = riven_rank::rank::check_fetch(&parsed, &download_profile);
             if !fetch {
@@ -145,10 +218,11 @@ fn pack_preference(item: &MediaItem, parsed: &ParsedData) -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use super::rank_streams_for_profile;
+    use super::{TitleMatchContext, rank_streams_for_profile};
     use riven_core::types::MediaItemType;
     use riven_db::entities::{MediaItem, Stream};
     use riven_rank::RankSettings;
+    use std::collections::HashMap;
 
     fn media_item() -> MediaItem {
         MediaItem {
@@ -206,6 +280,14 @@ mod tests {
         }
     }
 
+    fn title_ctx(correct_title: &str, country: Option<&str>) -> TitleMatchContext {
+        TitleMatchContext {
+            correct_title: correct_title.to_string(),
+            item_country: country.map(str::to_string),
+            aliases: HashMap::new(),
+        }
+    }
+
     #[test]
     fn pick_best_for_profile_respects_profile_resolution_filters() {
         let mut profile = RankSettings::default();
@@ -218,11 +300,52 @@ mod tests {
         let stream_1080p = stream(2, "hash1080", "Shrek.2.1080p.BluRay");
         let streams = [stream_2160p, stream_1080p];
 
-        let best = rank_streams_for_profile(&streams, &media_item(), &profile)
-            .into_iter()
-            .next()
-            .expect("1080p stream should remain eligible");
+        let best = rank_streams_for_profile(
+            &streams,
+            &media_item(),
+            &profile,
+            &title_ctx("Shrek 2", None),
+        )
+        .into_iter()
+        .next()
+        .expect("1080p stream should remain eligible");
 
         assert_eq!(best.info_hash, "hash1080");
+    }
+
+    #[test]
+    fn wrong_title_streams_are_not_download_candidates() {
+        let profile = RankSettings::default();
+        let ctx = title_ctx("Top Gear", Some("gbr"));
+
+        // "Top Gear France" is a different show; even when it slipped into
+        // the item's stream list (and regardless of its stored rank), the
+        // title re-check must drop it. "Top.Gear.UK." releases tag the item's
+        // own country and must stay eligible, even when every scrape-time
+        // ranking profile rejected them (rank = NULL).
+        let wrong_show = stream(1, "hashwrongversion", "Top.Gear.France.S09E01.1080p.WEB.H264");
+        let mut correct_show = stream(2, "hashcorrect", "Top.Gear.UK.S09E01.1080p.WEB.H264");
+        correct_show.rank = None;
+        let streams = [wrong_show, correct_show];
+
+        let candidates = rank_streams_for_profile(&streams, &media_item(), &profile, &ctx);
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].info_hash, "hashcorrect");
+    }
+
+    #[test]
+    fn extras_only_releases_are_not_download_candidates() {
+        let profile = RankSettings::default();
+        let ctx = title_ctx("Top Gear", Some("gbr"));
+
+        let extras_disc = stream(1, "hashextras", "Top.Gear.S17.EXTRAS.1080p.BluRay.x264-aAF");
+        let season_pack = stream(2, "hashseason", "Top.Gear.S17.1080p.BluRay.x264-aAF");
+        let streams = [extras_disc, season_pack];
+
+        let candidates = rank_streams_for_profile(&streams, &media_item(), &profile, &ctx);
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].info_hash, "hashseason");
     }
 }

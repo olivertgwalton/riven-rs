@@ -637,6 +637,37 @@ fn canonical_extra(extra: &str) -> String {
     }
 }
 
+/// True when the release is a bonus-features disc rather than actual content:
+/// a delimited "extras" token appearing at or after the first season/year
+/// marker ("Top.Gear.S17.EXTRAS.1080p.BluRay", "Top Gear Season 15 Extras",
+/// "Movie.2014.Extras.1080p"). An "extras" before any marker is part of the
+/// title itself (e.g. the show "Extras") and does not count.
+pub fn is_extras_only_release(raw_title: &str) -> bool {
+    static RE_EXTRAS_TOKEN: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"(?i)(?:^|[^A-Za-z0-9])extras(?:[^A-Za-z0-9]|$)").unwrap()
+    });
+
+    let Some(extras_pos) = RE_EXTRAS_TOKEN
+        .find(raw_title)
+        .map(|m| m.start() + usize::from(!m.as_str().starts_with(['e', 'E'])))
+    else {
+        return false;
+    };
+
+    [
+        &*RE_SEASON_SE,
+        &*RE_SEASON_FULL,
+        &*RE_SEASON_RANGE,
+        &*RE_SEASON_ORDINAL,
+        &*RE_YEAR,
+    ]
+    .iter()
+    .filter_map(|re| re.find(raw_title))
+    .map(|m| m.start())
+    .min()
+    .is_some_and(|marker_pos| extras_pos > marker_pos)
+}
+
 fn detect_standard_extras(raw: &str, extras: &mut Vec<String>) {
     let year_pos = RE_YEAR.find(raw).map(|m| m.start());
 
@@ -1065,4 +1096,28 @@ pub fn parse_with_options(raw_title: &str, options: ParseOptions) -> ParsedData 
     }
 
     data
+}
+
+#[cfg(test)]
+mod extras_only_tests {
+    use super::is_extras_only_release;
+
+    #[test]
+    fn flags_extras_discs_after_season_or_year_markers() {
+        assert!(is_extras_only_release(
+            "Top.Gear.S17.EXTRAS.1080p.BluRay.x264-aAF"
+        ));
+        assert!(is_extras_only_release("Top Gear Season 15 Extras"));
+        assert!(is_extras_only_release("Movie.2014.Extras.1080p.BluRay"));
+    }
+
+    #[test]
+    fn does_not_flag_titles_containing_extras() {
+        // "Extras" (2005) — the token is the title, before any marker.
+        assert!(!is_extras_only_release("Extras.S01.1080p.WEB-DL"));
+        assert!(!is_extras_only_release(
+            "Top.Gear.Extra.Gear.S04E05.1080p.HDTV"
+        ));
+        assert!(!is_extras_only_release("Top.Gear.S17.1080p.BluRay.x264-aAF"));
+    }
 }

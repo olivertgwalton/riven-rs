@@ -15,6 +15,7 @@ pub struct ParseContext {
     pub item_year: Option<i32>,
     pub parent_year: Option<i32>,
     pub item_country: Option<String>,
+    pub item_language: Option<String>,
     pub season_episodes: Vec<(i32, Option<i32>)>,
     pub show_season_numbers: Vec<i32>,
     pub show_status: Option<ShowStatus>,
@@ -84,6 +85,44 @@ fn year_candidates(year: i32) -> [i32; 3] {
     [year - 1, year, year + 1]
 }
 
+/// ISO 639-1 form of a language code, accepting the alpha-2 codes the release
+/// parser emits and the alpha-3 codes metadata providers store (e.g. TVDB's
+/// "eng"). Returns `None` for unrecognized values.
+fn normalize_lang_code(code: &str) -> Option<String> {
+    let lower = code.to_ascii_lowercase();
+    let two = match lower.as_str() {
+        "eng" => "en",
+        "deu" | "ger" => "de",
+        "fra" | "fre" => "fr",
+        "spa" => "es",
+        "ita" => "it",
+        "nld" | "dut" => "nl",
+        "jpn" => "ja",
+        "kor" => "ko",
+        "zho" | "chi" => "zh",
+        "rus" => "ru",
+        "por" => "pt",
+        "pol" => "pl",
+        "swe" => "sv",
+        "nor" => "no",
+        "dan" => "da",
+        "fin" => "fi",
+        "ces" | "cze" => "cs",
+        "hun" => "hu",
+        "tur" => "tr",
+        "ell" | "gre" => "el",
+        "heb" => "he",
+        "ara" => "ar",
+        "hin" => "hi",
+        "tha" => "th",
+        "vie" => "vi",
+        "ukr" => "uk",
+        other if other.len() == 2 => other,
+        _ => return None,
+    };
+    Some(two.to_string())
+}
+
 fn validate(ctx: &ParseContext, parsed: &riven_rank::ParsedData) -> Option<String> {
     let has_episodes = !parsed.episodes.is_empty();
     let has_seasons = !parsed.seasons.is_empty();
@@ -92,11 +131,39 @@ fn validate(ctx: &ParseContext, parsed: &riven_rank::ParsedData) -> Option<Strin
         return Some("non-dubbed anime torrent (dubbed_anime_only=true)".into());
     }
 
+    // Bonus-features discs ("Top.Gear.S17.EXTRAS.1080p.BluRay") parse to a
+    // clean title + season and would otherwise rank like a real season pack.
+    if riven_rank::is_extras_only_release(&parsed.raw_title) {
+        return Some("extras-only release".into());
+    }
+
+    // Sub-only tags ("NL Subs") make the parser pick up a country/language
+    // that describes the subtitles, not the production, so subbed releases
+    // are exempt from both origin checks; anime has its own dub logic.
     if !parsed.anime
+        && !parsed.subbed
         && let (Some(pc), Some(ic)) = (parsed.country.as_deref(), ctx.item_country.as_deref())
-        && !pc.eq_ignore_ascii_case(ic)
+        && !riven_rank::countries_match(pc, ic)
     {
         return Some(format!("incorrect country: {pc} vs {ic}"));
+    }
+
+    // A release explicitly tagged with audio languages that include neither
+    // the item's own language nor English is a foreign dub/broadcast of this
+    // title.
+    if !parsed.anime
+        && !parsed.subbed
+        && !parsed.languages.is_empty()
+        && let Some(item_lang) = ctx.item_language.as_deref().and_then(normalize_lang_code)
+        && !parsed
+            .languages
+            .iter()
+            .any(|l| *l == item_lang || l == "en")
+    {
+        return Some(format!(
+            "incorrect language: {:?} vs {item_lang}",
+            parsed.languages
+        ));
     }
 
     if let Some(py) = parsed.year {
@@ -244,6 +311,7 @@ pub fn rank_streams(
                         title,
                         info_hash,
                         &ctx.correct_title,
+                        ctx.item_country.as_deref(),
                         &ctx.aliases,
                         settings,
                     ) {
@@ -383,9 +451,65 @@ fn merge_json_value(base: &mut Value, override_value: &Value) {
 
 #[cfg(test)]
 mod tests {
-    use super::merge_builtin_profile_settings;
+    use super::{ParseContext, merge_builtin_profile_settings, validate};
+    use riven_core::types::MediaItemType;
     use riven_rank::QualityProfile;
     use serde_json::json;
+    use std::collections::HashMap;
+
+    fn episode_ctx() -> ParseContext {
+        ParseContext {
+            item_type: MediaItemType::Episode,
+            season_number: Some(9),
+            episode_number: Some(1),
+            absolute_number: None,
+            item_year: None,
+            parent_year: None,
+            item_country: Some("gbr".to_string()),
+            item_language: Some("eng".to_string()),
+            season_episodes: vec![],
+            show_season_numbers: vec![],
+            show_status: None,
+            item_title: "Episode 1".to_string(),
+            item_aired_at: None,
+            correct_title: "Top Gear".to_string(),
+            aliases: HashMap::new(),
+            profiles: vec![],
+            dubbed_anime_only: false,
+        }
+    }
+
+    #[test]
+    fn validate_rejects_foreign_language_release() {
+        let ctx = episode_ctx();
+        let parsed = riven_rank::parse("Top.Gear.S09E01.GERMAN.DL.1080p.WEB.x264-TSCC");
+        let reason = validate(&ctx, &parsed).expect("German dub should be rejected");
+        assert!(reason.starts_with("incorrect language"), "{reason}");
+    }
+
+    #[test]
+    fn validate_allows_subbed_release_with_foreign_sub_tag() {
+        let ctx = episode_ctx();
+        // English audio with Dutch subtitles — the language tag describes the
+        // subs, not the audio.
+        let parsed = riven_rank::parse("Top.Gear.S09E01.1080p.WEB.x264.NL.Subs");
+        assert_eq!(validate(&ctx, &parsed), None);
+    }
+
+    #[test]
+    fn validate_rejects_other_country_release() {
+        let ctx = episode_ctx();
+        let parsed = riven_rank::parse("Top.Gear.US.S09E01.1080p.WEB.x264-GROUP");
+        let reason = validate(&ctx, &parsed).expect("US release should be rejected for GB item");
+        assert!(reason.starts_with("incorrect country"), "{reason}");
+    }
+
+    #[test]
+    fn validate_allows_release_tagged_with_item_country() {
+        let ctx = episode_ctx();
+        let parsed = riven_rank::parse("Top.Gear.UK.S09E01.1080p.WEB.x264-GROUP");
+        assert_eq!(validate(&ctx, &parsed), None);
+    }
 
     #[test]
     fn built_in_profile_overrides_are_merged_on_top_of_preset() {

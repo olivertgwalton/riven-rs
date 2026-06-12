@@ -21,7 +21,7 @@ use crate::{DownloadJob, JobQueue, RankStreamsJob};
 use self::helpers::load_item_or_err;
 use self::persist::{finalize_download_success, persist_supplied_download};
 
-use self::candidates::rank_streams_for_profile;
+use self::candidates::{TitleMatchContext, rank_streams_for_profile};
 use self::execute::{DownloadAttemptOutcome, attempt_download};
 
 #[derive(Debug, Clone, Deserialize)]
@@ -575,6 +575,7 @@ async fn run_downloads(
         .read()
         .await
         .attempt_unknown_downloads;
+    let title_ctx = TitleMatchContext::new(item, hierarchy);
 
     for (profile_name, profile_settings) in profiles {
         if done_profiles.contains(profile_name.as_str()) {
@@ -586,7 +587,7 @@ async fn run_downloads(
             continue;
         }
 
-        let ranked = rank_streams_for_profile(streams, item, profile_settings);
+        let ranked = rank_streams_for_profile(streams, item, profile_settings, &title_ctx);
         if ranked.is_empty() {
             tracing::debug!(id, profile = profile_name, "no stream found for profile");
             continue;
