@@ -65,11 +65,6 @@ enum ContentRating {
 	TV_MA
 }
 
-"""
-Implement the DateTime<Utc> scalar
-
-The input/output is a string in RFC3339 format.
-"""
 scalar DateTime
 
 type DebridUserInfo {
@@ -149,23 +144,11 @@ type Episode {
 	itemRequestId: Int
 	activeStreamId: Int
 	streams(infoHashes: [String!]): [Stream!]!
-	"""
-	The parent season for this episode.
-	"""
 	season: Season!
-	"""
-	Lookup keys: `["abs:{absoluteNumber}", "{seasonNumber}:{episodeNumber}"]`.
-	"""
 	lookupKeys: [String!]!
-	"""
-	Always 1 — an episode has exactly one expected media file.
-	"""
 	expectedFileCount: Int!
 }
 
-"""
-Episode with its primary filesystem entry (media file only).
-"""
 type EpisodeFull {
 	id: Int!
 	title: String!
@@ -209,9 +192,6 @@ type EpisodeFull {
 	filesystemEntries: [FileSystemEntry!]!
 }
 
-"""
-Lightweight episode state used for live state subscriptions.
-"""
 type EpisodeState {
 	id: Int!
 	episodeNumber: Int
@@ -240,15 +220,7 @@ type FileSystemEntry {
 	fileHash: String
 	videoFileSize: Int
 	opensubtitlesId: String
-	"""
-	Subtitle source plugin (e.g. "subdl"). Set when the subtitle was
-	fetched by an upstream provider plugin.
-	"""
 	sourceProvider: String
-	"""
-	Provider-specific external identifier for the subtitle (e.g. SubDL
-	subtitle id). Used for de-dup / refresh.
-	"""
 	sourceId: String
 	streamId: Int
 	resolution: String
@@ -273,43 +245,25 @@ input IndexEpisodeInput {
 	absoluteNumber: Int
 	contentRating: ContentRating
 	runtime: Int
-	"""
-	ISO date string (YYYY-MM-DD).
-	"""
 	airedAt: String
 	posterPath: String
 }
 
-"""
-Input for the `indexMovie` mutation.
-"""
 input IndexMovieInput {
-	"""
-	ID of the `ItemRequest` being indexed.
-	"""
 	id: Int!
 	title: String!
 	imdbId: String
 	contentRating: ContentRating
 	rating: Float
 	posterUrl: String
-	"""
-	ISO date string (YYYY-MM-DD) for the theatrical release.
-	"""
 	releaseDate: String
 	country: String
 	language: String
-	"""
-	Locale → title aliases, e.g. `{"de": ["Titel"]}`.
-	"""
 	aliases: JSON
 	genres: [String!]!
 	runtime: Int
 }
 
-"""
-Structured response returned by `indexMovie`.
-"""
 type IndexMovieMutationResponse {
 	success: Boolean!
 	message: String!
@@ -323,13 +277,7 @@ input IndexSeasonInput {
 	episodes: [IndexEpisodeInput!]!
 }
 
-"""
-Input for the `indexShow` mutation.
-"""
 input IndexShowInput {
-	"""
-	ID of the `ItemRequest` being indexed.
-	"""
 	id: Int!
 	title: String!
 	imdbId: String
@@ -338,9 +286,6 @@ input IndexShowInput {
 	posterUrl: String
 	country: String
 	language: String
-	"""
-	Locale → title aliases, e.g. `{"de": ["Titel"]}`.
-	"""
 	aliases: JSON
 	status: ShowStatus!
 	network: String
@@ -348,9 +293,6 @@ input IndexShowInput {
 	genres: [String!]!
 }
 
-"""
-Structured response returned by `indexShow`.
-"""
 type IndexShowMutationResponse {
 	success: Boolean!
 	message: String!
@@ -374,21 +316,11 @@ type ItemRequest {
 	completedAt: DateTime
 	state: ItemRequestState!
 	seasons: JSON
-	"""
-	True when the request specifies a strict subset of the show's
-	non-special seasons. Computed at indexer time. Always false for movies.
-	"""
 	isPartialRequest: Boolean!
 }
 
 enum ItemRequestState {
 	REQUESTED
-	"""
-	An existing request had additional seasons appended after it was
-	already completed/ongoing. Signals to the indexer that it should
-	re-process this show; the recompute pipeline will then transition it
-	back to its derived state (completed/ongoing/unreleased).
-	"""
 	REQUESTED_ADDITIONAL_SEASONS
 	COMPLETED
 	FAILED
@@ -409,9 +341,6 @@ type ItemsPage {
 	totalPages: Int!
 }
 
-"""
-A scalar that can represent any JSON value.
-"""
 scalar JSON
 
 type LibraryStats {
@@ -480,9 +409,6 @@ type MediaItem {
 	activeStreamId: Int
 }
 
-"""
-Media item (movie or show) with filesystem entry and, for shows, full season/episode tree.
-"""
 type MediaItemFull {
 	id: Int!
 	title: String!
@@ -584,9 +510,6 @@ enum MediaItemState {
 	Failed
 }
 
-"""
-Lightweight media state tree used for live state subscriptions.
-"""
 type MediaItemStateTree {
 	id: Int!
 	state: MediaItemState!
@@ -604,9 +527,6 @@ enum MediaItemType {
 	EPISODE
 }
 
-"""
-Discriminated union of all concrete media item types.
-"""
 union MediaItemUnion = Movie | Show | Season | Episode
 
 type Movie {
@@ -649,213 +569,53 @@ type Movie {
 	itemRequestId: Int
 	activeStreamId: Int
 	streams(infoHashes: [String!]): [Stream!]!
-	"""
-	Always 1 — a movie has exactly one expected media file.
-	"""
 	expectedFileCount: Int!
 }
 
-"""
-Input for requesting a movie to be tracked.
-"""
 input MovieRequestInput {
-	"""
-	Title used as a placeholder until indexing fills in the canonical name.
-	"""
 	title: String!
 	imdbId: String
 	tmdbId: String
-	"""
-	Identifier of the external system (e.g. Seerr) that originated this request.
-	"""
 	requestedBy: String
-	"""
-	External request ID for correlation with the originating content service.
-	"""
 	externalRequestId: String
 }
 
 type MutationRoot {
-	"""
-	Request a movie to be tracked and indexed.
-	
-	Returns a structured response. If an identical request already exists
-	the mutation succeeds without error but the `statusText` is `CONFLICT`
-	and `item` is `null`.
-	"""
 	requestMovie(input: MovieRequestInput!): RequestItemMutationResponse!
-	"""
-	Request a show (and optionally specific seasons) to be tracked and indexed.
-	
-	If the show was already requested but new seasons are included the request
-	is updated and `statusText` is `OK`. If nothing has changed `statusText`
-	is `CONFLICT` and `item` is `null`.
-	"""
 	requestShow(input: ShowRequestInput!): RequestItemMutationResponse!
-	"""
-	Bulk-request movies and shows in a single call.
-	
-	Items are deduplicated by their primary external ID (TMDB for movies,
-	TVDB for shows, with IMDB as fallback) so duplicate entries from a
-	single content-service payload are collapsed before processing.
-	
-	Returns the count of unique items processed and separate lists of newly
-	created vs updated item requests. Conflicts (already-requested items
-	with no change) are silently skipped.
-	"""
 	requestItems(movies: [MovieRequestInput!]!, shows: [ShowRequestInput!]!): RequestItemsResult!
-	"""
-	Persist indexer data for a movie and advance it to the scraping stage.
-	
-	Called by the indexer plugin after it has resolved metadata (title,
-	content rating, release date, etc.) for a movie item request.
-	"""
 	indexMovie(input: IndexMovieInput!): IndexMovieMutationResponse!
-	"""
-	Persist indexer data for a show (including seasons and episodes) and
-	advance it to the scraping stage.
-	
-	Called by the indexer plugin after it has resolved metadata for a show
-	item request.
-	"""
 	indexShow(input: IndexShowInput!): IndexShowMutationResponse!
 	scrapeMediaItem(input: ScrapeMediaItemMutationInput!): ScrapeMediaItemMutationResponse!
 	downloadMediaItem(input: DownloadMediaItemMutationInput!): DownloadMediaItemMutationResponse!
-	"""
-	Save a stream URL on a filesystem entry (media entry).
-	
-	Used by players and integrations to store the resolved playback URL
-	alongside the downloaded file record.
-	"""
 	saveStreamUrl(id: Int!, url: String!): SaveStreamUrlMutationResponse!
-	"""
-	Save a custom profile. If `id` is provided the existing profile is
-	updated; otherwise a new one is created. Built-in profiles cannot be
-	modified through this mutation — use `setProfileEnabled` instead.
-	"""
 	saveCustomProfile(id: Int, name: String!, settings: JSON!, enabled: Boolean): JSON!
-	"""
-	Delete a custom ranking profile by ID. Built-in profiles cannot be deleted.
-	"""
 	deleteCustomProfile(id: Int!): Boolean!
-	"""
-	Enable or disable a ranking profile (built-in or custom) by name.
-	Enabled profiles are used for multi-version scraping and downloading.
-	"""
 	setProfileEnabled(name: String!, enabled: Boolean!): Boolean!
-	"""
-	Update settings for any profile (built-in or custom) by name.
-	For built-in profiles these are stored as overrides that get merged on
-	top of the Rust defaults at load time.
-	"""
 	updateProfileSettings(name: String!, settings: JSON!): Boolean!
-	"""
-	Update rank settings. Deserialises into [`RankSettings`] (applying
-	serde defaults for any missing fields), then re-serialises the
-	canonical form — ensuring the Rust schema is the source of truth.
-	"""
 	updateRankSettings(settings: JSON!): JSON!
-	"""
-	Update all settings. Accepts a JSON object of key/value pairs.
-	"""
 	updateAllSettings(settings: JSON!): JSON!
-	"""
-	Mark the instance-wide first-run setup flow as completed.
-	"""
 	completeInitialSetup: Boolean!
-	"""
-	Update settings for a specific plugin (stored under "plugin.{name}" key).
-	Also re-validates the plugin with the new settings in-memory.
-	Returns an object with the saved settings and the new valid status.
-	"""
 	updatePluginSettings(plugin: String!, settings: JSON!): JSON!
-	"""
-	Enable or disable a plugin without overwriting its saved settings.
-	"""
 	setPluginEnabled(plugin: String!, enabled: Boolean!): JSON!
-	"""
-	Update general (non-plugin) settings and apply them to the live runtime config.
-	"""
 	updateGeneralSettings(settings: JSON!): JSON!
-	"""
-	Recompute stored library-profile matches for every existing media entry.
-	"""
 	rematchFilesystemLibraryProfiles: Int!
-	"""
-	Delete a specific filesystem entry (a single downloaded version) by its ID.
-	Returns true if the entry was found and deleted. The DB trigger on
-	`filesystem_entries` recomputes the owning item's state automatically.
-	"""
 	deleteFilesystemEntry(id: Int!): Boolean!
 	resetLibrary: Int!
-	"""
-	Reset items to Indexed state and clear failed_attempts.
-	"""
 	resetItems(ids: [Int!]!): Int!
-	"""
-	Clear failed_attempts for items so they will be retried.
-	"""
 	retryItems(ids: [Int!]!): Int!
-	"""
-	Remove items by ID.
-	"""
 	removeItems(ids: [Int!]!): Int!
-	"""
-	Pause items.
-	"""
 	pauseItems(ids: [Int!]!): Int!
-	"""
-	Unpause items (derives next state from current facts).
-	"""
 	unpauseItems(ids: [Int!]!): Int!
-	"""
-	Trigger a scrape for an existing item by entering its
-	per-item state machine. For shows, optionally provide season_numbers
-	to mark additional seasons requested before processing.
-	"""
 	scrapeItem(id: Int!, seasonNumbers: [Int!]): String!
-	"""
-	Add a new media item to track and immediately queue it for indexing.
-	For shows, `seasons` is an optional list of season numbers to request.
-	If omitted, all non-special seasons are requested.
-	"""
 	addItem(itemType: MediaItemType!, title: String!, imdbId: String, tmdbId: String, tvdbId: String, seasons: [Int!]): MediaItem!
-	"""
-	Create or reuse a non-requested media item, then index/scrape it so streams can be inspected.
-	"""
 	discoverItem(itemType: MediaItemType!, title: String!, imdbId: String, tmdbId: String, tvdbId: String, seasons: [Int!]): MediaItem!
-	"""
-	Discover stream candidates without creating or mutating media items.
-	"""
 	discoverStreams(itemType: MediaItemType!, title: String!, imdbId: String, tmdbId: String, tvdbId: String, seasons: [Int!], cachedOnly: Boolean): [DiscoveredStream!]!
-	"""
-	Create or prepare the real target item only after the user picks a specific stream.
-	
-	For TV, the stream is matched against its parsed seasons (or the
-	caller-supplied `seasons` / `season_number`). A single-season pack links
-	to that season; a multi-season pack links to the **show** so the download
-	flow can fill every season it contains.
-	"""
 	downloadDiscoveredStream(itemType: MediaItemType!, title: String!, imdbId: String, tmdbId: String, tvdbId: String, seasonNumber: Int, seasons: [Int!], infoHash: String!, magnet: String!, parsedData: JSON, rank: Int): String!
-	"""
-	Re-acquire a usenet title whose release is broken (missing data) or was
-	never ingested. The item is "completed" only because it still has a
-	media filesystem entry, so reset alone bounces back to completed; we
-	delete that entry to genuinely un-complete it, then re-process. The
-	re-scrape's ingest availability probe skips any incomplete release, so a
-	complete one is picked.
-	"""
 	regrabUsenetTitle(mediaItemId: Int!): String!
-	"""
-	Re-run the availability scan for one usenet file now and persist the
-	result. Returns the new status (`healthy` / `unhealthy` / `unknown`).
-	"""
 	rescanUsenetHealth(infoHash: String!, fileIndex: Int!): String!
 }
 
-"""
-Shared status enum returned by all structured mutation responses.
-"""
 enum MutationStatusText {
 	OK
 	CREATED
@@ -865,55 +625,19 @@ enum MutationStatusText {
 	INTERNAL_SERVER_ERROR
 }
 
-"""
-ISO 8601 calendar date without timezone.
-Format: %Y-%m-%d
-
-# Examples
-
-* `1994-11-13`
-* `2000-02-24`
-"""
 scalar NaiveDate
 
-"""
-Live health of one configured NNTP provider.
-"""
 type NntpProviderHealth {
 	host: String!
 	port: Int!
-	"""
-	Lower = preferred. Primaries are tried before backups.
-	"""
 	priority: Int!
 	isBackup: Boolean!
-	"""
-	Connection ceiling (`max_connections`).
-	"""
 	maxConnections: Int!
-	"""
-	Open sockets right now (idle + in-flight).
-	"""
 	openConnections: Int!
-	"""
-	Open sockets sitting idle in the pool.
-	"""
 	idleConnections: Int!
-	"""
-	Open sockets currently servicing a fetch.
-	"""
 	activeConnections: Int!
-	"""
-	Circuit breaker is muting this provider after repeated failures.
-	"""
 	breakerTripped: Boolean!
-	"""
-	Seconds until the breaker re-allows the provider (0 if healthy).
-	"""
 	cooldownSecondsRemaining: Int!
-	"""
-	Consecutive transient failures since the last success.
-	"""
 	consecutiveFailures: Int!
 }
 
@@ -937,9 +661,6 @@ type PluginInfo {
 	version: String!
 	enabled: Boolean!
 	valid: Boolean!
-	"""
-	JSON array of SettingField descriptors for rendering the settings form.
-	"""
 	schema: JSON!
 }
 
@@ -962,68 +683,18 @@ type QueryRoot {
 	itemsByState(state: MediaItemState!, itemType: MediaItemType!): [MediaItem!]!
 	items(page: Int, limit: Int, sort: String, types: [MediaItemType!], search: String, states: [MediaItemState!]): ItemsPage!
 	episodeByTvdb(tvdbId: String!, episodeNumber: Int!, seasonNumber: Int): MediaItem
-	"""
-	Return the number of media files expected for a media item:
-	- Movie / Episode → 1
-	- Season → total episode count
-	- Show → total processable episode count (continuing shows exclude the last season)
-	"""
 	expectedFileCount(id: Int!): Int!
-	"""
-	Return lookup key strings for an episode:
-	`["abs:{absolute_number}", "{season_number}:{episode_number}"]`.
-	"""
 	lookupKeys(id: Int!): [String!]!
-	"""
-	Get the current rank settings. Returns defaults if not yet configured.
-	Each `custom_ranks` entry is annotated with a `"default"` field carrying
-	the built-in score so the UI can display the effective value without a
-	separate query.
-	"""
 	rankSettings: JSON!
-	"""
-	Return all quality profiles as an ordered array of
-	`{ id, label, description, settings }` objects.
-	The `settings` field reflects the *effective* settings (base preset merged
-	with any user overrides stored in the database), so the UI always shows
-	the values that will actually be used at runtime.
-	"""
 	qualityProfiles: JSON!
-	"""
-	Return the built-in default score for every CustomRank field.
-	"""
 	rankDefaults: JSON!
-	"""
-	Return all ranking profiles (built-in + custom) with their enabled status.
-	"""
 	customProfiles: JSON!
-	"""
-	Get all stored settings as a JSON object.
-	"""
 	allSettings: JSON!
-	"""
-	Return instance-level status flags used by frontend bootstrap flows.
-	"""
 	instanceStatus: InstanceStatus!
-	"""
-	Get info about all registered plugins.
-	"""
 	pluginInfo: [PluginInfo!]!
-	"""
-	Get effective settings for a specific plugin (env vars merged with any DB overrides).
-	"""
 	pluginSettings(plugin: String!): JSON!
-	"""
-	Return whether a plugin is effectively enabled.
-	"""
 	pluginEnabled(plugin: String!): Boolean!
-	"""
-	Return the SettingField schema for the general (non-plugin) settings.
-	"""
 	generalSettingsSchema: JSON!
-	"""
-	Get general (non-plugin) settings. Returns defaults merged with DB values.
-	"""
 	generalSettings: JSON!
 	tmdbDetails(type: String!, id: Int!, appendToResponse: String): JSON!
 	tmdbCollection(id: Int!): JSON!
@@ -1045,63 +716,19 @@ type QueryRoot {
 	tvdbEpisodes(id: Int!, seasonType: String!, lang: String!, page: Int): JSON!
 	resolveTmdbToTvdb(tmdbId: String!): Int
 	logs(limit: Int, level: String): [LogEntry!]!
-	"""
-	Per-provider NNTP health (connections + circuit-breaker state). Empty
-	when usenet isn't configured.
-	"""
 	nntpProviders: [NntpProviderHealth!]!
-	"""
-	Per-title usenet health from the background availability scanner.
-	Ordered worst-first (unhealthy, then most missing segments).
-	"""
 	usenetTitleHealth: [UsenetTitleHealth!]!
-	"""
-	Title-health counts grouped by status. The `WHERE EXISTS` filter must
-	mirror `usenet_title_health` so the summary matches the listed rows.
-	"""
 	usenetTitleHealthSummary: UsenetTitleHealthSummary!
-	"""
-	Per-provider download traffic — lifetime totals + a daily series for
-	the usage-trend chart.
-	"""
 	usenetTraffic: UsenetTraffic!
-	"""
-	Cache + fetch metrics for the in-process usenet streaming engine.
-	"""
 	usenetStreamingHealth: UsenetStreamingHealth!
 	stats: LibraryStats!
-	"""
-	Get completed-item activity counts grouped by date (past year).
-	Returns a JSON object mapping ISO date strings (YYYY-MM-DD) to counts.
-	"""
 	activity: JSON!
-	"""
-	Count of movies and shows per release year.
-	"""
 	yearReleases: [YearRelease!]!
-	"""
-	Get debrid account information for all configured stores.
-	"""
 	debridAccountInfo: [DebridUserInfo!]!
-	"""
-	Get active playback sessions from configured media-server plugins.
-	"""
 	activePlaybackSessions: [ActivePlaybackSession!]!
-	"""
-	Get upcoming unreleased items (calendar feed), with show title resolved in a single query.
-	"""
 	calendar(limit: Int): [CalendarEntry!]!
-	"""
-	Get filesystem stat info for a VFS path (file or directory).
-	"""
 	vfsEntryStat(path: String!): VfsEntryStat!
-	"""
-	Get the filesystem entry (media file record) for a VFS file path.
-	"""
 	vfsEntry(path: String!): FileSystemEntry
-	"""
-	List child entry names (file or directory names) directly under a VFS path.
-	"""
 	vfsDirectoryEntryPaths(path: String!): [String!]!
 }
 
@@ -1120,17 +747,11 @@ type RatingsResponse {
 	imdbId: String
 }
 
-"""
-Structured response returned by `requestMovie` and `requestShow`.
-"""
 type RequestItemMutationResponse {
 	success: Boolean!
 	message: String!
 	statusText: MutationStatusText!
 	errorCode: RequestItemMutationResponseErrorCode
-	"""
-	The item request that was created or updated; `null` on conflict.
-	"""
 	item: ItemRequest
 }
 
@@ -1139,21 +760,9 @@ enum RequestItemMutationResponseErrorCode {
 	UNEXPECTED_ERROR
 }
 
-"""
-Returned by `requestItems` — a summary of a bulk upsert operation.
-"""
 type RequestItemsResult {
-	"""
-	Total number of unique items processed after deduplication.
-	"""
 	count: Int!
-	"""
-	Newly created item requests.
-	"""
 	newItems: [ItemRequest!]!
-	"""
-	Item requests that were updated (e.g. new seasons added to an existing show request).
-	"""
 	updatedItems: [ItemRequest!]!
 }
 
@@ -1174,9 +783,6 @@ type RivenNotification {
 	error: String
 }
 
-"""
-Structured response returned by `saveStreamUrl`.
-"""
 type SaveStreamUrlMutationResponse {
 	success: Boolean!
 	message: String!
@@ -1244,27 +850,12 @@ type Season {
 	itemRequestId: Int
 	activeStreamId: Int
 	streams(infoHashes: [String!]): [Stream!]!
-	"""
-	The parent show for this season.
-	"""
 	show: Show!
-	"""
-	All episodes in this season.
-	"""
 	episodes: [Episode!]!
-	"""
-	Total number of episodes in this season.
-	"""
 	totalEpisodes: Int!
-	"""
-	Expected number of episode files to download (equals total episodes).
-	"""
 	expectedFileCount: Int!
 }
 
-"""
-Season with its episodes and their file info.
-"""
 type SeasonFull {
 	id: Int!
 	title: String!
@@ -1307,9 +898,6 @@ type SeasonFull {
 	episodes: [EpisodeFull!]!
 }
 
-"""
-Lightweight season state used for live state subscriptions.
-"""
 type SeasonState {
 	id: Int!
 	seasonNumber: Int
@@ -1359,38 +947,16 @@ type Show {
 	itemRequestId: Int
 	activeStreamId: Int
 	streams(infoHashes: [String!]): [Stream!]!
-	"""
-	Seasons for this show. Excludes season 0 (specials) by default.
-	"""
 	seasons(includeSpecials: Boolean! = false): [Season!]!
-	"""
-	Total expected downloadable episode files.
-	For continuing shows the currently-airing season is excluded.
-	"""
 	expectedFileCount: Int!
 }
 
-"""
-Input for requesting a show (and optionally specific seasons) to be tracked.
-"""
 input ShowRequestInput {
-	"""
-	Title used as a placeholder until indexing fills in the canonical name.
-	"""
 	title: String!
 	imdbId: String
 	tvdbId: String
-	"""
-	Season numbers to request. When omitted all non-special seasons are requested.
-	"""
 	seasons: [Int!]
-	"""
-	Identifier of the external system (e.g. Seerr) that originated this request.
-	"""
 	requestedBy: String
-	"""
-	External request ID for correlation with the originating content service.
-	"""
 	externalRequestId: String
 }
 
@@ -1407,57 +973,19 @@ type Stream {
 	updatedAt: DateTime
 	parsedData: JSON
 	rank: Int
-	"""
-	Best-known file size in bytes — populated at scrape time when the
-	scraper reports a size, or recorded after a download attempt rejects
-	the stream on a bitrate check. Used by the download loop to pre-filter
-	streams that cannot pass the configured bitrate bounds before paying
-	for a debrid round-trip. `None` means the size is not yet known.
-	"""
 	fileSizeBytes: Int
 }
 
 type SubscriptionRoot {
-	"""
-	Stream of all UI-notable Riven events. Replaces the `/notifications/stream` SSE endpoint.
-	"""
 	notifications: RivenNotification!
-	"""
-	Stream of live log lines. Replaces the `/logs/stream` SSE endpoint.
-	Each item is a JSON string matching `{ timestamp, level, message, target }`.
-	"""
 	logLines: String!
-	"""
-	Fires when a new movie item request is created.
-	"""
 	movieRequested: ItemRequest!
-	"""
-	Fires when a new show item request is created.
-	"""
 	showRequested: ItemRequest!
-	"""
-	Fires when an existing show item request is updated (e.g. new seasons added).
-	"""
 	showRequestUpdated: ItemRequest!
-	"""
-	Fires when a show has been indexed (metadata and episode structure persisted).
-	"""
 	showIndexed: Show!
-	"""
-	Fires when a media item transitions to the scraped state.
-	"""
 	itemScraped: Int!
-	"""
-	Fires when a media item transitions to the completed state.
-	"""
 	itemDownloaded: Int!
-	"""
-	Fires when a media item transitions to the failed state (scrape or download error).
-	"""
 	itemFailed: Int!
-	"""
-	Fires when one or more media items are deleted.
-	"""
 	itemsDeleted: [Int!]!
 	mediaItemStateUpdatesByTmdb(tmdbId: String!): MediaItemStateTree
 	mediaItemStateUpdatesByTvdb(tvdbId: String!): MediaItemStateTree
@@ -1523,162 +1051,75 @@ type TraktListItem {
 	indexer: String!
 }
 
-"""
-One provider's traffic on one day (for the usage-trend chart).
-"""
 type UsenetDailyTraffic {
-	"""
-	`YYYY-MM-DD`.
-	"""
 	day: String!
 	host: String!
 	bytesDownloaded: Int!
 	articlesDownloaded: Int!
 }
 
-"""
-Lifetime download total for one provider.
-"""
 type UsenetProviderTraffic {
 	host: String!
 	bytesDownloaded: Int!
 	articlesDownloaded: Int!
 }
 
-"""
-In-process streaming engine health (segment cache + NNTP fetch counters).
-"""
 type UsenetStreamingHealth {
 	cacheBytesUsed: Int!
 	cacheBytesMax: Int!
 	cacheEntries: Int!
 	cacheHits: Int!
 	cacheMisses: Int!
-	"""
-	Cache hit rate over all lookups since start, 0.0–1.0.
-	"""
 	cacheHitRate: Float!
-	"""
-	Successful wire fetches (cache misses that decoded cleanly).
-	"""
 	fetchesOk: Int!
-	"""
-	Fetches that exhausted retries or hit a missing article.
-	"""
 	fetchesFailed: Int!
-	"""
-	Fetch success rate over all wire fetches, 0.0–1.0.
-	"""
 	fetchSuccessRate: Float!
-	"""
-	Total decoded bytes served from the wire (poll deltas for throughput).
-	"""
 	bytesDecoded: Int!
-	"""
-	Segments being fetched + decoded right now.
-	"""
 	inFlight: Int!
-	"""
-	Segments known permanently missing on every provider.
-	"""
 	deadSegments: Int!
-	"""
-	Usenet file handles the VFS is currently serving.
-	"""
 	activeStreams: Int!
 }
 
-"""
-Health of one usenet-backed title, enriched for display.
-"""
 type UsenetTitleHealth {
 	infoHash: String!
 	fileIndex: Int!
 	mediaItemId: Int
-	"""
-	`healthy` | `unhealthy` | `unknown` | `checking`.
-	"""
 	status: String!
 	totalSegments: Int!
 	sampledSegments: Int!
 	missingSegments: Int!
 	errorSegments: Int!
-	"""
-	Missing segments as a percentage of those sampled.
-	"""
 	missingPct: Float!
-	"""
-	Unix seconds of the last check (null if never checked).
-	"""
 	checkedAt: Int
-	"""
-	Auto-repair attempts made so far (0 if none / not applicable).
-	"""
 	repairAttempts: Int!
-	"""
-	Unix seconds of the next scheduled auto-repair (null if none pending).
-	"""
 	nextRepairAt: Int
-	"""
-	Show/movie title for display.
-	"""
 	title: String
-	"""
-	`S05E03 · Sand Job` for episodes, year for movies.
-	"""
 	subtitle: String
 	posterPath: String
 	mediaType: String
 }
 
-"""
-Title-health counts grouped by status, for the dashboard summary line.
-"""
 type UsenetTitleHealthSummary {
 	healthy: Int!
 	unhealthy: Int!
 	notIngested: Int!
-	"""
-	Catch-all for any other status (e.g. `checking`/`unknown`).
-	"""
 	unknown: Int!
 	total: Int!
 }
 
-"""
-Download-traffic accounting across all usenet providers.
-"""
 type UsenetTraffic {
-	"""
-	Lifetime totals per provider, busiest first.
-	"""
 	providers: [UsenetProviderTraffic!]!
-	"""
-	Per-provider per-day series over the last two weeks (oldest first).
-	"""
 	daily: [UsenetDailyTraffic!]!
 	totalBytesDownloaded: Int!
 	totalArticlesDownloaded: Int!
 }
 
-"""
-Filesystem stat metadata for a VFS path.
-"""
 type VfsEntryStat {
 	mtime: DateTime!
 	ctime: DateTime!
 	atime: DateTime!
-	"""
-	Unix file mode (e.g. 0o040755 for directory, 0o100644 for regular file).
-	"""
 	mode: Int!
-	"""
-	Number of hard links.
-	"""
 	nlink: Int!
-	"""
-	File size in bytes (0 for directories).
-	"""
 	size: Int!
 	uid: Int!
 	gid: Int!
@@ -1689,17 +1130,8 @@ type YearRelease {
 	count: Int!
 }
 
-"""
-Directs the executor to include this field or fragment only when the `if` argument is true.
-"""
 directive @include(if: Boolean!) on FIELD | FRAGMENT_SPREAD | INLINE_FRAGMENT
-"""
-Directs the executor to skip this field or fragment when the `if` argument is true.
-"""
 directive @skip(if: Boolean!) on FIELD | FRAGMENT_SPREAD | INLINE_FRAGMENT
-"""
-Provides a scalar specification URL for specifying the behavior of custom scalar types.
-"""
 directive @specifiedBy(url: String!) on SCALAR
 schema {
 	query: QueryRoot
