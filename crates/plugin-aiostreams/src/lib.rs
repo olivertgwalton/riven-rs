@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use riven_core::events::{EventType, HookResponse, ScrapeRequest};
 use riven_core::http::HttpServiceProfile;
-use riven_core::plugin::{Plugin, PluginContext, SettingField};
+use riven_core::plugin::{FieldType, Plugin, PluginContext, SettingField};
 use riven_core::settings::PluginSettings;
 
 use crate::client::{scrape, validate_search};
@@ -23,6 +23,10 @@ pub struct AioStreamsPlugin;
 impl Plugin for AioStreamsPlugin {
     fn name(&self) -> &'static str {
         "aiostreams"
+    }
+
+    fn category(&self) -> &'static str {
+        "sources"
     }
 
     fn subscribed_events(&self) -> &[EventType] {
@@ -49,16 +53,16 @@ impl Plugin for AioStreamsPlugin {
 
     fn settings_schema(&self) -> Vec<SettingField> {
         vec![
-            SettingField::new("url", "URL", "url")
+            SettingField::new("url", "URL", FieldType::Url)
                 .required()
                 .with_default(DEFAULT_URL)
                 .with_placeholder(DEFAULT_URL)
                 .with_description("Base URL of your AIOStreams instance."),
-            SettingField::new("uuid", "User UUID", "text")
+            SettingField::new("uuid", "User UUID", FieldType::Text)
                 .required()
                 .with_placeholder("00000000-0000-0000-0000-000000000000")
                 .with_description("Your AIOStreams user ID."),
-            SettingField::new("password", "Password", "password")
+            SettingField::new("password", "Password", FieldType::Password)
                 .required()
                 .with_description("Your AIOStreams password."),
         ]

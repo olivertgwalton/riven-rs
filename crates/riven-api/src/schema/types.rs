@@ -69,19 +69,45 @@ pub struct ItemsPage {
     pub total_pages: i64,
 }
 
+/// One configurable settings surface — either the instance-wide "general"
+/// settings or a single plugin. The frontend renders `schema` + `values`
+/// generically; the plugin-only fields are null for the general section.
 #[derive(SimpleObject)]
-pub struct PluginInfo {
-    pub name: String,
-    pub version: String,
-    pub enabled: bool,
-    pub valid: bool,
-    /// JSON array of SettingField descriptors for rendering the settings form.
+pub struct SettingsSection {
+    pub id: String,
+    pub title: String,
+    /// "general" | "plugin".
+    pub kind: String,
+    /// JSON array of SettingField descriptors for rendering the form.
     pub schema: serde_json::Value,
+    /// Typed values object keyed by field key.
+    pub values: serde_json::Value,
+    /// Setup grouping key (plugins only; see `setupGroups`).
+    pub category: Option<String>,
+    pub enabled: Option<bool>,
+    pub valid: Option<bool>,
+    pub configured: Option<bool>,
+    pub missing_required_fields: Vec<String>,
+    pub version: Option<String>,
 }
 
 #[derive(SimpleObject)]
 pub struct InstanceStatus {
     pub setup_completed: bool,
+    /// Whether the minimum viable configuration exists to finish setup.
+    pub ready_to_complete: bool,
+    pub enabled_valid_plugin_count: i32,
+    pub enabled_profile_count: i32,
+    /// Human-readable reasons setup can't be completed yet (empty when ready).
+    pub blockers: Vec<String>,
+}
+
+/// An ordered setup section that plugins are grouped under (by `PluginInfo.category`).
+#[derive(SimpleObject)]
+pub struct SetupGroup {
+    pub id: String,
+    pub title: String,
+    pub description: String,
 }
 
 #[derive(SimpleObject)]

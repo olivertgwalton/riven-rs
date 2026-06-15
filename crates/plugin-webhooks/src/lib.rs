@@ -22,7 +22,7 @@ use ulid::Ulid;
 
 use riven_core::events::{EventType, HookResponse, RivenEvent};
 use riven_core::http::profiles;
-use riven_core::plugin::{Plugin, PluginContext, SettingField};
+use riven_core::plugin::{FieldType, Plugin, PluginContext, SettingField};
 use riven_core::settings::PluginSettings;
 use riven_db::repo;
 
@@ -42,6 +42,10 @@ impl Plugin for WebhooksPlugin {
         "webhooks"
     }
 
+    fn category(&self) -> &'static str {
+        "services"
+    }
+
     fn subscribed_events(&self) -> &[EventType] {
         EventType::NOTABLE
     }
@@ -56,21 +60,21 @@ impl Plugin for WebhooksPlugin {
 
     fn settings_schema(&self) -> Vec<SettingField> {
         vec![
-            SettingField::new("urls", "Webhook URLs", "textarea")
+            SettingField::new("urls", "Webhook URLs", FieldType::Textarea)
                 .required()
                 .with_placeholder("https://example.com/hook, https://ntfy.sh/riven")
                 .with_description("Comma-separated URLs. Each receives a POST request when an event fires."),
             {
                 let slugs: Vec<&'static str> =
                     EventType::NOTABLE.iter().map(|e| e.slug()).collect();
-                SettingField::new("events", "Event Filter", "string_array")
+                SettingField::new("events", "Event Filter", FieldType::StringArray)
                     .with_options(&slugs)
                     .with_description("Which events to send. Leave empty to send all events.")
             },
-            SettingField::new("secret", "Signing Secret", "password").with_description(
+            SettingField::new("secret", "Signing Secret", FieldType::Password).with_description(
                 "Optional secret key. When set, each request includes a signature header so you can verify it came from Riven.",
             ),
-            SettingField::new("enrich", "Enrich Payload", "boolean").with_description(
+            SettingField::new("enrich", "Enrich Payload", FieldType::Boolean).with_description(
                 "Include full item details (title, artwork, rating) in the payload.",
             ),
         ]

@@ -3,7 +3,7 @@ mod external_ids;
 pub(crate) mod logs;
 mod media;
 mod ratings;
-mod settings;
+pub(crate) mod settings;
 mod tmdb;
 mod trakt;
 mod tvdb;

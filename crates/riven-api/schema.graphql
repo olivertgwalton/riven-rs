@@ -302,6 +302,10 @@ type IndexShowMutationResponse {
 
 type InstanceStatus {
 	setupCompleted: Boolean!
+	readyToComplete: Boolean!
+	enabledValidPluginCount: Int!
+	enabledProfileCount: Int!
+	blockers: [String!]!
 }
 
 type ItemRequest {
@@ -596,9 +600,7 @@ type MutationRoot {
 	updateRankSettings(settings: JSON!): JSON!
 	updateAllSettings(settings: JSON!): JSON!
 	completeInitialSetup: Boolean!
-	updatePluginSettings(plugin: String!, settings: JSON!): JSON!
-	setPluginEnabled(plugin: String!, enabled: Boolean!): JSON!
-	updateGeneralSettings(settings: JSON!): JSON!
+	updateSettings(section: String!, values: JSON!): SettingsSection!
 	rematchFilesystemLibraryProfiles: Int!
 	deleteFilesystemEntry(id: Int!): Boolean!
 	resetLibrary: Int!
@@ -656,14 +658,6 @@ enum PlaybackState {
 	UNKNOWN
 }
 
-type PluginInfo {
-	name: String!
-	version: String!
-	enabled: Boolean!
-	valid: Boolean!
-	schema: JSON!
-}
-
 type QueryRoot {
 	mediaItemById(id: Int!): MediaItemUnion
 	mediaItems: [MediaItemUnion!]!
@@ -685,17 +679,14 @@ type QueryRoot {
 	episodeByTvdb(tvdbId: String!, episodeNumber: Int!, seasonNumber: Int): MediaItem
 	expectedFileCount(id: Int!): Int!
 	lookupKeys(id: Int!): [String!]!
-	rankSettings: JSON!
 	qualityProfiles: JSON!
-	rankDefaults: JSON!
+	rankSettingsSchema: JSON!
+	defaultRankProfile: JSON!
 	customProfiles: JSON!
 	allSettings: JSON!
 	instanceStatus: InstanceStatus!
-	pluginInfo: [PluginInfo!]!
-	pluginSettings(plugin: String!): JSON!
-	pluginEnabled(plugin: String!): Boolean!
-	generalSettingsSchema: JSON!
-	generalSettings: JSON!
+	setupGroups: [SetupGroup!]!
+	settingsSections: [SettingsSection!]!
 	tmdbDetails(type: String!, id: Int!, appendToResponse: String): JSON!
 	tmdbCollection(id: Int!): JSON!
 	tmdbCollectionDetails(id: Int!): TmdbCollectionDetails!
@@ -905,6 +896,26 @@ type SeasonState {
 	isRequested: Boolean!
 	expectedFileCount: Int!
 	episodes: [EpisodeState!]!
+}
+
+type SettingsSection {
+	id: String!
+	title: String!
+	kind: String!
+	schema: JSON!
+	values: JSON!
+	category: String
+	enabled: Boolean
+	valid: Boolean
+	configured: Boolean
+	missingRequiredFields: [String!]!
+	version: String
+}
+
+type SetupGroup {
+	id: String!
+	title: String!
+	description: String!
 }
 
 type Show {

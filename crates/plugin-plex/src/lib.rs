@@ -33,6 +33,10 @@ impl Plugin for PlexPlugin {
         "plex"
     }
 
+    fn category(&self) -> &'static str {
+        "media"
+    }
+
     fn subscribed_events(&self) -> &[EventType] {
         &[
             EventType::MediaItemDownloadSuccess,
@@ -49,13 +53,13 @@ impl Plugin for PlexPlugin {
     }
 
     fn settings_schema(&self) -> Vec<riven_core::plugin::SettingField> {
-        use riven_core::plugin::SettingField;
+        use riven_core::plugin::{FieldType, SettingField};
         vec![
-            SettingField::new("plextoken", "Plex Token", "password").required(),
-            SettingField::new("plexserverurl", "Server URL", "url")
+            SettingField::new("plextoken", "Plex Token", FieldType::Password).required(),
+            SettingField::new("plexserverurl", "Server URL", FieldType::Url)
                 .required()
                 .with_placeholder("http://localhost:32400"),
-            SettingField::new("plexlibrarypath", "Library Path", "text")
+            SettingField::new("plexlibrarypath", "Library Path", FieldType::Text)
                 .with_default("/mount")
                 .with_placeholder("/mount")
                 .with_description("Path Plex uses to reference the VFS mount."),

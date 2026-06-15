@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use reqwest::Method;
 use riven_core::events::{DownloadSuccessInfo, EventType, HookResponse};
 use riven_core::http::HttpServiceProfile;
-use riven_core::plugin::{Plugin, PluginContext, SettingField};
+use riven_core::plugin::{FieldType, Plugin, PluginContext, SettingField};
 use riven_core::settings::PluginSettings;
 use riven_core::types::{ActivePlaybackSession, PlaybackMethod, PlaybackState};
 use riven_db::repo;
@@ -112,11 +112,11 @@ async fn refresh_library(
 
 fn media_server_settings_schema() -> Vec<SettingField> {
     vec![
-        SettingField::new("url", "Server URL", "url")
+        SettingField::new("url", "Server URL", FieldType::Url)
             .required()
             .with_placeholder("http://localhost:8096"),
-        SettingField::new("apikey", "API Key", "password").required(),
-        SettingField::new("librarypath", "Library Path", "text")
+        SettingField::new("apikey", "API Key", FieldType::Password).required(),
+        SettingField::new("librarypath", "Library Path", FieldType::Text)
             .with_default("/mount")
             .with_placeholder("/mount")
             .with_description("Path Jellyfin/Emby uses to reference the Riven VFS mount."),
@@ -195,6 +195,10 @@ macro_rules! impl_media_server_plugin {
         impl Plugin for $plugin_ty {
             fn name(&self) -> &'static str {
                 $name
+            }
+
+            fn category(&self) -> &'static str {
+                "media"
             }
 
             fn subscribed_events(&self) -> &[EventType] {

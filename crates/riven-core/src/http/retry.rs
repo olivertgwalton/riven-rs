@@ -10,10 +10,6 @@ use super::rate_limit::ServiceState;
 
 pub(super) const BACKOFF_BASE_SECS: u64 = 5;
 const JITTER: f64 = 0.5;
-/// Fallback pause when a 429 response carries no usable `Retry-After` header.
-/// Matches riven-ts' `defaultWaitMs = 10_000` in
-/// `packages/util-plugin-sdk/lib/datasource/index.ts`: many indexers (nzbgeek,
-/// most newznab variants) return bare 429s, and without this the limiter falls
 /// straight back to the configured rate and keeps hammering. 10 s is long
 /// enough to break a tight retry loop, short enough that legitimate transient
 /// 429s clear quickly.
@@ -22,12 +18,7 @@ pub(super) const DEFAULT_429_PAUSE_SECS: u64 = 10;
 /// HTTP statuses that represent a *transient upstream failure* — the request
 /// reached the server (or a gateway in front of it) and bounced back with no
 /// useful application response. Treated the same as a transient socket error:
-/// worth one more attempt with backoff before bubbling up.
-///
-/// Matches the riven-ts retry surface: all 5xx (server-side problems that may
-/// clear momentarily) plus 408 Request Timeout. 429 is intentionally excluded
-/// because `parse_rate_limit_pause` handles it via `Retry-After` and the
-/// service-state pause window instead of inline retries.
+
 fn is_retryable_status(status: StatusCode) -> bool {
     status.as_u16() == 408 || status.is_server_error()
 }

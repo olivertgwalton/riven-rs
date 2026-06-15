@@ -65,6 +65,10 @@ impl Plugin for TvdbPlugin {
         "tvdb"
     }
 
+    fn category(&self) -> &'static str {
+        "services"
+    }
+
     fn subscribed_events(&self) -> &[EventType] {
         &[EventType::MediaItemIndexRequested]
     }
@@ -78,8 +82,8 @@ impl Plugin for TvdbPlugin {
     }
 
     fn settings_schema(&self) -> Vec<riven_core::plugin::SettingField> {
-        use riven_core::plugin::SettingField;
-        vec![SettingField::new("apikey", "API Key", "password").required()]
+        use riven_core::plugin::{FieldType, SettingField};
+        vec![SettingField::new("apikey", "API Key", FieldType::Password).required()]
     }
 
     async fn on_index_requested(

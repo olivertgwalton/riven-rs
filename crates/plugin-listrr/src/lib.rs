@@ -21,6 +21,10 @@ impl Plugin for ListrrPlugin {
         "listrr"
     }
 
+    fn category(&self) -> &'static str {
+        "services"
+    }
+
     fn subscribed_events(&self) -> &[EventType] {
         &[EventType::ContentServiceRequested]
     }
@@ -41,13 +45,13 @@ impl Plugin for ListrrPlugin {
     }
 
     fn settings_schema(&self) -> Vec<riven_core::plugin::SettingField> {
-        use riven_core::plugin::SettingField;
+        use riven_core::plugin::{FieldType, SettingField};
         vec![
-            SettingField::new("apikey", "API Key", "password").required(),
-            SettingField::new("movielists", "Movie List IDs", "text")
+            SettingField::new("apikey", "API Key", FieldType::Password).required(),
+            SettingField::new("movielists", "Movie List IDs", FieldType::Text)
                 .with_placeholder("id1, id2")
                 .with_description("Comma-separated Listrr movie list IDs."),
-            SettingField::new("showlists", "Show List IDs", "text")
+            SettingField::new("showlists", "Show List IDs", FieldType::Text)
                 .with_placeholder("id1, id2")
                 .with_description("Comma-separated Listrr show list IDs."),
         ]

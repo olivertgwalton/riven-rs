@@ -13,7 +13,7 @@ use lru::LruCache;
 use redis::AsyncCommands;
 use riven_core::events::{EventType, HookResponse};
 use riven_core::http::HttpServiceProfile;
-use riven_core::plugin::{Plugin, PluginContext, SettingField};
+use riven_core::plugin::{FieldType, Plugin, PluginContext, SettingField};
 use riven_core::settings::PluginSettings;
 use riven_core::types::StreamLinkResponse;
 use riven_core::types::{
@@ -131,6 +131,10 @@ impl Plugin for UsenetPlugin {
         "usenet"
     }
 
+    fn category(&self) -> &'static str {
+        "sources"
+    }
+
     fn subscribed_events(&self) -> &[EventType] {
         &[
             EventType::CoreStarted,
@@ -164,7 +168,7 @@ impl Plugin for UsenetPlugin {
 
     fn settings_schema(&self) -> Vec<SettingField> {
         vec![
-            SettingField::new("nntpproviders", "NNTP Providers", "dictionary")
+            SettingField::new("nntpproviders", "NNTP Providers", FieldType::Dictionary)
                 .required()
                 .with_key_placeholder("provider_name")
                 .with_add_label("Add provider")
@@ -173,40 +177,40 @@ impl Plugin for UsenetPlugin {
                      Primaries are tried first; backup servers are only used when every primary fails.",
                 )
                 .with_item_fields(vec![
-                    SettingField::new("host", "Host", "text")
+                    SettingField::new("host", "Host", FieldType::Text)
                         .required()
                         .with_placeholder("news.newshosting.com"),
-                    SettingField::new("port", "Port", "number").with_default("563"),
-                    SettingField::new("user", "Username", "text"),
-                    SettingField::new("pass", "Password", "password"),
-                    SettingField::new("tls", "Use TLS", "boolean").with_default("true"),
-                    SettingField::new("max_connections", "Max Connections", "number")
+                    SettingField::new("port", "Port", FieldType::Number).with_default("563"),
+                    SettingField::new("user", "Username", FieldType::Text),
+                    SettingField::new("pass", "Password", FieldType::Password),
+                    SettingField::new("tls", "Use TLS", FieldType::Boolean).with_default("true"),
+                    SettingField::new("max_connections", "Max Connections", FieldType::Number)
                         .with_default("8")
                         .with_description(
                             "How many simultaneous connections to open. Don't exceed your provider's account limit.",
                         ),
-                    SettingField::new("priority", "Priority", "number")
+                    SettingField::new("priority", "Priority", FieldType::Number)
                         .with_default("0")
                         .with_description("Lower numbers are tried first."),
-                    SettingField::new("backup", "Backup", "boolean")
+                    SettingField::new("backup", "Backup", FieldType::Boolean)
                         .with_default("false")
                         .with_description(
                             "Only use this server when all primary servers fail. Good for block accounts or fill providers.",
                         ),
                 ]),
-            SettingField::new("archivepassword", "Archive Password", "password").with_description(
+            SettingField::new("archivepassword", "Archive Password", FieldType::Password).with_description(
                 "Password for password-protected archives. Leave blank if your downloads aren't encrypted.",
             ),
             SettingField::new(
                 "healthcheckmaxfailures",
                 "Consecutive Failures Before Delete",
-                "number",
+                FieldType::Number,
             )
             .with_default("2")
             .with_description(
                 "How many health check failures in a row before a title is dropped and re-scraped.",
             ),
-            SettingField::new("maxdownloadworkers", "Max Download Workers", "number")
+            SettingField::new("maxdownloadworkers", "Max Download Workers", FieldType::Number)
                 .with_default("4")
                 .with_description(
                     "How many downloads run at the same time. Keep this low — more parallel downloads \
@@ -215,7 +219,7 @@ impl Plugin for UsenetPlugin {
             SettingField::new(
                 "availabilitysamplepercent",
                 "Availability Sample %",
-                "number",
+                FieldType::Number,
             )
             .with_default("5")
             .with_description(
@@ -223,7 +227,7 @@ impl Plugin for UsenetPlugin {
                  Higher = more thorough but slower. Even at 100% a single bad file can slip through — \
                  enable Full Segment Verification to catch those.",
             ),
-            SettingField::new("checkallsegments", "Full Segment Verification", "boolean")
+            SettingField::new("checkallsegments", "Full Segment Verification", FieldType::Boolean)
                 .with_default("false")
                 .with_description(
                     "Check every file in the release before committing to it. The only reliable way \
@@ -232,20 +236,20 @@ impl Plugin for UsenetPlugin {
             SettingField::new(
                 "acceptablemissingpercent",
                 "Acceptable Missing Segments %",
-                "number",
+                FieldType::Number,
             )
             .with_default("0")
             .with_description(
                 "How many missing files (%) to tolerate before rejecting a release. \
                  Leave at 0 — any missing file can cause playback to stall.",
             ),
-            SettingField::new("autorepair", "Auto-Repair Unhealthy Titles", "boolean")
+            SettingField::new("autorepair", "Auto-Repair Unhealthy Titles", FieldType::Boolean)
                 .with_default("false")
                 .with_description(
                     "Automatically re-download titles the health scanner finds broken. \
                      Drops the bad release and looks for a working one. Gives up after the retry limit below.",
                 ),
-            SettingField::new("repairmaxretries", "Auto-Repair Max Retries", "number")
+            SettingField::new("repairmaxretries", "Auto-Repair Max Retries", FieldType::Number)
                 .with_default("3")
                 .with_description(
                     "How many times to retry a broken title before giving up. Waits longer between each attempt (1h, 2h, 4h…).",
@@ -253,7 +257,7 @@ impl Plugin for UsenetPlugin {
             SettingField::new(
                 "blacklistonreadfailure",
                 "Blacklist On Read Failure",
-                "boolean",
+                FieldType::Boolean,
             )
             .with_default("false")
             .with_description(

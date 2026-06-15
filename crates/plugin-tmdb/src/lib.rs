@@ -23,6 +23,10 @@ impl Plugin for TmdbPlugin {
         "tmdb"
     }
 
+    fn category(&self) -> &'static str {
+        "services"
+    }
+
     fn subscribed_events(&self) -> &[EventType] {
         &[EventType::MediaItemIndexRequested]
     }
@@ -36,8 +40,8 @@ impl Plugin for TmdbPlugin {
     }
 
     fn settings_schema(&self) -> Vec<riven_core::plugin::SettingField> {
-        use riven_core::plugin::SettingField;
-        vec![SettingField::new("apikey", "API Read Access Token", "password").required()]
+        use riven_core::plugin::{FieldType, SettingField};
+        vec![SettingField::new("apikey", "API Read Access Token", FieldType::Password).required()]
     }
 
     async fn on_index_requested(

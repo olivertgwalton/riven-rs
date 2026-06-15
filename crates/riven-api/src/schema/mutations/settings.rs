@@ -12,6 +12,8 @@ use std::sync::atomic::Ordering;
 use tokio::sync::RwLock;
 
 use crate::schema::auth::require_settings_access;
+use crate::schema::queries::settings::{build_general_section, build_plugin_section};
+use crate::schema::types::SettingsSection;
 use crate::vfs_mount::VfsMountManager;
 
 fn coerce_json_bool(value: &serde_json::Value) -> Option<bool> {
@@ -185,179 +187,26 @@ impl SettingsMutations {
         Ok(true)
     }
 
-    /// Update settings for a specific plugin (stored under "plugin.{name}" key).
-    /// Also re-validates the plugin with the new settings in-memory.
-    /// Returns an object with the saved settings and the new valid status.
-    async fn update_plugin_settings(
+    /// The single write entry point for settings: the "general" section or any
+    /// plugin (by name). Persists the section's values, reconciles its side
+    /// effects (general → logging/downloader/VFS; plugin → revalidate), and
+    /// returns the updated section so the UI gets fresh enabled/valid state.
+    async fn update_settings(
         &self,
         ctx: &Context<'_>,
-        plugin: String,
-        mut settings: serde_json::Value,
-    ) -> Result<serde_json::Value> {
+        section: String,
+        values: serde_json::Value,
+    ) -> Result<SettingsSection> {
         require_settings_access(ctx)?;
         let pool = ctx.data::<PgPool>()?;
-        let key = format!("plugin.{plugin}");
-        let enabled = match settings
-            .as_object_mut()
-            .and_then(|obj| obj.remove("enabled"))
-            .as_ref()
-            .and_then(coerce_json_bool)
-        {
-            Some(enabled) => enabled,
-            None => repo::get_plugin_enabled(pool, &plugin).await?,
-        };
-
-        repo::set_setting(pool, &key, settings.clone()).await?;
-        repo::set_plugin_enabled(pool, &plugin, enabled).await?;
-
-        let registry = ctx.data::<Arc<PluginRegistry>>()?;
-        let valid = registry
-            .revalidate_plugin(&plugin, enabled, &settings)
-            .await;
-
-        let mut response_settings = settings;
-        if let Some(obj) = response_settings.as_object_mut() {
-            obj.insert("enabled".to_string(), serde_json::Value::Bool(enabled));
+        if section == "general" {
+            apply_general_settings(ctx, values).await?;
+            build_general_section(pool).await
+        } else {
+            apply_plugin_settings(ctx, &section, values).await?;
+            let registry = ctx.data::<Arc<PluginRegistry>>()?;
+            build_plugin_section(registry, &section).await
         }
-
-        Ok(serde_json::json!({
-            "settings": response_settings,
-            "enabled": enabled,
-            "valid": valid
-        }))
-    }
-
-    /// Enable or disable a plugin without overwriting its saved settings.
-    async fn set_plugin_enabled(
-        &self,
-        ctx: &Context<'_>,
-        plugin: String,
-        enabled: bool,
-    ) -> Result<serde_json::Value> {
-        require_settings_access(ctx)?;
-        let pool = ctx.data::<PgPool>()?;
-        let settings_key = format!("plugin.{plugin}");
-        let settings = match repo::get_setting(pool, &settings_key).await? {
-            Some(value @ serde_json::Value::Object(_)) => value,
-            _ => serde_json::json!({}),
-        };
-
-        repo::set_plugin_enabled(pool, &plugin, enabled).await?;
-
-        let registry = ctx.data::<Arc<PluginRegistry>>()?;
-        let valid = registry
-            .revalidate_plugin(&plugin, enabled, &settings)
-            .await;
-
-        if plugin == "logs" {
-            let log_control = ctx.data::<Arc<LogControl>>()?;
-            let log_settings = log_settings_from_json(&settings, enabled);
-
-            log_control
-                .apply(&log_settings)
-                .map_err(|error| Error::new(error.to_string()))?;
-        }
-
-        Ok(serde_json::json!({
-            "enabled": enabled,
-            "valid": valid
-        }))
-    }
-
-    /// Update general (non-plugin) settings and apply them to the live runtime config.
-    async fn update_general_settings(
-        &self,
-        ctx: &Context<'_>,
-        settings: serde_json::Value,
-    ) -> Result<serde_json::Value> {
-        require_settings_access(ctx)?;
-        let pool = ctx.data::<PgPool>()?;
-        repo::set_setting(pool, "general", settings.clone()).await?;
-
-        let log_control = ctx.data::<Arc<LogControl>>()?;
-        let enabled = settings
-            .get("logging_enabled")
-            .and_then(coerce_json_bool)
-            .unwrap_or(true);
-        let log_settings = log_settings_from_json(&settings, enabled);
-        log_control
-            .apply(&log_settings)
-            .map_err(|error| Error::new(error.to_string()))?;
-
-        let cfg = ctx.data::<Arc<RwLock<DownloaderConfig>>>()?;
-        let mut cfg = cfg.write().await;
-        let mbps = |key: &str| {
-            settings
-                .get(key)
-                .and_then(serde_json::Value::as_u64)
-                .map(|v| v as u32)
-        };
-        cfg.minimum_average_bitrate_movies = mbps("minimum_average_bitrate_movies");
-        cfg.minimum_average_bitrate_episodes = mbps("minimum_average_bitrate_episodes");
-        cfg.maximum_average_bitrate_movies = mbps("maximum_average_bitrate_movies");
-        cfg.maximum_average_bitrate_episodes = mbps("maximum_average_bitrate_episodes");
-        if let Some(v) = settings
-            .get("attempt_unknown_downloads")
-            .and_then(serde_json::Value::as_bool)
-        {
-            cfg.attempt_unknown_downloads = v;
-        }
-
-        let queue = ctx.data::<Arc<JobQueue>>()?;
-        let mut reindex_cfg = queue.reindex_config.write().await;
-        reindex_cfg.schedule_offset_minutes = settings
-            .get("schedule_offset_minutes")
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(reindex_cfg.schedule_offset_minutes);
-        reindex_cfg.unknown_air_date_offset_days = settings
-            .get("unknown_air_date_offset_days")
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(reindex_cfg.unknown_air_date_offset_days);
-        queue.retry_interval_secs.store(
-            settings
-                .get("retry_interval_secs")
-                .and_then(serde_json::Value::as_u64)
-                .unwrap_or(queue.retry_interval_secs.load(Ordering::SeqCst)),
-            Ordering::SeqCst,
-        );
-        queue.maximum_scrape_attempts.store(
-            settings
-                .get("maximum_scrape_attempts")
-                .and_then(serde_json::Value::as_u64)
-                .map_or(queue.maximum_scrape_attempts.load(Ordering::SeqCst), |v| {
-                    v as u32
-                }),
-            Ordering::SeqCst,
-        );
-
-        let previous_filesystem = queue.filesystem_settings.read().await.clone();
-        let filesystem = settings
-            .get("filesystem")
-            .and_then(|v| serde_json::from_value::<FilesystemSettings>(v.clone()).ok())
-            .unwrap_or_default();
-        *queue.filesystem_settings.write().await = filesystem.clone();
-        *queue.vfs_layout.write().await = VfsLibraryLayout::new(filesystem.clone());
-        let mut rematch_count = 0_i64;
-        if previous_filesystem != filesystem {
-            rematch_count = rematch_filesystem_library_profiles_inner(pool, &filesystem).await?;
-            queue
-                .filesystem_settings_revision
-                .fetch_add(1, Ordering::SeqCst);
-            if previous_filesystem.mount_path != filesystem.mount_path {
-                ctx.data::<Arc<VfsMountManager>>()?
-                    .set_mount_path(&filesystem.mount_path)
-                    .await?;
-            }
-            tracing::info!(
-                rematch_count,
-                "updated filesystem settings and rematched library profiles"
-            );
-        }
-
-        Ok(serde_json::json!({
-            "settings": settings,
-            "filesystem_profile_rematch_count": rematch_count
-        }))
     }
 
     /// Recompute stored library-profile matches for every existing media entry.
@@ -374,4 +223,138 @@ impl SettingsMutations {
 
         Ok(updated)
     }
+}
+
+/// Persist and reconcile the general (non-plugin) settings: store them, then
+/// apply to the live runtime (logging, downloader config, scheduling, and the
+/// filesystem layout — rematching library profiles when the mount changes).
+/// The single source of truth for general-settings side effects.
+async fn apply_general_settings(ctx: &Context<'_>, settings: serde_json::Value) -> Result<()> {
+    let pool = ctx.data::<PgPool>()?;
+    repo::set_setting(pool, "general", settings.clone()).await?;
+
+    let log_control = ctx.data::<Arc<LogControl>>()?;
+    let enabled = settings
+        .get("logging_enabled")
+        .and_then(coerce_json_bool)
+        .unwrap_or(true);
+    let log_settings = log_settings_from_json(&settings, enabled);
+    log_control
+        .apply(&log_settings)
+        .map_err(|error| Error::new(error.to_string()))?;
+
+    let cfg = ctx.data::<Arc<RwLock<DownloaderConfig>>>()?;
+    let mut cfg = cfg.write().await;
+    let mbps = |key: &str| {
+        settings
+            .get(key)
+            .and_then(serde_json::Value::as_u64)
+            .map(|v| v as u32)
+    };
+    cfg.minimum_average_bitrate_movies = mbps("minimum_average_bitrate_movies");
+    cfg.minimum_average_bitrate_episodes = mbps("minimum_average_bitrate_episodes");
+    cfg.maximum_average_bitrate_movies = mbps("maximum_average_bitrate_movies");
+    cfg.maximum_average_bitrate_episodes = mbps("maximum_average_bitrate_episodes");
+    if let Some(v) = settings
+        .get("attempt_unknown_downloads")
+        .and_then(serde_json::Value::as_bool)
+    {
+        cfg.attempt_unknown_downloads = v;
+    }
+    drop(cfg);
+
+    let queue = ctx.data::<Arc<JobQueue>>()?;
+    let mut reindex_cfg = queue.reindex_config.write().await;
+    reindex_cfg.schedule_offset_minutes = settings
+        .get("schedule_offset_minutes")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(reindex_cfg.schedule_offset_minutes);
+    reindex_cfg.unknown_air_date_offset_days = settings
+        .get("unknown_air_date_offset_days")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(reindex_cfg.unknown_air_date_offset_days);
+    drop(reindex_cfg);
+    queue.retry_interval_secs.store(
+        settings
+            .get("retry_interval_secs")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(queue.retry_interval_secs.load(Ordering::SeqCst)),
+        Ordering::SeqCst,
+    );
+    queue.maximum_scrape_attempts.store(
+        settings
+            .get("maximum_scrape_attempts")
+            .and_then(serde_json::Value::as_u64)
+            .map_or(queue.maximum_scrape_attempts.load(Ordering::SeqCst), |v| {
+                v as u32
+            }),
+        Ordering::SeqCst,
+    );
+
+    let previous_filesystem = queue.filesystem_settings.read().await.clone();
+    let mut filesystem = settings
+        .get("filesystem")
+        .and_then(|v| serde_json::from_value::<FilesystemSettings>(v.clone()).ok())
+        .unwrap_or_default();
+    // An empty mount path means "unset" — the mount point is a boot-time concern,
+    // so keep the running mount rather than tearing the VFS down by remounting at "".
+    if filesystem.mount_path.trim().is_empty() {
+        filesystem.mount_path = previous_filesystem.mount_path.clone();
+    }
+    *queue.filesystem_settings.write().await = filesystem.clone();
+    *queue.vfs_layout.write().await = VfsLibraryLayout::new(filesystem.clone());
+    if previous_filesystem != filesystem {
+        let rematch_count = rematch_filesystem_library_profiles_inner(pool, &filesystem).await?;
+        queue
+            .filesystem_settings_revision
+            .fetch_add(1, Ordering::SeqCst);
+        if previous_filesystem.mount_path != filesystem.mount_path {
+            ctx.data::<Arc<VfsMountManager>>()?
+                .set_mount_path(&filesystem.mount_path)
+                .await?;
+        }
+        tracing::info!(
+            rematch_count,
+            "updated filesystem settings and rematched library profiles"
+        );
+    }
+
+    Ok(())
+}
+
+/// Persist a plugin's settings and revalidate it in-memory with the new values.
+/// `enabled` is taken from the values object when present, else left unchanged.
+async fn apply_plugin_settings(
+    ctx: &Context<'_>,
+    plugin: &str,
+    mut settings: serde_json::Value,
+) -> Result<()> {
+    let pool = ctx.data::<PgPool>()?;
+    let key = format!("plugin.{plugin}");
+    let enabled = match settings
+        .as_object_mut()
+        .and_then(|obj| obj.remove("enabled"))
+        .as_ref()
+        .and_then(coerce_json_bool)
+    {
+        Some(enabled) => enabled,
+        None => repo::get_plugin_enabled(pool, plugin).await?,
+    };
+
+    repo::set_setting(pool, &key, settings.clone()).await?;
+    repo::set_plugin_enabled(pool, plugin, enabled).await?;
+
+    let registry = ctx.data::<Arc<PluginRegistry>>()?;
+    registry.revalidate_plugin(plugin, enabled, &settings).await;
+
+    // The logging pseudo-plugin drives the live log subscriber.
+    if plugin == "logs" {
+        let log_control = ctx.data::<Arc<LogControl>>()?;
+        let log_settings = log_settings_from_json(&settings, enabled);
+        log_control
+            .apply(&log_settings)
+            .map_err(|error| Error::new(error.to_string()))?;
+    }
+
+    Ok(())
 }

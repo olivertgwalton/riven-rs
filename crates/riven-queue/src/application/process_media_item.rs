@@ -160,10 +160,6 @@ async fn handle_validate(job: &ProcessMediaItemJob, item: &MediaItem, queue: &Jo
     }
 }
 
-/// Push a fresh `ProcessMediaItem` for each incomplete child of `parent`.
-/// Used at validate-step (Season → episodes after a partial pack download)
-/// and by the orchestrator when a Season scrape yields zero new streams
-/// (matches riven-ts `fanOutDownload`).
 pub(crate) async fn fan_out_to_children(parent: &MediaItem, queue: &JobQueue) {
     match parent.item_type {
         MediaItemType::Show => {

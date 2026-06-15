@@ -24,14 +24,18 @@ impl Plugin for TorrentioPlugin {
         "torrentio"
     }
 
+    fn category(&self) -> &'static str {
+        "sources"
+    }
+
     fn subscribed_events(&self) -> &[EventType] {
         &[EventType::MediaItemScrapeRequested]
     }
 
     fn settings_schema(&self) -> Vec<riven_core::plugin::SettingField> {
-        use riven_core::plugin::SettingField;
+        use riven_core::plugin::{FieldType, SettingField};
         vec![
-            SettingField::new("filter", "Filter", "text")
+            SettingField::new("filter", "Filter", FieldType::Text)
                 .with_default("sort=qualitysize|qualityfilter=threed,480p,scr,cam")
                 .with_placeholder("sort=qualitysize|qualityfilter=...")
                 .with_description("Torrentio filter/sort query string."),

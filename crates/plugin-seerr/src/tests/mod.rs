@@ -56,6 +56,6 @@ fn plugin_schema_declares_default_url_and_filter() {
         .iter()
         .find(|field| field.key == "filter")
         .expect("filter field");
-    assert_eq!(url.default_value, Some(DEFAULT_URL));
-    assert_eq!(filter.default_value, Some(DEFAULT_FILTER));
+    assert_eq!(url.default_value.as_deref(), Some(DEFAULT_URL));
+    assert_eq!(filter.default_value.as_deref(), Some(DEFAULT_FILTER));
 }

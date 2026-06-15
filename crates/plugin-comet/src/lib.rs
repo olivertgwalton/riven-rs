@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use riven_core::events::{EventType, HookResponse, ScrapeRequest};
 use riven_core::http::{HttpServiceProfile, RateLimitedError};
-use riven_core::plugin::{Plugin, PluginContext, SettingField};
+use riven_core::plugin::{FieldType, Plugin, PluginContext, SettingField};
 use riven_core::settings::PluginSettings;
 use riven_core::types::*;
 
@@ -20,6 +20,10 @@ pub struct CometPlugin;
 impl Plugin for CometPlugin {
     fn name(&self) -> &'static str {
         "comet"
+    }
+
+    fn category(&self) -> &'static str {
+        "sources"
     }
 
     fn subscribed_events(&self) -> &[EventType] {
@@ -42,7 +46,7 @@ impl Plugin for CometPlugin {
 
     fn settings_schema(&self) -> Vec<SettingField> {
         vec![
-            SettingField::new("url", "URL", "url")
+            SettingField::new("url", "URL", FieldType::Url)
                 .required()
                 .with_default(DEFAULT_URL)
                 .with_placeholder(DEFAULT_URL)

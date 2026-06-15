@@ -24,6 +24,13 @@ pub trait Plugin: Send + Sync + 'static {
         true
     }
 
+    /// Grouping key used by the setup UI to place this plugin under a section
+    /// (e.g. "media", "sources", "services"). Defaults to "other". The set of
+    /// groups and their labels are described by the `setup_groups` query.
+    fn category(&self) -> &'static str {
+        "other"
+    }
+
     fn subscribed_events(&self) -> &[EventType] {
         &[]
     }

@@ -9,7 +9,7 @@ use riven_core::nzb::{
     NZB_URL_TTL_SECS, NewznabItem, newznab_text_query, nzb_info_hash, nzb_url_redis_key,
     parse_newznab_xml,
 };
-use riven_core::plugin::{Plugin, PluginContext, SettingField};
+use riven_core::plugin::{FieldType, Plugin, PluginContext, SettingField};
 use riven_core::settings::PluginSettings;
 use riven_core::types::{MediaItemType, ScrapeEntry, ScrapeResponse};
 
@@ -236,6 +236,10 @@ impl Plugin for NewznabPlugin {
         "newznab"
     }
 
+    fn category(&self) -> &'static str {
+        "sources"
+    }
+
     fn subscribed_events(&self) -> &[EventType] {
         &[EventType::MediaItemScrapeRequested]
     }
@@ -250,7 +254,7 @@ impl Plugin for NewznabPlugin {
 
     fn settings_schema(&self) -> Vec<SettingField> {
         vec![
-            SettingField::new("indexers", "Indexers", "dictionary")
+            SettingField::new("indexers", "Indexers", FieldType::Dictionary)
                 .with_key_placeholder("indexer_name")
                 .with_add_label("Add indexer")
                 .with_description(
@@ -258,11 +262,11 @@ impl Plugin for NewznabPlugin {
                      All indexers are searched at the same time and duplicate results are removed.",
                 )
                 .with_item_fields(vec![
-                    SettingField::new("url", "Indexer URL", "url")
+                    SettingField::new("url", "Indexer URL", FieldType::Url)
                         .required()
                         .with_placeholder("https://nzbgeek.info"),
-                    SettingField::new("apikey", "API Key", "password").required(),
-                    SettingField::new("categories", "Categories", "text")
+                    SettingField::new("apikey", "API Key", FieldType::Password).required(),
+                    SettingField::new("categories", "Categories", FieldType::Text)
                         .with_default("2000,5000")
                         .with_description(
                             "Comma-separated Newznab category IDs. 2000 = Movies, 5000 = TV.",

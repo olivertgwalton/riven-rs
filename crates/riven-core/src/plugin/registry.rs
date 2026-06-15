@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use tokio::sync::RwLock;
 
-use super::{Plugin, PluginContext, SettingField};
+use super::{FieldType, Plugin, PluginContext, SettingField};
 use crate::events::{EventType, HookResponse, RivenEvent};
 use crate::settings::PluginSettings;
 
@@ -13,6 +13,7 @@ pub struct PluginInfo {
     pub version: String,
     pub enabled: bool,
     pub valid: bool,
+    pub category: String,
     pub schema: Vec<SettingField>,
 }
 
@@ -224,6 +225,7 @@ impl PluginRegistry {
                 version: p.plugin.version().to_string(),
                 enabled: p.enabled,
                 valid: p.valid,
+                category: p.plugin.category().to_string(),
                 schema: plugin_settings_schema(&*p.plugin),
             })
             .collect()
@@ -250,7 +252,7 @@ impl PluginRegistry {
 
 fn plugin_settings_schema(plugin: &dyn Plugin) -> Vec<SettingField> {
     let mut schema = Vec::with_capacity(plugin.settings_schema().len() + 1);
-    schema.push(SettingField::new("enabled", "Enabled", "boolean").with_default("false"));
+    schema.push(SettingField::new("enabled", "Enabled", FieldType::Boolean).with_default("false"));
     schema.extend(plugin.settings_schema());
     schema
 }

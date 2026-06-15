@@ -23,6 +23,10 @@ impl Plugin for MdblistPlugin {
         "mdblist"
     }
 
+    fn category(&self) -> &'static str {
+        "services"
+    }
+
     fn subscribed_events(&self) -> &[EventType] {
         &[EventType::ContentServiceRequested]
     }
@@ -45,10 +49,10 @@ impl Plugin for MdblistPlugin {
     }
 
     fn settings_schema(&self) -> Vec<riven_core::plugin::SettingField> {
-        use riven_core::plugin::SettingField;
+        use riven_core::plugin::{FieldType, SettingField};
         vec![
-            SettingField::new("apikey", "API Key", "password").required(),
-            SettingField::new("lists", "Lists", "text")
+            SettingField::new("apikey", "API Key", FieldType::Password).required(),
+            SettingField::new("lists", "Lists", FieldType::Text)
                 .with_placeholder("list-url, another-url")
                 .with_description("Comma-separated MDBList list URLs, slugs, or IDs."),
         ]

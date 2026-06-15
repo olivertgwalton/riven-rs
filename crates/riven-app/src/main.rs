@@ -16,21 +16,6 @@ mod setup;
 
 const USER_AGENT: &str = concat!("riven-rs/", env!("CARGO_PKG_VERSION"));
 
-/// Single shared HTTP client for every outbound request in the process —
-/// plugins, the VFS streaming path, and ad-hoc fetches all share one
-/// connection pool, TLS session cache, and DNS cache.
-///
-/// Mirrors the riven-ts design (single global `undici.Agent` set via
-/// `setGlobalDispatcher`). Splitting plugins from streaming as we previously
-/// did gave two independent pools against the same debrid hosts: every
-/// playback URL refresh paid a cold TCP+TLS dial in one pool while the
-/// other had warm connections sitting idle.
-///
-/// Keep-alive matches the TS `keepAliveMaxTimeout` (60 s) so the bursty
-/// Plex scan pattern — "probe file, wait ~1 s, probe next file" — keeps
-/// reusing connections instead of redialing for every file. Per-host idle
-/// capacity is bumped to 32 to absorb scans of large libraries fanning out
-/// across many files in parallel.
 fn build_http_client() -> Result<reqwest::Client> {
     Ok(reqwest::Client::builder()
         .user_agent(USER_AGENT)

@@ -143,6 +143,10 @@ impl Plugin for StremthruPlugin {
         "stremthru"
     }
 
+    fn category(&self) -> &'static str {
+        "sources"
+    }
+
     fn subscribed_events(&self) -> &[EventType] {
         &[
             EventType::MediaItemScrapeRequested,
@@ -163,35 +167,35 @@ impl Plugin for StremthruPlugin {
     }
 
     fn settings_schema(&self) -> Vec<riven_core::plugin::SettingField> {
-        use riven_core::plugin::SettingField;
+        use riven_core::plugin::{FieldType, SettingField};
         vec![
-            SettingField::new("stremthruurl", "StremThru URL", "url")
+            SettingField::new("stremthruurl", "StremThru URL", FieldType::Url)
                 .with_default(DEFAULT_URL)
                 .with_placeholder(DEFAULT_URL),
-            SettingField::new("scrapenabled", "Enable Torznab Scraper", "boolean")
+            SettingField::new("scrapenabled", "Enable Torznab Scraper", FieldType::Boolean)
                 .with_default("true")
                 .with_description("Search for torrents through StremThru. Disable if you only want to use StremThru for downloading."),
-            SettingField::new("newznabenabled", "Enable Newznab (NZB) Scraper", "boolean")
+            SettingField::new("newznabenabled", "Enable Newznab (NZB) Scraper", FieldType::Boolean)
                 .with_default("false")
                 .with_description("Search for NZBs through StremThru. Requires the Auth field below."),
-            SettingField::new("stremthruauth", "StremThru Auth", "password")
+            SettingField::new("stremthruauth", "StremThru Auth", FieldType::Password)
                 .with_placeholder("username:apikey")
                 .with_description("Your StremThru auth credentials. Used for both NZB searches and sending downloads to a self-hosted StremThru."),
-            SettingField::new("newznabcategories", "Newznab Categories", "text")
+            SettingField::new("newznabcategories", "Newznab Categories", FieldType::Text)
                 .with_default("2000,5000")
                 .with_description("Comma-separated Newznab category IDs (2000 = Movies, 5000 = TV)."),
-            SettingField::new("checkdebridcache", "Check Debrid Cache", "boolean")
+            SettingField::new("checkdebridcache", "Check Debrid Cache", FieldType::Boolean)
                 .with_default("true")
                 .with_description("Only download torrents already in your debrid cache. Disable to try all torrents without checking first."),
-            SettingField::new("realdebridapikey", "Real-Debrid API Key", "password"),
-            SettingField::new("alldebridapikey", "AllDebrid API Key", "password"),
-            SettingField::new("debriderapikey", "Debrider API Key", "password"),
-            SettingField::new("debridlinkapikey", "DebridLink API Key", "password"),
-            SettingField::new("easydebridapikey", "EasyDebrid API Key", "password"),
-            SettingField::new("offcloudapikey", "OffCloud API Key", "password"),
-            SettingField::new("pikpakapikey", "PikPak API Key", "password"),
-            SettingField::new("premiumizeapikey", "Premiumize API Key", "password"),
-            SettingField::new("torboxapikey", "TorBox API Key", "password"),
+            SettingField::new("realdebridapikey", "Real-Debrid API Key", FieldType::Password),
+            SettingField::new("alldebridapikey", "AllDebrid API Key", FieldType::Password),
+            SettingField::new("debriderapikey", "Debrider API Key", FieldType::Password),
+            SettingField::new("debridlinkapikey", "DebridLink API Key", FieldType::Password),
+            SettingField::new("easydebridapikey", "EasyDebrid API Key", FieldType::Password),
+            SettingField::new("offcloudapikey", "OffCloud API Key", FieldType::Password),
+            SettingField::new("pikpakapikey", "PikPak API Key", FieldType::Password),
+            SettingField::new("premiumizeapikey", "Premiumize API Key", FieldType::Password),
+            SettingField::new("torboxapikey", "TorBox API Key", FieldType::Password),
         ]
     }
 

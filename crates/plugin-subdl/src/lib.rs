@@ -9,7 +9,7 @@
 use async_trait::async_trait;
 use riven_core::events::{DownloadSuccessInfo, EventType, HookResponse};
 use riven_core::http::HttpServiceProfile;
-use riven_core::plugin::{Plugin, PluginContext, SettingField};
+use riven_core::plugin::{FieldType, Plugin, PluginContext, SettingField};
 use riven_core::settings::PluginSettings;
 use riven_core::types::MediaItemType;
 use riven_db::entities::FileSystemEntry;
@@ -30,6 +30,10 @@ pub struct SubdlPlugin;
 impl Plugin for SubdlPlugin {
     fn name(&self) -> &'static str {
         "subdl"
+    }
+
+    fn category(&self) -> &'static str {
+        "services"
     }
 
     fn subscribed_events(&self) -> &[EventType] {
@@ -63,8 +67,8 @@ impl Plugin for SubdlPlugin {
 
     fn settings_schema(&self) -> Vec<SettingField> {
         vec![
-            SettingField::new("apikey", "API Key", "password").required(),
-            SettingField::new("languages", "Languages", "text")
+            SettingField::new("apikey", "API Key", FieldType::Password).required(),
+            SettingField::new("languages", "Languages", FieldType::Text)
                 .with_default(DEFAULT_LANGUAGES)
                 .with_placeholder("en, es")
                 .with_description(

@@ -23,6 +23,10 @@ impl Plugin for TraktPlugin {
         "trakt"
     }
 
+    fn category(&self) -> &'static str {
+        "services"
+    }
+
     fn subscribed_events(&self) -> &[EventType] {
         &[EventType::ContentServiceRequested]
     }
@@ -36,22 +40,22 @@ impl Plugin for TraktPlugin {
     }
 
     fn settings_schema(&self) -> Vec<riven_core::plugin::SettingField> {
-        use riven_core::plugin::SettingField;
+        use riven_core::plugin::{FieldType, SettingField};
         vec![
-            SettingField::new("clientid", "Client ID", "password").required(),
-            SettingField::new("accesstoken", "Access Token", "password"),
-            SettingField::new("watchlist", "Enable Watchlist", "boolean").with_default("false"),
-            SettingField::new("userlists", "User Lists", "text")
+            SettingField::new("clientid", "Client ID", FieldType::Password).required(),
+            SettingField::new("accesstoken", "Access Token", FieldType::Password),
+            SettingField::new("watchlist", "Enable Watchlist", FieldType::Boolean).with_default("false"),
+            SettingField::new("userlists", "User Lists", FieldType::Text)
                 .with_placeholder("list-slug, another-list")
                 .with_description("Comma-separated Trakt list slugs."),
-            SettingField::new("fetchtrending", "Fetch Trending", "boolean").with_default("false"),
-            SettingField::new("trendingcount", "Trending Count", "number").with_default("10"),
-            SettingField::new("fetchpopular", "Fetch Popular", "boolean").with_default("false"),
-            SettingField::new("popularcount", "Popular Count", "number").with_default("10"),
-            SettingField::new("fetchwatched", "Fetch Watched History", "boolean")
+            SettingField::new("fetchtrending", "Fetch Trending", FieldType::Boolean).with_default("false"),
+            SettingField::new("trendingcount", "Trending Count", FieldType::Number).with_default("10"),
+            SettingField::new("fetchpopular", "Fetch Popular", FieldType::Boolean).with_default("false"),
+            SettingField::new("popularcount", "Popular Count", FieldType::Number).with_default("10"),
+            SettingField::new("fetchwatched", "Fetch Watched History", FieldType::Boolean)
                 .with_default("false"),
-            SettingField::new("watchedcount", "Watched Count", "number").with_default("10"),
-            SettingField::new("watchedperiod", "Watched Period", "text")
+            SettingField::new("watchedcount", "Watched Count", FieldType::Number).with_default("10"),
+            SettingField::new("watchedperiod", "Watched Period", FieldType::Text)
                 .with_default("weekly")
                 .with_placeholder("weekly")
                 .with_description(

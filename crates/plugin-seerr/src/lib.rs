@@ -23,6 +23,10 @@ impl Plugin for SeerrPlugin {
         "seerr"
     }
 
+    fn category(&self) -> &'static str {
+        "services"
+    }
+
     fn subscribed_events(&self) -> &[EventType] {
         &[
             EventType::ContentServiceRequested,
@@ -49,13 +53,13 @@ impl Plugin for SeerrPlugin {
     }
 
     fn settings_schema(&self) -> Vec<riven_core::plugin::SettingField> {
-        use riven_core::plugin::SettingField;
+        use riven_core::plugin::{FieldType, SettingField};
         vec![
-            SettingField::new("apikey", "API Key", "password").required(),
-            SettingField::new("url", "Server URL", "url")
+            SettingField::new("apikey", "API Key", FieldType::Password).required(),
+            SettingField::new("url", "Server URL", FieldType::Url)
                 .with_default("http://localhost:5055")
                 .with_placeholder("http://localhost:5055"),
-            SettingField::new("filter", "Request Filter", "text")
+            SettingField::new("filter", "Request Filter", FieldType::Text)
                 .with_default("approved")
                 .with_placeholder("approved")
                 .with_description("Which request status to import (approved, all, pending)."),

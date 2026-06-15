@@ -28,6 +28,10 @@ impl Plugin for NotificationsPlugin {
         "notifications"
     }
 
+    fn category(&self) -> &'static str {
+        "services"
+    }
+
     fn subscribed_events(&self) -> &[EventType] {
         &[EventType::MediaItemDownloadSuccess]
     }
@@ -42,18 +46,18 @@ impl Plugin for NotificationsPlugin {
     }
 
     fn settings_schema(&self) -> Vec<riven_core::plugin::SettingField> {
-        use riven_core::plugin::SettingField;
+        use riven_core::plugin::{FieldType, SettingField};
         vec![
-            SettingField::new("urls", "Webhook URLs", "textarea")
+            SettingField::new("urls", "Webhook URLs", FieldType::Textarea)
                 .required()
                 .with_placeholder("https://discord.com/api/webhooks/...")
                 .with_description(
                     "Comma-separated webhook URLs. Supports Discord and generic JSON endpoints.",
                 ),
-            SettingField::new("detailed", "Detailed Embeds", "boolean").with_description(
+            SettingField::new("detailed", "Detailed Embeds", FieldType::Boolean).with_description(
                 "Show rich Discord embeds with overview, rating, and external links.",
             ),
-            SettingField::new("tmdb_api_key", "TMDB API Read Access Token", "password")
+            SettingField::new("tmdb_api_key", "TMDB API Read Access Token", FieldType::Password)
                 .with_description(
                     "Optional. Required for overview text in detailed Discord embeds.",
                 ),
