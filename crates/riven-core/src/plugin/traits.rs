@@ -5,7 +5,7 @@ use crate::events::{
     DownloadSuccessInfo, EventType, HookResponse, IndexRequest, RivenEvent, ScrapeRequest,
 };
 use crate::settings::PluginSettings;
-use crate::types::{CachedStoreEntry, ContentServiceResponse, MediaItemType};
+use crate::types::{CachedStoreEntry, MediaItemType};
 
 /// Plugin lifecycle and event handling.
 ///
@@ -38,18 +38,6 @@ pub trait Plugin: Send + Sync + 'static {
 
     fn settings_schema(&self) -> Vec<SettingField> {
         vec![]
-    }
-
-    /// Fetch content on-demand for a GraphQL query.
-    /// `query` is `"movies"`, `"shows"`, or `"all"`; `args` is plugin-specific JSON.
-    /// Returns empty by default; content-provider plugins override this.
-    async fn query_content(
-        &self,
-        _query: &str,
-        _args: &serde_json::Value,
-        _ctx: &PluginContext,
-    ) -> anyhow::Result<ContentServiceResponse> {
-        Ok(ContentServiceResponse::default())
     }
 
     /// Catch-all invoked for every subscribed event before typed routing, with

@@ -57,21 +57,6 @@ impl Plugin for MdblistPlugin {
         ]
     }
 
-    async fn query_content(
-        &self,
-        _query: &str,
-        args: &serde_json::Value,
-        ctx: &PluginContext,
-    ) -> anyhow::Result<riven_core::types::ContentServiceResponse> {
-        let api_key = ctx.require_setting("apikey")?;
-        let list_names: Vec<String> = args
-            .get("list_names")
-            .and_then(|v| serde_json::from_value(v.clone()).ok())
-            .unwrap_or_default();
-        let content = fetch_and_build_content(&ctx.http, api_key, &list_names).await?;
-        Ok(content.into_response())
-    }
-
     async fn on_content_service_requested(
         &self,
         ctx: &PluginContext,

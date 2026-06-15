@@ -5,7 +5,6 @@ use tokio::sync::RwLock;
 use super::{Plugin, PluginContext, SettingField};
 use crate::events::{EventType, HookResponse, RivenEvent};
 use crate::settings::PluginSettings;
-use crate::types::ContentServiceResponse;
 
 pub const PLUGIN_ENABLED_PREFIX: &str = "plugin_enabled.";
 
@@ -261,57 +260,6 @@ impl PluginRegistry {
             .map(|p| p.enabled)
     }
 
-    /// Validate a plugin against its current settings without mutating state.
-    pub async fn validate_plugin_current(&self, name: &str) -> bool {
-        let target = self
-            .plugins
-            .read()
-            .await
-            .iter()
-            .find(|p| p.plugin.name() == name)
-            .map(|active| (Arc::clone(&active.plugin), Arc::clone(&active.context)));
-
-        let Some((plugin, context)) = target else {
-            return false;
-        };
-        plugin
-            .validate(&context.settings, &context.http)
-            .await
-            .unwrap_or(false)
-    }
-
-    /// Call a plugin's `query_content` with the given query type and args.
-    pub async fn query_plugin_content(
-        &self,
-        name: &str,
-        query: &str,
-        args: &serde_json::Value,
-    ) -> anyhow::Result<ContentServiceResponse> {
-        let target = self
-            .plugins
-            .read()
-            .await
-            .iter()
-            .find(|p| p.plugin.name() == name)
-            .map(|active| (Arc::clone(&active.plugin), Arc::clone(&active.context)))
-            .ok_or_else(|| anyhow::anyhow!("plugin '{name}' not found"))?;
-        let (plugin, context) = target;
-        plugin.query_content(query, args, &context).await
-    }
-
-    pub async fn valid_plugin_names(&self) -> Vec<String> {
-        self.plugins
-            .read()
-            .await
-            .iter()
-            .filter(|p| p.valid)
-            .map(|p| p.plugin.name().to_string())
-            .collect()
-    }
-
-    pub async fn plugin_count(&self) -> usize {
-        self.plugins.read().await.len()
-    }
 }
 
 fn plugin_settings_schema(plugin: &dyn Plugin) -> Vec<SettingField> {

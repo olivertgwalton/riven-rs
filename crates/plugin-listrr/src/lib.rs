@@ -67,28 +67,6 @@ impl Plugin for ListrrPlugin {
             fetch_configured_content(&ctx.http, api_key, &movie_lists, &show_lists).await?;
         Ok(content.into_hook_response())
     }
-
-    async fn query_content(
-        &self,
-        query: &str,
-        args: &serde_json::Value,
-        ctx: &PluginContext,
-    ) -> anyhow::Result<riven_core::types::ContentServiceResponse> {
-        let api_key = ctx.require_setting("apikey")?;
-        let list_ids: Vec<String> = args
-            .get("list_ids")
-            .and_then(|v| serde_json::from_value(v.clone()).ok())
-            .unwrap_or_default();
-
-        let (movie_ids, show_ids) = match query {
-            "movies" => (list_ids.clone(), vec![]),
-            "shows" => (vec![], list_ids.clone()),
-            _ => (list_ids.clone(), list_ids.clone()),
-        };
-
-        let content = fetch_configured_content(&ctx.http, api_key, &movie_ids, &show_ids).await?;
-        Ok(content.into_response())
-    }
 }
 
 async fn fetch_configured_content(

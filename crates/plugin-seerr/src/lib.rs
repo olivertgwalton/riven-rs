@@ -65,34 +65,6 @@ impl Plugin for SeerrPlugin {
         ]
     }
 
-    async fn query_content(
-        &self,
-        query: &str,
-        args: &serde_json::Value,
-        ctx: &PluginContext,
-    ) -> anyhow::Result<riven_core::types::ContentServiceResponse> {
-        let api_key = ctx.require_setting("apikey")?;
-        let url = ctx.settings.get_or("url", DEFAULT_URL);
-        let base_url_owned = url.trim_end_matches('/').to_string();
-        let filter = args
-            .get("filter")
-            .and_then(|v| v.as_str())
-            .unwrap_or(DEFAULT_FILTER)
-            .to_string();
-        let full = fetch_seerr_content(&ctx.http, api_key, &base_url_owned, &filter).await?;
-        Ok(match query {
-            "movies" => riven_core::types::ContentServiceResponse {
-                movies: full.movies,
-                shows: vec![],
-            },
-            "shows" => riven_core::types::ContentServiceResponse {
-                movies: vec![],
-                shows: full.shows,
-            },
-            _ => full,
-        })
-    }
-
     async fn on_content_service_requested(
         &self,
         ctx: &PluginContext,
