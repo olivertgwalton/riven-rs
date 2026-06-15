@@ -7,7 +7,6 @@ use tokio::sync::RwLock;
 use riven_core::events::{DownloadSuccessInfo, EventType, HookResponse};
 use riven_core::http::HttpServiceProfile;
 use riven_core::plugin::{Plugin, PluginContext};
-use riven_core::register_plugin;
 use riven_core::settings::{FilesystemSettings, LibraryProfileMembership, PluginSettings};
 use riven_core::types::{ActivePlaybackSession, PlaybackMethod, PlaybackState};
 use riven_db::repo;
@@ -27,8 +26,6 @@ impl Default for PlexPlugin {
         }
     }
 }
-
-register_plugin!(PlexPlugin);
 
 #[async_trait]
 impl Plugin for PlexPlugin {

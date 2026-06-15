@@ -10,7 +10,6 @@ use async_trait::async_trait;
 use riven_core::events::{DownloadSuccessInfo, EventType, HookResponse};
 use riven_core::http::HttpServiceProfile;
 use riven_core::plugin::{Plugin, PluginContext, SettingField};
-use riven_core::register_plugin;
 use riven_core::settings::PluginSettings;
 use riven_core::types::MediaItemType;
 use riven_db::entities::FileSystemEntry;
@@ -26,8 +25,6 @@ pub(crate) const PROFILE: HttpServiceProfile =
 
 #[derive(Default)]
 pub struct SubdlPlugin;
-
-register_plugin!(SubdlPlugin);
 
 #[async_trait]
 impl Plugin for SubdlPlugin {

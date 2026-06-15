@@ -5,7 +5,6 @@ use std::time::Duration;
 use riven_core::events::{EventType, HookResponse, ScrapeRequest};
 use riven_core::http::{HttpServiceProfile, RateLimitedError};
 use riven_core::plugin::{Plugin, PluginContext, SettingField};
-use riven_core::register_plugin;
 use riven_core::settings::PluginSettings;
 use riven_core::types::*;
 
@@ -16,8 +15,6 @@ pub(crate) const PROFILE: HttpServiceProfile =
 
 #[derive(Default)]
 pub struct CometPlugin;
-
-register_plugin!(CometPlugin);
 
 #[async_trait]
 impl Plugin for CometPlugin {

@@ -8,25 +8,12 @@ use crate::settings::PluginSettings;
 
 pub const PLUGIN_ENABLED_PREFIX: &str = "plugin_enabled.";
 
-pub struct PluginRegistration {
-    pub create: fn() -> Box<dyn Plugin>,
-}
-
-inventory::collect!(PluginRegistration);
-
 pub struct PluginInfo {
     pub name: String,
     pub version: String,
     pub enabled: bool,
     pub valid: bool,
     pub schema: Vec<SettingField>,
-}
-
-pub fn collect_plugins() -> Vec<Box<dyn Plugin>> {
-    inventory::iter::<PluginRegistration>
-        .into_iter()
-        .map(|reg| (reg.create)())
-        .collect()
 }
 
 pub struct ActivePlugin {
@@ -259,15 +246,11 @@ impl PluginRegistry {
             .find(|p| p.plugin.name() == name)
             .map(|p| p.enabled)
     }
-
 }
 
 fn plugin_settings_schema(plugin: &dyn Plugin) -> Vec<SettingField> {
     let mut schema = Vec::with_capacity(plugin.settings_schema().len() + 1);
-    schema.push(
-        SettingField::new("enabled", "Enabled", "boolean")
-            .with_default("false"),
-    );
+    schema.push(SettingField::new("enabled", "Enabled", "boolean").with_default("false"));
     schema.extend(plugin.settings_schema());
     schema
 }

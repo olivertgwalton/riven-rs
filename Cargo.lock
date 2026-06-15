@@ -2018,15 +2018,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "inventory"
-version = "0.3.22"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "009ae045c87e7082cb72dab0ccd01ae075dd00141ddc108f43a0ea150a9e7227"
-dependencies = [
- "rustversion",
-]
-
-[[package]]
 name = "ipconfig"
 version = "0.3.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3006,7 +2997,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "inventory",
  "reqwest 0.13.2",
  "riven-core",
  "serde",
@@ -3022,7 +3012,6 @@ dependencies = [
  "async-graphql",
  "async-trait",
  "chrono",
- "inventory",
  "redis",
  "riven-core",
  "riven-db",
@@ -3037,7 +3026,6 @@ dependencies = [
  "anyhow",
  "async-graphql",
  "async-trait",
- "inventory",
  "reqwest 0.13.2",
  "riven-core",
  "serde",
@@ -3052,7 +3040,6 @@ dependencies = [
  "anyhow",
  "async-graphql",
  "async-trait",
- "inventory",
  "riven-core",
  "riven-db",
  "serde_json",
@@ -3068,7 +3055,6 @@ dependencies = [
  "anyhow",
  "async-graphql",
  "async-trait",
- "inventory",
  "reqwest 0.13.2",
  "riven-core",
  "riven-db",
@@ -3085,7 +3071,6 @@ dependencies = [
  "anyhow",
  "async-graphql",
  "async-trait",
- "inventory",
  "reqwest 0.13.2",
  "riven-core",
  "riven-db",
@@ -3101,7 +3086,6 @@ dependencies = [
  "anyhow",
  "async-graphql",
  "async-trait",
- "inventory",
  "reqwest 0.13.2",
  "riven-core",
  "riven-db",
@@ -3118,7 +3102,6 @@ dependencies = [
  "anyhow",
  "async-trait",
  "futures",
- "inventory",
  "redis",
  "reqwest 0.13.2",
  "riven-core",
@@ -3135,7 +3118,6 @@ dependencies = [
  "async-graphql",
  "async-trait",
  "chrono",
- "inventory",
  "redis",
  "reqwest 0.13.2",
  "riven-core",
@@ -3153,7 +3135,6 @@ dependencies = [
  "async-graphql",
  "async-trait",
  "futures",
- "inventory",
  "reqwest 0.13.2",
  "riven-core",
  "riven-db",
@@ -3171,7 +3152,6 @@ dependencies = [
  "anyhow",
  "async-graphql",
  "async-trait",
- "inventory",
  "reqwest 0.13.2",
  "riven-core",
  "riven-db",
@@ -3190,7 +3170,6 @@ dependencies = [
  "async-trait",
  "chrono",
  "futures",
- "inventory",
  "redis",
  "reqwest 0.13.2",
  "riven-core",
@@ -3207,7 +3186,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "inventory",
  "reqwest 0.13.2",
  "riven-core",
  "riven-db",
@@ -3227,7 +3205,6 @@ dependencies = [
  "async-graphql",
  "async-trait",
  "chrono",
- "inventory",
  "reqwest 0.13.2",
  "riven-core",
  "riven-db",
@@ -3243,7 +3220,6 @@ dependencies = [
  "anyhow",
  "async-graphql",
  "async-trait",
- "inventory",
  "reqwest 0.13.2",
  "riven-core",
  "riven-db",
@@ -3259,7 +3235,6 @@ dependencies = [
  "anyhow",
  "async-graphql",
  "async-trait",
- "inventory",
  "reqwest 0.13.2",
  "riven-core",
  "riven-db",
@@ -3277,7 +3252,6 @@ dependencies = [
  "async-trait",
  "chrono",
  "chrono-tz",
- "inventory",
  "parking_lot",
  "reqwest 0.13.2",
  "riven-core",
@@ -3295,7 +3269,6 @@ dependencies = [
  "anyhow",
  "async-trait",
  "futures",
- "inventory",
  "lru",
  "redis",
  "reqwest 0.13.2",
@@ -3318,7 +3291,6 @@ dependencies = [
  "chrono",
  "hex",
  "hmac 0.13.0",
- "inventory",
  "redis",
  "reqwest 0.13.2",
  "riven-core",
@@ -3890,7 +3862,6 @@ dependencies = [
  "hex",
  "hickory-resolver",
  "hyper",
- "inventory",
  "log",
  "opentelemetry",
  "opentelemetry-otlp",

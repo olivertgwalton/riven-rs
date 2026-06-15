@@ -4,7 +4,6 @@ use redis::AsyncCommands;
 
 use riven_core::events::{EventType, HookResponse};
 use riven_core::plugin::{Plugin, PluginContext};
-use riven_core::register_plugin;
 use riven_core::types::{MediaItemState, MediaItemType};
 use riven_db::entities::MediaItem;
 use riven_db::repo;
@@ -20,8 +19,6 @@ const CALENDAR_ITEM_LIMIT: i64 = 1000;
 
 #[derive(Default)]
 pub struct CalendarPlugin;
-
-register_plugin!(CalendarPlugin);
 
 #[async_trait]
 impl Plugin for CalendarPlugin {

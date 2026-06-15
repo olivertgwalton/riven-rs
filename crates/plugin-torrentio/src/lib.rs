@@ -3,7 +3,6 @@ use reqwest::StatusCode;
 use riven_core::events::{EventType, HookResponse, ScrapeRequest};
 use riven_core::http::{HttpServiceProfile, RetryLaterError};
 use riven_core::plugin::{Plugin, PluginContext};
-use riven_core::register_plugin;
 use riven_core::stremio::StremioScrapeConfig;
 use riven_core::types::{ScrapeEntry, ScrapeResponse};
 use serde::Deserialize;
@@ -18,8 +17,6 @@ const PEER_COUNT_MARKER: &str = "\u{1F464}";
 
 #[derive(Default)]
 pub struct TorrentioPlugin;
-
-register_plugin!(TorrentioPlugin);
 
 #[async_trait]
 impl Plugin for TorrentioPlugin {

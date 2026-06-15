@@ -11,7 +11,7 @@ use riven_core::reindex::ReindexConfig;
 use riven_queue::worker::Scheduler;
 use riven_queue::{DownloaderConfig, JobQueue};
 
-include!(concat!(env!("OUT_DIR"), "/plugin_crates.rs"));
+mod plugins;
 mod setup;
 
 const USER_AGENT: &str = concat!("riven-rs/", env!("CARGO_PKG_VERSION"));

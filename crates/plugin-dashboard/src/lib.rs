@@ -2,7 +2,6 @@ use async_graphql::{Context, Object, Result as GqlResult, SchemaBuilder, SimpleO
 use async_trait::async_trait;
 use riven_core::events::{HookResponse, RivenEvent};
 use riven_core::plugin::{Plugin, PluginRegistry};
-use riven_core::register_plugin;
 use riven_core::types::{ActivePlaybackSession, DebridUserInfo};
 use riven_db::repo;
 use std::sync::Arc;
@@ -11,8 +10,6 @@ use tokio::sync::Mutex;
 
 #[derive(Default)]
 pub struct DashboardPlugin;
-
-register_plugin!(DashboardPlugin);
 
 #[async_trait]
 impl Plugin for DashboardPlugin {

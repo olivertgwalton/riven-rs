@@ -14,7 +14,6 @@ async-trait = { workspace = true }
 async-graphql = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
-inventory = { workspace = true }
 futures = { workspace = true }
 chrono = { workspace = true }
 redis = { workspace = true }

@@ -23,7 +23,6 @@ use ulid::Ulid;
 use riven_core::events::{EventType, HookResponse, RivenEvent};
 use riven_core::http::profiles;
 use riven_core::plugin::{Plugin, PluginContext, SettingField};
-use riven_core::register_plugin;
 use riven_core::settings::PluginSettings;
 use riven_db::repo;
 
@@ -36,8 +35,6 @@ const DEAD_LETTER_MAX: isize = 100;
 
 #[derive(Default)]
 pub struct WebhooksPlugin;
-
-register_plugin!(WebhooksPlugin);
 
 #[async_trait]
 impl Plugin for WebhooksPlugin {

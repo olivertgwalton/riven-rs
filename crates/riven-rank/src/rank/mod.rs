@@ -211,8 +211,14 @@ pub fn rank_torrent(
     aliases: &HashMap<String, Vec<String>>,
     settings: &RankSettings,
 ) -> Result<RankedTorrent, RankError> {
-    let (data, lev_ratio) =
-        prepare_torrent(raw_title, hash, correct_title, item_country, aliases, settings)?;
+    let (data, lev_ratio) = prepare_torrent(
+        raw_title,
+        hash,
+        correct_title,
+        item_country,
+        aliases,
+        settings,
+    )?;
     let (total_score, score_parts) = get_rank(&data, settings, &DEFAULT_MODEL);
     let (fetch, failed_checks) = finalize_torrent(&data, total_score, settings)?;
 
@@ -243,8 +249,14 @@ pub fn rank_torrent_fast(
     aliases: &HashMap<String, Vec<String>>,
     settings: &RankSettings,
 ) -> Result<RankedTorrent, RankError> {
-    let (data, lev_ratio) =
-        prepare_torrent(raw_title, hash, correct_title, item_country, aliases, settings)?;
+    let (data, lev_ratio) = prepare_torrent(
+        raw_title,
+        hash,
+        correct_title,
+        item_country,
+        aliases,
+        settings,
+    )?;
     let total_score = get_rank_total(&data, settings, &DEFAULT_MODEL);
     finalize_torrent(&data, total_score, settings)?;
 

@@ -12,7 +12,6 @@ serde_json = { workspace = true }
 async-trait = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
-inventory = { workspace = true }
 chrono = { workspace = true }
 redis = { workspace = true }
 hmac = { workspace = true }

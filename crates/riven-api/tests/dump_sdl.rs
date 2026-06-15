@@ -31,5 +31,8 @@ fn dump_sdl() {
     }
 
     std::fs::write("schema.graphql", &out).unwrap();
-    eprintln!("wrote {} bytes to crates/riven-api/schema.graphql", out.len());
+    eprintln!(
+        "wrote {} bytes to crates/riven-api/schema.graphql",
+        out.len()
+    );
 }

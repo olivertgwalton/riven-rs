@@ -14,7 +14,6 @@ use redis::AsyncCommands;
 use riven_core::events::{EventType, HookResponse};
 use riven_core::http::HttpServiceProfile;
 use riven_core::plugin::{Plugin, PluginContext, SettingField};
-use riven_core::register_plugin;
 use riven_core::settings::PluginSettings;
 use riven_core::types::StreamLinkResponse;
 use riven_core::types::{
@@ -42,8 +41,6 @@ pub(crate) use riven_core::nzb::{is_nzb_info_hash, nzb_url_redis_key};
 
 #[derive(Default)]
 pub struct UsenetPlugin;
-
-register_plugin!(UsenetPlugin);
 
 #[derive(Debug, serde::Deserialize)]
 struct ProviderJson {

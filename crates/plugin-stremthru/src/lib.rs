@@ -7,7 +7,6 @@ use redis::AsyncCommands;
 use riven_core::events::{EventType, HookResponse, ScrapeRequest};
 use riven_core::http::HttpServiceProfile;
 use riven_core::plugin::{Plugin, PluginContext};
-use riven_core::register_plugin;
 use riven_core::settings::PluginSettings;
 use riven_core::types::*;
 use std::collections::HashMap;
@@ -53,8 +52,6 @@ const STORE_NAMES: &[&str] = &[
 
 #[derive(Default)]
 pub struct StremthruPlugin;
-
-register_plugin!(StremthruPlugin);
 
 fn get_configured_stores(settings: &PluginSettings) -> Vec<(&'static str, String)> {
     STORE_NAMES

@@ -10,7 +10,6 @@ use std::time::{Duration, Instant};
 use riven_core::events::{EventType, HookResponse, IndexRequest};
 use riven_core::http::HttpServiceProfile;
 use riven_core::plugin::{Plugin, PluginContext};
-use riven_core::register_plugin;
 use riven_core::settings::PluginSettings;
 use riven_core::types::*;
 
@@ -59,8 +58,6 @@ impl TvdbPlugin {
         Ok(token)
     }
 }
-
-register_plugin!(TvdbPlugin);
 
 #[async_trait]
 impl Plugin for TvdbPlugin {

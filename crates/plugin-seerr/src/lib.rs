@@ -2,7 +2,6 @@ use async_trait::async_trait;
 use riven_core::events::{DownloadSuccessInfo, EventType, HookResponse};
 use riven_core::http::HttpServiceProfile;
 use riven_core::plugin::{ContentCollection, Plugin, PluginContext, validate_api_key};
-use riven_core::register_plugin;
 use riven_core::settings::PluginSettings;
 use riven_core::types::*;
 use serde::Deserialize;
@@ -17,8 +16,6 @@ const PAGE_SIZE: u32 = 20;
 
 #[derive(Default)]
 pub struct SeerrPlugin;
-
-register_plugin!(SeerrPlugin);
 
 #[async_trait]
 impl Plugin for SeerrPlugin {

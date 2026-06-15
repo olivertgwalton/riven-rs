@@ -170,12 +170,14 @@ pub async fn build_parse_item_context_with_hierarchy(
         absolute_number: item.absolute_number,
         item_year: item.year,
         parent_year,
-        item_country: item.country.clone().or_else(|| {
-            hierarchy.and_then(|h| h.resolved_show_country.clone())
-        }),
-        item_language: item.language.clone().or_else(|| {
-            hierarchy.and_then(|h| h.resolved_show_language.clone())
-        }),
+        item_country: item
+            .country
+            .clone()
+            .or_else(|| hierarchy.and_then(|h| h.resolved_show_country.clone())),
+        item_language: item
+            .language
+            .clone()
+            .or_else(|| hierarchy.and_then(|h| h.resolved_show_language.clone())),
         season_episodes,
         show_season_numbers,
         show_status,

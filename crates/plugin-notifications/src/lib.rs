@@ -6,7 +6,6 @@ use serde::{Deserialize, Serialize};
 use riven_core::events::{DownloadSuccessInfo, EventType, HookResponse};
 use riven_core::http::{HttpServiceProfile, profiles};
 use riven_core::plugin::{Plugin, PluginContext};
-use riven_core::register_plugin;
 use riven_core::settings::PluginSettings;
 use riven_core::types::*;
 use std::time::Duration;
@@ -22,8 +21,6 @@ const TVDB_PROFILE: HttpServiceProfile =
 
 #[derive(Default)]
 pub struct NotificationsPlugin;
-
-register_plugin!(NotificationsPlugin);
 
 #[async_trait]
 impl Plugin for NotificationsPlugin {

@@ -10,7 +10,6 @@ use riven_core::nzb::{
     parse_newznab_xml,
 };
 use riven_core::plugin::{Plugin, PluginContext, SettingField};
-use riven_core::register_plugin;
 use riven_core::settings::PluginSettings;
 use riven_core::types::{MediaItemType, ScrapeEntry, ScrapeResponse};
 
@@ -27,8 +26,6 @@ fn indexer_profile(indexer: &Indexer) -> HttpServiceProfile {
 
 #[derive(Default)]
 pub struct NewznabPlugin;
-
-register_plugin!(NewznabPlugin);
 
 /// One configured Newznab/Torznab-compatible indexer.
 #[derive(Debug, Clone)]

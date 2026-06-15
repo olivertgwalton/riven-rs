@@ -1,7 +1,9 @@
 use std::sync::Arc;
 
-use riven_core::plugin::{PluginRegistry, collect_plugins};
+use riven_core::plugin::PluginRegistry;
 use riven_core::settings::{PluginSettings, RivenSettings};
+
+use crate::plugins::all_plugins;
 
 pub async fn register_plugins(
     http: riven_core::http::HttpClient,
@@ -11,7 +13,7 @@ pub async fn register_plugins(
     settings: &RivenSettings,
 ) -> Arc<PluginRegistry> {
     let registry = PluginRegistry::new();
-    let plugins = collect_plugins();
+    let plugins = all_plugins();
 
     tracing::info!(count = plugins.len(), "discovered plugins");
 

@@ -7,7 +7,6 @@ use std::time::Duration;
 use riven_core::events::{EventType, HookResponse, ScrapeRequest};
 use riven_core::http::HttpServiceProfile;
 use riven_core::plugin::{Plugin, PluginContext, SettingField};
-use riven_core::register_plugin;
 use riven_core::settings::PluginSettings;
 
 use crate::client::{scrape, validate_search};
@@ -19,8 +18,6 @@ pub(crate) const PROFILE: HttpServiceProfile =
 
 #[derive(Default)]
 pub struct AioStreamsPlugin;
-
-register_plugin!(AioStreamsPlugin);
 
 #[async_trait]
 impl Plugin for AioStreamsPlugin {

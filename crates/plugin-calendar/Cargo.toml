@@ -10,7 +10,6 @@ async-trait = { workspace = true }
 async-graphql = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
-inventory = { workspace = true }
 redis = { workspace = true }
 chrono = { workspace = true }
 sqlx = { workspace = true }

@@ -5,7 +5,6 @@ use std::time::Duration;
 use riven_core::events::{EventType, HookResponse};
 use riven_core::http::HttpServiceProfile;
 use riven_core::plugin::{ContentCollection, Plugin, PluginContext};
-use riven_core::register_plugin;
 use riven_core::settings::PluginSettings;
 use riven_core::types::*;
 
@@ -17,8 +16,6 @@ pub const PROFILE: HttpServiceProfile =
 
 #[derive(Default)]
 pub struct TraktPlugin;
-
-register_plugin!(TraktPlugin);
 
 #[async_trait]
 impl Plugin for TraktPlugin {

@@ -3,7 +3,6 @@ use reqwest::Method;
 use riven_core::events::{DownloadSuccessInfo, EventType, HookResponse};
 use riven_core::http::HttpServiceProfile;
 use riven_core::plugin::{Plugin, PluginContext, SettingField};
-use riven_core::register_plugin;
 use riven_core::settings::PluginSettings;
 use riven_core::types::{ActivePlaybackSession, PlaybackMethod, PlaybackState};
 use riven_db::repo;
@@ -26,9 +25,6 @@ pub struct EmbyPlugin;
 
 #[derive(Default)]
 pub struct JellyfinPlugin;
-
-register_plugin!(EmbyPlugin);
-register_plugin!(JellyfinPlugin);
 
 const MEDIA_SERVER_TOKEN_HEADER: &str = "X-Emby-Token";
 
