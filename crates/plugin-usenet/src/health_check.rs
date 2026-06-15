@@ -105,7 +105,6 @@ async fn run_once(
             continue;
         }
         let key = format!("riven:usenet:hc:{entry_id}");
-        // Presence of a TTL means the cooldown is still active.
         let ttl: i64 = AsyncCommands::ttl(&mut redis, &key).await.unwrap_or(-2);
         if ttl > 0 {
             continue;
@@ -119,8 +118,6 @@ async fn run_once(
             None => HcState::default(),
         };
 
-        // Postgres-backed meta load. (Previously read from a Redis key that
-        // ceased being populated when meta storage moved to Postgres.)
         let meta = match streamer.load_meta(&info_hash).await {
             Ok(m) => m,
             Err(error) => {
@@ -138,8 +135,6 @@ async fn run_once(
         summary.checked += 1;
         let pool = streamer.pool();
         let (alive, total) = stat_sample(pool.as_ref(), &segments).await;
-        // total == 0 means the pool errored — no verdict, no state change,
-        // try again next tick.
         if total == 0 {
             set_state(&mut redis, &key, &prior, FAILURE_BACKOFF).await;
             continue;
@@ -181,7 +176,6 @@ async fn run_once(
                     tracing::warn!(entry_id, %error, "health check: failed to delete entry");
                 }
             }
-            // Drop the cooldown key — entry's gone, no further state needed.
             let _del: redis::RedisResult<()> = AsyncCommands::del(&mut redis, &key).await;
         } else {
             tracing::debug!(
@@ -247,8 +241,6 @@ fn sample_segments(meta: &NzbMeta) -> Vec<NzbSegment> {
     let middle_end = total - VERIFY_LAST_N;
     let middle_count = middle_end - middle_start;
     for i in 0..MIDDLE_SAMPLE {
-        // Evenly-spaced midpoints: floor((i + 0.5) * middle_count / MIDDLE_SAMPLE)
-        // in exact integer arithmetic (no float, no sign-loss cast).
         let idx = middle_start + ((2 * i + 1) * middle_count) / (2 * MIDDLE_SAMPLE);
         if idx < middle_end {
             indices.push(idx);
@@ -271,8 +263,6 @@ async fn stat_sample(pool: &NntpPool, segments: &[NzbSegment]) -> (usize, usize)
             Ok(true) => alive += 1,
             Ok(false) => {}
             Err(error) => {
-                // Treat a hard error as unknown rather than missing; bail so
-                // a transient pool hiccup doesn't nuke healthy entries.
                 tracing::debug!(message_id = %seg.message_id, %error, "health check STAT errored; treating as unknown");
                 return (0, 0);
             }

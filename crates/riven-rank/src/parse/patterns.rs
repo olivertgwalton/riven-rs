@@ -1,10 +1,6 @@
 use regex::Regex;
 use std::sync::LazyLock;
 
-// =============================================================================
-// Year
-// =============================================================================
-
 pub static RE_YEAR: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?:^|[\.\s\(\[,])((?:19|20)\d{2})(?:[\.\s\)\],]|$)").unwrap());
 
@@ -15,10 +11,6 @@ pub static RE_YEAR_RANGE: LazyLock<Regex> =
 /// Partial year range like "(2000-05)" in brackets.
 pub static RE_YEAR_RANGE_SHORT: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"[(\[]\s?((?:19\d|20[012])\d)\s?-\s?(\d{2})\s?[)\]]").unwrap());
-
-// =============================================================================
-// Resolution
-// =============================================================================
 
 pub static RE_RES_3840: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)3840\s*[x×]\s*\d+").unwrap());
@@ -48,10 +40,6 @@ pub static RE_RES_TYPO: LazyLock<Regex> =
 /// Generic WxH dimension (e.g. "704x400", "1280X720") — height used to classify
 pub static RE_RES_WXH: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)\b\d{3,4}[x×]\s*(\d{3,4})\b").unwrap());
-
-// =============================================================================
-// Season
-// =============================================================================
 
 pub static RE_SEASON_SE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)(?:^|[.\s\[(])S(\d{1,4})(?:(?:\s*[&+]\s*S?|\s*-\s*S)(\d{1,4}))*").unwrap()
@@ -86,10 +74,6 @@ pub static RE_SEASON_EP_COMPACT: LazyLock<Regex> =
 /// ТВ-N format
 pub static RE_SEASON_TV: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)\bТВ-(\d{1,2})\b").unwrap());
-
-// =============================================================================
-// Episode
-// =============================================================================
 
 pub static RE_EPISODE_SE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)(?:S\d{1,4})\s*E(\d{1,4})(?:\s*[-+&]\s*E?(\d{1,4}))*").unwrap()
@@ -160,20 +144,12 @@ pub static RE_EPISODE_RUSSIAN: LazyLock<Regex> = LazyLock::new(|| {
 pub static RE_PART: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)\b(?:Part|Pt)\.?\s*(\d{1,2})\b").unwrap());
 
-// =============================================================================
-// Episode code (CRC32 / checksum in brackets)
-// =============================================================================
-
 /// 8-char hex code in brackets: [5E46AC39]
 pub static RE_EPISODE_CODE_HEX: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"[\[\(]([A-Fa-f0-9]{8})[\]\)]").unwrap());
 /// 8-digit numeric code in brackets: [12345678]
 pub static RE_EPISODE_CODE_NUM: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"[\[\(]([0-9]{8})[\]\)]").unwrap());
-
-// =============================================================================
-// Quality (ordered per PTT handler order)
-// =============================================================================
 
 pub static RE_Q_TELESYNC: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)\b(?:HD[ .\-]*)?T(?:ELE)?S(?:YNC)?(?:Rip)?\b").unwrap());
@@ -236,10 +212,6 @@ pub static RE_Q_PDTV: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\bPDTV
 pub static RE_Q_HDTV: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)(?:^|[\W_])HD(?:.?TV)?(?:$|[\W_])").unwrap());
 
-// =============================================================================
-// Codec
-// =============================================================================
-
 pub static RE_CODEC_AVC: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)(?:^|[\W_])(?:x\.?264|h\.?264|AVC)(?:$|[\W_])").unwrap());
 pub static RE_CODEC_HEVC: LazyLock<Regex> = LazyLock::new(|| {
@@ -251,15 +223,10 @@ pub static RE_CODEC_AV1: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)(?:^|[\W_])AV1(?:$|[\W_])").unwrap());
 pub static RE_CODEC_MPEG: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)(?:^|[\W_])mpe?g\d*(?:$|[\W_])").unwrap());
-/// Bare 264/265 not preceded by x or h
 pub static RE_CODEC_264_BARE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)\W264\W").unwrap());
 pub static RE_CODEC_265_BARE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)\W265\W").unwrap());
-
-// =============================================================================
-// Audio
-// =============================================================================
 
 pub static RE_AUDIO_DTS_LOSSLESS: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
@@ -296,10 +263,6 @@ pub static RE_AUDIO_MP3: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\bM
 pub static RE_AUDIO_HQ_CLEAN: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)\bHQ[\s.]*Clean[\s.]*Audio\b").unwrap());
 
-// =============================================================================
-// Channels
-// =============================================================================
-
 pub static RE_CHAN_71: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\b7[. \-]1\b").unwrap());
 pub static RE_CHAN_51: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)(?:5[\.\s]1(?:ch|-S\d+|x[2-4])?|5\W1(?:x[2-4])?)").unwrap());
@@ -309,10 +272,6 @@ pub static RE_CHAN_STEREO: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)\bstereo\b").unwrap());
 pub static RE_CHAN_MONO: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\bmono\b").unwrap());
 
-// =============================================================================
-// HDR
-// =============================================================================
-
 pub static RE_HDR_DV: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)\bDV\b|dolby[ .\-]*vision|\bDoVi\b").unwrap());
 pub static RE_HDR_HDR10PLUS: LazyLock<Regex> =
@@ -320,10 +279,6 @@ pub static RE_HDR_HDR10PLUS: LazyLock<Regex> =
 pub static RE_HDR_HDR: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)\bHDR(?:10)?\b").unwrap());
 pub static RE_HDR_SDR: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\bSDR\b").unwrap());
-
-// =============================================================================
-// Bit depth
-// =============================================================================
 
 /// 10-bit detection
 pub static RE_BIT_DEPTH_10: LazyLock<Regex> = LazyLock::new(|| {
@@ -336,10 +291,6 @@ pub static RE_BIT_DEPTH_8: LazyLock<Regex> =
 pub static RE_BIT_DEPTH_12: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)\b12[- ]?bit\b").unwrap());
 
-// =============================================================================
-// Group
-// =============================================================================
-
 pub static RE_GROUP_DASH: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"- ?([^\-. \[]+[^\-. \[)\]\d][^\-. \[)\]]*)(?:\[[\w.-]+])?(?:\.\w{2,4}$|$)")
         .unwrap()
@@ -348,10 +299,6 @@ pub static RE_GROUP_BRACKET: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^\[([^\]]+)\]").unwrap());
 pub static RE_GROUP_PAREN: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\(([\w-]+)\)(?:$|\.\w{2,4}$)").unwrap());
-
-// =============================================================================
-// Misc
-// =============================================================================
 
 pub static RE_SIZE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)\b(\d+(?:\.\d+)?\s*(?:GB|MB|TB|KB))\b").unwrap());
@@ -375,10 +322,6 @@ pub static RE_COMPLETE: LazyLock<Regex> = LazyLock::new(|| {
 pub static RE_COMPLETE_COLLECTION: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)(?:(?:movie|complete)\s*\.?\s*collection|(?:complete|dvd)?\s*box\s*set|mini\s*series|duology|trilogy|quadr[oi]logy|tetralogy|pentalogy|hexalogy|heptalogy|anthology|kolekcja|saga\b)").unwrap()
 });
-
-// =============================================================================
-// Date — multiple formats matching PTT
-// =============================================================================
 
 /// YYYY-MM-DD / YYYY.MM.DD / YYYY/MM/DD
 pub static RE_DATE_YMD: LazyLock<Regex> = LazyLock::new(|| {
@@ -419,7 +362,6 @@ pub static RE_DATE_DMY_MONTH: LazyLock<Regex> = LazyLock::new(|| {
 pub static RE_DATE_DMY_MONTH_SHORT: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)(?:^|\W)(0?[1-9]|[12]\d|3[01])(?:[. ]?(?:st|nd|rd|th))?[. \-/\\](jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sept?(?:ember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)[. \-/\\](0[1-9]|[0126789]\d)(?:\W|$)").unwrap()
 });
-
 pub static RE_BITRATE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)\b(\d+(?:\.\d+)?\s*(?:[KkMm]bps|[KkMm]b/s))\b").unwrap());
 pub static RE_REGION: LazyLock<Regex> = LazyLock::new(|| {
@@ -474,10 +416,6 @@ pub static RE_TITLE_QUALITY: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)(?:\b(?:HD[ .\-]*)?T(?:ELE)?S(?:YNC)?(?:Rip)?|\b(?:HD[ .\-]*)?T(?:ELE)?C(?:INE)?(?:Rip)?|\bBlu[ .\-]*Ray|\bremux|\bWEB[ .\-]*(?:DL|Rip)|\bWEB\b|\bHDTV|\bDVD(?:Rip)?|\bBDRip|\bBRRip|\bHDRip|\bCAM|\bPDTV|\bSAT[ .\-]*Rip|\bVHS)\b").unwrap()
 });
 
-// =============================================================================
-// Trash detection
-// =============================================================================
-
 pub static RE_DVB: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\bDVB\b").unwrap());
 pub static RE_LEAKED: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\bLEAKED\b").unwrap());
 pub static RE_SPRINT: LazyLock<Regex> =
@@ -485,10 +423,6 @@ pub static RE_SPRINT: LazyLock<Regex> =
 pub static RE_R6: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\bR6\b").unwrap());
 pub static RE_THREESIXTYP: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)threesixtyp").unwrap());
-
-// =============================================================================
-// Boolean flags
-// =============================================================================
 
 pub static RE_PROPER: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)\b(?:REAL\.)?PROPER\b").unwrap());
@@ -537,5 +471,3 @@ pub static RE_SCENE: LazyLock<Regex> = LazyLock::new(|| {
 /// Scene detection: resolution + WEB marker (not WEB-DL) — caller must exclude WEB-DL
 pub static RE_SCENE_WEB: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)\b\d{3,4}p\b.*[_. ]WEB[_. ]").unwrap());
-
-// Network patterns are defined as a table in detect.rs

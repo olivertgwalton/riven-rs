@@ -137,10 +137,6 @@ pub async fn start_server(config: StartServerConfig) -> Result<()> {
         runtime: tokio::runtime::Handle::current(),
     };
 
-    // `graphql` and `media` own their response shapes (WS upgrade, range
-    // responses, structured GraphQL errors), so they perform their own
-    // per-handler API-key check. There is no global auth gate; the board UI,
-    // its API, the seerr webhook, and the static frontend are unauthenticated.
     let routes = Router::new()
         .route(
             "/graphql",
@@ -155,9 +151,6 @@ pub async fn start_server(config: StartServerConfig) -> Result<()> {
         .nest("/board", board_ui.with_state(()))
         .fallback_service(serve_frontend);
 
-    // Layer order is outside-in for a request: the LAST `.layer()` is the
-    // outermost. Build up:
-    //   request → cors → board_assets_middleware → router
     let app = routes
         .layer(axum::middleware::from_fn(board::board_assets_middleware))
         .layer(build_cors_layer(cors_allowed_origins))

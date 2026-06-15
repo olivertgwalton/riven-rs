@@ -43,7 +43,6 @@ impl NzbDocument {
         }
         let first = self.files.first()?;
         let raw = filename_from_subject(&first.subject);
-        // Strip the extension — the caller will reattach its own.
         let stem = match raw.rfind('.') {
             Some(i) if i > 0 => raw[..i].to_string(),
             _ => raw,
@@ -147,10 +146,6 @@ pub fn parse_nzb_document(xml: &str) -> Result<NzbDocument, NzbError> {
                     text_target = Some("group");
                 }
                 b"meta" => {
-                    // `<meta type="title">Release Name</meta>` style head
-                    // metadata. Only entries with a non-empty `type` attribute
-                    // are kept; the value is captured on the corresponding
-                    // text/cdata event.
                     for attr in e.attributes().flatten() {
                         if attr.key.as_ref() == b"type"
                             && let Ok(v) = attr.unescape_value()
@@ -232,9 +227,6 @@ pub fn parse_nzb_document(xml: &str) -> Result<NzbDocument, NzbError> {
                     text_target = None;
                 }
                 b"meta" => {
-                    // Clear pending state in case the meta element had no
-                    // text body — don't leak `meta` target into the next
-                    // event.
                     cur_meta_type = None;
                     text_target = None;
                 }
@@ -324,7 +316,6 @@ pub fn rar_volume_info(filename: &str) -> Option<(String, u32)> {
     let lower = filename.to_ascii_lowercase();
     let bytes = lower.as_bytes();
 
-    // .partNN.rar (NN any width)
     if let Some(rar_pos) = lower.rfind(".rar")
         && rar_pos + 4 == lower.len()
     {
@@ -339,11 +330,9 @@ pub fn rar_volume_info(filename: &str) -> Option<(String, u32)> {
                 return Some((prefix[..part_pos].to_string(), n - 1));
             }
         }
-        // Plain `.rar` (volume 0 of an `.rNN`-style continuation set).
         return Some((prefix.to_string(), 0));
     }
 
-    // .rNN / .rNNN (2- or 3-digit suffix after a leading `.r`).
     if bytes.len() >= 4 {
         for tail_len in [3, 4] {
             if bytes.len() < tail_len {
@@ -384,8 +373,6 @@ pub fn detect_rar_volume_groups(files: &[NzbFile]) -> Vec<Vec<usize>> {
             (base, indexed.into_iter().map(|(_, i)| i).collect())
         })
         .collect();
-    // Stable ordering by group base name — keeps virtual file order
-    // deterministic across reingests of the same NZB.
     out.sort_by(|a, b| a.0.cmp(&b.0));
     out.into_iter().map(|(_, v)| v).collect()
 }
@@ -483,8 +470,6 @@ mod tests {
 
     #[test]
     fn detects_multiple_rar_groups_for_season_pack() {
-        // iVy-style season pack: one RAR set per episode. Should produce
-        // one group per episode, not one giant set across all episodes.
         let mk = |s: &str| NzbFile {
             subject: format!(r#""{s}" yEnc"#),
             poster: String::new(),
@@ -501,7 +486,6 @@ mod tests {
         ];
         let groups = detect_rar_volume_groups(&files);
         assert_eq!(groups.len(), 2, "expected two RAR groups, one per episode");
-        // Each group has its own two volumes, ordered by volume index.
         for g in &groups {
             assert_eq!(g.len(), 2);
             let v0 = &files[g[0]].subject;
@@ -509,7 +493,6 @@ mod tests {
             assert!(v0.contains(".part01.rar"));
             assert!(v1.contains(".part02.rar"));
         }
-        // Different base names → different groups.
         let g0_v0 = &files[groups[0][0]].subject;
         let g1_v0 = &files[groups[1][0]].subject;
         assert_ne!(g0_v0, g1_v0);

@@ -1,7 +1,7 @@
 /// Safety TTL for dedup keys. Under normal operation keys are deleted synchronously
 /// by `DedupGuard::drop`; this TTL fires only when the process is hard-killed before
 /// the guard runs, preventing permanently orphaned keys.
-pub(crate) const DEDUP_KEY_TTL_SECS: u64 = 30 * 60; // 30 minutes
+pub(crate) const DEDUP_KEY_TTL_SECS: u64 = 30 * 60;
 
 /// RAII guard that releases a dedup key when dropped.
 ///
@@ -26,9 +26,6 @@ impl Drop for DedupGuard {
     fn drop(&mut self) {
         let key = self.key.clone();
         let mut conn = self.redis.clone();
-        // Fire-and-forget: spawning a task is the only way to do async work in Drop.
-        // If the runtime is already shutting down the task is silently dropped, but
-        // the safety TTL on the key will clean it up within 30 minutes.
         tokio::spawn(async move {
             let _result: Result<(), _> = redis::cmd("DEL").arg(&key).query_async(&mut conn).await;
         });

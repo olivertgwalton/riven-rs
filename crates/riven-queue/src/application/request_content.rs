@@ -116,10 +116,6 @@ pub async fn finalize(scope: i64, queue: &JobQueue) {
         )
         .collect();
 
-    // Removed-item cleanup: only fire when at least one plugin returned
-    // results. We can't tell here whether a missing response means "plugin
-    // errored" or "plugin returned empty"; conservatively skip the cleanup
-    // when there's nothing to scope it against.
     if !active_external_ids.is_empty() {
         match repo::delete_items_removed_from_content_services(&queue.db_pool, &active_external_ids)
             .await

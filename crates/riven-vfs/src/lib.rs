@@ -54,14 +54,14 @@ pub fn mount(
     }
 
     {
-        // Attempt lazy unmount only if a FUSE filesystem is already mounted here,
-        // to avoid accidentally unmounting a legitimate bind mount (e.g. Docker's
-        // rshared bind mount), which would break mount propagation to the host.
+        // Lazy-unmount only if a FUSE filesystem is already mounted here:
+        // unmounting a legitimate bind mount (e.g. Docker rshared) would break
+        // mount propagation to the host.
         let path_str = mount_path.to_str().unwrap_or_default();
         let is_fuse_mounted = std::fs::read_to_string("/proc/self/mounts").is_ok_and(|m| {
             m.lines().any(|line| {
                 let mut parts = line.splitn(4, ' ');
-                let _ = parts.next(); // device
+                let _ = parts.next();
                 let mountpoint = parts.next().unwrap_or("");
                 let fstype = parts.next().unwrap_or("");
                 mountpoint == path_str && fstype.starts_with("fuse")
@@ -103,16 +103,12 @@ pub fn mount(
     );
 
     let mut config = fuser::Config::default();
-    // SessionACL::All ↔ the old `allow_other`. AutoUnmount requires non-Owner ACL.
     config.acl = fuser::SessionACL::All;
     config.mount_options = vec![
         fuser::MountOption::RO,
         fuser::MountOption::FSName("riven".to_string()),
         fuser::MountOption::AutoUnmount,
         fuser::MountOption::DefaultPermissions,
-        // Allow the kernel to issue up to 4 MB reads per FUSE call instead of
-        // the default 128 KB. Combined with the large readahead set in init(),
-        // this reduces block_on() call frequency ~32x for sequential playback.
         fuser::MountOption::CUSTOM("max_read=4194304".to_string()),
     ];
     let session = fuser::spawn_mount2(fs, mount_path, &config)?;

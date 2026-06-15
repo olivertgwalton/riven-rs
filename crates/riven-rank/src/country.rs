@@ -97,7 +97,6 @@ mod tests {
         assert!(countries_match("US", "usa"));
         assert!(!countries_match("US", "gbr"));
         assert!(!countries_match("FR", "gbr"));
-        // Unknown codes fall back to direct comparison.
         assert!(countries_match("XX", "xx"));
         assert!(!countries_match("XX", "YY"));
     }

@@ -45,9 +45,6 @@ pub async fn scrape(
     password: &str,
     request: &ScrapeRequest<'_>,
 ) -> anyhow::Result<ScrapeResponse> {
-    // AIOStreams has its own identifier convention that differs from the
-    // canonical Stremio one (Season uses just `:N`, no trailing `:1`), so this
-    // plugin builds its IDs inline rather than via `riven_core::stremio`.
     let Some(id) = request_identifier(request) else {
         tracing::debug!(
             title = request.title,

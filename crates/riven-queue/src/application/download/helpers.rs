@@ -121,10 +121,6 @@ pub fn looks_obfuscated(filename: &str) -> bool {
     if lower.len() >= 40 && lower.chars().all(|c| c.is_ascii_hexdigit() || c == '.') {
         return true;
     }
-    // Long, single-token stem with no separators — typical of obfuscated
-    // releases (e.g. `VfYc6l3ibzTHwlPkvX1hocwymwUNt6yt`). 24 chars is the
-    // shortest such name we want to catch without flagging real titles like
-    // `Movie.2024.mkv`.
     if stem.len() >= 24
         && !stem.contains(['.', ' ', '-', '_'])
         && stem.chars().all(|c| c.is_ascii_alphanumeric())
@@ -264,7 +260,6 @@ mod tests {
             "top.gear.s23e03.1080p.bluray.x264-ouija.sample.mkv"
         ));
 
-        // The word inside a real title does not match the delimited token.
         assert!(!is_sample_file("Free.Samples.2012.1080p.BluRay.mkv"));
         assert!(is_persistable_video_file(
             "top.gear.s23e03.1080p.bluray.x264-ouija.mkv"

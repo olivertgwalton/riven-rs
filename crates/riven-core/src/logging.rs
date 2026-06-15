@@ -218,9 +218,6 @@ fn build_level_filter(settings: &LogSettings) -> anyhow::Result<EnvFilter> {
     let filter = EnvFilter::try_from_default_env()
         .or_else(|_| EnvFilter::try_new(&settings.level))
         .map(|filter| {
-            // The hickory DNS resolver and hyper emit a block of per-request
-            // DEBUG traces on every lookup/connection — pure noise for a user.
-            // Cap them at info unconditionally (independent of VFS debug logging).
             filter
                 .add_directive("apalis_core=info".parse().unwrap())
                 .add_directive("hickory_resolver=info".parse().unwrap())
@@ -229,12 +226,6 @@ fn build_level_filter(settings: &LogSettings) -> anyhow::Result<EnvFilter> {
         })
         .map_err(|error| anyhow::anyhow!("invalid log level '{}': {error}", settings.level))?;
 
-    // When VFS debug logging is off, silence the noisy targets without
-    // capping the global log level:
-    //   - "streaming": riven VFS/media-stream debug logs.
-    //   - "log": tracing-log 0.2 bridges log-crate records under this target
-    //     when no module path is available.
-    //   - "fuser": FUSE kernel traces from the fuser crate.
     if !settings.vfs_debug_logging {
         Ok(filter
             .add_directive("streaming=off".parse()?)

@@ -10,8 +10,6 @@ use std::sync::Arc;
 
 use crate::schema::auth::{require_library_access, require_settings_access};
 
-// ── Resolver ──
-
 #[derive(Default)]
 pub struct LibraryMutations;
 
@@ -106,8 +104,6 @@ impl LibraryMutations {
             .await?
             .ok_or_else(|| Error::new("Item not found"))?;
 
-        // For Show + specific seasons: flip is_requested on those seasons /
-        // their episodes so ProcessMediaItem's Show fan-out picks them up.
         if item.item_type == MediaItemType::Show
             && let Some(seasons) = season_numbers.as_deref()
             && !seasons.is_empty()
@@ -215,10 +211,6 @@ impl LibraryMutations {
         };
 
         if item.imdb_id.is_some() {
-            // Unrequested discovery: route through ProcessMediaItem. The
-            // `is_requested=false` flag short-circuits the Download advance
-            // in `MainOrchestrator::on_event`, so this scrapes without
-            // continuing to a download.
             job_queue
                 .push_process_media_item(riven_queue::ProcessMediaItemJob::new(item.id))
                 .await;

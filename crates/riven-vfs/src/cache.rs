@@ -35,9 +35,6 @@ impl RangeCache {
     pub fn get(&self, key: CacheKey) -> Option<Bytes> {
         let mut inner = self.inner.lock().expect("range cache poisoned");
         let hit = inner.map.get(&key).cloned()?;
-        // Bring to MRU. Linear scan is fine; the cache is small (low
-        // thousands of entries at most given our chunk sizes), and read
-        // hits are far rarer than misses on a Plex scan workload.
         if let Some(pos) = inner.order.iter().position(|k| k == &key) {
             inner.order.remove(pos);
         }
@@ -67,8 +64,6 @@ impl RangeCache {
             }
         }
         let incoming = data.len();
-        // A single entry larger than the whole cache is dropped rather than
-        // forcing eviction of everything else for a one-shot value.
         if incoming > inner.bytes_capacity {
             return;
         }
@@ -110,7 +105,6 @@ mod tests {
 
         cache.put((1, 0, 9), Bytes::from_static(b"1234567890"));
         cache.put((1, 10, 19), Bytes::from_static(b"abcdefghij"));
-        // (1, 0, 9) is LRU; this push should evict it.
         cache.put((1, 20, 29), Bytes::from_static(b"!@#$%^&*()"));
 
         assert!(cache.get((1, 0, 9)).is_none());

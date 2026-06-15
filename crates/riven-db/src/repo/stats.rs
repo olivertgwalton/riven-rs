@@ -4,8 +4,6 @@ use sqlx::PgPool;
 
 use crate::entities::*;
 
-// ── Ranking profiles ──
-
 #[derive(Debug, sqlx::FromRow, serde::Serialize, serde::Deserialize)]
 pub struct RankingProfile {
     pub id: i32,

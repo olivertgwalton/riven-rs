@@ -419,7 +419,6 @@ pub async fn mark_seasons_requested_and_get_episodes(
     show_id: i64,
     season_numbers: &[i32],
 ) -> Result<Vec<MediaItem>> {
-    // Mark the seasons themselves as requested.
     sqlx::query!(
         r#"UPDATE media_items
            SET is_requested = true, updated_at = NOW()
@@ -432,7 +431,6 @@ pub async fn mark_seasons_requested_and_get_episodes(
     .execute(pool)
     .await?;
 
-    // Mark all episodes as requested, then return the indexed ones (those needing a scrape).
     sqlx::query!(
         r#"UPDATE media_items
            SET is_requested = true, updated_at = NOW()
@@ -449,10 +447,8 @@ pub async fn mark_seasons_requested_and_get_episodes(
     .execute(pool)
     .await?;
 
-    // The show's rollup filters seasons by `is_requested = true`, so adding
-    // a season to the requested set can change the show's derived state.
-    // Episode `is_requested` doesn't feed any rollup, so episodes don't need
-    // a recompute here.
+    // Only the show is recomputed: its rollup filters seasons by is_requested,
+    // but episode is_requested feeds no rollup, so episodes need no recompute.
     super::state::recompute(pool, &[show_id]).await?;
 
     Ok(sqlx::query_as::<_, MediaItem>(
@@ -480,8 +476,6 @@ pub async fn unmark_unrequested_seasons(
     show_id: i64,
     requested_season_numbers: &[i32],
 ) -> Result<()> {
-    // Un-mark seasons not in the requested list (skip already-completed ones so
-    // they remain visible in the show's state computation).
     sqlx::query(
         "UPDATE media_items \
          SET is_requested = false, updated_at = NOW() \
@@ -496,7 +490,6 @@ pub async fn unmark_unrequested_seasons(
     .execute(pool)
     .await?;
 
-    // Un-mark episodes inside those seasons too.
     sqlx::query(
         "UPDATE media_items \
          SET is_requested = false, updated_at = NOW() \
@@ -515,7 +508,6 @@ pub async fn unmark_unrequested_seasons(
     .execute(pool)
     .await?;
 
-    // Removing seasons from the requested set can change the show's rollup.
     super::state::recompute(pool, &[show_id]).await?;
 
     Ok(())

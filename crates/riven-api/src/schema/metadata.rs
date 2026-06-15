@@ -4,8 +4,6 @@ use riven_core::plugin::PluginRegistry;
 pub const TMDB_API_BASE: &str = "https://api.themoviedb.org";
 pub const TMDB_IMAGE_BASE: &str = "https://image.tmdb.org/t/p";
 
-// ── Output types ──────────────────────────────────────────────────────────────
-
 #[derive(SimpleObject)]
 pub struct TmdbListItem {
     pub id: i64,
@@ -61,8 +59,6 @@ pub struct TmdbCollectionDetails {
     pub backdrop_path: Option<String>,
     pub parts: Vec<TmdbCollectionPart>,
 }
-
-// ── Helpers ───────────────────────────────────────────────────────────────────
 
 pub fn transform_item(item: &serde_json::Value, default_type: &str) -> TmdbListItem {
     let media_type = item

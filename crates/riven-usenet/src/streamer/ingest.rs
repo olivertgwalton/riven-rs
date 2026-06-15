@@ -74,8 +74,6 @@ impl UsenetStreamer {
         if segments.is_empty() {
             return Ok(());
         }
-        // Strategic sample (first-N / last-N / spread middle), or every segment
-        // when `sample_percent >= 100`. See `select_validation_indices`.
         let mids: Vec<String> = select_validation_indices(segments.len(), sample_percent)
             .into_iter()
             .map(|i| segments[i].message_id.clone())
@@ -101,9 +99,6 @@ impl UsenetStreamer {
                 Ok(true) => {}
                 Ok(false) => missing += 1,
                 Err(error) => {
-                    // Transient/provider error — ambiguous, tracked separately
-                    // from a confirmed-missing STAT so a flaky provider doesn't
-                    // masquerade as a dead release (and vice versa).
                     tracing::debug!(error = %error, "availability probe error");
                     errors += 1;
                 }
@@ -116,8 +111,6 @@ impl UsenetStreamer {
         if missing > 0 {
             return Err(StreamerError::IncompleteRelease { missing, checked });
         }
-        // Couldn't actually verify the release (provider unreachable for most
-        // of the sample) — don't pass it through blindly.
         if errors as f64 / checked.max(1) as f64 > AVAILABILITY_ERROR_LIMIT {
             return Err(StreamerError::IncompleteRelease {
                 missing: errors,
@@ -138,13 +131,6 @@ impl UsenetStreamer {
         password: Option<&str>,
         sample_percent: usize,
     ) -> Result<NzbMeta, StreamerError> {
-        // Idempotency check: the same NZB is frequently re-submitted across
-        // scrape cycles (e.g. a season-pack scrape and a per-episode scrape
-        // both surface the same release, or a cascade re-pushes after a
-        // transient failure). If we already ingested this info_hash, reuse
-        // the persisted meta — re-fetching RAR headers is the most expensive
-        // step in this method (parallel volume probes + header parses) and
-        // a duplicate submission can't change the result.
         if let Some(existing) = store::load(&self.db, info_hash).await? {
             tracing::debug!(
                 info_hash,
@@ -161,15 +147,10 @@ impl UsenetStreamer {
             .ingest_sem
             .clone()
             .try_acquire_owned()
-            // Only ever `NoPermits` here (the semaphore is never closed), so
-            // the source carries no caller-actionable detail.
             .map_err(|_e| StreamerError::IngestQueueFull)?;
 
         let document = parse_nzb_document(nzb_xml)?;
         let release_title = document.release_title();
-        // Caller-supplied password wins; fall back to the NZB's `<meta>`
-        // password entry. Owning the resolved value keeps the borrow lifetime
-        // simple across the rest of this function.
         let resolved_password: Option<String> = password
             .map(str::to_string)
             .or_else(|| document.password().map(str::to_string));
@@ -179,11 +160,6 @@ impl UsenetStreamer {
             return Err(StreamerError::NoMediaFile);
         }
 
-        // For stored multi-volume RAR archives the contained media isn't
-        // present as a top-level NZB file — try building virtual files first.
-        // A single-file RAR archive produces one virtual file (movie); a
-        // multi-file RAR (season pack) produces one virtual file per inner
-        // media file.
         let (mut meta_files, file_password) =
             match self.try_build_rar_virtual_files(&files, password).await? {
                 Some(virtual_files) if !virtual_files.is_empty() => {
@@ -194,8 +170,6 @@ impl UsenetStreamer {
                                 if slices.iter().any(|s| s.encryption.is_some())
                         )
                     });
-                    // All virtual files share the same `parts` array; probe
-                    // availability once across every segment.
                     if let Some(NzbMetaSource::Rar { parts, .. }) =
                         virtual_files.first().map(|vf| &vf.source)
                     {
@@ -207,9 +181,6 @@ impl UsenetStreamer {
                             .await?;
                     }
                     let mut out = virtual_files;
-                    // Keep the underlying RAR parts as additional entries so
-                    // sidecars (par2/nfo/etc.) and the parts themselves remain
-                    // reachable for debugging.
                     for f in &files {
                         out.push(direct_meta_file(f));
                     }
@@ -235,13 +206,6 @@ impl UsenetStreamer {
                 }
             };
 
-        // PAR2-based name recovery. When the assembled virtual files have
-        // obfuscated inner names, fetch the NZB's smallest PAR2 file and parse
-        // its `FileDesc` packets — those hold the original (pre-obfuscation)
-        // filenames the par2 set was created over. If the FileDesc media count
-        // matches the virtual file count, rename in NZB order so
-        // persist_season's per-episode matcher can recognise S01E01 / S01E02 /
-        // ... and avoid the sort-order fallback altogether.
         let obfuscated_playable: Vec<usize> = meta_files
             .iter()
             .enumerate()
@@ -272,10 +236,6 @@ impl UsenetStreamer {
             }
         }
 
-        // Obfuscated single-file rename — last resort when par2 recovery didn't
-        // apply (no par2 present, or count mismatch). When exactly one playable
-        // virtual file emerged and its name is still a random hash, restore the
-        // release title from the NZB head metadata.
         let playable_count = meta_files
             .iter()
             .filter(|f| is_media_filename(&f.filename))
@@ -303,29 +263,6 @@ impl UsenetStreamer {
             file.filename = new_name;
         }
 
-        // Rescale Direct sources from yEnc-encoded byte offsets to decoded
-        // byte offsets. The NZB lists per-segment *encoded* sizes, so the
-        // naive `direct_meta_file` returns a file whose `total_size` and
-        // segment offsets overstate the real decoded payload by the yEnc
-        // overhead (~3%). That mismatch surfaces as the `Content-Length`
-        // we promise to the HTTP client being larger than the bytes we
-        // can actually serve, producing the "body chunk SHORT" warning
-        // and endless player retries. Probing the first segment of each
-        // Direct file lets us recompute offsets in true decoded space —
-        // yEnc encodes uniformly within a single posting, so one sample
-        // is enough to scale the whole file. RAR sources are unaffected
-        // (their slice lengths are already exact decoded sizes from the
-        // RAR header).
-        // Rescaling only matters for files we actually serve as video over HTTP
-        // — it corrects the Content-Length we promise the client (see
-        // `rescale_direct_to_decoded`). The sidecars kept for debugging (the raw
-        // RAR volumes pushed above, plus par2/nfo/sfv) are never streamed as
-        // video, and the real episodes are Rar sources that rescale no-ops on, so
-        // restricting to playable media is what keeps a multi-hundred-volume
-        // REMUX season pack from triggering thousands of needless first/last
-        // -segment fetches here. Each surviving file still costs two article
-        // fetches, so run them concurrently instead of serially — same cap as the
-        // RAR header-fetch fan-out above.
         let rescale_concurrency = self.pool.ingest_concurrency().max(PREFETCH_FLOOR);
         stream::iter(
             meta_files
@@ -397,8 +334,6 @@ impl UsenetStreamer {
                 }
                 Err(StreamerError::MissingPassword) => {
                     missing_password = true;
-                    // Keep iterating — other groups in the same NZB might be
-                    // unencrypted and still recoverable.
                 }
                 Err(error) => return Err(error),
             }
@@ -432,10 +367,6 @@ impl UsenetStreamer {
             return Ok(None);
         }
 
-        // Build all parts up front so we can fan out header fetches in
-        // parallel. A 73-volume episode sequentially is 73 round-trips through
-        // the rate-limited NNTP path; parallelism caps overall wall-clock at
-        // roughly the slowest single fetch.
         let mut parts: Vec<NzbRarPart> = Vec::with_capacity(ordered_indices.len());
         for &nzb_idx in ordered_indices {
             let f = &files[nzb_idx];
@@ -460,9 +391,6 @@ impl UsenetStreamer {
             .await;
 
         let mut volume_entries: Vec<Vec<RarVolumeFileEntry>> = Vec::with_capacity(parts.len());
-        // All volumes in one RAR set share a format. We capture it from
-        // whichever volume parses first and use it later when re-parsing
-        // synthesized block headers at arbitrary offsets in `parts[i]`.
         let mut archive_format: Option<rar::RarFormat> = None;
 
         for (vol_idx, (part, fetch_result)) in parts.iter_mut().zip(header_results).enumerate() {
@@ -479,10 +407,6 @@ impl UsenetStreamer {
                 }
             };
 
-            // The header probe just decoded the first segment(s) of this
-            // part. Their decoded sizes are memoized — record the first
-            // one as the part's uniform segment size so the read path can
-            // map decoded positions to segments in O(1).
             if let Some(first_seg) = part.segments.first()
                 && let Some(size) = self.state.decoded_sizes.get(&first_seg.message_id)
             {
@@ -516,12 +440,6 @@ impl UsenetStreamer {
             volume_entries.push(entries);
         }
 
-        // Walk every (volume, stored_entry) pair in order and group by
-        // inner-file name. Each unique name becomes a candidate virtual file
-        // assembled from its per-volume slices. Grouping by name (rather than
-        // relying on RAR4's split_before/after flags) means we also handle
-        // RAR5 archives — our parser doesn't read RAR5 extra-area split
-        // records, so those entries arrive with both flags zero.
         let any_encrypted = volume_entries
             .iter()
             .flatten()
@@ -534,8 +452,6 @@ impl UsenetStreamer {
             return Err(StreamerError::MissingPassword);
         }
 
-        // Preserve first-occurrence order so the returned files match the
-        // playback order in the archive (E01 before E02, etc.).
         let mut group_order: Vec<String> = Vec::new();
         let mut groups: std::collections::HashMap<String, RarFileGroup> =
             std::collections::HashMap::new();
@@ -552,9 +468,6 @@ impl UsenetStreamer {
                         plaintext_sum: 0,
                     }
                 });
-                // Encrypted slice plaintext length is capped at the file's
-                // remaining unpacked bytes — the last volume absorbs the
-                // 16-byte AES padding difference.
                 let cipher_len = entry.packed_size;
                 let plaintext_len = if g.encryption.is_some() {
                     cipher_len.min(g.unpacked_size.saturating_sub(g.plaintext_sum))
@@ -572,28 +485,6 @@ impl UsenetStreamer {
             }
         }
 
-        // For each inner file whose observed slices don't cover its declared
-        // unpacked size, synthesize the missing first slice. This handles
-        // the common case where the 32 KB front-of-volume probe sees the
-        // previous file's end-continuation header (with `split_after=false`)
-        // and breaks before reaching the next file's start header in the
-        // same "transition" volume.
-        //
-        // Synthesis is pure arithmetic on what we already know:
-        //   - The file's `unpacked_size` is repeated in every continuation
-        //     header so we have it from any observed slice.
-        //   - The missing chunk lives in the volume immediately before the
-        //     file's first observed slice. In that volume, our parser's
-        //     last seen entry's `data_offset + packed_size` is the byte
-        //     position where the previous file's data ended — i.e. exactly
-        //     where this file's missing first chunk begins.
-        //   - The missing length is `unpacked_size - plaintext_sum`.
-        //
-        // Works for both RAR4 and RAR5; no split-flag dependency. The
-        // edge case it doesn't handle is a small inner file fitting
-        // entirely inside a single transition volume with no observed
-        // continuation in a later volume (would require fetching).
-        // Season-pack episodes are large enough that this doesn't happen.
         for name in &group_order {
             let Some(g) = groups.get(name) else { continue };
             if g.plaintext_sum >= g.unpacked_size {
@@ -604,16 +495,12 @@ impl UsenetStreamer {
             };
             let prev_vol = match first_slice.part_index.checked_sub(1) {
                 Some(v) => v,
-                None => continue, // first observed slice is in vol 0 — nowhere to look back to
+                None => continue,
             };
             let Some(prev_last) = volume_entries[prev_vol].last() else {
                 continue;
             };
             let prev_data_end = prev_last.data_offset.saturating_add(prev_last.packed_size);
-            // Encrypted RAR multi-file synthesis would need AES-block
-            // alignment maths the observed slices already encode for us;
-            // it's not in scope here. Drop those rather than risk emitting
-            // an unreadable virtual file.
             if g.encryption.is_some() {
                 tracing::debug!(
                     name = %g.name,
@@ -634,8 +521,6 @@ impl UsenetStreamer {
             // file's real first byte.
             let part = &parts[prev_vol];
             let Some(format) = archive_format else {
-                // Format wasn't captured (no volume parsed cleanly) —
-                // we'd rather not produce a slice we can't validate.
                 continue;
             };
             let probe_end = prev_data_end.saturating_add(1023);
@@ -671,10 +556,6 @@ impl UsenetStreamer {
                 }
             };
             let synth_start = prev_data_end.saturating_add(header_skip);
-            // `synth_len` is just the file's bytes that live in this
-            // volume — independent of the header we just skipped. The
-            // header lives outside the file's payload so it doesn't
-            // count toward the file's unpacked size.
             let synth_len = g.unpacked_size.saturating_sub(g.plaintext_sum);
 
             let synth_slice = NzbRarSlice {
@@ -697,12 +578,6 @@ impl UsenetStreamer {
             g.plaintext_sum = g.plaintext_sum.saturating_add(synth_len);
         }
 
-        // Validate and filter. A group is usable when (a) its slice plaintext
-        // sum equals the declared unpacked size — i.e. we observed every
-        // volume the file lives in — and (b) it has a media file extension.
-        // Anything else (incomplete coverage, .nfo, .sfv, sample.mkv if the
-        // sample isn't actually playable, etc.) gets dropped here so the
-        // persist step downstream doesn't waste a slot on it.
         let mut out: Vec<NzbMetaFile> = Vec::new();
         for name in group_order {
             let Some(g) = groups.remove(&name) else {
@@ -791,16 +666,6 @@ impl UsenetStreamer {
         if dec_first == 0 {
             return Ok(());
         }
-        // Every *full* yEnc part in one posting decodes to the same size (the
-        // poster's part size); only the final part is a partial remainder. So
-        // the decoded offsets are exact multiples of `dec_first`, with the last
-        // part measured directly. The previous approach scaled each segment by
-        // its *encoded* byte count, but yEnc escaping makes encoded size vary
-        // with content, so that estimate drifted several MB over a multi-GB
-        // file — the advertised `total_size` ended up larger than the bytes we
-        // could serve, and end-of-file reads (player cue/index probes) fell
-        // into the phantom tail and looped on EIO. Measuring the uniform full
-        // part + the real last part removes the drift entirely.
         let n = segments.len();
         let dec_last = if n <= 1 {
             dec_first
@@ -883,9 +748,6 @@ impl UsenetStreamer {
         if media.is_empty() {
             return None;
         }
-        // If everything the par2 set named is itself obfuscated, the recovery
-        // is no better than what we have. Skip — the downstream sort-order
-        // fallback in persist_season will still work.
         if media.iter().all(|n| looks_obfuscated(n)) {
             tracing::debug!("par2 FileDesc names are themselves obfuscated; skipping rename");
             return None;

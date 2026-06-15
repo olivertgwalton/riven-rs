@@ -79,9 +79,6 @@ pub async fn start(id: i64, job: &ScrapeJob, queue: &JobQueue) {
         tracing::warn!(id, %err, "failed to clear blacklisted streams");
     }
 
-    // Persist the parent ScrapeJob so `finalize` — which runs in whichever
-    // plugin-hook worker drains the last child — can reconstruct the
-    // rate-limit retry counter and replay the next attempt.
     queue.flow_set_context("scrape", id, job).await;
 
     if queue.fan_out_plugin_hook(scrape_event(job), id).await == 0 {
@@ -91,17 +88,11 @@ pub async fn start(id: i64, job: &ScrapeJob, queue: &JobQueue) {
 
 pub async fn finalize(id: i64, queue: &JobQueue) {
     let Some(job) = queue.flow_get_context::<ScrapeJob>("scrape", id).await else {
-        // Context was wiped (cancellation, TTL expiry, race with restart).
-        // We can't reconstruct rate_limit_retries; clear flow state and bail
-        // — the next process-media-item cycle will rebuild from scratch.
         tracing::warn!(id, "scrape finalize: missing flow context, clearing flow");
         queue.clear_flow_all("scrape", id).await;
         return;
     };
 
-    // Snapshot the counters and tear down everything except `flow_results`.
-    // `flow_results` is owned by the next stage (parse_results) on the success
-    // path; bail-out paths below clear it explicitly via `clear_flow_all`.
     let result_count = queue.flow_result_count("scrape", id).await;
     let rate_limited_count = queue.flow_rate_limited_count("scrape", id).await;
     queue.clear_flow("scrape", id).await;
@@ -113,12 +104,6 @@ pub async fn finalize(id: i64, queue: &JobQueue) {
         return;
     };
 
-    // Skip items in terminal/non-processable states — stale plugin jobs can
-    // still drain after an item is marked Failed or Completed (e.g. a season
-    // pack downloaded every requested episode while this scrape was in
-    // flight); without this guard they would fire spurious "no streams"
-    // notifications indefinitely. Emit IncorrectState (mirrors riven-ts
-    // ScraperService.scrapeItem) so subscribers can observe the skip.
     if matches!(
         item.state,
         MediaItemState::Failed | MediaItemState::Paused | MediaItemState::Completed
@@ -134,9 +119,6 @@ pub async fn finalize(id: i64, queue: &JobQueue) {
     if result_count == 0 {
         queue.clear_flow_all("scrape", id).await;
 
-        // Every scraper deferred. Rate-limit failures don't count as scrape
-        // failures; schedule a delayed retry until the per-item budget
-        // (`max_scrape_attempts - failed_attempts`) is exhausted.
         if rate_limited_count > 0 {
             let max = queue.maximum_scrape_attempts.load(Ordering::Relaxed);
             let budget = rate_limit_retry_budget(max, item.failed_attempts);
@@ -198,9 +180,6 @@ pub async fn finalize(id: i64, queue: &JobQueue) {
 pub async fn parse_results(id: i64, _job: &ParseScrapeResultsJob, queue: &JobQueue) {
     tracing::debug!(id, "running parse-scrape-results flow");
 
-    // Drain results unconditionally up front: this stage is the sole consumer,
-    // so reading and clearing in one round-trip means every downstream bail-out
-    // path can return without juggling Redis cleanup.
     let responses: Vec<ScrapeResponse> = queue.drain_flow_results("scrape", id).await;
 
     let Some(item) = load_media_item_or_log(&queue.db_pool, id, "parse-scrape-results").await
@@ -293,9 +272,6 @@ pub async fn parse_results(id: i64, _job: &ParseScrapeResultsJob, queue: &JobQue
             })
             .await;
     } else {
-        // The new media_item_streams rows already triggered a state recompute;
-        // resetting failed_attempts triggers another that incorporates the
-        // counter.
         if let Err(err) = repo::reset_failed_attempts(&queue.db_pool, id).await {
             tracing::warn!(id, %err, "failed to reset failed_attempts");
         }

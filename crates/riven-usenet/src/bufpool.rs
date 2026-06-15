@@ -123,8 +123,6 @@ impl Drop for PooledBuf {
 mod tests {
     use super::*;
 
-    // Separate static pools per test — tests run in parallel and would
-    // otherwise race on a shared free list.
     static RECYCLE_POOL: BufPool = BufPool::new(2, 1024);
     static CAP_POOL: BufPool = BufPool::new(2, 1024);
 
@@ -143,10 +141,8 @@ mod tests {
 
     #[test]
     fn drops_oversized_and_respects_cap() {
-        // Oversized: not pooled.
         CAP_POOL.give(Vec::with_capacity(4096));
         assert_eq!(CAP_POOL.len(), 0);
-        // Cap of 2 retained.
         CAP_POOL.give(Vec::with_capacity(512));
         CAP_POOL.give(Vec::with_capacity(512));
         CAP_POOL.give(Vec::with_capacity(512));

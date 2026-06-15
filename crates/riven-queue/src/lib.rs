@@ -44,8 +44,6 @@ pub use maintenance::{
 };
 pub use workers::start_workers;
 
-// ── JobQueue ──────────────────────────────────────────────────────────────────
-
 /// Per-command response timeout for every Redis connection. The socket itself
 /// is reconnected by `ConnectionManager` in the background; this bounds the
 /// wait for a *reply* so a command in flight across a blip fails fast instead
@@ -105,15 +103,6 @@ impl JobQueue {
         retry_interval_secs: u64,
         maximum_scrape_attempts: u32,
     ) -> Result<Self> {
-        // Both the apalis worker/storage connection and the maintenance
-        // connection are built with an explicit `response_timeout`. A bare
-        // `ConnectionManager` reconnects its socket in the background, but with
-        // no response timeout a command already in flight when Redis blips
-        // awaits a reply that never arrives and hangs forever — which silently
-        // wedges the worker-pool restart loop in `riven-app` (it issues Redis
-        // commands with no timeout of its own). A bounded response timeout
-        // turns that hang into an error so the loop can recover without a
-        // process restart.
         let apalis_conn = connect_managed(redis_url).await?;
 
         let index_storage =
@@ -133,8 +122,6 @@ impl JobQueue {
             RedisConfig::new("riven:process-media-item"),
         );
 
-        // Skip Inline events — caller invokes the registry directly and
-        // awaits in-process, so the queue would never receive a job.
         let mut plugin_hook_storages: HashMap<(String, EventType), RedisStorage<PluginHookJob>> =
             HashMap::new();
         for (plugin_name, event_type) in registry.subscribed_event_pairs().await {
@@ -208,8 +195,6 @@ impl JobQueue {
         }
         names
     }
-
-    // ── Job push ──────────────────────────────────────────────────────────────
 
     pub async fn push_index(&self, job: IndexJob) {
         self.push_deduped("index", job.id, "IndexJob", || async {
@@ -342,9 +327,6 @@ impl JobQueue {
         .fetch_all(&self.db_pool)
         .await?;
 
-        // Permanently blacklist the current (broken) release(s) so the re-scrape
-        // can't re-pick the same one — otherwise a release whose gaps slip past
-        // the ingest probe gets re-grabbed endlessly.
         for (_, info_hash) in &entries {
             if let Some(info_hash) = info_hash
                 && let Err(error) = riven_db::repo::blacklist_stream_permanent_by_hash(
@@ -358,8 +340,6 @@ impl JobQueue {
             }
         }
 
-        // Delete the media entries so the item is no longer "completed", then
-        // recompute and re-process to scrape + ingest a different release.
         for (id, _) in &entries {
             if let Err(error) = riven_db::repo::delete_filesystem_entry(&self.db_pool, *id).await {
                 tracing::warn!(%error, entry_id = *id, "regrab: failed to delete filesystem entry");
@@ -416,8 +396,6 @@ impl JobQueue {
         true
     }
 
-    // ── Dedup ─────────────────────────────────────────────────────────────────
-
     /// Release the dedup key for a job, allowing it to be re-queued.
     pub async fn release_dedup(&self, prefix: &str, id: i64) {
         let mut conn = self.redis.clone();
@@ -460,8 +438,6 @@ impl JobQueue {
             tracing::error!(error = %e, label, "failed to push job");
         }
     }
-
-    // ── Scheduled tasks ───────────────────────────────────────────────────────
 
     pub async fn schedule_scrape_at(&self, job: ScrapeJob, run_at: DateTime<Utc>) {
         if run_at <= Utc::now() {
@@ -603,11 +579,8 @@ impl JobQueue {
         }
     }
 
-    // ── Flow helpers ──────────────────────────────────────────────────────────
-
     pub async fn init_flow(&self, prefix: &str, id: i64, pending: usize) {
         let mut conn = self.redis.clone();
-        // Clear any stale results from a previous run and reset the pending counter atomically.
         let _result: Result<(), _> = redis::pipe()
             .del(flow_results_key(prefix, id))
             .cmd("SET")
@@ -642,7 +615,6 @@ impl JobQueue {
     pub async fn flow_complete_child(&self, prefix: &str, id: i64) -> bool {
         let pending_key = flow_pending_key(prefix, id);
         let mut conn = self.redis.clone();
-        // Pipeline DECR + EXPIRE to save a round-trip on every plugin job completion.
         let (remaining, _): (i64, i64) = redis::pipe()
             .cmd("DECR")
             .arg(&pending_key)
@@ -784,8 +756,6 @@ impl JobQueue {
             .await;
     }
 
-    // ── Queue cancellation ────────────────────────────────────────────────────
-
     /// Returns true if `cancel_items` was called for this id recently. In-flight
     /// download handlers poll this between candidates so deleting an item
     /// stops debrid churn immediately, not only after the whole candidate list
@@ -812,9 +782,6 @@ impl JobQueue {
         }
         let id_set: std::collections::HashSet<i64> = ids.iter().copied().collect();
 
-        // Tombstone set so in-flight handlers can bail at their next checkpoint.
-        // Queue purge below handles jobs that haven't been dequeued; the set
-        // catches the ones already executing.
         let mut conn = self.redis.clone();
         let mut pipe = redis::pipe();
         for id in ids {
@@ -826,8 +793,6 @@ impl JobQueue {
             .ignore();
         let _result: Result<(), _> = pipe.query_async(&mut conn).await;
 
-        // Every queue that carries a `{ "id": <media_item_id>, ... }` payload
-        // at the top level of the job payload.
         let configs: [apalis_redis::RedisConfig; 5] = [
             self.index_storage.get_config().clone(),
             self.scrape_storage.get_config().clone(),
@@ -842,10 +807,6 @@ impl JobQueue {
             }
         }
 
-        // Plugin-hook queues for per-item fan-in events embed the media item
-        // id under `event.id`. Content-service fan-in carries no item id, so
-        // its hook queue is excluded — its singleton flow won't have anything
-        // to cancel for an individual item.
         for ((_plugin, event_type), storage) in &self.plugin_hook_storages {
             if !matches!(
                 event_type,
@@ -859,7 +820,6 @@ impl JobQueue {
             }
         }
 
-        // Dedup keys and flow state live outside apalis-managed keys.
         let mut conn = self.redis.clone();
         for id in ids {
             for prefix in ["index", "scrape", "parse", "download", "rank-streams"] {
@@ -941,7 +901,6 @@ impl JobQueue {
                 .query_async(&mut conn)
                 .await?;
 
-            // HSCAN returns flat [field, value, field, value, ...].
             let mut iter = batch.into_iter();
             while let (Some(task_id), Some(payload)) = (iter.next(), iter.next()) {
                 let Ok(value) = serde_json::from_str::<serde_json::Value>(&payload) else {
@@ -992,8 +951,6 @@ impl JobQueue {
         let _: () = pipe.query_async(&mut conn).await?;
         Ok(())
     }
-
-    // ── Domain events ─────────────────────────────────────────────────────────
 
     pub async fn notify(&self, event: RivenEvent) {
         drop(self.event_tx.send(event.clone()));
@@ -1050,8 +1007,6 @@ fn serialize_job_payload<T: Serialize>(job: &T) -> serde_json::Result<Vec<u8>> {
     Ok(buf)
 }
 
-// ── Redis key helpers ─────────────────────────────────────────────────────────
-
 #[inline]
 fn flow_pending_key(prefix: &str, id: i64) -> String {
     format!("riven:flow:{prefix}:{id}:pending")
@@ -1095,11 +1050,7 @@ fn dedup_key(prefix: &str, id: i64) -> String {
     format!("riven:dedup:{prefix}:{id}")
 }
 
-// ── Scheduled task IDs ────────────────────────────────────────────────────────
-
-// "RIVENIND" in ASCII
 const SCHEDULED_INDEX_TASK_NAMESPACE: u128 = 0x524956454e494e44_0000000000000000;
-// "RIVENSCR" in ASCII
 const SCHEDULED_SCRAPE_TASK_NAMESPACE: u128 = 0x524956454e534352_0000000000000000;
 
 fn scheduled_index_task_id(id: i64) -> Ulid {

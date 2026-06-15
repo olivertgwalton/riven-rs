@@ -15,12 +15,6 @@ use crate::{
     RankStreamsJob, ScrapeJob,
 };
 
-// ── Job handlers ──────────────────────────────────────────────────────────────
-
-// All flow `run` functions return `()` — they handle errors internally (log + emit events)
-// and are intentionally infallible. Handlers always return Ok(()) so Apalis does not retry;
-// retries are driven by the flows themselves re-enqueuing jobs as needed.
-
 async fn handle_index_job(job: IndexJob, q: Data<Arc<JobQueue>>) -> Result<(), BoxDynError> {
     let _guard = DedupGuard::new("index", job.id, q.redis.clone());
     crate::application::index::start(&job, &q).await;
@@ -81,9 +75,6 @@ async fn handle_plugin_hook_job(
         DispatchStrategy::Broadcast => handle_broadcast(&job, &q).await,
         DispatchStrategy::FanIn { prefix } => handle_fan_in(&job, &q, prefix).await,
         DispatchStrategy::Inline => {
-            // Should be unreachable — Inline events are filtered out at queue
-            // registration time. If a job is here, treat it as a broadcast so
-            // it doesn't sit dead in the queue.
             tracing::error!(?event_type, "Inline event reached plugin-hook worker");
             handle_broadcast(&job, &q).await
         }
@@ -232,8 +223,6 @@ async fn finalize_event(queue: &JobQueue, event: &RivenEvent, scope: i64) {
     }
 }
 
-// ── Monitor factory ───────────────────────────────────────────────────────────
-
 macro_rules! register_worker {
     ($monitor:expr, $queue:expr, $name:literal, $storage:ident, $n:expr, $handler:ident, $timeout_secs:expr) => {{
         let q = Arc::clone(&$queue);
@@ -257,26 +246,12 @@ macro_rules! register_worker {
 pub fn start_workers(queue: Arc<JobQueue>, usenet_download_workers: Option<usize>) -> Monitor {
     let cpu_n = std::thread::available_parallelism().map_or(4, std::num::NonZeroUsize::get);
 
-    // Orchestrators fan-out sub-jobs and return immediately — no IO, no blocking.
-    // Sized at `cpu * 1.5` so every flow worker (process-media-item, scrape,
-    // download, rank-streams, etc.) can have many items in flight without
-    // changing per-plugin load — the plugin-hook queues are the actual rate cap.
     let orchestrator_n = cpu_n.saturating_mul(3).div_ceil(2);
 
-    // Plugin workers spend almost all their time waiting on external HTTP calls
-    // (scrapers, TMDB/TVDB). Our jobs combine both in one task, so we set this high enough that external API rate limits — not
-    // our concurrency cap — are the bottleneck.
     let plugin_n = cpu_n.max(4) * 8;
 
-    // Parse is CPU-bound (spawn_blocking stream ranking) then sequential DB writes.
     let parse_n = cpu_n.max(5);
 
-    // Download workers run usenet ingests or call the torrent-client API.
-    // For usenet the binding resource is NNTP connections: each ingest is
-    // capped to a fixed per-job budget, so we run `pool ÷ cap` workers to fill
-    // the pool without oversubscribing it (the altmount model — small fixed
-    // per-import budget, scale the worker pool). Falls back to the conservative
-    // torrent-client default when usenet isn't configured.
     let download_n = usenet_download_workers.unwrap_or_else(|| cpu_n.max(10));
 
     let m = Monitor::new();
@@ -325,7 +300,6 @@ pub fn start_workers(queue: Arc<JobQueue>, usenet_download_workers: Option<usize
         handle_rank_streams_job,
         300
     );
-    // Per-item state machine — orchestration only, fans out and returns.
     let m = register_worker!(
         m,
         queue,

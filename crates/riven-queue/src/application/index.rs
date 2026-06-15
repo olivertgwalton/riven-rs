@@ -27,7 +27,6 @@ pub async fn start(job: &IndexJob, queue: &JobQueue) {
     }
 
     if queue.fan_out_plugin_hook(index_event(job), job.id).await == 0 {
-        // No indexer subscribed — finalize will see zero results and reschedule.
         finalize(job.id, queue).await;
     }
 }

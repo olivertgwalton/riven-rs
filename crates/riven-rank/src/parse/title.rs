@@ -126,7 +126,6 @@ fn strip_leading_brackets(cleaned: String) -> String {
 /// Extract the human-readable title from a raw torrent name.
 pub(crate) fn extract_title(raw: &str) -> String {
     let original_raw = raw;
-    // Step 1: Clean the raw title - replace dots/underscores with spaces
     let raw = {
         static RE_HONORIFIC_DOT: LazyLock<Regex> =
             LazyLock::new(|| Regex::new(r"(?i)\b(Mr|Mrs|Ms|Dr)\.\s").unwrap());
@@ -191,8 +190,8 @@ pub(crate) fn extract_title(raw: &str) -> String {
         promoted.unwrap_or(cleaned)
     };
 
-    // Step 2: Remove bracket groups at the start (e.g., [SubGroup]) before
-    // stripping non-Latin prefixes so anime group prefixes stay intact.
+    // Must strip leading bracket groups before non-Latin prefixes, or anime
+    // group prefixes get mangled.
     let cleaned = strip_leading_brackets(cleaned);
     let cleaned = {
         static RE_BRACKET_START: LazyLock<Regex> =
@@ -200,7 +199,6 @@ pub(crate) fn extract_title(raw: &str) -> String {
         RE_BRACKET_START.replace(&cleaned, "").to_string()
     };
 
-    // Step 3: Remove non-English character blocks from the beginning
     let cleaned = if should_strip_non_english_prefix(&cleaned) {
         RE_NON_ENGLISH_PREFIX.replace(&cleaned, "").to_string()
     } else {
@@ -255,17 +253,15 @@ pub(crate) fn extract_title(raw: &str) -> String {
         cleaned
     };
 
-    // Step 4: Remove site prefix if present
     let cleaned = if let Some(cap) = RE_SITE.captures(&cleaned) {
         cleaned[cap.get(0).unwrap().end()..].to_string()
     } else {
         cleaned
     };
 
-    // Step 5: Find the earliest "marker" position
     let mut end = cleaned.len();
 
-    // Check year — skip if it's at position 0 (year is part of the title, e.g. "2019 After...")
+    // A year at position 0 is part of the title (e.g. "2019 After...").
     for m in RE_YEAR.find_iter(&cleaned) {
         if m.start() > 0 {
             let tail = cleaned[m.end()..].trim_start();
@@ -284,9 +280,6 @@ pub(crate) fn extract_title(raw: &str) -> String {
     static RE_EPISODE_SINGLE_BRACKET: LazyLock<Regex> =
         LazyLock::new(|| Regex::new(r"\[\d{1,3}\]").unwrap());
 
-    // Year range, info parens, resolution, season/episode indicators, codec,
-    // audio, edition flags, collection markers, and embedded extensions all
-    // unconditionally mark the end of the title — take the earliest.
     if let Some(start) = min_match_start(
         &cleaned,
         &[
@@ -321,7 +314,6 @@ pub(crate) fn extract_title(raw: &str) -> String {
         end = end.min(start);
     }
 
-    // Check quality markers
     if let Some(m) = RE_TITLE_QUALITY.find(&cleaned) {
         let matched = m.as_str().trim().to_ascii_lowercase();
         let tail = cleaned[m.end()..].trim_start();
@@ -338,7 +330,6 @@ pub(crate) fn extract_title(raw: &str) -> String {
         static RE_TITLE_METADATA_BRACKET: LazyLock<Regex> = LazyLock::new(|| {
             Regex::new(r"(?i)\[(?:movie|multiple subtitle|avc|hevc|aac|dual(?:[- ]audio)?|sub(?:title)?s?)\]").unwrap()
         });
-        // Anime and scene names often use "Title - 05" for bare episode numbers.
         static RE_TITLE_DASH_EPISODE: LazyLock<Regex> =
             LazyLock::new(|| Regex::new(r"\s-\s\d{1,3}\b").unwrap());
         if let Some(start) = min_match_start(
@@ -353,7 +344,6 @@ pub(crate) fn extract_title(raw: &str) -> String {
         }
     }
 
-    // Check network/service markers that commonly trail titles in scene names.
     {
         static RE_TITLE_NETWORK: LazyLock<Regex> = LazyLock::new(|| {
             Regex::new(
@@ -368,8 +358,6 @@ pub(crate) fn extract_title(raw: &str) -> String {
         }
     }
 
-    // Edition/flag, codec, audio, and embedded-extension markers all mark
-    // the end of the title unconditionally.
     if let Some(start) = min_match_start(
         &cleaned,
         &[
@@ -395,8 +383,6 @@ pub(crate) fn extract_title(raw: &str) -> String {
     ) {
         end = end.min(start);
     }
-    // "Documentary" ends the title unless it's part of a phrase like
-    // "Documentary in ...".
     if let Some(m) = RE_DOCUMENTARY.find(&cleaned) {
         let tail = cleaned[m.end()..].trim_start().to_ascii_lowercase();
         if !tail.starts_with("in ") {
@@ -404,7 +390,6 @@ pub(crate) fn extract_title(raw: &str) -> String {
         }
     }
 
-    // Step 6: Extract and clean up
     let title = &cleaned[..end];
     let title = title.trim_start_matches(|c: char| c == '/' || c == '-' || c.is_whitespace());
     let title = {
@@ -413,7 +398,6 @@ pub(crate) fn extract_title(raw: &str) -> String {
         RE_LEADING_YEAR_PAREN.replace(title, "").to_string()
     };
 
-    // Remove trailing dashes, parens, brackets, whitespace, and stray source tags
     let mut title = title
         .trim_end_matches(|c: char| matches!(c, '-' | '(' | '[' | ']') || c.is_whitespace())
         .to_string();
@@ -433,7 +417,6 @@ pub(crate) fn extract_title(raw: &str) -> String {
         RE_TRAILING_EXTENSION_WORD.replace(&title, "").to_string()
     };
 
-    // Collapse whitespace and trim
     let title = title
         .split_whitespace()
         .collect::<Vec<_>>()
@@ -484,7 +467,6 @@ pub(crate) fn normalize_title(title: &str) -> String {
     let no_accents = remove_accents(&lower);
     let replaced = no_accents.replace('&', " and ");
 
-    // Remove 4-digit years (e.g. 1900-2099) to handle matching when one source excludes it
     static RE_YEAR_STRIP: LazyLock<Regex> =
         LazyLock::new(|| Regex::new(r"\b(19|20)\d{2}\b").unwrap());
     let no_year = RE_YEAR_STRIP.replace_all(&replaced, "").to_string();

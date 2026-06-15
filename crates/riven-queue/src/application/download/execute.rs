@@ -102,10 +102,6 @@ pub async fn attempt_download(
 
     let (mut download_result, mut saw_unavailable) = dispatch_once(queue, &event, info_hash).await;
 
-    // Retry once after clearing stale cache-check keys. A parallel item can get a stale
-    // "cached" hit, call add_torrent, find it's not actually available, and return
-    // `DownloadStreamUnavailable`. Clearing + re-dispatching forces a fresh cache check,
-    // which usually reveals the torrent IS cached and add_torrent succeeds.
     if download_result.is_none() && saw_unavailable {
         if let Err(error) = clear_stremthru_cache_check_keys(queue, info_hash).await {
             tracing::error!(
@@ -120,9 +116,6 @@ pub async fn attempt_download(
                 info_hash,
                 "retrying download after clearing stale cache-check"
             );
-            // Empty `cached_stores` forces the plugin to run an on-demand cache check rather
-            // than reusing the stale pre-checked entries from the original dispatch (which
-            // are what sent us down the `add_torrent → unavailable` path in the first place).
             let retry_event = RivenEvent::MediaItemDownloadRequested {
                 id,
                 info_hash: info_hash.clone(),
@@ -137,17 +130,15 @@ pub async fn attempt_download(
     }
 
     let Some(download) = download_result else {
-        if saw_unavailable {
-            // Still unavailable after retry — clear keys one more time and give up on this
-            // candidate. Do not blacklist; stream may become available later.
-            if let Err(error) = clear_stremthru_cache_check_keys(queue, info_hash).await {
-                tracing::error!(
-                    id,
-                    info_hash,
-                    error = %error,
-                    "failed to clear stale stremthru cache-check keys"
-                );
-            }
+        if saw_unavailable
+            && let Err(error) = clear_stremthru_cache_check_keys(queue, info_hash).await
+        {
+            tracing::error!(
+                id,
+                info_hash,
+                error = %error,
+                "failed to clear stale stremthru cache-check keys"
+            );
         }
         tracing::debug!(id, info_hash, "no download provider accepted cached stream");
         return DownloadAttemptOutcome::Failed;

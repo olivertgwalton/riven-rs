@@ -194,8 +194,6 @@ fn parse_content_rating(rating: &str) -> Option<ContentRating> {
     }
 }
 
-// ── TMDB API response types ──
-
 #[derive(Deserialize)]
 struct TmdbFindResponse {
     movie_results: Vec<TmdbFindMovie>,

@@ -121,7 +121,6 @@ mod tests {
         let cache = SegmentCache::new(100);
         cache.put("a".into(), Bytes::from(vec![0u8; 60]));
         cache.put("b".into(), Bytes::from(vec![0u8; 60]));
-        // 60 + 60 = 120 > 100 → evict LRU ("a").
         assert!(cache.get("a").is_none());
         assert!(cache.get("b").is_some());
         assert_eq!(cache.current_bytes(), 60);
@@ -132,10 +131,9 @@ mod tests {
         let cache = SegmentCache::new(100);
         cache.put("a".into(), Bytes::from(vec![0u8; 40]));
         cache.put("b".into(), Bytes::from(vec![0u8; 40]));
-        // `contains` must NOT promote "a" to MRU.
         assert!(cache.contains("a"));
         assert!(!cache.contains("missing"));
-        cache.put("c".into(), Bytes::from(vec![0u8; 40])); // 120 > 100 → evict LRU = a
+        cache.put("c".into(), Bytes::from(vec![0u8; 40]));
         assert!(cache.get("a").is_none());
         assert!(cache.get("b").is_some());
     }
@@ -145,8 +143,8 @@ mod tests {
         let cache = SegmentCache::new(100);
         cache.put("a".into(), Bytes::from(vec![0u8; 40]));
         cache.put("b".into(), Bytes::from(vec![0u8; 40]));
-        let _ = cache.get("a"); // a → MRU
-        cache.put("c".into(), Bytes::from(vec![0u8; 40])); // 120 > 100 → evict LRU = b
+        let _ = cache.get("a");
+        cache.put("c".into(), Bytes::from(vec![0u8; 40]));
         assert!(cache.get("a").is_some());
         assert!(cache.get("b").is_none());
         assert!(cache.get("c").is_some());

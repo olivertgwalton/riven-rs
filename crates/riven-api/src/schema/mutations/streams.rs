@@ -12,8 +12,6 @@ use crate::schema::discovery::{
 };
 use crate::schema::types::DiscoveredStream;
 
-// ── Resolver ──
-
 #[derive(Default)]
 pub struct StreamsMutations;
 

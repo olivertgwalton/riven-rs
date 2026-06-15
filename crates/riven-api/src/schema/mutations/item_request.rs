@@ -16,8 +16,6 @@ pub(super) enum RequestItemMutationResponseErrorCode {
     UnexpectedError,
 }
 
-// ── Input types ──
-
 /// Input for requesting a movie to be tracked.
 #[derive(InputObject)]
 pub(super) struct MovieRequestInput {
@@ -46,8 +44,6 @@ pub(super) struct ShowRequestInput {
     external_request_id: Option<String>,
 }
 
-// ── Response types ──
-
 /// Structured response returned by `requestMovie` and `requestShow`.
 #[derive(SimpleObject)]
 pub(super) struct RequestItemMutationResponse {
@@ -69,8 +65,6 @@ pub(super) struct RequestItemsResult {
     /// Item requests that were updated (e.g. new seasons added to an existing show request).
     updated_items: Vec<ItemRequest>,
 }
-
-// ── Resolver ──
 
 #[derive(Default)]
 pub struct ItemRequestMutations;

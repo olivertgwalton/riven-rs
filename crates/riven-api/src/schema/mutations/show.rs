@@ -13,8 +13,6 @@ use crate::schema::typed_items::Show;
 use super::MutationStatusText;
 use super::movie::{parse_aliases, parse_naive_date};
 
-// ── Input types ──
-
 #[derive(InputObject)]
 pub(super) struct IndexEpisodeInput {
     title: String,
@@ -54,8 +52,6 @@ pub(super) struct IndexShowInput {
     genres: Vec<String>,
 }
 
-// ── Response types ──
-
 /// Structured response returned by `indexShow`.
 #[derive(SimpleObject)]
 pub(super) struct IndexShowMutationResponse {
@@ -64,8 +60,6 @@ pub(super) struct IndexShowMutationResponse {
     status_text: MutationStatusText,
     show: Option<Show>,
 }
-
-// ── Resolver ──
 
 #[derive(Default)]
 pub struct ShowMutations;

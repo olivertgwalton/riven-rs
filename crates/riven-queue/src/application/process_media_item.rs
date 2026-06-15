@@ -40,15 +40,11 @@ pub async fn run(job: &ProcessMediaItemJob, queue: &JobQueue) {
         return;
     };
 
-    // Hard-stop on terminal/sticky states.
     if matches!(item.state, MediaItemState::Failed | MediaItemState::Paused) {
         tracing::debug!(id, state = ?item.state, "process-media-item: terminal state, stopping");
         return;
     }
 
-    // Already done — a prior step's writes flipped this to Completed. For
-    // Show/Season this can happen when a season pack matched every requested
-    // episode in one shot.
     if item.state == MediaItemState::Completed {
         log_completion(&item, job.started_at);
         return;
@@ -111,9 +107,6 @@ async fn handle_scrape(job: &ProcessMediaItemJob, item: &MediaItem, queue: &JobQ
                 .await;
         }
         MediaItemType::Show => {
-            // Shows fan out to their requested seasons (each becomes its own
-            // ProcessMediaItem). The Show itself has no scrape job — its
-            // state cascades from children.
             fan_out_to_children(item, queue).await;
         }
     }
@@ -145,16 +138,10 @@ async fn handle_validate(job: &ProcessMediaItemJob, item: &MediaItem, queue: &Jo
     match item.state {
         MediaItemState::Completed => log_completion(&item, job.started_at),
         MediaItemState::PartiallyCompleted | MediaItemState::Ongoing => {
-            // Show/Season got *some* of its children but not all — kick off
-            // a fresh ProcessMediaItem per incomplete child.
             fan_out_to_children(&item, queue).await;
         }
-        MediaItemState::Failed | MediaItemState::Paused => {
-            // Sticky state — no further action.
-        }
+        MediaItemState::Failed | MediaItemState::Paused => {}
         MediaItemState::Scraped | MediaItemState::Indexed | MediaItemState::Unreleased => {
-            // Download didn't make this item Completed — schedule a re-scrape
-            // 30 minutes from now.
             let at = Utc::now() + Duration::minutes(30);
             tracing::debug!(
                 id = item.id,
@@ -205,9 +192,7 @@ pub(crate) async fn fan_out_to_children(parent: &MediaItem, queue: &JobQueue) {
                     .await;
             }
         }
-        MediaItemType::Movie | MediaItemType::Episode => {
-            // Leaf: no children to fan out to.
-        }
+        MediaItemType::Movie | MediaItemType::Episode => {}
     }
 }
 

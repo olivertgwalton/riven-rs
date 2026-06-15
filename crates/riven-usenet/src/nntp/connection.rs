@@ -61,14 +61,9 @@ pub struct NntpConnection {
 
 impl NntpConnection {
     pub async fn connect(cfg: &NntpServerConfig) -> Result<Self, NntpError> {
-        // Sized to absorb a typical ~720 KB segment body in roughly one
-        // fill rather than thousands of 8 KB syscalls.
         const NNTP_READ_BUF: usize = 512 * 1024;
 
         let connect_fut = async {
-            // Dial a cached/resolved IP (TLS still verifies against `cfg.host`
-            // below, so the SNI/cert path is unaffected). On connect failure,
-            // drop the cached address so the next attempt re-resolves.
             let addrs = resolve_cached(&cfg.host, cfg.port).await?;
             let tcp = match connect_first(&addrs).await {
                 Ok(tcp) => tcp,
@@ -145,7 +140,6 @@ impl NntpConnection {
     /// `spawn_blocking` decode closure) returns the allocation to the pool
     /// when the `PooledBuf` drops.
     pub(crate) async fn fetch_body(&mut self, message_id: &str) -> Result<PooledBuf, NntpError> {
-        // Some servers reject angle-less message-ids, so always wrap in <>.
         let id_wrapped = if message_id.starts_with('<') {
             message_id.to_string()
         } else {
@@ -159,8 +153,6 @@ impl NntpConnection {
         if !status.starts_with("222") {
             return Err(NntpError::ServerError(status));
         }
-        // Pull a recycled buffer from the pool; ~1 MB matches the typical
-        // ~720 KB encoded segment with headroom for yEnc escape overhead.
         let mut buf = PooledBuf::take(&ENCODED_BUF_POOL, 1 << 20);
         self.stream
             .read_until_dot(buf.as_mut_vec(), self.read_timeout)

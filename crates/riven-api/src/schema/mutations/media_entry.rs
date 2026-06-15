@@ -7,8 +7,6 @@ use crate::schema::auth::require_library_access;
 
 use super::MutationStatusText;
 
-// ── Response types ──
-
 /// Structured response returned by `saveStreamUrl`.
 #[derive(SimpleObject)]
 pub(super) struct SaveStreamUrlMutationResponse {
@@ -17,8 +15,6 @@ pub(super) struct SaveStreamUrlMutationResponse {
     status_text: MutationStatusText,
     item: Option<FileSystemEntry>,
 }
-
-// ── Resolver ──
 
 #[derive(Default)]
 pub struct MediaEntryMutations;

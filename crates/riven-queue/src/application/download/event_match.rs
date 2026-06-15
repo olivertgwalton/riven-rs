@@ -86,8 +86,6 @@ pub fn parse_episode_event(title: &str) -> Option<(Vec<String>, SessionKind)> {
     }
     let session_toks = tokens(&title[open + 1..close]);
     let (session, at) = parse_session(&session_toks)?;
-    // The whole parenthesised part must be the session descriptor — reject
-    // titles like "The Show (Part 1 Race Edition)" where it's mid-sentence.
     if at != 0 {
         return None;
     }
@@ -128,12 +126,12 @@ fn within_one_edit(a: &str, b: &str) -> bool {
         i += 1;
     }
     if i == sb.len() {
-        return true; // prefix, lengths differ by ≤1
+        return true;
     }
     if sb.len() == lb.len() {
-        sb[i + 1..] == lb[i + 1..] // one substitution
+        sb[i + 1..] == lb[i + 1..]
     } else {
-        sb[i..] == lb[i + 1..] // one insertion in the longer
+        sb[i..] == lb[i + 1..]
     }
 }
 
@@ -247,12 +245,19 @@ pub fn match_release_to_episode(candidate: &str, events: &[EpisodeEvent]) -> Opt
     let (session, _) = parse_session(&toks)?;
     let dates = extract_dates(&toks);
 
-    let mut hits = events
-        .iter()
-        .filter(|ev| event_hit(&toks, session, &dates, &ev.venue_words, ev.session, ev.aired));
+    let mut hits = events.iter().filter(|ev| {
+        event_hit(
+            &toks,
+            session,
+            &dates,
+            &ev.venue_words,
+            ev.session,
+            ev.aired,
+        )
+    });
     let first = hits.next()?;
     if hits.next().is_some() {
-        return None; // ambiguous — refuse to guess
+        return None;
     }
     Some(first.episode_index)
 }
@@ -325,7 +330,6 @@ mod tests {
     #[test]
     fn matches_by_date_when_venue_is_unrecognisable() {
         let events = f1_2020_sample();
-        // 08.09.2020 is ambiguous (Aug 9 / Sep 8); only Aug 9 has a Race.
         assert_eq!(
             match_release_to_episode(
                 "Formula.1.70th.Anniversary.Grand.Prix.08.09.2020.RACE.1080p.WEB-WDTeam",
@@ -351,12 +355,13 @@ mod tests {
     #[test]
     fn season_packs_and_ambiguity_do_not_match() {
         let events = f1_2020_sample();
-        // "Races" is not a session token — packs never event-match.
         assert_eq!(
-            match_release_to_episode("Formula.1.2020.Complete.Races.SkyF1HD.1080p-smcgill", &events),
+            match_release_to_episode(
+                "Formula.1.2020.Complete.Races.SkyF1HD.1080p-smcgill",
+                &events
+            ),
             None,
         );
-        // Session without venue or date matches nothing unambiguously.
         assert_eq!(
             match_release_to_episode("Formula1.2020.Race.1080p.WEB", &events),
             None,
@@ -371,13 +376,11 @@ mod tests {
             "Bahrain (Qualifying)",
             aired,
         ));
-        // Wrong session for the same venue/date.
         assert!(!release_matches_episode(
             "Formula1.2020.Bahrein.GP.Race.1080p.WEB-DL",
             "Bahrain (Qualifying)",
             aired,
         ));
-        // Right session but no venue or date evidence.
         assert!(!release_matches_episode(
             "Formula1.2020.Qualifying.1080p.WEB-DL",
             "Bahrain (Qualifying)",

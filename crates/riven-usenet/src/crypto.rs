@@ -48,9 +48,6 @@ pub fn decrypt_blocks_in_place(
         return Ok(());
     }
     let mut dec = Decryptor::<Aes256>::new(key.into(), iv.into());
-    // `slice_as_chunks_mut` is a safe API that splits `&mut [u8]` into
-    // `&mut [Array<u8, U16>]` (and a tail). The tail is empty because we
-    // verified the length is a multiple of `AES_BLOCK` above.
     let (blocks, _tail) = AesBlock::slice_as_chunks_mut(ciphertext);
     dec.decrypt_blocks(blocks);
     Ok(())
@@ -70,7 +67,7 @@ mod tests {
 
     #[test]
     fn cbc_round_trip() {
-        let key = derive_key("hunter2", &[7u8; 16], 4); // 2^4 = 16 iters
+        let key = derive_key("hunter2", &[7u8; 16], 4);
         let iv = [3u8; 16];
         let plaintext = b"sixteen-byte-blo".to_vec();
         assert_eq!(plaintext.len() % AES_BLOCK, 0);

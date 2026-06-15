@@ -82,14 +82,9 @@ fn check_exclude(data: &ParsedData, settings: &RankSettings, failed: &mut Vec<St
 
 const LANG_ANIME: &[&str] = &["ja", "zh", "ko"];
 const LANG_NON_ANIME: &[&str] = &[
-    "de", "es", "hi", "ta", "ru", "ua", "th", "it", "ar", "pt", "fr",
-    // South/Southeast Asian
-    "pa", "mr", "gu", "te", "kn", "ml", "vi", "id", "ms", "bn",
-    // Middle East / Central Asia
-    "tr", "he", "fa", // European
-    "el", "lt", "lv", "et", "pl", "cs", "sk", "hu", "ro", "bg", "sr", "hr", "sl", "nl", "da", "fi",
-    "sv", "no", // Additional (riven-rs extensions beyond RTN)
-    "uk", "ca", "eu",
+    "de", "es", "hi", "ta", "ru", "ua", "th", "it", "ar", "pt", "fr", "pa", "mr", "gu", "te", "kn",
+    "ml", "vi", "id", "ms", "bn", "tr", "he", "fa", "el", "lt", "lv", "et", "pl", "cs", "sk", "hu",
+    "ro", "bg", "sr", "hr", "sl", "nl", "da", "fi", "sv", "no", "uk", "ca", "eu",
 ];
 const LANG_COMMON: &[&str] = &[
     "de", "es", "hi", "ta", "ru", "ua", "th", "it", "zh", "ar", "fr",
@@ -151,7 +146,6 @@ fn language_handler(data: &ParsedData, settings: &RankSettings, failed: &mut Vec
 }
 
 fn fetch_resolution(data: &ParsedData, settings: &RankSettings, failed: &mut Vec<String>) -> bool {
-    // Aliases mirror RTN's res_map: 1440p→1080p bucket, 576p→480p, 240p→360p.
     let enabled = settings.resolutions.allows(&data.resolution);
     if !enabled {
         failed.push("resolution".into());
@@ -283,7 +277,6 @@ pub fn check_fetch(data: &ParsedData, settings: &RankSettings) -> (bool, Vec<Str
         ($fn:expr) => {{
             let ok = $fn(data, settings, &mut failed);
             if speed && !ok {
-                // Required patterns override even a speed-mode early exit.
                 return (required_matches(data, settings), failed);
             }
         }};

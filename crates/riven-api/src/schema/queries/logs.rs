@@ -47,8 +47,6 @@ impl LogsQuery {
         let entries = task::spawn_blocking(move || -> Vec<LogEntry> {
             use std::collections::VecDeque;
 
-            // The rolling file appender writes files named with the "riven.log"
-            // prefix followed by the rotation timestamp.
             let dir = std::path::Path::new(&log_dir);
             let mut log_files: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
                 .into_iter()
@@ -69,8 +67,6 @@ impl LogsQuery {
 
             'outer: for path in log_files.iter().rev() {
                 if let Ok(file) = std::fs::File::open(path) {
-                    // Read all lines from this file, then prepend them as a block
-                    // so that within each file lines stay in chronological order.
                     let file_lines: Vec<String> = BufReader::new(file)
                         .lines()
                         .map_while(Result::ok)
@@ -95,8 +91,6 @@ impl LogsQuery {
                     {
                         return None;
                     }
-                    // tracing-subscriber JSON format:
-                    // { "timestamp": "...", "level": "INFO", "fields": { "message": "..." }, "target": "..." }
                     let message = v["fields"]["message"]
                         .as_str()
                         .or_else(|| v["message"].as_str())

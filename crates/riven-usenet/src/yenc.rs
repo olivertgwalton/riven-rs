@@ -69,9 +69,6 @@ pub enum YencError {
 pub fn decode(body: &[u8]) -> Result<(Bytes, YencInfo), YencError> {
     let mut info = YencInfo::default();
 
-    // Locate `=ybegin` at the start of a line. The NNTP server may prepend
-    // a `222 <id>` status line and/or blank lines before the article body;
-    // we just scan forward for the marker rather than parsing those.
     let begin_idx = find_line_starting_with(body, b"=ybegin").ok_or(YencError::MissingBegin)?;
     let after_begin = line_end(body, begin_idx);
     parse_kv(&body[begin_idx..after_begin], &mut |k, v| match k {
@@ -80,7 +77,6 @@ pub fn decode(body: &[u8]) -> Result<(Bytes, YencInfo), YencError> {
         _ => {}
     });
 
-    // Optional `=ypart` line immediately after `=ybegin`.
     let mut payload_start = after_begin;
     if body[payload_start..].starts_with(b"=ypart") {
         let part_end = line_end(body, payload_start);
@@ -92,10 +88,6 @@ pub fn decode(body: &[u8]) -> Result<(Bytes, YencInfo), YencError> {
         payload_start = part_end;
     }
 
-    // Locate `=yend` at the start of a line within the remaining body.
-    // Payload bytes never contain unescaped `\r` or `\n`, so any `\n=yend`
-    // is the terminator. (Handle the corner case of `=yend` being the very
-    // first thing after the headers via `starts_with`.)
     let yend_idx = if body[payload_start..].starts_with(b"=yend") {
         payload_start
     } else {
@@ -121,9 +113,6 @@ pub fn decode(body: &[u8]) -> Result<(Bytes, YencInfo), YencError> {
         tracing::warn!(declared, computed, "yEnc pcrc32 mismatch");
     }
 
-    // `out` (a `PooledBuf`) owns the decoded allocation; `Bytes::from_owner`
-    // keeps it alive while the cache holds the segment and returns it to the
-    // pool when the last `Bytes` referencing it drops.
     Ok((Bytes::from_owner(out), info))
 }
 
@@ -143,18 +132,11 @@ fn decode_payload(payload: &[u8], info: &mut YencInfo, out: &mut Vec<u8>) {
     let mut i = 0;
 
     while i < payload.len() {
-        // Find the next byte that needs special handling: `=` starts an
-        // escape; `\r` and `\n` are line terminators. Everything else is a
-        // plain encoded byte we can bulk-decode.
         let rel = memchr3(b'=', b'\r', b'\n', &payload[i..]).unwrap_or(payload.len() - i);
 
         if rel > 0 {
             let src = &payload[i..i + rel];
             let dst_start = out.len();
-            // The tight loop over `spare_capacity_mut` is what LLVM
-            // vectorises here — measurably faster than
-            // `extend(iter.map(...))`, which goes through Iterator and
-            // doesn't auto-SIMD.
             out.reserve(rel);
             let spare = &mut out.spare_capacity_mut()[..rel];
             for (slot, &b) in spare.iter_mut().zip(src) {
@@ -173,11 +155,6 @@ fn decode_payload(payload: &[u8], info: &mut YencInfo, out: &mut Vec<u8>) {
         }
         match payload[i] {
             b'=' => {
-                // Escape sequence: next byte carries the actual value
-                // shifted by an additional 64. A trailing `=` with no
-                // following byte means the article body was truncated
-                // mid-escape; tolerate by stopping rather than indexing
-                // out of bounds.
                 if i + 1 >= payload.len() {
                     break;
                 }
@@ -186,7 +163,6 @@ fn decode_payload(payload: &[u8], info: &mut YencInfo, out: &mut Vec<u8>) {
                 i += 2;
             }
             _ => {
-                // `\r` or `\n` — line terminator, drop and continue.
                 i += 1;
             }
         }
@@ -223,13 +199,10 @@ fn parse_kv(line: &[u8], cb: &mut dyn FnMut(&str, &str)) {
         Ok(s) => s.trim_end_matches(['\r', '\n']),
         Err(_) => return,
     };
-    // Skip the leading directive token (e.g. `=ybegin`).
     let mut iter = s.splitn(2, char::is_whitespace);
     let _ = iter.next();
     let rest = iter.next().unwrap_or("");
 
-    // `name=...` is special: it consumes the rest of the line. Handle it
-    // ourselves before tokenizing the remaining `key=value` pairs.
     let prefix: &str = if let Some(idx) = rest.find("name=") {
         let (before, name_part) = rest.split_at(idx);
         cb("name", name_part[5..].trim());
@@ -238,7 +211,6 @@ fn parse_kv(line: &[u8], cb: &mut dyn FnMut(&str, &str)) {
         rest
     };
 
-    // Tokenize the prefix on whitespace; skip the consumed `name=...` portion.
     for tok in prefix.split_ascii_whitespace() {
         if let Some((k, v)) = tok.split_once('=') {
             cb(k, v);
@@ -287,11 +259,7 @@ mod tests {
 
     #[test]
     fn round_trip_with_escapes() {
-        // Bytes that require escaping: \0 \n \r =. After +42 these become
-        // 42, 52, 55, 107 — but the encoder additionally escapes
-        // post-+42 values that hit the same set, so a payload of bytes that
-        // produce =/\0/\n/\r when shifted will exercise the escape path.
-        let payload: Vec<u8> = vec![214, 222, 223, 19]; // +42 = 256(=0), 264(=8), 265, 61(=)
+        let payload: Vec<u8> = vec![214, 222, 223, 19];
         let encoded = encode_single(&payload, "x");
         let (decoded, _) = decode(&encoded).unwrap();
         assert_eq!(decoded.as_ref(), payload.as_slice());
@@ -299,8 +267,6 @@ mod tests {
 
     #[test]
     fn round_trip_large_payload() {
-        // Exercise the bulk-decode path: a long run of plain bytes
-        // interrupted by occasional escapes.
         let mut payload = Vec::with_capacity(64 * 1024);
         for i in 0..64u32 * 1024 {
             payload.push((i & 0xff) as u8);
@@ -314,8 +280,6 @@ mod tests {
 
     #[test]
     fn multipart_parses_ypart() {
-        // Build a minimal multi-part article: =ybegin (no size on the
-        // single-part stand-in) + =ypart begin=/end= + payload + =yend.
         let data = b"hello world";
         let mut encoded = Vec::new();
         encoded.extend_from_slice(b"=ybegin part=1 line=128 size=11 name=hello.bin\r\n");
@@ -337,7 +301,6 @@ mod tests {
 
     #[test]
     fn skips_nntp_status_preamble() {
-        // Real NNTP responses begin with `222 <id>\r\n` before =ybegin.
         let payload = b"abc";
         let body = encode_single(payload, "x");
         let mut with_preamble = b"222 0 <foo@bar>\r\n".to_vec();

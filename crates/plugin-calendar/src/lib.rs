@@ -34,8 +34,6 @@ impl Plugin for CalendarPlugin {
     }
 
     fn subscribed_events(&self) -> &[EventType] {
-        // Regenerate on startup and whenever item metadata is refreshed,
-        // which is when air dates are first written or updated.
         &[EventType::CoreStarted, EventType::MediaItemIndexSuccess]
     }
 
@@ -141,7 +139,6 @@ fn build_description(item: &MediaItem) -> String {
         parts.push(format!("TVDB: {id}"));
     }
 
-    // Use iCal escaped newlines so clients render each field on its own line.
     parts.join("\\n")
 }
 
@@ -170,7 +167,6 @@ fn fold_line(line: &str) -> String {
     while pos < bytes.len() {
         let end = (pos + MAX).min(bytes.len());
 
-        // Walk back to a UTF-8 char boundary so we never split a multi-byte sequence.
         let mut end = end;
         while !line.is_char_boundary(end) {
             end -= 1;
@@ -181,14 +177,12 @@ fn fold_line(line: &str) -> String {
         pos = end;
 
         if pos < bytes.len() {
-            out.push(' '); // RFC 5545 continuation marker
+            out.push(' ');
         }
     }
 
     out
 }
-
-// ── GraphQL types and query ──
 
 #[derive(SimpleObject)]
 pub struct CalendarEntry {

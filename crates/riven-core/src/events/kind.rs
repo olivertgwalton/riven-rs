@@ -166,7 +166,6 @@ impl EventType {
     pub const fn dispatch_strategy(self) -> DispatchStrategy {
         use DispatchStrategy::*;
         match self {
-            // ── Inline (synchronous request-response, no queue) ──────────
             Self::MediaItemDownloadRequested
             | Self::MediaItemDownloadCacheCheckRequested
             | Self::MediaItemDownloadProviderListRequested
@@ -174,12 +173,10 @@ impl EventType {
             | Self::ActivePlaybackSessionsRequested
             | Self::DebridUserInfoRequested => Inline,
 
-            // ── Fan-in (orchestrator fans out, finalize aggregates) ──────
             Self::MediaItemScrapeRequested => FanIn { prefix: "scrape" },
             Self::MediaItemIndexRequested => FanIn { prefix: "index" },
             Self::ContentServiceRequested => FanIn { prefix: "content" },
 
-            // ── Broadcast (notifications) ────────────────────────────────
             Self::CoreStarted
             | Self::CoreShutdown
             | Self::ItemRequestCreated
@@ -236,20 +233,33 @@ mod tests {
             DebridUserInfoRequested,
             ActivePlaybackSessionsRequested,
         ];
-        // Exhaustiveness check: the match must cover every variant, so a new
-        // one can't be added without also adding it to the array above.
         for variant in all {
             match variant {
-                CoreStarted | CoreShutdown | ContentServiceRequested | ItemRequestCreated
-                | ItemRequestUpdated | MediaItemIndexRequested | MediaItemIndexSuccess
-                | MediaItemIndexError | MediaItemIndexErrorIncorrectState
-                | MediaItemScrapeRequested | MediaItemScrapeSuccess | MediaItemScrapeError
-                | MediaItemScrapeErrorIncorrectState | MediaItemScrapeErrorNoNewStreams
-                | MediaItemDownloadRequested | MediaItemDownloadCacheCheckRequested
-                | MediaItemDownloadError | MediaItemDownloadErrorIncorrectState
-                | MediaItemDownloadPartialSuccess | MediaItemDownloadProviderListRequested
-                | MediaItemDownloadSuccess | MediaItemStreamLinkRequested | MediaItemsDeleted
-                | DebridUserInfoRequested | ActivePlaybackSessionsRequested => {}
+                CoreStarted
+                | CoreShutdown
+                | ContentServiceRequested
+                | ItemRequestCreated
+                | ItemRequestUpdated
+                | MediaItemIndexRequested
+                | MediaItemIndexSuccess
+                | MediaItemIndexError
+                | MediaItemIndexErrorIncorrectState
+                | MediaItemScrapeRequested
+                | MediaItemScrapeSuccess
+                | MediaItemScrapeError
+                | MediaItemScrapeErrorIncorrectState
+                | MediaItemScrapeErrorNoNewStreams
+                | MediaItemDownloadRequested
+                | MediaItemDownloadCacheCheckRequested
+                | MediaItemDownloadError
+                | MediaItemDownloadErrorIncorrectState
+                | MediaItemDownloadPartialSuccess
+                | MediaItemDownloadProviderListRequested
+                | MediaItemDownloadSuccess
+                | MediaItemStreamLinkRequested
+                | MediaItemsDeleted
+                | DebridUserInfoRequested
+                | ActivePlaybackSessionsRequested => {}
             }
         }
         all.to_vec()

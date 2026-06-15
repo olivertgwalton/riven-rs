@@ -276,9 +276,6 @@ pub async fn persist_episode(
         .map(|(f, p)| (*f, p.clone()))
         .collect();
 
-    // Event fallback for sports-style episodes: the release names the event
-    // (venue/session/date) rather than SxxExx, so verify it identifies THIS
-    // episode. Obfuscated inner names defer to the indexer release title.
     if matched.is_empty() && super::event_match::parse_episode_event(&item.title).is_some() {
         let single_playable = playable_videos.len() == 1;
         for (file, parsed) in &playable_videos {
@@ -304,11 +301,6 @@ pub async fn persist_episode(
         }
     }
 
-    // Obfuscated-NZB fallback: when no inner filename parses to S/E but the
-    // payload is a single video file with a random/hash name, trust the stream
-    // selection (the release title was already vetted by the ranker) and
-    // accept that one file. Typical for releases where inner files like
-    // `VfYc6l3ibzTHwlPkvX1hocwymwUNt6yt.mkv` carry no episode metadata.
     if matched.is_empty()
         && playable_videos.len() == 1
         && looks_obfuscated(&playable_videos[0].0.filename)
@@ -429,10 +421,6 @@ pub async fn persist_season(
     let show = match repo::get_media_item(&queue.db_pool, show_id).await {
         Ok(Some(s)) => s,
         Ok(None) => {
-            // Parent show was deleted while this download was in flight (cascade also
-            // removed the season). Skip silently — there's no surviving item to attach
-            // an error to, and emitting MediaItemDownloadError would produce a UI toast
-            // for an item the user has already removed.
             tracing::debug!(
                 id,
                 show_id,
@@ -478,9 +466,6 @@ pub async fn persist_season(
     let library_profiles_json = library_profiles.into_json();
     drop(filesystem_settings);
 
-    // Pre-parse all video files once — reused across every episode filter below.
-    // Files without a playable URL are dropped here so they never reach
-    // `create_media_entry` — see `has_playable_url` for why.
     let parsed_video_files: Vec<(&DownloadFile, riven_rank::ParsedData)> = dl
         .files
         .iter()
@@ -503,13 +488,6 @@ pub async fn persist_season(
         episode_matches.push((ep, matched));
     }
 
-    // Event-based fallback for sports-style seasons (F1 and friends): the
-    // releases are named by venue/session/date with no SxxExx anywhere, so the
-    // normal lookup leaves every episode unmatched. Map each still-unmatched
-    // playable file onto an episode through its event identity. Obfuscated
-    // single-file payloads are matched via the indexer release title — for
-    // multi-file packs an obfuscated name identifies nothing, so those are
-    // left to the 1:1 sort-order fallback below.
     let events = super::event_match::episode_events(&episodes);
     if !events.is_empty() {
         let single_playable = parsed_video_files.len() == 1;
@@ -566,8 +544,6 @@ pub async fn persist_season(
     {
         let mut ordered: Vec<&(&DownloadFile, riven_rank::ParsedData)> =
             parsed_video_files.iter().collect();
-        // Stable filename sort — obfuscated names sort consistently and
-        // typically follow upload order on the indexer side.
         ordered.sort_by(|a, b| a.0.filename.cmp(&b.0.filename));
         let mut by_ep: Vec<(&MediaItem, Vec<(&DownloadFile, riven_rank::ParsedData)>)> =
             Vec::with_capacity(episodes.len());
@@ -732,7 +708,6 @@ pub async fn persist_show(
     let library_profiles_json = library_profiles.into_json();
     drop(filesystem_settings);
 
-    // Pre-parse all playable video files once — reused across every episode.
     let parsed_video_files: Vec<(&DownloadFile, riven_rank::ParsedData)> = dl
         .files
         .iter()
@@ -816,8 +791,6 @@ pub async fn persist_show(
         return SeasonPersistOutcome::Failed;
     }
 
-    // The filesystem_entries inserts above already cascaded state recomputes up
-    // through each season to the show. Sync the request state and emit success.
     LibraryOrchestrator::new(queue)
         .sync_item_request_state(item)
         .await;
@@ -1065,8 +1038,6 @@ async fn persist_supplied_show_download(
         anyhow::bail!("no episode files were persisted from the torrent");
     }
 
-    // The filesystem_entries inserts above triggered state recomputes for
-    // each completed episode and cascaded up to the season(s) and the show.
     LibraryOrchestrator::new(queue)
         .sync_item_request_state(item)
         .await;
@@ -1104,14 +1075,10 @@ pub async fn finalize_download_success(
     provider: Option<String>,
     plugin_name: Option<String>,
 ) {
-    // The download persist already triggered state recomputes via the
-    // filesystem_entries inserts; just sync the request state here.
     LibraryOrchestrator::new(queue)
         .sync_item_request_state(item)
         .await;
 
-    // Invalidate VFS readdir/entry caches so media servers that scan immediately
-    // after this event see the new file rather than a stale 30-second cache.
     queue
         .filesystem_settings_revision
         .fetch_add(1, Ordering::SeqCst);

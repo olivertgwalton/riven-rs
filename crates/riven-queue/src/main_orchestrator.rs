@@ -39,7 +39,6 @@ impl MainOrchestrator {
     /// through the wildcard.
     pub async fn on_event(&self, event: &RivenEvent) {
         match event {
-            // ── Item-request lifecycle ───────────────────────────────────────
             RivenEvent::ItemRequestCreated {
                 item_id,
                 requested_seasons,
@@ -65,17 +64,10 @@ impl MainOrchestrator {
                 .await;
             }
 
-            // ── Index ────────────────────────────────────────────────────────
             RivenEvent::MediaItemIndexSuccess { id, .. } => {
                 self.handle_index_success(*id).await;
             }
 
-            // ── Scrape ───────────────────────────────────────────────────────
-            //
-            // On scrape success, advance the per-item state machine to the
-            // Download step. We only do this for `is_requested` items; one-off
-            // discovery scrapes (UI flow) hit this event with is_requested=false
-            // and should stop here.
             RivenEvent::MediaItemScrapeSuccess { id, .. } => {
                 if let Some(item) = self.load_item(*id).await
                     && item.is_requested
@@ -87,34 +79,12 @@ impl MainOrchestrator {
                         .await;
                 }
             }
-            // Scrape produced no new streams. `record_scrape_failure` already
-            // ran inside scrape `parse_results`, bumping `failed_attempts` and
-            // recomputing state. Mirroring riven-ts' `fanOutDownload`, also
-            // fan out to children so a Season with no available season pack
-            // falls back to per-episode scrape/download attempts (the children
-            // pull from the same indexer pool but match against episode-level
-            // candidates the season-level filter rejects).
             RivenEvent::MediaItemScrapeErrorNoNewStreams { id, .. } => {
                 if let Some(item) = self.load_item(*id).await {
                     fan_out_to_children(&item, &self.queue).await;
                 }
             }
 
-            // ── Download ─────────────────────────────────────────────────────
-            //
-            // Download finished (success, partial, or error) — advance to
-            // Validate, which centralises the post-download decision: emit
-            // completion, fan out to incomplete children, or schedule a
-            // re-scrape +30 min.
-            //
-            // Additionally, on partial-success and error we fan out to
-            // children directly here (mirroring riven-ts' `fanOutDownload`
-            // actions on `download.partial-success` and `download.error`).
-            // Validate's own fan_out only fires for PartiallyCompleted/
-            // Ongoing states — a Season whose pack failed every persist
-            // attempt stays in `Scraped` and would otherwise just reschedule
-            // its own scrape in 30 min, leaving episode-level NZBs
-            // (per-episode releases that don't match the pack) untried.
             RivenEvent::MediaItemDownloadSuccess { id, .. } => {
                 self.queue
                     .push_process_media_item(
@@ -137,8 +107,6 @@ impl MainOrchestrator {
             _ => {}
         }
     }
-
-    // ── Actors ────────────────────────────────────────────────────────────────
 
     /// `processItemRequest` actor. Runs the index → process pipeline for a
     /// freshly-created or -updated item request.
@@ -164,17 +132,10 @@ impl MainOrchestrator {
         let Some(item) = self.load_item(id).await else {
             return;
         };
-        // Sync request state first so any state transitions on the item
-        // request itself land before we start enqueueing further work.
         LibraryOrchestrator::new(&self.queue)
             .sync_item_request_state(&item)
             .await;
 
-        // Reindexing tracks metadata facts, not derived state: keep the
-        // schedule while new episodes can still appear (continuing show) or
-        // a descendant has yet to air. A continuing show with un-grabbed
-        // aired episodes derives PartiallyCompleted — not Ongoing — and must
-        // keep reindexing all the same.
         let needs_reindex = match item.item_type {
             MediaItemType::Show => {
                 item.show_status == Some(ShowStatus::Continuing)
@@ -269,11 +230,6 @@ impl MainOrchestrator {
     /// Retry-library actor. Periodically called by the worker to nudge items
     /// stuck in retryable states.
     pub async fn retry_library(&self) {
-        // Re-derive `ongoing` shows/seasons first: `ongoing` is not in the
-        // retryable-state query below, so a container settled there while
-        // holding actionable children (aired episodes still Indexed/Scraped)
-        // would never be picked up. Recompute flips those to a retryable
-        // state the query then sees.
         match repo::get_ongoing_container_ids(&self.queue.db_pool).await {
             Ok(ids) => {
                 if let Err(error) = repo::force_recompute(&self.queue.db_pool, &ids).await {
@@ -285,7 +241,6 @@ impl MainOrchestrator {
             }
         }
 
-        // Item requests in `failed`/`requested` → re-trigger index.
         let requests = match repo::get_retryable_item_requests(&self.queue.db_pool).await {
             Ok(r) => r,
             Err(error) => {
@@ -303,9 +258,6 @@ impl MainOrchestrator {
             })
             .await;
 
-        // Media items in retryable states → push ProcessMediaItem. Movies and
-        // shows only — children are reached via Show fan-out inside
-        // ProcessMediaItem.
         for item_type in [MediaItemType::Movie, MediaItemType::Show] {
             let items =
                 match repo::get_pending_items_for_retry(&self.queue.db_pool, item_type).await {

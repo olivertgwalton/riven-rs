@@ -113,8 +113,8 @@ impl Plugin for WebhooksPlugin {
             "item": item,
         });
 
-        // Serialize once: the exact bytes are what we sign and what we send, so
-        // a consumer's HMAC check sees the same body we hashed.
+        // Serialize once: the signed bytes must be byte-identical to the sent
+        // body or the consumer's HMAC check fails. Do not re-serialize.
         let body = match serde_json::to_vec(&envelope) {
             Ok(body) => body,
             Err(error) => {

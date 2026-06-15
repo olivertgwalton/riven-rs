@@ -1,24 +1,24 @@
 pub mod vfs {
     /// Kernel block size — the byte length the OS reads/writes at a time.
-    pub const BLOCK_SIZE: u64 = 131_072; // 128 KB
+    pub const BLOCK_SIZE: u64 = 131_072;
 
     /// Default header size for scanning purposes.
-    pub const HEADER_SIZE: u64 = 262_144; // 256 KB
+    pub const HEADER_SIZE: u64 = 262_144;
 
     /// Minimum footer size for scanning purposes.
-    pub const MIN_FOOTER_SIZE: u64 = 16_384; // 16 KB
+    pub const MIN_FOOTER_SIZE: u64 = 16_384;
 
     /// Maximum footer size for scanning purposes.
-    pub const MAX_FOOTER_SIZE: u64 = 10_485_760; // 10 MB
+    pub const MAX_FOOTER_SIZE: u64 = 10_485_760;
 
     /// Target footer size as 1/N of file size (50 = 2%).
     pub const TARGET_FOOTER_DIVISOR: u64 = 50;
 
     /// Chunk size (in bytes) used for streaming calculations.
-    pub const CHUNK_SIZE: u64 = 1_048_576; // 1 MB
+    pub const CHUNK_SIZE: u64 = 1_048_576;
 
     /// Per-handle RAM budget for sequential playback buffering.
-    pub const STREAM_BUFFER_SIZE: u64 = 32 * 1_048_576; // 32 MB
+    pub const STREAM_BUFFER_SIZE: u64 = 32 * 1_048_576;
 
     /// Timeout for detecting stalled streams.
     pub const ACTIVITY_TIMEOUT_SECS: u64 = 60;
@@ -55,7 +55,6 @@ pub mod vfs {
     pub fn footer_size(file_size: u64) -> u64 {
         let target = file_size / TARGET_FOOTER_DIVISOR;
         let clamped = target.clamp(MIN_FOOTER_SIZE, MAX_FOOTER_SIZE);
-        // Align to block boundary
         (clamped / BLOCK_SIZE) * BLOCK_SIZE
     }
 }

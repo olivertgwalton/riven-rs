@@ -39,7 +39,6 @@ impl Plugin for MdblistPlugin {
             Some(k) => k,
             None => return Ok(false),
         };
-        // mdblist uses query param auth, not header
         let resp = http
             .send(PROFILE, |client| {
                 client.get(format!("{MDBLIST_BASE_URL}user?apikey={api_key}"))

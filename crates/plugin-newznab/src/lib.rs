@@ -97,10 +97,6 @@ fn parse_indexers_str(raw: &str) -> Option<Vec<Indexer>> {
 fn build_query(request: &ScrapeRequest<'_>) -> Option<(&'static str, Vec<(&'static str, String)>)> {
     let imdb_numeric = request.imdb_id.map(|s| s.trim_start_matches("tt"));
 
-    // For TV searches prefer `tvdbid` — NZBGeek and most public newznab
-    // indexers tag TV releases by TVDB and have spotty IMDb coverage, so
-    // an imdbid-only query frequently returns zero results even when the
-    // show is well-indexed. Movies stay on imdbid (the standard there).
     let tv_id_param: Option<(&'static str, String)> = request
         .tvdb_id
         .map(|v| ("tvdbid", v.to_string()))
@@ -174,12 +170,6 @@ async fn scrape_one(
         "requesting newznab"
     );
 
-    // Dedupe key must reflect the actual query, not just the base URL —
-    // otherwise the in-flight deduper collapses every concurrent episode
-    // scrape onto whichever (season, ep) arrived first, and every other
-    // episode receives the wrong-episode results. Apikey is excluded for
-    // log hygiene (the key surfaces in error paths) and because it's
-    // invariant across one indexer's lifetime.
     let dedupe_key = {
         let mut key = String::with_capacity(url.len() + params.len() * 16);
         key.push_str(&url);
@@ -293,22 +283,12 @@ impl Plugin for NewznabPlugin {
         if indexers.is_empty() {
             return Ok(HookResponse::Empty);
         }
-        // ID-based search is preferred. The text (`q=`) query is the primary
-        // when the item has no usable IDs, and a per-indexer fallback when an
-        // indexer returns zero items for the IDs — sports/yearly content is
-        // frequently not ID-mapped on indexers and only reachable by title.
         let text_query = newznab_text_query(request);
         let ((search_type, base_params), fallback_query) = match build_query(request) {
             Some(id_query) => (id_query, Some(text_query)),
             None => (text_query, None),
         };
 
-        // Fire every indexer in parallel. One indexer's failure (auth,
-        // network, malformed XML) is logged and skipped — the others still
-        // contribute. Without parallelism, scrape latency would scale
-        // linearly with indexer count, and that adds up fast for fan-in
-        // flows (a 33-season show with 5 indexers = 165 sequential
-        // round-trips).
         let http = &ctx.http;
         let scrape_futures = indexers.iter().map(|indexer| {
             let base_params = base_params.clone();
@@ -350,14 +330,7 @@ impl Plugin for NewznabPlugin {
                             continue;
                         }
                         let info_hash = nzb_info_hash(&item.nzb_url);
-                        // Same NZB URL hashed by multiple indexers collapses
-                        // to the same info_hash, so duplicates across
-                        // indexers are deduped here.
                         let was_new = !results.contains_key(&info_hash);
-                        // Store the NZB URL in Redis so the SAB downloader
-                        // can recover it later. The pipeline only carries
-                        // `info_hash` + opaque `magnet`; this sidecar
-                        // bridges the indexer → downloader handoff.
                         let _result: Result<(), _> = redis_conn
                             .set_ex(
                                 nzb_url_redis_key(&info_hash),
@@ -401,11 +374,6 @@ impl Plugin for NewznabPlugin {
             }
         }
 
-        // Promote "every indexer rate-limited, no successes" into a
-        // RateLimitedError so the scrape framework schedules a delayed retry
-        // instead of recording a permanent "no streams" failure. We require
-        // zero successful indexers to avoid failing the whole scrape when some
-        // indexers contributed results even if others 429'd.
         if rate_limited_count > 0 && ok_count == 0 && indexer_count > 0 {
             tracing::warn!(
                 rate_limited_count,
@@ -444,15 +412,11 @@ mod tests {
         assert_eq!(parsed[0].name, "finder");
         assert_eq!(parsed[0].categories, "5000");
         assert_eq!(parsed[1].name, "geek");
-        // Default categories when omitted.
         assert_eq!(parsed[1].categories, "2000,5000");
     }
 
     #[test]
     fn ignores_indexer_entries_missing_credentials() {
-        // Entry without apikey is silently skipped, not a hard failure —
-        // the user is mid-edit and the half-configured entry shouldn't
-        // crash scrapes from the entries that are complete.
         let raw = r#"{
             "good": {"url": "https://nzbgeek.info", "apikey": "abc"},
             "blank": {"url": "https://example.com", "apikey": ""},
@@ -469,7 +433,6 @@ mod tests {
         assert!(parse_indexers_str("   ").is_none());
         assert!(parse_indexers_str("not json").is_none());
         assert!(parse_indexers_str("{}").is_none());
-        // Every entry missing required fields.
         assert!(parse_indexers_str(r#"{"x":{"url":"a"}}"#).is_none());
     }
 }

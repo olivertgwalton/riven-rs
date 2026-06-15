@@ -70,8 +70,6 @@ impl CircuitBreaker {
     }
 
     fn now_ms() -> u64 {
-        // Process-local monotonic ms. `Instant` can't be coerced to a stable
-        // u64 across the process directly, so anchor on the first call.
         use std::sync::OnceLock;
         static EPOCH: OnceLock<Instant> = OnceLock::new();
         let epoch = EPOCH.get_or_init(Instant::now);
@@ -101,8 +99,6 @@ impl CircuitBreaker {
     }
 
     fn record_failure(&self, host: &str) {
-        // Trip the breaker on the failure that crosses the threshold and
-        // double the cooldown when a re-trip happens after a probe.
         let was_tripped = self.is_tripped();
         let count = self
             .consecutive_failures
@@ -283,9 +279,6 @@ impl NntpPool {
     /// Failures are logged and skipped; callers dial on demand instead.
     pub async fn prewarm(&self) {
         for slot in &self.slots {
-            // Warm the DNS cache once (low concurrency) before fanning out the
-            // concurrent dials below, so they all hit the cache instead of
-            // hammering the resolver simultaneously.
             super::connection::warm_dns(&slot.provider.config.host, slot.provider.config.port)
                 .await;
             let target = (slot.provider.config.max_connections as usize).min(PREWARM_CAP);
@@ -342,8 +335,6 @@ impl NntpPool {
                 let idle_permit = idle.permit;
                 match tokio::time::timeout(PING_TIMEOUT, conn.date()).await {
                     Ok(Ok(())) => {
-                        // Reuse the popped permit; drop our newly-acquired
-                        // one so total semaphore count stays consistent.
                         drop(permit);
                         return Ok(Checkout {
                             conn,
@@ -407,10 +398,6 @@ impl NntpPool {
         let mut not_found = false;
         let mut last_err: Option<NntpError> = None;
 
-        // Build the order: providers whose breaker is *not* tripped come
-        // first, in the existing priority order. Tripped providers come last
-        // so they still get a probe attempt when every healthy provider has
-        // been exhausted; that tail probe gives the breaker a chance to reset.
         let mut order: Vec<usize> = Vec::with_capacity(self.slots.len());
         let mut tripped: Vec<usize> = Vec::new();
         for (idx, slot) in self.slots.iter().enumerate() {
@@ -457,8 +444,6 @@ impl NntpPool {
                     return Ok((v, slot_idx));
                 }
                 Err(NntpError::ArticleNotFound(s)) => {
-                    // Missing articles are a normal outcome — not a provider
-                    // health signal. Leave the breaker state alone.
                     self.release(Checkout {
                         conn,
                         permit,
@@ -469,7 +454,6 @@ impl NntpPool {
                     continue;
                 }
                 Err(e) => {
-                    // Wire state unclear — close rather than reuse.
                     drop(conn);
                     drop(permit);
                     tracing::debug!(
@@ -508,8 +492,6 @@ impl NntpPool {
                 }
             })
             .await?;
-        // Attribute the downloaded (encoded) wire bytes + this article to the
-        // provider that served it.
         let slot = &self.slots[slot_idx];
         slot.bytes_downloaded
             .fetch_add(buf.len() as u64, Ordering::Relaxed);
@@ -554,7 +536,6 @@ impl NntpPool {
 
     pub async fn stat(&self, message_id: &str, priority: Priority) -> Result<bool, NntpError> {
         let mid = message_id.to_string();
-        // STAT is a check, not a download, so it doesn't count toward traffic.
         let (exists, _slot_idx) = self
             .try_each(priority, |mut conn| {
                 let mid = mid.clone();

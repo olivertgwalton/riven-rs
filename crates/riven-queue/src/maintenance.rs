@@ -47,7 +47,6 @@ pub async fn purge_orphaned_worker_sets(
         if live.contains(&workers_set) {
             continue;
         }
-        // Pull worker ids out so we can drop their per-worker metadata + inflight sets too.
         let workers: Vec<String> = redis::cmd("ZRANGE")
             .arg(&workers_set)
             .arg(0i64)
@@ -58,7 +57,6 @@ pub async fn purge_orphaned_worker_sets(
         let mut pipe = redis::pipe();
         for worker in &workers {
             pipe.del(worker_metadata_key(&workers_set, worker));
-            // worker name doubles as the per-worker inflight set key.
             pipe.del(worker);
         }
         pipe.del(&workers_set);
@@ -132,7 +130,6 @@ async fn rescue_workers(
             continue;
         }
 
-        // Fetch all worker job sets in one pipelined round-trip.
         let all_job_sets: Vec<Vec<String>> = {
             let mut pipe = redis::pipe();
             for key in &members {
@@ -141,7 +138,6 @@ async fn rescue_workers(
             pipe.query_async(redis).await.unwrap_or_default()
         };
 
-        // Collect rescued jobs and pipeline all DEL commands together.
         let workers_set = config.workers_set();
         let mut candidates: Vec<String> = Vec::new();
         let mut del_pipe = redis::pipe();
@@ -153,9 +149,6 @@ async fn rescue_workers(
         }
         let _result: Result<(), _> = del_pipe.query_async(redis).await;
 
-        // Only re-enqueue jobs whose data still exists. Jobs whose data was
-        // pruned by `prune_queue_history` would cause the worker to emit a
-        // StreamError on its first poll, stopping it immediately.
         let rescued: Vec<String> = if candidates.is_empty() {
             Vec::new()
         } else {
@@ -198,7 +191,6 @@ async fn rescue_workers(
                 .query_async(redis)
                 .await;
         } else {
-            // Remove all stale worker entries in a single ZREM varargs call.
             let _result: Result<(), _> = redis::cmd("ZREM")
                 .arg(config.workers_set())
                 .arg(&members)
@@ -259,7 +251,6 @@ pub async fn purge_orphaned_active_jobs(
             continue;
         }
 
-        // LREM 0 removes ALL occurrences of the value.
         let mut pipe = redis::pipe();
         for id in &orphans {
             pipe.cmd("LREM").arg(&active_key).arg(0i64).arg(id);

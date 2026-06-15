@@ -147,9 +147,6 @@ pub(super) fn parse_rate_limit_pause(
     status: StatusCode,
     headers: &HeaderMap,
 ) -> Option<Duration> {
-    // Mirror riven-ts: trust whatever `Retry-After` the server sent (no cap),
-    // and fall back to a default pause when the header is missing — many
-    // indexers send bare 429s.
     let retry_after = if status == StatusCode::TOO_MANY_REQUESTS {
         Some(parse_retry_after(headers).unwrap_or(Duration::from_secs(DEFAULT_429_PAUSE_SECS)))
     } else {

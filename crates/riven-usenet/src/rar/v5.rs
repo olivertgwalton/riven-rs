@@ -2,35 +2,6 @@ use super::{
     METHOD_STORE, RAR5_SIGNATURE, RarEncryption, RarError, RarVolumeFileEntry, RarVolumeHeader,
 };
 
-// RAR5 format (from rarlab tech note):
-//   - 8-byte signature.
-//   - Stream of blocks. Each block has:
-//       crc32           : 4 bytes
-//       header_size     : vint (size of header AFTER this field)
-//       header_type     : vint
-//       header_flags    : vint
-//       [extra_size]    : vint, present iff header_flags & 0x01
-//       [data_size]     : vint, present iff header_flags & 0x02
-//       <type-specific fields>
-//       [extra area]    : `extra_size` bytes
-//       [data area]     : `data_size` bytes (this is where the file payload lives)
-//   - Block types: 1=Main, 2=File, 3=Service, 4=Encryption, 5=EndOfArchive.
-//   - File header (type 2) type-specific fields:
-//       file_flags      : vint    (bit 0 = directory, 1 = mtime, 2 = crc32,
-//                                   3 = unp-size-unknown)
-//       unpacked_size   : vint
-//       attributes      : vint
-//       [mtime          : 4 bytes if file_flags & 0x02]
-//       [crc32          : 4 bytes if file_flags & 0x04]
-//       compression_info: vint    (bits 0-5 version, 6 solid, 7-9 method, ...)
-//       host_os         : vint
-//       name_length     : vint
-//       name            : name_length bytes
-//   - Method 0 (bits 7-9 of compression_info == 0) is stored.
-//
-// We only need: filename, unpacked_size, stored?, header_size (to compute
-// data offset), data_size (this volume's data contribution).
-
 /// RAR5 file-header extra-area record types.
 const RAR5_EXTRA_ENCRYPTION: u64 = 0x01;
 
@@ -51,7 +22,6 @@ pub(super) fn parse_volume_header_v5(bytes: &[u8]) -> Result<RarVolumeHeader, Ra
     while pos < bytes.len() {
         let block_start = pos;
 
-        // crc32 (4 bytes), skipped.
         if pos + 4 > bytes.len() {
             break;
         }
@@ -61,10 +31,6 @@ pub(super) fn parse_volume_header_v5(bytes: &[u8]) -> Result<RarVolumeHeader, Ra
             Some(v) => v as usize,
             None => break,
         };
-        // header_size is the size of the rest of the header (after crc32 and
-        // the header_size vint itself, but including header_type/flags/...).
-        // checked_add guards against malformed vints with absurdly large
-        // values; we treat such inputs as truncated and stop parsing.
         let Some(header_end) = pos.checked_add(header_size) else {
             break;
         };
@@ -138,11 +104,7 @@ pub(super) fn parse_volume_header_v5(bytes: &[u8]) -> Result<RarVolumeHeader, Ra
                     break;
                 }
                 let name = String::from_utf8_lossy(&bytes[pos..name_end]).into_owned();
-                // We don't advance `pos` past the name field — we jump
-                // straight to `header_end + extra_size + data_size` below.
 
-                // Compression method lives at bits 8-10 of compression_info
-                // (mask 0x0700). 0 = store.
                 let method_bits = (compression_info >> 8) & 0b111;
                 let is_stored = method_bits == 0;
 
@@ -165,15 +127,10 @@ pub(super) fn parse_volume_header_v5(bytes: &[u8]) -> Result<RarVolumeHeader, Ra
 
                 let data_offset = header_end as u64;
 
-                // The extra area lives between the type-specific fields and
-                // the data area; we walk it for the encryption record (0x01).
                 let extra_start = pos;
                 let extra_end = header_end;
                 let encryption = parse_rar5_file_extra(bytes, extra_start, extra_end);
 
-                // RAR5 split flags live in extra-area records (e.g. 0x05
-                // redirect); we don't parse them. The streamer's
-                // slice-total-vs-unpacked-size sanity check is the real gate.
                 if !is_directory {
                     out.files.push(RarVolumeFileEntry {
                         name,
@@ -185,9 +142,6 @@ pub(super) fn parse_volume_header_v5(bytes: &[u8]) -> Result<RarVolumeHeader, Ra
                     });
                 }
 
-                // `header_end` already covers the extra area (header_size
-                // includes it per spec). The data area follows, sized by
-                // `data_size`. Don't double-count.
                 let _ = extra_size;
                 pos = match header_end.checked_add(data_size as usize) {
                     Some(p) => p,
@@ -249,7 +203,6 @@ fn parse_rar5_encryption_record(bytes: &[u8], start: usize, end: usize) -> Optio
     }
     let log2_count = bytes[pos];
     pos += 1;
-    // 16-byte salt + 16-byte IV
     if pos.checked_add(32)? > end {
         return None;
     }
@@ -277,15 +230,11 @@ pub(super) fn block_layout_v5(bytes: &[u8]) -> Option<(u64, u64)> {
     if bytes.len() < 5 {
         return None;
     }
-    let mut pos = 4; // skip CRC32
+    let mut pos = 4;
     let size_vint_start = pos;
     let header_size = read_vint(bytes, &mut pos)?;
     let header_total = pos as u64 + header_size;
 
-    // Walk far enough into the header to determine the data-area size.
-    // We don't need the type or flags themselves — just whether the
-    // optional `data_size` vint is present (head_flags bit 1) and what
-    // it says.
     let _header_type = read_vint(bytes, &mut pos)?;
     let head_flags = read_vint(bytes, &mut pos)?;
     if head_flags & RAR5_HEAD_FLAG_EXTRA != 0 {

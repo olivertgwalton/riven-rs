@@ -102,9 +102,6 @@ pub async fn check_cache(
     }
 
     for result in &fetched_results {
-        // Only cache stable results. Ephemeral statuses (downloading, queued) get re-checked
-        // next scrape pass. Unknown is cached to avoid hammering the API but isn't treated as
-        // a positive hit for dispatch.
         if !matches!(
             result.status,
             riven_core::types::TorrentStatus::Cached
@@ -287,7 +284,9 @@ where
         .into());
     }
 
-    let response = http.send_data(PROFILE, Some(dedupe_key), make_request).await?;
+    let response = http
+        .send_data(PROFILE, Some(dedupe_key), make_request)
+        .await?;
     if !response.status().is_success()
         && let Some(retry_after) =
             rate_limit_cooldown(response.status(), &response.text().unwrap_or_default())
@@ -324,7 +323,11 @@ pub enum AddTorrentOutcome {
 fn classify_add_torrent_rejection(status: reqwest::StatusCode, body: &str) -> AddTorrentOutcome {
     let error = StremthruErrorResponse::parse(body).error;
 
-    if error.message.to_ascii_lowercase().contains("already queued") {
+    if error
+        .message
+        .to_ascii_lowercase()
+        .contains("already queued")
+    {
         return AddTorrentOutcome::AlreadyQueued;
     }
 
@@ -397,11 +400,8 @@ pub async fn add_torrent(
         return Ok(AddTorrentOutcome::Unavailable);
     };
 
-    // "downloaded" = files present and ready (all stores).
-    // "cached"     = in store's instant-download pool; TorBox items whose
-    //                DownloadFinished/DownloadPresent flags aren't set on the
-    //                initial ADD response come back with this status even
-    //                though the files are accessible.
+    // "cached" is treated as ready: TorBox returns it on the ADD response for
+    // items whose files are already accessible (DownloadFinished/Present flags unset).
     if !matches!(data.status.as_str(), "downloaded" | "cached") {
         let torrent_id = data.id;
         tracing::debug!(
@@ -462,7 +462,16 @@ pub async fn add_newz(
         return Ok(None);
     };
 
-    poll_newz(http, redis, base_url, store, api_key, &added.id, poll_timeout).await
+    poll_newz(
+        http,
+        redis,
+        base_url,
+        store,
+        api_key,
+        &added.id,
+        poll_timeout,
+    )
+    .await
 }
 
 async fn poll_newz(
@@ -787,9 +796,6 @@ pub async fn generate_link(
     api_key: &str,
     magnet: &str,
 ) -> anyhow::Result<GeneratedLink> {
-    // The same /link/generate shape exists for both torz (torrents) and newz
-    // (usenet). The link itself is the only signal we have to decide which
-    // namespace it belongs to once we're past the initial download.
     let kind = if magnet.contains("/store/newz/") {
         "newz"
     } else {

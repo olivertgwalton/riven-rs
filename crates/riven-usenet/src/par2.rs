@@ -60,8 +60,6 @@ pub fn parse_file_descriptors(par2: &[u8]) -> Result<Vec<Par2FileDesc>, Par2Erro
     let mut seen: std::collections::HashSet<[u8; 16]> = std::collections::HashSet::new();
     let mut cursor = 0usize;
     while cursor + 64 <= par2.len() {
-        // Magic search — par2 files often have leading garbage / yEnc
-        // padding, so advance byte-by-byte until we find a valid header.
         if &par2[cursor..cursor + 8] != PACKET_MAGIC {
             cursor += 1;
             continue;
@@ -79,8 +77,6 @@ pub fn parse_file_descriptors(par2: &[u8]) -> Result<Vec<Par2FileDesc>, Par2Erro
         let packet_type = &par2[cursor + 48..cursor + 64];
         if packet_type == PACKET_TYPE_FILE_DESC {
             let body = &par2[cursor + 64..cursor + packet_length];
-            // FileDesc body: file_id(16) + md5_full(16) + md5_16k(16) +
-            // length(8 LE) + filename(rest, NUL-padded to 4-byte alignment).
             if body.len() < 56 {
                 return Err(Par2Error::Truncated(cursor));
             }
@@ -93,9 +89,6 @@ pub fn parse_file_descriptors(par2: &[u8]) -> Result<Vec<Par2FileDesc>, Par2Erro
             let mut len_bytes = [0u8; 8];
             len_bytes.copy_from_slice(&body[48..56]);
             let length = u64::from_le_bytes(len_bytes);
-            // Filename: strip trailing NUL padding and decode as UTF-8 lossily
-            // (some par2 producers historically emit Windows-1252; lossy is
-            // good enough for our display/match use).
             let name_raw = &body[56..];
             let trimmed = match name_raw.iter().rposition(|&b| b != 0) {
                 Some(p) => &name_raw[..=p],
@@ -132,11 +125,10 @@ mod tests {
     use super::*;
 
     fn make_filedesc_packet(name: &str, length: u64) -> Vec<u8> {
-        // Body: 16 + 16 + 16 + 8 + name (padded to 4-byte alignment).
         let mut body = Vec::new();
-        body.extend_from_slice(&[0u8; 16]); // file_id
-        body.extend_from_slice(&[1u8; 16]); // md5_full
-        body.extend_from_slice(&[2u8; 16]); // md5_16k
+        body.extend_from_slice(&[0u8; 16]);
+        body.extend_from_slice(&[1u8; 16]);
+        body.extend_from_slice(&[2u8; 16]);
         body.extend_from_slice(&length.to_le_bytes());
         body.extend_from_slice(name.as_bytes());
         while body.len() % 4 != 0 {
@@ -146,8 +138,8 @@ mod tests {
         let mut out = Vec::new();
         out.extend_from_slice(PACKET_MAGIC);
         out.extend_from_slice(&packet_length.to_le_bytes());
-        out.extend_from_slice(&[0u8; 16]); // packet md5 (unused by parser)
-        out.extend_from_slice(&[0u8; 16]); // recovery set id
+        out.extend_from_slice(&[0u8; 16]);
+        out.extend_from_slice(&[0u8; 16]);
         out.extend_from_slice(PACKET_TYPE_FILE_DESC);
         out.extend_from_slice(&body);
         out
@@ -164,8 +156,6 @@ mod tests {
 
     #[test]
     fn dedupes_repeated_filedesc() {
-        // PAR2 mirrors FileDesc packets across the set; we want one entry per
-        // unique file_id.
         let one = make_filedesc_packet("Movie.mkv", 1);
         let mut blob = one.clone();
         blob.extend(one);
@@ -180,7 +170,6 @@ mod tests {
 
     #[test]
     fn rejects_no_filedesc_packets() {
-        // Non-FileDesc packet; loop should yield NoPackets.
         let mut packet = Vec::new();
         packet.extend_from_slice(PACKET_MAGIC);
         let packet_length: u64 = 64 + 4;

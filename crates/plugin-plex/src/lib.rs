@@ -95,9 +95,6 @@ impl Plugin for PlexPlugin {
             .flat_map(|s| s.locations.iter().map(|l| l.path.clone()))
             .collect();
 
-        // De-dupe with a set so a season-pack download (N episodes in the
-        // same Season folder) collapses to one Plex refresh per matching
-        // section, not N identical refreshes hammering the server.
         let mut refresh_tasks: std::collections::HashSet<(String, String)> =
             std::collections::HashSet::new();
         let mut all_vfs_dirs: Vec<String> = Vec::new();

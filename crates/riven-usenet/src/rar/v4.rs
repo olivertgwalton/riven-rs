@@ -11,7 +11,6 @@ pub(super) const FLAG_LONG_BLOCK: u16 = 0x8000;
 const FILE_FLAG_HIGH_SIZE: u16 = 0x0100;
 const FILE_FLAG_UNICODE: u16 = 0x0200;
 const FILE_FLAG_SALT: u16 = 0x0400;
-const FILE_FLAG_EXT_TIME: u16 = 0x1000;
 
 pub(super) fn parse_volume_header_v4(bytes: &[u8]) -> Result<RarVolumeHeader, RarError> {
     let mut cursor = Cursor::new(bytes);
@@ -39,9 +38,6 @@ pub(super) fn parse_volume_header_v4(bytes: &[u8]) -> Result<RarVolumeHeader, Ra
                         Err(_) => break,
                     };
 
-                // Skip over this file's data payload to land at the next block,
-                // if it fits. If the data extends past our buffer, we're at
-                // the natural end of header-only parsing.
                 let data_end = entry.data_offset.saturating_add(entry.packed_size);
                 out.files.push(entry);
 
@@ -139,10 +135,6 @@ fn read_file_head(
     if (common.head_flags & FILE_FLAG_SALT) != 0 {
         cur.set_position(cur.position() + 8);
     }
-    if (common.head_flags & FILE_FLAG_EXT_TIME) != 0 {
-        // Variable-length ext-time block; HEAD_SIZE points past it to the
-        // data section so no skip needed.
-    }
 
     let data_offset = block_start + common.head_size as u64;
 
@@ -152,7 +144,6 @@ fn read_file_head(
         packed_size: pack_size,
         unpacked_size,
         method,
-        // RAR4 encryption isn't parsed; modern encrypted releases use RAR5.
         encryption: None,
     }))
 }
@@ -180,10 +171,6 @@ pub(super) fn block_layout_v4(bytes: &[u8]) -> Option<(u64, u64)> {
 }
 
 fn decode_filename(bytes: &[u8], _unicode_flag: bool) -> String {
-    // For unicode-flagged names the layout is `ascii\0unicode-encoded` where
-    // the second half uses a quirky compressed encoding. Most modern releases
-    // use 7-bit ASCII filenames, so taking everything up to the first NUL
-    // works for the common case. Falls back to lossy UTF-8 otherwise.
     let cut = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
     String::from_utf8_lossy(&bytes[..cut]).into_owned()
 }

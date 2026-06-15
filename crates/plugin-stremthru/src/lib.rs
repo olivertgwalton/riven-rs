@@ -261,8 +261,6 @@ impl Plugin for StremthruPlugin {
                 .await;
         }
 
-        // Priority: pre-checked stores from the bulk cache check > on-demand
-        // cache check > direct add (when checkdebridcache is disabled).
         #[derive(Clone)]
         struct StoreAttempt<'s> {
             store: &'s str,
@@ -396,8 +394,6 @@ impl Plugin for StremthruPlugin {
                     );
                 }
                 Ok(AddTorrentOutcome::AlreadyQueued) => {
-                    // The store is already fetching this hash from an earlier
-                    // add — in progress, not a failure. No score change.
                     tracing::debug!(
                         store = attempt.store,
                         info_hash,
@@ -445,8 +441,6 @@ impl Plugin for StremthruPlugin {
         if !check_cache_enabled {
             return Ok(HookResponse::Empty);
         }
-        // NZB hashes are synthetic (sha1 of the NZB URL) and don't map to
-        // StremThru's content-hash-keyed cache.
         let hashes: Vec<String> = hashes
             .iter()
             .filter(|h| !is_nzb_info_hash(h))
@@ -459,8 +453,6 @@ impl Plugin for StremthruPlugin {
         let base_url = ctx.settings.get_or("stremthruurl", DEFAULT_URL);
         let mut stores = get_configured_stores(&ctx.settings);
 
-        // Caller-scoped to a single provider — drop the others so an early
-        // hit on the first provider skips slower ones.
         if let Some(filter) = provider {
             stores.retain(|(store, _)| *store == filter);
             if stores.is_empty() {
@@ -500,8 +492,6 @@ impl Plugin for StremthruPlugin {
         ctx: &PluginContext,
     ) -> anyhow::Result<HookResponse> {
         let stores = get_configured_stores(&ctx.settings);
-        // Rate-limited stores sit out until their cooldown lapses so the
-        // core never dispatches to a store that would just reject the call.
         let mut providers = Vec::with_capacity(stores.len());
         for (store, _) in &stores {
             if let Some(remaining) = store_cooldown_remaining(&ctx.redis, store).await {
@@ -528,18 +518,12 @@ impl Plugin for StremthruPlugin {
         ctx: &PluginContext,
     ) -> anyhow::Result<HookResponse> {
         let base_url = ctx.settings.get_or("stremthruurl", DEFAULT_URL);
-        // Use the newz-inclusive store list: an entry originally served by
-        // the StremThru aggregator store must be reachable again for the
-        // link refresh.
         let stores = get_newz_stores(&ctx.settings);
         let score_map = get_store_scores(&ctx.redis, &stores).await;
         let mut ordered_stores: Vec<(&str, &str)> = stores
             .iter()
             .map(|(store, api_key)| (*store, api_key.as_str()))
             .collect();
-        // Prefer the originally-pinned store first; fall through to other
-        // configured stores if it returns Dead/Err. Beyond the pinned store,
-        // order by health score so historically-reliable stores are tried first.
         ordered_stores.sort_by(|(store_a, _), (store_b, _)| {
             let pinned_a = provider.is_some_and(|p| *store_a == p);
             let pinned_b = provider.is_some_and(|p| *store_b == p);
@@ -576,9 +560,6 @@ impl Plugin for StremthruPlugin {
                 }
             }
         }
-        // Every configured store either reported the torrent permanently
-        // gone or errored. If at least one reported `Dead`, surface that so
-        // the link-request consumer can blacklist the stream and re-download.
         if saw_dead {
             return Ok(HookResponse::StreamLinkDead);
         }

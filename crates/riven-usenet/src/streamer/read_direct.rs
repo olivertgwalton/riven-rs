@@ -49,9 +49,6 @@ impl UsenetStreamer {
 
             match self.state.in_flight.enter_or_wait(message_id) {
                 FetchEntry::Wait(slot) => {
-                    // Another task is fetching this segment. Park on the
-                    // promise slot; when it's marked done, recheck the
-                    // cache and the permanent-fail set on the next loop.
                     slot.wait().await;
                     continue;
                 }
@@ -88,9 +85,6 @@ impl UsenetStreamer {
                     };
 
                     let result = self.do_fetch_with_retry(message_id, priority).await;
-                    // Cache must be populated BEFORE marking the slot done
-                    // so waiters observe the hit on their next loop. Reuse the
-                    // shared `Arc<str>` for both inserts — no extra allocation.
                     if let Ok(bytes) = &result {
                         let size = bytes.len() as u64;
                         self.state.cache.put(mid.clone(), bytes.clone());
@@ -200,8 +194,6 @@ impl UsenetStreamer {
             return;
         }
 
-        // Encoded offsets are within ~2% of decoded positions, fine for
-        // cache-warming where over-fetching adjacent segments is cheap.
         let mids: Vec<String> = match &file.source {
             NzbMetaSource::Direct { offsets, segments } => {
                 segments_overlapping(offsets, segments, start, end_inclusive)
@@ -261,10 +253,6 @@ impl UsenetStreamer {
         if !self.state.precached.claim(info_hash, file_index) {
             return;
         }
-        // Bound concurrent precache pipelines so a library scan's burst of
-        // HEAD requests doesn't spawn hundreds of simultaneous 8 MB
-        // fetch+decode operations (a multi-GB allocation spike musl won't
-        // return). The permit is held for the duration of the fetch.
         let Ok(_permit) = self.state.precache_sem.acquire().await else {
             return;
         };
@@ -316,10 +304,6 @@ impl UsenetStreamer {
             .read_range_slices(info_hash, file_index, start, end_inclusive)
             .await?;
         let mut buf = concat_slices(slices, start, end_inclusive);
-        // `read_direct` already returns exactly the requested window (short
-        // only at the true end of the file); this clamp is a cheap safety net
-        // so a buffered HTTP response can't set a Content-Length past the
-        // requested `bytes=start-end` range.
         let want = (end_inclusive - start + 1) as usize;
         if buf.len() > want {
             buf.truncate(want);
@@ -355,14 +339,8 @@ impl UsenetStreamer {
                 self.read_direct(offsets, segments, start, end_inclusive)
                     .await
             }
-            NzbMetaSource::Rar { parts, slices } => {
-                // RAR-contained sources route through a single contiguous
-                // buffer because the encrypted-slice path needs in-place
-                // AES-CBC decrypt. The boundary cost only matters for
-                // Direct sources where 256 KB chunks straddle 720 KB
-                // segments; RAR slices are typically a whole volume long
-                // (100 MB+) so a body chunk almost always fits in one.
-                self.read_rar(
+            NzbMetaSource::Rar { parts, slices } => self
+                .read_rar(
                     parts,
                     slices,
                     meta.password.as_deref(),
@@ -377,8 +355,7 @@ impl UsenetStreamer {
                     } else {
                         vec![buf]
                     }
-                })
-            }
+                }),
         };
 
         if let Err(StreamerError::Nntp(NntpError::ArticleNotFound(status))) = &result {
@@ -419,15 +396,10 @@ impl UsenetStreamer {
             return Ok(Vec::new());
         }
 
-        // Segment whose offset-table slot contains `start`, and how far into
-        // that segment's decoded data the request begins.
         let (first, last) = direct_segment_span(offsets, segments.len(), start, end_inclusive);
         let mut skip = start.saturating_sub(offsets[first]) as usize;
         let read_concurrency = self.pool.download_concurrency().max(PREFETCH_FLOOR);
 
-        // Zero-copy `Bytes` slices, consumed in order. The common
-        // single-segment request yields one slice the caller hands straight to
-        // hyper; multi-segment requests yield one slice per segment.
         let mut slices: Vec<Bytes> = Vec::new();
         let mut produced: usize = 0;
 
@@ -457,13 +429,9 @@ impl UsenetStreamer {
             while let Some(result) = stream.next().await {
                 let decoded = result?;
                 if produced >= want {
-                    // Request already satisfied; keep draining so no fetch in
-                    // this batch is cancelled, but don't accumulate more.
                     continue;
                 }
                 if skip >= decoded.len() {
-                    // Anchor skip spans past this whole segment (start sits in a
-                    // later segment than the table's slot suggested).
                     skip -= decoded.len();
                     continue;
                 }
@@ -474,7 +442,6 @@ impl UsenetStreamer {
             }
 
             if produced >= want || batch_last + 1 >= segments.len() {
-                // Filled, or ran out of segments (legitimate only at true EOF).
                 break;
             }
             batch_start = batch_last + 1;
@@ -510,17 +477,12 @@ mod tests {
 
     #[test]
     fn direct_segment_span_covers_request() {
-        // 3 segments: [0,100), [100,250), [250,400).
         let offsets = [0u64, 100, 250, 400];
         assert_eq!(direct_segment_span(&offsets, 3, 0, 0), (0, 0));
         assert_eq!(direct_segment_span(&offsets, 3, 50, 99), (0, 0));
-        // Spans the first boundary.
         assert_eq!(direct_segment_span(&offsets, 3, 50, 150), (0, 1));
-        // Starts mid-segment-1, ends in segment-2.
         assert_eq!(direct_segment_span(&offsets, 3, 120, 300), (1, 2));
-        // Exactly on a boundary start.
         assert_eq!(direct_segment_span(&offsets, 3, 100, 100), (1, 1));
-        // Whole file.
         assert_eq!(direct_segment_span(&offsets, 3, 0, 399), (0, 2));
     }
 }

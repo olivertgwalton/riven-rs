@@ -106,10 +106,6 @@ pub async fn resolve_tmdb_to_tvdb_id(ctx: &Context<'_>, tmdb_id: &str) -> Result
 
     let token = get_tvdb_token(ctx).await?;
 
-    // TMDB often carries no direct tvdb mapping (e.g. sports series like
-    // Formula 1, whose `external_ids.tvdb_id` is null) but still exposes an
-    // IMDB id. TVDB's remote-id search resolves reliably by IMDB id, so try
-    // that first, then fall back to the raw TMDB id.
     let remote_ids = externals
         .imdb_id
         .iter()

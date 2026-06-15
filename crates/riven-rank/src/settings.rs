@@ -72,12 +72,6 @@ impl QualityProfile {
     }
 }
 
-// ── Built-in profile definitions ─────────────────────────────────────────────
-//
-// Each profile is a pure function returning a fully-specified `RankSettings`.
-// Use `..T::default()` to inherit the HD baseline for anything not overridden.
-// Adding a new profile = add a variant + add a function here + add a match arm.
-
 /// 4K / Ultra HD — maximum quality, lossless audio, Dolby Vision.
 fn ultra_hd_settings() -> RankSettings {
     RankSettings {
@@ -104,7 +98,6 @@ fn ultra_hd_settings() -> RankSettings {
             unknown: 0,
         },
         custom_ranks: CustomRanksConfig {
-            // Source: REMUX > BluRay > WEB-DL > WEB; ban HDTV/DVD
             quality: QualityRanks {
                 remux: CustomRank::scored(true, 10000),
                 bluray: CustomRank::scored(true, 6000),
@@ -117,7 +110,6 @@ fn ultra_hd_settings() -> RankSettings {
                 dvd: CustomRank::scored(false, -10000),
                 ..QualityRanks::default()
             },
-            // HDR: Dolby Vision > HDR10+ > HDR; heavily penalise SDR
             hdr: HdrRanks {
                 dolby_vision: CustomRank::scored(true, 5000),
                 hdr10plus: CustomRank::scored(true, 4500),
@@ -125,7 +117,6 @@ fn ultra_hd_settings() -> RankSettings {
                 sdr: CustomRank::scored(true, -4000),
                 bit10: CustomRank::scored(true, 600),
             },
-            // Audio: lossless first; penalise compressed/stereo/mono
             audio: AudioRanks {
                 truehd: CustomRank::scored(true, 3500),
                 atmos: CustomRank::scored(true, 3200),
@@ -260,7 +251,6 @@ fn standard_settings() -> RankSettings {
             unknown: 4,
         },
         custom_ranks: CustomRanksConfig {
-            // Source: more equal; HDTV/DVD enabled, REMUX disabled
             quality: QualityRanks {
                 webdl: CustomRank::scored(true, 500),
                 bluray: CustomRank::scored(true, 425),
@@ -273,7 +263,6 @@ fn standard_settings() -> RankSettings {
                 avc: CustomRank::scored(true, 175),
                 ..QualityRanks::default()
             },
-            // HDR: SDR only; all HDR formats disabled
             hdr: HdrRanks {
                 dolby_vision: CustomRank::scored(false, -10000),
                 hdr10plus: CustomRank::scored(false, -10000),
@@ -281,7 +270,6 @@ fn standard_settings() -> RankSettings {
                 sdr: CustomRank::scored(true, 500),
                 bit10: CustomRank::scored(false, -5000),
             },
-            // Audio: decent quality, less strict
             audio: AudioRanks {
                 atmos: CustomRank::scored(true, 225),
                 truehd: CustomRank::scored(true, 250),
@@ -304,7 +292,6 @@ fn standard_settings() -> RankSettings {
                 dubbed: CustomRank::scored(true, -500),
                 ..ExtrasRanks::default()
             },
-            // Rips enabled at lower scores
             rips: RipsRanks {
                 bdrip: CustomRank::scored(true, -150),
                 dvdrip: CustomRank::scored(true, -200),

@@ -21,9 +21,6 @@ impl Scheduler {
     pub async fn run(self) {
         let mut content_tick = tokio::time::interval(Duration::from_secs(120));
         let mut cleanup_tick = tokio::time::interval(Duration::from_secs(60 * 60));
-        // Check for stale workers every 60s (2× the apalis default keep-alive of 30s).
-        // Rescued jobs will release their own dedup keys on completion, mirroring
-        // the normal job lifecycle so dedup state stays consistent after recovery.
         let mut worker_recovery_tick = tokio::time::interval(Duration::from_secs(60));
         let retry_wait =
             Self::retry_wait_duration(self.job_queue.retry_interval_secs.load(Ordering::SeqCst));
@@ -54,7 +51,6 @@ impl Scheduler {
                 _ = worker_recovery_tick.tick() => {
                     let mut redis = self.job_queue.redis.clone();
                     let queues = self.job_queue.queue_names();
-                    // 60s threshold: a worker missing two heartbeats is considered dead.
                     crate::recover_stale_workers(&mut redis, &queues, 60).await;
                 }
             }
@@ -73,8 +69,6 @@ impl Scheduler {
         let queues = self.job_queue.queue_names();
         crate::prune_queue_history(&mut redis, &queues).await;
 
-        // GC orphan streams (stale cached scrape results referenced by nothing).
-        // Recoverable — they are recreated on the next scrape.
         match riven_db::repo::delete_orphan_streams(&self.job_queue.db_pool).await {
             Ok(0) => {}
             Ok(removed) => tracing::info!(removed, "pruned orphan streams"),

@@ -48,7 +48,6 @@ impl Plugin for SubdlPlugin {
             Some(k) if !k.is_empty() => k.to_string(),
             _ => return Ok(false),
         };
-        // SubDL has no /me endpoint; ping a known TMDB id with a tiny page size.
         let url = format!(
             "{DEFAULT_BASE_URL}subtitles?api_key={api_key}&tmdb_id=27205&type=movie&subs_per_page=1"
         );
@@ -89,8 +88,6 @@ impl Plugin for SubdlPlugin {
             return Ok(HookResponse::Empty);
         }
 
-        // Resolve TMDB / IMDB ids and (for episodes) season/episode numbers
-        // from the media item — the download event only carries movie ids.
         let meta = match resolve_item_metadata(&ctx.db_pool, info).await {
             Ok(Some(m)) => m,
             Ok(None) => {
@@ -111,10 +108,6 @@ impl Plugin for SubdlPlugin {
             return Ok(HookResponse::Empty);
         }
 
-        // Find the media filesystem entry so we know where to put the
-        // subtitle file. Without it, the subtitle has nowhere to live in the
-        // VFS — the show might have multiple recently-downloaded episodes
-        // racing through this hook, so we look up the specific item.
         let media_entry = match find_media_entry(&ctx.db_pool, info.id).await {
             Ok(Some(e)) => e,
             Ok(None) => {
@@ -138,10 +131,6 @@ impl Plugin for SubdlPlugin {
             }
         };
 
-        // Best-of-language selection: first match per language. For TV we
-        // additionally require the entry's season/episode to match (when the
-        // API returns those fields) to filter season-pack-but-wrong-episode
-        // hits.
         use std::collections::HashMap;
         let mut best_per_lang: HashMap<String, SubtitleEntry> = HashMap::new();
         for sub in results {
@@ -235,7 +224,6 @@ async fn resolve_item_metadata(
             let Some(hierarchy) = hierarchy else {
                 return Ok(None);
             };
-            // Episodes carry their own number; season comes via the join.
             Ok(Some(ItemMetadata {
                 media_type: SubMediaType::Tv,
                 tmdb_id: hierarchy
@@ -251,8 +239,6 @@ async fn resolve_item_metadata(
                 episode_number: hierarchy.item.episode_number,
             }))
         }
-        // Shows/seasons don't directly produce a downloaded file — they
-        // expand into per-episode downloads which fire this hook each.
         _ => Ok(None),
     }
 }
@@ -332,9 +318,6 @@ async fn download_and_save(
     let srt = extract_srt_from_zip(&bytes)?
         .ok_or_else(|| anyhow::anyhow!("no .srt found in downloaded ZIP"))?;
 
-    // Sit the subtitle next to the media file: strip the trailing extension
-    // and append `.{lang}.srt`. Falls back to a sane default if the path has
-    // no extension.
     let subtitle_path = subtitle_path_from(&media_entry.path, language);
 
     riven_db::repo::upsert_subtitle_entry(
@@ -352,7 +335,6 @@ async fn download_and_save(
 }
 
 fn subtitle_path_from(media_path: &str, language: &str) -> String {
-    // Find the last segment, strip its extension if any.
     let (dir, file) = match media_path.rsplit_once('/') {
         Some((d, f)) => (d, f),
         None => ("", media_path),
@@ -397,8 +379,6 @@ fn extract_srt_from_zip(buf: &[u8]) -> anyhow::Result<Option<String>> {
         if !name.to_ascii_lowercase().ends_with(".srt") {
             continue;
         }
-        // Subtitle files come in many encodings; accept valid UTF-8, fall
-        // back to lossy conversion rather than dropping the subtitle.
         let mut bytes = Vec::with_capacity(file.size() as usize);
         file.read_to_end(&mut bytes)?;
         let content = String::from_utf8(bytes)

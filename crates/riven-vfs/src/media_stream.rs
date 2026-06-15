@@ -104,9 +104,6 @@ impl SequentialReader {
             self.read_pos = pos;
         }
 
-        // Read into uninitialized spare capacity via `read_buf` (no zero-fill
-        // of a buffer we immediately overwrite). `take(size)` caps the read at
-        // exactly `size` bytes so we never over-read the stream.
         let mut buf = Vec::with_capacity(size);
         let mut limited = (&mut self.reader).take(size as u64);
         while buf.len() < size {
@@ -230,10 +227,6 @@ impl MediaStream {
             Ok(full) => match slice_request_bytes(&full, start, end, first.start) {
                 Some(slice) => ReadOutcome::Data(slice),
                 None => {
-                    // Poisoned cache entry: data is present but too short to
-                    // cover the requested range. Evict all chunks so the next
-                    // retry re-fetches from the origin instead of looping on
-                    // the same bad entry.
                     for chunk in chunks {
                         cache.evict((self.ino, chunk.start, chunk.end));
                     }
@@ -514,8 +507,6 @@ impl UsenetSession {
     }
 
     pub fn read(&mut self, start: u64, end: u64, runtime: &tokio::runtime::Handle) -> ReadOutcome {
-        // Register on the first read and refresh the heartbeat every ~16 reads
-        // (each up to 4 MB) — cheap, and well inside the idle-detection window.
         const TOUCH_EVERY_N_READS: u32 = 16;
         if !self.registered {
             self.source.stream_register(
@@ -538,11 +529,6 @@ impl UsenetSession {
         }
         let end = end.min(self.file_size - 1);
 
-        // Warm a look-ahead window so the next sequential reads land in cache.
-        // Bytes ahead of the current read to keep pre-fetched. ~46 MB matches
-        // the old eager-producer read-ahead depth; deep enough to ride out a
-        // multi-second provider latency excursion. Override with
-        // `RIVEN_USENET_STREAM_READAHEAD_BYTES`.
         const DEFAULT_PREFETCH_LEAD: u64 = 46 * 1024 * 1024;
         let lead = std::env::var("RIVEN_USENET_STREAM_READAHEAD_BYTES")
             .ok()
@@ -551,10 +537,6 @@ impl UsenetSession {
             .unwrap_or(DEFAULT_PREFETCH_LEAD);
         let want_through = (start + lead).min(self.file_size - 1);
         if want_through > self.prefetch_frontier {
-            // Cover the gap between what's already scheduled and the new
-            // frontier (or from `start` on the first read / a forward seek
-            // past the frontier). De-dup + concurrency bounding live in the
-            // streamer, so a fire-and-forget overlapping window is cheap.
             let from = self.prefetch_frontier.max(start);
             self.prefetch_frontier = want_through;
             let source = Arc::clone(&self.source);
@@ -572,15 +554,10 @@ impl UsenetSession {
                 .read_range(&self.info_hash, self.file_index, start, end),
         ) {
             Ok(data) => {
-                // Guard against a mid-file short read ever reaching the kernel.
-                // The Linux FUSE client treats a read that returns fewer bytes
-                // than requested as EOF and *permanently truncates* the file's
-                // cached size to `offset + returned` — which makes playback die
-                // after the first such read (everything past it returns EOF).
-                // `read_range` fills the whole window except at the true end of
-                // the file; if it ever comes up short anywhere else, surface a
-                // (retryable) EIO rather than corrupting the kernel's view of
-                // the file size.
+                // A mid-file short read must never reach the kernel: the Linux
+                // FUSE client treats short reads as EOF and permanently truncates
+                // the cached file size to `offset + returned`, killing playback.
+                // Surface a retryable EIO instead of forwarding it.
                 let want = (end - start + 1) as usize;
                 if data.len() < want && end < self.file_size - 1 {
                     tracing::warn!(

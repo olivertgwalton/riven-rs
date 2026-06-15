@@ -26,9 +26,6 @@ impl UsenetStreamer {
         end_inclusive: u64,
         priority: Priority,
     ) -> Result<Bytes, StreamerError> {
-        // Most reads stay inside a single RAR slice; we collect zero-copy
-        // `Bytes` slices first and only concatenate when more than one
-        // contributes to the range.
         let mut parts_out: Vec<Bytes> = Vec::new();
 
         let mut virtual_pos: u64 = 0;
@@ -47,9 +44,6 @@ impl UsenetStreamer {
             let req_v_lo = start.max(slice_start);
             let req_v_hi = end_inclusive.min(slice_end - 1);
 
-            // Offsets WITHIN this slice's plaintext stream (i.e. byte 0
-            // is the first plaintext byte this volume contributes to the
-            // contained file).
             let slice_plain_lo = req_v_lo - slice_start;
             let slice_plain_hi = req_v_hi - slice_start;
 
@@ -109,9 +103,6 @@ impl UsenetStreamer {
             cipher_lo_in_part -= block;
         }
 
-        // Decrypt mutates in place, so materialise into an owned BytesMut.
-        // The extra copy here is unavoidable but the encrypted-RAR path is
-        // not the streaming hot path.
         let fetched_bytes = self
             .read_decoded_range_within_part(part, cipher_lo_in_part, cipher_hi_in_part, priority)
             .await?;
@@ -138,8 +129,6 @@ impl UsenetStreamer {
         if end > fetched.len() {
             return Err(StreamerError::BadRange);
         }
-        // Truncate to the plaintext window without re-allocating: drop the
-        // tail, then split off the leading padding into a throwaway prefix.
         fetched.truncate(end);
         let plain = fetched.split_off(plain_offset_in_fetched);
         Ok(Bytes::from(plain))
@@ -191,16 +180,11 @@ impl UsenetStreamer {
         priority: Priority,
     ) -> Result<Bytes, StreamerError> {
         let total_segs = part.segments.len();
-        // Anchor: floor-divide picks the segment whose uniform slot contains
-        // `dec_start`. `skip` is always in `[0, seg_size)`, so it can't
-        // underflow even when actual sizes drift from `seg_size`.
         let first_seg = (dec_start / seg_size) as usize;
         if first_seg >= total_segs {
             return Ok(Bytes::new());
         }
         let skip = (dec_start - (first_seg as u64) * seg_size) as usize;
-        // First batch generously covers the request so it almost always
-        // suffices in one pass; `+2` absorbs ordinary per-segment slop.
         let last_hint = ((dec_end_inclusive / seg_size) as usize).min(total_segs - 1);
         let batch_last = (last_hint + 2).min(total_segs - 1);
 
@@ -314,13 +298,9 @@ impl UsenetStreamer {
             while let Some(result) = stream.next().await {
                 let decoded = result?;
                 if produced >= want {
-                    // Request satisfied; keep draining so no in-flight fetch in
-                    // this batch is cancelled, but stop accumulating.
                     continue;
                 }
                 if skip >= decoded.len() {
-                    // Anchor skip spans past this whole segment (decode slop put
-                    // `dec_start` in a later segment than the slot suggested).
                     skip -= decoded.len();
                     continue;
                 }
@@ -331,8 +311,6 @@ impl UsenetStreamer {
             }
 
             if produced >= want || batch_last + 1 >= total_segs {
-                // Filled, or ran out of segments (legitimate only at true
-                // end-of-part — the outer guard fails EIO if it was mid-file).
                 break;
             }
             batch_start = batch_last + 1;

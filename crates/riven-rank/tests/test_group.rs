@@ -15,7 +15,6 @@ fn test_group_bracket() {
 #[test]
 fn test_group_not_codec() {
     let data = parse("Movie.Title.2023.1080p.BluRay.x265");
-    // x265 should not be detected as group
     assert_ne!(data.group, Some("x265".into()));
 }
 

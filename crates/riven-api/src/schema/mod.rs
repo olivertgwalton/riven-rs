@@ -27,8 +27,6 @@ pub use queries::CoreQuery;
 pub use subscriptions::SubscriptionRoot;
 pub use vfs::VfsQuery;
 
-// ── Merged query root ──
-
 #[derive(MergedObject, Default)]
 pub struct QueryRoot(CoreQuery, DashboardQuery, CalendarQuery, VfsQuery);
 

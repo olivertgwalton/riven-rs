@@ -20,8 +20,6 @@ pub struct NzbMeta {
     pub password: Option<String>,
 }
 
-// Manual Debug so accidental `tracing::debug!(?meta)` doesn't print the
-// archive password.
 impl std::fmt::Debug for NzbMeta {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("NzbMeta")
@@ -99,22 +97,11 @@ pub(crate) fn segments_overlapping(
         return Vec::new();
     }
     let n = segments.len();
-    // `offsets[i]..offsets[i+1]` is segment `i`'s encoded-byte span (offsets is
-    // sorted, length `n + 1`). Binary-search the boundaries instead of the
-    // previous two linear `windows(2)` scans.
-    //
-    // first = smallest `i` with `offsets[i + 1] > lo`. `partition_point`
-    // returns the count of offsets `<= lo`, so the first offset index strictly
-    // greater than `lo` is that count; the matching window start is one less.
-    // Falls back to 0 (the old loop's default) when nothing exceeds `lo`.
     let first = if offsets.last().is_some_and(|&end| end > lo) {
         offsets.partition_point(|&o| o <= lo).saturating_sub(1)
     } else {
         0
     };
-    // last = largest `i` reached before `offsets[i] > hi`; defaults to `n - 1`.
-    // `partition_point` over the first `n` offsets returns the first index where
-    // `offsets[i] > hi` (or `n` when none do), matching the old loop's `i - 1`.
     let last = offsets[..n].partition_point(|&o| o <= hi).saturating_sub(1);
     (first..=last)
         .map(|i| segments[i].message_id.clone())
@@ -138,10 +125,6 @@ pub(crate) fn select_validation_indices(total: usize, sample_percent: usize) -> 
     if sample_percent >= 100 {
         return (0..total).collect();
     }
-    // Strategic-sample shape and bounds. The ceiling keeps the inline
-    // per-candidate ingest probe cheap (it runs while walking many ranked
-    // candidates); reliable single-segment detection is the job of the
-    // `sample_percent >= 100` full-verify path, not a bigger sample.
     const FIRST_N: usize = 3;
     const LAST_N: usize = 2;
     const SAMPLE_MIN: usize = 20;
@@ -167,8 +150,6 @@ pub(crate) fn select_validation_indices(total: usize, sample_percent: usize) -> 
     let middle_range = middle_end - middle_start;
     let middle_count = n.saturating_sub(FIRST_N + LAST_N);
     for i in 0..middle_count {
-        // Evenly-spaced midpoints: floor((i + 0.5) * middle_range / middle_count)
-        // in exact integer arithmetic (no float, no sign-loss cast).
         let idx = middle_start + ((2 * i + 1) * middle_range) / (2 * middle_count.max(1));
         if idx < middle_end {
             indices.push(idx);
@@ -212,8 +193,6 @@ mod tests {
 
     #[test]
     fn validation_full_coverage_at_100_percent() {
-        // 100% (or more) must return every index — the only mode that catches a
-        // single dead article.
         let got = select_validation_indices(36_526, 100);
         assert_eq!(got.len(), 36_526);
         assert_eq!(got.first(), Some(&0));
@@ -227,13 +206,11 @@ mod tests {
     fn validation_sample_includes_head_tail_and_is_bounded() {
         let total = 36_526;
         let got = select_validation_indices(total, 5);
-        // Strategic shape: always probe the first 3 and last 2 (DMCA / truncation).
         for i in 0..3 {
             assert!(got.contains(&i), "missing head index {i}");
         }
         assert!(got.contains(&(total - 1)));
         assert!(got.contains(&(total - 2)));
-        // Sorted, de-duplicated, and capped well under the file size.
         assert!(got.windows(2).all(|w| w[0] < w[1]), "not sorted/unique");
         assert!(got.len() <= 150, "sample exceeded the cap: {}", got.len());
         assert!(got.iter().all(|&i| i < total));
@@ -241,29 +218,22 @@ mod tests {
 
     #[test]
     fn validation_small_file_probes_everything() {
-        // Below the first+last+min thresholds, just check the whole file.
         assert_eq!(select_validation_indices(4, 5), vec![0, 1, 2, 3]);
         assert_eq!(select_validation_indices(0, 5), Vec::<usize>::new());
     }
 
     #[test]
     fn segments_overlapping_picks_touched_segments() {
-        // 3 segments: [0,100), [100,250), [250,400).
         let offsets = [0u64, 100, 250, 400];
         let segments = [seg("a"), seg("b"), seg("c")];
 
         let ids = |lo, hi| segments_overlapping(&offsets, &segments, lo, hi);
 
-        // Inside the first segment.
         assert_eq!(ids(0, 0), vec!["a"]);
         assert_eq!(ids(50, 99), vec!["a"]);
-        // Spans the first boundary.
         assert_eq!(ids(50, 150), vec!["a", "b"]);
-        // Starts mid-segment-1, ends in segment-2.
         assert_eq!(ids(120, 300), vec!["b", "c"]);
-        // Exactly on a boundary start picks the later segment.
         assert_eq!(ids(100, 100), vec!["b"]);
-        // Whole file.
         assert_eq!(ids(0, 399), vec!["a", "b", "c"]);
     }
 

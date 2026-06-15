@@ -65,11 +65,6 @@ impl Plugin for CometPlugin {
         let base_url = ctx.settings.get_or("url", DEFAULT_URL);
         let base_url = base_url.trim_end_matches('/');
 
-        // Build the identifier suffix and scrape type.
-        // Movies:  /stream/movie/{imdbId}.json
-        // Shows:   /stream/series/{imdbId}.json
-        // Seasons: /stream/series/{imdbId}:{season}.json
-        // Episodes:/stream/series/{imdbId}:{season}:{episode}.json
         let (scrape_type, identifier) = match request.item_type {
             MediaItemType::Movie => ("movie", String::new()),
             MediaItemType::Show => ("series", String::new()),
@@ -96,10 +91,6 @@ impl Plugin for CometPlugin {
         };
         let status = resp_data.status();
         if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-            // Defer to job-level retry instead of silently returning an empty
-            // ScrapeResponse — same pattern as plugin-newznab and HttpClient::get_json.
-            // The HTTP layer has already registered the Retry-After pause on the
-            // shared service state, so the next attempt will respect it.
             tracing::warn!(
                 imdb_id,
                 title = request.title,
@@ -186,9 +177,6 @@ fn scrape_results_from_response(resp: CometResponse) -> ScrapeResponse {
 }
 
 fn title_from_stream(stream: CometStream) -> Option<String> {
-    // Title priority:
-    // 1. behaviorHints.filename (exact original filename)
-    // 2. First line of description, strip leading emoji char
     stream.behavior_hints.and_then(|h| h.filename).or_else(|| {
         stream.description.map(|desc| {
             desc.lines()

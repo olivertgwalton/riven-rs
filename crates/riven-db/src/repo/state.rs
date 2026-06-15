@@ -30,7 +30,6 @@ pub fn aggregate_states(
         return None;
     }
 
-    // Sticky states on the parent itself short-circuit the rollup.
     if matches!(
         parent_state,
         MediaItemState::Paused | MediaItemState::Failed
@@ -50,7 +49,6 @@ pub fn aggregate_states(
         return Some(MediaItemState::Unreleased);
     }
 
-    // All completed → ongoing for a continuing show, else completed.
     if all_eq(MediaItemState::Completed) {
         if parent_type == MediaItemType::Show && show_status == Some(ShowStatus::Continuing) {
             return Some(MediaItemState::Ongoing);
@@ -58,11 +56,9 @@ pub fn aggregate_states(
         return Some(MediaItemState::Completed);
     }
 
-    // Ongoing means "waiting on future airings" and only wins when no child
-    // has actionable work left. An aired child in Indexed/Scraped/
-    // PartiallyCompleted still needs scraping or downloading, and `ongoing`
-    // is not a state `get_pending_items_for_retry` picks up — deriving
-    // Ongoing over it would orphan that work until a user intervenes.
+    // Ongoing must not win while a child has actionable work: `ongoing` is not
+    // picked up by `get_pending_items_for_retry`, so deriving it over an
+    // Indexed/Scraped/PartiallyCompleted child would orphan that work.
     let any_actionable = child_states.iter().any(|s| {
         matches!(
             s,
@@ -79,8 +75,6 @@ pub fn aggregate_states(
         return Some(MediaItemState::Ongoing);
     }
 
-    // An Ongoing child counts as partial progress: it only derives when some
-    // of its own children completed.
     if child_states.iter().any(|s| {
         matches!(
             s,

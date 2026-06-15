@@ -130,8 +130,6 @@ pub fn parse_newznab_xml(body: &str) -> Vec<NewznabItem> {
                             }
                         }
                     }
-                    // Some indexers emit <link> as the NZB url; only adopt
-                    // when we don't already have one from <enclosure>.
                     b"link" if item.nzb_url.is_empty() => {
                         for attr in e.attributes().flatten() {
                             if attr.key.as_ref() == b"href"

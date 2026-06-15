@@ -40,7 +40,6 @@ fn test_season_multiple() {
 
 #[test]
 fn test_season_dot_separated() {
-    // "Season.1" with dot separator — was broken before fix
     let data = parse("Mr.Robot.Season.1.Complete.720p.WEB-DL");
     assert_eq!(data.parsed_title, "Mr Robot");
     assert_eq!(data.seasons, vec![1]);

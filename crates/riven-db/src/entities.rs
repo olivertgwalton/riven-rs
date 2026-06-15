@@ -4,8 +4,6 @@ use riven_core::types::*;
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 
-// ── Media Item ──
-
 #[derive(Debug, Clone, FromRow, Serialize, Deserialize, async_graphql::SimpleObject)]
 pub struct MediaItem {
     pub id: i64,
@@ -37,19 +35,14 @@ pub struct MediaItem {
     pub item_type: MediaItemType,
     pub is_requested: bool,
     pub network_timezone: Option<String>,
-    // Show-specific
     pub show_status: Option<ShowStatus>,
-    // Season-specific
     pub season_number: Option<i32>,
     pub is_special: Option<bool>,
     pub parent_id: Option<i64>,
-    // Episode-specific
     pub episode_number: Option<i32>,
     pub absolute_number: Option<i32>,
     pub runtime: Option<i32>,
-    // Item request FK
     pub item_request_id: Option<i64>,
-    // Active stream FK
     pub active_stream_id: Option<i64>,
 }
 
@@ -118,8 +111,6 @@ impl MediaItem {
     }
 }
 
-// ── Calendar Row ──
-
 /// Lightweight projection used by the calendar GraphQL query.
 /// Resolves the ancestor show title in a single SQL JOIN rather than N+1 lookups.
 #[derive(Debug, Clone, FromRow)]
@@ -138,8 +129,6 @@ pub struct CalendarRow {
     pub tvdb_id: Option<String>,
 }
 
-// ── Filesystem Entry ──
-
 #[derive(Debug, Clone, FromRow, Serialize, Deserialize, async_graphql::SimpleObject)]
 pub struct FileSystemEntry {
     pub id: i64,
@@ -149,7 +138,6 @@ pub struct FileSystemEntry {
     pub media_item_id: i64,
     pub entry_type: FileSystemEntryType,
     pub path: String,
-    // Media entry fields
     pub original_filename: Option<String>,
     pub download_url: Option<String>,
     pub stream_url: Option<String>,
@@ -158,7 +146,6 @@ pub struct FileSystemEntry {
     pub provider_download_id: Option<String>,
     pub library_profiles: Option<serde_json::Value>,
     pub media_metadata: Option<serde_json::Value>,
-    // Subtitle entry fields
     pub language: Option<String>,
     pub parent_original_filename: Option<String>,
     pub subtitle_content: Option<String>,
@@ -171,12 +158,9 @@ pub struct FileSystemEntry {
     /// Provider-specific external identifier for the subtitle (e.g. SubDL
     /// subtitle id). Used for de-dup / refresh.
     pub source_id: Option<String>,
-    // Multi-version tracking
     pub stream_id: Option<i64>,
     pub resolution: Option<String>,
     pub ranking_profile_name: Option<String>,
-    // Usenet identity: the article address for in-process VFS streaming.
-    // Set for usenet-backed media entries; NULL for debrid/subtitle.
     pub usenet_info_hash: Option<String>,
     pub usenet_file_index: Option<i32>,
 }
@@ -281,8 +265,6 @@ impl FileSystemEntry {
     }
 }
 
-// ── Stream ──
-
 #[derive(Debug, Clone, FromRow, Serialize, Deserialize, async_graphql::SimpleObject)]
 pub struct Stream {
     pub id: i64,
@@ -301,8 +283,6 @@ pub struct Stream {
     pub file_size_bytes: Option<i64>,
 }
 
-// ── Item Request ──
-
 #[derive(Debug, Clone, FromRow, Serialize, Deserialize, async_graphql::SimpleObject)]
 pub struct ItemRequest {
     pub id: i64,
@@ -320,8 +300,6 @@ pub struct ItemRequest {
     /// non-special seasons. Computed at indexer time. Always false for movies.
     pub is_partial_request: bool,
 }
-
-// ── Media Item with relations (for VFS readdir) ──
 
 #[derive(Debug, Clone)]
 pub struct MovieWithEntries {

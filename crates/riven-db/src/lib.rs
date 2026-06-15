@@ -8,8 +8,6 @@ use sqlx::postgres::PgPoolOptions;
 
 pub async fn connect(database_url: &str) -> Result<PgPool> {
     let parallelism = std::thread::available_parallelism().map_or(4, |n| n.get() as u32);
-    // Peak demand: IO-bound workers (scrape-plugin, index-plugin, download) run at 8× CPU
-    // concurrency each, so size the pool to cover them plus parse + API headroom.
     let max_connections = (parallelism * 16).max(64);
 
     let pool = PgPoolOptions::new()

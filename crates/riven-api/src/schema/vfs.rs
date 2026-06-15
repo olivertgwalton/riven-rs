@@ -79,7 +79,6 @@ async fn get_vfs_entry_stat(pool: &PgPool, path: &str) -> async_graphql::Result<
     let segments = path_segments(path);
 
     match segments.as_slice() {
-        // Root "/"
         [] => {
             let stat = repo::get_vfs_dir_stat(pool, "").await?;
             Ok(VfsEntryStat {
@@ -87,14 +86,13 @@ async fn get_vfs_entry_stat(pool: &PgPool, path: &str) -> async_graphql::Result<
                 ctime: stat.ctime.unwrap_or(now),
                 atime: stat.mtime.unwrap_or(now),
                 mode: MODE_DIR,
-                nlink: 4, // 2 + 2 (movies dir + shows dir)
+                nlink: 4,
                 size: 0,
                 uid: 0,
                 gid: 0,
             })
         }
 
-        // /movies
         ["movies"] => {
             let stat = repo::get_vfs_dir_stat(pool, "/movies").await?;
             let count = repo::count_vfs_distinct_dirs(pool, "/movies/%/%", 3).await?;
@@ -110,7 +108,6 @@ async fn get_vfs_entry_stat(pool: &PgPool, path: &str) -> async_graphql::Result<
             })
         }
 
-        // /shows
         ["shows"] => {
             let stat = repo::get_vfs_dir_stat(pool, "/shows").await?;
             let count = repo::count_vfs_distinct_dirs(pool, "/shows/%/%/%", 3).await?;
@@ -126,7 +123,6 @@ async fn get_vfs_entry_stat(pool: &PgPool, path: &str) -> async_graphql::Result<
             })
         }
 
-        // /movies/{dir}
         ["movies", dir] => {
             let prefix = format!("/movies/{dir}");
             let stat = repo::get_vfs_dir_stat(pool, &prefix).await?;
@@ -145,7 +141,6 @@ async fn get_vfs_entry_stat(pool: &PgPool, path: &str) -> async_graphql::Result<
             })
         }
 
-        // /movies/{dir}/{file}
         ["movies", _, _] => {
             let entry = repo::get_media_entry_by_path(pool, path)
                 .await?
@@ -153,7 +148,6 @@ async fn get_vfs_entry_stat(pool: &PgPool, path: &str) -> async_graphql::Result<
             Ok(file_stat(&entry))
         }
 
-        // /shows/{dir}
         ["shows", dir] => {
             let prefix = format!("/shows/{dir}");
             let stat = repo::get_vfs_dir_stat(pool, &prefix).await?;
@@ -174,7 +168,6 @@ async fn get_vfs_entry_stat(pool: &PgPool, path: &str) -> async_graphql::Result<
             })
         }
 
-        // /shows/{dir}/{season}
         ["shows", dir, season] => {
             let prefix = format!("/shows/{dir}/{season}");
             let stat = repo::get_vfs_dir_stat(pool, &prefix).await?;
@@ -193,7 +186,6 @@ async fn get_vfs_entry_stat(pool: &PgPool, path: &str) -> async_graphql::Result<
             })
         }
 
-        // /shows/{dir}/{season}/{file}
         ["shows", _, _, _] => {
             let entry = repo::get_media_entry_by_path(pool, path)
                 .await?
@@ -212,10 +204,8 @@ async fn get_vfs_directory_entry_paths(
     let segments = path_segments(path);
 
     match segments.as_slice() {
-        // Root "/" → always ["movies", "shows"]
         [] => Ok(vec!["movies".to_string(), "shows".to_string()]),
 
-        // /movies → list of movie directory names (e.g. "Inception (2010) {tmdb-27205}")
         ["movies"] => {
             let entries = repo::list_vfs_dir_names(pool, "/movies/%/%", 3).await?;
             let mut seen = std::collections::HashSet::new();
@@ -226,14 +216,12 @@ async fn get_vfs_directory_entry_paths(
                 .collect())
         }
 
-        // /movies/{dir} → list of filenames within that movie directory
         ["movies", dir] => {
             let dir_path = format!("/movies/{dir}");
             let entries = repo::list_vfs_file_names(pool, &dir_path).await?;
             Ok(entries.into_iter().filter_map(|e| e.name).collect())
         }
 
-        // /shows → list of show directory names
         ["shows"] => {
             let entries = repo::list_vfs_dir_names(pool, "/shows/%/%/%", 3).await?;
             let mut seen = std::collections::HashSet::new();
@@ -244,7 +232,6 @@ async fn get_vfs_directory_entry_paths(
                 .collect())
         }
 
-        // /shows/{dir} → list of season directory names
         ["shows", dir] => {
             let pattern = format!("/shows/{dir}/%/%");
             let entries = repo::list_vfs_dir_names(pool, &pattern, 4).await?;
@@ -256,14 +243,12 @@ async fn get_vfs_directory_entry_paths(
                 .collect())
         }
 
-        // /shows/{dir}/{season} → list of episode filenames
         ["shows", dir, season] => {
             let dir_path = format!("/shows/{dir}/{season}");
             let entries = repo::list_vfs_file_names(pool, &dir_path).await?;
             Ok(entries.into_iter().filter_map(|e| e.name).collect())
         }
 
-        // /shows/{dir}/{season}/{file} → the file itself
         ["shows", _, _, file] => Ok(vec![file.to_string()]),
 
         _ => Err(Error::new("Invalid path")),

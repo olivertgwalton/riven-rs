@@ -12,8 +12,6 @@ use crate::schema::typed_items::Movie;
 
 use super::MutationStatusText;
 
-// ── Input types ──
-
 /// Input for the `indexMovie` mutation.
 #[derive(InputObject)]
 pub(super) struct IndexMovieInput {
@@ -34,8 +32,6 @@ pub(super) struct IndexMovieInput {
     runtime: Option<i32>,
 }
 
-// ── Response types ──
-
 /// Structured response returned by `indexMovie`.
 #[derive(SimpleObject)]
 pub(super) struct IndexMovieMutationResponse {
@@ -44,8 +40,6 @@ pub(super) struct IndexMovieMutationResponse {
     status_text: MutationStatusText,
     movie: Option<Movie>,
 }
-
-// ── Resolver ──
 
 #[derive(Default)]
 pub struct MovieMutations;
@@ -116,8 +110,6 @@ impl MovieMutations {
         })
     }
 }
-
-// ── Helpers ──
 
 pub(super) fn parse_aliases(
     value: Option<serde_json::Value>,

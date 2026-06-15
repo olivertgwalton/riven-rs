@@ -17,7 +17,6 @@ fn non_empty_filter_is_an_allowlist() {
 
 #[test]
 fn sign_matches_rfc4231_test_case_2() {
-    // RFC 4231, Test Case 2 — HMAC-SHA256("Jefe", "what do ya want for nothing?").
     let sig = sign("Jefe", b"what do ya want for nothing?");
     assert_eq!(
         sig,

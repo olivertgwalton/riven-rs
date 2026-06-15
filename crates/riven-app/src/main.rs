@@ -11,7 +11,6 @@ use riven_core::reindex::ReindexConfig;
 use riven_queue::worker::Scheduler;
 use riven_queue::{DownloaderConfig, JobQueue};
 
-// Force plugin crate linking so inventory collects registrations.
 include!(concat!(env!("OUT_DIR"), "/plugin_crates.rs"));
 mod setup;
 
@@ -35,9 +34,6 @@ const USER_AGENT: &str = concat!("riven-rs/", env!("CARGO_PKG_VERSION"));
 fn build_http_client() -> Result<reqwest::Client> {
     Ok(reqwest::Client::builder()
         .user_agent(USER_AGENT)
-        // Resolve through the same serve-stale hickory cache as the NNTP dialer
-        // (see `riven_core::dns`). Its `Ipv4thenIpv6` strategy also keeps egress
-        // on IPv4 when the container advertises AAAA records it can't route.
         .dns_resolver(riven_core::dns::CachedDnsResolver)
         .connect_timeout(Duration::from_secs(
             riven_core::config::vfs::CONNECT_TIMEOUT_SECS,
@@ -105,9 +101,6 @@ async fn main() -> Result<()> {
         riven_db::run_migrations(&db_pool).await?;
     }
 
-    // Shared with every plugin (dedup guards, dashboard, …). Built with the
-    // same bounded-timeout connection as the job-queue connections so no Redis
-    // command can hang indefinitely after a connection blip.
     let redis_conn = riven_queue::connect_managed(settings.redis_url.as_str()).await?;
     tracing::info!("redis connection established");
 
@@ -124,15 +117,6 @@ async fn main() -> Result<()> {
     )
     .await;
 
-    // If the `usenet` plugin is configured with NNTP credentials, build a
-    // streamer the VFS reads through in-process (as a `LocalByteSource`).
-    // Failure to build is non-fatal — Usenet streaming is just disabled.
-    // Concurrent usenet download workers. Kept small (default 4) rather than
-    // scaled to the pool: on usenet, total throughput is line-bound, so many
-    // concurrent ingests don't drain a backlog faster — they split the pipe
-    // and starve playback/scanning of bandwidth. Leaving most connections idle
-    // keeps streaming fast (altmount keeps imports at ~2 workers for this
-    // reason). Overridable via the `maxdownloadworkers` usenet setting.
     let mut usenet_download_workers: Option<usize> = None;
     let usenet_settings_json = registry.get_plugin_settings_json("usenet").await;
     let usenet_streamer: Option<riven_usenet::UsenetStreamer> = match usenet_settings_json
@@ -153,11 +137,6 @@ async fn main() -> Result<()> {
                 .filter(|&n| n > 0);
             usenet_download_workers =
                 Some(configured.unwrap_or(riven_usenet::DEFAULT_DOWNLOAD_WORKERS));
-            // `shared` (not `new`) so playback, ingest, and the health-check
-            // task all use the same `NntpPool` — the user's configured
-            // `max_connections` is then the true ceiling against the
-            // provider rather than being multiplied by the number of
-            // construction sites.
             Some(riven_usenet::UsenetStreamer::shared(cfg, db_pool.clone()))
         }
         None => {
@@ -191,8 +170,6 @@ async fn main() -> Result<()> {
     let (link_tx, mut link_rx) = tokio::sync::mpsc::channel(64);
 
     let vfs_mount_path = settings.effective_vfs_mount_path().to_string();
-    // Usenet-backed VFS reads go in-process through the streamer (the old
-    // loopback HTTP route has been removed).
     let usenet_local_source: Option<Arc<dyn riven_core::local_source::LocalByteSource>> =
         usenet_streamer
             .clone()
@@ -208,11 +185,6 @@ async fn main() -> Result<()> {
         usenet_local_source,
     )?);
 
-    // Background usenet availability scanner: periodically STAT-samples each
-    // usenet-backed file's segments and records per-title health, powering the
-    // dashboard's "Usenet Health" view. Low-priority STATs in small batches so
-    // it never competes with live playback. Tunable via
-    // `RIVEN_USENET_HEALTH_SCAN_INTERVAL_SECS` / `_BATCH`.
     if let Some(streamer) = usenet_streamer.clone() {
         let db = db_pool.clone();
         let repair_queue = job_queue.clone();
@@ -226,10 +198,6 @@ async fn main() -> Result<()> {
         let batch = env_parsed::<i64>("RIVEN_USENET_HEALTH_SCAN_BATCH")
             .filter(|&n| n > 0)
             .unwrap_or(5);
-        // altmount-style auto-repair. Enabled via the usenet plugin's
-        // "Auto-Repair" UI toggle (read per-tick below so it takes effect
-        // without a restart); `RIVEN_USENET_AUTO_REPAIR` is a force-on override
-        // for headless setups. Backoff timing is env-tunable (sensible defaults).
         let auto_repair_forced = std::env::var("RIVEN_USENET_AUTO_REPAIR")
             .map(|v| {
                 matches!(
@@ -251,9 +219,6 @@ async fn main() -> Result<()> {
             loop {
                 tick.tick().await;
 
-                // Drop health rows for usenet files that no longer exist (e.g.
-                // a re-grab moved the title onto a different/non-usenet release),
-                // so stale "not ingested"/"missing data" rows don't linger.
                 match riven_db::repo::prune_orphaned_usenet_health(&db).await {
                     Ok(n) if n > 0 => {
                         tracing::debug!(removed = n, "usenet health: pruned orphaned rows")
@@ -262,18 +227,12 @@ async fn main() -> Result<()> {
                     _ => {}
                 }
 
-                // Read the auto-repair toggle + retry cap from settings each tick
-                // so the UI toggle is live. Env force-on wins when set.
                 let usenet_cfg = scanner_registry.get_plugin_settings_json("usenet").await;
                 let auto_repair = auto_repair_forced || setting_flag(&usenet_cfg, "autorepair");
                 let repair_max_retries = setting_u64(&usenet_cfg, "repairmaxretries")
                     .filter(|&n| n > 0)
                     .map(|n| n as i32)
                     .unwrap_or(3);
-                // When "Full Segment Verification" is on, the background scanner
-                // STAT-checks every segment (percent = 100) so a single post-grab
-                // article death is actually detected — sampling almost always
-                // misses one. Read per-tick so the toggle is live.
                 let check_all_segments = setting_flag(&usenet_cfg, "checkallsegments");
                 let effective_sample_percent = if check_all_segments {
                     100
@@ -301,9 +260,6 @@ async fn main() -> Result<()> {
                             scan.missing_segments as i32,
                             scan.error_segments as i32,
                         ),
-                        // No segment map for this release — it was never
-                        // ingested (or the meta is gone), so it isn't
-                        // streamable. Distinct from "couldn't reach provider".
                         Err(riven_usenet::StreamerError::NotIngested(_)) => {
                             ("not_ingested", 0, 0, 0, 0)
                         }
@@ -334,7 +290,6 @@ async fn main() -> Result<()> {
                         continue;
                     }
                     match status {
-                        // Healthy again → clear repair bookkeeping (resolve).
                         "healthy" => {
                             if let Err(error) = riven_db::repo::clear_usenet_repair_state(
                                 &db,
@@ -346,8 +301,6 @@ async fn main() -> Result<()> {
                                 tracing::debug!(%error, "usenet auto-repair: clear state failed");
                             }
                         }
-                        // Confirmed broken / never ingested → auto re-grab if due
-                        // and under the retry cap (exponential backoff between).
                         "unhealthy" | "not_ingested" => {
                             let Some(media_item_id) = file.media_item_id else {
                                 continue;
@@ -390,14 +343,12 @@ async fn main() -> Result<()> {
                                         tracing::debug!(%error, "usenet auto-repair: record attempt failed");
                                     }
                                 }
-                                // Not due / retries exhausted.
                                 Ok(None) => {}
                                 Err(error) => {
                                     tracing::debug!(%error, "usenet auto-repair: due check failed")
                                 }
                             }
                         }
-                        // "unknown"/unverified is transient — don't auto-repair.
                         _ => {}
                     }
                 }
@@ -452,10 +403,6 @@ async fn main() -> Result<()> {
         });
     }
 
-    // Persist per-provider download traffic. The pool counts encoded wire
-    // bytes + article bodies per provider in memory; this flusher writes the
-    // deltas to the DB every minute so lifetime totals survive restarts and
-    // daily buckets accumulate for the usage-trend chart.
     if let Some(streamer) = usenet_streamer.clone() {
         let db = db_pool.clone();
         tokio::spawn(async move {
@@ -479,7 +426,6 @@ async fn main() -> Result<()> {
                         .await
                     {
                         tracing::debug!(%error, host = %t.host, "usenet traffic flush failed");
-                        // Don't advance the baseline — retry the delta next tick.
                         continue;
                     }
                     last.insert(t.host, (t.bytes_downloaded, t.articles_downloaded));
@@ -491,14 +437,6 @@ async fn main() -> Result<()> {
     tokio::spawn({
         let link_registry = registry.clone();
         async move {
-            // Matches riven-ts open.ts: refresh the stream URL on demand and
-            // hand back whatever the plugin returns. On failure we send None,
-            // which surfaces as ENOENT to the VFS caller. We intentionally do
-            // NOT blacklist the stream, delete the entry, or regress item
-            // state — playback errors are transient and shouldn't tear down
-            // a Completed item (a single dead URL on one episode of a
-            // season pack would otherwise orphan that episode with no
-            // fallback stream of its own).
             while let Some(req) = link_rx.recv().await {
                 let event = RivenEvent::MediaItemStreamLinkRequested {
                     magnet: req.download_url,
@@ -595,23 +533,9 @@ async fn main() -> Result<()> {
         async move {
             let mut redis_conn = jq.redis.clone();
             let queues = jq.queue_names();
-            // Hard ceiling on the pre-start maintenance phase. The Redis
-            // connection already has a per-command `response_timeout`, but a
-            // blip can stall each of many per-queue commands; without an outer
-            // bound the restart loop could still sit for minutes before
-            // spawning workers. If maintenance overruns we proceed to
-            // `start_workers` anyway and let the next iteration retry — a
-            // wedged restart loop (workers never come back until the process
-            // is restarted) is far worse than skipping one orphan purge.
             const MAINTENANCE_TIMEOUT: Duration = Duration::from_secs(60);
-            // Backoff between restart attempts so a connection that is fully
-            // down (every `start_workers().run()` returning immediately) cannot
-            // turn into a hot loop hammering Redis.
             const RESTART_BACKOFF: Duration = Duration::from_secs(5);
             while !cancel.is_cancelled() {
-                // Unconditionally clears worker heartbeats so re-registration is
-                // not rejected by `register_worker.lua`'s "still active within
-                // threshold" check after a previous run died.
                 let maintenance = async {
                     riven_queue::clear_worker_registrations(&mut redis_conn, &queues).await;
                     riven_queue::purge_orphaned_worker_sets(&mut redis_conn, &queues).await;
@@ -626,11 +550,6 @@ async fn main() -> Result<()> {
                     );
                 }
 
-                // `Monitor::run()` resolves as soon as all workers complete (e.g.
-                // a Redis blip on the shared `apalis_conn` errors every backend's
-                // poll stream in the same tick). `run_with_signal()` would have
-                // hung here forever because it `join!`s workers with an external
-                // signal that only fires on shutdown.
                 let monitor_handle = tokio::spawn({
                     let jq = jq.clone();
                     async move {
@@ -655,9 +574,6 @@ async fn main() -> Result<()> {
                     }
                     Err(e) => tracing::error!(error = ?e, "apalis monitor task failed, restarting"),
                 }
-                // Brief pause before re-registering. Guards against a hot
-                // restart loop when Redis is down hard and every attempt fails
-                // immediately; harmless in the normal (rare) restart case.
                 tokio::select! {
                     _ = tokio::time::sleep(RESTART_BACKOFF) => {}
                     _ = cancel.cancelled() => break,
@@ -695,7 +611,6 @@ async fn main() -> Result<()> {
 
     tracing::info!(gql_port, vfs = vfs_mount_path, "riven is running");
 
-    // Handle SIGINT and SIGTERM so the FUSE mount is properly unmounted on shutdown.
     #[cfg(unix)]
     {
         use signal::unix::{SignalKind, signal as unix_signal};

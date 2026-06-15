@@ -58,9 +58,6 @@ impl UsenetStreamer {
         let ingest_sem = Arc::new(tokio::sync::Semaphore::new(
             crate::state::ingest_concurrency_for(pool.total_capacity()),
         ));
-        // Fire-and-forget: open a handful of authenticated NNTP sockets per
-        // provider so the first stream request finds hot connections in the
-        // pool instead of paying TCP + TLS + AUTHINFO latency.
         {
             let pool = pool.clone();
             tokio::spawn(async move {
@@ -123,15 +120,6 @@ impl UsenetStreamer {
             .await?
             .ok_or_else(|| StreamerError::NotIngested(info_hash.to_string()))?;
 
-        // Auto-heal Direct metas whose offset table predates exact-offset
-        // rescaling. Those tables hold encoded-byte *estimates* (each segment's
-        // slot drifts from its true decoded length), which misaligns the
-        // stateless random-access read path and corrupts playback. Detection is
-        // a pure check on the stored array — no I/O — so already-exact metas
-        // pass straight through. When a table looks approximate we re-run the
-        // same rescale a fresh ingest would (cheap: it fetches only the first +
-        // last segment) and persist the result, so it's a one-time cost per
-        // title that survives restarts and cache eviction.
         let mut healed = false;
         for file in &mut meta.files {
             let approximate = matches!(
@@ -204,10 +192,6 @@ impl UsenetStreamer {
             return Ok(AvailabilityScan::default());
         }
 
-        // Strategic sample (first-N / last-N / spread middle), or every segment
-        // when `sample_percent >= 100`. Full coverage is the only mode that
-        // catches a single dead article — set it for the background scanner via
-        // the "check all segments" toggle.
         let sample: Vec<String> = select_validation_indices(total, sample_percent)
             .into_iter()
             .map(|i| message_ids[i].clone())
@@ -271,8 +255,6 @@ impl UsenetStreamer {
                 }
             }
         }
-        // RAR parts can be shared across contained files — de-dup so a segment
-        // is STAT'd once.
         message_ids.sort_unstable();
         message_ids.dedup();
         let total = message_ids.len();
@@ -362,10 +344,6 @@ impl AvailabilityScan {
 /// (S5E3, for instance, drifts at the very second segment) while leaving a
 /// genuinely uniform table untouched.
 fn direct_offsets_look_approximate(offsets: &[u64]) -> bool {
-    // `offsets` has `n_segments + 1` entries. The final step
-    // (`offsets[len-2]..offsets[len-1]`) is the partial last segment and is
-    // excluded; full-part steps are indices `0..len-2`. Need at least two of
-    // them to compare.
     let full_steps = offsets.len().saturating_sub(2);
     if full_steps < 2 {
         return false;
@@ -460,7 +438,6 @@ impl riven_core::local_source::LocalByteSource for UsenetStreamer {
         start: u64,
         end_inclusive: u64,
     ) -> anyhow::Result<bytes::Bytes> {
-        // Inherent `read_range` loads meta + dispatches Direct/RAR.
         Ok(UsenetStreamer::read_range(self, info_hash, file_index, start, end_inclusive).await?)
     }
 

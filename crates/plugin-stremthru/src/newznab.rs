@@ -83,10 +83,6 @@ pub async fn scrape_newznab(
     categories: &str,
     req: &ScrapeRequest<'_>,
 ) -> anyhow::Result<ScrapeResponse> {
-    // ID-based search is preferred; the text (`q=`) query is the primary when
-    // the item has no IMDb id, and a fallback when the ID search returns
-    // nothing — sports/yearly content is frequently not ID-mapped on indexers
-    // and only reachable by title.
     let text_query = newznab_text_query(req);
     let ((search_type, params), fallback) = match build_id_query(req) {
         Some(id_query) => (id_query, Some(text_query)),
@@ -112,8 +108,6 @@ pub async fn scrape_newznab(
             continue;
         }
         let info_hash = nzb_info_hash(&item.nzb_url);
-        // Park the NZB URL in Redis so the download path can submit it to
-        // /v0/store/newz later.
         let _result: Result<(), _> = redis_conn
             .set_ex(
                 nzb_url_redis_key(&info_hash),

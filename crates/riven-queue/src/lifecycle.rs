@@ -144,9 +144,6 @@ impl<'a> LibraryOrchestrator<'a> {
                     if item.imdb_id.is_none() || requested_specific_seasons {
                         self.queue.push_index(IndexJob::from_item(item)).await;
                     } else {
-                        // Already indexed and no new seasons added — kick the
-                        // per-item state machine. ProcessMediaItem.handle_scrape
-                        // for a Show fans out to its requested seasons.
                         self.queue
                             .push_process_media_item(ProcessMediaItemJob::new(item.id))
                             .await;

@@ -5,7 +5,6 @@
 /// fall back to the value here when no custom override is set.
 #[derive(Debug, Clone)]
 pub struct RankingModel {
-    // Quality (incl. codec — both live in CustomRanksConfig.quality)
     pub av1: i64,
     pub avc: i64,
     pub bluray: i64,
@@ -19,7 +18,6 @@ pub struct RankingModel {
     pub webdl: i64,
     pub webmux: i64,
     pub xvid: i64,
-    // Rips
     pub bdrip: i64,
     pub brrip: i64,
     pub dvdrip: i64,
@@ -31,13 +29,11 @@ pub struct RankingModel {
     pub vhsrip: i64,
     pub webdlrip: i64,
     pub webrip: i64,
-    // HDR
     pub bit10: i64,
     pub dolby_vision: i64,
     pub hdr: i64,
     pub hdr10plus: i64,
     pub sdr: i64,
-    // Audio
     pub aac: i64,
     pub atmos: i64,
     pub dolby_digital: i64,
@@ -50,7 +46,6 @@ pub struct RankingModel {
     pub stereo: i64,
     pub surround: i64,
     pub truehd: i64,
-    // Extras
     pub three_d: i64,
     pub converted: i64,
     pub commentary: i64,
@@ -67,7 +62,6 @@ pub struct RankingModel {
     pub upscaled: i64,
     pub scene: i64,
     pub uncensored: i64,
-    // Trash
     pub cam: i64,
     pub clean_audio: i64,
     pub pdtv: i64,
@@ -81,7 +75,6 @@ pub struct RankingModel {
 impl Default for RankingModel {
     fn default() -> Self {
         Self {
-            // Quality
             av1: 500,
             avc: 500,
             bluray: 100,
@@ -95,7 +88,6 @@ impl Default for RankingModel {
             webdl: 200,
             webmux: -10000,
             xvid: -10000,
-            // Rips
             bdrip: -5000,
             brrip: -10000,
             dvdrip: -5000,
@@ -107,13 +99,11 @@ impl Default for RankingModel {
             vhsrip: -10000,
             webdlrip: -10000,
             webrip: -1000,
-            // HDR
             bit10: 100,
             dolby_vision: 3000,
             hdr: 2000,
             hdr10plus: 2100,
             sdr: 0,
-            // Audio
             aac: 100,
             atmos: 1000,
             dolby_digital: 50,
@@ -126,7 +116,6 @@ impl Default for RankingModel {
             stereo: 0,
             surround: 0,
             truehd: 2000,
-            // Extras
             three_d: -10000,
             converted: -1000,
             commentary: 0,
@@ -143,7 +132,6 @@ impl Default for RankingModel {
             upscaled: -10000,
             scene: 0,
             uncensored: 0,
-            // Trash
             cam: -10000,
             clean_audio: -10000,
             pdtv: -10000,

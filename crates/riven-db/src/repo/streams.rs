@@ -150,8 +150,6 @@ fn build_stream_query(ranks: &ResolutionRanks, limit_one: bool) -> String {
 }
 
 pub async fn clear_blacklisted_streams(pool: &PgPool, media_item_id: i64) -> Result<()> {
-    // Preserve permanent blacklists (releases confirmed broken by the health
-    // check) — only the transient, per-scrape entries are cleared.
     sqlx::query(
         "DELETE FROM media_item_blacklisted_streams \
          WHERE media_item_id = $1 AND permanent = false",
@@ -342,10 +340,9 @@ pub async fn upsert_subtitle_entry(
 ) -> Result<FileSystemEntry> {
     let file_size = subtitle_content.len() as i64;
 
-    // ON CONFLICT (media_item_id, language) doesn't work here because the
-    // unique index is partial (entry_type='subtitle'); Postgres only matches
-    // ON CONFLICT against full-relation indexes. Delete+insert guarantees at
-    // most one subtitle row per (item, language).
+    // Delete+insert, not ON CONFLICT: the unique index is partial
+    // (entry_type='subtitle') and Postgres only matches ON CONFLICT against
+    // full-relation indexes.
     sqlx::query(
         "DELETE FROM filesystem_entries \
          WHERE media_item_id = $1 AND language = $2 AND entry_type = 'subtitle'",
@@ -693,9 +690,6 @@ pub async fn list_vfs_dir_names(
 }
 
 pub async fn list_vfs_file_names(pool: &PgPool, dir_path: &str) -> Result<Vec<VfsFileName>> {
-    // Subtitle entries inherit library_profiles from the sibling media entry
-    // on insert (or have NULL membership = "all profiles"), so the media-file
-    // profile filter applies to them too.
     let sql = "SELECT split_part(path, '/', array_length(string_to_array(trim(both '/' from $1), '/'), 1) + 2) AS name, library_profiles \
          FROM filesystem_entries \
          WHERE path LIKE ($1 || '/%') AND entry_type IN ('media', 'subtitle') \

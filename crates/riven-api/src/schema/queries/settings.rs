@@ -39,18 +39,15 @@ impl CoreSettingsQuery {
         require_settings_access(ctx)?;
         let pool = ctx.data::<sqlx::PgPool>()?;
 
-        // Load all DB profile rows so we can look up stored overrides by name.
         let db_profiles = repo::list_ranking_profiles(pool).await.unwrap_or_default();
 
         let profiles: serde_json::Value = riven_rank::QualityProfile::ALL
             .iter()
             .map(|&p| {
-                // Find the matching DB row (if any) for this built-in profile.
                 let db_row = db_profiles.iter().find(|r| r.name == p.id());
 
                 let effective_settings = db_row
                     .and_then(|row| {
-                        // Only merge if the DB actually has non-empty settings.
                         let is_empty = matches!(&row.settings, serde_json::Value::Object(m) if m.is_empty())
                             || matches!(&row.settings, serde_json::Value::Null);
                         if is_empty {
@@ -316,8 +313,6 @@ impl CoreSettingsQuery {
         Ok(result)
     }
 }
-
-// ── Helpers ───────────────────────────────────────────────────────────────────
 
 /// Remove `"rank": 0` from every CustomRank entry — old DB data used 0 as the
 /// "unset" sentinel before `rank` became `Option<i64>`.

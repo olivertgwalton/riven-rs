@@ -75,7 +75,6 @@ impl Plugin for TraktPlugin {
         let watched_count = ctx.settings.get_parsed_or("watchedcount", 10usize);
         let watched_period = ctx.settings.get_or("watchedperiod", "weekly");
 
-        // Watchlist (requires access token)
         if ctx.settings.get_bool("watchlist") {
             if let Some(token) = access_token {
                 collect_wrapped(
@@ -93,7 +92,6 @@ impl Plugin for TraktPlugin {
             }
         }
 
-        // User lists
         let user_lists = ctx.settings.get_list("userlists");
         if let Some(token) = access_token {
             for list_slug in &user_lists {
@@ -110,7 +108,6 @@ impl Plugin for TraktPlugin {
             }
         }
 
-        // Trending
         if ctx.settings.get_bool("fetchtrending") {
             collect_wrapped(
                 fetch_trending(&ctx.http, client_id, "movies", trending_count).await?,
@@ -124,7 +121,6 @@ impl Plugin for TraktPlugin {
             );
         }
 
-        // Popular
         if ctx.settings.get_bool("fetchpopular") {
             collect_direct(
                 fetch_popular(&ctx.http, client_id, "movies", popular_count).await?,
@@ -138,7 +134,6 @@ impl Plugin for TraktPlugin {
             );
         }
 
-        // Most watched
         if ctx.settings.get_bool("fetchwatched") {
             collect_wrapped(
                 fetch_watched(
@@ -265,7 +260,6 @@ async fn fetch_user_list(
     list_slug: &str,
     media_type: &str,
 ) -> anyhow::Result<Vec<WrappedItem>> {
-    // list_slug format: "username/listname"
     let (username, listname) = list_slug.split_once('/').unwrap_or(("me", list_slug));
     let url = format!("{TRAKT_BASE_URL}/users/{username}/lists/{listname}/items/{media_type}");
     tracing::debug!(

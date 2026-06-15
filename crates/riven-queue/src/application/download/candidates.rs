@@ -74,8 +74,6 @@ pub fn rank_streams_for_profile<'a>(
                 return None;
             };
 
-            // Persisted streams can predate the scrape-time extras guard;
-            // never select a bonus-features disc as the item's content.
             if riven_rank::is_extras_only_release(&parsed.raw_title) {
                 tracing::debug!(
                     item_id = item.id,
@@ -87,11 +85,6 @@ pub fn rank_streams_for_profile<'a>(
                 return None;
             }
 
-            // Re-validate the release title against the item before selecting,
-            // mirroring the scrape-time similarity check. Persisted streams can
-            // be linked to the wrong title (different regional version of a
-            // same-named show), and the relaxed fetch checks below would
-            // otherwise let them through.
             if !riven_rank::title_matches(
                 &parsed,
                 &title_ctx.correct_title,
@@ -163,7 +156,6 @@ fn build_download_candidate_profile(profile: &RankSettings) -> RankSettings {
     download_profile.custom_ranks.extras.documentary.fetch = true;
     download_profile.custom_ranks.extras.site.fetch = true;
 
-    // Avoid hard-failing sparse TV releases that only parse weakly.
     download_profile.custom_ranks.quality.hdtv.fetch = true;
     download_profile.custom_ranks.quality.dvd.fetch = true;
     download_profile.custom_ranks.audio.mono.fetch = true;
@@ -318,12 +310,14 @@ mod tests {
         let profile = RankSettings::default();
         let ctx = title_ctx("Top Gear", Some("gbr"));
 
-        // "Top Gear France" is a different show; even when it slipped into
-        // the item's stream list (and regardless of its stored rank), the
-        // title re-check must drop it. "Top.Gear.UK." releases tag the item's
-        // own country and must stay eligible, even when every scrape-time
-        // ranking profile rejected them (rank = NULL).
-        let wrong_show = stream(1, "hashwrongversion", "Top.Gear.France.S09E01.1080p.WEB.H264");
+        // "Top.Gear.UK." releases tag the item's own country and must stay
+        // eligible even when every scrape-time ranking profile rejected them
+        // (rank = NULL); the wrong-version "France" release must still be dropped.
+        let wrong_show = stream(
+            1,
+            "hashwrongversion",
+            "Top.Gear.France.S09E01.1080p.WEB.H264",
+        );
         let mut correct_show = stream(2, "hashcorrect", "Top.Gear.UK.S09E01.1080p.WEB.H264");
         correct_show.rank = None;
         let streams = [wrong_show, correct_show];

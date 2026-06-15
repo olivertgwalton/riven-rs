@@ -79,14 +79,9 @@ impl HttpClient {
         };
 
         if is_leader {
-            // RAII guard so a cancelled leader (caller's future dropped while
-            // `self.send(...)` is awaiting) still publishes a failure to the
-            // watch channel and removes the dedupe entry. Without this, the
-            // entry would stay in `inflight` and any future call with the
-            // same key would `state.wait().await` forever — observed when
-            // an iOS HTTP query was cancelled mid-flight: subsequent calls
-            // hung 90s+ with the request never reaching the resolver and no
-            // backend log at all.
+            // RAII guard: a cancelled leader (caller future dropped mid-send)
+            // must still publish failure and remove the dedupe entry, or every
+            // future call with this key blocks on `state.wait()` forever.
             struct InflightGuard {
                 state: Arc<InFlightRequest>,
                 inflight: Arc<DashMap<String, Arc<InFlightRequest>>>,
@@ -120,8 +115,6 @@ impl HttpClient {
             };
             state.finish(result.clone());
             guard.completed = true;
-            // Guard's Drop still runs to remove the entry; setting `completed`
-            // just prevents the redundant failure-publish on the channel.
             return result.map_err(anyhow::Error::msg);
         }
 

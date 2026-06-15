@@ -60,7 +60,6 @@ fn dns_cache() -> &'static Mutex<HashMap<String, CachedAddrs>> {
 /// address on failure) removes that failure mode while still picking up real
 /// address changes.
 pub async fn resolve_cached(host: &str) -> std::io::Result<Vec<IpAddr>> {
-    // Fresh cache hit — skip the resolver completely.
     if let Some(entry) = dns_cache().lock().expect("dns cache poisoned").get(host)
         && entry.resolved_at.elapsed() < DNS_CACHE_TTL
     {
@@ -83,7 +82,7 @@ pub async fn resolve_cached(host: &str) -> std::io::Result<Vec<IpAddr>> {
         }
         Err(error) => {
             // Resolver failed — reuse the last good address rather than failing.
-            // This is what keeps a flaky resolver from wedging us.
+            // This is what keeps a flaky resolver from wedging us (EAI_AGAIN storm).
             if let Some(entry) = dns_cache().lock().expect("dns cache poisoned").get(host) {
                 tracing::debug!(host, %error, "DNS resolve failed; using cached address");
                 return Ok(entry.addrs.clone());
@@ -92,7 +91,6 @@ pub async fn resolve_cached(host: &str) -> std::io::Result<Vec<IpAddr>> {
         }
     }
 
-    // Empty (but non-erroring) result — fall back to stale if we have it.
     if let Some(entry) = dns_cache().lock().expect("dns cache poisoned").get(host) {
         return Ok(entry.addrs.clone());
     }
@@ -124,7 +122,6 @@ impl Resolve for CachedDnsResolver {
     fn resolve(&self, name: Name) -> Resolving {
         Box::pin(async move {
             let ips = resolve_cached(name.as_str()).await?;
-            // Port 0 — reqwest overrides it with the URL/scheme port.
             let addrs: Addrs = Box::new(ips.into_iter().map(|ip| SocketAddr::new(ip, 0)));
             Ok(addrs)
         })

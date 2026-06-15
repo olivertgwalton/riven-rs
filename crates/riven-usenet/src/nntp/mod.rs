@@ -33,8 +33,6 @@ pub struct NntpServerConfig {
     pub timeout: Duration,
 }
 
-// Manual Debug: redact `pass` so accidental `tracing::debug!(?cfg)` or
-// panic backtraces don't print credentials.
 impl std::fmt::Debug for NntpServerConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("NntpServerConfig")
@@ -69,7 +67,6 @@ pub enum NntpError {
 
 pub(crate) enum NntpStream {
     Plain(BufReader<TcpStream>),
-    // Boxed: rustls' TlsStream is ~1KB on the stack and dwarfs the Plain variant.
     Tls(Box<BufReader<tokio_rustls::client::TlsStream<TcpStream>>>),
 }
 
@@ -115,10 +112,6 @@ impl NntpStream {
         out: &mut Vec<u8>,
         timeout: Duration,
     ) -> io::Result<()> {
-        // RFC 3977: multi-line response is terminated by `<CRLF>.<CRLF>`.
-        // Lines beginning with `.` are dot-stuffed (sender doubles the leading
-        // `.`). Strictly searching for `\r\n.\r\n` is unambiguous because
-        // a dot-stuffed line would be `\r\n..<more>`.
         const TERMINATOR: &[u8] = b"\r\n.\r\n";
 
         out.clear();
@@ -128,15 +121,12 @@ impl NntpStream {
         tokio::pin!(sleep);
 
         let term_end = loop {
-            // Search only what we haven't seen yet, plus a 4-byte overlap so a
-            // terminator straddling the previous read boundary isn't missed.
             let scan_from = scanned.saturating_sub(TERMINATOR.len() - 1);
             if out.len() >= TERMINATOR.len()
                 && let Some(rel) = memchr::memmem::find(&out[scan_from..], TERMINATOR)
             {
                 break scan_from + rel + TERMINATOR.len();
             }
-            // Special case: the response is the terminator itself (empty body).
             if out.len() >= 3 && &out[..3] == b".\r\n" {
                 break 3;
             }
@@ -159,14 +149,9 @@ impl NntpStream {
                     ));
                 }
             };
-            // Extend the inactivity deadline: data made it through, so the
-            // socket is still alive even if the next read stalls briefly.
             sleep.as_mut().reset(tokio::time::Instant::now() + timeout);
         };
 
-        // Trim everything from the terminator's leading `\r\n` (inclusive of
-        // the trailing CRLF on the body's last line, which the caller's yEnc
-        // decoder expects) onward.
         out.truncate(term_end - 3);
         undot_stuff(out);
         Ok(())
@@ -223,8 +208,6 @@ fn undot_stuff(buf: &mut Vec<u8>) {
         return;
     }
 
-    // In-place compact: read from `r`, write to `w` (always `w <= r`).
-    // Skips the second `.` of every `..` that opens a line.
     let len = buf.len();
     let mut r = 0;
     let mut w = 0;
@@ -345,7 +328,6 @@ mod tests {
 
     #[test]
     fn undot_stuff_leading_dot() {
-        // Body begins with a stuffed line (rare but legal): `..foo\r\n` → `.foo\r\n`.
         let mut buf = b"..start\r\nbody\r\n".to_vec();
         undot_stuff(&mut buf);
         assert_eq!(buf, b".start\r\nbody\r\n");
@@ -353,16 +335,11 @@ mod tests {
 
     #[test]
     fn undot_stuff_does_not_touch_mid_line_double_dot() {
-        // `foo..bar` (no preceding CRLF) is content, not a stuffed line.
         let mut buf = b"foo..bar\r\n".to_vec();
         let before = buf.clone();
         undot_stuff(&mut buf);
         assert_eq!(buf, before);
     }
-
-    // (Pool recycling/oversized behaviour is now covered by
-    // `crate::bufpool::tests` — the encoded body pool is just a `BufPool`
-    // instance.)
 
     /// Helper that drives `read_until_dot`'s scanning logic against an
     /// in-memory reader so we can exercise the terminator + un-stuff paths
@@ -417,9 +394,6 @@ mod tests {
 
     #[tokio::test]
     async fn read_until_dot_terminator_at_buffer_boundary() {
-        // Force the terminator to straddle a read boundary by sourcing
-        // bytes from a reader that returns short chunks. `Cursor` returns
-        // the full slice in one read, so we wrap in a chunked reader.
         struct ChunkedReader {
             data: Vec<u8>,
             pos: usize,
@@ -446,7 +420,7 @@ mod tests {
         let mut reader = ChunkedReader {
             data: b"abc\r\n.\r\n".to_vec(),
             pos: 0,
-            chunk: 1, // one byte per read; terminator straddles every boundary
+            chunk: 1,
         };
         let mut buf: Vec<u8> = Vec::new();
         let mut scanned: usize = 0;

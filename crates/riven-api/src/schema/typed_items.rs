@@ -30,8 +30,6 @@ async fn load_streams_for(
     load_streams(pool, item.id, info_hashes).await
 }
 
-// ── Movie ──────────────────────────────────────────────────────────────────
-
 pub struct Movie {
     pub item: MediaItem,
 }
@@ -56,8 +54,6 @@ impl Movie {
         1
     }
 }
-
-// ── Show ───────────────────────────────────────────────────────────────────
 
 pub struct Show {
     pub item: MediaItem,
@@ -100,8 +96,6 @@ impl Show {
         Ok(repo::count_expected_files_for_show(pool, self.item.id).await?)
     }
 }
-
-// ── Season ─────────────────────────────────────────────────────────────────
 
 pub struct Season {
     pub item: MediaItem,
@@ -155,8 +149,6 @@ impl Season {
     }
 }
 
-// ── Episode ────────────────────────────────────────────────────────────────
-
 pub struct Episode {
     pub item: MediaItem,
 }
@@ -206,8 +198,6 @@ impl Episode {
         1
     }
 }
-
-// ── Union ──────────────────────────────────────────────────────────────────
 
 /// Discriminated union of all concrete media item types.
 #[derive(Union)]

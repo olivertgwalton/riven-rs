@@ -54,7 +54,6 @@ impl Inner {
                     {
                         return;
                     }
-                    // Receiver dropped — task was cancelled; try next.
                 }
                 (false, true) => {
                     if let Some(tx) = self.low.pop_front()
@@ -78,7 +77,6 @@ impl Inner {
                     {
                         return;
                     }
-                    // Chosen sender's receiver was dropped; loop to retry.
                 }
             }
         }
@@ -122,9 +120,6 @@ impl PrioritizedSemaphore {
             }
             rx
         };
-        // Park until a release wakes us. A RecvError means the sender was
-        // dropped (shutdown); we hand out the permit and let the caller proceed
-        // either way.
         let _woken = rx.await;
         OwnedPermit { sem: self.clone() }
     }

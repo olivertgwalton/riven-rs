@@ -131,15 +131,10 @@ fn validate(ctx: &ParseContext, parsed: &riven_rank::ParsedData) -> Option<Strin
         return Some("non-dubbed anime torrent (dubbed_anime_only=true)".into());
     }
 
-    // Bonus-features discs ("Top.Gear.S17.EXTRAS.1080p.BluRay") parse to a
-    // clean title + season and would otherwise rank like a real season pack.
     if riven_rank::is_extras_only_release(&parsed.raw_title) {
         return Some("extras-only release".into());
     }
 
-    // Sub-only tags ("NL Subs") make the parser pick up a country/language
-    // that describes the subtitles, not the production, so subbed releases
-    // are exempt from both origin checks; anime has its own dub logic.
     if !parsed.anime
         && !parsed.subbed
         && let (Some(pc), Some(ic)) = (parsed.country.as_deref(), ctx.item_country.as_deref())
@@ -148,9 +143,6 @@ fn validate(ctx: &ParseContext, parsed: &riven_rank::ParsedData) -> Option<Strin
         return Some(format!("incorrect country: {pc} vs {ic}"));
     }
 
-    // A release explicitly tagged with audio languages that include neither
-    // the item's own language nor English is a foreign dub/broadcast of this
-    // title.
     if !parsed.anime
         && !parsed.subbed
         && !parsed.languages.is_empty()
@@ -187,9 +179,6 @@ fn validate(ctx: &ParseContext, parsed: &riven_rank::ParsedData) -> Option<Strin
         }
         MediaItemType::Episode => {
             if !has_episodes && !has_seasons {
-                // Sports-style releases ("Formula1.2020.Bahrein.GP.Qualifying")
-                // never parse to S/E; accept them when the venue/session/date
-                // identifies this exact episode.
                 if crate::application::download::event_match::release_matches_episode(
                     &parsed.raw_title,
                     &ctx.item_title,
@@ -490,8 +479,6 @@ mod tests {
     #[test]
     fn validate_allows_subbed_release_with_foreign_sub_tag() {
         let ctx = episode_ctx();
-        // English audio with Dutch subtitles — the language tag describes the
-        // subs, not the audio.
         let parsed = riven_rank::parse("Top.Gear.S09E01.1080p.WEB.x264.NL.Subs");
         assert_eq!(validate(&ctx, &parsed), None);
     }

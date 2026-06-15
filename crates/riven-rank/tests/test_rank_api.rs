@@ -24,9 +24,6 @@ fn test_rank_torrent_skips_similarity_when_correct_title_missing() {
 fn test_rank_torrent_accepts_release_tagged_with_item_country() {
     let settings = RankSettings::default().prepare();
 
-    // "Top Gear UK" scores 0.84 against "Top Gear" — below the 0.85
-    // threshold — but the UK tag matches the item's own country (TVDB
-    // alpha-3 "gbr"), so similarity is also computed with the tag stripped.
     let ranked = rank_torrent(
         "Top.Gear.UK.S05.1080p.WEB.H264-GROUP",
         "c08a9ee8ce3a5c2c08865e2b05406273cabc97e7",
@@ -44,8 +41,6 @@ fn test_rank_torrent_accepts_release_tagged_with_item_country() {
 fn test_rank_torrent_rejects_release_tagged_with_other_country() {
     let settings = RankSettings::default().prepare();
 
-    // The US tag does not match the GB item, so no stripping happens and
-    // "Top Gear US" fails similarity against "Top Gear".
     let result = rank_torrent(
         "Top.Gear.US.S05.1080p.WEB.H264-GROUP",
         "c08a9ee8ce3a5c2c08865e2b05406273cabc97e7",

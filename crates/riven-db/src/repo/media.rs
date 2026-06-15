@@ -25,7 +25,6 @@ async fn upsert_top_level_item(
     if let Some(existing) =
         find_existing_media_item(pool, type_val, imdb_id, tmdb_id, tvdb_id).await?
     {
-        // Update is_requested and link to the current request when not already set.
         let needs_update = is_requested
             && (!existing.is_requested
                 || (item_request_id.is_some() && existing.item_request_id != item_request_id));
@@ -532,7 +531,6 @@ pub async fn delete_items_removed_from_content_services(
     .execute(pool)
     .await?;
 
-    // Clean up the now-orphaned item_requests.
     sqlx::query!(
         r#"DELETE FROM item_requests
            WHERE external_request_id IS NOT NULL

@@ -123,9 +123,6 @@ impl FilesystemFilterRules {
         metadata: &FilesystemItemMetadata,
         content_type: FilesystemContentType,
     ) -> bool {
-        // Borrow trimmed genre slices instead of allocating a lowered String
-        // per genre. Filter matching is ASCII-case insensitive (see
-        // `matches_token_filter`), so no lowering is needed.
         let genres: Vec<&str> = metadata
             .genres
             .iter()

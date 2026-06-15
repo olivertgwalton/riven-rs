@@ -221,10 +221,6 @@ impl MetaCache {
         }
         state.current_bytes = state.current_bytes.saturating_add(weight);
 
-        // Evict least-recently-used entries until under budget, but always
-        // keep at least the just-inserted entry — a single meta larger than
-        // the whole budget (e.g. a 40 MB remux address book) must still be
-        // cached for the stream that just requested it.
         while state.current_bytes > self.max_bytes && state.lru.len() > 1 {
             let Some((_, (_, popped_weight))) = state.lru.pop_lru() else {
                 break;
@@ -371,8 +367,6 @@ impl InFlight {
     }
 
     pub fn finish(&self, message_id: &str, slot: &Arc<PromiseSlot>) {
-        // Mark done BEFORE removing from map. A new caller arriving in the
-        // gap would become their own Owner and re-fetch — wasteful but correct.
         slot.mark_done();
         self.inner.lock().remove(message_id);
     }
@@ -544,7 +538,6 @@ mod tests {
             .map(|i| NzbSegment {
                 bytes: 700_000,
                 number: i as u32 + 1,
-                // ~40-char message-ids, like real usenet posts.
                 message_id: format!("{i:08}@news.example.invalid.padding.xx"),
             })
             .collect();
@@ -562,13 +555,11 @@ mod tests {
 
     #[test]
     fn meta_cache_evicts_lru_over_budget() {
-        // Budget for ~2 of these metas.
         let one = estimate_meta_bytes(&meta_with_segments("probe", 1_000));
         let cache = MetaCache::new(one * 2 + one / 2);
 
         cache.put("a".into(), meta_with_segments("a", 1_000));
         cache.put("b".into(), meta_with_segments("b", 1_000));
-        // Touch "a" so "b" becomes the LRU victim.
         assert!(cache.get("a").is_some());
         cache.put("c".into(), meta_with_segments("c", 1_000));
 
@@ -580,10 +571,8 @@ mod tests {
 
     #[test]
     fn meta_cache_keeps_oversized_single_entry() {
-        // A meta larger than the whole budget must still be cached for the
-        // stream that just asked for it.
         let big = meta_with_segments("big", 50_000);
-        let cache = MetaCache::new(1024); // absurdly small
+        let cache = MetaCache::new(1024);
         cache.put("big".into(), big);
         assert!(cache.get("big").is_some());
         assert_eq!(cache.entry_count(), 1);
@@ -594,8 +583,8 @@ mod tests {
         let sizes = DecodedSizes::new(2);
         sizes.put("a".into(), 1);
         sizes.put("b".into(), 2);
-        let _ = sizes.get("a"); // a → MRU
-        sizes.put("c".into(), 3); // evicts b
+        let _ = sizes.get("a");
+        sizes.put("c".into(), 3);
         assert_eq!(sizes.get("a"), Some(1));
         assert_eq!(sizes.get("b"), None);
         assert_eq!(sizes.get("c"), Some(3));

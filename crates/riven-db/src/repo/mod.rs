@@ -38,8 +38,6 @@ pub async fn reset_items_by_ids(pool: &PgPool, ids: Vec<i64>) -> Result<u64> {
     if ids.is_empty() {
         return Ok(0);
     }
-    // Stomp the column to a non-sticky placeholder, zero the attempts ceiling,
-    // then re-derive the real state from current facts.
     let result = sqlx::query!(
         "UPDATE media_items SET state = 'indexed', failed_attempts = 0, updated_at = NOW() \
          WHERE id = ANY($1)",
@@ -69,9 +67,6 @@ pub async fn pause_items_by_ids(pool: &PgPool, ids: Vec<i64>) -> Result<u64> {
     if ids.is_empty() {
         return Ok(0);
     }
-    // `Paused` is the only sticky state the application authors. The recompute
-    // call below propagates this up to parents (their rollup logic recognises
-    // the new sticky state on the child).
     let result = sqlx::query!(
         "UPDATE media_items SET state = 'paused', updated_at = NOW() WHERE id = ANY($1)",
         &ids[..]
@@ -91,9 +86,8 @@ pub async fn delete_items_by_ids(pool: &PgPool, ids: Vec<i64>) -> Result<u64> {
     if ids.is_empty() {
         return Ok(0);
     }
-    // Capture parents before the DELETE so we can recompute them after.
-    // (Children deletion fires no recompute on the parent — there's no
-    // remaining row that emitted the change.)
+    // Capture parents before the DELETE: deleting children fires no recompute
+    // on the parent, so they must be recomputed explicitly afterward.
     let parent_ids: Vec<i64> = sqlx::query_scalar(
         "SELECT DISTINCT parent_id FROM media_items WHERE id = ANY($1) AND parent_id IS NOT NULL",
     )
@@ -106,8 +100,6 @@ pub async fn delete_items_by_ids(pool: &PgPool, ids: Vec<i64>) -> Result<u64> {
         .execute(pool)
         .await?;
 
-    // Drop any item_request that no media_item still references — otherwise
-    // re-requesting the same show merges the old request's prior seasons back in.
     if let Err(e) = sqlx::query(
         "DELETE FROM item_requests \
          WHERE id NOT IN ( \

@@ -3,7 +3,6 @@ use riven_core::http::HttpClient;
 
 use super::RatingScore;
 
-// Shared with `external_ids`; defined once in `crate::schema::helpers`.
 pub(super) use crate::schema::helpers::{key, parse_id, required_media_type};
 
 pub(super) fn optional_http(ctx: &Context<'_>, operation: &str) -> Option<HttpClient> {

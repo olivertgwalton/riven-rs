@@ -39,7 +39,6 @@ impl UsenetHealthMutations {
             return Ok("unknown".to_string());
         };
 
-        // Preserve the row's media_item_id so the title display survives the upsert.
         let media_item_id: Option<i64> = sqlx::query_scalar::<_, Option<i64>>(
             "SELECT media_item_id FROM filesystem_entries \
              WHERE usenet_info_hash = $1 AND usenet_file_index = $2 LIMIT 1",
@@ -66,7 +65,6 @@ impl UsenetHealthMutations {
                 scan.missing_segments as i32,
                 scan.error_segments as i32,
             ),
-            // No segment map — never ingested / meta gone, so not streamable.
             Err(riven_usenet::StreamerError::NotIngested(_)) => ("not_ingested", 0, 0, 0, 0),
             Err(_) => ("unknown", 0, 0, 0, 0),
         };

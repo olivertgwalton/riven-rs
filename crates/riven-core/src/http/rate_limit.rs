@@ -73,7 +73,6 @@ impl LimiterState {
     fn next_wait(&mut self, profile: &HttpServiceProfile) -> Option<Duration> {
         let now = Instant::now();
 
-        // Honour any explicit Retry-After pause first.
         if let Some(paused_until) = self.paused_until {
             if paused_until > now {
                 return Some(paused_until - now);
@@ -85,8 +84,6 @@ impl LimiterState {
         let capacity = rate_limit.capacity();
         let refill = rate_limit.refill_per_sec();
 
-        // Refill: add tokens accrued since the last check, capped at capacity.
-        // First request seeds a full bucket so an idle service bursts freely.
         let mut tokens = match (self.tokens, self.last_refill) {
             (Some(t), Some(last)) => {
                 (t + now.duration_since(last).as_secs_f64() * refill).min(capacity)
@@ -100,7 +97,6 @@ impl LimiterState {
             self.tokens = Some(tokens);
             None
         } else {
-            // Not enough for a whole token yet — wait for the deficit to refill.
             self.tokens = Some(tokens);
             let deficit = 1.0 - tokens;
             Some(Duration::from_secs_f64(deficit / refill))

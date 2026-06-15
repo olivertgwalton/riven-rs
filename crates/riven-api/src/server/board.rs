@@ -5,9 +5,6 @@ use axum::{
 
 use apalis_board_api::ui::ServeUI;
 
-// The board WASM SPA requests its hashed assets at root-level absolute paths
-// (e.g. /apalis-board-web-<hash>.js). This middleware intercepts any such
-// request before it reaches the frontend fallback, without hardcoding filenames.
 pub(super) async fn board_assets_middleware(
     uri: axum::http::Uri,
     req: axum::extract::Request,

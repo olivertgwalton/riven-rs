@@ -50,8 +50,6 @@ async fn load_show_tree(
         .await?
     };
 
-    // Episodes arrive sorted by parent_id (see ORDER BY above), so
-    // a linear group-by produces contiguous buckets without a HashMap.
     let episodes_by_season = group_sorted_by_key(episodes, |e| e.parent_id.unwrap_or_default());
     Ok((seasons, episodes_by_season))
 }
@@ -281,8 +279,6 @@ impl MediaQuery {
     }
 }
 
-// ── Non-GraphQL helpers ───────────────────────────────────────────────────────
-
 impl MediaQuery {
     /// Build a `MediaItemFull` from an already-resolved lookup result,
     /// short-circuiting to `None` when the item was not found.
@@ -431,8 +427,6 @@ impl MediaQuery {
                 .await?
             };
 
-            // Episode entries sorted by media_item_id so they can be grouped
-            // with a single linear pass (episodes already grouped by parent_id).
             episode_entries.sort_by_key(|e| e.media_item_id);
             let mut entries_by_episode =
                 group_sorted_by_key(episode_entries.into_iter().map(with_metadata), |e| {

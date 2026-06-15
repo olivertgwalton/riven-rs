@@ -4,10 +4,6 @@ use std::sync::LazyLock;
 use super::ParsedData;
 use super::patterns::*;
 
-// =============================================================================
-// Network detection
-// =============================================================================
-
 static NETWORK_TABLE: LazyLock<Vec<(Regex, &'static str)>> = LazyLock::new(|| {
     [
         (r"(?i)\b(?:ATVP|ATV\+|Apple\s*TV\+?)\b", "Apple TV"),
@@ -64,10 +60,6 @@ pub(crate) fn detect_network(raw: &str, data: &mut ParsedData) {
         }
     }
 }
-
-// =============================================================================
-// False group detection
-// =============================================================================
 
 /// Check if a detected group name is actually a false positive (codec, format, etc.).
 pub(crate) fn is_false_group(group: &str) -> bool {
@@ -133,10 +125,6 @@ pub(crate) fn is_false_group(group: &str) -> bool {
         || RE_FALSE_GROUP_EP.is_match(group)
 }
 
-// =============================================================================
-// Trash detection
-// =============================================================================
-
 const TRASH_QUALITIES: &[&str] = &["CAM", "TeleSync", "TeleCine", "SCR", "R5", "PDTV"];
 
 const TRASH_EXTRAS: &[&str] = &["sample", "trailer", "deleted scene"];
@@ -161,18 +149,10 @@ pub(crate) fn detect_trash(raw: &str, data: &ParsedData) -> bool {
             .any(|e| TRASH_EXTRAS.contains(&e.to_lowercase().as_str()))
 }
 
-// =============================================================================
-// Scene detection
-// =============================================================================
-
 /// Detect if this is a scene release based on group names and patterns.
 pub(crate) fn detect_scene(raw: &str) -> bool {
     RE_SCENE.is_match(raw) || (RE_SCENE_WEB.is_match(raw) && !RE_Q_WEBDL.is_match(raw))
 }
-
-// =============================================================================
-// Anime detection
-// =============================================================================
 
 /// Known anime fansub/encoding groups.
 static ANIME_GROUPS: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
@@ -456,12 +436,10 @@ fn raw_has_anime_group(raw: &str) -> bool {
 }
 
 pub(crate) fn detect_anime(raw: &str, data: &ParsedData) -> bool {
-    // Check for anime episode code (CRC32)
     if data.episode_code.is_some() {
         return true;
     }
 
-    // Check for known anime groups
     if let Some(group) = &data.group
         && is_anime_group(group)
     {
@@ -471,7 +449,6 @@ pub(crate) fn detect_anime(raw: &str, data: &ParsedData) -> bool {
         return true;
     }
 
-    // Check for anime extras
     if data
         .extras
         .iter()
@@ -480,7 +457,6 @@ pub(crate) fn detect_anime(raw: &str, data: &ParsedData) -> bool {
         return true;
     }
 
-    // Check for anime keyword
     static RE_ANIME: LazyLock<Regex> =
         LazyLock::new(|| Regex::new(r"(?i)\b(?:anime?|anim)\b").unwrap());
     RE_ANIME.is_match(raw)

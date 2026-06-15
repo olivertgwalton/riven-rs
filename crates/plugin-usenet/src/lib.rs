@@ -35,9 +35,6 @@ fn nzb_body_cache() -> &'static Mutex<LruCache<String, Arc<String>>> {
     C.get_or_init(|| Mutex::new(LruCache::new(NonZeroUsize::new(256).unwrap())))
 }
 
-// Indexer download endpoints rate-limit separately from search and start
-// returning 429s well before the per-day quota; 30/min stays under the
-// common indexer limits.
 pub(crate) const PROFILE: HttpServiceProfile =
     HttpServiceProfile::new("usenet-nzb-fetch").with_rate_limit(30, Duration::from_secs(60));
 
@@ -100,8 +97,6 @@ pub fn nntp_config_from_settings(settings: &PluginSettings) -> Option<NntpConfig
     parse_providers_str(raw)
 }
 
-// `nntpproviders` is stored as a JSON object when loaded from DB JSONB, or
-// as a JSON-encoded string when loaded via the flattened settings store.
 pub fn nntp_config_from_json_value(value: &serde_json::Value) -> Option<NntpConfig> {
     let raw_field = value.as_object()?.get("nntpproviders")?;
     match raw_field {
@@ -151,10 +146,6 @@ impl Plugin for UsenetPlugin {
 
     async fn on_core_started(&self, ctx: &PluginContext) -> anyhow::Result<HookResponse> {
         if let Some(cfg) = nntp_config_from_settings(&ctx.settings) {
-            // Build (or retrieve) the shared streamer so the playback path,
-            // ingest path, and this health-check task all share one
-            // `NntpPool` — and one `max_connections` budget — against the
-            // provider.
             let streamer = UsenetStreamer::shared(cfg, ctx.db_pool.clone());
             health_check::spawn(
                 ctx.db_pool.clone(),
@@ -292,12 +283,6 @@ impl Plugin for UsenetPlugin {
             return Ok(HookResponse::Empty);
         }
 
-        // Treat every NZB candidate as Cached without probing. Probing each
-        // would cost a full NZB-XML download plus an NNTP STAT, and with dozens
-        // of candidates per item the indexer rate limit is exhausted before any
-        // actual download runs. The streamer's ingest step STATs a sample of
-        // segments before exposing the file, so dead NZBs are caught there
-        // instead — at NNTP speed, with no extra throttled HTTP round-trip.
         let results: Vec<CacheCheckResult> = nzb_hashes
             .into_iter()
             .map(|h| CacheCheckResult {
@@ -351,12 +336,6 @@ impl Plugin for UsenetPlugin {
             }
         };
 
-        // Full-verify the *winner* before committing. The ingest probe above is
-        // a cheap strategic sample (it runs per candidate); it catches grossly
-        // incomplete releases but can miss a lone dead article. When enabled,
-        // STAT every segment of this selected release once so a single-segment
-        // gap (which stalls playback at a fixed runtime point) is caught here
-        // and the download loop falls through to the next ranked candidate.
         let check_all = ctx.settings.get_bool("checkallsegments");
         if check_all {
             let acceptable_missing = ctx
@@ -382,12 +361,6 @@ impl Plugin for UsenetPlugin {
             .iter()
             .enumerate()
             .map(|(idx, f)| {
-                // The VFS reads usenet files in-process and identifies them by
-                // the explicit (info_hash, file_index) below. The `usenet://`
-                // URI is a self-contained marker (no public base URL needed,
-                // nothing fetches it) that keeps the queue's "has a playable
-                // URL" check happy and is recognised by the stream-link
-                // refresh short-circuit.
                 let url = format!("usenet://{info_hash}/{idx}");
                 DownloadFile {
                     filename: f.filename.clone(),
@@ -422,10 +395,6 @@ impl Plugin for UsenetPlugin {
         _provider: Option<&str>,
         _ctx: &PluginContext,
     ) -> anyhow::Result<HookResponse> {
-        // The usenet stream marker is a permanent `usenet://{hash}/{index}`
-        // URI. It never expires, so when the VFS refreshes after a transient
-        // NNTP error we return it unchanged instead of letting StremThru try
-        // (and fail) to debrid-resolve a non-magnet URL.
         if magnet.starts_with("usenet://") {
             return Ok(HookResponse::StreamLink(StreamLinkResponse {
                 link: magnet.to_string(),

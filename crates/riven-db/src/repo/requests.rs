@@ -132,11 +132,6 @@ pub async fn create_item_request(
             }
 
             if existing_seasons != desired_seasons {
-                // If the existing request had already reached a terminal-ish
-                // state (completed/ongoing/unreleased), flag it as having had
-                // additional seasons appended so the indexer knows to
-                // re-process. New requests (still `requested`/`failed`) or
-                // requests already mid-extension are left untouched.
                 let bump_state = matches!(
                     existing.state,
                     ItemRequestState::Completed

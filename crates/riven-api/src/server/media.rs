@@ -450,7 +450,6 @@ async fn serve_usenet_media(
                         (streamer, info_hash, file_index, next, end),
                     ))
                 }
-                // A truly empty read at EOF: stop cleanly.
                 Ok(_) => None,
                 Err(error) => {
                     tracing::warn!(
@@ -462,7 +461,6 @@ async fn serve_usenet_media(
                     );
                     Some((
                         Err(std::io::Error::other("usenet read failed")),
-                        // Advance past `end` so the next poll terminates the stream.
                         (streamer, info_hash, file_index, end + 1, end),
                     ))
                 }
@@ -499,13 +497,6 @@ pub(super) async fn media_bridge_handler(
 
     let want_download = query.download.is_some();
 
-    // Usenet-backed entries have no HTTP origin to proxy; serve them directly
-    // from the in-process streamer instead. They carry a `usenet://` identifier
-    // in their download_url/stream_url columns rather than an HTTP origin, so
-    // they must be detected *before* the debrid proxy path — otherwise we'd try
-    // to issue an HTTP request against a `usenet://` URL, which fails to build
-    // and 502s. `usenet_target` returns `None` for real debrid entries (their
-    // http/magnet URLs don't parse as `usenet://`), so this never shadows them.
     if let Some((info_hash, file_index)) = usenet_target(&entry) {
         return serve_usenet_media(
             &entry,
@@ -750,7 +741,6 @@ mod tests {
             ),
             (950, 999, true)
         );
-        // Explicit end past EOF is clamped to the last byte.
         assert_eq!(
             resolve_concrete_range(
                 Some(RequestedRange {

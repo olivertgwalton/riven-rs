@@ -201,22 +201,12 @@ pub async fn run_rank_streams(id: i64, job: &RankStreamsJob, queue: &JobQueue) {
         None
     };
 
-    // Preferred path carries info_hash/magnet; the normal path's placeholders
-    // are fine since DownloadJob only consults `preferred_info_hash` for
-    // selection.
     let download_job = DownloadJob {
         id,
         info_hash: preferred.clone().unwrap_or_default(),
         magnet: magnet_for_preferred.unwrap_or_default(),
         preferred_info_hash: preferred,
     };
-    // Rely on `push_download`'s dedup (`set_nx`): if a download for this id is
-    // already queued or in flight its key is held, so the push no-ops and the
-    // per-cycle Scraped→Download redirect can't pile up duplicate download jobs
-    // for the same item (previously ~8 copies/item accumulated because we
-    // cleared the key here before every push). The worker's `DedupGuard`
-    // releases the key on completion — or the 30-min safety TTL clears it after
-    // a hard crash — at which point a genuine retry can re-queue.
     queue.push_download(download_job).await;
 }
 
@@ -280,8 +270,6 @@ pub async fn run(id: i64, job: &DownloadJob, queue: &JobQueue) {
         load_bitrate_limits(queue, &item).await
     };
 
-    // Cache memo keyed on (plugin, provider) so each cache check fires at
-    // most once per item flow.
     let plugin_providers = build_plugin_provider_iterations(queue).await;
     let mut cache = CacheMemo::new(all_streams.iter().map(|s| s.info_hash.clone()).collect());
 
@@ -378,9 +366,6 @@ impl CacheMemo {
             self.results.insert(key.clone(), map);
         }
         let map = self.results.get(&key)?;
-        // Presence in the map means the plugin returned a positive
-        // verdict for this hash. Empty `files` is valid and proceeds to
-        // attempt_download; the bitrate pre-filter just gets skipped.
         map.get(&info_hash.to_lowercase()).cloned()
     }
 }
@@ -510,9 +495,6 @@ async fn run_preferred_stream(
         .await
         .attempt_unknown_downloads;
 
-    // The user explicitly picked this stream from the scrape UI, so we trust
-    // its earlier "cached" verdict and let attempt_download fall back to a
-    // direct add when no provider currently reports it cached.
     for (plugin, provider) in plugin_providers {
         let cached_files = cache
             .lookup(
@@ -567,8 +549,6 @@ async fn run_downloads(
         .into_iter()
         .collect();
     let mut any_success = false;
-    // (info_hash, plugin, provider) — we only skip exact retries; the same
-    // hash can still be tried on a different provider that might have it.
     let mut attempted: HashSet<(String, String, Option<String>)> = HashSet::new();
     let attempt_unknown = queue
         .downloader_config
@@ -603,10 +583,6 @@ async fn run_downloads(
                 return any_success;
             }
 
-            // Pre-debrid bitrate filter using the size already known for this
-            // stream (from the torznab scrape or recorded by a previous failed
-            // attempt via `update_stream_file_size`). Avoids the multi-second
-            // debrid round-trip + cache-check for streams that cannot pass.
             if let Some(size) = stream.file_size_bytes
                 && size >= 0
                 && !passes_size_bounds(size.unsigned_abs(), max_size_bytes, min_size_bytes)
@@ -726,11 +702,6 @@ fn passes_bitrate_filter(
     if max_size_bytes.is_none() && min_size_bytes.is_none() {
         return true;
     }
-    // Empty file list means the plugin didn't surface per-file metadata at
-    // cache-check time (e.g. the usenet plugin skips per-candidate NZB-XML
-    // fetches). The stream-level size pre-filter at the call site already
-    // handled the bitrate gate using the indexer-supplied `file_size_bytes`,
-    // so there's nothing extra to check here.
     if files.is_empty() {
         return true;
     }

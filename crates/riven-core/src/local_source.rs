@@ -49,7 +49,6 @@ pub trait LocalByteSource: Send + Sync {
 /// are normally identified by those columns directly.
 pub fn parse_usenet_url(url: &str) -> Option<(String, usize)> {
     let rest = url.strip_prefix("usenet://")?;
-    // Strip any query string / fragment.
     let rest = rest.split(['?', '#']).next().unwrap_or(rest);
     let mut parts = rest.split('/');
     let info_hash = parts.next()?;
