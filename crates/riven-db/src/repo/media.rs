@@ -189,10 +189,12 @@ pub async fn get_pending_items_for_retry(
            AND {FAILED_ATTEMPTS_COOLDOWN_SQL}
          ORDER BY failed_attempts ASC, last_scrape_attempt_at ASC NULLS FIRST, created_at ASC",
     );
-    Ok(sqlx::query_as::<_, MediaItem>(sqlx::AssertSqlSafe(sql.as_str()))
-        .bind(item_type)
-        .fetch_all(pool)
-        .await?)
+    Ok(
+        sqlx::query_as::<_, MediaItem>(sqlx::AssertSqlSafe(sql.as_str()))
+            .bind(item_type)
+            .fetch_all(pool)
+            .await?,
+    )
 }
 
 /// IDs of shows/seasons currently in `ongoing`. The retry scheduler re-derives

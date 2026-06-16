@@ -44,17 +44,23 @@ impl Plugin for TraktPlugin {
         vec![
             SettingField::new("clientid", "Client ID", FieldType::Password).required(),
             SettingField::new("accesstoken", "Access Token", FieldType::Password),
-            SettingField::new("watchlist", "Enable Watchlist", FieldType::Boolean).with_default("false"),
+            SettingField::new("watchlist", "Enable Watchlist", FieldType::Boolean)
+                .with_default("false"),
             SettingField::new("userlists", "User Lists", FieldType::Text)
                 .with_placeholder("list-slug, another-list")
                 .with_description("Comma-separated Trakt list slugs."),
-            SettingField::new("fetchtrending", "Fetch Trending", FieldType::Boolean).with_default("false"),
-            SettingField::new("trendingcount", "Trending Count", FieldType::Number).with_default("10"),
-            SettingField::new("fetchpopular", "Fetch Popular", FieldType::Boolean).with_default("false"),
-            SettingField::new("popularcount", "Popular Count", FieldType::Number).with_default("10"),
+            SettingField::new("fetchtrending", "Fetch Trending", FieldType::Boolean)
+                .with_default("false"),
+            SettingField::new("trendingcount", "Trending Count", FieldType::Number)
+                .with_default("10"),
+            SettingField::new("fetchpopular", "Fetch Popular", FieldType::Boolean)
+                .with_default("false"),
+            SettingField::new("popularcount", "Popular Count", FieldType::Number)
+                .with_default("10"),
             SettingField::new("fetchwatched", "Fetch Watched History", FieldType::Boolean)
                 .with_default("false"),
-            SettingField::new("watchedcount", "Watched Count", FieldType::Number).with_default("10"),
+            SettingField::new("watchedcount", "Watched Count", FieldType::Number)
+                .with_default("10"),
             SettingField::new("watchedperiod", "Watched Period", FieldType::Text)
                 .with_default("weekly")
                 .with_placeholder("weekly")

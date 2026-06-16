@@ -208,10 +208,12 @@ pub async fn get_non_blacklisted_streams(
     ranks: &ResolutionRanks,
 ) -> Result<Vec<Stream>> {
     let sql = build_stream_query(ranks, false);
-    Ok(sqlx::query_as::<_, Stream>(sqlx::AssertSqlSafe(sql.as_str()))
-        .bind(media_item_id)
-        .fetch_all(pool)
-        .await?)
+    Ok(
+        sqlx::query_as::<_, Stream>(sqlx::AssertSqlSafe(sql.as_str()))
+            .bind(media_item_id)
+            .fetch_all(pool)
+            .await?,
+    )
 }
 
 /// Fetch only the highest-ranked non-blacklisted stream for an item.
@@ -221,10 +223,12 @@ pub async fn get_best_stream(
     ranks: &ResolutionRanks,
 ) -> Result<Option<Stream>> {
     let sql = build_stream_query(ranks, true);
-    Ok(sqlx::query_as::<_, Stream>(sqlx::AssertSqlSafe(sql.as_str()))
-        .bind(media_item_id)
-        .fetch_optional(pool)
-        .await?)
+    Ok(
+        sqlx::query_as::<_, Stream>(sqlx::AssertSqlSafe(sql.as_str()))
+            .bind(media_item_id)
+            .fetch_optional(pool)
+            .await?,
+    )
 }
 
 pub async fn get_filesystem_entries(
@@ -683,10 +687,12 @@ pub async fn list_vfs_dir_names(
          WHERE path LIKE $1 AND entry_type = 'media' \
          ORDER BY 1"
     );
-    Ok(sqlx::query_as::<_, VfsDirName>(sqlx::AssertSqlSafe(sql.as_str()))
-        .bind(pattern)
-        .fetch_all(pool)
-        .await?)
+    Ok(
+        sqlx::query_as::<_, VfsDirName>(sqlx::AssertSqlSafe(sql.as_str()))
+            .bind(pattern)
+            .fetch_all(pool)
+            .await?,
+    )
 }
 
 pub async fn list_vfs_file_names(pool: &PgPool, dir_path: &str) -> Result<Vec<VfsFileName>> {
@@ -755,10 +761,12 @@ pub async fn count_vfs_distinct_dirs(pool: &PgPool, pattern: &str, depth: u32) -
          FROM filesystem_entries \
          WHERE path LIKE $1 AND entry_type = 'media'"
     );
-    Ok(sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(sql.as_str()))
-        .bind(pattern)
-        .fetch_one(pool)
-        .await?)
+    Ok(
+        sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(sql.as_str()))
+            .bind(pattern)
+            .fetch_one(pool)
+            .await?,
+    )
 }
 
 pub async fn list_vfs_file_paths(pool: &PgPool, dir_path: &str) -> Result<Vec<String>> {

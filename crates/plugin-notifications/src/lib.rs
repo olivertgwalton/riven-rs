@@ -57,10 +57,12 @@ impl Plugin for NotificationsPlugin {
             SettingField::new("detailed", "Detailed Embeds", FieldType::Boolean).with_description(
                 "Show rich Discord embeds with overview, rating, and external links.",
             ),
-            SettingField::new("tmdb_api_key", "TMDB API Read Access Token", FieldType::Password)
-                .with_description(
-                    "Optional. Required for overview text in detailed Discord embeds.",
-                ),
+            SettingField::new(
+                "tmdb_api_key",
+                "TMDB API Read Access Token",
+                FieldType::Password,
+            )
+            .with_description("Optional. Required for overview text in detailed Discord embeds."),
         ]
     }
 

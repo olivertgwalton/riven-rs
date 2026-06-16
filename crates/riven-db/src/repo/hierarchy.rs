@@ -304,10 +304,12 @@ async fn seasons_for_show(
            AND is_special = false AND {state_filter} \
          ORDER BY season_number ASC"
     );
-    Ok(sqlx::query_as::<_, MediaItem>(sqlx::AssertSqlSafe(sql.as_str()))
-        .bind(show_id)
-        .fetch_all(pool)
-        .await?)
+    Ok(
+        sqlx::query_as::<_, MediaItem>(sqlx::AssertSqlSafe(sql.as_str()))
+            .bind(show_id)
+            .fetch_all(pool)
+            .await?,
+    )
 }
 
 /// Fetch all requested, non-completed seasons for a show.
