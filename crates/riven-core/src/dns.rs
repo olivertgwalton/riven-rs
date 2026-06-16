@@ -15,9 +15,9 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use hickory_resolver::TokioResolver;
-use hickory_resolver::config::ResolverConfig;
+use hickory_resolver::config::{LookupIpStrategy, ResolverConfig};
 use hickory_resolver::net::runtime::TokioRuntimeProvider;
+use hickory_resolver::{ResolverBuilder, TokioResolver};
 use reqwest::dns::{Addrs, Name, Resolve, Resolving};
 
 /// How long a resolved address is reused before re-resolving.
@@ -25,25 +25,33 @@ const DNS_CACHE_TTL: Duration = Duration::from_secs(300);
 
 /// Process-wide async DNS resolver (hickory). Built once from the system
 /// resolver config (`/etc/resolv.conf`); falls back to a default config if
-/// that's unreadable. hickory's default `Ipv4thenIpv6` strategy prefers A
-/// records, which keeps egress on IPv4 when a container advertises AAAA records
-/// it can't actually route.
+/// that's unreadable.
+///
+/// We force the `Ipv4thenIpv6` lookup strategy — query A first and only fall
+/// back to AAAA — so egress stays on IPv4 when a container advertises AAAA
+/// records it can't actually route, and we don't fire wasted AAAA lookups at
+/// IPv4-only usenet hosts. hickory 0.26 changed the *default* strategy to
+/// `Ipv6AndIpv4` (AAAA + A in parallel, IPv6 first), so this must be set
+/// explicitly — it is no longer the default.
 fn resolver() -> &'static TokioResolver {
     static RESOLVER: OnceLock<TokioResolver> = OnceLock::new();
-    RESOLVER.get_or_init(
-        || match TokioResolver::builder_tokio().and_then(|builder| builder.build()) {
-            Ok(resolver) => resolver,
-            Err(error) => {
-                tracing::warn!(%error, "hickory: system resolver config unavailable; using defaults");
-                TokioResolver::builder_with_config(
-                    ResolverConfig::default(),
-                    TokioRuntimeProvider::default(),
-                )
-                .build()
-                .expect("building hickory resolver from default config cannot fail")
-            }
-        },
-    )
+
+    let with_ipv4_first = |mut builder: ResolverBuilder<TokioRuntimeProvider>| {
+        builder.options_mut().ip_strategy = LookupIpStrategy::Ipv4thenIpv6;
+        builder.build()
+    };
+
+    RESOLVER.get_or_init(|| match TokioResolver::builder_tokio().and_then(&with_ipv4_first) {
+        Ok(resolver) => resolver,
+        Err(error) => {
+            tracing::warn!(%error, "hickory: system resolver config unavailable; using defaults");
+            with_ipv4_first(TokioResolver::builder_with_config(
+                ResolverConfig::default(),
+                TokioRuntimeProvider::default(),
+            ))
+            .expect("building hickory resolver from default config cannot fail")
+        }
+    })
 }
 
 struct CachedAddrs {
