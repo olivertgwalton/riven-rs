@@ -18,7 +18,6 @@ pub(super) const DEFAULT_429_PAUSE_SECS: u64 = 10;
 /// HTTP statuses that represent a *transient upstream failure* — the request
 /// reached the server (or a gateway in front of it) and bounced back with no
 /// useful application response. Treated the same as a transient socket error:
-
 fn is_retryable_status(status: StatusCode) -> bool {
     status.as_u16() == 408 || status.is_server_error()
 }

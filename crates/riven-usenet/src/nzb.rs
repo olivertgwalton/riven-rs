@@ -115,7 +115,7 @@ pub fn parse_nzb_document(xml: &str) -> Result<NzbDocument, NzbError> {
                         segments: Vec::new(),
                     };
                     for attr in e.attributes().flatten() {
-                        let val = attr.unescape_value().ok().map(std::borrow::Cow::into_owned);
+                        let val = attr.normalized_value(quick_xml::XmlVersion::Implicit1_0).ok().map(std::borrow::Cow::into_owned);
                         match (attr.key.as_ref(), val) {
                             (b"subject", Some(v)) => f.subject = v,
                             (b"poster", Some(v)) => f.poster = v,
@@ -131,7 +131,7 @@ pub fn parse_nzb_document(xml: &str) -> Result<NzbDocument, NzbError> {
                         message_id: String::new(),
                     };
                     for attr in e.attributes().flatten() {
-                        let val = attr.unescape_value().ok().map(std::borrow::Cow::into_owned);
+                        let val = attr.normalized_value(quick_xml::XmlVersion::Implicit1_0).ok().map(std::borrow::Cow::into_owned);
                         match (attr.key.as_ref(), val) {
                             (b"bytes", Some(v)) => s.bytes = v.parse().unwrap_or(0),
                             (b"number", Some(v)) => s.number = v.parse().unwrap_or(0),
@@ -148,7 +148,7 @@ pub fn parse_nzb_document(xml: &str) -> Result<NzbDocument, NzbError> {
                 b"meta" => {
                     for attr in e.attributes().flatten() {
                         if attr.key.as_ref() == b"type"
-                            && let Ok(v) = attr.unescape_value()
+                            && let Ok(v) = attr.normalized_value(quick_xml::XmlVersion::Implicit1_0)
                         {
                             let key = v.trim().to_ascii_lowercase();
                             if !key.is_empty() {

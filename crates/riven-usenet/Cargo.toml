@@ -2,6 +2,7 @@
 name = "riven-usenet"
 version = "0.1.0"
 edition.workspace = true
+rust-version.workspace = true
 
 [dependencies]
 riven-core = { path = "../riven-core" }
@@ -9,7 +10,7 @@ tokio = { workspace = true, features = ["io-util", "net", "sync", "time", "rt", 
 tokio-rustls = "0.26"
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std"] }
 webpki-roots = "1"
-quick-xml = "0.39"
+quick-xml = "0.40"
 async-trait = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }

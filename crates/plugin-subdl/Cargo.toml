@@ -2,6 +2,7 @@
 name = "plugin-subdl"
 version = "0.1.0"
 edition.workspace = true
+rust-version.workspace = true
 
 [dependencies]
 riven-core = { path = "../riven-core" }
@@ -14,7 +15,7 @@ anyhow = { workspace = true }
 tracing = { workspace = true }
 sqlx = { workspace = true }
 serde_urlencoded = "0.7"
-zip = { version = "2", default-features = false, features = ["deflate"] }
+zip = { version = "8", default-features = false, features = ["deflate"] }
 
 [lints]
 workspace = true

@@ -49,7 +49,7 @@ async fn upsert_top_level_item(
          VALUES ($1, $2, $3, '{item_type}', 'indexed', $4, $5, $6) \
          RETURNING *"
     );
-    let item = sqlx::query_as::<_, MediaItem>(&sql)
+    let item = sqlx::query_as::<_, MediaItem>(sqlx::AssertSqlSafe(sql.as_str()))
         .bind(title)
         .bind(imdb_id)
         .bind(second_id_val)
@@ -189,7 +189,7 @@ pub async fn get_pending_items_for_retry(
            AND {FAILED_ATTEMPTS_COOLDOWN_SQL}
          ORDER BY failed_attempts ASC, last_scrape_attempt_at ASC NULLS FIRST, created_at ASC",
     );
-    Ok(sqlx::query_as::<_, MediaItem>(&sql)
+    Ok(sqlx::query_as::<_, MediaItem>(sqlx::AssertSqlSafe(sql.as_str()))
         .bind(item_type)
         .fetch_all(pool)
         .await?)

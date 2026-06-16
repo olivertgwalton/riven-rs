@@ -457,7 +457,7 @@ fn coerce_value(field_type: FieldType, value: &serde_json::Value) -> serde_json:
             _ => serde_json::Value::Null,
         },
         FieldType::Number => match as_str {
-            Some(s) if s.is_empty() => serde_json::Value::Null,
+            Some("") => serde_json::Value::Null,
             Some(s) => s
                 .parse::<i64>()
                 .map(Into::into)

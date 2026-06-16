@@ -31,7 +31,7 @@ pub async fn reset_library(pool: &PgPool) -> Result<u64> {
     .execute(pool)
     .await?;
 
-    Ok(count as u64)
+    Ok(count.cast_unsigned())
 }
 
 pub async fn reset_items_by_ids(pool: &PgPool, ids: Vec<i64>) -> Result<u64> {

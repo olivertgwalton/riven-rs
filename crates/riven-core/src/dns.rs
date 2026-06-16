@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 
 use hickory_resolver::TokioResolver;
 use hickory_resolver::config::ResolverConfig;
-use hickory_resolver::name_server::TokioConnectionProvider;
+use hickory_resolver::net::runtime::TokioRuntimeProvider;
 use reqwest::dns::{Addrs, Name, Resolve, Resolving};
 
 /// How long a resolved address is reused before re-resolving.
@@ -30,17 +30,20 @@ const DNS_CACHE_TTL: Duration = Duration::from_secs(300);
 /// it can't actually route.
 fn resolver() -> &'static TokioResolver {
     static RESOLVER: OnceLock<TokioResolver> = OnceLock::new();
-    RESOLVER.get_or_init(|| match TokioResolver::builder_tokio() {
-        Ok(builder) => builder.build(),
-        Err(error) => {
-            tracing::warn!(%error, "hickory: system resolver config unavailable; using defaults");
-            TokioResolver::builder_with_config(
-                ResolverConfig::default(),
-                TokioConnectionProvider::default(),
-            )
-            .build()
-        }
-    })
+    RESOLVER.get_or_init(
+        || match TokioResolver::builder_tokio().and_then(|builder| builder.build()) {
+            Ok(resolver) => resolver,
+            Err(error) => {
+                tracing::warn!(%error, "hickory: system resolver config unavailable; using defaults");
+                TokioResolver::builder_with_config(
+                    ResolverConfig::default(),
+                    TokioRuntimeProvider::default(),
+                )
+                .build()
+                .expect("building hickory resolver from default config cannot fail")
+            }
+        },
+    )
 }
 
 struct CachedAddrs {

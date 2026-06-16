@@ -124,7 +124,7 @@ pub fn parse_newznab_xml(body: &str) -> Vec<NewznabItem> {
                     b"enclosure" => {
                         for attr in e.attributes().flatten() {
                             if attr.key.as_ref() == b"url"
-                                && let Ok(v) = attr.unescape_value()
+                                && let Ok(v) = attr.normalized_value(quick_xml::XmlVersion::Implicit1_0)
                             {
                                 item.nzb_url = v.into_owned();
                             }
@@ -133,7 +133,7 @@ pub fn parse_newznab_xml(body: &str) -> Vec<NewznabItem> {
                     b"link" if item.nzb_url.is_empty() => {
                         for attr in e.attributes().flatten() {
                             if attr.key.as_ref() == b"href"
-                                && let Ok(v) = attr.unescape_value()
+                                && let Ok(v) = attr.normalized_value(quick_xml::XmlVersion::Implicit1_0)
                             {
                                 item.nzb_url = v.into_owned();
                             }
@@ -146,13 +146,13 @@ pub fn parse_newznab_xml(body: &str) -> Vec<NewznabItem> {
                             match attr.key.as_ref() {
                                 b"name" => {
                                     name_val = attr
-                                        .unescape_value()
+                                        .normalized_value(quick_xml::XmlVersion::Implicit1_0)
                                         .ok()
                                         .map(std::borrow::Cow::into_owned);
                                 }
                                 b"value" => {
                                     value_val = attr
-                                        .unescape_value()
+                                        .normalized_value(quick_xml::XmlVersion::Implicit1_0)
                                         .ok()
                                         .map(std::borrow::Cow::into_owned);
                                 }

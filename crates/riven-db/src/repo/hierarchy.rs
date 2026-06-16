@@ -304,7 +304,7 @@ async fn seasons_for_show(
            AND is_special = false AND {state_filter} \
          ORDER BY season_number ASC"
     );
-    Ok(sqlx::query_as::<_, MediaItem>(&sql)
+    Ok(sqlx::query_as::<_, MediaItem>(sqlx::AssertSqlSafe(sql.as_str()))
         .bind(show_id)
         .fetch_all(pool)
         .await?)
@@ -514,7 +514,7 @@ pub async fn unmark_unrequested_seasons(
 }
 
 fn apply_item_filters(
-    qb: &mut sqlx::QueryBuilder<'_, sqlx::Postgres>,
+    qb: &mut sqlx::QueryBuilder<sqlx::Postgres>,
     types: Option<&[MediaItemType]>,
     search: Option<&str>,
     states: Option<&[MediaItemState]>,

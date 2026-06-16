@@ -1,4 +1,5 @@
 use super::*;
+use riven_core::plugin::FieldType;
 
 #[test]
 fn response_deserializes_external_id_field_names() {
@@ -29,5 +30,5 @@ fn plugin_schema_marks_api_key_required() {
         .find(|field| field.key == "apikey")
         .expect("apikey field");
     assert!(api_key.required);
-    assert_eq!(api_key.field_type, "password");
+    assert_eq!(api_key.field_type, FieldType::Password);
 }
