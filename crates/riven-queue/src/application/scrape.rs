@@ -13,7 +13,7 @@ use crate::context::{
     load_media_item_or_log,
 };
 use crate::discovery::rank_streams;
-use crate::{JobQueue, ParseScrapeResultsJob, ScrapeJob};
+use crate::{IndexJob, JobQueue, ParseScrapeResultsJob, ScrapeJob};
 
 fn rate_limit_backoff(prior_retries: u32) -> Duration {
     let secs = match prior_retries {
@@ -72,6 +72,18 @@ pub async fn start(id: i64, job: &ScrapeJob, queue: &JobQueue) {
             | MediaItemState::PartiallyCompleted
     ) {
         tracing::debug!(id, state = ?item.state, "skipping scrape");
+        return;
+    }
+
+    if item.indexed_at.is_none()
+        && matches!(item.item_type, MediaItemType::Movie | MediaItemType::Show)
+    {
+        tracing::warn!(
+            id,
+            item_type = ?item.item_type,
+            "scrape requested for never-indexed item; enqueuing index instead of scraping blind"
+        );
+        queue.push_index(IndexJob::from_item(&item)).await;
         return;
     }
 
