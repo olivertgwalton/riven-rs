@@ -20,6 +20,7 @@ use apalis::prelude::{TaskBuilder, TaskSink};
 use apalis_redis::{RedisConfig, RedisStorage};
 use chrono::{DateTime, Utc};
 use futures::future;
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use tokio::sync::{RwLock, broadcast};
@@ -77,7 +78,6 @@ pub struct JobQueue {
     pub registry: Arc<PluginRegistry>,
     pub event_tx: broadcast::Sender<RivenEvent>,
     pub notification_tx: broadcast::Sender<String>,
-    pub db_pool: sqlx::PgPool,
     pub downloader_config: Arc<RwLock<DownloaderConfig>>,
     pub reindex_config: Arc<RwLock<ReindexConfig>>,
     pub filesystem_settings: Arc<RwLock<FilesystemSettings>>,
@@ -96,7 +96,6 @@ impl JobQueue {
         redis_url: &str,
         registry: Arc<PluginRegistry>,
         notification_tx: broadcast::Sender<String>,
-        db_pool: sqlx::PgPool,
         downloader_config: DownloaderConfig,
         reindex_config: ReindexConfig,
         filesystem_settings: FilesystemSettings,
@@ -136,7 +135,7 @@ impl JobQueue {
 
         let redis = connect_managed(redis_url).await?;
 
-        let resolution_ranks = riven_db::repo::load_resolution_ranks(&db_pool).await;
+        let resolution_ranks = riven_db::repo::load_resolution_ranks().await;
         let (event_tx, _) = broadcast::channel(4096);
 
         Ok(Self {
@@ -151,7 +150,6 @@ impl JobQueue {
             registry,
             event_tx,
             notification_tx,
-            db_pool,
             downloader_config: Arc::new(RwLock::new(downloader_config)),
             reindex_config: Arc::new(RwLock::new(reindex_config)),
             vfs_layout: Arc::new(RwLock::new(VfsLibraryLayout::new(
@@ -163,14 +161,6 @@ impl JobQueue {
             maximum_scrape_attempts: Arc::new(AtomicU32::new(maximum_scrape_attempts)),
             resolution_ranks: Arc::new(RwLock::new(resolution_ranks)),
         })
-    }
-
-    /// Snapshot the current per-item scrape ceiling. `0` disables the ceiling.
-    /// State computation reads this to apply the
-    /// `failed_attempts >= max → Failed` rule.
-    pub fn max_scrape_attempts(&self) -> u32 {
-        self.maximum_scrape_attempts
-            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Every apalis-redis queue this `JobQueue` owns — fixed orchestrator queues
@@ -319,18 +309,23 @@ impl JobQueue {
     /// any incomplete/dead release, so a complete one is picked. Shared by the
     /// manual "Re-grab" mutation and the usenet auto-repair worker.
     pub async fn regrab_media_item(&self, media_item_id: i64) -> anyhow::Result<()> {
-        let entries: Vec<(i64, Option<String>)> = sqlx::query_as::<_, (i64, Option<String>)>(
-            "SELECT id, usenet_info_hash FROM filesystem_entries \
-             WHERE media_item_id = $1 AND entry_type = 'media'",
-        )
-        .bind(media_item_id)
-        .fetch_all(&self.db_pool)
-        .await?;
+        use riven_core::entities::filesystem_entries;
+        let entries: Vec<(i64, Option<String>)> = filesystem_entries::Entity::find()
+            .filter(filesystem_entries::Column::MediaItemId.eq(media_item_id))
+            .filter(
+                filesystem_entries::Column::EntryType
+                    .eq(riven_core::types::FileSystemEntryType::Media),
+            )
+            .select_only()
+            .column(filesystem_entries::Column::Id)
+            .column(filesystem_entries::Column::UsenetInfoHash)
+            .into_tuple::<(i64, Option<String>)>()
+            .all(riven_db::orm())
+            .await?;
 
         for (_, info_hash) in &entries {
             if let Some(info_hash) = info_hash
                 && let Err(error) = riven_db::repo::blacklist_stream_permanent_by_hash(
-                    &self.db_pool,
                     media_item_id,
                     info_hash,
                 )
@@ -341,12 +336,12 @@ impl JobQueue {
         }
 
         for (id, _) in &entries {
-            if let Err(error) = riven_db::repo::delete_filesystem_entry(&self.db_pool, *id).await {
+            if let Err(error) = riven_db::repo::delete_filesystem_entry(*id).await {
                 tracing::warn!(%error, entry_id = *id, "regrab: failed to delete filesystem entry");
             }
         }
 
-        riven_db::repo::recompute(&self.db_pool, &[media_item_id]).await?;
+        riven_db::repo::recompute(&[media_item_id]).await?;
         self.push_process_media_item(ProcessMediaItemJob::new(media_item_id))
             .await;
         Ok(())
@@ -380,7 +375,7 @@ impl JobQueue {
     /// non-blacklisted stream exists. Returns `true` when enqueued.
     pub async fn push_download_from_best_stream(&self, id: i64) -> bool {
         let ranks = self.resolution_ranks.read().await.clone();
-        let has_any = riven_db::repo::get_best_stream(&self.db_pool, id, &ranks)
+        let has_any = riven_db::repo::get_best_stream(id, &ranks)
             .await
             .ok()
             .flatten()
@@ -437,31 +432,6 @@ impl JobQueue {
             self.release_dedup(prefix, id).await;
             tracing::error!(error = %e, label, "failed to push job");
         }
-    }
-
-    pub async fn schedule_scrape_at(&self, job: ScrapeJob, run_at: DateTime<Utc>) {
-        if run_at <= Utc::now() {
-            self.clear_scheduled_scrape(job.id).await;
-            self.push_scrape(job).await;
-            return;
-        }
-        let id = job.id;
-        let task_id = scheduled_scrape_task_id(id).to_string();
-        self.schedule_apalis_task(
-            "scrape",
-            id,
-            self.scrape_storage.get_config(),
-            &task_id,
-            &job,
-            run_at,
-        )
-        .await;
-    }
-
-    pub async fn clear_scheduled_scrape(&self, id: i64) {
-        let task_id = scheduled_scrape_task_id(id).to_string();
-        self.clear_apalis_scheduled_task("scrape", id, self.scrape_storage.get_config(), &task_id)
-            .await;
     }
 
     pub async fn schedule_index_at(&self, job: IndexJob, run_at: DateTime<Utc>) {
@@ -579,13 +549,19 @@ impl JobQueue {
         }
     }
 
-    pub async fn init_flow(&self, prefix: &str, id: i64, pending: usize) {
+    /// Begin a fan-in flow expecting `expected` children. Records the expected
+    /// total and clears any leftover state for this scope so a re-run (e.g. a
+    /// re-scrape of the same item) starts clean. The pending key now holds the
+    /// immutable expected count; per-child progress lives in the done set.
+    pub async fn init_flow(&self, prefix: &str, id: i64, expected: usize) {
         let mut conn = self.redis.clone();
         let _result: Result<(), _> = redis::pipe()
             .del(flow_results_key(prefix, id))
+            .del(flow_done_key(prefix, id))
+            .del(flow_rate_limited_key(prefix, id))
             .cmd("SET")
             .arg(flow_pending_key(prefix, id))
-            .arg(pending)
+            .arg(expected)
             .arg("EX")
             .arg(3600i64)
             .query_async(&mut conn)
@@ -612,19 +588,38 @@ impl JobQueue {
             .await;
     }
 
-    pub async fn flow_complete_child(&self, prefix: &str, id: i64) -> bool {
-        let pending_key = flow_pending_key(prefix, id);
+    /// Mark `child` (the plugin name) done for this flow and report whether it
+    /// was the final outstanding child — the signal to run `finalize`.
+    ///
+    /// apalis redelivers jobs at least once, so completion is tracked in a
+    /// Redis set rather than a counter: a retried child re-adds the same member
+    /// (a no-op), so it can neither finalize twice nor push the total past the
+    /// expected count and skip the finalize entirely (the old `DECR` counter
+    /// could go negative on a retry and strand the item). The add-and-compare
+    /// runs in one Lua script so exactly one caller observes completion even
+    /// when siblings finish concurrently.
+    pub async fn flow_complete_child(&self, prefix: &str, id: i64, child: &str) -> bool {
+        let script = redis::Script::new(
+            r"
+            local added = redis.call('SADD', KEYS[1], ARGV[1])
+            redis.call('EXPIRE', KEYS[1], ARGV[2])
+            redis.call('EXPIRE', KEYS[2], ARGV[2])
+            if added == 0 then return 0 end
+            local expected = tonumber(redis.call('GET', KEYS[2]))
+            if not expected or expected <= 0 then return 0 end
+            if redis.call('SCARD', KEYS[1]) == expected then return 1 else return 0 end
+            ",
+        );
         let mut conn = self.redis.clone();
-        let (remaining, _): (i64, i64) = redis::pipe()
-            .cmd("DECR")
-            .arg(&pending_key)
-            .cmd("EXPIRE")
-            .arg(&pending_key)
+        let last: i64 = script
+            .key(flow_done_key(prefix, id))
+            .key(flow_pending_key(prefix, id))
+            .arg(child)
             .arg(3600i64)
-            .query_async(&mut conn)
+            .invoke_async(&mut conn)
             .await
-            .unwrap_or((-1, 0));
-        remaining == 0
+            .unwrap_or(0);
+        last == 1
     }
 
     /// Atomically read and clear the flow results hash. Use this when the
@@ -648,6 +643,7 @@ impl JobQueue {
         let mut conn = self.redis.clone();
         let _result: Result<(), _> = redis::cmd("DEL")
             .arg(flow_pending_key(prefix, id))
+            .arg(flow_done_key(prefix, id))
             .query_async(&mut conn)
             .await;
     }
@@ -659,6 +655,7 @@ impl JobQueue {
         let mut conn = self.redis.clone();
         let _result: Result<(), _> = redis::cmd("DEL")
             .arg(flow_pending_key(prefix, id))
+            .arg(flow_done_key(prefix, id))
             .arg(flow_results_key(prefix, id))
             .arg(flow_rate_limited_key(prefix, id))
             .query_async(&mut conn)
@@ -833,6 +830,8 @@ impl JobQueue {
                     .cmd("DEL")
                     .arg(flow_pending_key(prefix, *id))
                     .cmd("DEL")
+                    .arg(flow_done_key(prefix, *id))
+                    .cmd("DEL")
                     .arg(flow_results_key(prefix, *id))
                     .cmd("DEL")
                     .arg(flow_rate_limited_key(prefix, *id))
@@ -989,11 +988,6 @@ impl JobQueue {
         }
     }
 
-    /// Reload the resolution ranks cache from the DB (call after settings are saved).
-    pub async fn reload_resolution_ranks(&self) {
-        let ranks = riven_db::repo::load_resolution_ranks(&self.db_pool).await;
-        *self.resolution_ranks.write().await = ranks;
-    }
 }
 
 /// Serialize a job payload into a single pre-sized heap allocation.
@@ -1015,6 +1009,14 @@ fn flow_pending_key(prefix: &str, id: i64) -> String {
 #[inline]
 fn flow_results_key(prefix: &str, id: i64) -> String {
     format!("riven:flow:{prefix}:{id}:results")
+}
+
+/// Set of children (plugin names) that have completed this flow. Replaces the
+/// old decrementing counter so completion is idempotent under apalis's
+/// at-least-once redelivery — see [`JobQueue::flow_complete_child`].
+#[inline]
+fn flow_done_key(prefix: &str, id: i64) -> String {
+    format!("riven:flow:{prefix}:{id}:done")
 }
 
 #[inline]
@@ -1051,12 +1053,7 @@ fn dedup_key(prefix: &str, id: i64) -> String {
 }
 
 const SCHEDULED_INDEX_TASK_NAMESPACE: u128 = 0x524956454e494e44_0000000000000000;
-const SCHEDULED_SCRAPE_TASK_NAMESPACE: u128 = 0x524956454e534352_0000000000000000;
 
 fn scheduled_index_task_id(id: i64) -> Ulid {
     Ulid::from(SCHEDULED_INDEX_TASK_NAMESPACE | u128::from(id.cast_unsigned()))
-}
-
-fn scheduled_scrape_task_id(id: i64) -> Ulid {
-    Ulid::from(SCHEDULED_SCRAPE_TASK_NAMESPACE | u128::from(id.cast_unsigned()))
 }

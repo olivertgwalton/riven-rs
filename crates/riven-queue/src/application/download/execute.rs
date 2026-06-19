@@ -145,7 +145,7 @@ pub async fn attempt_download(
     };
     let download = *download;
 
-    let fresh_item = match repo::get_media_item(&queue.db_pool, id).await {
+    let fresh_item = match repo::get_media_item(id).await {
         Ok(Some(fresh)) => fresh,
         Ok(None) => {
             tracing::debug!(

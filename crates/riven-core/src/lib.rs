@@ -1,6 +1,7 @@
 pub mod config;
 pub mod dns;
 pub mod downloader;
+pub mod entities;
 pub mod events;
 pub mod http;
 pub mod local_source;

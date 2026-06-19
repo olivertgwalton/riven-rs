@@ -58,7 +58,6 @@ impl<'a> LibraryOrchestrator<'a> {
         external_request_id: Option<&str>,
     ) -> Result<RequestedItemOutcome> {
         let request = repo::create_item_request(
-            &self.queue.db_pool,
             imdb_id,
             tmdb_id,
             None,
@@ -70,7 +69,6 @@ impl<'a> LibraryOrchestrator<'a> {
         .await?;
 
         let (item, _) = repo::create_movie(
-            &self.queue.db_pool,
             title,
             imdb_id,
             tmdb_id,
@@ -95,7 +93,6 @@ impl<'a> LibraryOrchestrator<'a> {
         requested_seasons: Option<&[i32]>,
     ) -> Result<RequestedItemOutcome> {
         let request = repo::create_item_request(
-            &self.queue.db_pool,
             imdb_id,
             None,
             tvdb_id,
@@ -107,7 +104,6 @@ impl<'a> LibraryOrchestrator<'a> {
         .await?;
 
         let (item, _) = repo::create_show(
-            &self.queue.db_pool,
             title,
             imdb_id,
             tvdb_id,
@@ -158,7 +154,6 @@ impl<'a> LibraryOrchestrator<'a> {
     pub async fn retry_item_request(&self, request: &ItemRequest) {
         let item = match request.request_type {
             ItemRequestType::Movie => repo::find_existing_media_item(
-                &self.queue.db_pool,
                 MediaItemType::Movie,
                 request.imdb_id.as_deref(),
                 request.tmdb_id.as_deref(),
@@ -168,7 +163,6 @@ impl<'a> LibraryOrchestrator<'a> {
             .ok()
             .flatten(),
             ItemRequestType::Show => repo::find_existing_media_item(
-                &self.queue.db_pool,
                 MediaItemType::Show,
                 request.imdb_id.as_deref(),
                 None,
@@ -189,7 +183,7 @@ impl<'a> LibraryOrchestrator<'a> {
             return;
         };
 
-        let request = match repo::get_item_request_by_id(&self.queue.db_pool, request_id).await {
+        let request = match repo::get_item_request_by_id(request_id).await {
             Ok(Some(request)) => request,
             Ok(None) => return,
             Err(error) => {
@@ -204,7 +198,6 @@ impl<'a> LibraryOrchestrator<'a> {
         };
 
         let request_state = match repo::derive_item_request_state_for_request(
-            &self.queue.db_pool,
             &request,
         )
         .await
@@ -222,7 +215,7 @@ impl<'a> LibraryOrchestrator<'a> {
         };
 
         if let Err(error) =
-            repo::update_item_request_state(&self.queue.db_pool, request_id, request_state).await
+            repo::update_item_request_state(request_id, request_state).await
         {
             tracing::error!(
                 item_id = item.id,

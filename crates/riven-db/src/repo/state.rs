@@ -1,16 +1,28 @@
 use std::collections::{HashSet, VecDeque};
 
 use anyhow::Result;
+use chrono::Utc;
+use riven_core::entities::{media_items, settings};
 use riven_core::types::{MediaItemState, MediaItemType, ShowStatus};
-use sqlx::PgPool;
+use sea_orm::ActiveValue::{Set, Unchanged};
+use sea_orm::sea_query::Expr;
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, DbBackend, EntityTrait, FromQueryResult, QueryFilter,
+    QuerySelect, Statement,
+};
+
+use crate::orm;
 
 /// Read the per-item retry ceiling from the `general` settings blob. `0`
 /// disables the ceiling.
-async fn read_max_attempts(pool: &PgPool) -> Result<i32> {
-    let value: Option<serde_json::Value> =
-        sqlx::query_scalar("SELECT value FROM settings WHERE key = 'general'")
-            .fetch_optional(pool)
-            .await?;
+async fn read_max_attempts() -> Result<i32> {
+    let value: Option<serde_json::Value> = settings::Entity::find()
+        .filter(settings::Column::Key.eq("general"))
+        .select_only()
+        .column(settings::Column::Value)
+        .into_tuple()
+        .one(orm())
+        .await?;
     Ok(value
         .as_ref()
         .and_then(|v| v.get("maximum_scrape_attempts"))
@@ -96,6 +108,7 @@ pub fn aggregate_states(
 /// Item facts a recompute needs. Consolidated in a single SELECT so a leaf
 /// recompute is one round-trip; shows/seasons need a second query for child
 /// states.
+#[derive(FromQueryResult)]
 struct ItemFacts {
     item_type: MediaItemType,
     state: MediaItemState,
@@ -107,19 +120,23 @@ struct ItemFacts {
     has_non_blacklisted_stream: bool,
 }
 
-async fn load_item_facts(pool: &PgPool, item_id: i64) -> Result<Option<ItemFacts>> {
-    let row = sqlx::query!(
+async fn load_item_facts(item_id: i64) -> Result<Option<ItemFacts>> {
+    Ok(ItemFacts::find_by_statement(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        // Cast the PG enum columns to text: a raw statement decodes columns by
+        // the FromQueryResult field types, and DeriveActiveEnum reads its
+        // `string_value` from text rather than the native enum OID.
         r#"SELECT
-              m.item_type    AS "item_type: MediaItemType",
-              m.state        AS "state: MediaItemState",
-              m.show_status  AS "show_status: ShowStatus",
+              m.item_type::text AS item_type,
+              m.state::text     AS state,
+              m.show_status::text AS show_status,
               m.parent_id,
               m.failed_attempts,
-              (m.aired_at IS NOT NULL AND m.aired_at > CURRENT_DATE) AS "is_unreleased!",
+              (m.aired_at IS NOT NULL AND m.aired_at > CURRENT_DATE) AS is_unreleased,
               EXISTS(
                   SELECT 1 FROM filesystem_entries fe
                   WHERE fe.media_item_id = m.id AND fe.entry_type = 'media'
-              ) AS "has_media_entry!",
+              ) AS has_media_entry,
               EXISTS(
                   SELECT 1 FROM media_item_streams ms
                   WHERE ms.media_item_id = m.id
@@ -127,53 +144,35 @@ async fn load_item_facts(pool: &PgPool, item_id: i64) -> Result<Option<ItemFacts
                         SELECT stream_id FROM media_item_blacklisted_streams
                         WHERE media_item_id = m.id
                     )
-              ) AS "has_non_blacklisted_stream!"
+              ) AS has_non_blacklisted_stream
            FROM media_items m WHERE m.id = $1"#,
-        item_id
-    )
-    .fetch_optional(pool)
-    .await?;
-
-    Ok(row.map(|r| ItemFacts {
-        item_type: r.item_type,
-        state: r.state,
-        show_status: r.show_status,
-        parent_id: r.parent_id,
-        is_unreleased: r.is_unreleased,
-        failed_attempts: r.failed_attempts,
-        has_media_entry: r.has_media_entry,
-        has_non_blacklisted_stream: r.has_non_blacklisted_stream,
-    }))
+        [item_id.into()],
+    ))
+    .one(orm())
+    .await?)
 }
 
 async fn load_child_states(
-    pool: &PgPool,
     parent_id: i64,
     parent_type: MediaItemType,
 ) -> Result<Vec<MediaItemState>> {
-    match parent_type {
-        MediaItemType::Show => Ok(sqlx::query_scalar!(
-            r#"SELECT state AS "state: MediaItemState"
-               FROM media_items
-               WHERE parent_id = $1
-                 AND item_type = 'season'
-                 AND is_requested = true
-                 AND is_special = false"#,
-            parent_id
-        )
-        .fetch_all(pool)
-        .await?),
-        MediaItemType::Season => Ok(sqlx::query_scalar!(
-            r#"SELECT state AS "state: MediaItemState"
-               FROM media_items
-               WHERE parent_id = $1
-                 AND item_type = 'episode'"#,
-            parent_id
-        )
-        .fetch_all(pool)
-        .await?),
-        _ => Ok(Vec::new()),
-    }
+    let base = media_items::Entity::find().filter(media_items::Column::ParentId.eq(parent_id));
+    let query = match parent_type {
+        MediaItemType::Show => base
+            .filter(media_items::Column::ItemType.eq(MediaItemType::Season))
+            .filter(media_items::Column::IsRequested.eq(true))
+            .filter(media_items::Column::IsSpecial.eq(false)),
+        MediaItemType::Season => {
+            base.filter(media_items::Column::ItemType.eq(MediaItemType::Episode))
+        }
+        _ => return Ok(Vec::new()),
+    };
+    Ok(query
+        .select_only()
+        .column(media_items::Column::State)
+        .into_tuple()
+        .all(orm())
+        .await?)
 }
 
 /// Apply the leaf-state rules. Pure so it can be unit-tested without a DB.
@@ -214,8 +213,8 @@ pub fn leaf_state(
 
 /// Recompute one item; if the state changed, return its `parent_id` so the
 /// caller can cascade.
-async fn recompute_one(pool: &PgPool, item_id: i64, max_attempts: i32) -> Result<Option<i64>> {
-    let Some(facts) = load_item_facts(pool, item_id).await? else {
+async fn recompute_one(item_id: i64, max_attempts: i32) -> Result<Option<i64>> {
+    let Some(facts) = load_item_facts(item_id).await? else {
         return Ok(None);
     };
 
@@ -232,7 +231,7 @@ async fn recompute_one(pool: &PgPool, item_id: i64, max_attempts: i32) -> Result
     };
     let new_state = match facts.item_type {
         MediaItemType::Show | MediaItemType::Season => {
-            let children = load_child_states(pool, item_id, facts.item_type).await?;
+            let children = load_child_states(item_id, facts.item_type).await?;
             aggregate_states(facts.item_type, facts.state, facts.show_status, &children)
                 .unwrap_or_else(leaf)
         }
@@ -243,22 +242,23 @@ async fn recompute_one(pool: &PgPool, item_id: i64, max_attempts: i32) -> Result
         return Ok(None);
     }
 
-    sqlx::query!(
-        "UPDATE media_items SET state = $1, updated_at = NOW() WHERE id = $2",
-        new_state as MediaItemState,
-        item_id,
-    )
-    .execute(pool)
+    media_items::ActiveModel {
+        id: Unchanged(item_id),
+        state: Set(new_state),
+        updated_at: Set(Some(Utc::now())),
+        ..Default::default()
+    }
+    .update(orm())
     .await?;
 
     Ok(facts.parent_id)
 }
 
-pub async fn recompute(pool: &PgPool, item_ids: &[i64]) -> Result<()> {
+pub async fn recompute(item_ids: &[i64]) -> Result<()> {
     if item_ids.is_empty() {
         return Ok(());
     }
-    let max_attempts = read_max_attempts(pool).await?;
+    let max_attempts = read_max_attempts().await?;
 
     let mut initial = HashSet::new();
     let mut queue: VecDeque<i64> = VecDeque::new();
@@ -269,7 +269,7 @@ pub async fn recompute(pool: &PgPool, item_ids: &[i64]) -> Result<()> {
     }
 
     while let Some(id) = queue.pop_front() {
-        if let Some(parent_id) = recompute_one(pool, id, max_attempts).await? {
+        if let Some(parent_id) = recompute_one(id, max_attempts).await? {
             queue.push_back(parent_id);
         }
     }
@@ -279,23 +279,23 @@ pub async fn recompute(pool: &PgPool, item_ids: &[i64]) -> Result<()> {
 /// User-driven exit from `Paused`. Flips paused rows to a non-sticky
 /// placeholder (`Indexed`), then derives the real post-pause state from the
 /// current facts via [`recompute`].
-pub async fn unpause_items(pool: &PgPool, ids: &[i64]) -> Result<()> {
+pub async fn unpause_items(ids: &[i64]) -> Result<()> {
     if ids.is_empty() {
         return Ok(());
     }
-    sqlx::query!(
-        "UPDATE media_items SET state = 'indexed', updated_at = NOW() \
-         WHERE id = ANY($1) AND state = 'paused'",
-        ids
-    )
-    .execute(pool)
-    .await?;
-    recompute(pool, ids).await
+    media_items::Entity::update_many()
+        .col_expr(media_items::Column::State, Expr::value(MediaItemState::Indexed))
+        .col_expr(media_items::Column::UpdatedAt, Expr::cust("NOW()"))
+        .filter(media_items::Column::Id.is_in(ids.iter().copied()))
+        .filter(media_items::Column::State.eq(MediaItemState::Paused))
+        .exec(orm())
+        .await?;
+    recompute(ids).await
 }
 
-/// Re-derive state for the given ids. Application writes already trigger a
-/// recompute via the repo layer; this exists for admin tools and one-off
-/// backfills after data fix-ups.
-pub async fn force_recompute(pool: &PgPool, ids: &[i64]) -> Result<()> {
-    recompute(pool, ids).await
+/// Re-derive state for the given ids. Application writes already recompute via
+/// the repo layer; this exists for admin tools and one-off backfills after data
+/// fix-ups.
+pub async fn force_recompute(ids: &[i64]) -> Result<()> {
+    recompute(ids).await
 }

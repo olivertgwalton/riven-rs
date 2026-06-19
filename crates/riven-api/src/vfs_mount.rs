@@ -14,7 +14,6 @@ struct MountedVfs {
 struct VfsMountConfig {
     vfs_layout: Arc<RwLock<VfsLibraryLayout>>,
     filesystem_settings_revision: Arc<AtomicU64>,
-    db_pool: sqlx::PgPool,
     stream_client: reqwest::Client,
     link_request_tx: mpsc::Sender<LinkRequest>,
     cache_max_size_mb: u64,
@@ -32,7 +31,6 @@ impl VfsMountManager {
         initial_path: &str,
         vfs_layout: Arc<RwLock<VfsLibraryLayout>>,
         filesystem_settings_revision: Arc<AtomicU64>,
-        db_pool: sqlx::PgPool,
         stream_client: reqwest::Client,
         link_request_tx: mpsc::Sender<LinkRequest>,
         cache_max_size_mb: u64,
@@ -41,7 +39,6 @@ impl VfsMountManager {
         let config = VfsMountConfig {
             vfs_layout,
             filesystem_settings_revision,
-            db_pool,
             stream_client,
             link_request_tx,
             cache_max_size_mb,
@@ -92,7 +89,6 @@ fn mount_with_config(mount_path: &str, config: &VfsMountConfig) -> Result<Option
         mount_path,
         config.vfs_layout.clone(),
         config.filesystem_settings_revision.clone(),
-        config.db_pool.clone(),
         config.stream_client.clone(),
         config.link_request_tx.clone(),
         config.cache_max_size_mb,

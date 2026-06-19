@@ -43,7 +43,6 @@ pub async fn handle_bitrate_failure(
     file_size: u64,
     runtime: Option<i32>,
     context: &str,
-    queue: &JobQueue,
 ) {
     tracing::warn!(
         id,
@@ -53,7 +52,7 @@ pub async fn handle_bitrate_failure(
         "{context} failed bitrate check — skipping stream"
     );
     if !info_hash.is_empty()
-        && let Err(err) = repo::update_stream_file_size(&queue.db_pool, info_hash, file_size).await
+        && let Err(err) = repo::update_stream_file_size(info_hash, file_size).await
     {
         tracing::warn!(info_hash, %err, "failed to update stream file size");
     }

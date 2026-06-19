@@ -8,16 +8,14 @@ rust-version.workspace = true
 riven-core = { path = "../riven-core" }
 riven-db = { path = "../riven-db" }
 riven-usenet = { path = "../riven-usenet" }
-reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 async-trait = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 redis = { workspace = true }
-futures = { workspace = true }
 lru = { workspace = true }
-sqlx = { workspace = true }
+sea-orm = { workspace = true }
 tokio = { workspace = true }
 
 [lints]

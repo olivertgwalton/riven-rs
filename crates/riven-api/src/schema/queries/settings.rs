@@ -19,9 +19,8 @@ impl CoreSettingsQuery {
     /// the values that will actually be used at runtime.
     async fn quality_profiles(&self, ctx: &Context<'_>) -> Result<serde_json::Value> {
         require_settings_access(ctx)?;
-        let pool = ctx.data::<sqlx::PgPool>()?;
 
-        let db_profiles = repo::list_ranking_profiles(pool).await.unwrap_or_default();
+        let db_profiles = repo::list_ranking_profiles().await.unwrap_or_default();
 
         let profiles: serde_json::Value = riven_rank::QualityProfile::ALL
             .iter()
@@ -64,8 +63,7 @@ impl CoreSettingsQuery {
 
     async fn default_rank_profile(&self, ctx: &Context<'_>) -> Result<serde_json::Value> {
         require_settings_access(ctx)?;
-        let pool = ctx.data::<sqlx::PgPool>()?;
-        let db_profiles = repo::list_ranking_profiles(pool).await.unwrap_or_default();
+        let db_profiles = repo::list_ranking_profiles().await.unwrap_or_default();
 
         // Prefer an enabled built-in preset (matched by name to a QualityProfile).
         if let Some(preset) = riven_rank::QualityProfile::ALL
@@ -99,7 +97,7 @@ impl CoreSettingsQuery {
         }
 
         // Otherwise the global rank settings, with no active profile.
-        let settings: riven_rank::RankSettings = repo::get_setting(pool, "rank_settings")
+        let settings: riven_rank::RankSettings = repo::get_setting("rank_settings")
             .await?
             .and_then(|v| serde_json::from_value(v).ok())
             .unwrap_or_default();
@@ -113,32 +111,29 @@ impl CoreSettingsQuery {
     /// Return all ranking profiles (built-in + custom) with their enabled status.
     async fn custom_profiles(&self, ctx: &Context<'_>) -> Result<serde_json::Value> {
         require_settings_access(ctx)?;
-        let pool = ctx.data::<sqlx::PgPool>()?;
-        let profiles = repo::list_ranking_profiles(pool).await?;
+        let profiles = repo::list_ranking_profiles().await?;
         Ok(serde_json::to_value(profiles)?)
     }
 
     /// Get all stored settings as a JSON object.
     async fn all_settings(&self, ctx: &Context<'_>) -> Result<serde_json::Value> {
         require_settings_access(ctx)?;
-        let pool = ctx.data::<sqlx::PgPool>()?;
-        Ok(repo::get_all_settings(pool).await?)
+        Ok(repo::get_all_settings().await?)
     }
 
     /// Return instance-level status flags used by frontend bootstrap flows.
     /// Owns the setup-readiness rule so the UI never has to recompute it.
     async fn instance_status(&self, ctx: &Context<'_>) -> Result<InstanceStatus> {
-        let pool = ctx.data::<sqlx::PgPool>()?;
         let registry = ctx.data::<Arc<PluginRegistry>>()?;
 
         let db_setup_completed = matches!(
-            repo::get_setting(pool, "instance.setup_completed").await?,
+            repo::get_setting("instance.setup_completed").await?,
             Some(serde_json::Value::Bool(true))
         );
         let setup_completed =
             env_bool("RIVEN_SETTING__SETUP_COMPLETED").unwrap_or(db_setup_completed);
 
-        let enabled_profile_count = repo::get_enabled_profiles(pool).await?.len() as i32;
+        let enabled_profile_count = repo::get_enabled_profiles().await?.len() as i32;
         let enabled_valid_plugin_count = registry
             .all_plugins_info()
             .await
@@ -198,10 +193,9 @@ impl CoreSettingsQuery {
     /// and its typed values. This is the single read the settings/setup UIs use.
     async fn settings_sections(&self, ctx: &Context<'_>) -> Result<Vec<SettingsSection>> {
         require_settings_access(ctx)?;
-        let pool = ctx.data::<sqlx::PgPool>()?;
         let registry = ctx.data::<Arc<PluginRegistry>>()?;
 
-        let mut sections = vec![build_general_section(pool).await?];
+        let mut sections = vec![build_general_section().await?];
         for p in registry.all_plugins_info().await {
             sections.push(plugin_section_from(registry, &p).await);
         }
@@ -329,7 +323,7 @@ fn general_settings_schema_fields() -> Vec<SettingField> {
 
 /// Effective general settings: defaults merged with stored DB overrides.
 /// Single source of truth, shared by `settingsSections` and the writer.
-async fn general_settings_values(pool: &sqlx::PgPool) -> Result<serde_json::Value> {
+async fn general_settings_values() -> Result<serde_json::Value> {
     let defaults = RivenSettings::default();
     let mut result = serde_json::json!({
         "dubbed_anime_only": defaults.dubbed_anime_only,
@@ -349,7 +343,7 @@ async fn general_settings_values(pool: &sqlx::PgPool) -> Result<serde_json::Valu
         "vfs_debug_logging": defaults.vfs_debug_logging,
         "filesystem": defaults.filesystem,
     });
-    if let Some(stored) = repo::get_setting(pool, "general").await?
+    if let Some(stored) = repo::get_setting("general").await?
         && let (Some(obj), Some(stored_obj)) = (result.as_object_mut(), stored.as_object())
     {
         for (k, v) in stored_obj {
@@ -360,14 +354,14 @@ async fn general_settings_values(pool: &sqlx::PgPool) -> Result<serde_json::Valu
 }
 
 /// Build the instance-wide "general" settings section.
-pub(crate) async fn build_general_section(pool: &sqlx::PgPool) -> Result<SettingsSection> {
+pub(crate) async fn build_general_section() -> Result<SettingsSection> {
     let schema = general_settings_schema_fields();
     Ok(SettingsSection {
         id: "general".to_string(),
         title: "General".to_string(),
         kind: "general".to_string(),
         schema: serde_json::to_value(&schema).unwrap_or(serde_json::Value::Array(vec![])),
-        values: general_settings_values(pool).await?,
+        values: general_settings_values().await?,
         category: None,
         enabled: None,
         valid: None,

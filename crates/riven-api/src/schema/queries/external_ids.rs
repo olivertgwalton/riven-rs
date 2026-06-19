@@ -108,10 +108,8 @@ async fn anilist_external_id(ctx: &Context<'_>, id: &str, target: &str) -> Resul
     .map(|id| id.to_string()))
 }
 
-async fn riven_external_id(ctx: &Context<'_>, id: &str, field: &str) -> Result<Option<String>> {
-    let pool = ctx.data::<sqlx::PgPool>()?;
-    let item =
-        riven_db::repo::media::get_media_item(pool, parse_id(id, "Riven media item")?).await?;
+async fn riven_external_id(_ctx: &Context<'_>, id: &str, field: &str) -> Result<Option<String>> {
+    let item = riven_db::repo::media::get_media_item(parse_id(id, "Riven media item")?).await?;
     Ok(item.and_then(|item| match field {
         "tmdb_id" => item.tmdb_id,
         "tvdb_id" => item.tvdb_id,

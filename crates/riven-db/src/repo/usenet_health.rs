@@ -2,11 +2,19 @@
 //! scanner; read by the API's usenet-health view.
 
 use anyhow::Result;
-use sqlx::PgPool;
+use riven_core::entities::usenet_file_health;
+use sea_orm::sea_query::{Expr, OnConflict};
+use sea_orm::ActiveValue::Set;
+use sea_orm::{
+    ColumnTrait, DbBackend, EntityTrait, FromQueryResult, QueryFilter,
+    QuerySelect, Statement,
+};
+
+use crate::orm;
 
 /// A usenet-backed media file the scanner may check, with its last check time
 /// (via the join) implicitly driving ordering.
-#[derive(Debug, Clone, sqlx::FromRow)]
+#[derive(Debug, Clone, FromQueryResult)]
 pub struct UsenetFileToCheck {
     pub info_hash: String,
     pub file_index: i32,
@@ -15,12 +23,13 @@ pub struct UsenetFileToCheck {
 
 /// Distinct usenet files ordered least-recently-checked first (never-checked
 /// lead). The scanner pulls a small batch each tick.
-pub async fn usenet_files_due_for_check(
-    pool: &PgPool,
-    limit: i64,
-) -> Result<Vec<UsenetFileToCheck>> {
-    Ok(sqlx::query_as::<_, UsenetFileToCheck>(
-        r#"
+pub async fn usenet_files_due_for_check(limit: i64) -> Result<Vec<UsenetFileToCheck>> {
+    // DISTINCT ON + a LEFT JOIN into a derived table with NULLS-FIRST ordering
+    // has no clean builder form; keep the raw statement. No enum columns here.
+    Ok(
+        UsenetFileToCheck::find_by_statement(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            r#"
         SELECT u.info_hash, u.file_index, u.media_item_id
         FROM (
             SELECT DISTINCT ON (usenet_info_hash, usenet_file_index)
@@ -37,10 +46,11 @@ pub async fn usenet_files_due_for_check(
         ORDER BY h.checked_at ASC NULLS FIRST
         LIMIT $1
         "#,
+            [limit.into()],
+        ))
+        .all(orm())
+        .await?,
     )
-    .bind(limit)
-    .fetch_all(pool)
-    .await?)
 }
 
 /// One health update for [`upsert_usenet_file_health`].
@@ -56,34 +66,39 @@ pub struct UsenetHealthUpdate<'a> {
 }
 
 /// Insert or update the health record for one usenet file. Stamps `checked_at`.
-pub async fn upsert_usenet_file_health(pool: &PgPool, u: UsenetHealthUpdate<'_>) -> Result<()> {
-    sqlx::query(
-        r#"
-        INSERT INTO usenet_file_health
-            (info_hash, file_index, media_item_id, status,
-             total_segments, sampled_segments, missing_segments, error_segments,
-             checked_at, updated_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now(), now())
-        ON CONFLICT (info_hash, file_index) DO UPDATE SET
-            media_item_id    = EXCLUDED.media_item_id,
-            status           = EXCLUDED.status,
-            total_segments   = EXCLUDED.total_segments,
-            sampled_segments = EXCLUDED.sampled_segments,
-            missing_segments = EXCLUDED.missing_segments,
-            error_segments   = EXCLUDED.error_segments,
-            checked_at       = now(),
-            updated_at       = now()
-        "#,
+pub async fn upsert_usenet_file_health(u: UsenetHealthUpdate<'_>) -> Result<()> {
+    let now = chrono::Utc::now().fixed_offset();
+    usenet_file_health::Entity::insert(usenet_file_health::ActiveModel {
+        info_hash: Set(u.info_hash.to_owned()),
+        file_index: Set(u.file_index),
+        media_item_id: Set(u.media_item_id),
+        status: Set(u.status.to_owned()),
+        total_segments: Set(u.total_segments),
+        sampled_segments: Set(u.sampled_segments),
+        missing_segments: Set(u.missing_segments),
+        error_segments: Set(u.error_segments),
+        checked_at: Set(Some(now)),
+        updated_at: Set(now),
+        ..Default::default()
+    })
+    .on_conflict(
+        OnConflict::columns([
+            usenet_file_health::Column::InfoHash,
+            usenet_file_health::Column::FileIndex,
+        ])
+        .update_columns([
+            usenet_file_health::Column::MediaItemId,
+            usenet_file_health::Column::Status,
+            usenet_file_health::Column::TotalSegments,
+            usenet_file_health::Column::SampledSegments,
+            usenet_file_health::Column::MissingSegments,
+            usenet_file_health::Column::ErrorSegments,
+            usenet_file_health::Column::CheckedAt,
+            usenet_file_health::Column::UpdatedAt,
+        ])
+        .to_owned(),
     )
-    .bind(u.info_hash)
-    .bind(u.file_index)
-    .bind(u.media_item_id)
-    .bind(u.status)
-    .bind(u.total_segments)
-    .bind(u.sampled_segments)
-    .bind(u.missing_segments)
-    .bind(u.error_segments)
-    .execute(pool)
+    .exec(orm())
     .await?;
     Ok(())
 }
@@ -91,90 +106,91 @@ pub async fn upsert_usenet_file_health(pool: &PgPool, u: UsenetHealthUpdate<'_>)
 /// Delete health rows whose usenet file no longer exists in the library — e.g.
 /// the title was re-grabbed onto a different (or non-usenet) release. Keeps the
 /// health view in sync so stale "not ingested"/"missing data" rows don't linger.
-pub async fn prune_orphaned_usenet_health(pool: &PgPool) -> Result<u64> {
-    let result = sqlx::query(
-        r#"
-        DELETE FROM usenet_file_health h
-        WHERE NOT EXISTS (
-            SELECT 1 FROM filesystem_entries fe
-            WHERE fe.usenet_info_hash = h.info_hash
-              AND fe.usenet_file_index = h.file_index
-        )
-        "#,
-    )
-    .execute(pool)
-    .await?;
-    Ok(result.rows_affected())
+pub async fn prune_orphaned_usenet_health() -> Result<u64> {
+    // Single-table DELETE; only the correlated NOT EXISTS against
+    // filesystem_entries stays raw inside the filter.
+    let result = usenet_file_health::Entity::delete_many()
+        .filter(Expr::cust(
+            "NOT EXISTS ( \
+                 SELECT 1 FROM filesystem_entries fe \
+                 WHERE fe.usenet_info_hash = usenet_file_health.info_hash \
+                   AND fe.usenet_file_index = usenet_file_health.file_index \
+             )",
+        ))
+        .exec(orm())
+        .await?;
+    Ok(result.rows_affected)
 }
 
 /// Auto-repair: if a file is eligible for another automatic re-grab (under the
 /// retry cap and past its backoff window), returns its current attempt count.
 /// `None` means not due / exhausted.
 pub async fn usenet_repair_due(
-    pool: &PgPool,
     info_hash: &str,
     file_index: i32,
     max_retries: i32,
 ) -> Result<Option<i32>> {
-    Ok(sqlx::query_scalar::<_, i32>(
-        r#"
-        SELECT repair_attempts
-        FROM usenet_file_health
-        WHERE info_hash = $1 AND file_index = $2
-          AND repair_attempts < $3
-          AND (next_repair_at IS NULL OR next_repair_at <= now())
-        "#,
-    )
-    .bind(info_hash)
-    .bind(file_index)
-    .bind(max_retries)
-    .fetch_optional(pool)
-    .await?)
+    Ok(usenet_file_health::Entity::find()
+        .filter(usenet_file_health::Column::InfoHash.eq(info_hash))
+        .filter(usenet_file_health::Column::FileIndex.eq(file_index))
+        .filter(usenet_file_health::Column::RepairAttempts.lt(max_retries))
+        .filter(
+            usenet_file_health::Column::NextRepairAt.is_null().or(
+                Expr::col(usenet_file_health::Column::NextRepairAt).lte(Expr::cust("now()")),
+            ),
+        )
+        .select_only()
+        .column(usenet_file_health::Column::RepairAttempts)
+        .into_tuple()
+        .one(orm())
+        .await?)
 }
 
 /// Record an auto-repair attempt: bump the counter and schedule the next
 /// attempt `backoff_secs` from now.
 pub async fn record_usenet_repair_attempt(
-    pool: &PgPool,
     info_hash: &str,
     file_index: i32,
     backoff_secs: i64,
 ) -> Result<()> {
-    sqlx::query(
-        r#"
-        UPDATE usenet_file_health
-        SET repair_attempts = repair_attempts + 1,
-            last_repair_at = now(),
-            next_repair_at = now() + ($3 * interval '1 second')
-        WHERE info_hash = $1 AND file_index = $2
-        "#,
-    )
-    .bind(info_hash)
-    .bind(file_index)
-    .bind(backoff_secs)
-    .execute(pool)
-    .await?;
+    usenet_file_health::Entity::update_many()
+        .col_expr(
+            usenet_file_health::Column::RepairAttempts,
+            Expr::col(usenet_file_health::Column::RepairAttempts).add(1),
+        )
+        .col_expr(usenet_file_health::Column::LastRepairAt, Expr::cust("now()"))
+        .col_expr(
+            usenet_file_health::Column::NextRepairAt,
+            Expr::cust_with_values("now() + ($1 * interval '1 second')", [backoff_secs]),
+        )
+        .filter(usenet_file_health::Column::InfoHash.eq(info_hash))
+        .filter(usenet_file_health::Column::FileIndex.eq(file_index))
+        .exec(orm())
+        .await?;
     Ok(())
 }
 
 /// Clear repair bookkeeping once a file is healthy again (altmount's
 /// "resolve on import"). No-op when there's nothing to clear.
-pub async fn clear_usenet_repair_state(
-    pool: &PgPool,
-    info_hash: &str,
-    file_index: i32,
-) -> Result<()> {
-    sqlx::query(
-        r#"
-        UPDATE usenet_file_health
-        SET repair_attempts = 0, last_repair_at = NULL, next_repair_at = NULL
-        WHERE info_hash = $1 AND file_index = $2
-          AND (repair_attempts > 0 OR next_repair_at IS NOT NULL)
-        "#,
-    )
-    .bind(info_hash)
-    .bind(file_index)
-    .execute(pool)
-    .await?;
+pub async fn clear_usenet_repair_state(info_hash: &str, file_index: i32) -> Result<()> {
+    usenet_file_health::Entity::update_many()
+        .col_expr(usenet_file_health::Column::RepairAttempts, Expr::value(0))
+        .col_expr(
+            usenet_file_health::Column::LastRepairAt,
+            Expr::value(Option::<chrono::DateTime<chrono::FixedOffset>>::None),
+        )
+        .col_expr(
+            usenet_file_health::Column::NextRepairAt,
+            Expr::value(Option::<chrono::DateTime<chrono::FixedOffset>>::None),
+        )
+        .filter(usenet_file_health::Column::InfoHash.eq(info_hash))
+        .filter(usenet_file_health::Column::FileIndex.eq(file_index))
+        .filter(
+            usenet_file_health::Column::RepairAttempts
+                .gt(0)
+                .or(usenet_file_health::Column::NextRepairAt.is_not_null()),
+        )
+        .exec(orm())
+        .await?;
     Ok(())
 }

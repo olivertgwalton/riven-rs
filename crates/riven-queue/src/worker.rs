@@ -69,7 +69,7 @@ impl Scheduler {
         let queues = self.job_queue.queue_names();
         crate::prune_queue_history(&mut redis, &queues).await;
 
-        match riven_db::repo::delete_orphan_streams(&self.job_queue.db_pool).await {
+        match riven_db::repo::delete_orphan_streams().await {
             Ok(0) => {}
             Ok(removed) => tracing::info!(removed, "pruned orphan streams"),
             Err(error) => tracing::error!(%error, "failed to prune orphan streams"),

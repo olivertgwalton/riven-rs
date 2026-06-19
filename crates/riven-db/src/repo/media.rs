@@ -1,15 +1,21 @@
 use anyhow::Result;
 use chrono::Utc;
+use riven_core::entities::{item_requests, media_item_blacklisted_streams, media_items, streams};
 use riven_core::types::*;
-use sqlx::PgPool;
+use sea_orm::ActiveValue::{NotSet, Set, Unchanged};
+use sea_orm::sea_query::{Expr, NullOrdering, OnConflict};
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, Condition, EntityTrait, Order, QueryFilter, QueryOrder,
+    QuerySelect,
+};
 
 use crate::entities::*;
+use crate::orm;
 
 /// Shared INSERT … ON CONFLICT … RETURNING * implementation for top-level items
 /// (movies and shows). `second_id_col` is either `"tmdb_id"` or `"tvdb_id"`;
 /// `item_type` is either `"movie"` or `"show"`.
 async fn upsert_top_level_item(
-    pool: &PgPool,
     title: &str,
     imdb_id: Option<&str>,
     second_id_col: &'static str,
@@ -23,143 +29,113 @@ async fn upsert_top_level_item(
         _ => (MediaItemType::Show, None, second_id_val),
     };
     if let Some(existing) =
-        find_existing_media_item(pool, type_val, imdb_id, tmdb_id, tvdb_id).await?
+        find_existing_media_item(type_val, imdb_id, tmdb_id, tvdb_id).await?
     {
         let needs_update = is_requested
             && (!existing.is_requested
                 || (item_request_id.is_some() && existing.item_request_id != item_request_id));
         if needs_update {
-            sqlx::query(
-                "UPDATE media_items \
-                 SET is_requested = TRUE, \
-                     item_request_id = COALESCE($1, item_request_id), \
-                     updated_at = NOW() \
-                 WHERE id = $2",
-            )
-            .bind(item_request_id)
-            .bind(existing.id)
-            .execute(pool)
+            media_items::ActiveModel {
+                id: Unchanged(existing.id),
+                is_requested: Set(true),
+                // COALESCE($1, item_request_id): keep the existing id when None.
+                item_request_id: item_request_id.map_or(NotSet, |v| Set(Some(v))),
+                updated_at: Set(Some(Utc::now())),
+                ..Default::default()
+            }
+            .update(orm())
             .await?;
-            super::state::recompute(pool, &[existing.id]).await?;
+            super::state::recompute(&[existing.id]).await?;
         }
         return Ok((existing, false));
     }
-    let sql = format!(
-        "INSERT INTO media_items (title, imdb_id, {second_id_col}, item_type, state, is_requested, created_at, item_request_id) \
-         VALUES ($1, $2, $3, '{item_type}', 'indexed', $4, $5, $6) \
-         RETURNING *"
-    );
-    let item = sqlx::query_as::<_, MediaItem>(sqlx::AssertSqlSafe(sql.as_str()))
-        .bind(title)
-        .bind(imdb_id)
-        .bind(second_id_val)
-        .bind(is_requested)
-        .bind(Utc::now())
-        .bind(item_request_id)
-        .fetch_one(pool)
-        .await?;
-    super::state::recompute(pool, &[item.id]).await?;
+    let _ = second_id_col;
+    let inserted = media_items::ActiveModel {
+        title: Set(title.to_owned()),
+        imdb_id: Set(imdb_id.map(str::to_owned)),
+        tmdb_id: Set(tmdb_id.map(str::to_owned)),
+        tvdb_id: Set(tvdb_id.map(str::to_owned)),
+        item_type: Set(type_val),
+        state: Set(MediaItemState::Indexed),
+        is_requested: Set(is_requested),
+        created_at: Set(Utc::now()),
+        item_request_id: Set(item_request_id),
+        ..Default::default()
+    }
+    .insert(orm())
+    .await?;
+    super::state::recompute(&[inserted.id]).await?;
+    let item = get_media_item(inserted.id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("inserted media item {} not found", inserted.id))?;
     Ok((item, true))
 }
 
-pub async fn get_media_item(pool: &PgPool, id: i64) -> Result<Option<MediaItem>> {
-    Ok(
-        sqlx::query_as::<_, MediaItem>("SELECT * FROM media_items WHERE id = $1")
-            .bind(id)
-            .fetch_optional(pool)
-            .await?,
-    )
+pub async fn get_media_item(id: i64) -> Result<Option<MediaItem>> {
+    Ok(media_items::Entity::find_by_id(id)
+        .into_model::<MediaItem>()
+        .one(orm())
+        .await?)
 }
 
-pub async fn list_media_items_by_ids(pool: &PgPool, ids: &[i64]) -> Result<Vec<MediaItem>> {
+pub async fn list_media_items_by_ids(ids: &[i64]) -> Result<Vec<MediaItem>> {
     if ids.is_empty() {
         return Ok(Vec::new());
     }
-
-    Ok(
-        sqlx::query_as::<_, MediaItem>("SELECT * FROM media_items WHERE id = ANY($1)")
-            .bind(ids)
-            .fetch_all(pool)
-            .await?,
-    )
+    Ok(media_items::Entity::find()
+        .filter(media_items::Column::Id.is_in(ids.iter().copied()))
+        .into_model::<MediaItem>()
+        .all(orm())
+        .await?)
 }
 
-pub async fn get_media_item_by_imdb(pool: &PgPool, id: &str) -> Result<Option<MediaItem>> {
-    Ok(
-        sqlx::query_as::<_, MediaItem>("SELECT * FROM media_items WHERE imdb_id = $1")
-            .bind(id)
-            .fetch_optional(pool)
-            .await?,
-    )
+async fn find_one_by(column: media_items::Column, value: &str) -> Result<Option<MediaItem>> {
+    Ok(media_items::Entity::find()
+        .filter(column.eq(value))
+        .into_model::<MediaItem>()
+        .one(orm())
+        .await?)
 }
 
-pub async fn get_media_item_by_tmdb(pool: &PgPool, id: &str) -> Result<Option<MediaItem>> {
-    Ok(
-        sqlx::query_as::<_, MediaItem>("SELECT * FROM media_items WHERE tmdb_id = $1")
-            .bind(id)
-            .fetch_optional(pool)
-            .await?,
-    )
+pub async fn get_media_item_by_imdb(id: &str) -> Result<Option<MediaItem>> {
+    find_one_by(media_items::Column::ImdbId, id).await
 }
 
-pub async fn get_media_item_by_tvdb(pool: &PgPool, id: &str) -> Result<Option<MediaItem>> {
-    Ok(
-        sqlx::query_as::<_, MediaItem>("SELECT * FROM media_items WHERE tvdb_id = $1")
-            .bind(id)
-            .fetch_optional(pool)
-            .await?,
-    )
+pub async fn get_media_item_by_tmdb(id: &str) -> Result<Option<MediaItem>> {
+    find_one_by(media_items::Column::TmdbId, id).await
 }
 
-pub async fn list_movies(pool: &PgPool) -> Result<Vec<MediaItem>> {
-    Ok(sqlx::query_as::<_, MediaItem>(
-        "SELECT * FROM media_items WHERE item_type = 'movie' ORDER BY title",
-    )
-    .fetch_all(pool)
-    .await?)
+pub async fn get_media_item_by_tvdb(id: &str) -> Result<Option<MediaItem>> {
+    find_one_by(media_items::Column::TvdbId, id).await
 }
 
-pub async fn list_shows(pool: &PgPool) -> Result<Vec<MediaItem>> {
-    Ok(sqlx::query_as::<_, MediaItem>(
-        "SELECT * FROM media_items WHERE item_type = 'show' ORDER BY title",
-    )
-    .fetch_all(pool)
-    .await?)
+async fn list_by_type(item_type: MediaItemType) -> Result<Vec<MediaItem>> {
+    Ok(media_items::Entity::find()
+        .filter(media_items::Column::ItemType.eq(item_type))
+        .order_by_asc(media_items::Column::Title)
+        .into_model::<MediaItem>()
+        .all(orm())
+        .await?)
+}
+
+pub async fn list_movies() -> Result<Vec<MediaItem>> {
+    list_by_type(MediaItemType::Movie).await
+}
+
+pub async fn list_shows() -> Result<Vec<MediaItem>> {
+    list_by_type(MediaItemType::Show).await
 }
 
 pub async fn get_items_by_state(
-    pool: &PgPool,
     state: MediaItemState,
     item_type: MediaItemType,
 ) -> Result<Vec<MediaItem>> {
-    Ok(sqlx::query_as::<_, MediaItem>(
-        "SELECT * FROM media_items WHERE state = $1 AND item_type = $2",
-    )
-    .bind(state)
-    .bind(item_type)
-    .fetch_all(pool)
-    .await?)
-}
-
-/// Fetch items ready for processing by a single state. Used for Ongoing shows
-/// and other single-state lookups.
-pub async fn get_items_ready_for_processing(
-    pool: &PgPool,
-    state: MediaItemState,
-    item_type: MediaItemType,
-    limit: i64,
-) -> Result<Vec<MediaItem>> {
-    Ok(sqlx::query_as::<_, MediaItem>(
-        "SELECT * FROM media_items
-         WHERE state = $1 AND item_type = $2 AND is_requested = true
-         ORDER BY failed_attempts ASC, created_at ASC
-         LIMIT $3",
-    )
-    .bind(state)
-    .bind(item_type)
-    .bind(limit)
-    .fetch_all(pool)
-    .await?)
+    Ok(media_items::Entity::find()
+        .filter(media_items::Column::State.eq(state))
+        .filter(media_items::Column::ItemType.eq(item_type))
+        .into_model::<MediaItem>()
+        .all(orm())
+        .await?)
 }
 
 /// Escalating cooldown applied to items with `failed_attempts > 0` so a
@@ -177,123 +153,109 @@ pub(crate) const FAILED_ATTEMPTS_COOLDOWN_SQL: &str = "(
 )";
 
 /// Fetch all pending top-level items needing a retry: Indexed, Scraped, or PartiallyCompleted.
-pub async fn get_pending_items_for_retry(
-    pool: &PgPool,
-    item_type: MediaItemType,
-) -> Result<Vec<MediaItem>> {
-    let sql = format!(
-        "SELECT * FROM media_items
-         WHERE state = ANY(ARRAY['indexed'::media_item_state, 'scraped'::media_item_state, 'partially_completed'::media_item_state])
-           AND item_type = $1
-           AND is_requested = true
-           AND {FAILED_ATTEMPTS_COOLDOWN_SQL}
-         ORDER BY failed_attempts ASC, last_scrape_attempt_at ASC NULLS FIRST, created_at ASC",
-    );
-    Ok(
-        sqlx::query_as::<_, MediaItem>(sqlx::AssertSqlSafe(sql.as_str()))
-            .bind(item_type)
-            .fetch_all(pool)
-            .await?,
-    )
+pub async fn get_pending_items_for_retry(item_type: MediaItemType) -> Result<Vec<MediaItem>> {
+    Ok(media_items::Entity::find()
+        .filter(media_items::Column::State.is_in([
+            MediaItemState::Indexed,
+            MediaItemState::Scraped,
+            MediaItemState::PartiallyCompleted,
+        ]))
+        .filter(media_items::Column::ItemType.eq(item_type))
+        .filter(media_items::Column::IsRequested.eq(true))
+        .filter(Expr::cust(FAILED_ATTEMPTS_COOLDOWN_SQL))
+        .order_by_asc(media_items::Column::FailedAttempts)
+        .order_by_with_nulls(
+            media_items::Column::LastScrapeAttemptAt,
+            Order::Asc,
+            NullOrdering::First,
+        )
+        .order_by_asc(media_items::Column::CreatedAt)
+        .into_model::<MediaItem>()
+        .all(orm())
+        .await?)
 }
 
 /// IDs of shows/seasons currently in `ongoing`. The retry scheduler re-derives
 /// these each cycle: rollup-rule changes and crash-window drift don't rewrite
 /// settled rows on their own, and a stale `ongoing` is invisible to
 /// [`get_pending_items_for_retry`].
-pub async fn get_ongoing_container_ids(pool: &PgPool) -> Result<Vec<i64>> {
-    Ok(sqlx::query_scalar(
-        "SELECT id FROM media_items
-         WHERE state = 'ongoing' AND item_type IN ('show', 'season')",
-    )
-    .fetch_all(pool)
-    .await?)
-}
-
-/// Fetch items stuck in Ongoing that haven't been updated in at least `min_age_minutes`.
-/// Used by the retry scheduler to recover items left in Ongoing after a crash or lost
-/// download session, without interfering with actively-downloading items.
-pub async fn get_stuck_ongoing_items(
-    pool: &PgPool,
-    item_type: MediaItemType,
-    min_age_minutes: i32,
-    limit: i64,
-) -> Result<Vec<MediaItem>> {
-    Ok(sqlx::query_as::<_, MediaItem>(
-        "SELECT * FROM media_items
-         WHERE state = 'ongoing' AND item_type = $1 AND is_requested = true
-           AND (updated_at IS NULL OR updated_at < NOW() - ($2 * INTERVAL '1 minute'))
-         ORDER BY updated_at ASC NULLS FIRST
-         LIMIT $3",
-    )
-    .bind(item_type)
-    .bind(f64::from(min_age_minutes))
-    .bind(limit)
-    .fetch_all(pool)
-    .await?)
+pub async fn get_ongoing_container_ids() -> Result<Vec<i64>> {
+    Ok(media_items::Entity::find()
+        .filter(media_items::Column::State.eq(MediaItemState::Ongoing))
+        .filter(
+            media_items::Column::ItemType
+                .is_in([MediaItemType::Show, MediaItemType::Season]),
+        )
+        .select_only()
+        .column(media_items::Column::Id)
+        .into_tuple::<i64>()
+        .all(orm())
+        .await?)
 }
 
 /// Return the earliest requested unreleased descendant air date for a show.
 pub async fn get_next_unreleased_air_date_for_show(
-    pool: &PgPool,
     show_id: i64,
 ) -> Result<Option<chrono::NaiveDate>> {
-    let next_air_date = sqlx::query_scalar::<_, Option<chrono::NaiveDate>>(
-        r#"SELECT MIN(child.aired_at) AS "min?"
-           FROM media_items child
-           WHERE child.aired_at IS NOT NULL
-             AND child.state = 'unreleased'
-             AND child.is_requested = true
-             AND (
-               child.parent_id = $1
-               OR child.parent_id IN (
-                 SELECT season.id
-                 FROM media_items season
-                 WHERE season.parent_id = $1
-               )
-             )"#,
-    )
-    .bind(show_id)
-    .fetch_one(pool)
-    .await?;
-
-    Ok(next_air_date)
+    // Scalar MIN aggregate; only the `parent_id IN (SELECT season ...)` self-
+    // referencing subquery (matching episodes under any of the show's seasons)
+    // stays raw inside the filter.
+    let min: Option<Option<chrono::NaiveDate>> = media_items::Entity::find()
+        .select_only()
+        .column_as(media_items::Column::AiredAt.min(), "min")
+        .filter(media_items::Column::AiredAt.is_not_null())
+        .filter(media_items::Column::State.eq(MediaItemState::Unreleased))
+        .filter(media_items::Column::IsRequested.eq(true))
+        .filter(Expr::cust_with_values(
+            "(parent_id = $1 OR parent_id IN ( \
+                 SELECT season.id FROM media_items season WHERE season.parent_id = $1 \
+             ))",
+            [show_id],
+        ))
+        .into_tuple()
+        .one(orm())
+        .await?;
+    Ok(min.flatten())
 }
 
 /// Find an existing media item by type and any matching external ID.
 pub async fn find_existing_media_item(
-    pool: &PgPool,
     item_type: MediaItemType,
     imdb_id: Option<&str>,
     tmdb_id: Option<&str>,
     tvdb_id: Option<&str>,
 ) -> Result<Option<MediaItem>> {
-    Ok(sqlx::query_as::<_, MediaItem>(
-        "SELECT * FROM media_items
-         WHERE item_type = $1
-           AND ((imdb_id = $2 AND $2 IS NOT NULL)
-             OR (tmdb_id = $3 AND $3 IS NOT NULL)
-             OR (tvdb_id = $4 AND $4 IS NOT NULL))
-         LIMIT 1",
-    )
-    .bind(item_type)
-    .bind(imdb_id)
-    .bind(tmdb_id)
-    .bind(tvdb_id)
-    .fetch_optional(pool)
-    .await?)
+    // Match any supplied external id. With none supplied there is nothing to
+    // match (the old SQL's `= $n AND $n IS NOT NULL` collapsed to false).
+    let mut by_external_id = Condition::any();
+    if let Some(imdb_id) = imdb_id {
+        by_external_id = by_external_id.add(media_items::Column::ImdbId.eq(imdb_id));
+    }
+    if let Some(tmdb_id) = tmdb_id {
+        by_external_id = by_external_id.add(media_items::Column::TmdbId.eq(tmdb_id));
+    }
+    if let Some(tvdb_id) = tvdb_id {
+        by_external_id = by_external_id.add(media_items::Column::TvdbId.eq(tvdb_id));
+    }
+    if by_external_id.is_empty() {
+        return Ok(None);
+    }
+    Ok(media_items::Entity::find()
+        .filter(media_items::Column::ItemType.eq(item_type))
+        .filter(by_external_id)
+        .into_model::<MediaItem>()
+        .one(orm())
+        .await?)
 }
 
 /// Returns `(item, was_created)`. `was_created` is false when an existing item was found.
 pub async fn create_movie(
-    pool: &PgPool,
     title: &str,
     imdb_id: Option<&str>,
     tmdb_id: Option<&str>,
     item_request_id: Option<i64>,
 ) -> Result<(MediaItem, bool)> {
     upsert_top_level_item(
-        pool,
         title,
         imdb_id,
         "tmdb_id",
@@ -307,14 +269,12 @@ pub async fn create_movie(
 
 /// Returns `(item, was_created)`. `was_created` is false when an existing item was found.
 pub async fn create_show(
-    pool: &PgPool,
     title: &str,
     imdb_id: Option<&str>,
     tvdb_id: Option<&str>,
     item_request_id: Option<i64>,
 ) -> Result<(MediaItem, bool)> {
     upsert_top_level_item(
-        pool,
         title,
         imdb_id,
         "tvdb_id",
@@ -327,27 +287,19 @@ pub async fn create_show(
 }
 
 pub async fn create_movie_unrequested(
-    pool: &PgPool,
     title: &str,
     imdb_id: Option<&str>,
     tmdb_id: Option<&str>,
 ) -> Result<(MediaItem, bool)> {
-    upsert_top_level_item(
-        pool, title, imdb_id, "tmdb_id", tmdb_id, "movie", None, false,
-    )
-    .await
+    upsert_top_level_item(title, imdb_id, "tmdb_id", tmdb_id, "movie", None, false).await
 }
 
 pub async fn create_show_unrequested(
-    pool: &PgPool,
     title: &str,
     imdb_id: Option<&str>,
     tvdb_id: Option<&str>,
 ) -> Result<(MediaItem, bool)> {
-    upsert_top_level_item(
-        pool, title, imdb_id, "tvdb_id", tvdb_id, "show", None, false,
-    )
-    .await
+    upsert_top_level_item(title, imdb_id, "tvdb_id", tvdb_id, "show", None, false).await
 }
 
 pub(crate) fn to_json<T: serde::Serialize>(v: &T) -> serde_json::Value {
@@ -355,80 +307,76 @@ pub(crate) fn to_json<T: serde::Serialize>(v: &T) -> serde_json::Value {
 }
 
 pub async fn update_media_item_index(
-    pool: &PgPool,
     id: i64,
     indexed: &riven_core::types::IndexedMediaItem,
 ) -> Result<()> {
     let now = Utc::now();
-    let is_anime = indexed.inferred_is_anime();
-    sqlx::query!(
-        r#"UPDATE media_items SET
-            title          = COALESCE($2,  title),
-            full_title     = COALESCE($3,  full_title),
-            imdb_id        = COALESCE($4,  imdb_id),
-            tvdb_id        = COALESCE($5,  tvdb_id),
-            tmdb_id        = COALESCE($6,  tmdb_id),
-            poster_path    = COALESCE($7,  poster_path),
-            year           = COALESCE($8,  year),
-            genres         = COALESCE($9,  genres),
-            country        = COALESCE($10, country),
-            language       = COALESCE($11, language),
-            network        = COALESCE($12, network),
-            content_rating = COALESCE($13, content_rating),
-            is_anime       = $14,
-            runtime        = COALESCE($15, runtime),
-            aliases        = COALESCE($16, aliases),
-            aired_at       = COALESCE($17, aired_at),
-            show_status        = COALESCE($19, show_status),
-            rating             = COALESCE($20, rating),
-            network_timezone   = COALESCE($21, network_timezone),
-            indexed_at = $18, updated_at = $18,
-            failed_attempts = 0
-           WHERE id = $1"#,
-        id,
-        indexed.title.as_deref(),
-        indexed.full_title.as_deref(),
-        indexed.imdb_id.as_deref(),
-        indexed.tvdb_id.as_deref(),
-        indexed.tmdb_id.as_deref(),
-        indexed.poster_path.as_deref(),
-        indexed.year,
-        indexed.genres.as_ref().map(to_json),
-        indexed.country.as_deref(),
-        indexed.language.as_deref(),
-        indexed.network.as_deref(),
-        indexed.content_rating as Option<ContentRating>,
-        is_anime,
-        indexed.runtime,
-        indexed.aliases.as_ref().map(to_json),
-        indexed.aired_at,
-        now,
-        indexed.status as Option<riven_core::types::ShowStatus>,
-        indexed.rating,
-        indexed.network_timezone.as_deref(),
-    )
-    .execute(pool)
+    // `COALESCE($n, col)` keeps the existing value when the new one is NULL —
+    // which is exactly SeaORM's `Set` vs `NotSet`: a `None` field leaves the
+    // column untouched.
+    let opt_str =
+        |o: Option<&str>| o.map_or(NotSet, |v| Set(Some(v.to_owned())));
+    media_items::ActiveModel {
+        id: Unchanged(id),
+        title: indexed.title.clone().map_or(NotSet, Set),
+        full_title: opt_str(indexed.full_title.as_deref()),
+        imdb_id: opt_str(indexed.imdb_id.as_deref()),
+        tvdb_id: opt_str(indexed.tvdb_id.as_deref()),
+        tmdb_id: opt_str(indexed.tmdb_id.as_deref()),
+        poster_path: opt_str(indexed.poster_path.as_deref()),
+        year: indexed.year.map_or(NotSet, |v| Set(Some(v))),
+        genres: indexed
+            .genres
+            .as_ref()
+            .map_or(NotSet, |g| Set(Some(to_json(g)))),
+        country: opt_str(indexed.country.as_deref()),
+        language: opt_str(indexed.language.as_deref()),
+        network: opt_str(indexed.network.as_deref()),
+        content_rating: indexed.content_rating.map_or(NotSet, |v| Set(Some(v))),
+        is_anime: Set(indexed.inferred_is_anime()),
+        runtime: indexed.runtime.map_or(NotSet, |v| Set(Some(v))),
+        aliases: indexed
+            .aliases
+            .as_ref()
+            .map_or(NotSet, |a| Set(Some(to_json(a)))),
+        aired_at: indexed.aired_at.map_or(NotSet, |v| Set(Some(v))),
+        show_status: indexed.status.map_or(NotSet, |v| Set(Some(v))),
+        rating: indexed.rating.map_or(NotSet, |v| Set(Some(v))),
+        network_timezone: opt_str(indexed.network_timezone.as_deref()),
+        indexed_at: Set(Some(now)),
+        updated_at: Set(Some(now)),
+        failed_attempts: Set(0),
+        ..Default::default()
+    }
+    .update(orm())
     .await?;
-    super::state::recompute(pool, &[id]).await?;
+    super::state::recompute(&[id]).await?;
     Ok(())
 }
 
-pub async fn set_active_stream(pool: &PgPool, id: i64, stream_id: i64) -> Result<()> {
-    sqlx::query("UPDATE media_items SET active_stream_id = $2, updated_at = NOW() WHERE id = $1")
-        .bind(id)
-        .bind(stream_id)
-        .execute(pool)
+pub async fn set_active_stream(id: i64, stream_id: i64) -> Result<()> {
+    media_items::ActiveModel {
+        id: Unchanged(id),
+        active_stream_id: Set(Some(stream_id)),
+        updated_at: Set(Some(Utc::now())),
+        ..Default::default()
+    }
+    .update(orm())
+    .await?;
+    Ok(())
+}
+
+pub async fn update_scraped(id: i64) -> Result<()> {
+    media_items::Entity::update_many()
+        .col_expr(media_items::Column::ScrapedAt, Expr::cust("NOW()"))
+        .col_expr(
+            media_items::Column::ScrapedTimes,
+            Expr::col(media_items::Column::ScrapedTimes).add(1),
+        )
+        .col_expr(media_items::Column::UpdatedAt, Expr::cust("NOW()"))
+        .filter(media_items::Column::Id.eq(id))
+        .exec(orm())
         .await?;
-    Ok(())
-}
-
-pub async fn update_scraped(pool: &PgPool, id: i64) -> Result<()> {
-    sqlx::query!(
-        "UPDATE media_items SET scraped_at = NOW(), scraped_times = scraped_times + 1, updated_at = NOW() WHERE id = $1",
-        id
-    )
-    .execute(pool)
-    .await?;
     Ok(())
 }
 
@@ -438,76 +386,83 @@ pub async fn update_scraped(pool: &PgPool, id: i64) -> Result<()> {
 /// `recompute` derive the correct state from first principles (so an episode
 /// with existing streams lands on `Scraped`, not just `Indexed`). The cascade
 /// inside `recompute` then propagates the change up to the season and show.
-pub async fn transition_unreleased_aired(pool: &PgPool) -> Result<Vec<i64>> {
-    let ids: Vec<i64> = sqlx::query_scalar!(
-        r#"SELECT id FROM media_items
-            WHERE state = 'unreleased' AND aired_at IS NOT NULL
-              AND aired_at <= CURRENT_DATE AND is_requested = true"#,
-    )
-    .fetch_all(pool)
-    .await?;
-    super::state::recompute(pool, &ids).await?;
+pub async fn transition_unreleased_aired() -> Result<Vec<i64>> {
+    let today = Utc::now().date_naive();
+    let ids: Vec<i64> = media_items::Entity::find()
+        .filter(media_items::Column::State.eq(MediaItemState::Unreleased))
+        .filter(media_items::Column::AiredAt.is_not_null())
+        .filter(media_items::Column::AiredAt.lte(today))
+        .filter(media_items::Column::IsRequested.eq(true))
+        .select_only()
+        .column(media_items::Column::Id)
+        .into_tuple()
+        .all(orm())
+        .await?;
+    super::state::recompute(&ids).await?;
     Ok(ids)
 }
 
-pub async fn blacklist_stream_by_hash(
-    pool: &PgPool,
-    media_item_id: i64,
-    info_hash: &str,
-) -> Result<()> {
-    let stream_id = sqlx::query_scalar!("SELECT id FROM streams WHERE info_hash = $1", info_hash)
-        .fetch_optional(pool)
+pub async fn blacklist_stream_by_hash(media_item_id: i64, info_hash: &str) -> Result<()> {
+    let stream_id: Option<i64> = streams::Entity::find()
+        .filter(streams::Column::InfoHash.eq(info_hash))
+        .select_only()
+        .column(streams::Column::Id)
+        .into_tuple()
+        .one(orm())
         .await?;
     if let Some(stream_id) = stream_id {
-        sqlx::query!(
-            "INSERT INTO media_item_blacklisted_streams (media_item_id, stream_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
-            media_item_id,
-            stream_id
+        let insert = media_item_blacklisted_streams::Entity::insert(
+            media_item_blacklisted_streams::ActiveModel {
+                media_item_id: Set(media_item_id),
+                stream_id: Set(stream_id),
+                ..Default::default()
+            },
         )
-        .execute(pool)
-        .await?;
-        super::state::recompute(pool, &[media_item_id]).await?;
+        .on_conflict(
+            OnConflict::columns([
+                media_item_blacklisted_streams::Column::MediaItemId,
+                media_item_blacklisted_streams::Column::StreamId,
+            ])
+            .do_nothing()
+            .to_owned(),
+        );
+        // `do_nothing` + an existing row surfaces as `RecordNotInserted`; that
+        // is the ON CONFLICT DO NOTHING no-op, not an error.
+        match insert.exec(orm()).await {
+            Ok(_) | Err(sea_orm::DbErr::RecordNotInserted) => {}
+            Err(error) => return Err(error.into()),
+        }
+        super::state::recompute(&[media_item_id]).await?;
     }
     Ok(())
 }
 
-pub async fn increment_failed_attempts(pool: &PgPool, id: i64) -> Result<()> {
-    sqlx::query!(
-        "UPDATE media_items
-         SET failed_attempts = failed_attempts + 1,
-             last_scrape_attempt_at = NOW(),
-             updated_at = NOW()
-         WHERE id = $1",
-        id
-    )
-    .execute(pool)
-    .await?;
-    super::state::recompute(pool, &[id]).await?;
-    Ok(())
-}
-
-pub async fn reset_failed_attempts(pool: &PgPool, id: i64) -> Result<()> {
-    sqlx::query("UPDATE media_items SET failed_attempts = 0, updated_at = NOW() WHERE id = $1")
-        .bind(id)
-        .execute(pool)
+pub async fn increment_failed_attempts(id: i64) -> Result<()> {
+    media_items::Entity::update_many()
+        .col_expr(
+            media_items::Column::FailedAttempts,
+            Expr::col(media_items::Column::FailedAttempts).add(1),
+        )
+        .col_expr(media_items::Column::LastScrapeAttemptAt, Expr::cust("NOW()"))
+        .col_expr(media_items::Column::UpdatedAt, Expr::cust("NOW()"))
+        .filter(media_items::Column::Id.eq(id))
+        .exec(orm())
         .await?;
-    super::state::recompute(pool, &[id]).await?;
+    super::state::recompute(&[id]).await?;
     Ok(())
 }
 
-pub async fn reset_failed_items(pool: &PgPool, older_than_secs: u64) -> Result<u64> {
-    let cutoff = Utc::now() - chrono::Duration::seconds(older_than_secs as i64);
-    let ids: Vec<i64> = sqlx::query_scalar!(
-        r#"UPDATE media_items SET failed_attempts = 0, updated_at = NOW()
-           WHERE is_requested = true AND failed_attempts > 0 AND updated_at < $1
-           RETURNING id"#,
-        cutoff
-    )
-    .fetch_all(pool)
+pub async fn reset_failed_attempts(id: i64) -> Result<()> {
+    media_items::ActiveModel {
+        id: Unchanged(id),
+        failed_attempts: Set(0),
+        updated_at: Set(Some(Utc::now())),
+        ..Default::default()
+    }
+    .update(orm())
     .await?;
-    let count = ids.len() as u64;
-    super::state::recompute(pool, &ids).await?;
-    Ok(count)
+    super::state::recompute(&[id]).await?;
+    Ok(())
 }
 
 /// Delete top-level items (movies/shows) whose content-service request is no
@@ -517,36 +472,44 @@ pub async fn reset_failed_items(pool: &PgPool, older_than_secs: u64) -> Result<u
 /// `active_external_ids` is the union of every `external_request_id` returned
 /// by all content-service plugins in the current run.
 pub async fn delete_items_removed_from_content_services(
-    pool: &PgPool,
     active_external_ids: &[String],
 ) -> Result<u64> {
-    let result = sqlx::query!(
-        r#"DELETE FROM media_items
-           WHERE item_type IN ('movie', 'show')
-             AND item_request_id IN (
-               SELECT id FROM item_requests
-               WHERE external_request_id IS NOT NULL
-                 AND NOT (external_request_id = ANY($1))
-             )"#,
-        active_external_ids
-    )
-    .execute(pool)
-    .await?;
+    let db = orm();
+    // Requests whose external id is no longer reported by any content service.
+    // An empty active set means "nothing is active", so every externally-sourced
+    // request is stale (matching the original `NOT (... = ANY('{}'))`).
+    let mut stale = item_requests::Entity::find()
+        .filter(item_requests::Column::ExternalRequestId.is_not_null());
+    if !active_external_ids.is_empty() {
+        stale = stale.filter(
+            item_requests::Column::ExternalRequestId.is_not_in(active_external_ids.iter().cloned()),
+        );
+    }
+    let stale_ids: Vec<i64> = stale
+        .select_only()
+        .column(item_requests::Column::Id)
+        .into_tuple()
+        .all(db)
+        .await?;
+    if stale_ids.is_empty() {
+        return Ok(0);
+    }
 
-    sqlx::query!(
-        r#"DELETE FROM item_requests
-           WHERE external_request_id IS NOT NULL
-             AND NOT (external_request_id = ANY($1))"#,
-        active_external_ids
-    )
-    .execute(pool)
-    .await?;
-
-    Ok(result.rows_affected())
+    // Seasons/episodes cascade via the FK; manually-added items (no request id)
+    // are never matched.
+    let deleted = media_items::Entity::delete_many()
+        .filter(media_items::Column::ItemType.is_in([MediaItemType::Movie, MediaItemType::Show]))
+        .filter(media_items::Column::ItemRequestId.is_in(stale_ids.iter().copied()))
+        .exec(db)
+        .await?;
+    item_requests::Entity::delete_many()
+        .filter(item_requests::Column::Id.is_in(stale_ids.iter().copied()))
+        .exec(db)
+        .await?;
+    Ok(deleted.rows_affected)
 }
 
 pub async fn add_media_item_unrequested(
-    pool: &PgPool,
     item_type: MediaItemType,
     title: String,
     imdb_id: Option<String>,
@@ -555,12 +518,12 @@ pub async fn add_media_item_unrequested(
 ) -> Result<MediaItem> {
     match item_type {
         MediaItemType::Movie => {
-            create_movie_unrequested(pool, &title, imdb_id.as_deref(), tmdb_id.as_deref())
+            create_movie_unrequested(&title, imdb_id.as_deref(), tmdb_id.as_deref())
                 .await
                 .map(|(item, _)| item)
         }
         MediaItemType::Show => {
-            create_show_unrequested(pool, &title, imdb_id.as_deref(), tvdb_id.as_deref())
+            create_show_unrequested(&title, imdb_id.as_deref(), tvdb_id.as_deref())
                 .await
                 .map(|(item, _)| item)
         }

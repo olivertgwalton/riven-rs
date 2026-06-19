@@ -6,7 +6,6 @@ use riven_core::settings::{FilesystemSettings, LibraryProfileMembership};
 use riven_core::vfs_layout::VfsLibraryLayout;
 use riven_db::repo;
 use riven_queue::JobQueue;
-use sqlx::PgPool;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use tokio::sync::RwLock;
@@ -59,10 +58,9 @@ fn log_settings_from_json(settings: &serde_json::Value, enabled: bool) -> LogSet
 }
 
 pub(super) async fn rematch_filesystem_library_profiles_inner(
-    pool: &PgPool,
     filesystem_settings: &FilesystemSettings,
 ) -> Result<i64> {
-    let candidates = repo::list_filesystem_profile_entry_candidates(pool).await?;
+    let candidates = repo::list_filesystem_profile_entry_candidates().await?;
     let updates = candidates
         .into_iter()
         .filter_map(|candidate| {
@@ -75,7 +73,7 @@ pub(super) async fn rematch_filesystem_library_profiles_inner(
         })
         .collect::<Vec<_>>();
 
-    Ok(repo::update_library_profiles_batch(pool, &updates).await? as i64)
+    Ok(repo::update_library_profiles_batch(&updates).await? as i64)
 }
 
 #[derive(Default)]
@@ -100,18 +98,15 @@ impl SettingsMutations {
         let canonical = serde_json::to_value(&validated)
             .map_err(|e| Error::new(format!("failed to serialise rank settings: {e}")))?;
 
-        let pool = ctx.data::<PgPool>()?;
         let profile =
-            repo::upsert_ranking_profile(pool, id, &name, canonical, enabled.unwrap_or(false))
-                .await?;
+            repo::upsert_ranking_profile(id, &name, canonical, enabled.unwrap_or(false)).await?;
         Ok(serde_json::to_value(profile)?)
     }
 
     /// Delete a custom ranking profile by ID. Built-in profiles cannot be deleted.
     async fn delete_custom_profile(&self, ctx: &Context<'_>, id: i32) -> Result<bool> {
         require_settings_access(ctx)?;
-        let pool = ctx.data::<PgPool>()?;
-        Ok(repo::delete_ranking_profile(pool, id).await?)
+        Ok(repo::delete_ranking_profile(id).await?)
     }
 
     /// Enable or disable a ranking profile (built-in or custom) by name.
@@ -123,8 +118,7 @@ impl SettingsMutations {
         enabled: bool,
     ) -> Result<bool> {
         require_settings_access(ctx)?;
-        let pool = ctx.data::<PgPool>()?;
-        Ok(repo::set_profile_enabled(pool, &name, enabled).await?)
+        Ok(repo::set_profile_enabled(&name, enabled).await?)
     }
 
     /// Update settings for any profile (built-in or custom) by name.
@@ -140,8 +134,7 @@ impl SettingsMutations {
         let _validated: riven_rank::RankSettings = serde_json::from_value(settings.clone())
             .map_err(|e| Error::new(format!("invalid rank settings: {e}")))?;
 
-        let pool = ctx.data::<PgPool>()?;
-        Ok(repo::update_profile_settings(pool, &name, settings).await?)
+        Ok(repo::update_profile_settings(&name, settings).await?)
     }
 
     /// Update rank settings. Deserialises into [`RankSettings`] (applying
@@ -158,8 +151,7 @@ impl SettingsMutations {
         let canonical = serde_json::to_value(&validated)
             .map_err(|e| Error::new(format!("failed to serialise rank settings: {e}")))?;
 
-        let pool = ctx.data::<PgPool>()?;
-        repo::set_setting(pool, "rank_settings", canonical.clone()).await?;
+        repo::set_setting("rank_settings", canonical.clone()).await?;
         Ok(canonical)
     }
 
@@ -170,20 +162,13 @@ impl SettingsMutations {
         settings: serde_json::Value,
     ) -> Result<serde_json::Value> {
         require_settings_access(ctx)?;
-        let pool = ctx.data::<PgPool>()?;
-        Ok(repo::set_all_settings(pool, settings).await?)
+        Ok(repo::set_all_settings(settings).await?)
     }
 
     /// Mark the instance-wide first-run setup flow as completed.
     async fn complete_initial_setup(&self, ctx: &Context<'_>) -> Result<bool> {
         require_settings_access(ctx)?;
-        let pool = ctx.data::<PgPool>()?;
-        repo::set_setting(
-            pool,
-            "instance.setup_completed",
-            serde_json::Value::Bool(true),
-        )
-        .await?;
+        repo::set_setting("instance.setup_completed", serde_json::Value::Bool(true)).await?;
         Ok(true)
     }
 
@@ -198,10 +183,9 @@ impl SettingsMutations {
         values: serde_json::Value,
     ) -> Result<SettingsSection> {
         require_settings_access(ctx)?;
-        let pool = ctx.data::<PgPool>()?;
         if section == "general" {
             apply_general_settings(ctx, values).await?;
-            build_general_section(pool).await
+            build_general_section().await
         } else {
             apply_plugin_settings(ctx, &section, values).await?;
             let registry = ctx.data::<Arc<PluginRegistry>>()?;
@@ -212,10 +196,9 @@ impl SettingsMutations {
     /// Recompute stored library-profile matches for every existing media entry.
     async fn rematch_filesystem_library_profiles(&self, ctx: &Context<'_>) -> Result<i64> {
         require_settings_access(ctx)?;
-        let pool = ctx.data::<PgPool>()?;
         let queue = ctx.data::<Arc<JobQueue>>()?;
         let filesystem_settings = queue.filesystem_settings.read().await.clone();
-        let updated = rematch_filesystem_library_profiles_inner(pool, &filesystem_settings).await?;
+        let updated = rematch_filesystem_library_profiles_inner(&filesystem_settings).await?;
 
         queue
             .filesystem_settings_revision
@@ -230,8 +213,7 @@ impl SettingsMutations {
 /// filesystem layout — rematching library profiles when the mount changes).
 /// The single source of truth for general-settings side effects.
 async fn apply_general_settings(ctx: &Context<'_>, settings: serde_json::Value) -> Result<()> {
-    let pool = ctx.data::<PgPool>()?;
-    repo::set_setting(pool, "general", settings.clone()).await?;
+    repo::set_setting("general", settings.clone()).await?;
 
     let log_control = ctx.data::<Arc<LogControl>>()?;
     let enabled = settings
@@ -304,7 +286,7 @@ async fn apply_general_settings(ctx: &Context<'_>, settings: serde_json::Value) 
     *queue.filesystem_settings.write().await = filesystem.clone();
     *queue.vfs_layout.write().await = VfsLibraryLayout::new(filesystem.clone());
     if previous_filesystem != filesystem {
-        let rematch_count = rematch_filesystem_library_profiles_inner(pool, &filesystem).await?;
+        let rematch_count = rematch_filesystem_library_profiles_inner(&filesystem).await?;
         queue
             .filesystem_settings_revision
             .fetch_add(1, Ordering::SeqCst);
@@ -329,7 +311,6 @@ async fn apply_plugin_settings(
     plugin: &str,
     mut settings: serde_json::Value,
 ) -> Result<()> {
-    let pool = ctx.data::<PgPool>()?;
     let key = format!("plugin.{plugin}");
     let enabled = match settings
         .as_object_mut()
@@ -338,11 +319,11 @@ async fn apply_plugin_settings(
         .and_then(coerce_json_bool)
     {
         Some(enabled) => enabled,
-        None => repo::get_plugin_enabled(pool, plugin).await?,
+        None => repo::get_plugin_enabled(plugin).await?,
     };
 
-    repo::set_setting(pool, &key, settings.clone()).await?;
-    repo::set_plugin_enabled(pool, plugin, enabled).await?;
+    repo::set_setting(&key, settings.clone()).await?;
+    repo::set_plugin_enabled(plugin, enabled).await?;
 
     let registry = ctx.data::<Arc<PluginRegistry>>()?;
     registry.revalidate_plugin(plugin, enabled, &settings).await;

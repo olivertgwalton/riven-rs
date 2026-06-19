@@ -11,7 +11,6 @@ regex = { workspace = true }
 strsim = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
-tracing = { workspace = true }
 
 [dev-dependencies]
 criterion = "0.8"

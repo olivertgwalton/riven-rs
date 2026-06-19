@@ -215,9 +215,9 @@ fn sign(secret: &str, body: &[u8]) -> String {
 /// Compact media-item snapshot attached when `enrich` is on. Hand-built rather
 /// than serializing the whole entity so internal/DB-only columns don't leak
 /// into the public payload.
-async fn enrich(ctx: &PluginContext, id: Option<i64>) -> Option<serde_json::Value> {
+async fn enrich(_ctx: &PluginContext, id: Option<i64>) -> Option<serde_json::Value> {
     let id = id?;
-    let item = match repo::get_media_item(&ctx.db_pool, id).await {
+    let item = match repo::get_media_item(id).await {
         Ok(Some(item)) => item,
         Ok(None) => return None,
         Err(error) => {

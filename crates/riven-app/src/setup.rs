@@ -7,7 +7,6 @@ use crate::plugins::all_plugins;
 
 pub async fn register_plugins(
     http: riven_core::http::HttpClient,
-    db_pool: sqlx::PgPool,
     redis_conn: redis::aio::ConnectionManager,
     vfs_mount_path: String,
     settings: &RivenSettings,
@@ -23,11 +22,11 @@ pub async fn register_plugins(
         let mut plugin_settings = PluginSettings::load(&prefix);
 
         let db_key = format!("plugin.{name}");
-        if let Ok(Some(db_val)) = riven_db::repo::get_setting(&db_pool, &db_key).await {
+        if let Ok(Some(db_val)) = riven_db::repo::get_setting(&db_key).await {
             plugin_settings.merge_db_override(&db_val);
         }
 
-        let enabled = riven_db::repo::get_plugin_enabled_setting(&db_pool, name)
+        let enabled = riven_db::repo::get_plugin_enabled_setting(name)
             .await
             .ok()
             .flatten()
@@ -41,7 +40,6 @@ pub async fn register_plugins(
                 enabled,
                 plugin_settings,
                 http.clone(),
-                db_pool.clone(),
                 redis_conn.clone(),
                 vfs_mount_path.clone(),
             )

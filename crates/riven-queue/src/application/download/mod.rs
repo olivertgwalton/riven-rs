@@ -100,7 +100,7 @@ pub async fn persist_manual_download(
         return Err(ManualDownloadError::incorrect_state(item));
     }
 
-    let streams = repo::get_streams_for_item(&queue.db_pool, id)
+    let streams = repo::get_streams_for_item(id)
         .await
         .map_err(|error| {
             ManualDownloadError::download_error(Some(item.clone()), error.to_string())
@@ -115,7 +115,7 @@ pub async fn persist_manual_download(
         ));
     };
 
-    if let Err(error) = repo::set_active_stream(&queue.db_pool, id, stream.id).await {
+    if let Err(error) = repo::set_active_stream(id, stream.id).await {
         return Err(ManualDownloadError::download_error(
             Some(item),
             error.to_string(),
@@ -144,7 +144,7 @@ pub async fn persist_manual_download(
     };
 
     match persist_supplied_download(&item, &stream, download, queue, start_time).await {
-        Ok(()) => repo::get_media_item(&queue.db_pool, id)
+        Ok(()) => repo::get_media_item(id)
             .await
             .map_err(|error| {
                 ManualDownloadError::download_error(Some(item.clone()), error.to_string())
@@ -170,7 +170,7 @@ pub async fn persist_manual_download(
 pub async fn run_rank_streams(id: i64, job: &RankStreamsJob, queue: &JobQueue) {
     tracing::debug!(id, "running rank-streams step");
 
-    let Some(item) = load_item_silently(queue, id, "rank-streams").await else {
+    let Some(item) = load_item_silently(id, "rank-streams").await else {
         return;
     };
 
@@ -188,7 +188,7 @@ pub async fn run_rank_streams(id: i64, job: &RankStreamsJob, queue: &JobQueue) {
     let preferred = job.preferred_info_hash.clone();
     let magnet_for_preferred = if let Some(hash) = preferred.as_ref() {
         let ranks = queue.resolution_ranks.read().await.clone();
-        repo::get_non_blacklisted_streams(&queue.db_pool, id, &ranks)
+        repo::get_non_blacklisted_streams(id, &ranks)
             .await
             .ok()
             .and_then(|streams| {
@@ -218,7 +218,7 @@ pub async fn run(id: i64, job: &DownloadJob, queue: &JobQueue) {
     let start_time = Instant::now();
     tracing::debug!(id, "running download (find-valid-torrent + persist) step");
 
-    let Some(item) = load_item_silently(queue, id, "download").await else {
+    let Some(item) = load_item_silently(id, "download").await else {
         return;
     };
 
@@ -235,15 +235,15 @@ pub async fn run(id: i64, job: &DownloadJob, queue: &JobQueue) {
 
     let hierarchy = match item.item_type {
         MediaItemType::Episode | MediaItemType::Season | MediaItemType::Show => {
-            Some(load_download_hierarchy_context(&queue.db_pool, &item).await)
+            Some(load_download_hierarchy_context(&item).await)
         }
         _ => None,
     };
 
-    let active_profiles: Vec<(String, RankSettings)> = load_active_profiles(&queue.db_pool).await;
+    let active_profiles: Vec<(String, RankSettings)> = load_active_profiles().await;
 
     let ranks = queue.resolution_ranks.read().await.clone();
-    let all_streams = match repo::get_non_blacklisted_streams(&queue.db_pool, id, &ranks).await {
+    let all_streams = match repo::get_non_blacklisted_streams(id, &ranks).await {
         Ok(streams) => streams,
         Err(error) => {
             tracing::error!(id, error = %error, "failed to fetch streams for download");
@@ -306,8 +306,8 @@ pub async fn run(id: i64, job: &DownloadJob, queue: &JobQueue) {
 
 /// Load the media item; return `None` (without emitting a user-visible event)
 /// when it's gone
-async fn load_item_silently(queue: &JobQueue, id: i64, phase: &str) -> Option<MediaItem> {
-    match repo::get_media_item(&queue.db_pool, id).await {
+async fn load_item_silently(id: i64, phase: &str) -> Option<MediaItem> {
+    match repo::get_media_item(id).await {
         Ok(Some(item)) => Some(item),
         Ok(None) => {
             tracing::debug!(
@@ -544,7 +544,7 @@ async fn run_downloads(
     max_size_bytes: Option<u64>,
     min_size_bytes: Option<u64>,
 ) -> bool {
-    let mut done_profiles: HashSet<String> = fetch_done_profiles(queue, id, item.item_type)
+    let mut done_profiles: HashSet<String> = fetch_done_profiles(id, item.item_type)
         .await
         .into_iter()
         .collect();
@@ -719,11 +719,11 @@ fn passes_size_bounds(size: u64, max_size_bytes: Option<u64>, min_size_bytes: Op
     true
 }
 
-async fn fetch_done_profiles(queue: &JobQueue, id: i64, item_type: MediaItemType) -> Vec<String> {
+async fn fetch_done_profiles(id: i64, item_type: MediaItemType) -> Vec<String> {
     let result = if item_type == MediaItemType::Season {
-        repo::get_downloaded_profile_names_for_season(&queue.db_pool, id).await
+        repo::get_downloaded_profile_names_for_season(id).await
     } else {
-        repo::get_downloaded_profile_names(&queue.db_pool, id).await
+        repo::get_downloaded_profile_names(id).await
     };
     result.unwrap_or_default()
 }

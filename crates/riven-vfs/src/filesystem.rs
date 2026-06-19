@@ -176,7 +176,6 @@ pub struct RivenFsInner {
     vfs_layout: Arc<RwLock<VfsLibraryLayout>>,
     filesystem_settings_revision: Arc<AtomicU64>,
     cache_revision: AtomicU64,
-    db_pool: sqlx::PgPool,
     stream_client: reqwest::Client,
     link_request_tx: mpsc::Sender<riven_core::stream_link::LinkRequest>,
     runtime: tokio::runtime::Handle,
@@ -203,7 +202,6 @@ impl RivenFs {
     pub fn new(
         vfs_layout: Arc<RwLock<VfsLibraryLayout>>,
         filesystem_settings_revision: Arc<AtomicU64>,
-        db_pool: sqlx::PgPool,
         stream_client: reqwest::Client,
         link_request_tx: mpsc::Sender<riven_core::stream_link::LinkRequest>,
         cache_max_size_mb: u64,
@@ -213,7 +211,6 @@ impl RivenFs {
             inner: Arc::new(RivenFsInner::new(
                 vfs_layout,
                 filesystem_settings_revision,
-                db_pool,
                 stream_client,
                 link_request_tx,
                 cache_max_size_mb,
@@ -227,7 +224,6 @@ impl RivenFsInner {
     fn new(
         vfs_layout: Arc<RwLock<VfsLibraryLayout>>,
         filesystem_settings_revision: Arc<AtomicU64>,
-        db_pool: sqlx::PgPool,
         stream_client: reqwest::Client,
         link_request_tx: mpsc::Sender<riven_core::stream_link::LinkRequest>,
         cache_max_size_mb: u64,
@@ -251,7 +247,6 @@ impl RivenFsInner {
             vfs_layout,
             filesystem_settings_revision,
             cache_revision: AtomicU64::new(0),
-            db_pool,
             stream_client,
             link_request_tx,
             runtime: tokio::runtime::Handle::current(),
@@ -324,10 +319,7 @@ impl RivenFsInner {
             _ => return None,
         };
         self.runtime
-            .block_on(repo::get_filesystem_entry_by_path(
-                &self.db_pool,
-                &actual_path,
-            ))
+            .block_on(repo::get_filesystem_entry_by_path(&actual_path))
             .ok()
             .flatten()
             .map(CachedEntry::from_db)
@@ -354,10 +346,10 @@ impl RivenFsInner {
             .clone();
         let guard = lock.lock();
 
-        if let Ok(Some(entry)) = self.runtime.block_on(riven_db::repo::get_media_entry_by_id(
-            &self.db_pool,
-            entry_id,
-        )) && let Some(fresh) = entry.stream_url
+        if let Ok(Some(entry)) = self
+            .runtime
+            .block_on(riven_db::repo::get_media_entry_by_id(entry_id))
+            && let Some(fresh) = entry.stream_url
             && Some(fresh.as_str()) != current_url
         {
             drop(guard);
@@ -376,11 +368,9 @@ impl RivenFsInner {
         );
 
         if let Some(url) = url.as_deref()
-            && let Err(err) = self.runtime.block_on(riven_db::repo::update_stream_url(
-                &self.db_pool,
-                entry_id,
-                url,
-            ))
+            && let Err(err) = self
+                .runtime
+                .block_on(riven_db::repo::update_stream_url(entry_id, url))
         {
             tracing::warn!(entry_id, %err, "failed to persist refreshed stream url");
         }
@@ -666,7 +656,6 @@ impl Filesystem for RivenFs {
             populate_entries(
                 ino,
                 ino_to_path.as_deref(),
-                &s.db_pool,
                 &s.runtime,
                 &layout,
                 &mut entries,

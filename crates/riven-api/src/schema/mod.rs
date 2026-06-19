@@ -33,7 +33,6 @@ pub struct QueryRoot(CoreQuery, DashboardQuery, CalendarQuery, VfsQuery);
 pub type AppSchema = Schema<QueryRoot, MutationRoot, SubscriptionRoot>;
 
 pub fn build_schema(
-    db_pool: sqlx::PgPool,
     registry: Arc<PluginRegistry>,
     job_queue: Arc<riven_queue::JobQueue>,
     http_client: HttpClient,
@@ -48,7 +47,6 @@ pub fn build_schema(
         MutationRoot::default(),
         SubscriptionRoot::default(),
     )
-    .data(db_pool)
     .data(registry)
     .data(job_queue)
     .data(http_client)

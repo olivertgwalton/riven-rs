@@ -16,7 +16,6 @@ pub type GetOrCreateIno<'a> = &'a mut dyn FnMut(&str) -> u64;
 pub fn populate_entries(
     ino: u64,
     ino_to_path: Option<&str>,
-    pool: &sqlx::PgPool,
     runtime: &tokio::runtime::Handle,
     layout: &VfsLibraryLayout,
     entries: &mut Vec<DirEntry>,
@@ -51,7 +50,6 @@ pub fn populate_entries(
             match canonical {
                 CanonicalPath::AllMovies => {
                     push_item_dirs(
-                        pool,
                         runtime,
                         entries,
                         get_ino,
@@ -64,7 +62,6 @@ pub fn populate_entries(
                 }
                 CanonicalPath::AllShows => {
                     push_item_dirs(
-                        pool,
                         runtime,
                         entries,
                         get_ino,
@@ -77,7 +74,6 @@ pub fn populate_entries(
                 }
                 CanonicalPath::MovieDir { actual_dir } => {
                     push_file_entries(
-                        pool,
                         runtime,
                         entries,
                         get_ino,
@@ -89,7 +85,6 @@ pub fn populate_entries(
                 }
                 CanonicalPath::ShowDir { actual_dir } => {
                     push_item_dirs(
-                        pool,
                         runtime,
                         entries,
                         get_ino,
@@ -102,7 +97,6 @@ pub fn populate_entries(
                 }
                 CanonicalPath::SeasonDir { actual_dir } => {
                     push_file_entries(
-                        pool,
                         runtime,
                         entries,
                         get_ino,
@@ -123,7 +117,6 @@ pub fn populate_entries(
 }
 
 fn push_item_dirs(
-    pool: &sqlx::PgPool,
     runtime: &tokio::runtime::Handle,
     entries: &mut Vec<DirEntry>,
     get_ino: GetOrCreateIno<'_>,
@@ -133,11 +126,9 @@ fn push_item_dirs(
     profile_key: Option<&str>,
     exclusive_keys: &[&str],
 ) {
-    let Ok(paths) = runtime.block_on(repo::list_vfs_dir_names(
-        pool,
-        pattern,
-        (dir_index + 2) as u32,
-    )) else {
+    let Ok(paths) =
+        runtime.block_on(repo::list_vfs_dir_names(pattern, (dir_index + 2) as u32))
+    else {
         return;
     };
     let mut seen = HashSet::new();
@@ -156,7 +147,6 @@ fn push_item_dirs(
 }
 
 fn push_file_entries(
-    pool: &sqlx::PgPool,
     runtime: &tokio::runtime::Handle,
     entries: &mut Vec<DirEntry>,
     get_ino: GetOrCreateIno<'_>,
@@ -165,7 +155,7 @@ fn push_file_entries(
     profile_key: Option<&str>,
     exclusive_keys: &[&str],
 ) {
-    let Ok(paths) = runtime.block_on(repo::list_vfs_file_names(pool, actual_dir)) else {
+    let Ok(paths) = runtime.block_on(repo::list_vfs_file_names(actual_dir)) else {
         return;
     };
     for entry in paths {

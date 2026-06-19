@@ -65,10 +65,9 @@ impl MediaItemMutations {
         input: ScrapeMediaItemMutationInput,
     ) -> Result<ScrapeMediaItemMutationResponse> {
         require_library_access(ctx)?;
-        let pool = ctx.data::<sqlx::PgPool>()?;
         let job_queue = ctx.data::<Arc<JobQueue>>()?;
 
-        let Some(item) = repo::get_media_item(pool, input.id).await? else {
+        let Some(item) = repo::get_media_item(input.id).await? else {
             return Ok(ScrapeMediaItemMutationResponse {
                 success: false,
                 message: "Media item not found.".to_string(),
@@ -110,7 +109,7 @@ impl MediaItemMutations {
             }
         };
 
-        let existing_stream_ids: HashSet<i64> = repo::get_streams_for_item(pool, input.id)
+        let existing_stream_ids: HashSet<i64> = repo::get_streams_for_item(input.id)
             .await?
             .into_iter()
             .map(|stream| stream.id)
@@ -118,7 +117,6 @@ impl MediaItemMutations {
 
         for (info_hash, parsed_data) in results {
             let stream = repo::upsert_stream(
-                pool,
                 &info_hash,
                 &build_magnet_uri(&info_hash),
                 Some(parsed_data),
@@ -126,21 +124,21 @@ impl MediaItemMutations {
                 None,
             )
             .await?;
-            repo::link_stream_to_item(pool, input.id, stream.id).await?;
+            repo::link_stream_to_item(input.id, stream.id).await?;
         }
 
-        repo::update_scraped(pool, input.id).await?;
+        repo::update_scraped(input.id).await?;
 
-        let fresh = repo::get_media_item(pool, input.id).await?.unwrap_or(item);
-        let new_streams_count = repo::get_streams_for_item(pool, input.id)
+        let fresh = repo::get_media_item(input.id).await?.unwrap_or(item);
+        let new_streams_count = repo::get_streams_for_item(input.id)
             .await?
             .into_iter()
             .filter(|stream| !existing_stream_ids.contains(&stream.id))
             .count();
 
-        let parse_ctx = build_parse_item_context(pool, fresh.clone()).await;
+        let parse_ctx = build_parse_item_context(fresh.clone()).await;
         if new_streams_count == 0 {
-            if let Err(err) = repo::increment_failed_attempts(pool, input.id).await {
+            if let Err(err) = repo::increment_failed_attempts(input.id).await {
                 tracing::warn!(id = input.id, %err, "failed to increment failed_attempts");
             }
             job_queue
@@ -161,7 +159,7 @@ impl MediaItemMutations {
             });
         }
 
-        if let Err(err) = repo::reset_failed_attempts(pool, input.id).await {
+        if let Err(err) = repo::reset_failed_attempts(input.id).await {
             tracing::warn!(id = input.id, %err, "failed to reset failed_attempts");
         }
         job_queue

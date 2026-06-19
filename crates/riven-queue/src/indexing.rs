@@ -8,16 +8,14 @@ use riven_db::repo;
 /// handled by DB triggers — every `media_items` insert/update fires the
 /// state-derivation pipeline automatically.
 pub async fn apply_indexed_media_item(
-    db_pool: &sqlx::PgPool,
     item: &MediaItem,
     indexed: &IndexedMediaItem,
     requested_seasons: Option<&[i32]>,
 ) -> Result<()> {
-    repo::update_media_item_index(db_pool, item.id, indexed).await?;
+    repo::update_media_item_index(item.id, indexed).await?;
 
     if let Some(request_id) = item.item_request_id {
         repo::backfill_item_request_external_ids(
-            db_pool,
             request_id,
             indexed.imdb_id.as_deref(),
             indexed.tvdb_id.as_deref(),
@@ -47,7 +45,6 @@ pub async fn apply_indexed_media_item(
             }
 
             let season = repo::create_season(
-                db_pool,
                 item.id,
                 season_data.number,
                 season_data.title.as_deref(),
@@ -60,7 +57,6 @@ pub async fn apply_indexed_media_item(
 
             for ep_data in &season_data.episodes {
                 repo::create_episode(
-                    db_pool,
                     season.id,
                     ep_data.number,
                     ep_data.title.as_deref(),
@@ -78,7 +74,7 @@ pub async fn apply_indexed_media_item(
         }
 
         if let Some(request_id) = item.item_request_id {
-            repo::recompute_is_partial_request(db_pool, request_id, item.id).await?;
+            repo::recompute_is_partial_request(request_id, item.id).await?;
         }
     }
 

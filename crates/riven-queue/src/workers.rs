@@ -104,7 +104,7 @@ async fn handle_fan_in(
     };
 
     if let Some(id) = job.event.media_item_id() {
-        let maybe_item = load_media_item_or_log(&q.db_pool, id, "plugin-hook").await;
+        let maybe_item = load_media_item_or_log(id, "plugin-hook").await;
         let drop_child = match (&job.event, &maybe_item) {
             (_, None) => true,
             (RivenEvent::MediaItemScrapeRequested { .. }, Some(item))
@@ -121,7 +121,7 @@ async fn handle_fan_in(
             _ => false,
         };
         if drop_child {
-            if q.flow_complete_child(prefix, scope).await {
+            if q.flow_complete_child(prefix, scope, &job.plugin_name).await {
                 q.clear_flow_all(prefix, scope).await;
                 finalize_event(q, &job.event, scope).await;
             }
@@ -163,7 +163,7 @@ async fn handle_fan_in(
         }
     }
 
-    if q.flow_complete_child(prefix, scope).await {
+    if q.flow_complete_child(prefix, scope, &job.plugin_name).await {
         finalize_event(q, &job.event, scope).await;
     }
     Ok(())

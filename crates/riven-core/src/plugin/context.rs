@@ -3,7 +3,6 @@ use crate::settings::PluginSettings;
 pub struct PluginContext {
     pub settings: PluginSettings,
     pub http: crate::http::HttpClient,
-    pub db_pool: sqlx::PgPool,
     pub redis: redis::aio::ConnectionManager,
     pub vfs_mount_path: String,
 }
@@ -12,14 +11,12 @@ impl PluginContext {
     pub fn new(
         settings: PluginSettings,
         http: crate::http::HttpClient,
-        db_pool: sqlx::PgPool,
         redis: redis::aio::ConnectionManager,
         vfs_mount_path: String,
     ) -> Self {
         Self {
             settings,
             http,
-            db_pool,
             redis,
             vfs_mount_path,
         }

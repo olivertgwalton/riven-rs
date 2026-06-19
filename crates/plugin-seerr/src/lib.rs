@@ -85,7 +85,7 @@ impl Plugin for SeerrPlugin {
         let url = ctx.settings.get_or("url", DEFAULT_URL);
         let base_url = url.trim_end_matches('/');
 
-        let request_id = get_seerr_request_id(&ctx.db_pool, info.id).await;
+        let request_id = get_seerr_request_id(info.id).await;
         if let Some(rid) = request_id {
             let mark_url = format!("{base_url}/api/v1/request/{rid}/available");
             tracing::debug!(request_id = rid, target_url = %mark_url, "marking seerr request as available");
@@ -136,14 +136,12 @@ impl Plugin for SeerrPlugin {
     }
 }
 
-async fn get_seerr_request_id(pool: &sqlx::PgPool, id: i64) -> Option<String> {
+async fn get_seerr_request_id(id: i64) -> Option<String> {
     use riven_db::repo;
 
-    let item = repo::get_media_item(pool, id).await.ok()??;
+    let item = repo::get_media_item(id).await.ok()??;
     let request_id = item.item_request_id?;
-    let request = repo::get_item_request_by_id(pool, request_id)
-        .await
-        .ok()??;
+    let request = repo::get_item_request_by_id(request_id).await.ok()??;
     request.external_request_id
 }
 

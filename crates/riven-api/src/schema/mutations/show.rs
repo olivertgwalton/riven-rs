@@ -77,14 +77,13 @@ impl ShowMutations {
         input: IndexShowInput,
     ) -> Result<IndexShowMutationResponse> {
         require_settings_access(ctx)?;
-        let pool = ctx.data::<sqlx::PgPool>()?;
         let job_queue = ctx.data::<Arc<JobQueue>>()?;
 
-        let item = repo::get_request_root_item(pool, input.id)
+        let item = repo::get_request_root_item(input.id)
             .await?
             .ok_or_else(|| Error::new("Item request not found"))?;
 
-        let requested_seasons = riven_queue::context::load_requested_seasons(pool, &item).await;
+        let requested_seasons = riven_queue::context::load_requested_seasons(&item).await;
 
         let seasons: Vec<IndexedSeason> = input
             .seasons
@@ -128,7 +127,6 @@ impl ShowMutations {
         };
 
         if let Err(e) = riven_queue::indexing::apply_indexed_media_item(
-            pool,
             &item,
             &indexed,
             requested_seasons.as_deref(),
@@ -143,7 +141,7 @@ impl ShowMutations {
             });
         }
 
-        let fresh = repo::get_media_item(pool, item.id).await?.unwrap_or(item);
+        let fresh = repo::get_media_item(item.id).await?.unwrap_or(item);
 
         job_queue
             .notify(RivenEvent::MediaItemIndexSuccess {

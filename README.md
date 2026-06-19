@@ -19,7 +19,7 @@ THIS IS AN ALTERNATIVE, RIVEN-TS IS THE MAIN DEVELOPMENT EFFORT
 | `crates/riven-app` | `riven` binary, startup wiring, plugin registration, logging, API, queues, and VFS mount lifecycle. |
 | `crates/riven-core` | Shared settings, events, plugin traits/registry, HTTP helpers, downloader config, and domain types. |
 | `crates/riven-api` | Axum and async-graphql API server, GraphQL schema, subscriptions, webhooks, media bridge, and board routes. |
-| `crates/riven-db` | SQLx database connection, migrations, entities, and repositories. |
+| `crates/riven-db` | SeaORM database connection, migrations, entities, and repositories. |
 | `crates/riven-queue` | Scheduler, job queue, indexing, scraping, parsing, downloading, and worker logic. |
 | `crates/riven-rank` | Filename parsing, stream ranking, and release scoring helpers. |
 | `crates/riven-vfs` | FUSE filesystem and stream-aware virtual media files. |
@@ -32,8 +32,6 @@ THIS IS AN ALTERNATIVE, RIVEN-TS IS THE MAIN DEVELOPMENT EFFORT
 - Redis.
 - FUSE 3 for VFS mounting.
 - Docker and Docker Compose if running the provided container stack.
-
-SQLx runs in offline mode by default through `.cargo/config.toml`, so normal builds use the checked-in `.sqlx` metadata. Regenerate that metadata when changing SQL queries.
 
 ## Quick Start With Docker Compose
 
@@ -148,7 +146,7 @@ make verify       # fmt-check, check, lint, and test
 For a direct release build:
 
 ```sh
-SQLX_OFFLINE=true cargo build --release
+cargo build --release
 ```
 
 For the application binary:
@@ -159,7 +157,7 @@ cargo build -p riven-app --bin riven
 
 ## Database Migrations
 
-Migrations live in `crates/riven-db/migrations` and run automatically during application startup. Because SQLx offline mode is enabled by default, query changes should be accompanied by updated `.sqlx` metadata.
+Migrations live in `crates/riven-db/migrations` and run automatically during application startup via `sea-orm-migration`.
 
 ## Contributing
 

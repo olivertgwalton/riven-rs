@@ -192,7 +192,6 @@ pub fn build_discovery_targets(
 }
 
 pub async fn discover_streams(
-    pool: &sqlx::PgPool,
     registry: &PluginRegistry,
     item_type: MediaItemType,
     title: &str,
@@ -206,7 +205,7 @@ pub async fn discover_streams(
     let imdb_id = indexed.imdb_id.as_deref().or(imdb_id);
 
     let (profiles, dubbed_anime_only) =
-        tokio::join!(load_active_profiles(pool), load_dubbed_anime_only(pool),);
+        tokio::join!(load_active_profiles(), load_dubbed_anime_only(),);
 
     let targets = build_discovery_targets(
         item_type,
@@ -368,7 +367,6 @@ pub fn resolve_pack_seasons(
 /// every contained season requested, index any season whose episodes are
 /// missing, and return the show `MediaItem` to link the stream against.
 pub async fn ensure_show_target(
-    pool: &sqlx::PgPool,
     registry: &PluginRegistry,
     queue: &Arc<JobQueue>,
     title: &str,
@@ -386,7 +384,7 @@ pub async fn ensure_show_target(
         .await
         .map_err(Error::from)?;
 
-    let existing_seasons = repo::list_seasons(pool, outcome.item.id).await?;
+    let existing_seasons = repo::list_seasons(outcome.item.id).await?;
     let mut needs_index = outcome.item.imdb_id.is_none();
     for &season_number in seasons {
         match existing_seasons
@@ -395,7 +393,7 @@ pub async fn ensure_show_target(
         {
             None => needs_index = true,
             Some(season) => {
-                if repo::list_episodes(pool, season.id).await?.is_empty() {
+                if repo::list_episodes(season.id).await?.is_empty() {
                     needs_index = true;
                 }
             }
@@ -405,18 +403,17 @@ pub async fn ensure_show_target(
     if needs_index {
         let indexed =
             run_index_discovery(registry, MediaItemType::Show, imdb_id, None, tvdb_id).await?;
-        apply_indexed_media_item(pool, &outcome.item, &indexed, Some(seasons))
+        apply_indexed_media_item(&outcome.item, &indexed, Some(seasons))
             .await
             .map_err(Error::from)?;
     }
 
-    repo::get_media_item(pool, outcome.item.id)
+    repo::get_media_item(outcome.item.id)
         .await?
         .ok_or_else(|| Error::new("Show not found after preparation"))
 }
 
 pub async fn ensure_download_target(
-    pool: &sqlx::PgPool,
     registry: &PluginRegistry,
     queue: &Arc<JobQueue>,
     item_type: MediaItemType,
@@ -440,12 +437,12 @@ pub async fn ensure_download_target(
                 let indexed =
                     run_index_discovery(registry, MediaItemType::Movie, imdb_id, tmdb_id, None)
                         .await?;
-                apply_indexed_media_item(pool, &outcome.item, &indexed, None)
+                apply_indexed_media_item(&outcome.item, &indexed, None)
                     .await
                     .map_err(Error::from)?;
             }
 
-            repo::get_media_item(pool, outcome.item.id)
+            repo::get_media_item(outcome.item.id)
                 .await?
                 .ok_or_else(|| Error::new("Movie not found after preparation"))
         }
@@ -459,7 +456,7 @@ pub async fn ensure_download_target(
                 .map_err(Error::from)?;
 
             let mut needs_index = outcome.item.imdb_id.is_none();
-            let existing_seasons = repo::list_seasons(pool, outcome.item.id).await?;
+            let existing_seasons = repo::list_seasons(outcome.item.id).await?;
             let existing_season = existing_seasons
                 .into_iter()
                 .find(|season| season.season_number == Some(season_number));
@@ -467,19 +464,19 @@ pub async fn ensure_download_target(
             if existing_season.is_none() {
                 needs_index = true;
             } else if let Some(ref season) = existing_season {
-                needs_index = repo::list_episodes(pool, season.id).await?.is_empty();
+                needs_index = repo::list_episodes(season.id).await?.is_empty();
             }
 
             if needs_index {
                 let indexed =
                     run_index_discovery(registry, MediaItemType::Show, imdb_id, None, tvdb_id)
                         .await?;
-                apply_indexed_media_item(pool, &outcome.item, &indexed, Some(&requested))
+                apply_indexed_media_item(&outcome.item, &indexed, Some(&requested))
                     .await
                     .map_err(Error::from)?;
             }
 
-            repo::list_seasons(pool, outcome.item.id)
+            repo::list_seasons(outcome.item.id)
                 .await?
                 .into_iter()
                 .find(|season| season.season_number == Some(season_number))

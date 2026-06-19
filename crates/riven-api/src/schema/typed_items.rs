@@ -2,14 +2,12 @@ use async_graphql::*;
 use riven_core::types::MediaItemType;
 use riven_db::entities::{MediaItem, Stream};
 use riven_db::repo;
-use sqlx::PgPool;
 
 async fn load_streams(
-    pool: &PgPool,
     media_item_id: i64,
     info_hashes: Option<Vec<String>>,
 ) -> Result<Vec<Stream>> {
-    let mut streams = repo::get_streams_for_item(pool, media_item_id).await?;
+    let mut streams = repo::get_streams_for_item(media_item_id).await?;
     if let Some(info_hashes) = info_hashes {
         streams.retain(|stream| {
             info_hashes
@@ -23,11 +21,10 @@ async fn load_streams(
 /// Shared body for the `streams` resolver on every typed media item.
 async fn load_streams_for(
     item: &MediaItem,
-    ctx: &Context<'_>,
+    _ctx: &Context<'_>,
     info_hashes: Option<Vec<String>>,
 ) -> Result<Vec<Stream>> {
-    let pool = ctx.data::<PgPool>()?;
-    load_streams(pool, item.id, info_hashes).await
+    load_streams(item.id, info_hashes).await
 }
 
 pub struct Movie {
@@ -77,23 +74,21 @@ impl Show {
     /// Seasons for this show. Excludes season 0 (specials) by default.
     async fn seasons(
         &self,
-        ctx: &Context<'_>,
+        _ctx: &Context<'_>,
         #[graphql(default = false)] include_specials: bool,
     ) -> Result<Vec<Season>> {
-        let pool = ctx.data::<PgPool>()?;
         let items = if include_specials {
-            repo::list_seasons(pool, self.item.id).await?
+            repo::list_seasons(self.item.id).await?
         } else {
-            repo::list_seasons_excluding_specials(pool, self.item.id).await?
+            repo::list_seasons_excluding_specials(self.item.id).await?
         };
         Ok(items.into_iter().map(|item| Season { item }).collect())
     }
 
     /// Total expected downloadable episode files.
     /// For continuing shows the currently-airing season is excluded.
-    async fn expected_file_count(&self, ctx: &Context<'_>) -> Result<i64> {
-        let pool = ctx.data::<PgPool>()?;
-        Ok(repo::count_expected_files_for_show(pool, self.item.id).await?)
+    async fn expected_file_count(&self, _ctx: &Context<'_>) -> Result<i64> {
+        Ok(repo::count_expected_files_for_show(self.item.id).await?)
     }
 }
 
@@ -117,35 +112,31 @@ impl Season {
     }
 
     /// The parent show for this season.
-    async fn show(&self, ctx: &Context<'_>) -> Result<Show> {
-        let pool = ctx.data::<PgPool>()?;
+    async fn show(&self, _ctx: &Context<'_>) -> Result<Show> {
         let parent_id = self
             .item
             .parent_id
             .ok_or_else(|| Error::new("Season has no parent show"))?;
-        let item = repo::get_media_item(pool, parent_id)
+        let item = repo::get_media_item(parent_id)
             .await?
             .ok_or_else(|| Error::new("Parent show not found"))?;
         Ok(Show { item })
     }
 
     /// All episodes in this season.
-    async fn episodes(&self, ctx: &Context<'_>) -> Result<Vec<Episode>> {
-        let pool = ctx.data::<PgPool>()?;
-        let items = repo::list_episodes(pool, self.item.id).await?;
+    async fn episodes(&self, _ctx: &Context<'_>) -> Result<Vec<Episode>> {
+        let items = repo::list_episodes(self.item.id).await?;
         Ok(items.into_iter().map(|item| Episode { item }).collect())
     }
 
     /// Total number of episodes in this season.
-    async fn total_episodes(&self, ctx: &Context<'_>) -> Result<i64> {
-        let pool = ctx.data::<PgPool>()?;
-        Ok(repo::count_episodes_in_season(pool, self.item.id).await?)
+    async fn total_episodes(&self, _ctx: &Context<'_>) -> Result<i64> {
+        Ok(repo::count_episodes_in_season(self.item.id).await?)
     }
 
     /// Expected number of episode files to download (equals total episodes).
-    async fn expected_file_count(&self, ctx: &Context<'_>) -> Result<i64> {
-        let pool = ctx.data::<PgPool>()?;
-        Ok(repo::count_episodes_in_season(pool, self.item.id).await?)
+    async fn expected_file_count(&self, _ctx: &Context<'_>) -> Result<i64> {
+        Ok(repo::count_episodes_in_season(self.item.id).await?)
     }
 }
 
@@ -169,13 +160,12 @@ impl Episode {
     }
 
     /// The parent season for this episode.
-    async fn season(&self, ctx: &Context<'_>) -> Result<Season> {
-        let pool = ctx.data::<PgPool>()?;
+    async fn season(&self, _ctx: &Context<'_>) -> Result<Season> {
         let parent_id = self
             .item
             .parent_id
             .ok_or_else(|| Error::new("Episode has no parent season"))?;
-        let item = repo::get_media_item(pool, parent_id)
+        let item = repo::get_media_item(parent_id)
             .await?
             .ok_or_else(|| Error::new("Parent season not found"))?;
         Ok(Season { item })

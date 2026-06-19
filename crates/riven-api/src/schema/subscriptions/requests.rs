@@ -8,11 +8,8 @@ use std::sync::Arc;
 
 use super::broadcast_stream;
 
-async fn load_item_request(
-    pool: &sqlx::PgPool,
-    request_id: i64,
-) -> async_graphql::Result<Option<ItemRequest>> {
-    repo::get_item_request_by_id(pool, request_id)
+async fn load_item_request(request_id: i64) -> async_graphql::Result<Option<ItemRequest>> {
+    repo::get_item_request_by_id(request_id)
         .await
         .map_err(Into::into)
 }
@@ -27,11 +24,9 @@ impl RequestsSubscription {
         &self,
         ctx: &Context<'_>,
     ) -> async_graphql::Result<impl Stream<Item = async_graphql::Result<ItemRequest>>> {
-        let pool = ctx.data::<sqlx::PgPool>()?.clone();
         let queue = Arc::clone(ctx.data::<Arc<riven_queue::JobQueue>>()?);
         Ok(
             broadcast_stream(queue.event_tx.subscribe()).filter_map(move |event| {
-                let pool = pool.clone();
                 async move {
                     let RivenEvent::ItemRequestCreated {
                         request_id,
@@ -44,7 +39,7 @@ impl RequestsSubscription {
                     if request_type != ItemRequestType::Movie {
                         return None;
                     }
-                    match load_item_request(&pool, request_id).await {
+                    match load_item_request(request_id).await {
                         Ok(Some(request)) => Some(Ok(request)),
                         Ok(None) => None,
                         Err(error) => Some(Err(error)),
@@ -59,11 +54,9 @@ impl RequestsSubscription {
         &self,
         ctx: &Context<'_>,
     ) -> async_graphql::Result<impl Stream<Item = async_graphql::Result<ItemRequest>>> {
-        let pool = ctx.data::<sqlx::PgPool>()?.clone();
         let queue = Arc::clone(ctx.data::<Arc<riven_queue::JobQueue>>()?);
         Ok(
             broadcast_stream(queue.event_tx.subscribe()).filter_map(move |event| {
-                let pool = pool.clone();
                 async move {
                     let RivenEvent::ItemRequestCreated {
                         request_id,
@@ -76,7 +69,7 @@ impl RequestsSubscription {
                     if request_type != ItemRequestType::Show {
                         return None;
                     }
-                    match load_item_request(&pool, request_id).await {
+                    match load_item_request(request_id).await {
                         Ok(Some(request)) => Some(Ok(request)),
                         Ok(None) => None,
                         Err(error) => Some(Err(error)),
@@ -91,11 +84,9 @@ impl RequestsSubscription {
         &self,
         ctx: &Context<'_>,
     ) -> async_graphql::Result<impl Stream<Item = async_graphql::Result<ItemRequest>>> {
-        let pool = ctx.data::<sqlx::PgPool>()?.clone();
         let queue = Arc::clone(ctx.data::<Arc<riven_queue::JobQueue>>()?);
         Ok(
             broadcast_stream(queue.event_tx.subscribe()).filter_map(move |event| {
-                let pool = pool.clone();
                 async move {
                     let RivenEvent::ItemRequestUpdated {
                         request_id,
@@ -108,7 +99,7 @@ impl RequestsSubscription {
                     if request_type != ItemRequestType::Show {
                         return None;
                     }
-                    match load_item_request(&pool, request_id).await {
+                    match load_item_request(request_id).await {
                         Ok(Some(request)) => Some(Ok(request)),
                         Ok(None) => None,
                         Err(error) => Some(Err(error)),

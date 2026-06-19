@@ -147,13 +147,8 @@ impl Plugin for UsenetPlugin {
 
     async fn on_core_started(&self, ctx: &PluginContext) -> anyhow::Result<HookResponse> {
         if let Some(cfg) = nntp_config_from_settings(&ctx.settings) {
-            let streamer = UsenetStreamer::shared(cfg, ctx.db_pool.clone());
-            health_check::spawn(
-                ctx.db_pool.clone(),
-                ctx.redis.clone(),
-                streamer,
-                ctx.settings.clone(),
-            );
+            let streamer = UsenetStreamer::shared(cfg, riven_db::orm().clone());
+            health_check::spawn(ctx.redis.clone(), streamer, ctx.settings.clone());
         }
         Ok(HookResponse::Empty)
     }
@@ -316,7 +311,7 @@ impl Plugin for UsenetPlugin {
             return Ok(HookResponse::DownloadStreamUnavailable);
         };
 
-        let streamer = UsenetStreamer::shared(nntp_cfg, ctx.db_pool.clone());
+        let streamer = UsenetStreamer::shared(nntp_cfg, riven_db::orm().clone());
         let password = ctx.settings.get("archivepassword");
         let sample_percent = ctx.settings.get_parsed_or::<usize>(
             "availabilitysamplepercent",

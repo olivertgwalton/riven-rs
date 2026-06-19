@@ -10,7 +10,7 @@ This workspace enforces the following baseline standards:
 - Changes must preserve or improve test coverage for the code they touch.
 - Configuration and parsing logic should live in shared crates instead of app entrypoints.
 - New plugin and workflow behaviour should prefer small, testable units over large inline functions.
-- SQLx builds run in offline mode by default through [`.cargo/config.toml`](/Users/oliverwalton/Desktop/riven-rs/.cargo/config.toml). Regenerate `.sqlx` metadata when queries change.
+- Database access goes through SeaORM (`riven-db`); prefer the query builder and reserve raw `Statement` for SQL the builder can't express (recursive CTEs, window functions, partial-index upserts, etc.).
 
 ## Local Workflow
 

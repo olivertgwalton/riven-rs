@@ -5,9 +5,11 @@
 use std::sync::Arc;
 
 use async_graphql::{Context, Object, Result};
+use riven_core::entities::filesystem_entries;
+use riven_db::orm;
 use riven_queue::JobQueue;
 use riven_usenet::UsenetStreamer;
-use sqlx::PgPool;
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
 
 #[derive(Default)]
 pub struct UsenetHealthMutations;
@@ -30,24 +32,22 @@ impl UsenetHealthMutations {
     /// result. Returns the new status (`healthy` / `unhealthy` / `unknown`).
     async fn rescan_usenet_health(
         &self,
-        ctx: &Context<'_>,
+        _ctx: &Context<'_>,
         info_hash: String,
         file_index: i32,
     ) -> Result<String> {
-        let pool = ctx.data::<PgPool>()?;
         let Some(streamer) = UsenetStreamer::existing_shared() else {
             return Ok("unknown".to_string());
         };
 
-        let media_item_id: Option<i64> = sqlx::query_scalar::<_, Option<i64>>(
-            "SELECT media_item_id FROM filesystem_entries \
-             WHERE usenet_info_hash = $1 AND usenet_file_index = $2 LIMIT 1",
-        )
-        .bind(&info_hash)
-        .bind(file_index)
-        .fetch_optional(pool)
-        .await?
-        .flatten();
+        let media_item_id: Option<i64> = filesystem_entries::Entity::find()
+            .select_only()
+            .column(filesystem_entries::Column::MediaItemId)
+            .filter(filesystem_entries::Column::UsenetInfoHash.eq(info_hash.clone()))
+            .filter(filesystem_entries::Column::UsenetFileIndex.eq(file_index))
+            .into_tuple::<i64>()
+            .one(orm())
+            .await?;
 
         let idx = usize::try_from(file_index).unwrap_or(0);
         let (status, total, sampled, missing, errors) = match streamer
@@ -70,7 +70,6 @@ impl UsenetHealthMutations {
         };
 
         riven_db::repo::upsert_usenet_file_health(
-            pool,
             riven_db::repo::UsenetHealthUpdate {
                 info_hash: &info_hash,
                 file_index,

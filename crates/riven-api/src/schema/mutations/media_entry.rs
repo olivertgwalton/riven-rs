@@ -1,7 +1,6 @@
 use async_graphql::*;
 use riven_db::entities::FileSystemEntry;
 use riven_db::repo;
-use sqlx::PgPool;
 
 use crate::schema::auth::require_library_access;
 
@@ -32,11 +31,10 @@ impl MediaEntryMutations {
         url: String,
     ) -> Result<SaveStreamUrlMutationResponse> {
         require_library_access(ctx)?;
-        let pool = ctx.data::<PgPool>()?;
 
-        repo::update_stream_url(pool, id, &url).await?;
+        repo::update_stream_url(id, &url).await?;
 
-        let entry = repo::get_media_entry_by_id(pool, id)
+        let entry = repo::get_media_entry_by_id(id)
             .await?
             .ok_or_else(|| Error::new("Filesystem entry not found"))?;
 

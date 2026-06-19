@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use futures::StreamExt;
 use futures::stream;
-use sqlx::PgPool;
+use sea_orm::DatabaseConnection;
 
 use crate::nntp::{NntpConfig, NntpPool, Priority};
 use crate::state::StreamerState;
@@ -48,11 +48,11 @@ pub struct UsenetStreamer {
     /// (`pool.total_capacity()`) so large accounts drain a scrape backlog fast
     /// while small ones stay conservative — see `ingest_concurrency_for`.
     pub(crate) ingest_sem: Arc<tokio::sync::Semaphore>,
-    pub(crate) db: PgPool,
+    pub(crate) db: DatabaseConnection,
 }
 
 impl UsenetStreamer {
-    pub fn new(cfg: NntpConfig, db: PgPool) -> Self {
+    pub fn new(cfg: NntpConfig, db: DatabaseConnection) -> Self {
         crate::nntp::init_crypto();
         let pool = NntpPool::new_multi(cfg.providers);
         let ingest_sem = Arc::new(tokio::sync::Semaphore::new(
@@ -77,7 +77,7 @@ impl UsenetStreamer {
     /// user's `max_connections` is the true ceiling against the provider.
     /// Settings change → fingerprint flips → cached entry rebuilt
     /// automatically, no restart needed.
-    pub fn shared(cfg: NntpConfig, db: PgPool) -> Self {
+    pub fn shared(cfg: NntpConfig, db: DatabaseConnection) -> Self {
         let fp = nntp_config_fingerprint(&cfg);
         let mut guard = shared_cell()
             .lock()

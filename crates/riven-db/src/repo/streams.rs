@@ -1,25 +1,34 @@
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use sqlx::{PgPool, Postgres, QueryBuilder};
+use riven_core::entities::{
+    filesystem_entries, media_item_blacklisted_streams, media_item_streams, streams,
+};
+use riven_core::types::FileSystemEntryType;
+use sea_orm::sea_query::{Expr, OnConflict};
+use sea_orm::ActiveValue::{Set, Unchanged};
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, ConnectionTrait, DbBackend, EntityTrait, FromQueryResult,
+    QueryFilter, QuerySelect, Statement,
+};
 
 use crate::entities::*;
+use crate::orm;
 use riven_rank::ResolutionRanks;
 
-#[derive(Debug, Clone, sqlx::FromRow)]
-pub struct VfsEntryPath {
-    pub path: String,
-    pub library_profiles: Option<serde_json::Value>,
-}
-
 pub async fn upsert_stream(
-    pool: &PgPool,
     info_hash: &str,
     magnet: &str,
     parsed_data: Option<serde_json::Value>,
     rank: Option<i64>,
     file_size_bytes: Option<u64>,
 ) -> Result<Stream> {
-    let stream = sqlx::query_as::<_, Stream>(
+    // Kept as a raw Statement: the magnet column uses a CASE expression on
+    // conflict (`CASE WHEN $2 <> '' THEN $2 ELSE streams.magnet END`) that the
+    // ActiveModel upsert path can't express cleanly.
+    let file_size = file_size_bytes
+        .map(|s| i64::try_from(s).unwrap_or(i64::MAX));
+    let stream = Stream::find_by_statement(Statement::from_sql_and_values(
+        DbBackend::Postgres,
         "INSERT INTO streams (info_hash, magnet, parsed_data, rank, file_size_bytes) \
          VALUES ($1, $2, $3, $4, $5) \
          ON CONFLICT (info_hash) DO UPDATE SET \
@@ -29,14 +38,17 @@ pub async fn upsert_stream(
              file_size_bytes = COALESCE($5, streams.file_size_bytes), \
              updated_at = NOW() \
          RETURNING *",
-    )
-    .bind(info_hash)
-    .bind(magnet)
-    .bind(parsed_data)
-    .bind(rank)
-    .bind(file_size_bytes.map(|s| s as i64))
-    .fetch_one(pool)
-    .await?;
+        [
+            info_hash.into(),
+            magnet.into(),
+            parsed_data.into(),
+            rank.into(),
+            file_size.into(),
+        ],
+    ))
+    .one(orm())
+    .await?
+    .ok_or_else(|| anyhow::anyhow!("upsert_stream returned no row"))?;
     Ok(stream)
 }
 
@@ -45,75 +57,69 @@ pub async fn upsert_stream(
 /// are stale cached scrape results that accumulate over time; they are
 /// recreated on the next scrape, so deletion is fully recoverable. Run
 /// periodically by the queue Scheduler. Returns the number of rows removed.
-pub async fn delete_orphan_streams(pool: &PgPool) -> Result<u64> {
-    let result = sqlx::query(
-        "DELETE FROM streams s \
-         WHERE NOT EXISTS (SELECT 1 FROM media_item_streams m WHERE m.stream_id = s.id) \
-           AND NOT EXISTS (SELECT 1 FROM media_item_blacklisted_streams b WHERE b.stream_id = s.id) \
-           AND NOT EXISTS (SELECT 1 FROM media_items i WHERE i.active_stream_id = s.id) \
-           AND NOT EXISTS (SELECT 1 FROM filesystem_entries f WHERE f.stream_id = s.id)",
-    )
-    .execute(pool)
-    .await?;
+pub async fn delete_orphan_streams() -> Result<u64> {
+    // Kept as a raw Statement: the DELETE has four correlated NOT EXISTS
+    // subqueries against other tables, outside what the builder DELETE expresses.
+    let result = orm()
+        .execute(Statement::from_string(
+            DbBackend::Postgres,
+            "DELETE FROM streams s \
+             WHERE NOT EXISTS (SELECT 1 FROM media_item_streams m WHERE m.stream_id = s.id) \
+               AND NOT EXISTS (SELECT 1 FROM media_item_blacklisted_streams b WHERE b.stream_id = s.id) \
+               AND NOT EXISTS (SELECT 1 FROM media_items i WHERE i.active_stream_id = s.id) \
+               AND NOT EXISTS (SELECT 1 FROM filesystem_entries f WHERE f.stream_id = s.id)",
+        ))
+        .await?;
     Ok(result.rows_affected())
 }
 
 /// Record the actual file size for a stream (learned from a download attempt).
-pub async fn update_stream_file_size(
-    pool: &PgPool,
-    info_hash: &str,
-    file_size_bytes: u64,
-) -> Result<()> {
-    sqlx::query!(
-        "UPDATE streams SET file_size_bytes = $1, updated_at = NOW() WHERE info_hash = $2",
-        file_size_bytes as i64,
-        info_hash
-    )
-    .execute(pool)
-    .await?;
+pub async fn update_stream_file_size(info_hash: &str, file_size_bytes: u64) -> Result<()> {
+    streams::Entity::update_many()
+        .col_expr(
+            streams::Column::FileSizeBytes,
+            Expr::value(i64::try_from(file_size_bytes).unwrap_or(i64::MAX)),
+        )
+        .col_expr(streams::Column::UpdatedAt, Expr::cust("NOW()"))
+        .filter(streams::Column::InfoHash.eq(info_hash))
+        .exec(orm())
+        .await?;
     Ok(())
 }
 
-pub async fn link_stream_to_item(
-    pool: &PgPool,
-    media_item_id: i64,
-    stream_id: i64,
-) -> Result<bool> {
-    let result = sqlx::query!(
-        "INSERT INTO media_item_streams (media_item_id, stream_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
-        media_item_id,
-        stream_id
-    )
-    .execute(pool)
-    .await?;
-    let inserted = result.rows_affected() > 0;
+pub async fn link_stream_to_item(media_item_id: i64, stream_id: i64) -> Result<bool> {
+    let insert = media_item_streams::Entity::insert(media_item_streams::ActiveModel {
+        media_item_id: Set(media_item_id),
+        stream_id: Set(stream_id),
+    })
+    .on_conflict(
+        OnConflict::columns([
+            media_item_streams::Column::MediaItemId,
+            media_item_streams::Column::StreamId,
+        ])
+        .do_nothing()
+        .to_owned(),
+    );
+    // `do_nothing` + an existing row surfaces as `RecordNotInserted`; that is
+    // the ON CONFLICT DO NOTHING no-op, not an error — and means not inserted.
+    let inserted = match insert.exec(orm()).await {
+        Ok(_) => true,
+        Err(sea_orm::DbErr::RecordNotInserted) => false,
+        Err(error) => return Err(error.into()),
+    };
     if inserted {
-        super::state::recompute(pool, &[media_item_id]).await?;
+        super::state::recompute(&[media_item_id]).await?;
     }
     Ok(inserted)
 }
 
-pub async fn get_streams_for_item(pool: &PgPool, media_item_id: i64) -> Result<Vec<Stream>> {
-    Ok(sqlx::query_as::<_, Stream>(
-        "SELECT s.* FROM streams s JOIN media_item_streams ms ON s.id = ms.stream_id WHERE ms.media_item_id = $1",
-    )
-    .bind(media_item_id)
-    .fetch_all(pool)
-    .await?)
-}
-
-pub async fn get_stream_for_item(
-    pool: &PgPool,
-    media_item_id: i64,
-    stream_id: i64,
-) -> Result<Option<Stream>> {
-    Ok(sqlx::query_as::<_, Stream>(
-        "SELECT s.* FROM streams s JOIN media_item_streams ms ON s.id = ms.stream_id WHERE ms.media_item_id = $1 AND s.id = $2 LIMIT 1",
-    )
-    .bind(media_item_id)
-    .bind(stream_id)
-    .fetch_optional(pool)
-    .await?)
+pub async fn get_streams_for_item(media_item_id: i64) -> Result<Vec<Stream>> {
+    Ok(streams::Entity::find()
+        .inner_join(media_item_streams::Entity)
+        .filter(media_item_streams::Column::MediaItemId.eq(media_item_id))
+        .into_model::<Stream>()
+        .all(orm())
+        .await?)
 }
 
 fn build_stream_query(ranks: &ResolutionRanks, limit_one: bool) -> String {
@@ -149,15 +155,13 @@ fn build_stream_query(ranks: &ResolutionRanks, limit_one: bool) -> String {
     )
 }
 
-pub async fn clear_blacklisted_streams(pool: &PgPool, media_item_id: i64) -> Result<()> {
-    sqlx::query(
-        "DELETE FROM media_item_blacklisted_streams \
-         WHERE media_item_id = $1 AND permanent = false",
-    )
-    .bind(media_item_id)
-    .execute(pool)
-    .await?;
-    super::state::recompute(pool, &[media_item_id]).await?;
+pub async fn clear_blacklisted_streams(media_item_id: i64) -> Result<()> {
+    media_item_blacklisted_streams::Entity::delete_many()
+        .filter(media_item_blacklisted_streams::Column::MediaItemId.eq(media_item_id))
+        .filter(media_item_blacklisted_streams::Column::Permanent.eq(false))
+        .exec(orm())
+        .await?;
+    super::state::recompute(&[media_item_id]).await?;
     Ok(())
 }
 
@@ -165,35 +169,45 @@ pub async fn clear_blacklisted_streams(pool: &PgPool, media_item_id: i64) -> Res
 /// it survives the scrape-time blacklist clear. Used when the health check
 /// confirms a release is broken. Returns `false` if no matching stream row.
 pub async fn blacklist_stream_permanent_by_hash(
-    pool: &PgPool,
     media_item_id: i64,
     info_hash: &str,
 ) -> Result<bool> {
-    let stream_id: Option<i64> =
-        sqlx::query_scalar::<_, i64>("SELECT id FROM streams WHERE info_hash = $1")
-            .bind(info_hash)
-            .fetch_optional(pool)
-            .await?;
+    let stream_id: Option<i64> = streams::Entity::find()
+        .filter(streams::Column::InfoHash.eq(info_hash))
+        .select_only()
+        .column(streams::Column::Id)
+        .into_tuple()
+        .one(orm())
+        .await?;
     let Some(stream_id) = stream_id else {
         return Ok(false);
     };
-    sqlx::query(
-        "INSERT INTO media_item_blacklisted_streams (media_item_id, stream_id, permanent) \
-         VALUES ($1, $2, true) \
-         ON CONFLICT (media_item_id, stream_id) DO UPDATE SET permanent = true",
+    media_item_blacklisted_streams::Entity::insert(media_item_blacklisted_streams::ActiveModel {
+        media_item_id: Set(media_item_id),
+        stream_id: Set(stream_id),
+        permanent: Set(true),
+    })
+    .on_conflict(
+        OnConflict::columns([
+            media_item_blacklisted_streams::Column::MediaItemId,
+            media_item_blacklisted_streams::Column::StreamId,
+        ])
+        .update_column(media_item_blacklisted_streams::Column::Permanent)
+        .to_owned(),
     )
-    .bind(media_item_id)
-    .bind(stream_id)
-    .execute(pool)
+    .exec(orm())
     .await?;
+    // Blacklisting changes `has_non_blacklisted_stream`, which can flip the item
+    // out of `Scraped`; recompute so the derived state can't go stale.
+    super::state::recompute(&[media_item_id]).await?;
     Ok(true)
 }
 
 /// Load resolution ranks from the `rank_settings` DB key.
 /// Called once at `JobQueue` startup and on settings reload — callers pass the
 /// cached value into stream queries so each query doesn't re-hit the DB.
-pub async fn load_resolution_ranks(pool: &PgPool) -> ResolutionRanks {
-    match super::get_setting(pool, "rank_settings").await {
+pub async fn load_resolution_ranks() -> ResolutionRanks {
+    match super::get_setting("rank_settings").await {
         Ok(Some(value)) => value
             .get("resolution_ranks")
             .and_then(|v| serde_json::from_value::<ResolutionRanks>(v.clone()).ok())
@@ -203,62 +217,58 @@ pub async fn load_resolution_ranks(pool: &PgPool) -> ResolutionRanks {
 }
 
 pub async fn get_non_blacklisted_streams(
-    pool: &PgPool,
     media_item_id: i64,
     ranks: &ResolutionRanks,
 ) -> Result<Vec<Stream>> {
+    // Raw Statement: dynamic ranking SQL with the resolution CASE expression.
     let sql = build_stream_query(ranks, false);
-    Ok(
-        sqlx::query_as::<_, Stream>(sqlx::AssertSqlSafe(sql.as_str()))
-            .bind(media_item_id)
-            .fetch_all(pool)
-            .await?,
-    )
+    Ok(Stream::find_by_statement(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        sql,
+        [media_item_id.into()],
+    ))
+    .all(orm())
+    .await?)
 }
 
 /// Fetch only the highest-ranked non-blacklisted stream for an item.
 pub async fn get_best_stream(
-    pool: &PgPool,
     media_item_id: i64,
     ranks: &ResolutionRanks,
 ) -> Result<Option<Stream>> {
     let sql = build_stream_query(ranks, true);
-    Ok(
-        sqlx::query_as::<_, Stream>(sqlx::AssertSqlSafe(sql.as_str()))
-            .bind(media_item_id)
-            .fetch_optional(pool)
-            .await?,
-    )
-}
-
-pub async fn get_filesystem_entries(
-    pool: &PgPool,
-    media_item_id: i64,
-) -> Result<Vec<FileSystemEntry>> {
-    Ok(sqlx::query_as::<_, FileSystemEntry>(
-        "SELECT * FROM filesystem_entries WHERE media_item_id = $1",
-    )
-    .bind(media_item_id)
-    .fetch_all(pool)
+    Ok(Stream::find_by_statement(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        sql,
+        [media_item_id.into()],
+    ))
+    .one(orm())
     .await?)
 }
 
-pub async fn get_media_entries(pool: &PgPool, media_item_id: i64) -> Result<Vec<FileSystemEntry>> {
-    Ok(sqlx::query_as::<_, FileSystemEntry>(
-        "SELECT * FROM filesystem_entries WHERE media_item_id = $1 AND entry_type = 'media'",
-    )
-    .bind(media_item_id)
-    .fetch_all(pool)
-    .await?)
+pub async fn get_filesystem_entries(media_item_id: i64) -> Result<Vec<FileSystemEntry>> {
+    Ok(filesystem_entries::Entity::find()
+        .filter(filesystem_entries::Column::MediaItemId.eq(media_item_id))
+        .into_model::<FileSystemEntry>()
+        .all(orm())
+        .await?)
+}
+
+pub async fn get_media_entries(media_item_id: i64) -> Result<Vec<FileSystemEntry>> {
+    Ok(filesystem_entries::Entity::find()
+        .filter(filesystem_entries::Column::MediaItemId.eq(media_item_id))
+        .filter(filesystem_entries::Column::EntryType.eq(FileSystemEntryType::Media))
+        .into_model::<FileSystemEntry>()
+        .all(orm())
+        .await?)
 }
 
 /// Like `get_media_entries` but walks the full media tree rooted at `root_id`.
 /// Needed for season-level IDs where entries are stored on child episodes.
-pub async fn get_media_entries_recursive(
-    pool: &PgPool,
-    root_id: i64,
-) -> Result<Vec<FileSystemEntry>> {
-    Ok(sqlx::query_as::<_, FileSystemEntry>(
+pub async fn get_media_entries_recursive(root_id: i64) -> Result<Vec<FileSystemEntry>> {
+    // Raw Statement: recursive CTE walking the media tree.
+    Ok(FileSystemEntry::find_by_statement(Statement::from_sql_and_values(
+        DbBackend::Postgres,
         "WITH RECURSIVE media_tree AS (
              SELECT id FROM media_items WHERE id = $1
              UNION
@@ -266,74 +276,78 @@ pub async fn get_media_entries_recursive(
              FROM media_items child
              INNER JOIN media_tree parent ON child.parent_id = parent.id
          )
-         SELECT fe.*
+         SELECT fe.id, fe.file_size, fe.created_at, fe.updated_at, fe.media_item_id,
+                fe.entry_type::text AS entry_type, fe.path, fe.original_filename, fe.download_url,
+                fe.stream_url, fe.plugin, fe.provider, fe.provider_download_id, fe.library_profiles,
+                fe.media_metadata, fe.language, fe.parent_original_filename, fe.subtitle_content,
+                fe.file_hash, fe.video_file_size, fe.opensubtitles_id, fe.source_provider,
+                fe.source_id, fe.stream_id, fe.resolution, fe.ranking_profile_name,
+                fe.usenet_info_hash, fe.usenet_file_index
          FROM filesystem_entries fe
          INNER JOIN media_tree mt ON fe.media_item_id = mt.id
          WHERE fe.entry_type = 'media'",
-    )
-    .bind(root_id)
-    .fetch_all(pool)
+        [root_id.into()],
+    ))
+    .all(orm())
     .await?)
 }
 
-pub async fn get_media_entry_paths_for_items(
-    pool: &PgPool,
-    root_ids: &[i64],
-) -> Result<Vec<String>> {
+pub async fn get_media_entry_paths_for_items(root_ids: &[i64]) -> Result<Vec<String>> {
     if root_ids.is_empty() {
         return Ok(Vec::new());
     }
 
-    let rows: Vec<String> = sqlx::query_scalar(
-        "WITH RECURSIVE media_tree AS (
-             SELECT id FROM media_items WHERE id = ANY($1)
-             UNION
-             SELECT child.id
-             FROM media_items child
-             INNER JOIN media_tree parent ON child.parent_id = parent.id
-         )
-         SELECT fe.path
-         FROM filesystem_entries fe
-         INNER JOIN media_tree mt ON fe.media_item_id = mt.id
-         WHERE fe.entry_type = 'media'
-         ORDER BY fe.path",
-    )
-    .bind(root_ids)
-    .fetch_all(pool)
-    .await?;
+    // Raw Statement: recursive CTE with id = ANY($1).
+    let rows = orm()
+        .query_all(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "WITH RECURSIVE media_tree AS (
+                 SELECT id FROM media_items WHERE id = ANY($1)
+                 UNION
+                 SELECT child.id
+                 FROM media_items child
+                 INNER JOIN media_tree parent ON child.parent_id = parent.id
+             )
+             SELECT fe.path
+             FROM filesystem_entries fe
+             INNER JOIN media_tree mt ON fe.media_item_id = mt.id
+             WHERE fe.entry_type = 'media'
+             ORDER BY fe.path",
+            [root_ids.to_vec().into()],
+        ))
+        .await?;
 
-    Ok(rows)
+    let mut paths = Vec::with_capacity(rows.len());
+    for row in rows {
+        paths.push(row.try_get::<String>("", "path")?);
+    }
+    Ok(paths)
 }
 
-pub async fn get_media_entry_by_path(pool: &PgPool, path: &str) -> Result<Option<FileSystemEntry>> {
-    Ok(sqlx::query_as::<_, FileSystemEntry>(
-        "SELECT * FROM filesystem_entries WHERE path = $1 AND entry_type = 'media'",
-    )
-    .bind(path)
-    .fetch_optional(pool)
-    .await?)
+pub async fn get_media_entry_by_path(path: &str) -> Result<Option<FileSystemEntry>> {
+    Ok(filesystem_entries::Entity::find()
+        .filter(filesystem_entries::Column::Path.eq(path))
+        .filter(filesystem_entries::Column::EntryType.eq(FileSystemEntryType::Media))
+        .into_model::<FileSystemEntry>()
+        .one(orm())
+        .await?)
 }
 
 /// Look up a filesystem entry by VFS path regardless of entry_type. Used by
 /// the VFS layer to resolve subtitle entries (which share path-space with the
 /// media file they sit beside).
-pub async fn get_filesystem_entry_by_path(
-    pool: &PgPool,
-    path: &str,
-) -> Result<Option<FileSystemEntry>> {
-    Ok(sqlx::query_as::<_, FileSystemEntry>(
-        "SELECT * FROM filesystem_entries WHERE path = $1 LIMIT 1",
-    )
-    .bind(path)
-    .fetch_optional(pool)
-    .await?)
+pub async fn get_filesystem_entry_by_path(path: &str) -> Result<Option<FileSystemEntry>> {
+    Ok(filesystem_entries::Entity::find()
+        .filter(filesystem_entries::Column::Path.eq(path))
+        .into_model::<FileSystemEntry>()
+        .one(orm())
+        .await?)
 }
 
 /// Insert or replace a subtitle filesystem entry for `(media_item_id, language)`.
 /// Subtitle content is stored inline in `subtitle_content`; the VFS serves it
 /// directly without going through the streaming code path.
 pub async fn upsert_subtitle_entry(
-    pool: &PgPool,
     media_item_id: i64,
     path: &str,
     language: &str,
@@ -342,61 +356,72 @@ pub async fn upsert_subtitle_entry(
     source_id: Option<&str>,
     parent_original_filename: Option<&str>,
 ) -> Result<FileSystemEntry> {
-    let file_size = subtitle_content.len() as i64;
+    let file_size = i64::try_from(subtitle_content.len()).unwrap_or(i64::MAX);
 
     // Delete+insert, not ON CONFLICT: the unique index is partial
     // (entry_type='subtitle') and Postgres only matches ON CONFLICT against
     // full-relation indexes.
-    sqlx::query(
-        "DELETE FROM filesystem_entries \
-         WHERE media_item_id = $1 AND language = $2 AND entry_type = 'subtitle'",
-    )
-    .bind(media_item_id)
-    .bind(language)
-    .execute(pool)
+    filesystem_entries::Entity::delete_many()
+        .filter(filesystem_entries::Column::MediaItemId.eq(media_item_id))
+        .filter(filesystem_entries::Column::Language.eq(language))
+        .filter(filesystem_entries::Column::EntryType.eq(FileSystemEntryType::Subtitle))
+        .exec(orm())
+        .await?;
+
+    let inserted = filesystem_entries::ActiveModel {
+        media_item_id: Set(media_item_id),
+        entry_type: Set(FileSystemEntryType::Subtitle),
+        path: Set(path.to_owned()),
+        file_size: Set(file_size),
+        language: Set(Some(language.to_owned())),
+        subtitle_content: Set(Some(subtitle_content.to_owned())),
+        source_provider: Set(Some(source_provider.to_owned())),
+        source_id: Set(source_id.map(str::to_owned)),
+        parent_original_filename: Set(parent_original_filename.map(str::to_owned)),
+        ..Default::default()
+    }
+    .insert(orm())
     .await?;
 
-    let entry = sqlx::query_as::<_, FileSystemEntry>(
-        "INSERT INTO filesystem_entries \
-         (media_item_id, entry_type, path, file_size, language, subtitle_content, \
-          source_provider, source_id, parent_original_filename) \
-         VALUES ($1, 'subtitle', $2, $3, $4, $5, $6, $7, $8) \
-         RETURNING *",
-    )
-    .bind(media_item_id)
-    .bind(path)
-    .bind(file_size)
-    .bind(language)
-    .bind(subtitle_content)
-    .bind(source_provider)
-    .bind(source_id)
-    .bind(parent_original_filename)
-    .fetch_one(pool)
-    .await?;
-
-    Ok(entry)
+    get_media_entry_by_id_any(inserted.id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("inserted subtitle entry {} not found", inserted.id))
 }
 
-pub async fn get_media_entry_by_id(
-    pool: &PgPool,
-    entry_id: i64,
-) -> Result<Option<FileSystemEntry>> {
-    Ok(sqlx::query_as::<_, FileSystemEntry>(
-        "SELECT * FROM filesystem_entries WHERE id = $1 AND entry_type = 'media'",
-    )
-    .bind(entry_id)
-    .fetch_optional(pool)
-    .await?)
+/// Fetch a filesystem entry by id regardless of entry_type, as the public
+/// `FileSystemEntry` struct. Used to re-fetch after inserts.
+async fn get_media_entry_by_id_any(entry_id: i64) -> Result<Option<FileSystemEntry>> {
+    Ok(filesystem_entries::Entity::find_by_id(entry_id)
+        .into_model::<FileSystemEntry>()
+        .one(orm())
+        .await?)
+}
+
+pub async fn get_media_entry_by_id(entry_id: i64) -> Result<Option<FileSystemEntry>> {
+    Ok(filesystem_entries::Entity::find()
+        .filter(filesystem_entries::Column::Id.eq(entry_id))
+        .filter(filesystem_entries::Column::EntryType.eq(FileSystemEntryType::Media))
+        .into_model::<FileSystemEntry>()
+        .one(orm())
+        .await?)
 }
 
 /// Return the most likely next playback target for episodic content.
 /// Movies and non-episodic items return `None`.
-pub async fn get_next_playback_entry(
-    pool: &PgPool,
-    entry_id: i64,
-) -> Result<Option<FileSystemEntry>> {
-    Ok(sqlx::query_as::<_, FileSystemEntry>(
-        r#"SELECT next_fe.*
+pub async fn get_next_playback_entry(entry_id: i64) -> Result<Option<FileSystemEntry>> {
+    // Raw Statement: multi-table self-join across episodes/seasons with the
+    // next-episode ordering logic.
+    Ok(FileSystemEntry::find_by_statement(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        r#"SELECT next_fe.id, next_fe.file_size, next_fe.created_at, next_fe.updated_at,
+                  next_fe.media_item_id, next_fe.entry_type::text AS entry_type, next_fe.path,
+                  next_fe.original_filename, next_fe.download_url, next_fe.stream_url, next_fe.plugin,
+                  next_fe.provider, next_fe.provider_download_id, next_fe.library_profiles,
+                  next_fe.media_metadata, next_fe.language, next_fe.parent_original_filename,
+                  next_fe.subtitle_content, next_fe.file_hash, next_fe.video_file_size,
+                  next_fe.opensubtitles_id, next_fe.source_provider, next_fe.source_id,
+                  next_fe.stream_id, next_fe.resolution, next_fe.ranking_profile_name,
+                  next_fe.usenet_info_hash, next_fe.usenet_file_index
            FROM filesystem_entries current_fe
            INNER JOIN media_items current_ep
                ON current_ep.id = current_fe.media_item_id
@@ -427,16 +452,19 @@ pub async fn get_next_playback_entry(
                next_ep.episode_number ASC NULLS LAST,
                next_fe.id ASC
            LIMIT 1"#,
-    )
-    .bind(entry_id)
-    .fetch_optional(pool)
+        [entry_id.into()],
+    ))
+    .one(orm())
     .await?)
 }
 
 pub async fn list_filesystem_profile_entry_candidates(
-    pool: &PgPool,
 ) -> Result<Vec<FilesystemProfileEntryCandidate>> {
-    Ok(sqlx::query_as::<_, FilesystemProfileEntryCandidate>(
+    // Raw Statement: large multi-CASE projection across self-joins. item_type
+    // is consumed only inside CASE expressions (not selected), so no enum cast
+    // is needed on the output.
+    Ok(FilesystemProfileEntryCandidate::find_by_statement(Statement::from_string(
+        DbBackend::Postgres,
         r#"SELECT
                fe.id,
                fe.library_profiles,
@@ -493,43 +521,40 @@ pub async fn list_filesystem_profile_entry_candidates(
                )
            WHERE fe.entry_type = 'media'
            ORDER BY fe.id"#,
-    )
-    .fetch_all(pool)
+    ))
+    .all(orm())
     .await?)
 }
 
 /// Return the ranking profile names that already have a downloaded entry for this item.
-pub async fn get_downloaded_profile_names(
-    pool: &PgPool,
-    media_item_id: i64,
-) -> Result<Vec<String>> {
-    let rows: Vec<Option<String>> = sqlx::query_scalar(
-        "SELECT DISTINCT ranking_profile_name FROM filesystem_entries \
-         WHERE media_item_id = $1 AND entry_type = 'media' AND ranking_profile_name IS NOT NULL",
-    )
-    .bind(media_item_id)
-    .fetch_all(pool)
-    .await?;
+pub async fn get_downloaded_profile_names(media_item_id: i64) -> Result<Vec<String>> {
+    let rows: Vec<Option<String>> = filesystem_entries::Entity::find()
+        .filter(filesystem_entries::Column::MediaItemId.eq(media_item_id))
+        .filter(filesystem_entries::Column::EntryType.eq(FileSystemEntryType::Media))
+        .filter(filesystem_entries::Column::RankingProfileName.is_not_null())
+        .select_only()
+        .column(filesystem_entries::Column::RankingProfileName)
+        .distinct()
+        .into_tuple()
+        .all(orm())
+        .await?;
     Ok(rows.into_iter().flatten().collect())
 }
 
 /// For a Season item, return profile names that have been downloaded for at
 /// least one episode in that season.
-pub async fn get_downloaded_profile_names_for_season(
-    pool: &PgPool,
-    season_id: i64,
-) -> Result<Vec<String>> {
-    let rows: Vec<Option<String>> = sqlx::query_scalar(
-        "SELECT DISTINCT fe.ranking_profile_name \
-         FROM filesystem_entries fe \
-         INNER JOIN media_items ep ON ep.id = fe.media_item_id \
-         WHERE ep.parent_id = $1 \
-           AND fe.entry_type = 'media' \
-           AND fe.ranking_profile_name IS NOT NULL",
-    )
-    .bind(season_id)
-    .fetch_all(pool)
-    .await?;
+pub async fn get_downloaded_profile_names_for_season(season_id: i64) -> Result<Vec<String>> {
+    let rows: Vec<Option<String>> = filesystem_entries::Entity::find()
+        .inner_join(riven_core::entities::media_items::Entity)
+        .filter(riven_core::entities::media_items::Column::ParentId.eq(season_id))
+        .filter(filesystem_entries::Column::EntryType.eq(FileSystemEntryType::Media))
+        .filter(filesystem_entries::Column::RankingProfileName.is_not_null())
+        .select_only()
+        .column(filesystem_entries::Column::RankingProfileName)
+        .distinct()
+        .into_tuple()
+        .all(orm())
+        .await?;
     Ok(rows.into_iter().flatten().collect())
 }
 
@@ -538,12 +563,7 @@ pub async fn get_downloaded_profile_names_for_season(
 ///
 /// Requires the partial unique index `idx_fs_entries_media_path_unique` on
 /// `(media_item_id, path) WHERE entry_type = 'media'` (migration 011).
-#[expect(
-    clippy::too_many_arguments,
-    reason = "wide upsert mirroring the entry columns"
-)]
 pub async fn create_media_entry(
-    pool: &PgPool,
     media_item_id: i64,
     path: &str,
     file_size: i64,
@@ -561,49 +581,62 @@ pub async fn create_media_entry(
 ) -> Result<FileSystemEntry> {
     let media_metadata = parse_filename_metadata(original_filename);
 
-    let entry = sqlx::query_as::<_, FileSystemEntry>(
-        "INSERT INTO filesystem_entries \
-         (media_item_id, entry_type, path, file_size, original_filename, download_url, stream_url, \
-          plugin, provider, media_metadata, stream_id, resolution, ranking_profile_name, library_profiles, \
-          usenet_info_hash, usenet_file_index) \
-         VALUES ($1, 'media', $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15) \
-         ON CONFLICT (media_item_id, path) WHERE entry_type = 'media' \
-         DO UPDATE SET \
-             file_size             = EXCLUDED.file_size, \
-             original_filename     = EXCLUDED.original_filename, \
-             download_url          = COALESCE(EXCLUDED.download_url, filesystem_entries.download_url), \
-             stream_url            = COALESCE(EXCLUDED.stream_url, filesystem_entries.stream_url), \
-             plugin                = EXCLUDED.plugin, \
-             provider              = EXCLUDED.provider, \
-             media_metadata        = EXCLUDED.media_metadata, \
-             stream_id             = COALESCE(EXCLUDED.stream_id, filesystem_entries.stream_id), \
-             resolution            = COALESCE(EXCLUDED.resolution, filesystem_entries.resolution), \
-             ranking_profile_name  = COALESCE(EXCLUDED.ranking_profile_name, filesystem_entries.ranking_profile_name), \
-             library_profiles      = EXCLUDED.library_profiles, \
-             usenet_info_hash      = COALESCE(EXCLUDED.usenet_info_hash, filesystem_entries.usenet_info_hash), \
-             usenet_file_index     = COALESCE(EXCLUDED.usenet_file_index, filesystem_entries.usenet_file_index), \
-             updated_at            = NOW() \
-         RETURNING *",
-    )
-    .bind(media_item_id)
-    .bind(path)
-    .bind(file_size)
-    .bind(original_filename)
-    .bind(download_url)
-    .bind(stream_url)
-    .bind(plugin)
-    .bind(provider)
-    .bind(&media_metadata)
-    .bind(stream_id)
-    .bind(resolution)
-    .bind(ranking_profile_name)
-    .bind(library_profiles)
-    .bind(usenet_info_hash)
-    .bind(usenet_file_index)
-    .fetch_one(pool)
-    .await?;
+    // Raw Statement: ON CONFLICT targets a *partial* unique index
+    // (`WHERE entry_type = 'media'`) and the DO UPDATE mixes EXCLUDED with
+    // COALESCE(EXCLUDED, existing) per-column — not expressible via ActiveModel
+    // upsert. Re-fetch the row through `get_media_entry_by_id` afterward.
+    let row = orm()
+        .query_one(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "INSERT INTO filesystem_entries \
+             (media_item_id, entry_type, path, file_size, original_filename, download_url, stream_url, \
+              plugin, provider, media_metadata, stream_id, resolution, ranking_profile_name, library_profiles, \
+              usenet_info_hash, usenet_file_index) \
+             VALUES ($1, 'media', $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15) \
+             ON CONFLICT (media_item_id, path) WHERE entry_type = 'media' \
+             DO UPDATE SET \
+                 file_size             = EXCLUDED.file_size, \
+                 original_filename     = EXCLUDED.original_filename, \
+                 download_url          = COALESCE(EXCLUDED.download_url, filesystem_entries.download_url), \
+                 stream_url            = COALESCE(EXCLUDED.stream_url, filesystem_entries.stream_url), \
+                 plugin                = EXCLUDED.plugin, \
+                 provider              = EXCLUDED.provider, \
+                 media_metadata        = EXCLUDED.media_metadata, \
+                 stream_id             = COALESCE(EXCLUDED.stream_id, filesystem_entries.stream_id), \
+                 resolution            = COALESCE(EXCLUDED.resolution, filesystem_entries.resolution), \
+                 ranking_profile_name  = COALESCE(EXCLUDED.ranking_profile_name, filesystem_entries.ranking_profile_name), \
+                 library_profiles      = EXCLUDED.library_profiles, \
+                 usenet_info_hash      = COALESCE(EXCLUDED.usenet_info_hash, filesystem_entries.usenet_info_hash), \
+                 usenet_file_index     = COALESCE(EXCLUDED.usenet_file_index, filesystem_entries.usenet_file_index), \
+                 updated_at            = NOW() \
+             RETURNING id",
+            [
+                media_item_id.into(),
+                path.into(),
+                file_size.into(),
+                original_filename.into(),
+                download_url.into(),
+                stream_url.into(),
+                plugin.into(),
+                provider.into(),
+                media_metadata.into(),
+                stream_id.into(),
+                resolution.into(),
+                ranking_profile_name.into(),
+                library_profiles.cloned().into(),
+                usenet_info_hash.into(),
+                usenet_file_index.into(),
+            ],
+        ))
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("create_media_entry returned no row"))?;
+    let entry_id: i64 = row.try_get::<i64>("", "id")?;
 
-    super::state::recompute(pool, &[media_item_id]).await?;
+    let entry = get_media_entry_by_id_any(entry_id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("created media entry {entry_id} not found"))?;
+
+    super::state::recompute(&[media_item_id]).await?;
 
     Ok(entry)
 }
@@ -662,209 +695,144 @@ fn parse_filename_metadata(filename: &str) -> serde_json::Value {
     })
 }
 
-async fn list_vfs_dirs_at_depth(pool: &PgPool, pattern: &str, depth: u32) -> Result<Vec<String>> {
-    let sql = format!(
-        "SELECT DISTINCT split_part(path, '/', {depth}) \
-         FROM filesystem_entries \
-         WHERE path LIKE $1 AND entry_type = 'media' \
-         ORDER BY 1"
-    );
-    let rows: Vec<Option<String>> = sqlx::query_scalar(sqlx::AssertSqlSafe(sql.as_str()))
-        .bind(pattern)
-        .fetch_all(pool)
-        .await?;
-    Ok(rows.into_iter().flatten().collect())
-}
-
-pub async fn list_vfs_dir_names(
-    pool: &PgPool,
-    pattern: &str,
-    depth: u32,
-) -> Result<Vec<VfsDirName>> {
+pub async fn list_vfs_dir_names(pattern: &str, depth: u32) -> Result<Vec<VfsDirName>> {
+    // Raw Statement: split_part with interpolated depth.
     let sql = format!(
         "SELECT split_part(path, '/', {depth}) AS name, library_profiles \
          FROM filesystem_entries \
          WHERE path LIKE $1 AND entry_type = 'media' \
          ORDER BY 1"
     );
-    Ok(
-        sqlx::query_as::<_, VfsDirName>(sqlx::AssertSqlSafe(sql.as_str()))
-            .bind(pattern)
-            .fetch_all(pool)
-            .await?,
-    )
+    Ok(VfsDirName::find_by_statement(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        sql,
+        [pattern.into()],
+    ))
+    .all(orm())
+    .await?)
 }
 
-pub async fn list_vfs_file_names(pool: &PgPool, dir_path: &str) -> Result<Vec<VfsFileName>> {
+pub async fn list_vfs_file_names(dir_path: &str) -> Result<Vec<VfsFileName>> {
+    // Raw Statement: split_part over an array_length expression.
     let sql = "SELECT split_part(path, '/', array_length(string_to_array(trim(both '/' from $1), '/'), 1) + 2) AS name, library_profiles \
          FROM filesystem_entries \
          WHERE path LIKE ($1 || '/%') AND entry_type IN ('media', 'subtitle') \
          ORDER BY 1";
-    Ok(sqlx::query_as::<_, VfsFileName>(sql)
-        .bind(dir_path)
-        .fetch_all(pool)
-        .await?)
-}
-
-pub async fn list_vfs_entry_paths(pool: &PgPool, pattern: &str) -> Result<Vec<VfsEntryPath>> {
-    Ok(sqlx::query_as::<_, VfsEntryPath>(
-        "SELECT path, library_profiles FROM filesystem_entries \
-         WHERE path LIKE $1 AND entry_type = 'media' \
-         ORDER BY path",
-    )
-    .bind(pattern)
-    .fetch_all(pool)
+    Ok(VfsFileName::find_by_statement(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        sql,
+        [dir_path.into()],
+    ))
+    .all(orm())
     .await?)
-}
-
-pub async fn list_vfs_movie_dirs(pool: &PgPool) -> Result<Vec<String>> {
-    list_vfs_dirs_at_depth(pool, "/movies/%/%", 3).await
-}
-
-pub async fn list_vfs_show_dirs(pool: &PgPool) -> Result<Vec<String>> {
-    list_vfs_dirs_at_depth(pool, "/shows/%/%/%", 3).await
-}
-
-pub async fn list_vfs_season_dirs(pool: &PgPool, show_path: &str) -> Result<Vec<String>> {
-    list_vfs_dirs_at_depth(pool, &format!("{show_path}/%/%"), 4).await
 }
 
 /// Aggregate stat (timestamps + entry count) for all media entries under `path_prefix`.
 /// A `path_prefix` of `""` covers all entries; `/movies` covers only movies, etc.
-#[derive(sqlx::FromRow)]
+#[derive(sea_orm::FromQueryResult)]
 pub struct VfsDirStatResult {
     pub ctime: Option<DateTime<Utc>>,
     pub mtime: Option<DateTime<Utc>>,
     pub entry_count: i64,
 }
 
-pub async fn get_vfs_dir_stat(pool: &PgPool, path_prefix: &str) -> Result<VfsDirStatResult> {
+pub async fn get_vfs_dir_stat(path_prefix: &str) -> Result<VfsDirStatResult> {
+    // Raw Statement: aggregate over MIN/MAX/COUNT with COALESCE.
     let pattern = format!("{path_prefix}/%");
-    Ok(sqlx::query_as::<_, VfsDirStatResult>(
+    VfsDirStatResult::find_by_statement(Statement::from_sql_and_values(
+        DbBackend::Postgres,
         "SELECT \
            MIN(created_at) AS ctime, \
            MAX(COALESCE(updated_at, created_at)) AS mtime, \
            COUNT(*) AS entry_count \
          FROM filesystem_entries \
          WHERE path LIKE $1 AND entry_type = 'media'",
-    )
-    .bind(pattern)
-    .fetch_one(pool)
-    .await?)
+        [pattern.into()],
+    ))
+    .one(orm())
+    .await?
+    .ok_or_else(|| anyhow::anyhow!("get_vfs_dir_stat returned no row"))
 }
 
 /// Count distinct directory names at `depth` (1-based split_part index) for entries
 /// matching `pattern`.
-pub async fn count_vfs_distinct_dirs(pool: &PgPool, pattern: &str, depth: u32) -> Result<i64> {
+pub async fn count_vfs_distinct_dirs(pattern: &str, depth: u32) -> Result<i64> {
+    // Raw Statement: COUNT(DISTINCT split_part(...)) with interpolated depth.
     let sql = format!(
-        "SELECT COUNT(DISTINCT split_part(path, '/', {depth})) \
+        "SELECT COUNT(DISTINCT split_part(path, '/', {depth})) AS count \
          FROM filesystem_entries \
          WHERE path LIKE $1 AND entry_type = 'media'"
     );
-    Ok(
-        sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(sql.as_str()))
-            .bind(pattern)
-            .fetch_one(pool)
-            .await?,
-    )
-}
-
-pub async fn list_vfs_file_paths(pool: &PgPool, dir_path: &str) -> Result<Vec<String>> {
-    let pattern = format!("{dir_path}/%");
-    Ok(sqlx::query_scalar!(
-        "SELECT path FROM filesystem_entries \
-         WHERE path LIKE $1 AND entry_type = 'media'",
-        pattern
-    )
-    .fetch_all(pool)
-    .await?)
+    let row = orm()
+        .query_one(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            sql,
+            [pattern.into()],
+        ))
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("count_vfs_distinct_dirs returned no row"))?;
+    Ok(row.try_get::<i64>("", "count")?)
 }
 
 /// Returns `(was_deleted, owning_media_item_id)`. Losing a media entry can
 /// flip Completed → Scraped/Indexed, so the affected item is recomputed
 /// before returning.
-pub async fn delete_filesystem_entry(pool: &PgPool, entry_id: i64) -> Result<(bool, Option<i64>)> {
-    let row: Option<(i64,)> = sqlx::query_as(
-        "DELETE FROM filesystem_entries \
-         WHERE id = $1 AND entry_type = 'media' \
-         RETURNING media_item_id",
-    )
-    .bind(entry_id)
-    .fetch_optional(pool)
-    .await?;
-    if let Some((media_item_id,)) = row {
-        super::state::recompute(pool, &[media_item_id]).await?;
+pub async fn delete_filesystem_entry(entry_id: i64) -> Result<(bool, Option<i64>)> {
+    // Raw Statement: DELETE ... RETURNING to learn the owning item in one trip.
+    let row = orm()
+        .query_one(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "DELETE FROM filesystem_entries \
+             WHERE id = $1 AND entry_type = 'media' \
+             RETURNING media_item_id",
+            [entry_id.into()],
+        ))
+        .await?;
+    let media_item_id = match row {
+        Some(row) => Some(row.try_get::<i64>("", "media_item_id")?),
+        None => None,
+    };
+    if let Some(id) = media_item_id {
+        super::state::recompute(&[id]).await?;
     }
-    Ok((row.is_some(), row.map(|r| r.0)))
+    Ok((media_item_id.is_some(), media_item_id))
 }
 
-pub async fn update_stream_url(pool: &PgPool, entry_id: i64, stream_url: &str) -> Result<()> {
-    sqlx::query("UPDATE filesystem_entries SET stream_url = $2 WHERE id = $1")
-        .bind(entry_id)
-        .bind(stream_url)
-        .execute(pool)
-        .await?;
-    Ok(())
-}
-
-/// Update the pinned `provider` for a media entry. Called when the
-/// link-request handler fell back to a different store after the originally
-/// pinned one reported the torrent dead — keeping `provider` in sync lets
-/// the next refresh prefer the live store first.
-pub async fn update_entry_provider(pool: &PgPool, entry_id: i64, provider: &str) -> Result<()> {
-    sqlx::query("UPDATE filesystem_entries SET provider = $2 WHERE id = $1")
-        .bind(entry_id)
-        .bind(provider)
-        .execute(pool)
-        .await?;
-    Ok(())
-}
-
-pub async fn update_library_profiles(
-    pool: &PgPool,
-    entry_id: i64,
-    library_profiles: &serde_json::Value,
-) -> Result<()> {
-    sqlx::query(
-        "UPDATE filesystem_entries SET library_profiles = $2, updated_at = NOW() WHERE id = $1",
-    )
-    .bind(entry_id)
-    .bind(library_profiles)
-    .execute(pool)
+pub async fn update_stream_url(entry_id: i64, stream_url: &str) -> Result<()> {
+    filesystem_entries::ActiveModel {
+        id: Unchanged(entry_id),
+        stream_url: Set(Some(stream_url.to_owned())),
+        ..Default::default()
+    }
+    .update(orm())
     .await?;
     Ok(())
 }
 
 pub async fn update_library_profiles_batch(
-    pool: &PgPool,
     updates: &[(i64, serde_json::Value)],
 ) -> Result<u64> {
     if updates.is_empty() {
         return Ok(0);
     }
 
+    // Kept as a per-row UPDATE loop: the original used a single multi-row
+    // UPDATE ... FROM (VALUES ...) join, which SeaORM's query builder can't
+    // express. Each row is a plain ActiveModel update. `Set` on the JsonBinary
+    // column mirrors the proven `Set(seasons_json)` pattern in requests.rs.
+    let now = Utc::now();
     let mut total = 0_u64;
-
-    for chunk in updates.chunks(500) {
-        let mut query_builder: QueryBuilder<Postgres> = QueryBuilder::new(
-            "UPDATE filesystem_entries AS fe \
-             SET library_profiles = data.library_profiles, updated_at = NOW() \
-             FROM (",
-        );
-
-        query_builder.push_values(chunk, |mut builder, (entry_id, library_profiles)| {
-            builder
-                .push_bind(*entry_id)
-                .push(", ")
-                .push_bind(library_profiles);
-        });
-
-        query_builder.push(
-            ") AS data(id, library_profiles) \
-             WHERE fe.id = data.id",
-        );
-
-        total += query_builder.build().execute(pool).await?.rows_affected();
+    for (entry_id, library_profiles) in updates {
+        let result = filesystem_entries::Entity::update_many()
+            .set(filesystem_entries::ActiveModel {
+                library_profiles: Set(Some(library_profiles.clone())),
+                updated_at: Set(Some(now)),
+                ..Default::default()
+            })
+            .filter(filesystem_entries::Column::Id.eq(*entry_id))
+            .exec(orm())
+            .await?;
+        total += result.rows_affected;
     }
 
     Ok(total)

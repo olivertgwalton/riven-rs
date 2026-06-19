@@ -2,6 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
+use sea_orm::ConnectionTrait;
 use tokio::signal;
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
@@ -64,10 +65,14 @@ fn env_parsed<T: std::str::FromStr>(name: &str) -> Option<T> {
 #[tokio::main]
 async fn main() -> Result<()> {
     let mut settings = riven_core::settings::RivenSettings::load()?;
-    let db_pool = riven_db::connect(&settings.database_url).await?;
-    riven_db::run_migrations(&db_pool).await?;
+    // `connect` opens the SeaORM connection and publishes it as the process-wide
+    // global that the migrated repo functions read via `riven_db::orm()`. It must
+    // run before any repo call. The returned handle is only needed locally for
+    // `run_migrations` and the optional startup wipe.
+    let db = riven_db::connect(&settings.database_url).await?;
+    riven_db::run_migrations(&db).await?;
 
-    if let Ok(Some(general_settings)) = riven_db::repo::get_setting(&db_pool, "general").await {
+    if let Ok(Some(general_settings)) = riven_db::repo::get_setting("general").await {
         settings.apply_general_db_override(&general_settings);
     }
 
@@ -80,10 +85,10 @@ async fn main() -> Result<()> {
 
     if settings.unsafe_wipe_database_on_startup {
         tracing::warn!("unsafe_wipe_database_on_startup is enabled — wiping database");
-        sqlx::query("DROP SCHEMA public CASCADE; CREATE SCHEMA public;")
-            .execute(&db_pool)
+        riven_db::orm()
+            .execute_unprepared("DROP SCHEMA public CASCADE; CREATE SCHEMA public;")
             .await?;
-        riven_db::run_migrations(&db_pool).await?;
+        riven_db::run_migrations(&db).await?;
     }
 
     let redis_conn = riven_queue::connect_managed(settings.redis_url.as_str()).await?;
@@ -95,7 +100,6 @@ async fn main() -> Result<()> {
 
     let registry = setup::register_plugins(
         http_client.clone(),
-        db_pool.clone(),
         redis_conn,
         settings.effective_vfs_mount_path().to_string(),
         &settings,
@@ -122,7 +126,7 @@ async fn main() -> Result<()> {
                 .filter(|&n| n > 0);
             usenet_download_workers =
                 Some(configured.unwrap_or(riven_usenet::DEFAULT_DOWNLOAD_WORKERS));
-            Some(riven_usenet::UsenetStreamer::shared(cfg, db_pool.clone()))
+            Some(riven_usenet::UsenetStreamer::shared(cfg, db.clone()))
         }
         None => {
             tracing::info!("usenet streaming disabled (plugin not configured)");
@@ -137,7 +141,6 @@ async fn main() -> Result<()> {
             &settings.redis_url,
             registry.clone(),
             notification_tx.clone(),
-            db_pool.clone(),
             DownloaderConfig::from(&settings),
             ReindexConfig::from(&settings),
             settings.filesystem.clone(),
@@ -163,7 +166,6 @@ async fn main() -> Result<()> {
         &vfs_mount_path,
         job_queue.vfs_layout.clone(),
         job_queue.filesystem_settings_revision.clone(),
-        db_pool.clone(),
         stream_http_client.clone(),
         link_tx.clone(),
         settings.vfs_cache_max_size_mb,
@@ -171,7 +173,6 @@ async fn main() -> Result<()> {
     )?);
 
     if let Some(streamer) = usenet_streamer.clone() {
-        let db = db_pool.clone();
         let repair_queue = job_queue.clone();
         let sample_percent = setting_u64(&usenet_settings_json, "availabilitysamplepercent")
             .map(|n| n as usize)
@@ -204,7 +205,7 @@ async fn main() -> Result<()> {
             loop {
                 tick.tick().await;
 
-                match riven_db::repo::prune_orphaned_usenet_health(&db).await {
+                match riven_db::repo::prune_orphaned_usenet_health().await {
                     Ok(n) if n > 0 => {
                         tracing::debug!(removed = n, "usenet health: pruned orphaned rows")
                     }
@@ -225,7 +226,7 @@ async fn main() -> Result<()> {
                     sample_percent
                 };
 
-                let due = match riven_db::repo::usenet_files_due_for_check(&db, batch).await {
+                let due = match riven_db::repo::usenet_files_due_for_check(batch).await {
                     Ok(due) => due,
                     Err(error) => {
                         tracing::debug!(%error, "usenet health: due-for-check query failed");
@@ -254,7 +255,6 @@ async fn main() -> Result<()> {
                         }
                     };
                     if let Err(error) = riven_db::repo::upsert_usenet_file_health(
-                        &db,
                         riven_db::repo::UsenetHealthUpdate {
                             info_hash: &file.info_hash,
                             file_index: file.file_index,
@@ -277,7 +277,6 @@ async fn main() -> Result<()> {
                     match status {
                         "healthy" => {
                             if let Err(error) = riven_db::repo::clear_usenet_repair_state(
-                                &db,
                                 &file.info_hash,
                                 file.file_index,
                             )
@@ -291,7 +290,6 @@ async fn main() -> Result<()> {
                                 continue;
                             };
                             match riven_db::repo::usenet_repair_due(
-                                &db,
                                 &file.info_hash,
                                 file.file_index,
                                 repair_max_retries,
@@ -318,7 +316,6 @@ async fn main() -> Result<()> {
                                     }
                                     if let Err(error) =
                                         riven_db::repo::record_usenet_repair_attempt(
-                                            &db,
                                             &file.info_hash,
                                             file.file_index,
                                             backoff,
@@ -344,7 +341,6 @@ async fn main() -> Result<()> {
     if usenet_streamer.is_some()
         && let Some(mut dead_rx) = riven_usenet::state::take_dead_segment_receiver()
     {
-        let db = db_pool.clone();
         let repair_queue = job_queue.clone();
         let reg = registry.clone();
         tokio::spawn(async move {
@@ -356,16 +352,25 @@ async fn main() -> Result<()> {
                 if !enabled {
                     continue;
                 }
-                let media_item_id: Option<i64> = sqlx::query_scalar(
-                    "SELECT media_item_id FROM filesystem_entries \
-                     WHERE usenet_info_hash = $1 AND usenet_file_index = $2 \
-                       AND entry_type = 'media' LIMIT 1",
-                )
-                .bind(&ev.info_hash)
-                .bind(ev.file_index as i32)
-                .fetch_optional(&db)
-                .await
-                .unwrap_or(None);
+                // `entry_type` is a Postgres enum; compare against its text form
+                // so the literal binds cleanly, and read back only the bigint id.
+                let media_item_id: Option<i64> = match riven_db::orm()
+                    .query_one(sea_orm::Statement::from_sql_and_values(
+                        sea_orm::DbBackend::Postgres,
+                        "SELECT media_item_id FROM filesystem_entries \
+                         WHERE usenet_info_hash = $1 AND usenet_file_index = $2 \
+                           AND entry_type::text = 'media' LIMIT 1",
+                        [ev.info_hash.clone().into(), (ev.file_index as i32).into()],
+                    ))
+                    .await
+                {
+                    Ok(Some(row)) => row.try_get::<Option<i64>>("", "media_item_id").unwrap_or(None),
+                    Ok(None) => None,
+                    Err(error) => {
+                        tracing::debug!(%error, "read-time repair: media entry lookup failed");
+                        None
+                    }
+                };
                 let Some(media_item_id) = media_item_id else {
                     tracing::debug!(
                         info_hash = %ev.info_hash,
@@ -389,7 +394,6 @@ async fn main() -> Result<()> {
     }
 
     if let Some(streamer) = usenet_streamer.clone() {
-        let db = db_pool.clone();
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -403,7 +407,6 @@ async fn main() -> Result<()> {
                     let articles_delta = t.articles_downloaded.saturating_sub(last_articles);
                     if (bytes_delta > 0 || articles_delta > 0)
                         && let Err(error) = riven_db::repo::add_provider_traffic(
-                            &db,
                             &t.host,
                             bytes_delta as i64,
                             articles_delta as i64,
@@ -456,7 +459,6 @@ async fn main() -> Result<()> {
         );
     }
     let gql_handle = tokio::spawn({
-        let pool = db_pool.clone();
         let jq = job_queue.clone();
         let reg = registry.clone();
         let api_key = (!settings.api_key.is_empty()).then(|| settings.api_key.clone());
@@ -486,7 +488,6 @@ async fn main() -> Result<()> {
             if let Err(e) = riven_api::start_server(riven_api::StartServerConfig {
                 host: gql_host,
                 port: gql_port,
-                db_pool: pool,
                 registry: reg,
                 job_queue: jq.clone(),
                 http_client: http_client.clone(),

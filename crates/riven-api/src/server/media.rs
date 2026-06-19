@@ -194,7 +194,7 @@ async fn resolve_media_stream_url(
         &state.link_request_tx,
     )
     .await?;
-    if let Err(error) = riven_db::repo::update_stream_url(&state.db_pool, entry.id, &url).await {
+    if let Err(error) = riven_db::repo::update_stream_url(entry.id, &url).await {
         tracing::warn!(
             entry_id = entry.id,
             error = %error,
@@ -249,7 +249,7 @@ fn maybe_spawn_next_prewarm(
 
     let state = state.clone();
     tokio::spawn(async move {
-        match riven_db::repo::get_next_playback_entry(&state.db_pool, entry_id).await {
+        match riven_db::repo::get_next_playback_entry(entry_id).await {
             Ok(Some(next_entry)) => {
                 prewarm_playback_target(state, next_entry, "next_playback").await
             }
@@ -278,7 +278,8 @@ async fn load_media_entry(
     state: &ApiState,
     entry_id: i64,
 ) -> Result<Option<riven_db::entities::FileSystemEntry>> {
-    riven_db::repo::get_media_entry_by_id(&state.db_pool, entry_id).await
+    let _ = state;
+    riven_db::repo::get_media_entry_by_id(entry_id).await
 }
 
 /// Query string for the media bridge. `?download=1` (any value) flips the

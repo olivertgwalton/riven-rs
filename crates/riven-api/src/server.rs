@@ -28,7 +28,6 @@ pub use state::ApiState;
 pub struct StartServerConfig {
     pub host: String,
     pub port: u16,
-    pub db_pool: sqlx::PgPool,
     pub registry: Arc<PluginRegistry>,
     pub job_queue: Arc<JobQueue>,
     pub http_client: HttpClient,
@@ -58,7 +57,6 @@ mod state {
     #[derive(Clone)]
     pub struct ApiState {
         pub schema: AppSchema,
-        pub db_pool: sqlx::PgPool,
         pub job_queue: Arc<JobQueue>,
         pub api_key: Option<String>,
         pub frontend_auth_signing_secret: Option<String>,
@@ -74,7 +72,6 @@ pub async fn start_server(config: StartServerConfig) -> Result<()> {
     let StartServerConfig {
         host,
         port,
-        db_pool,
         registry,
         job_queue,
         http_client,
@@ -93,7 +90,6 @@ pub async fn start_server(config: StartServerConfig) -> Result<()> {
     } = config;
 
     let schema = build_schema(
-        db_pool.clone(),
         registry,
         job_queue.clone(),
         http_client,
@@ -126,7 +122,6 @@ pub async fn start_server(config: StartServerConfig) -> Result<()> {
 
     let state = ApiState {
         schema,
-        db_pool,
         job_queue,
         api_key,
         frontend_auth_signing_secret,

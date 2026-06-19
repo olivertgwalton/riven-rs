@@ -42,11 +42,10 @@ pub struct DownloadHierarchyContext {
 }
 
 pub async fn load_media_item_hierarchy_or_log(
-    db_pool: &sqlx::PgPool,
     id: i64,
     context: &str,
 ) -> Option<MediaItemHierarchy> {
-    match repo::get_media_item_hierarchy(db_pool, id).await {
+    match repo::get_media_item_hierarchy(id).await {
         Ok(Some(item)) => Some(item),
         Ok(None) => {
             tracing::error!(id, "media item not found for {context}");
@@ -61,11 +60,10 @@ pub async fn load_media_item_hierarchy_or_log(
 
 /// Load a media item by id, logging an error and returning `None` on failure.
 pub async fn load_media_item_or_log(
-    db_pool: &sqlx::PgPool,
     id: i64,
     context: &str,
 ) -> Option<MediaItem> {
-    match repo::get_media_item(db_pool, id).await {
+    match repo::get_media_item(id).await {
         Ok(Some(item)) => Some(item),
         Ok(None) => {
             tracing::error!(id, "media item not found for {context}");
@@ -83,7 +81,7 @@ pub async fn load_media_item_or_download_error(
     id: i64,
     error_msg: &str,
 ) -> Option<MediaItem> {
-    match load_media_item_or_log(&queue.db_pool, id, error_msg).await {
+    match load_media_item_or_log(id, error_msg).await {
         Some(item) => Some(item),
         None => {
             queue
@@ -98,9 +96,9 @@ pub async fn load_media_item_or_download_error(
     }
 }
 
-pub async fn load_requested_seasons(db_pool: &sqlx::PgPool, item: &MediaItem) -> Option<Vec<i32>> {
+pub async fn load_requested_seasons(item: &MediaItem) -> Option<Vec<i32>> {
     let req_id = item.item_request_id?;
-    repo::get_item_request_by_id(db_pool, req_id)
+    repo::get_item_request_by_id(req_id)
         .await
         .ok()
         .flatten()
@@ -108,9 +106,9 @@ pub async fn load_requested_seasons(db_pool: &sqlx::PgPool, item: &MediaItem) ->
         .and_then(|s| serde_json::from_value(s).ok())
 }
 
-pub async fn load_show_context(db_pool: &sqlx::PgPool, item: &MediaItem) -> ShowContext {
+pub async fn load_show_context(item: &MediaItem) -> ShowContext {
     let Some(hierarchy) =
-        load_media_item_hierarchy_or_log(db_pool, item.id, "load show context").await
+        load_media_item_hierarchy_or_log(item.id, "load show context").await
     else {
         return ShowContext {
             title: item.title.clone(),
@@ -134,14 +132,13 @@ pub async fn load_show_context(db_pool: &sqlx::PgPool, item: &MediaItem) -> Show
     }
 }
 
-pub async fn build_parse_item_context(db_pool: &sqlx::PgPool, item: MediaItem) -> ParseItemContext {
+pub async fn build_parse_item_context(item: MediaItem) -> ParseItemContext {
     let hierarchy =
-        load_media_item_hierarchy_or_log(db_pool, item.id, "build parse item context").await;
-    build_parse_item_context_with_hierarchy(db_pool, item, hierarchy.as_ref()).await
+        load_media_item_hierarchy_or_log(item.id, "build parse item context").await;
+    build_parse_item_context_with_hierarchy(item, hierarchy.as_ref()).await
 }
 
 pub async fn build_parse_item_context_with_hierarchy(
-    db_pool: &sqlx::PgPool,
     item: MediaItem,
     hierarchy: Option<&MediaItemHierarchy>,
 ) -> ParseItemContext {
@@ -152,9 +149,9 @@ pub async fn build_parse_item_context_with_hierarchy(
         dubbed_anime_only,
     ) = tokio::join!(
         resolve_parent_info(&item, hierarchy),
-        load_episode_or_season_data(db_pool, &item),
-        load_active_profiles(db_pool),
-        load_dubbed_anime_only(db_pool),
+        load_episode_or_season_data(&item),
+        load_active_profiles(),
+        load_dubbed_anime_only(),
     );
 
     let item_title = match (item.item_type, show_title_for_format.as_deref()) {
@@ -198,12 +195,11 @@ pub async fn build_parse_item_context_with_hierarchy(
 }
 
 pub async fn load_download_hierarchy_context(
-    db_pool: &sqlx::PgPool,
     item: &MediaItem,
 ) -> DownloadHierarchyContext {
     let (hierarchy, (season_episodes, _, _)) = tokio::join!(
-        load_media_item_hierarchy_or_log(db_pool, item.id, "load download hierarchy context"),
-        load_episode_or_season_data(db_pool, item),
+        load_media_item_hierarchy_or_log(item.id, "load download hierarchy context"),
+        load_episode_or_season_data(item),
     );
 
     let default_show_id = match item.item_type {
@@ -342,12 +338,11 @@ async fn resolve_parent_info(
 /// Load season episodes (Season items) or show season numbers (Show items).
 /// Returns (season_episodes, show_season_numbers, show_status).
 async fn load_episode_or_season_data(
-    db_pool: &sqlx::PgPool,
     item: &MediaItem,
 ) -> (Vec<(i32, Option<i32>)>, Vec<i32>, Option<ShowStatus>) {
     match item.item_type {
         MediaItemType::Season => {
-            let eps = match repo::list_episodes(db_pool, item.id).await {
+            let eps = match repo::list_episodes(item.id).await {
                 Ok(eps) => eps
                     .into_iter()
                     .map(|e| (e.episode_number.unwrap_or(0), e.absolute_number))
@@ -364,7 +359,7 @@ async fn load_episode_or_season_data(
             (eps, vec![], item.show_status)
         }
         MediaItemType::Show => {
-            let season_nums = match repo::list_seasons(db_pool, item.id).await {
+            let season_nums = match repo::list_seasons(item.id).await {
                 Ok(seasons) => seasons.iter().filter_map(|s| s.season_number).collect(),
                 Err(e) => {
                     tracing::warn!(

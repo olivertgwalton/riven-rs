@@ -7,7 +7,9 @@ pub enum StreamerError {
     #[error("yenc error: {0}")]
     Yenc(#[from] crate::yenc::YencError),
     #[error("database error: {0}")]
-    Db(#[from] sqlx::Error),
+    Db(#[from] sea_orm::DbErr),
+    #[error("serialization error: {0}")]
+    Serde(#[from] serde_json::Error),
     #[error("metadata not found for info_hash {0}")]
     NotIngested(String),
     #[error("file index {0} out of range")]

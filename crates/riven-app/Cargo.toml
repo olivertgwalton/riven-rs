@@ -13,7 +13,6 @@ riven-core = { path = "../riven-core" }
 riven-db = { path = "../riven-db" }
 riven-api = { path = "../riven-api" }
 riven-queue = { path = "../riven-queue" }
-riven-rank = { path = "../riven-rank" }
 plugin-tmdb = { path = "../plugin-tmdb" }
 plugin-tvdb = { path = "../plugin-tvdb" }
 plugin-comet = { path = "../plugin-comet" }
@@ -37,15 +36,11 @@ riven-usenet = { path = "../riven-usenet" }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
-tracing-appender = { workspace = true }
 anyhow = { workspace = true }
-figment = { workspace = true }
-sqlx = { workspace = true }
+sea-orm = { workspace = true }
 redis = { workspace = true }
 reqwest = { workspace = true }
 serde_json = { workspace = true }
-chrono = { workspace = true }
 
 [lints]
 workspace = true

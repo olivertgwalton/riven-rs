@@ -10,10 +10,12 @@ use riven_db::repo;
 /// Returns true when the error is a FK violation caused by the media item being
 /// deleted while a background persist task was still running.
 fn is_item_deleted_fk_error(err: &anyhow::Error) -> bool {
-    err.downcast_ref::<sqlx::Error>().and_then(|e| match e {
-        sqlx::Error::Database(db) => db.constraint(),
-        _ => None,
-    }) == Some("filesystem_entries_media_item_id_fkey")
+    use sea_orm::{DbErr, SqlErr};
+    matches!(
+        err.downcast_ref::<DbErr>().and_then(DbErr::sql_err),
+        Some(SqlErr::ForeignKeyConstraintViolation(msg))
+            if msg.contains("filesystem_entries_media_item_id_fkey")
+    )
 }
 
 use super::helpers::{
@@ -83,9 +85,9 @@ pub(crate) fn pretty_show_name(ctx: &DownloadHierarchyContext, fallback_title: &
 
 /// Blacklist the stream behind `info_hash` for this media item (best-effort;
 /// a non-empty hash is required and failures are logged, not propagated).
-async fn blacklist_stream(queue: &JobQueue, id: i64, info_hash: &str) {
+async fn blacklist_stream(id: i64, info_hash: &str) {
     if !info_hash.is_empty()
-        && let Err(err) = repo::blacklist_stream_by_hash(&queue.db_pool, id, info_hash).await
+        && let Err(err) = repo::blacklist_stream_by_hash(id, info_hash).await
     {
         tracing::warn!(id, info_hash, %err, "failed to blacklist stream");
     }
@@ -138,7 +140,7 @@ pub async fn persist_movie(
         largest
     } else {
         tracing::warn!(id, info_hash = %info_hash, "torrent has no files — blacklisting stream");
-        blacklist_stream(queue, id, info_hash).await;
+        blacklist_stream(id, info_hash).await;
         queue
             .notify(RivenEvent::MediaItemDownloadPartialSuccess { id })
             .await;
@@ -148,7 +150,7 @@ pub async fn persist_movie(
     let config = queue.downloader_config.read().await;
     if !skip_bitrate_check && !config.movie_passes(file.file_size, item.runtime) {
         drop(config);
-        handle_bitrate_failure(id, info_hash, file.file_size, item.runtime, "movie", queue).await;
+        handle_bitrate_failure(id, info_hash, file.file_size, item.runtime, "movie").await;
         return false;
     }
     drop(config);
@@ -158,7 +160,7 @@ pub async fn persist_movie(
             id, info_hash = %info_hash, filename = %file.filename,
             "matched movie file has no playable URL — blacklisting stream"
         );
-        blacklist_stream(queue, id, info_hash).await;
+        blacklist_stream(id, info_hash).await;
         queue
             .notify(RivenEvent::MediaItemDownloadPartialSuccess { id })
             .await;
@@ -182,7 +184,6 @@ pub async fn persist_movie(
     drop(filesystem_settings);
 
     if let Err(e) = repo::create_media_entry(
-        &queue.db_pool,
         id,
         &path,
         file.file_size as i64,
@@ -321,7 +322,7 @@ pub async fn persist_episode(
             info_hash = %info_hash,
             "no playable torrent file matched episode — blacklisting stream"
         );
-        blacklist_stream(queue, id, info_hash).await;
+        blacklist_stream(id, info_hash).await;
         queue
             .notify(RivenEvent::MediaItemDownloadPartialSuccess { id })
             .await;
@@ -338,7 +339,6 @@ pub async fn persist_episode(
             largest.file_size,
             item.runtime,
             "episode",
-            queue,
         )
         .await;
         return false;
@@ -349,7 +349,6 @@ pub async fn persist_episode(
     for (file, part) in select_episode_files(&matched) {
         let path = episode_vfs_path(&show_name, season_number, episode_number, part, path_tag);
         if let Err(e) = repo::create_media_entry(
-            &queue.db_pool,
             id,
             &path,
             file.file_size as i64,
@@ -418,7 +417,7 @@ pub async fn persist_season(
         }
     };
 
-    let show = match repo::get_media_item(&queue.db_pool, show_id).await {
+    let show = match repo::get_media_item(show_id).await {
         Ok(Some(s)) => s,
         Ok(None) => {
             tracing::debug!(
@@ -441,7 +440,7 @@ pub async fn persist_season(
         }
     };
 
-    let episodes = match repo::list_episodes(&queue.db_pool, id).await {
+    let episodes = match repo::list_episodes(id).await {
         Ok(eps) => eps,
         Err(e) => {
             queue
@@ -573,7 +572,6 @@ pub async fn persist_season(
         for (file, part) in select_episode_files(matched) {
             let path = episode_vfs_path(&show_name, season_number, episode_number, part, path_tag);
             match repo::create_media_entry(
-                &queue.db_pool,
                 ep.id,
                 &path,
                 file.file_size as i64,
@@ -610,19 +608,19 @@ pub async fn persist_season(
             id, season = season_number, info_hash = %info_hash,
             "season pack matched episodes but no entries were persisted — blacklisting stream"
         );
-        blacklist_stream(queue, id, info_hash).await;
+        blacklist_stream(id, info_hash).await;
         return SeasonPersistOutcome::Failed;
     }
 
-    // The filesystem_entries inserts above already triggered state recomputes
-    // for each episode; the state-cascade trigger walked them up to the
-    // season and show. Just sync the request state and read the now-current
+    // The filesystem_entries inserts above already recomputed state for each
+    // episode (via the repo layer), and the recompute cascade walked them up to
+    // the season and show. Just sync the request state and read the now-current
     // season state.
     LibraryOrchestrator::new(queue)
         .sync_item_request_state(item)
         .await;
 
-    let season_complete = repo::get_media_item(&queue.db_pool, item.id)
+    let season_complete = repo::get_media_item(item.id)
         .await
         .ok()
         .flatten()
@@ -686,7 +684,7 @@ pub async fn persist_show(
 ) -> SeasonPersistOutcome {
     let id = item.id;
 
-    let seasons = match repo::list_seasons_excluding_specials(&queue.db_pool, id).await {
+    let seasons = match repo::list_seasons_excluding_specials(id).await {
         Ok(seasons) => seasons,
         Err(e) => {
             queue
@@ -720,7 +718,7 @@ pub async fn persist_show(
 
     for season in &seasons {
         let season_number = season.season_number.unwrap_or(1);
-        let episodes = match repo::list_episodes(&queue.db_pool, season.id).await {
+        let episodes = match repo::list_episodes(season.id).await {
             Ok(eps) => eps,
             Err(e) => {
                 tracing::error!(id, season_id = season.id, error = %e, "failed to load episodes for season");
@@ -745,7 +743,6 @@ pub async fn persist_show(
                 let path =
                     episode_vfs_path(&show_name, season_number, episode_number, part, path_tag);
                 match repo::create_media_entry(
-                    &queue.db_pool,
                     ep.id,
                     &path,
                     file.file_size as i64,
@@ -784,7 +781,7 @@ pub async fn persist_show(
             id, info_hash = %info_hash,
             "show pack matched no episodes — blacklisting stream"
         );
-        blacklist_stream(queue, id, info_hash).await;
+        blacklist_stream(id, info_hash).await;
         queue
             .notify(RivenEvent::MediaItemDownloadPartialSuccess { id })
             .await;
@@ -860,7 +857,7 @@ pub async fn persist_supplied_download(
             .await;
         }
         MediaItemType::Episode => {
-            let hierarchy = load_download_hierarchy_context(&queue.db_pool, item).await;
+            let hierarchy = load_download_hierarchy_context(item).await;
             if !persist_episode(
                 item,
                 &download,
@@ -890,7 +887,7 @@ pub async fn persist_supplied_download(
             .await;
         }
         MediaItemType::Season => {
-            let hierarchy = load_download_hierarchy_context(&queue.db_pool, item).await;
+            let hierarchy = load_download_hierarchy_context(item).await;
             match persist_season(
                 item,
                 download,
@@ -946,7 +943,7 @@ async fn persist_supplied_show_download(
         .iter()
         .map(|(_, episode_id)| *episode_id)
         .collect();
-    let episodes = repo::list_media_items_by_ids(&queue.db_pool, &episode_ids).await?;
+    let episodes = repo::list_media_items_by_ids(&episode_ids).await?;
     let episode_map: std::collections::HashMap<i64, MediaItem> = episodes
         .into_iter()
         .map(|episode| (episode.id, episode))
@@ -981,7 +978,7 @@ async fn persist_supplied_show_download(
             continue;
         }
 
-        let hierarchy = load_download_hierarchy_context(&queue.db_pool, episode).await;
+        let hierarchy = load_download_hierarchy_context(episode).await;
         let season_number = hierarchy
             .season_number
             .unwrap_or_else(|| episode.season_number.unwrap_or(1));
@@ -997,7 +994,6 @@ async fn persist_supplied_show_download(
         let parsed = parse_file_path(&file.filename);
         let path = episode_vfs_path(&show_name, season_number, episode_number, parsed.part, None);
         match repo::create_media_entry(
-            &queue.db_pool,
             episode.id,
             &path,
             file.file_size as i64,
@@ -1042,7 +1038,7 @@ async fn persist_supplied_show_download(
         .sync_item_request_state(item)
         .await;
 
-    let completed = repo::get_media_item(&queue.db_pool, item.id)
+    let completed = repo::get_media_item(item.id)
         .await
         .ok()
         .flatten()

@@ -3,7 +3,6 @@ use riven_core::plugin::PluginRegistry;
 use riven_core::types::MediaItemType;
 use riven_db::repo;
 use riven_queue::{JobQueue, RankStreamsJob};
-use sqlx::PgPool;
 use std::sync::Arc;
 
 use crate::schema::auth::require_library_access;
@@ -30,11 +29,9 @@ impl StreamsMutations {
         cached_only: Option<bool>,
     ) -> Result<Vec<DiscoveredStream>> {
         require_library_access(ctx)?;
-        let pool = ctx.data::<PgPool>()?;
         let registry = ctx.data::<Arc<PluginRegistry>>()?;
 
         discover_streams(
-            pool,
             registry.as_ref(),
             item_type,
             &title,
@@ -69,13 +66,11 @@ impl StreamsMutations {
         rank: Option<i64>,
     ) -> Result<String> {
         require_library_access(ctx)?;
-        let pool = ctx.data::<PgPool>()?;
         let registry = ctx.data::<Arc<PluginRegistry>>()?;
         let job_queue = ctx.data::<Arc<JobQueue>>()?;
 
         let target = if item_type == MediaItemType::Movie {
             ensure_download_target(
-                pool,
                 registry.as_ref(),
                 job_queue,
                 item_type,
@@ -93,7 +88,6 @@ impl StreamsMutations {
                 [] => return Err(async_graphql::Error::new("No season selected for download")),
                 [single] => {
                     ensure_download_target(
-                        pool,
                         registry.as_ref(),
                         job_queue,
                         MediaItemType::Season,
@@ -107,7 +101,6 @@ impl StreamsMutations {
                 }
                 many => {
                     ensure_show_target(
-                        pool,
                         registry.as_ref(),
                         job_queue,
                         &title,
@@ -121,8 +114,8 @@ impl StreamsMutations {
         };
 
         let stream =
-            repo::upsert_stream(pool, &info_hash, &magnet, parsed_data, rank, None).await?;
-        repo::link_stream_to_item(pool, target.id, stream.id).await?;
+            repo::upsert_stream(&info_hash, &magnet, parsed_data, rank, None).await?;
+        repo::link_stream_to_item(target.id, stream.id).await?;
 
         job_queue
             .push_rank_streams(RankStreamsJob {

@@ -31,7 +31,7 @@ use crate::{JobQueue, ProcessMediaItemJob, ProcessStep, ScrapeJob};
 pub async fn run(job: &ProcessMediaItemJob, queue: &JobQueue) {
     let id = job.id;
 
-    let Some(item) = repo::get_media_item(&queue.db_pool, id)
+    let Some(item) = repo::get_media_item(id)
         .await
         .ok()
         .flatten()
@@ -85,7 +85,7 @@ async fn handle_scrape(job: &ProcessMediaItemJob, item: &MediaItem, queue: &JobQ
             queue.push_scrape(ScrapeJob::for_movie(item)).await;
         }
         MediaItemType::Season => {
-            let ctx = load_show_context(&queue.db_pool, item).await;
+            let ctx = load_show_context(item).await;
             queue
                 .push_scrape(ScrapeJob::for_season(
                     item,
@@ -96,7 +96,7 @@ async fn handle_scrape(job: &ProcessMediaItemJob, item: &MediaItem, queue: &JobQ
                 .await;
         }
         MediaItemType::Episode => {
-            let ctx = load_show_context(&queue.db_pool, item).await;
+            let ctx = load_show_context(item).await;
             queue
                 .push_scrape(ScrapeJob::for_episode(
                     item,
@@ -130,7 +130,7 @@ async fn handle_download(job: &ProcessMediaItemJob, item: &MediaItem, queue: &Jo
 async fn handle_validate(job: &ProcessMediaItemJob, item: &MediaItem, queue: &JobQueue) {
     // The download flow's filesystem_entries inserts already triggered a
     // recompute; just re-load the row to read the post-write state.
-    let item = match repo::get_media_item(&queue.db_pool, item.id).await {
+    let item = match repo::get_media_item(item.id).await {
         Ok(Some(i)) => i,
         _ => return,
     };
@@ -163,7 +163,7 @@ async fn handle_validate(job: &ProcessMediaItemJob, item: &MediaItem, queue: &Jo
 pub(crate) async fn fan_out_to_children(parent: &MediaItem, queue: &JobQueue) {
     match parent.item_type {
         MediaItemType::Show => {
-            let seasons = repo::get_all_requested_seasons_for_show(&queue.db_pool, parent.id)
+            let seasons = repo::get_all_requested_seasons_for_show(parent.id)
                 .await
                 .unwrap_or_default();
             for season in seasons {
@@ -179,7 +179,7 @@ pub(crate) async fn fan_out_to_children(parent: &MediaItem, queue: &JobQueue) {
             }
         }
         MediaItemType::Season => {
-            let episodes = repo::get_incomplete_episodes_for_season(&queue.db_pool, parent.id)
+            let episodes = repo::get_incomplete_episodes_for_season(parent.id)
                 .await
                 .unwrap_or_default();
             for ep in episodes {

@@ -106,9 +106,8 @@ impl PlaybackSessionsCache {
 
 #[Object]
 impl DashboardQuery {
-    async fn stats(&self, ctx: &Context<'_>) -> GqlResult<LibraryStats> {
-        let pool = ctx.data::<sqlx::PgPool>()?;
-        let s = repo::get_stats(pool).await?;
+    async fn stats(&self, _ctx: &Context<'_>) -> GqlResult<LibraryStats> {
+        let s = repo::get_stats().await?;
         let total_items = s.total_movies + s.total_episodes;
         let completion_rate = if total_items > 0 {
             s.completed as f64 / total_items as f64 * 100.0
@@ -136,16 +135,14 @@ impl DashboardQuery {
 
     /// Get completed-item activity counts grouped by date (past year).
     /// Returns a JSON object mapping ISO date strings (YYYY-MM-DD) to counts.
-    async fn activity(&self, ctx: &Context<'_>) -> GqlResult<serde_json::Value> {
-        let pool = ctx.data::<sqlx::PgPool>()?;
-        let map = repo::get_activity(pool).await?;
+    async fn activity(&self, _ctx: &Context<'_>) -> GqlResult<serde_json::Value> {
+        let map = repo::get_activity().await?;
         Ok(serde_json::to_value(map)?)
     }
 
     /// Count of movies and shows per release year.
-    async fn year_releases(&self, ctx: &Context<'_>) -> GqlResult<Vec<YearRelease>> {
-        let pool = ctx.data::<sqlx::PgPool>()?;
-        Ok(repo::get_year_releases(pool)
+    async fn year_releases(&self, _ctx: &Context<'_>) -> GqlResult<Vec<YearRelease>> {
+        Ok(repo::get_year_releases()
             .await?
             .into_iter()
             .map(|(year, count)| YearRelease { year, count })

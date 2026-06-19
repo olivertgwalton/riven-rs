@@ -120,7 +120,7 @@ async fn rewrite_for_request_root(
     item_id: i64,
     payload: &mut NotificationPayload,
 ) -> anyhow::Result<bool> {
-    let Some(item) = repo::get_media_item(&ctx.db_pool, item_id).await? else {
+    let Some(item) = repo::get_media_item(item_id).await? else {
         return Ok(true);
     };
 
@@ -131,13 +131,13 @@ async fn rewrite_for_request_root(
     let Some(request_id) = item.item_request_id else {
         return Ok(true);
     };
-    let Some(request) = repo::get_item_request_by_id(&ctx.db_pool, request_id).await? else {
+    let Some(request) = repo::get_item_request_by_id(request_id).await? else {
         return Ok(false);
     };
     if request.state != ItemRequestState::Completed {
         return Ok(false);
     }
-    let Some(root_item) = repo::get_request_root_item(&ctx.db_pool, request_id).await? else {
+    let Some(root_item) = repo::get_request_root_item(request_id).await? else {
         return Ok(false);
     };
     if !mark_request_notification_sent(ctx, request_id).await? {

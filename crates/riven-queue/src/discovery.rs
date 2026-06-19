@@ -350,8 +350,8 @@ pub fn rank_streams(
         .collect()
 }
 
-pub async fn load_active_profiles(db_pool: &sqlx::PgPool) -> Vec<(String, RankSettings)> {
-    let profiles = match repo::get_enabled_profiles(db_pool).await {
+pub async fn load_active_profiles() -> Vec<(String, RankSettings)> {
+    let profiles = match repo::get_enabled_profiles().await {
         Ok(p) => p,
         Err(e) => {
             tracing::error!(error = %e, "failed to load enabled ranking profiles");
@@ -401,8 +401,8 @@ pub async fn load_active_profiles(db_pool: &sqlx::PgPool) -> Vec<(String, RankSe
     result
 }
 
-pub async fn load_dubbed_anime_only(db_pool: &sqlx::PgPool) -> bool {
-    match repo::get_setting(db_pool, "general").await {
+pub async fn load_dubbed_anime_only() -> bool {
+    match repo::get_setting("general").await {
         Ok(Some(v)) => v
             .get("dubbed_anime_only")
             .and_then(serde_json::Value::as_bool)

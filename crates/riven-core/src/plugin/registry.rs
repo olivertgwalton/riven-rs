@@ -47,7 +47,6 @@ impl PluginRegistry {
         enabled: bool,
         settings: PluginSettings,
         http: crate::http::HttpClient,
-        db_pool: sqlx::PgPool,
         redis: redis::aio::ConnectionManager,
         vfs_mount_path: String,
     ) {
@@ -69,13 +68,7 @@ impl PluginRegistry {
             "validation failed, skipping",
         );
 
-        let context = Arc::new(PluginContext::new(
-            settings,
-            http,
-            db_pool,
-            redis,
-            vfs_mount_path,
-        ));
+        let context = Arc::new(PluginContext::new(settings, http, redis, vfs_mount_path));
         self.plugins.write().await.push(ActivePlugin {
             plugin,
             context,
@@ -99,13 +92,12 @@ impl PluginRegistry {
             new_settings.merge_db_override(db_override);
             let plugin = Arc::clone(&active.plugin);
             let http = active.context.http.clone();
-            let db_pool = active.context.db_pool.clone();
             let redis = active.context.redis.clone();
             let vfs_mount_path = active.context.vfs_mount_path.clone();
-            (plugin, new_settings, http, db_pool, redis, vfs_mount_path)
+            (plugin, new_settings, http, redis, vfs_mount_path)
         };
 
-        let (plugin, new_settings, http, db_pool, redis, vfs_mount_path) = extracted;
+        let (plugin, new_settings, http, redis, vfs_mount_path) = extracted;
         let valid = enabled
             && match plugin.validate(&new_settings, &http).await {
                 Ok(v) => v,
@@ -119,13 +111,7 @@ impl PluginRegistry {
         let Some(active) = plugins.iter_mut().find(|p| p.plugin.name() == name) else {
             return false;
         };
-        active.context = Arc::new(PluginContext::new(
-            new_settings,
-            http,
-            db_pool,
-            redis,
-            vfs_mount_path,
-        ));
+        active.context = Arc::new(PluginContext::new(new_settings, http, redis, vfs_mount_path));
         active.enabled = enabled;
         active.valid = valid;
         log_plugin_state(
@@ -240,14 +226,6 @@ impl PluginRegistry {
             .map(|p| p.context.settings.to_json())
     }
 
-    pub async fn is_plugin_enabled(&self, name: &str) -> Option<bool> {
-        self.plugins
-            .read()
-            .await
-            .iter()
-            .find(|p| p.plugin.name() == name)
-            .map(|p| p.enabled)
-    }
 }
 
 fn plugin_settings_schema(plugin: &dyn Plugin) -> Vec<SettingField> {

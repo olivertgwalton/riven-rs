@@ -36,12 +36,11 @@ fn rate_limit_retry_budget(max: u32, failed_attempts: i32) -> u32 {
     max.saturating_sub(failed_attempts.max(0).cast_unsigned())
 }
 
-/// Bump `failed_attempts`. The DB trigger on the `failed_attempts` column
-/// recomputes state — and applies the `failed_attempts >= max → Failed`
-/// rule + parent cascade automatically.
-async fn record_scrape_failure(queue: &JobQueue, item: &riven_db::entities::MediaItem) {
+/// Bump `failed_attempts`. `increment_failed_attempts` recomputes state —
+/// applying the `failed_attempts >= max → Failed` rule + parent cascade.
+async fn record_scrape_failure(item: &riven_db::entities::MediaItem) {
     let id = item.id;
-    if let Err(err) = repo::increment_failed_attempts(&queue.db_pool, id).await {
+    if let Err(err) = repo::increment_failed_attempts(id).await {
         tracing::warn!(id, %err, "failed to increment failed_attempts");
     }
 }
@@ -60,7 +59,7 @@ fn scrape_event(job: &ScrapeJob) -> RivenEvent {
 
 pub async fn start(id: i64, job: &ScrapeJob, queue: &JobQueue) {
     tracing::debug!(id, "running scrape flow");
-    let Some(item) = load_media_item_or_log(&queue.db_pool, id, "scrape").await else {
+    let Some(item) = load_media_item_or_log(id, "scrape").await else {
         return;
     };
 
@@ -87,7 +86,7 @@ pub async fn start(id: i64, job: &ScrapeJob, queue: &JobQueue) {
         return;
     }
 
-    if let Err(err) = repo::clear_blacklisted_streams(&queue.db_pool, id).await {
+    if let Err(err) = repo::clear_blacklisted_streams(id).await {
         tracing::warn!(id, %err, "failed to clear blacklisted streams");
     }
 
@@ -111,7 +110,7 @@ pub async fn finalize(id: i64, queue: &JobQueue) {
     queue.clear_flow_rate_limited("scrape", id).await;
     queue.flow_clear_context("scrape", id).await;
 
-    let Some(item) = load_media_item_or_log(&queue.db_pool, id, "scrape finalize").await else {
+    let Some(item) = load_media_item_or_log(id, "scrape finalize").await else {
         queue.clear_flow_all("scrape", id).await;
         return;
     };
@@ -172,7 +171,7 @@ pub async fn finalize(id: i64, queue: &JobQueue) {
         } else {
             item.title.clone()
         };
-        record_scrape_failure(queue, &item).await;
+        record_scrape_failure(&item).await;
         queue
             .notify(RivenEvent::MediaItemScrapeErrorNoNewStreams {
                 id,
@@ -194,7 +193,7 @@ pub async fn parse_results(id: i64, _job: &ParseScrapeResultsJob, queue: &JobQue
 
     let responses: Vec<ScrapeResponse> = queue.drain_flow_results("scrape", id).await;
 
-    let Some(item) = load_media_item_or_log(&queue.db_pool, id, "parse-scrape-results").await
+    let Some(item) = load_media_item_or_log(id, "parse-scrape-results").await
     else {
         return;
     };
@@ -215,10 +214,10 @@ pub async fn parse_results(id: i64, _job: &ParseScrapeResultsJob, queue: &JobQue
     }
 
     let hierarchy =
-        load_media_item_hierarchy_or_log(&queue.db_pool, item.id, "parse-scrape-results hierarchy")
+        load_media_item_hierarchy_or_log(item.id, "parse-scrape-results hierarchy")
             .await;
     let parse_context =
-        build_parse_item_context_with_hierarchy(&queue.db_pool, item, hierarchy.as_ref()).await;
+        build_parse_item_context_with_hierarchy(item, hierarchy.as_ref()).await;
     let item = parse_context.item;
     let item_title = parse_context.item_title;
     let item_type = parse_context.item_type;
@@ -236,10 +235,8 @@ pub async fn parse_results(id: i64, _job: &ParseScrapeResultsJob, queue: &JobQue
 
     let new_stream_count = stream::iter(ranked)
         .map(|candidate| {
-            let pool = queue.db_pool.clone();
             async move {
                 let stream = match repo::upsert_stream(
-                    &pool,
                     &candidate.info_hash,
                     &build_magnet_uri(&candidate.info_hash),
                     candidate.parsed_data,
@@ -254,7 +251,7 @@ pub async fn parse_results(id: i64, _job: &ParseScrapeResultsJob, queue: &JobQue
                         return false;
                     }
                 };
-                match repo::link_stream_to_item(&pool, id, stream.id).await {
+                match repo::link_stream_to_item(id, stream.id).await {
                     Ok(inserted) => inserted,
                     Err(e) => {
                         tracing::error!(error = %e, "failed to link stream to item");
@@ -268,14 +265,14 @@ pub async fn parse_results(id: i64, _job: &ParseScrapeResultsJob, queue: &JobQue
         .count()
         .await;
 
-    if let Err(e) = repo::update_scraped(&queue.db_pool, id).await {
+    if let Err(e) = repo::update_scraped(id).await {
         tracing::error!(error = %e, "failed to update scraped timestamp");
     }
 
     tracing::info!(id, new_stream_count, "parse-scrape-results completed");
 
     if new_stream_count == 0 {
-        record_scrape_failure(queue, &item).await;
+        record_scrape_failure(&item).await;
         queue
             .notify(RivenEvent::MediaItemScrapeErrorNoNewStreams {
                 id,
@@ -284,7 +281,7 @@ pub async fn parse_results(id: i64, _job: &ParseScrapeResultsJob, queue: &JobQue
             })
             .await;
     } else {
-        if let Err(err) = repo::reset_failed_attempts(&queue.db_pool, id).await {
+        if let Err(err) = repo::reset_failed_attempts(id).await {
             tracing::warn!(id, %err, "failed to reset failed_attempts");
         }
         queue

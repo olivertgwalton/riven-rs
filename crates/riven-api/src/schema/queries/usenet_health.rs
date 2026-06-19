@@ -7,8 +7,9 @@
 //! usenet isn't configured) without spinning up a pool.
 
 use async_graphql::{Context, Object, Result, SimpleObject};
+use riven_db::orm;
 use riven_usenet::UsenetStreamer;
-use sqlx::PgPool;
+use sea_orm::{DbBackend, FromQueryResult, Statement};
 
 /// Live health of one configured NNTP provider.
 #[derive(SimpleObject)]
@@ -128,7 +129,7 @@ pub struct UsenetTitleHealthSummary {
     pub total: i64,
 }
 
-#[derive(sqlx::FromRow)]
+#[derive(FromQueryResult)]
 struct HealthSummaryRow {
     healthy: i64,
     unhealthy: i64,
@@ -136,7 +137,7 @@ struct HealthSummaryRow {
     total: i64,
 }
 
-#[derive(sqlx::FromRow)]
+#[derive(FromQueryResult)]
 struct HealthRow {
     info_hash: String,
     file_index: i32,
@@ -227,9 +228,9 @@ impl UsenetHealthQuery {
 
     /// Per-title usenet health from the background availability scanner.
     /// Ordered worst-first (unhealthy, then most missing segments).
-    async fn usenet_title_health(&self, ctx: &Context<'_>) -> Result<Vec<UsenetTitleHealth>> {
-        let pool = ctx.data::<PgPool>()?;
-        let rows = sqlx::query_as::<_, HealthRow>(
+    async fn usenet_title_health(&self, _ctx: &Context<'_>) -> Result<Vec<UsenetTitleHealth>> {
+        let rows = HealthRow::find_by_statement(Statement::from_sql_and_values(
+            DbBackend::Postgres,
             r#"
             SELECT h.info_hash,
                    h.file_index,
@@ -265,8 +266,9 @@ impl UsenetHealthQuery {
             ORDER BY (h.status = 'unhealthy') DESC, h.missing_segments DESC,
                      h.checked_at DESC NULLS LAST
             "#,
-        )
-        .fetch_all(pool)
+            [],
+        ))
+        .all(orm())
         .await?;
 
         Ok(rows
@@ -304,10 +306,10 @@ impl UsenetHealthQuery {
     /// mirror `usenet_title_health` so the summary matches the listed rows.
     async fn usenet_title_health_summary(
         &self,
-        ctx: &Context<'_>,
+        _ctx: &Context<'_>,
     ) -> Result<UsenetTitleHealthSummary> {
-        let pool = ctx.data::<PgPool>()?;
-        let row = sqlx::query_as::<_, HealthSummaryRow>(
+        let row = HealthSummaryRow::find_by_statement(Statement::from_sql_and_values(
+            DbBackend::Postgres,
             r#"
             SELECT
                 COUNT(*) FILTER (WHERE h.status = 'healthy')::bigint      AS healthy,
@@ -321,9 +323,11 @@ impl UsenetHealthQuery {
                   AND fe.usenet_file_index = h.file_index
             )
             "#,
-        )
-        .fetch_one(pool)
-        .await?;
+            [],
+        ))
+        .one(orm())
+        .await?
+        .ok_or_else(|| async_graphql::Error::new("health summary query returned no rows"))?;
 
         Ok(UsenetTitleHealthSummary {
             healthy: row.healthy,
@@ -336,10 +340,9 @@ impl UsenetHealthQuery {
 
     /// Per-provider download traffic — lifetime totals + a daily series for
     /// the usage-trend chart.
-    async fn usenet_traffic(&self, ctx: &Context<'_>) -> Result<UsenetTraffic> {
-        let pool = ctx.data::<PgPool>()?;
-        let totals = riven_db::repo::list_provider_traffic_totals(pool).await?;
-        let daily = riven_db::repo::list_provider_traffic_daily(pool, 14).await?;
+    async fn usenet_traffic(&self, _ctx: &Context<'_>) -> Result<UsenetTraffic> {
+        let totals = riven_db::repo::list_provider_traffic_totals().await?;
+        let daily = riven_db::repo::list_provider_traffic_daily(14).await?;
         let total_bytes_downloaded = totals.iter().map(|t| t.bytes_downloaded).sum();
         let total_articles_downloaded = totals.iter().map(|t| t.articles_downloaded).sum();
         Ok(UsenetTraffic {

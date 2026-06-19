@@ -10,8 +10,8 @@ use riven_usenet::UsenetStreamer;
 use riven_usenet::nntp::NntpPool;
 use riven_usenet::nzb::NzbSegment;
 use riven_usenet::streamer::{NzbMeta, NzbMetaSource};
+use sea_orm::{DbBackend, FromQueryResult, Statement};
 use serde::{Deserialize, Serialize};
-use sqlx::PgPool;
 
 use crate::PROVIDER;
 
@@ -37,7 +37,6 @@ struct HcState {
 }
 
 pub fn spawn(
-    db_pool: PgPool,
     redis: redis::aio::ConnectionManager,
     streamer: UsenetStreamer,
     settings: PluginSettings,
@@ -53,7 +52,7 @@ pub fn spawn(
     tokio::spawn(async move {
         tokio::time::sleep(Duration::from_secs(30)).await;
         loop {
-            match run_once(&db_pool, &redis, &streamer, max_failures).await {
+            match run_once(&redis, &streamer, max_failures).await {
                 Ok(summary) => {
                     if summary.checked > 0 {
                         tracing::info!(
@@ -78,29 +77,42 @@ struct PassSummary {
     removed: usize,
 }
 
+/// One candidate usenet media entry: its filesystem id, the joined stream's
+/// info_hash (empty when no stream row), and the owning media item.
+#[derive(FromQueryResult)]
+struct HealthCheckRow {
+    id: i64,
+    info_hash: String,
+    media_item_id: i64,
+}
+
 async fn run_once(
-    db_pool: &PgPool,
     redis_seed: &redis::aio::ConnectionManager,
     streamer: &UsenetStreamer,
     max_failures: u32,
 ) -> Result<PassSummary> {
-    let rows: Vec<(i64, String, i64)> = sqlx::query_as(
+    let rows = HealthCheckRow::find_by_statement(Statement::from_sql_and_values(
+        DbBackend::Postgres,
         "SELECT fe.id, COALESCE(s.info_hash, '') AS info_hash, fe.media_item_id \
          FROM filesystem_entries fe \
          LEFT JOIN streams s ON s.id = fe.stream_id \
-         WHERE fe.plugin = $1 AND fe.entry_type = 'media' \
+         WHERE fe.plugin = $1 AND fe.entry_type::text = 'media' \
          ORDER BY fe.updated_at NULLS FIRST, fe.id \
          LIMIT $2",
-    )
-    .bind(PROVIDER)
-    .bind(BATCH_LIMIT)
-    .fetch_all(db_pool)
+        [PROVIDER.into(), BATCH_LIMIT.into()],
+    ))
+    .all(riven_db::orm())
     .await?;
 
     let mut summary = PassSummary::default();
     let mut redis = redis_seed.clone();
 
-    for (entry_id, info_hash, media_item_id) in rows {
+    for HealthCheckRow {
+        id: entry_id,
+        info_hash,
+        media_item_id,
+    } in rows
+    {
         if info_hash.is_empty() {
             continue;
         }
@@ -165,11 +177,11 @@ async fn run_once(
                 "usenet health check: failure threshold breached; removing entry"
             );
             if let Err(error) =
-                riven_db::repo::blacklist_stream_by_hash(db_pool, media_item_id, &info_hash).await
+                riven_db::repo::blacklist_stream_by_hash(media_item_id, &info_hash).await
             {
                 tracing::warn!(entry_id, info_hash, %error, "health check: failed to blacklist stream");
             }
-            match riven_db::repo::delete_filesystem_entry(db_pool, entry_id).await {
+            match riven_db::repo::delete_filesystem_entry(entry_id).await {
                 Ok((true, _)) => summary.removed += 1,
                 Ok((false, _)) => {}
                 Err(error) => {

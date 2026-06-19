@@ -5,33 +5,48 @@
 //! map." Postgres holds that record for as long as it's relevant; the
 //! in-memory LRU above absorbs hot reads. No TTL, no Redis hop.
 
-use sqlx::PgPool;
+use riven_core::entities::usenet_meta;
+use sea_orm::sea_query::OnConflict;
+use sea_orm::ActiveValue::Set;
+use sea_orm::{DatabaseConnection, EntityTrait};
 
 use super::{NzbMeta, StreamerError};
 
-pub(super) async fn load(db: &PgPool, info_hash: &str) -> Result<Option<NzbMeta>, StreamerError> {
-    let row: Option<(sqlx::types::Json<NzbMeta>,)> =
-        sqlx::query_as("SELECT meta FROM usenet_meta WHERE info_hash = $1")
-            .bind(info_hash)
-            .fetch_optional(db)
-            .await?;
-    Ok(row.map(|(j,)| j.0))
+pub(super) async fn load(
+    db: &DatabaseConnection,
+    info_hash: &str,
+) -> Result<Option<NzbMeta>, StreamerError> {
+    let row = usenet_meta::Entity::find_by_id(info_hash.to_string())
+        .one(db)
+        .await?;
+    match row {
+        Some(model) => {
+            let meta: NzbMeta = serde_json::from_value(model.meta)?;
+            Ok(Some(meta))
+        }
+        None => Ok(None),
+    }
 }
 
 pub(super) async fn store(
-    db: &PgPool,
+    db: &DatabaseConnection,
     info_hash: &str,
     meta: &NzbMeta,
 ) -> Result<(), StreamerError> {
-    sqlx::query(
-        "INSERT INTO usenet_meta (info_hash, meta, created_at, updated_at) \
-         VALUES ($1, $2, NOW(), NOW()) \
-         ON CONFLICT (info_hash) DO UPDATE \
-            SET meta = EXCLUDED.meta, updated_at = NOW()",
+    let now = chrono::Utc::now().fixed_offset();
+    let value = serde_json::to_value(meta)?;
+    usenet_meta::Entity::insert(usenet_meta::ActiveModel {
+        info_hash: Set(info_hash.to_string()),
+        meta: Set(value),
+        created_at: Set(now),
+        updated_at: Set(now),
+    })
+    .on_conflict(
+        OnConflict::column(usenet_meta::Column::InfoHash)
+            .update_columns([usenet_meta::Column::Meta, usenet_meta::Column::UpdatedAt])
+            .to_owned(),
     )
-    .bind(info_hash)
-    .bind(sqlx::types::Json(meta))
-    .execute(db)
+    .exec(db)
     .await?;
     Ok(())
 }

@@ -52,7 +52,7 @@ impl Plugin for CalendarPlugin {
 }
 
 async fn regenerate_feed(ctx: &PluginContext) -> anyhow::Result<()> {
-    let items = repo::get_upcoming_unreleased(&ctx.db_pool, CALENDAR_ITEM_LIMIT).await?;
+    let items = repo::get_upcoming_unreleased(CALENDAR_ITEM_LIMIT).await?;
 
     let ical = build_ical(&items);
 
@@ -202,11 +202,10 @@ impl CalendarQuery {
     /// Get upcoming unreleased items (calendar feed), with show title resolved in a single query.
     async fn calendar(
         &self,
-        ctx: &Context<'_>,
+        _ctx: &Context<'_>,
         limit: Option<i64>,
     ) -> GqlResult<Vec<CalendarEntry>> {
-        let pool = ctx.data::<sqlx::PgPool>()?;
-        let rows = repo::get_calendar_entries(pool, limit.unwrap_or(100)).await?;
+        let rows = repo::get_calendar_entries(limit.unwrap_or(100)).await?;
 
         let entries = rows
             .into_iter()

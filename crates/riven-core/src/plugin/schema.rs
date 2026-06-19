@@ -128,15 +128,6 @@ impl SettingField {
         self
     }
 
-    /// Set options from owned/generated strings (e.g. a runtime-derived list).
-    pub fn with_options_owned(
-        mut self,
-        values: impl IntoIterator<Item = impl Into<Cow<'static, str>>>,
-    ) -> Self {
-        self.options = Some(values.into_iter().map(Into::into).collect());
-        self
-    }
-
     pub fn with_fields(mut self, fields: Vec<SettingField>) -> Self {
         self.fields = Some(fields);
         self

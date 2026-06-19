@@ -144,4 +144,4 @@ erDiagram
 | `item_request_type` | movie, show |
 | `item_request_state` | requested, completed, failed, ongoing, unreleased, requested_additional_seasons |
 
-> `_sqlx_migrations` (sqlx bookkeeping) omitted from the diagram.
+> `seaql_migrations` (SeaORM migration bookkeeping) omitted from the diagram.

@@ -139,7 +139,7 @@ impl MainOrchestrator {
         let needs_reindex = match item.item_type {
             MediaItemType::Show => {
                 item.show_status == Some(ShowStatus::Continuing)
-                    || repo::get_next_unreleased_air_date_for_show(&self.queue.db_pool, item.id)
+                    || repo::get_next_unreleased_air_date_for_show(item.id)
                         .await
                         .ok()
                         .flatten()
@@ -169,7 +169,7 @@ impl MainOrchestrator {
         match item.item_type {
             MediaItemType::Show => {
                 let seasons =
-                    repo::get_all_requested_seasons_for_show(&self.queue.db_pool, item.id)
+                    repo::get_all_requested_seasons_for_show(item.id)
                         .await
                         .unwrap_or_default();
                 for season in seasons {
@@ -208,7 +208,7 @@ impl MainOrchestrator {
 
         let target_date = match item.item_type {
             MediaItemType::Show => {
-                match repo::get_next_unreleased_air_date_for_show(&self.queue.db_pool, item.id)
+                match repo::get_next_unreleased_air_date_for_show(item.id)
                     .await
                 {
                     Ok(Some(date)) => Some(date),
@@ -230,9 +230,9 @@ impl MainOrchestrator {
     /// Retry-library actor. Periodically called by the worker to nudge items
     /// stuck in retryable states.
     pub async fn retry_library(&self) {
-        match repo::get_ongoing_container_ids(&self.queue.db_pool).await {
+        match repo::get_ongoing_container_ids().await {
             Ok(ids) => {
-                if let Err(error) = repo::force_recompute(&self.queue.db_pool, &ids).await {
+                if let Err(error) = repo::force_recompute(&ids).await {
                     tracing::error!(%error, "retry_library: failed to recompute ongoing items");
                 }
             }
@@ -241,7 +241,7 @@ impl MainOrchestrator {
             }
         }
 
-        let requests = match repo::get_retryable_item_requests(&self.queue.db_pool).await {
+        let requests = match repo::get_retryable_item_requests().await {
             Ok(r) => r,
             Err(error) => {
                 tracing::error!(%error, "retry_library: failed to fetch item requests");
@@ -260,7 +260,7 @@ impl MainOrchestrator {
 
         for item_type in [MediaItemType::Movie, MediaItemType::Show] {
             let items =
-                match repo::get_pending_items_for_retry(&self.queue.db_pool, item_type).await {
+                match repo::get_pending_items_for_retry(item_type).await {
                     Ok(items) => items,
                     Err(error) => {
                         tracing::error!(%error, "retry_library: failed to fetch pending items");
@@ -274,7 +274,7 @@ impl MainOrchestrator {
     }
 
     pub async fn transition_newly_aired(&self) {
-        let ids = match repo::transition_unreleased_aired(&self.queue.db_pool).await {
+        let ids = match repo::transition_unreleased_aired().await {
             Ok(ids) => ids,
             Err(error) => {
                 tracing::error!(%error, "failed to transition unreleased aired items");
@@ -296,7 +296,7 @@ impl MainOrchestrator {
     }
 
     async fn load_item(&self, id: i64) -> Option<MediaItem> {
-        context::load_media_item_or_log(&self.queue.db_pool, id, "main_orchestrator").await
+        context::load_media_item_or_log(id, "main_orchestrator").await
     }
 }
 

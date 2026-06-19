@@ -1,54 +1,17 @@
-use chrono::{DateTime, Datelike, NaiveDate, Utc};
+use chrono::NaiveDate;
+use riven_core::entities::helpers::build_filesystem_metadata;
 use riven_core::settings::{FilesystemContentType, FilesystemItemMetadata};
 use riven_core::types::*;
 use serde::{Deserialize, Serialize};
-use sqlx::FromRow;
 
-#[derive(Debug, Clone, FromRow, Serialize, Deserialize, async_graphql::SimpleObject)]
-pub struct MediaItem {
-    pub id: i64,
-    pub title: String,
-    pub full_title: Option<String>,
-    pub imdb_id: Option<String>,
-    pub tvdb_id: Option<String>,
-    pub tmdb_id: Option<String>,
-    pub poster_path: Option<String>,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: Option<DateTime<Utc>>,
-    pub indexed_at: Option<DateTime<Utc>>,
-    pub scraped_at: Option<DateTime<Utc>>,
-    pub scraped_times: i32,
-    pub aliases: Option<serde_json::Value>,
-    pub network: Option<String>,
-    pub country: Option<String>,
-    pub language: Option<String>,
-    pub is_anime: bool,
-    pub aired_at: Option<NaiveDate>,
-    pub aired_at_utc: Option<DateTime<Utc>>,
-    pub year: Option<i32>,
-    pub genres: Option<serde_json::Value>,
-    pub rating: Option<f64>,
-    pub content_rating: Option<ContentRating>,
-    pub state: MediaItemState,
-    pub failed_attempts: i32,
-    pub last_scrape_attempt_at: Option<DateTime<Utc>>,
-    pub item_type: MediaItemType,
-    pub is_requested: bool,
-    pub network_timezone: Option<String>,
-    pub show_status: Option<ShowStatus>,
-    pub season_number: Option<i32>,
-    pub is_special: Option<bool>,
-    pub parent_id: Option<i64>,
-    pub episode_number: Option<i32>,
-    pub absolute_number: Option<i32>,
-    pub runtime: Option<i32>,
-    pub item_request_id: Option<i64>,
-    pub active_stream_id: Option<i64>,
-}
+pub use riven_core::entities::{
+    filesystem_entries::Model as FileSystemEntry, item_requests::Model as ItemRequest,
+    media_items::Model as MediaItem, streams::Model as Stream,
+};
 
-#[derive(Debug, Clone, FromRow)]
+#[derive(Debug, Clone, sea_orm::FromQueryResult)]
 pub struct MediaItemHierarchy {
-    #[sqlx(flatten)]
+    #[sea_orm(nested)]
     pub item: MediaItem,
     pub resolved_season_id: Option<i64>,
     pub resolved_season_number: Option<i32>,
@@ -67,10 +30,12 @@ pub struct MediaItemHierarchy {
     pub resolved_show_is_anime: Option<bool>,
 }
 
-#[derive(Debug, Clone, FromRow, Serialize, Deserialize, async_graphql::SimpleObject)]
+#[derive(
+    Debug, Clone, Serialize, Deserialize, async_graphql::SimpleObject, sea_orm::FromQueryResult,
+)]
 pub struct MediaItemListRow {
-    #[sqlx(flatten)]
     #[graphql(flatten)]
+    #[sea_orm(nested)]
     pub item: MediaItem,
     pub show_id: Option<i64>,
     pub show_title: Option<String>,
@@ -79,41 +44,9 @@ pub struct MediaItemListRow {
     pub show_poster_path: Option<String>,
 }
 
-impl MediaItem {
-    pub fn filesystem_metadata(&self) -> FilesystemItemMetadata {
-        build_filesystem_metadata(
-            self.genres.as_ref(),
-            self.network.clone(),
-            self.content_rating,
-            self.language.clone(),
-            self.country.clone(),
-            self.aired_at.map(|date| date.year()).or(self.year),
-            self.rating,
-            self.is_anime,
-        )
-    }
-
-    pub fn pretty_name(&self) -> String {
-        let year_str = self.year.map(|y| format!(" ({y})")).unwrap_or_default();
-        let id_str = match self.item_type {
-            MediaItemType::Movie => self
-                .tmdb_id
-                .as_ref()
-                .map(|id| format!(" {{tmdb-{id}}}"))
-                .unwrap_or_default(),
-            _ => self
-                .tvdb_id
-                .as_ref()
-                .map(|id| format!(" {{tvdb-{id}}}"))
-                .unwrap_or_default(),
-        };
-        format!("{}{year_str}{id_str}", self.title)
-    }
-}
-
 /// Lightweight projection used by the calendar GraphQL query.
 /// Resolves the ancestor show title in a single SQL JOIN rather than N+1 lookups.
-#[derive(Debug, Clone, FromRow)]
+#[derive(Debug, Clone, sea_orm::FromQueryResult)]
 pub struct CalendarRow {
     pub id: i64,
     pub item_type: MediaItemType,
@@ -129,43 +62,7 @@ pub struct CalendarRow {
     pub tvdb_id: Option<String>,
 }
 
-#[derive(Debug, Clone, FromRow, Serialize, Deserialize, async_graphql::SimpleObject)]
-pub struct FileSystemEntry {
-    pub id: i64,
-    pub file_size: i64,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: Option<DateTime<Utc>>,
-    pub media_item_id: i64,
-    pub entry_type: FileSystemEntryType,
-    pub path: String,
-    pub original_filename: Option<String>,
-    pub download_url: Option<String>,
-    pub stream_url: Option<String>,
-    pub plugin: Option<String>,
-    pub provider: Option<String>,
-    pub provider_download_id: Option<String>,
-    pub library_profiles: Option<serde_json::Value>,
-    pub media_metadata: Option<serde_json::Value>,
-    pub language: Option<String>,
-    pub parent_original_filename: Option<String>,
-    pub subtitle_content: Option<String>,
-    pub file_hash: Option<String>,
-    pub video_file_size: Option<i64>,
-    pub opensubtitles_id: Option<String>,
-    /// Subtitle source plugin (e.g. "subdl"). Set when the subtitle was
-    /// fetched by an upstream provider plugin.
-    pub source_provider: Option<String>,
-    /// Provider-specific external identifier for the subtitle (e.g. SubDL
-    /// subtitle id). Used for de-dup / refresh.
-    pub source_id: Option<String>,
-    pub stream_id: Option<i64>,
-    pub resolution: Option<String>,
-    pub ranking_profile_name: Option<String>,
-    pub usenet_info_hash: Option<String>,
-    pub usenet_file_index: Option<i32>,
-}
-
-#[derive(Debug, Clone, FromRow)]
+#[derive(Debug, Clone, sea_orm::FromQueryResult)]
 pub struct FilesystemProfileEntryCandidate {
     pub id: i64,
     pub library_profiles: Option<serde_json::Value>,
@@ -180,13 +77,13 @@ pub struct FilesystemProfileEntryCandidate {
     pub is_anime: bool,
 }
 
-#[derive(Debug, Clone, FromRow)]
+#[derive(Debug, Clone, sea_orm::FromQueryResult)]
 pub struct VfsDirName {
     pub name: Option<String>,
     pub library_profiles: Option<serde_json::Value>,
 }
 
-#[derive(Debug, Clone, FromRow)]
+#[derive(Debug, Clone, sea_orm::FromQueryResult)]
 pub struct VfsFileName {
     pub name: Option<String>,
     pub library_profiles: Option<serde_json::Value>,
@@ -212,115 +109,4 @@ impl FilesystemProfileEntryCandidate {
             self.is_anime,
         )
     }
-}
-
-fn build_filesystem_metadata(
-    genres: Option<&serde_json::Value>,
-    network: Option<String>,
-    content_rating: Option<ContentRating>,
-    language: Option<String>,
-    country: Option<String>,
-    year: Option<i32>,
-    rating: Option<f64>,
-    is_anime: bool,
-) -> FilesystemItemMetadata {
-    FilesystemItemMetadata {
-        genres: lowercase_json_strings(genres),
-        network,
-        content_rating,
-        language,
-        country,
-        year,
-        rating,
-        is_anime,
-    }
-}
-
-fn lowercase_json_strings(value: Option<&serde_json::Value>) -> Vec<String> {
-    value
-        .and_then(serde_json::Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(serde_json::Value::as_str)
-        .map(str::to_ascii_lowercase)
-        .collect()
-}
-
-impl FileSystemEntry {
-    pub fn base_directory(&self) -> &str {
-        if self.path.starts_with("/movies") {
-            "movies"
-        } else {
-            "shows"
-        }
-    }
-
-    pub fn vfs_filename(&self, pretty_name: &str) -> String {
-        let ext = self
-            .original_filename
-            .as_ref()
-            .and_then(|f| f.rsplit('.').next())
-            .unwrap_or("mkv");
-        format!("{pretty_name}.{ext}")
-    }
-}
-
-#[derive(Debug, Clone, FromRow, Serialize, Deserialize, async_graphql::SimpleObject)]
-pub struct Stream {
-    pub id: i64,
-    pub info_hash: String,
-    pub magnet: String,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: Option<DateTime<Utc>>,
-    #[sqlx(json(nullable))]
-    pub parsed_data: Option<serde_json::Value>,
-    pub rank: Option<i64>,
-    /// Best-known file size in bytes — populated at scrape time when the
-    /// scraper reports a size, or recorded after a download attempt rejects
-    /// the stream on a bitrate check. Used by the download loop to pre-filter
-    /// streams that cannot pass the configured bitrate bounds before paying
-    /// for a debrid round-trip. `None` means the size is not yet known.
-    pub file_size_bytes: Option<i64>,
-}
-
-#[derive(Debug, Clone, FromRow, Serialize, Deserialize, async_graphql::SimpleObject)]
-pub struct ItemRequest {
-    pub id: i64,
-    pub imdb_id: Option<String>,
-    pub tmdb_id: Option<String>,
-    pub tvdb_id: Option<String>,
-    pub request_type: ItemRequestType,
-    pub requested_by: Option<String>,
-    pub external_request_id: Option<String>,
-    pub created_at: DateTime<Utc>,
-    pub completed_at: Option<DateTime<Utc>>,
-    pub state: ItemRequestState,
-    pub seasons: Option<serde_json::Value>,
-    /// True when the request specifies a strict subset of the show's
-    /// non-special seasons. Computed at indexer time. Always false for movies.
-    pub is_partial_request: bool,
-}
-
-#[derive(Debug, Clone)]
-pub struct MovieWithEntries {
-    pub item: MediaItem,
-    pub entries: Vec<FileSystemEntry>,
-}
-
-#[derive(Debug, Clone)]
-pub struct ShowWithSeasons {
-    pub item: MediaItem,
-    pub seasons: Vec<SeasonWithEpisodes>,
-}
-
-#[derive(Debug, Clone)]
-pub struct SeasonWithEpisodes {
-    pub item: MediaItem,
-    pub episodes: Vec<EpisodeWithEntries>,
-}
-
-#[derive(Debug, Clone)]
-pub struct EpisodeWithEntries {
-    pub item: MediaItem,
-    pub entries: Vec<FileSystemEntry>,
 }

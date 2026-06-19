@@ -135,7 +135,7 @@ async fn notify_download_success(
     let api_key = ctx.require_setting("apikey")?;
     let library_path = ctx.settings.get_or("librarypath", "/mount");
 
-    let raw_paths = repo::get_media_entry_paths_for_items(&ctx.db_pool, &[info.id]).await?;
+    let raw_paths = repo::get_media_entry_paths_for_items(&[info.id]).await?;
     if raw_paths.is_empty() {
         tracing::warn!(
             id = info.id,

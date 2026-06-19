@@ -76,13 +76,13 @@ impl Plugin for PlexPlugin {
         let plex_token = ctx.require_setting("plextoken")?;
         let plex_url = ctx.require_setting("plexserverurl")?.trim_end_matches('/');
 
-        let entries = repo::get_media_entries_recursive(&ctx.db_pool, id).await?;
+        let entries = repo::get_media_entries_recursive(id).await?;
         if entries.is_empty() {
             anyhow::bail!("no filesystem entries found for media item {id}");
         }
         tracing::debug!(id, count = entries.len(), "plex: found filesystem entries");
 
-        let fs_settings = load_filesystem_settings(&ctx.db_pool).await;
+        let fs_settings = load_filesystem_settings().await;
         let library_path =
             effective_library_path(&ctx.settings, fs_settings.as_ref(), &ctx.vfs_mount_path);
 
@@ -174,8 +174,8 @@ impl Plugin for PlexPlugin {
     }
 }
 
-async fn load_filesystem_settings(pool: &sqlx::PgPool) -> Option<FilesystemSettings> {
-    riven_db::repo::get_setting(pool, "filesystem")
+async fn load_filesystem_settings() -> Option<FilesystemSettings> {
+    riven_db::repo::get_setting("filesystem")
         .await
         .ok()
         .flatten()

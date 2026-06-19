@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use super::{EventType, IndexRequest, ScrapeRequest};
+use super::EventType;
 use crate::types::{ItemRequestType, MediaItemType};
 
 /// A concrete event with its payload.
@@ -148,48 +148,6 @@ pub enum RivenEvent {
 }
 
 impl RivenEvent {
-    pub fn index_request(&self) -> Option<IndexRequest<'_>> {
-        match self {
-            Self::MediaItemIndexRequested {
-                id,
-                item_type,
-                imdb_id,
-                tvdb_id,
-                tmdb_id,
-            } => Some(IndexRequest {
-                id: *id,
-                item_type: *item_type,
-                imdb_id: imdb_id.as_deref(),
-                tvdb_id: tvdb_id.as_deref(),
-                tmdb_id: tmdb_id.as_deref(),
-            }),
-            _ => None,
-        }
-    }
-
-    pub fn scrape_request(&self) -> Option<ScrapeRequest<'_>> {
-        match self {
-            Self::MediaItemScrapeRequested {
-                id,
-                item_type,
-                imdb_id,
-                tvdb_id,
-                title,
-                season,
-                episode,
-            } => Some(ScrapeRequest {
-                id: *id,
-                item_type: *item_type,
-                imdb_id: imdb_id.as_deref(),
-                tvdb_id: tvdb_id.as_deref(),
-                title,
-                season: *season,
-                episode: *episode,
-            }),
-            _ => None,
-        }
-    }
-
     /// Returns true for events that should be shown as UI notifications.
     pub fn is_notable(&self) -> bool {
         self.event_type().is_notable()

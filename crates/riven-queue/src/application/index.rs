@@ -19,7 +19,7 @@ fn index_event(job: &IndexJob) -> RivenEvent {
 }
 
 pub async fn start(job: &IndexJob, queue: &JobQueue) {
-    if load_media_item_or_log(&queue.db_pool, job.id, "indexing")
+    if load_media_item_or_log(job.id, "indexing")
         .await
         .is_none()
     {
@@ -32,18 +32,18 @@ pub async fn start(job: &IndexJob, queue: &JobQueue) {
 }
 
 pub async fn finalize(id: i64, queue: &JobQueue) {
-    let Some(item) = load_media_item_or_log(&queue.db_pool, id, "index finalize").await else {
+    let Some(item) = load_media_item_or_log(id, "index finalize").await else {
         queue.clear_flow_all("index", id).await;
         return;
     };
 
-    let requested_seasons = load_requested_seasons(&queue.db_pool, &item).await;
+    let requested_seasons = load_requested_seasons(&item).await;
     let responses: Vec<IndexedMediaItem> = queue.drain_flow_results("index", id).await;
     queue.clear_flow("index", id).await;
 
     if responses.is_empty() {
         tracing::warn!(id, "no indexer plugin responded; retrying in 24h");
-        if let Err(err) = repo::increment_failed_attempts(&queue.db_pool, id).await {
+        if let Err(err) = repo::increment_failed_attempts(id).await {
             tracing::warn!(id, %err, "failed to increment failed_attempts");
         }
         queue
@@ -65,10 +65,10 @@ pub async fn finalize(id: i64, queue: &JobQueue) {
         });
 
     if let Err(e) =
-        apply_indexed_media_item(&queue.db_pool, &item, &merged, requested_seasons.as_deref()).await
+        apply_indexed_media_item(&item, &merged, requested_seasons.as_deref()).await
     {
         tracing::error!(id, error = %e, "failed to persist indexed data");
-        if let Err(err) = repo::increment_failed_attempts(&queue.db_pool, id).await {
+        if let Err(err) = repo::increment_failed_attempts(id).await {
             tracing::warn!(id, %err, "failed to increment failed_attempts");
         }
         queue
@@ -80,7 +80,7 @@ pub async fn finalize(id: i64, queue: &JobQueue) {
         return;
     }
 
-    let fresh = match riven_db::repo::get_media_item(&queue.db_pool, id).await {
+    let fresh = match riven_db::repo::get_media_item(id).await {
         Ok(Some(item)) => item,
         _ => item,
     };

@@ -37,7 +37,6 @@ pub fn mount(
     mount_path: &str,
     vfs_layout: Arc<RwLock<VfsLibraryLayout>>,
     filesystem_settings_revision: Arc<AtomicU64>,
-    db_pool: sqlx::PgPool,
     stream_client: reqwest::Client,
     link_request_tx: mpsc::Sender<riven_core::stream_link::LinkRequest>,
     cache_max_size_mb: u64,
@@ -95,7 +94,6 @@ pub fn mount(
     let fs = RivenFs::new(
         vfs_layout,
         filesystem_settings_revision,
-        db_pool,
         stream_client,
         link_request_tx,
         cache_max_size_mb,

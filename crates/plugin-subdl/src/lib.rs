@@ -89,7 +89,7 @@ impl Plugin for SubdlPlugin {
             return Ok(HookResponse::Empty);
         }
 
-        let meta = match resolve_item_metadata(&ctx.db_pool, info).await {
+        let meta = match resolve_item_metadata(info).await {
             Ok(Some(m)) => m,
             Ok(None) => {
                 tracing::debug!(item_id = info.id, "subdl: unsupported item type, skipping");
@@ -109,7 +109,7 @@ impl Plugin for SubdlPlugin {
             return Ok(HookResponse::Empty);
         }
 
-        let media_entry = match find_media_entry(&ctx.db_pool, info.id).await {
+        let media_entry = match find_media_entry(info.id).await {
             Ok(Some(e)) => e,
             Ok(None) => {
                 tracing::debug!(
@@ -147,15 +147,7 @@ impl Plugin for SubdlPlugin {
 
         let mut saved = 0usize;
         for (language, sub) in best_per_lang {
-            match download_and_save(
-                &ctx.http,
-                &ctx.db_pool,
-                info.id,
-                &media_entry,
-                &language,
-                &sub,
-            )
-            .await
+            match download_and_save(&ctx.http, info.id, &media_entry, &language, &sub).await
             {
                 Ok(()) => saved += 1,
                 Err(e) => tracing::warn!(
@@ -205,10 +197,9 @@ impl SubMediaType {
 }
 
 async fn resolve_item_metadata(
-    pool: &sqlx::PgPool,
     info: &DownloadSuccessInfo<'_>,
 ) -> anyhow::Result<Option<ItemMetadata>> {
-    let item = match riven_db::repo::get_media_item(pool, info.id).await? {
+    let item = match riven_db::repo::get_media_item(info.id).await? {
         Some(i) => i,
         None => return Ok(None),
     };
@@ -221,7 +212,7 @@ async fn resolve_item_metadata(
             episode_number: None,
         })),
         MediaItemType::Episode => {
-            let hierarchy = riven_db::repo::get_media_item_hierarchy(pool, info.id).await?;
+            let hierarchy = riven_db::repo::get_media_item_hierarchy(info.id).await?;
             let Some(hierarchy) = hierarchy else {
                 return Ok(None);
             };
@@ -244,11 +235,8 @@ async fn resolve_item_metadata(
     }
 }
 
-async fn find_media_entry(
-    pool: &sqlx::PgPool,
-    item_id: i64,
-) -> anyhow::Result<Option<FileSystemEntry>> {
-    let entries = riven_db::repo::get_filesystem_entries(pool, item_id).await?;
+async fn find_media_entry(item_id: i64) -> anyhow::Result<Option<FileSystemEntry>> {
+    let entries = riven_db::repo::get_filesystem_entries(item_id).await?;
     Ok(entries
         .into_iter()
         .find(|e| matches!(e.entry_type, riven_core::types::FileSystemEntryType::Media)))
@@ -296,7 +284,6 @@ async fn search_subtitles(
 
 async fn download_and_save(
     http: &riven_core::http::HttpClient,
-    pool: &sqlx::PgPool,
     item_id: i64,
     media_entry: &FileSystemEntry,
     language: &str,
@@ -322,7 +309,6 @@ async fn download_and_save(
     let subtitle_path = subtitle_path_from(&media_entry.path, language);
 
     riven_db::repo::upsert_subtitle_entry(
-        pool,
         item_id,
         &subtitle_path,
         language,

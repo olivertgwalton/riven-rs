@@ -33,45 +33,39 @@ fn event_item_id(event: &RivenEvent) -> Option<i64> {
     }
 }
 
-async fn item_relates_to_target(pool: &sqlx::PgPool, item_id: i64, target_id: i64) -> bool {
-    repo::is_item_descendant_of(pool, item_id, target_id)
+async fn item_relates_to_target(item_id: i64, target_id: i64) -> bool {
+    repo::is_item_descendant_of(item_id, target_id)
         .await
         .unwrap_or(false)
 }
 
 async fn load_item_state_by_tmdb(
-    pool: &sqlx::PgPool,
     tmdb_id: &str,
 ) -> async_graphql::Result<Option<MediaItemStateTree>> {
-    let Some(item) = repo::get_media_item_by_tmdb(pool, tmdb_id).await? else {
+    let Some(item) = repo::get_media_item_by_tmdb(tmdb_id).await? else {
         return Ok(None);
     };
     MediaQuery
-        .media_item_state_tree_inner(pool, item)
+        .media_item_state_tree_inner(item)
         .await
         .map(Some)
 }
 
 async fn load_item_state_by_tvdb(
-    pool: &sqlx::PgPool,
     tvdb_id: &str,
 ) -> async_graphql::Result<Option<MediaItemStateTree>> {
-    let Some(item) = repo::get_media_item_by_tvdb(pool, tvdb_id).await? else {
+    let Some(item) = repo::get_media_item_by_tvdb(tvdb_id).await? else {
         return Ok(None);
     };
     MediaQuery
-        .media_item_state_tree_inner(pool, item)
+        .media_item_state_tree_inner(item)
         .await
         .map(Some)
 }
 
-async fn should_emit_for_external_target(
-    pool: &sqlx::PgPool,
-    event: &RivenEvent,
-    target: &MediaItem,
-) -> bool {
+async fn should_emit_for_external_target(event: &RivenEvent, target: &MediaItem) -> bool {
     if let Some(event_id) = event_item_id(event) {
-        return item_relates_to_target(pool, event_id, target.id).await;
+        return item_relates_to_target(event_id, target.id).await;
     }
     matches!(
         target.item_type,
@@ -81,7 +75,6 @@ async fn should_emit_for_external_target(
 
 async fn wait_for_relevant_event(
     rx: &mut tokio::sync::broadcast::Receiver<RivenEvent>,
-    pool: &sqlx::PgPool,
     target: &MediaItem,
 ) -> Option<()> {
     loop {
@@ -91,7 +84,7 @@ async fn wait_for_relevant_event(
             Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
         };
 
-        if should_emit_for_external_target(pool, &event, target).await {
+        if should_emit_for_external_target(&event, target).await {
             while rx.try_recv().is_ok() {}
             return Some(());
         }
@@ -108,23 +101,19 @@ impl MediaItemsSubscription {
         &self,
         ctx: &Context<'_>,
     ) -> async_graphql::Result<impl Stream<Item = async_graphql::Result<Show>>> {
-        let pool = ctx.data::<sqlx::PgPool>()?.clone();
         let queue = Arc::clone(ctx.data::<Arc<riven_queue::JobQueue>>()?);
         Ok(
-            broadcast_stream(queue.event_tx.subscribe()).filter_map(move |event| {
-                let pool = pool.clone();
-                async move {
-                    let RivenEvent::MediaItemIndexSuccess { id, item_type, .. } = event else {
-                        return None;
-                    };
-                    if item_type != MediaItemType::Show {
-                        return None;
-                    }
-                    match repo::get_media_item(&pool, id).await {
-                        Ok(Some(item)) => Some(Ok(Show { item })),
-                        Ok(None) => None,
-                        Err(error) => Some(Err(error.into())),
-                    }
+            broadcast_stream(queue.event_tx.subscribe()).filter_map(|event| async move {
+                let RivenEvent::MediaItemIndexSuccess { id, item_type, .. } = event else {
+                    return None;
+                };
+                if item_type != MediaItemType::Show {
+                    return None;
+                }
+                match repo::get_media_item(id).await {
+                    Ok(Some(item)) => Some(Ok(Show { item })),
+                    Ok(None) => None,
+                    Err(error) => Some(Err(error.into())),
                 }
             }),
         )
@@ -206,16 +195,15 @@ impl MediaItemsSubscription {
         tmdb_id: String,
     ) -> async_graphql::Result<impl Stream<Item = async_graphql::Result<Option<MediaItemStateTree>>>>
     {
-        let pool = ctx.data::<sqlx::PgPool>()?.clone();
         let queue = Arc::clone(ctx.data::<Arc<riven_queue::JobQueue>>()?);
         Ok(stream::unfold(
-            (queue.event_tx.subscribe(), pool, tmdb_id),
-            |(mut rx, pool, tmdb_id)| async move {
+            (queue.event_tx.subscribe(), tmdb_id),
+            |(mut rx, tmdb_id)| async move {
                 loop {
-                    let current_item = match repo::get_media_item_by_tmdb(&pool, &tmdb_id).await {
+                    let current_item = match repo::get_media_item_by_tmdb(&tmdb_id).await {
                         Ok(item) => item,
                         Err(error) => {
-                            return Some((Err(error.into()), (rx, pool, tmdb_id)));
+                            return Some((Err(error.into()), (rx, tmdb_id)));
                         }
                     };
 
@@ -223,28 +211,28 @@ impl MediaItemsSubscription {
                         if rx.recv().await.is_err() {
                             return None;
                         }
-                        let next = match load_item_state_by_tmdb(&pool, &tmdb_id).await {
+                        let next = match load_item_state_by_tmdb(&tmdb_id).await {
                             Ok(value) => value,
                             Err(error) => {
-                                return Some((Err(error), (rx, pool, tmdb_id)));
+                                return Some((Err(error), (rx, tmdb_id)));
                             }
                         };
                         if next.is_some() {
-                            return Some((Ok(next), (rx, pool, tmdb_id)));
+                            return Some((Ok(next), (rx, tmdb_id)));
                         }
                         continue;
                     };
 
-                    wait_for_relevant_event(&mut rx, &pool, item).await?;
+                    wait_for_relevant_event(&mut rx, item).await?;
 
-                    let next = match load_item_state_by_tmdb(&pool, &tmdb_id).await {
+                    let next = match load_item_state_by_tmdb(&tmdb_id).await {
                         Ok(value) => value,
                         Err(error) => {
-                            return Some((Err(error), (rx, pool, tmdb_id)));
+                            return Some((Err(error), (rx, tmdb_id)));
                         }
                     };
 
-                    return Some((Ok(next), (rx, pool, tmdb_id)));
+                    return Some((Ok(next), (rx, tmdb_id)));
                 }
             },
         ))
@@ -256,16 +244,15 @@ impl MediaItemsSubscription {
         tvdb_id: String,
     ) -> async_graphql::Result<impl Stream<Item = async_graphql::Result<Option<MediaItemStateTree>>>>
     {
-        let pool = ctx.data::<sqlx::PgPool>()?.clone();
         let queue = Arc::clone(ctx.data::<Arc<riven_queue::JobQueue>>()?);
         Ok(stream::unfold(
-            (queue.event_tx.subscribe(), pool, tvdb_id),
-            |(mut rx, pool, tvdb_id)| async move {
+            (queue.event_tx.subscribe(), tvdb_id),
+            |(mut rx, tvdb_id)| async move {
                 loop {
-                    let current_item = match repo::get_media_item_by_tvdb(&pool, &tvdb_id).await {
+                    let current_item = match repo::get_media_item_by_tvdb(&tvdb_id).await {
                         Ok(item) => item,
                         Err(error) => {
-                            return Some((Err(error.into()), (rx, pool, tvdb_id)));
+                            return Some((Err(error.into()), (rx, tvdb_id)));
                         }
                     };
 
@@ -273,28 +260,28 @@ impl MediaItemsSubscription {
                         if rx.recv().await.is_err() {
                             return None;
                         }
-                        let next = match load_item_state_by_tvdb(&pool, &tvdb_id).await {
+                        let next = match load_item_state_by_tvdb(&tvdb_id).await {
                             Ok(value) => value,
                             Err(error) => {
-                                return Some((Err(error), (rx, pool, tvdb_id)));
+                                return Some((Err(error), (rx, tvdb_id)));
                             }
                         };
                         if next.is_some() {
-                            return Some((Ok(next), (rx, pool, tvdb_id)));
+                            return Some((Ok(next), (rx, tvdb_id)));
                         }
                         continue;
                     };
 
-                    wait_for_relevant_event(&mut rx, &pool, item).await?;
+                    wait_for_relevant_event(&mut rx, item).await?;
 
-                    let next = match load_item_state_by_tvdb(&pool, &tvdb_id).await {
+                    let next = match load_item_state_by_tvdb(&tvdb_id).await {
                         Ok(value) => value,
                         Err(error) => {
-                            return Some((Err(error), (rx, pool, tvdb_id)));
+                            return Some((Err(error), (rx, tvdb_id)));
                         }
                     };
 
-                    return Some((Ok(next), (rx, pool, tvdb_id)));
+                    return Some((Ok(next), (rx, tvdb_id)));
                 }
             },
         ))
