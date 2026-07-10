@@ -120,15 +120,15 @@ impl UsenetStreamer {
             .await?
             .ok_or_else(|| StreamerError::NotIngested(info_hash.to_string()))?;
 
-        let mut healed = false;
-        for file in &mut meta.files {
+        let mut healed_indices: Vec<usize> = Vec::new();
+        for (file_index, file) in meta.files.iter_mut().enumerate() {
             let approximate = matches!(
                 &file.source,
                 NzbMetaSource::Direct { offsets, .. } if direct_offsets_look_approximate(offsets)
             );
             if approximate {
                 match self.rescale_direct_to_decoded(file).await {
-                    Ok(()) => healed = true,
+                    Ok(()) => healed_indices.push(file_index),
                     Err(error) => tracing::warn!(
                         info_hash,
                         %error,
@@ -137,10 +137,11 @@ impl UsenetStreamer {
                 }
             }
         }
-        if healed {
+        if !healed_indices.is_empty() {
             match store::store(&self.db, info_hash, &meta).await {
                 Ok(()) => tracing::info!(
                     info_hash,
+                    healed = healed_indices.len(),
                     "usenet meta auto-heal: rescaled Direct offsets to exact decoded space"
                 ),
                 Err(error) => tracing::warn!(
@@ -148,6 +149,31 @@ impl UsenetStreamer {
                     %error,
                     "usenet meta auto-heal: persist failed; healed in memory only"
                 ),
+            }
+            // The heal above can shrink `total_size` (an encoded-byte estimate
+            // corrected to the exact decoded length). `filesystem_entries.file_size`
+            // was set once at grab time from the old estimate and won't pick up
+            // this correction on its own, so every library entry serving this
+            // file would keep advertising a size the source can't actually back —
+            // any tail read past the real end then fails with EIO. Sync it now.
+            for file_index in &healed_indices {
+                let file_size = meta.files[*file_index].total_size;
+                match store::sync_file_size(&self.db, info_hash, *file_index, file_size).await {
+                    Ok(rows) if rows > 0 => tracing::info!(
+                        info_hash,
+                        file_index,
+                        file_size,
+                        rows,
+                        "usenet meta auto-heal: synced filesystem_entries.file_size"
+                    ),
+                    Ok(_) => {}
+                    Err(error) => tracing::warn!(
+                        info_hash,
+                        file_index,
+                        %error,
+                        "usenet meta auto-heal: failed to sync filesystem_entries.file_size"
+                    ),
+                }
             }
         }
 

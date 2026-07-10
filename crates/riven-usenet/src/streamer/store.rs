@@ -5,10 +5,10 @@
 //! map." Postgres holds that record for as long as it's relevant; the
 //! in-memory LRU above absorbs hot reads. No TTL, no Redis hop.
 
-use riven_core::entities::usenet_meta;
-use sea_orm::sea_query::OnConflict;
+use riven_core::entities::{filesystem_entries, usenet_meta};
 use sea_orm::ActiveValue::Set;
-use sea_orm::{DatabaseConnection, EntityTrait};
+use sea_orm::sea_query::OnConflict;
+use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter};
 
 use super::{NzbMeta, StreamerError};
 
@@ -49,4 +49,30 @@ pub(super) async fn store(
     .exec(db)
     .await?;
     Ok(())
+}
+
+/// Propagate a corrected `total_size` (e.g. from the `Direct` offset
+/// auto-heal in `load_meta`) into `filesystem_entries.file_size` for every
+/// library entry pointing at this `(info_hash, file_index)`. The two tables
+/// are otherwise independent — `file_size` is only written once, at grab
+/// time, from whatever size estimate `NzbMeta` had then — so without this
+/// they silently drift apart whenever the meta's size estimate improves,
+/// leaving the FUSE mount advertising a size larger than the source can
+/// actually serve and every tail read past the real end failing with EIO.
+pub(super) async fn sync_file_size(
+    db: &DatabaseConnection,
+    info_hash: &str,
+    file_index: usize,
+    file_size: u64,
+) -> Result<u64, StreamerError> {
+    let result = filesystem_entries::Entity::update_many()
+        .set(filesystem_entries::ActiveModel {
+            file_size: Set(file_size as i64),
+            ..Default::default()
+        })
+        .filter(filesystem_entries::Column::UsenetInfoHash.eq(info_hash))
+        .filter(filesystem_entries::Column::UsenetFileIndex.eq(file_index as i32))
+        .exec(db)
+        .await?;
+    Ok(result.rows_affected)
 }

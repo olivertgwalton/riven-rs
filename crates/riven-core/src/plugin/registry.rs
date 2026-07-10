@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use tokio::sync::RwLock;
 
@@ -7,6 +8,13 @@ use crate::events::{EventType, HookResponse, RivenEvent};
 use crate::settings::PluginSettings;
 
 pub const PLUGIN_ENABLED_PREFIX: &str = "plugin_enabled.";
+
+/// Per-plugin cap on `dispatch()`'s synchronous `handle_event` call. Without
+/// this, a single plugin blocked on a slow/hung network call (e.g. an NNTP
+/// connection with no client-side timeout) stalls every other subscriber and
+/// the calling job for as long as the caller's own timeout allows — up to the
+/// 10-minute `riven-download` worker timeout in practice.
+const DISPATCH_TIMEOUT: Duration = Duration::from_secs(60);
 
 pub struct PluginInfo {
     pub name: String,
@@ -144,11 +152,28 @@ impl PluginRegistry {
             })
             .collect();
 
-        let futures = targets
-            .into_iter()
-            .map(|(name, plugin, context)| async move {
-                (name, plugin.handle_event(event, &context).await)
-            });
+        let futures = targets.into_iter().map(|(name, plugin, context)| async move {
+            let result = match tokio::time::timeout(
+                DISPATCH_TIMEOUT,
+                plugin.handle_event(event, &context),
+            )
+            .await
+            {
+                Ok(result) => result,
+                Err(_) => {
+                    tracing::error!(
+                        plugin = name,
+                        timeout_secs = DISPATCH_TIMEOUT.as_secs(),
+                        "plugin handle_event timed out"
+                    );
+                    Err(anyhow::anyhow!(
+                        "plugin '{name}' timed out after {}s",
+                        DISPATCH_TIMEOUT.as_secs()
+                    ))
+                }
+            };
+            (name, result)
+        });
         futures::future::join_all(futures).await
     }
 

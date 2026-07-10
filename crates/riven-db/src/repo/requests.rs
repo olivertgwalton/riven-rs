@@ -4,8 +4,8 @@ use riven_core::types::*;
 use sea_orm::ActiveValue::{Set, Unchanged};
 use sea_orm::sea_query::Expr;
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, ConnectionTrait, DbBackend, EntityTrait, QueryFilter,
-    QueryOrder, QuerySelect, Statement,
+    ActiveEnum, ActiveModelTrait, ColumnTrait, ConnectionTrait, DbBackend, EntityTrait,
+    QueryFilter, QueryOrder, QuerySelect, Statement,
 };
 
 use crate::entities::*;
@@ -311,7 +311,7 @@ pub async fn update_item_request_state(
     // preserves any earlier timestamp. Done in one statement so it stays atomic;
     // re-fetch afterwards to return the public struct (RETURNING * equivalent).
     let mut update =
-        item_requests::Entity::update_many().col_expr(item_requests::Column::State, Expr::value(state));
+        item_requests::Entity::update_many().col_expr(item_requests::Column::State, state.as_enum());
     if state == ItemRequestState::Completed {
         update =
             update.col_expr(item_requests::Column::CompletedAt, Expr::cust("COALESCE(completed_at, NOW())"));

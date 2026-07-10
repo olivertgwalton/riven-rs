@@ -21,8 +21,8 @@ use riven_core::entities::{item_requests, media_items};
 use riven_core::types::MediaItemState;
 use sea_orm::sea_query::Expr;
 use sea_orm::{
-    ColumnTrait, ConnectionTrait, DbBackend, EntityTrait, PaginatorTrait, QueryFilter, QuerySelect,
-    Statement,
+    ActiveEnum, ColumnTrait, ConnectionTrait, DbBackend, EntityTrait, PaginatorTrait, QueryFilter,
+    QuerySelect, Statement,
 };
 
 use crate::orm;
@@ -47,7 +47,7 @@ pub async fn reset_items_by_ids(ids: Vec<i64>) -> Result<u64> {
         return Ok(0);
     }
     let result = media_items::Entity::update_many()
-        .col_expr(media_items::Column::State, Expr::value(MediaItemState::Indexed))
+        .col_expr(media_items::Column::State, MediaItemState::Indexed.as_enum())
         .col_expr(media_items::Column::FailedAttempts, Expr::value(0))
         .col_expr(media_items::Column::UpdatedAt, Expr::cust("NOW()"))
         .filter(media_items::Column::Id.is_in(ids.iter().copied()))
@@ -76,7 +76,7 @@ pub async fn pause_items_by_ids(ids: Vec<i64>) -> Result<u64> {
         return Ok(0);
     }
     let result = media_items::Entity::update_many()
-        .col_expr(media_items::Column::State, Expr::value(MediaItemState::Paused))
+        .col_expr(media_items::Column::State, MediaItemState::Paused.as_enum())
         .col_expr(media_items::Column::UpdatedAt, Expr::cust("NOW()"))
         .filter(media_items::Column::Id.is_in(ids.iter().copied()))
         .exec(orm())
