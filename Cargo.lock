@@ -4033,6 +4033,7 @@ dependencies = [
  "async-graphql",
  "async-trait",
  "chrono",
+ "log",
  "riven-core",
  "riven-rank",
  "sea-orm",

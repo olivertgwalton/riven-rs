@@ -34,7 +34,10 @@ pub async fn connect(database_url: &str) -> Result<DatabaseConnection> {
     let mut opt = ConnectOptions::new(database_url.to_owned());
     opt.max_connections(pool_size())
         .min_connections(2)
-        .acquire_timeout(std::time::Duration::from_secs(10));
+        .acquire_timeout(std::time::Duration::from_secs(10))
+        // SeaORM defaults sqlx query logging to `info`, which floods the logs
+        // with every SQL statement executed (dozens per item processed).
+        .sqlx_logging_level(log::LevelFilter::Trace);
 
     let db = Database::connect(opt).await?;
     if ORM.set(db.clone()).is_err() {
