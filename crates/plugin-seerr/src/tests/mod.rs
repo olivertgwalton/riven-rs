@@ -45,6 +45,21 @@ fn request_response_deserializes_media_and_requested_seasons() {
 }
 
 #[test]
+fn request_media_id_deserializes() {
+    let response: SeerrRequestResponse = serde_json::from_value(serde_json::json!({
+        "results": [
+            { "id": 789, "type": "tv", "media": { "id": 793, "tvdbId": 379169 } }
+        ]
+    }))
+    .expect("seerr response should deserialize");
+
+    assert_eq!(
+        response.results[0].media.as_ref().and_then(|media| media.id),
+        Some(793)
+    );
+}
+
+#[test]
 fn plugin_schema_declares_default_url_and_filter() {
     let schema = SeerrPlugin.settings_schema();
 
