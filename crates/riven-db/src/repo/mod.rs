@@ -110,10 +110,47 @@ pub async fn delete_items_by_ids(ids: Vec<i64>) -> Result<u64> {
         .flatten()
         .collect();
 
+    // Collect every usenet info_hash the about-to-be-deleted subtree
+    // references before the cascade runs. `media_items.parent_id` and
+    // `filesystem_entries.media_item_id` are both `ON DELETE CASCADE`, so a
+    // show delete removes seasons/episodes/entries at the DB level directly —
+    // never going through `streams::delete_filesystem_entry`, which is where
+    // the equivalent orphan check normally lives. Without this, a deleted
+    // show's info_hashes are left permanently cached in `usenet_meta`, and a
+    // later re-scrape that lands back on the same (deterministic-hash)
+    // release silently reuses whatever was parsed before — skipping every
+    // ingest-time check, including PAR2 block verification — instead of
+    // re-validating it.
+    let info_hashes: Vec<String> = orm()
+        .query_all(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "WITH RECURSIVE descendants AS ( \
+                 SELECT id FROM media_items WHERE id = ANY($1) \
+                 UNION ALL \
+                 SELECT mi.id FROM media_items mi \
+                 JOIN descendants d ON mi.parent_id = d.id \
+             ) \
+             SELECT DISTINCT fe.usenet_info_hash AS info_hash \
+             FROM filesystem_entries fe \
+             JOIN descendants d ON fe.media_item_id = d.id \
+             WHERE fe.usenet_info_hash IS NOT NULL",
+            [ids.clone().into()],
+        ))
+        .await?
+        .into_iter()
+        .filter_map(|row| row.try_get::<String>("", "info_hash").ok())
+        .collect();
+
     let result = media_items::Entity::delete_many()
         .filter(media_items::Column::Id.is_in(ids.iter().copied()))
         .exec(orm())
         .await?;
+
+    for info_hash in &info_hashes {
+        if let Err(e) = streams::delete_orphaned_usenet_meta(info_hash).await {
+            tracing::warn!(info_hash, error = %e, "failed to clean up orphaned usenet_meta");
+        }
+    }
 
     // Prune item_requests no longer referenced by any media_item. The
     // `NOT IN (SELECT ...)` correlated subquery stays raw inside the filter.

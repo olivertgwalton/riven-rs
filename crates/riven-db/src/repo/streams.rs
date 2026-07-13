@@ -1,7 +1,7 @@
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use riven_core::entities::{
-    filesystem_entries, media_item_blacklisted_streams, media_item_streams, streams,
+    filesystem_entries, media_item_blacklisted_streams, media_item_streams, streams, usenet_meta,
 };
 use riven_core::types::FileSystemEntryType;
 use sea_orm::sea_query::{Expr, OnConflict};
@@ -774,24 +774,60 @@ pub async fn count_vfs_distinct_dirs(pattern: &str, depth: u32) -> Result<i64> {
     Ok(row.try_get::<i64>("", "count")?)
 }
 
+/// Deletes the `usenet_meta` row for `info_hash` — but only if no
+/// `filesystem_entries` row still references it. A single info_hash's
+/// segment map can back multiple media items at once (a season-pack NZB's
+/// shared RAR volumes span several episodes' virtual files), so this must
+/// never remove data a sibling entry still depends on.
+///
+/// Called whenever a usenet-backed filesystem entry is removed, so that a
+/// later re-scrape landing on the same release (NZB info_hash is
+/// deterministic from its content, so a repeat scrape of an unchanged
+/// release reliably reproduces the same hash) re-runs ingest-time
+/// validation — segment availability, RAR structure, PAR2 block checks —
+/// instead of `UsenetStreamer::ingest`'s idempotency fast path silently
+/// reusing a stale, possibly already-known-bad, cached parse.
+pub async fn delete_orphaned_usenet_meta(info_hash: &str) -> Result<bool> {
+    let still_referenced = filesystem_entries::Entity::find()
+        .filter(filesystem_entries::Column::UsenetInfoHash.eq(info_hash))
+        .limit(1)
+        .one(orm())
+        .await?
+        .is_some();
+    if still_referenced {
+        return Ok(false);
+    }
+    let result = usenet_meta::Entity::delete_by_id(info_hash.to_owned())
+        .exec(orm())
+        .await?;
+    Ok(result.rows_affected > 0)
+}
+
 /// Returns `(was_deleted, owning_media_item_id)`. Losing a media entry can
 /// flip Completed → Scraped/Indexed, so the affected item is recomputed
 /// before returning.
 pub async fn delete_filesystem_entry(entry_id: i64) -> Result<(bool, Option<i64>)> {
-    // Raw Statement: DELETE ... RETURNING to learn the owning item in one trip.
+    // Raw Statement: DELETE ... RETURNING to learn the owning item (and, for
+    // usenet entries, the info_hash to check for orphaned meta) in one trip.
     let row = orm()
         .query_one(Statement::from_sql_and_values(
             DbBackend::Postgres,
             "DELETE FROM filesystem_entries \
              WHERE id = $1 AND entry_type = 'media' \
-             RETURNING media_item_id",
+             RETURNING media_item_id, usenet_info_hash",
             [entry_id.into()],
         ))
         .await?;
-    let media_item_id = match row {
-        Some(row) => Some(row.try_get::<i64>("", "media_item_id")?),
-        None => None,
+    let (media_item_id, usenet_info_hash) = match &row {
+        Some(row) => (
+            Some(row.try_get::<i64>("", "media_item_id")?),
+            row.try_get::<Option<String>>("", "usenet_info_hash")?,
+        ),
+        None => (None, None),
     };
+    if let Some(info_hash) = usenet_info_hash.as_deref() {
+        delete_orphaned_usenet_meta(info_hash).await?;
+    }
     if let Some(id) = media_item_id {
         super::state::recompute(&[id]).await?;
     }
