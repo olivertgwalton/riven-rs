@@ -103,10 +103,35 @@ fn best_title_ratio(
 
     for alias in aliases.values().flatten() {
         let normalized_alias = crate::parse::normalize_title(alias);
+        if is_derivative_alias(&normalized_alias, &normalized_query) {
+            continue;
+        }
         best_ratio = best_ratio.max(lev_ratio(&data.normalized_title, &normalized_alias));
     }
 
     best_ratio
+}
+
+/// Whether `normalized_alias` is the show's own title plus trailing words
+/// (e.g. "top gear the races" for query "top gear").
+///
+/// Metadata providers frequently nest spin-off, compilation, or "best of"
+/// specials under the parent show's alias list (TVDB does this for Top
+/// Gear: "Top Gear: The Races", "Top Gear: Huippumokat" i.e. "Top Gear:
+/// Epic Fails", etc. are all separate clip-show titles, not alternate
+/// names for the main series). Treating every alias as an equally-trusted
+/// match target lets a release for one of these derivative titles pass the
+/// title-similarity check for the real show, since the alias equals the
+/// release's own title exactly. Genuine translated/foreign aliases don't
+/// share the title as a literal word-prefix, so this only filters the
+/// derivative-title pattern, not real aliases.
+fn is_derivative_alias(normalized_alias: &str, normalized_query: &str) -> bool {
+    if normalized_query.is_empty() {
+        return false;
+    }
+    let query_words: Vec<&str> = normalized_query.split_whitespace().collect();
+    let alias_words: Vec<&str> = normalized_alias.split_whitespace().collect();
+    alias_words.len() > query_words.len() && alias_words[..query_words.len()] == query_words[..]
 }
 
 /// Whether an already-parsed release matches `correct_title` (or an alias)
@@ -283,5 +308,56 @@ mod tests {
         assert_eq!(lev_ratio("toy story", "toy story"), 1.0);
 
         assert!(lev_ratio("abc", "xyz") < 0.6);
+    }
+
+    #[test]
+    fn derivative_alias_is_rejected_but_genuine_alias_is_kept() {
+        // Reproduces the Top Gear (tvdb-74608) incident: TVDB's alias list
+        // for the main show includes several derivative/compilation titles
+        // alongside one genuine foreign-language alias.
+        let mut aliases = HashMap::new();
+        aliases.insert(
+            "eng".to_string(),
+            vec!["Top Gear: The Races".to_string()],
+        );
+        aliases.insert("hun".to_string(), vec!["Csúcsmodellek".to_string()]);
+
+        let settings = RankSettings::default();
+
+        let races_release = parse("Top.Gear.The.Races.S01E01.1080p.WEB-DL.DDP2.0.H-264.mkv");
+        assert!(
+            !title_matches(
+                &races_release,
+                "Top Gear",
+                None,
+                &aliases,
+                &settings
+            ),
+            "a release for a derivative spin-off must not match the parent show via its own alias"
+        );
+
+        let genuine_release = parse("Csucsmodellek.S01E01.1080p.WEB-DL.mkv");
+        assert!(
+            title_matches(
+                &genuine_release,
+                "Top Gear",
+                None,
+                &aliases,
+                &settings
+            ),
+            "a genuine foreign-language alias must still match"
+        );
+    }
+
+    #[test]
+    fn is_derivative_alias_detects_title_plus_suffix_only() {
+        assert!(is_derivative_alias("top gear the races", "top gear"));
+        assert!(is_derivative_alias(
+            "top gear jeremy clarksonin parhaat",
+            "top gear"
+        ));
+        assert!(!is_derivative_alias("csucsmodellek", "top gear"));
+        assert!(!is_derivative_alias("top gear", "top gear"));
+        assert!(!is_derivative_alias("top gear australia", "top gear australia"));
     }
 }
