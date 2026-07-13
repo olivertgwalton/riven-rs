@@ -42,6 +42,20 @@ fn is_media_filename(name: &str) -> bool {
     )
 }
 
+/// Whether a group's slices (assumed already in ascending `part_index`
+/// order, as produced by the volume-order iteration plus at most one
+/// prepended synthesized slice) skip a RAR volume. A single file's data is
+/// always contiguous across volumes, so consecutive slices must sit in
+/// adjacent volumes; a jump of more than one means at least one volume's
+/// worth of this file's data was never located. Returns the boundary
+/// `(prev_part_index, next_part_index)` of the first such gap, if any.
+pub(crate) fn first_slice_gap(slices: &[NzbRarSlice]) -> Option<(usize, usize)> {
+    slices
+        .windows(2)
+        .find(|w| w[1].part_index > w[0].part_index + 1)
+        .map(|w| (w[0].part_index, w[1].part_index))
+}
+
 /// Default fraction of a candidate file's segments to STAT-probe at ingest,
 /// matching altmount's `segment_sample_percentage` default of 5%. A fixed tiny
 /// sample (the old 12 segments) is ~0.1% of a 10 GB REMUX, so sparsely-dead
@@ -589,6 +603,28 @@ impl UsenetStreamer {
                     plaintext_sum = g.plaintext_sum,
                     declared = g.unpacked_size,
                     "RAR inner file slices do not cover its declared size; skipping"
+                );
+                continue;
+            }
+            if let Some((prev_part, next_part)) = first_slice_gap(&g.slices) {
+                // The byte-sum check above only proves the *lengths* add up to
+                // `unpacked_size` — it can't prove the bytes are the right
+                // ones. Two header-probes hitting real (non-synthesized)
+                // FILE_HEAD blocks that skip one or more intervening volumes
+                // means some other file's header was found sitting inside
+                // that gap (observed in a Black Mirror S02 season-pack: the
+                // header probe is front-of-volume only, so when a volume's
+                // *true* first header is itself missed, a stale/adjacent
+                // file's header can be misattributed and the sums still add
+                // up by coincidence). A contiguous RAR file can never
+                // legitimately skip a whole volume, so treat this as
+                // unverifiable rather than serving corrupted bytes.
+                tracing::warn!(
+                    name = %g.name,
+                    prev_part,
+                    next_part,
+                    "RAR inner file slices skip one or more volumes; \
+                     reconstruction is unverifiable, skipping"
                 );
                 continue;
             }

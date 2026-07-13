@@ -1,5 +1,16 @@
-use super::ingest::pick_primary_media_index;
+use super::ingest::{first_slice_gap, pick_primary_media_index};
+use super::NzbRarSlice;
 use crate::nzb::{NzbFile, NzbSegment};
+
+fn mk_slice(part_index: usize) -> NzbRarSlice {
+    NzbRarSlice {
+        part_index,
+        start_in_part: 0,
+        length: 1,
+        encryption: None,
+        ciphertext_length: 1,
+    }
+}
 
 #[test]
 fn primary_media_index_picks_largest_media() {
@@ -31,4 +42,21 @@ fn offset_table_heuristic_flags_estimates_only() {
     assert!(direct_offsets_look_approximate(&estimate));
     assert!(!direct_offsets_look_approximate(&[0, 716800, 900000]));
     assert!(!direct_offsets_look_approximate(&[0, 500000]));
+}
+
+#[test]
+fn first_slice_gap_detects_skipped_volume() {
+    // Reproduces the Black Mirror S02 season-pack incident: the byte-sum
+    // check alone let a stale header from a neighbouring file (whose real
+    // data landed beyond the front-of-volume probe) pass as if this file's
+    // reconstruction were complete, when volume 21 was silently never
+    // claimed by either file.
+    let slices = vec![mk_slice(19), mk_slice(20), mk_slice(22), mk_slice(23)];
+    assert_eq!(first_slice_gap(&slices), Some((20, 22)));
+}
+
+#[test]
+fn first_slice_gap_allows_contiguous_slices() {
+    let slices = vec![mk_slice(11), mk_slice(12), mk_slice(13)];
+    assert_eq!(first_slice_gap(&slices), None);
 }
