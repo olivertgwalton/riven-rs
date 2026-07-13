@@ -202,7 +202,7 @@ pub async fn persist_movie(
     .await
     {
         if is_item_deleted_fk_error(&e) {
-            tracing::info!(id, "movie was deleted mid-persist, skipping");
+            tracing::debug!(id, "movie was deleted mid-persist, skipping");
             return false;
         }
         tracing::error!(error = %e, "failed to create media entry");
@@ -290,7 +290,7 @@ pub async fn persist_episode(
                 file.filename.as_str()
             };
             if super::event_match::release_matches_episode(candidate, &item.title, item.aired_at) {
-                tracing::info!(
+                tracing::debug!(
                     id, season = season_number, episode = episode_number,
                     info_hash = %info_hash,
                     episode_title = %item.title,
@@ -306,7 +306,7 @@ pub async fn persist_episode(
         && playable_videos.len() == 1
         && looks_obfuscated(&playable_videos[0].0.filename)
     {
-        tracing::info!(
+        tracing::debug!(
             id, season = season_number, episode = episode_number,
             info_hash = %info_hash,
             filename = %playable_videos[0].0.filename,
@@ -317,7 +317,7 @@ pub async fn persist_episode(
     }
 
     if matched.is_empty() {
-        tracing::info!(
+        tracing::warn!(
             id, season = season_number, episode = episode_number,
             info_hash = %info_hash,
             "no playable torrent file matched episode — blacklisting stream"
@@ -367,7 +367,7 @@ pub async fn persist_episode(
         .await
         {
             if is_item_deleted_fk_error(&e) {
-                tracing::info!(id, "episode was deleted mid-persist, skipping");
+                tracing::debug!(id, "episode was deleted mid-persist, skipping");
                 return false;
             }
             tracing::error!(error = %e, "failed to create media entry");
@@ -509,7 +509,7 @@ pub async fn persist_season(
             };
             if let Some(idx) = super::event_match::match_release_to_episode(candidate, &events) {
                 let ep_id = episodes[idx].id;
-                tracing::info!(
+                tracing::debug!(
                     id, season = season_number, info_hash = %info_hash,
                     episode = episodes[idx].episode_number,
                     episode_title = %episodes[idx].title,
@@ -555,7 +555,7 @@ pub async fn persist_season(
             ));
         }
         let example = ordered.first().map_or("", |(f, _)| f.filename.as_str());
-        tracing::info!(
+        tracing::debug!(
             id, season = season_number, info_hash = %info_hash,
             file_count = parsed_video_files.len(),
             episode_count = episodes.len(),
@@ -594,7 +594,7 @@ pub async fn persist_season(
                 }
                 Err(e) => {
                     if is_item_deleted_fk_error(&e) {
-                        tracing::info!(ep_id = ep.id, "episode was deleted mid-persist, skipping");
+                        tracing::debug!(ep_id = ep.id, "episode was deleted mid-persist, skipping");
                     } else {
                         tracing::error!(error = %e, ep_id = ep.id, "failed to create media entry for episode");
                     }
@@ -604,7 +604,7 @@ pub async fn persist_season(
     }
 
     if completed_episode_ids.is_empty() {
-        tracing::info!(
+        tracing::warn!(
             id, season = season_number, info_hash = %info_hash,
             "season pack matched episodes but no entries were persisted — blacklisting stream"
         );
@@ -763,7 +763,7 @@ pub async fn persist_show(
                     Ok(_) => completed_episode_ids.push(ep.id),
                     Err(e) => {
                         if is_item_deleted_fk_error(&e) {
-                            tracing::info!(
+                            tracing::debug!(
                                 ep_id = ep.id,
                                 "episode was deleted mid-persist, skipping"
                             );
@@ -777,7 +777,7 @@ pub async fn persist_show(
     }
 
     if completed_episode_ids.is_empty() {
-        tracing::info!(
+        tracing::warn!(
             id, info_hash = %info_hash,
             "show pack matched no episodes — blacklisting stream"
         );
@@ -1015,7 +1015,7 @@ async fn persist_supplied_show_download(
         {
             Ok(_) => {}
             Err(e) if is_item_deleted_fk_error(&e) => {
-                tracing::info!(
+                tracing::debug!(
                     ep_id = episode.id,
                     "episode was deleted mid-persist, skipping"
                 );
@@ -1095,7 +1095,7 @@ pub async fn finalize_download_success(
             duration_seconds: duration.as_secs_f64(),
         })
         .await;
-    tracing::debug!(
+    tracing::info!(
         id,
         duration_secs = duration.as_secs_f64(),
         "download flow completed"

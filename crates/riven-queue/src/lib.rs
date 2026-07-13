@@ -523,7 +523,7 @@ impl JobQueue {
             .query_async(&mut conn)
             .await;
         match result {
-            Ok(()) => tracing::info!(id, kind, run_at = %run_at, "scheduled delayed job"),
+            Ok(()) => tracing::debug!(id, kind, run_at = %run_at, "scheduled delayed job"),
             Err(error) => tracing::error!(id, kind, %error, "failed to schedule delayed job"),
         }
     }

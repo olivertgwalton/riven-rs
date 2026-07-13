@@ -123,7 +123,7 @@ pub async fn scrape_newznab(
         results.insert(info_hash, entry);
     }
 
-    tracing::info!(
+    tracing::debug!(
         count = results.len(),
         imdb_id = req.imdb_id,
         "stremthru newznab scrape complete"

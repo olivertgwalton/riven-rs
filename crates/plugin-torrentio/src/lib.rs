@@ -94,7 +94,7 @@ impl Plugin for TorrentioPlugin {
 
         let results = scrape_results_from_response(resp);
 
-        tracing::info!(
+        tracing::debug!(
             count = results.len(),
             imdb_id = stremio.imdb_id,
             "torrentio scrape complete"

@@ -88,7 +88,7 @@ pub async fn attempt_download(
                 }
                 Ok(_) => {}
                 Err(error) => {
-                    tracing::error!(
+                    tracing::warn!(
                         plugin = plugin_name,
                         info_hash,
                         error = %error,

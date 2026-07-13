@@ -386,7 +386,7 @@ impl Plugin for NewznabPlugin {
             return Err(RateLimitedError.into());
         }
 
-        tracing::info!(
+        tracing::debug!(
             count = results.len(),
             indexers = ?per_indexer_counts,
             imdb_id = request.imdb_id,

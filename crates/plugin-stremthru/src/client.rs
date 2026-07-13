@@ -758,7 +758,7 @@ pub async fn scrape_torznab(
         results.insert(info_hash, entry);
     }
 
-    tracing::info!(
+    tracing::debug!(
         count = results.len(),
         imdb_id = req.imdb_id,
         title = req.title,

@@ -48,7 +48,7 @@ pub async fn load_media_item_hierarchy_or_log(
     match repo::get_media_item_hierarchy(id).await {
         Ok(Some(item)) => Some(item),
         Ok(None) => {
-            tracing::error!(id, "media item not found for {context}");
+            tracing::debug!(id, "media item not found for {context}");
             None
         }
         Err(e) => {
@@ -66,7 +66,7 @@ pub async fn load_media_item_or_log(
     match repo::get_media_item(id).await {
         Ok(Some(item)) => Some(item),
         Ok(None) => {
-            tracing::error!(id, "media item not found for {context}");
+            tracing::debug!(id, "media item not found for {context}");
             None
         }
         Err(e) => {

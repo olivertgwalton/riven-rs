@@ -321,7 +321,7 @@ pub fn rank_streams(
             let (parsed_value, rank) = match best {
                 Some(ranked) => {
                     if let Some(bitrate) = ranked.data.bitrate.as_deref() {
-                        tracing::info!(
+                        tracing::debug!(
                             info_hash,
                             rank = ranked.rank,
                             bitrate,
@@ -329,7 +329,7 @@ pub fn rank_streams(
                             "stream ranked"
                         );
                     } else {
-                        tracing::info!(info_hash, rank = ranked.rank, title, "stream ranked");
+                        tracing::debug!(info_hash, rank = ranked.rank, title, "stream ranked");
                     }
                     (serde_json::to_value(&ranked.data).ok(), Some(ranked.rank))
                 }
@@ -354,7 +354,7 @@ pub async fn load_active_profiles() -> Vec<(String, RankSettings)> {
     let profiles = match repo::get_enabled_profiles().await {
         Ok(p) => p,
         Err(e) => {
-            tracing::error!(error = %e, "failed to load enabled ranking profiles");
+            tracing::warn!(error = %e, "failed to load enabled ranking profiles");
             return vec![(
                 "ultra_hd".to_string(),
                 QualityProfile::UltraHd.base_settings().prepare(),

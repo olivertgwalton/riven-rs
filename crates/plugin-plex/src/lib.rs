@@ -72,7 +72,7 @@ impl Plugin for PlexPlugin {
         ctx: &PluginContext,
     ) -> anyhow::Result<HookResponse> {
         let id = info.id;
-        tracing::info!(id, "plex: handling download success event");
+        tracing::debug!(id, "plex: handling download success event");
         let plex_token = ctx.require_setting("plextoken")?;
         let plex_url = ctx.require_setting("plexserverurl")?.trim_end_matches('/');
 

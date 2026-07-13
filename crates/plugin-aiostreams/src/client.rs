@@ -128,7 +128,7 @@ pub async fn scrape(
         }
     }
 
-    tracing::info!(
+    tracing::debug!(
         count = results.len(),
         raw_result_count,
         missing_info_hash_count,

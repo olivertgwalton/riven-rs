@@ -378,7 +378,7 @@ impl Plugin for UsenetPlugin {
             })
             .collect();
 
-        tracing::info!(
+        tracing::debug!(
             info_hash,
             file_count = files.len(),
             primary = files.first().map(|f| f.filename.as_str()),

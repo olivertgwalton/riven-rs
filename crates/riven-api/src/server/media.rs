@@ -418,7 +418,7 @@ async fn serve_usenet_media(
         }
     }
 
-    tracing::info!(
+    tracing::debug!(
         entry_id = entry.id,
         method = %method,
         range = ?requested_range,
@@ -602,7 +602,7 @@ pub(super) async fn media_bridge_handler(
         }
     }
 
-    tracing::info!(
+    tracing::debug!(
         entry_id,
         method = %method,
         status = %upstream.status(),

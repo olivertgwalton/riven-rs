@@ -130,7 +130,7 @@ impl Plugin for CometPlugin {
 
         let results = scrape_results_from_response(resp);
 
-        tracing::info!(
+        tracing::debug!(
             count = results.len(),
             imdb_id,
             title = request.title,
