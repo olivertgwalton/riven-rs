@@ -642,8 +642,7 @@ async fn run_downloads(
                     DownloadAttemptOutcome::Failed => {
                         attempted.insert(key);
                     }
-                    DownloadAttemptOutcome::TerminalHandled => return true,
-                    DownloadAttemptOutcome::Succeeded => {
+                    DownloadAttemptOutcome::TerminalHandled | DownloadAttemptOutcome::Succeeded => {
                         done_profiles.insert(profile_name.clone());
                         any_success = true;
                         profile_done = true;
@@ -664,6 +663,16 @@ async fn run_downloads(
             })
             .await;
         return false;
+    }
+
+    // Season/Show persists already emit their own Success/PartialSuccess events
+    // and library-state updates per profile (see persist_season/persist_show);
+    // the notify+finalize below is the Movie/Episode-only completion path.
+    if matches!(
+        item.item_type,
+        MediaItemType::Season | MediaItemType::Show
+    ) {
+        return true;
     }
 
     if !profiles

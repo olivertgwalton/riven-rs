@@ -260,11 +260,15 @@ pub async fn list_ranking_profiles() -> Result<Vec<RankingProfile>> {
         .await?)
 }
 
-/// Return only profiles whose `enabled` flag is true.
+/// Return only profiles whose `enabled` flag is true, in creation order (the
+/// built-ins are seeded best-quality-first: ultra_hd, hd, standard). Each
+/// profile ranks and attempts a download independently, so this order no
+/// longer affects which profile "wins" — it only fixes the order in which
+/// their attempts are logged/dispatched.
 pub async fn get_enabled_profiles() -> Result<Vec<RankingProfile>> {
     Ok(ranking_profiles::Entity::find()
         .filter(ranking_profiles::Column::Enabled.eq(true))
-        .order_by_asc(ranking_profiles::Column::Name)
+        .order_by_asc(ranking_profiles::Column::Id)
         .into_model::<RankingProfile>()
         .all(orm())
         .await?)
