@@ -23,7 +23,7 @@ pub(super) async fn graphql_handler(
     headers: HeaderMap,
     req: Request<Body>,
 ) -> Response {
-    let auth = match authorize_request(&state, &headers) {
+    let auth = match authorize_request(&state, &headers, req.uri().query()) {
         Ok(auth) => auth,
         Err(AuthError::Unauthorized) => {
             return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
@@ -84,7 +84,7 @@ pub(super) async fn graphql_get_handler(
         .is_some_and(|v| v.eq_ignore_ascii_case("websocket"));
 
     if is_ws {
-        let auth = match authorize_request(&state, req.headers()) {
+        let auth = match authorize_request(&state, req.headers(), req.uri().query()) {
             Ok(auth) => auth,
             Err(AuthError::Unauthorized) => {
                 return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();

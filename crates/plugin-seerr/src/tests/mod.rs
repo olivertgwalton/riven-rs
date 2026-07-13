@@ -45,6 +45,57 @@ fn request_response_deserializes_media_and_requested_seasons() {
 }
 
 #[test]
+fn multiple_partial_season_requests_for_same_show_are_merged_not_dropped() {
+    let response: SeerrRequestResponse = serde_json::from_value(serde_json::json!({
+        "results": [
+            {
+                "id": 1,
+                "type": "tv",
+                "media": { "id": 500, "tvdbId": 1234 },
+                "seasons": [{ "seasonNumber": 1 }, { "seasonNumber": 2 }, { "seasonNumber": 3 }]
+            },
+            {
+                "id": 2,
+                "type": "tv",
+                "media": { "id": 500, "tvdbId": 1234 },
+                "seasons": [{ "seasonNumber": 4 }]
+            }
+        ]
+    }))
+    .expect("seerr response should deserialize");
+
+    let mut content = ContentCollection::default();
+    for request in &response.results {
+        let media = request.media.as_ref().expect("media");
+        let seasons: Vec<i32> = request
+            .seasons
+            .as_ref()
+            .into_iter()
+            .flatten()
+            .filter_map(|s| s.season_number)
+            .collect();
+        let external_request_id = media
+            .id
+            .map(|id| id.to_string())
+            .unwrap_or_else(|| request.id.to_string());
+        content.insert_show(ExternalIds {
+            tvdb_id: media.tvdb_id.map(|id| id.to_string()),
+            external_request_id: Some(external_request_id),
+            requested_seasons: Some(seasons),
+            ..Default::default()
+        });
+    }
+
+    assert_eq!(content.show_count(), 1);
+    let show = &content.into_response().shows[0];
+    assert_eq!(show.external_request_id.as_deref(), Some("500"));
+    assert_eq!(
+        show.requested_seasons.as_deref(),
+        Some([1, 2, 3, 4].as_slice())
+    );
+}
+
+#[test]
 fn plugin_schema_declares_default_url_and_filter() {
     let schema = SeerrPlugin.settings_schema();
 

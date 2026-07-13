@@ -111,10 +111,9 @@ When running locally on the default port:
 - GraphiQL UI: `http://localhost:8080/graphql`
 - Apalis board API: `http://localhost:8080/api/v1`
 - Apalis board UI: `http://localhost:8080/board`
-- Seerr webhook: `POST http://localhost:8080/webhook/seerr`
 - Media bridge: `GET` or `HEAD http://localhost:8080/media/{entry_id}`
 
-If `RIVEN_SETTING__API_KEY` is set, GraphQL requests must include the configured key with either the `x-api-key` header or an `Authorization: Bearer <key>` header.
+If `RIVEN_SETTING__API_KEY` is set, GraphQL requests must include the configured key with either the `x-api-key` header, an `Authorization: Bearer <key>` header, or an `?api_key=<key>` query parameter (needed for Seerr's webhook, which POSTs to `/graphql` calling the `seerrHandleWebhook` mutation and can't set custom headers — see `crates/plugin-seerr`).
 
 When browser traffic goes through `riven-frontend`, the frontend signs the authenticated user's role claims and the backend verifies them with `RIVEN_SETTING__FRONTEND_AUTH_SIGNING_SECRET` before applying RBAC. `riven-frontend` can read that same variable directly in shared deployments, or `BACKEND_AUTH_SIGNING_SECRET` in standalone frontend deployments. Direct non-frontend API-key clients still work without those signed headers.
 

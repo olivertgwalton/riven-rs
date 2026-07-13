@@ -483,7 +483,7 @@ pub(super) async fn media_bridge_handler(
 ) -> Response {
     let request_started = Instant::now();
 
-    if !check_api_key(&state, &headers) {
+    if !check_api_key(&state, &headers, None) {
         return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
     }
 

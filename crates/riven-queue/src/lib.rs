@@ -41,7 +41,7 @@ pub use jobs::{
 };
 pub use maintenance::{
     clear_worker_registrations, prune_queue_history, purge_orphaned_active_jobs,
-    purge_orphaned_worker_sets, recover_stale_workers,
+    purge_orphaned_worker_sets, purge_stale_dedup_keys, recover_stale_workers,
 };
 pub use workers::start_workers;
 

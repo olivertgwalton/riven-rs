@@ -1,51 +1,55 @@
-use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
+use std::sync::Arc;
+
+use async_graphql::{Context, Object};
+use riven_queue::JobQueue;
 use riven_queue::lifecycle::LibraryOrchestrator;
 use serde::Deserialize;
 
-use super::ApiState;
+/// GraphQL surface for Seerr's inbound webhook, merged into `MutationRoot`
+/// (`crates/riven-api/src/schema/mutations/mod.rs`). Replaces the previous
+/// hand-written `POST /webhook/seerr` REST route: this is the plugin-owned
+/// equivalent, reachable at `/graphql`.
+#[derive(Default)]
+pub struct SeerrMutations;
 
-/// Seerr (Overseerr/Jellyseerr) webhook handler.
-///
-/// Accepts the standard webhook payload and either:
-///   - acknowledges a `TEST_NOTIFICATION` ping; or
-///   - upserts the requested movie/show directly into the library, mirroring
-///     what the periodic content-service flow would have produced for the same
-///     request — so users don't have to wait for the next poll cycle.
-///
-/// Falls back to a full content-service refresh if the body is missing or
-/// fails to parse, preserving prior behaviour.
-pub(super) async fn seerr_webhook(
-    State(state): State<ApiState>,
-    body: Option<Json<serde_json::Value>>,
-) -> impl IntoResponse {
-    let Some(Json(body)) = body else {
-        tracing::info!("seerr webhook received without body, triggering content service");
-        riven_queue::application::request_content::enqueue(&state.job_queue).await;
-        return StatusCode::OK;
-    };
+#[Object]
+impl SeerrMutations {
+    /// Accepts Seerr's webhook payload (wrapped in a GraphQL envelope by the
+    /// JSON payload template `validate_webhook_settings` configures on Seerr)
+    /// and either acknowledges a `TEST_NOTIFICATION` ping or upserts the
+    /// requested movie/show directly into the library, mirroring what the
+    /// periodic content-service flow would have produced for the same
+    /// request — so users don't have to wait for the next poll cycle.
+    async fn seerr_handle_webhook(
+        &self,
+        ctx: &Context<'_>,
+        payload: async_graphql::Json<serde_json::Value>,
+    ) -> async_graphql::Result<bool> {
+        let job_queue = ctx.data::<Arc<JobQueue>>()?;
 
-    let parsed: SeerrWebhookPayload = match serde_json::from_value(body.clone()) {
-        Ok(p) => p,
-        Err(e) => {
-            tracing::warn!(error = %e, "seerr webhook payload failed to parse, falling back to full refresh");
-            riven_queue::application::request_content::enqueue(&state.job_queue).await;
-            return StatusCode::OK;
-        }
-    };
+        let parsed: SeerrWebhookPayload = match serde_json::from_value(payload.0) {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!(error = %e, "seerr webhook payload failed to parse, falling back to full refresh");
+                riven_queue::application::request_content::enqueue(job_queue).await;
+                return Ok(true);
+            }
+        };
 
-    match parsed {
-        SeerrWebhookPayload::Test { .. } => {
-            tracing::info!("seerr webhook test notification received");
-            StatusCode::OK
+        match parsed {
+            SeerrWebhookPayload::Test { .. } => {
+                tracing::info!("seerr webhook test notification received");
+            }
+            SeerrWebhookPayload::Notification(n) => {
+                handle_notification(job_queue, n).await;
+            }
         }
-        SeerrWebhookPayload::Notification(n) => {
-            handle_notification(&state, n).await;
-            StatusCode::OK
-        }
+
+        Ok(true)
     }
 }
 
-async fn handle_notification(state: &ApiState, n: NotificationPayload) {
+async fn handle_notification(job_queue: &Arc<JobQueue>, n: NotificationPayload) {
     let trigger_kinds = [
         "MEDIA_PENDING",
         "MEDIA_APPROVED",
@@ -71,7 +75,7 @@ async fn handle_notification(state: &ApiState, n: NotificationPayload) {
         .as_ref()
         .and_then(|r| r.requested_by_email.clone());
 
-    let orchestrator = LibraryOrchestrator::new(&state.job_queue);
+    let orchestrator = LibraryOrchestrator::new(job_queue);
     let result = match media_type {
         "movie" => {
             let title = imdb_id.or(tmdb_id).unwrap_or("Unknown");
@@ -110,7 +114,7 @@ async fn handle_notification(state: &ApiState, n: NotificationPayload) {
     match result {
         Ok((outcome, requested_seasons)) => {
             if let Some(event) = outcome.lifecycle_event(requested_seasons.as_deref()) {
-                state.job_queue.notify(event).await;
+                job_queue.notify(event).await;
             }
             orchestrator
                 .enqueue_after_request_action(

@@ -2,12 +2,11 @@ mod auth;
 mod board;
 mod graphql;
 mod media;
-mod webhooks;
 
 use std::sync::Arc;
 
 use anyhow::Result;
-use axum::{Router, routing::get, routing::post};
+use axum::{Router, routing::get};
 use riven_core::http::HttpClient;
 use riven_core::logging::LogControl;
 use riven_core::plugin::PluginRegistry;
@@ -142,7 +141,6 @@ pub async fn start_server(config: StartServerConfig) -> Result<()> {
             get(media::media_bridge_handler).head(media::media_bridge_handler),
         )
         .nest("/api/v1", board_api.with_state(()))
-        .route("/webhook/seerr", post(webhooks::seerr_webhook))
         .nest("/board", board_ui.with_state(()))
         .fallback_service(serve_frontend);
 

@@ -11,11 +11,17 @@ pub struct ContentCollection {
 
 impl ContentCollection {
     pub fn insert_movie(&mut self, ids: ExternalIds) {
-        self.movies.entry(ids.movie_key()).or_insert(ids);
+        self.movies
+            .entry(ids.movie_key())
+            .and_modify(|existing| existing.merge(ids.clone()))
+            .or_insert(ids);
     }
 
     pub fn insert_show(&mut self, ids: ExternalIds) {
-        self.shows.entry(ids.show_key()).or_insert(ids);
+        self.shows
+            .entry(ids.show_key())
+            .and_modify(|existing| existing.merge(ids.clone()))
+            .or_insert(ids);
     }
 
     pub fn movie_count(&self) -> usize {

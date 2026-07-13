@@ -6,11 +6,12 @@ rust-version.workspace = true
 
 [dependencies]
 riven-core = { path = "../riven-core" }
-riven-db = { path = "../riven-db" }
+riven-queue = { path = "../riven-queue" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
 async-trait = { workspace = true }
+async-graphql = { workspace = true }
 anyhow = { workspace = true }
 
 [lints]

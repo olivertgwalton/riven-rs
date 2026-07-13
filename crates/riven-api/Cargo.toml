@@ -14,6 +14,7 @@ riven-usenet = { path = "../riven-usenet" }
 apalis-board-api = { workspace = true }
 plugin-dashboard = { path = "../plugin-dashboard" }
 plugin-calendar = { path = "../plugin-calendar" }
+plugin-seerr = { path = "../plugin-seerr" }
 async-graphql = { workspace = true }
 async-graphql-axum = { workspace = true }
 axum = { workspace = true }
@@ -32,6 +33,7 @@ reqwest = { workspace = true }
 hmac = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
+url = "2"
 
 [lints]
 workspace = true

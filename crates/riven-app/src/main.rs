@@ -526,6 +526,7 @@ async fn main() -> Result<()> {
                     riven_queue::clear_worker_registrations(&mut redis_conn, &queues).await;
                     riven_queue::purge_orphaned_worker_sets(&mut redis_conn, &queues).await;
                     riven_queue::purge_orphaned_active_jobs(&mut redis_conn, &queues).await;
+                    riven_queue::purge_stale_dedup_keys(&mut redis_conn).await;
                 };
                 if tokio::time::timeout(MAINTENANCE_TIMEOUT, maintenance)
                     .await

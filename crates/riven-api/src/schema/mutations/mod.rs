@@ -9,6 +9,7 @@ mod streams;
 mod usenet_health;
 
 use async_graphql::{Enum, MergedObject};
+use plugin_seerr::SeerrMutations;
 
 /// Shared status enum returned by all structured mutation responses.
 #[derive(Enum, Copy, Clone, PartialEq, Eq)]
@@ -32,4 +33,5 @@ pub struct MutationRoot(
     library::LibraryMutations,
     streams::StreamsMutations,
     usenet_health::UsenetHealthMutations,
+    SeerrMutations,
 );

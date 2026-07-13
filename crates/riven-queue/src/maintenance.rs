@@ -265,6 +265,49 @@ pub async fn purge_orphaned_active_jobs(
     }
 }
 
+const DEDUP_KEY_PATTERN: &str = "riven:dedup:*";
+
+/// Delete all `riven:dedup:*` keys left over by `DedupGuard::drop`, which only
+/// *attempts* an async cleanup and can lose the race against process exit on
+/// a hard restart. Safe to run unconditionally here for the same reason
+/// `clear_worker_registrations` unconditionally rescues jobs at this point:
+/// anything holding a dedup key before this pass is presumed dead.
+pub async fn purge_stale_dedup_keys(redis: &mut redis::aio::ConnectionManager) {
+    let mut cursor: u64 = 0;
+    let mut purged = 0usize;
+    loop {
+        let (next_cursor, keys): (u64, Vec<String>) = match redis::cmd("SCAN")
+            .arg(cursor)
+            .arg("MATCH")
+            .arg(DEDUP_KEY_PATTERN)
+            .arg("COUNT")
+            .arg(500)
+            .query_async(redis)
+            .await
+        {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::error!(error = %e, "purge_stale_dedup_keys: SCAN failed");
+                return;
+            }
+        };
+
+        if !keys.is_empty() {
+            let _result: Result<(), _> = redis::cmd("DEL").arg(&keys).query_async(redis).await;
+            purged += keys.len();
+        }
+
+        cursor = next_cursor;
+        if cursor == 0 {
+            break;
+        }
+    }
+
+    if purged > 0 {
+        tracing::info!(count = purged, "purged stale dedup keys");
+    }
+}
+
 pub async fn prune_queue_history(redis: &mut redis::aio::ConnectionManager, queues: &[String]) {
     for queue in queues {
         let config = RedisConfig::new(queue);

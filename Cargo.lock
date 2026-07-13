@@ -3300,9 +3300,10 @@ name = "plugin-seerr"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-graphql",
  "async-trait",
  "riven-core",
- "riven-db",
+ "riven-queue",
  "serde",
  "serde_json",
  "tracing",
@@ -3934,6 +3935,7 @@ dependencies = [
  "hmac 0.13.0",
  "plugin-calendar",
  "plugin-dashboard",
+ "plugin-seerr",
  "reqwest",
  "riven-core",
  "riven-db",
@@ -3949,6 +3951,7 @@ dependencies = [
  "tokio-util",
  "tower-http 0.7.0",
  "tracing",
+ "url",
 ]
 
 [[package]]

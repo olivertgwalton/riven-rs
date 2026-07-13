@@ -14,19 +14,33 @@ pub(super) const FRONTEND_AUTH_TIMESTAMP_HEADER: &str = "x-riven-auth-timestamp"
 pub(super) const FRONTEND_AUTH_SIGNATURE_HEADER: &str = "x-riven-auth-signature";
 const FRONTEND_AUTH_MAX_SKEW_SECS: i64 = 300;
 
-pub(super) fn check_api_key(state: &ApiState, headers: &HeaderMap) -> bool {
+/// `query` is the raw request query string (e.g. from `Uri::query()`), checked
+/// for `api_key=...` when no header credential is present. This exists for
+/// callers that can't set custom headers — notably Overseerr/Jellyseerr's
+/// webhook notification agent, which only exposes a URL and a JSON payload
+/// template, so its webhook to `SeerrMutations::seerr_handle_webhook` can only
+/// authenticate via a token embedded in the URL itself.
+pub(super) fn check_api_key(state: &ApiState, headers: &HeaderMap, query: Option<&str>) -> bool {
     let Some(ref expected) = state.api_key else {
         return true;
     };
     if expected.is_empty() {
         return true;
     }
-    let provided = headers
+    let header_value = headers
         .get("x-api-key")
         .or_else(|| headers.get("authorization"))
         .and_then(|v| v.to_str().ok())
         .map(|s| s.trim_start_matches("Bearer ").trim());
-    provided == Some(expected.as_str())
+    if header_value == Some(expected.as_str()) {
+        return true;
+    }
+    let query_value = query.and_then(|q| {
+        url::form_urlencoded::parse(q.as_bytes())
+            .find(|(key, _)| key == "api_key")
+            .map(|(_, value)| value.into_owned())
+    });
+    query_value.as_deref() == Some(expected.as_str())
 }
 
 pub(super) enum AuthError {
@@ -41,8 +55,9 @@ fn signing_payload(user_id: &str, role: &str, timestamp: i64) -> String {
 pub(super) fn authorize_request(
     state: &ApiState,
     headers: &HeaderMap,
+    query: Option<&str>,
 ) -> Result<RequestAuth, AuthError> {
-    if !check_api_key(state, headers) {
+    if !check_api_key(state, headers, query) {
         tracing::warn!("auth rejected: api key missing or mismatched");
         return Err(AuthError::Unauthorized);
     }

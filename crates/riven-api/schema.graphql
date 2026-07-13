@@ -121,19 +121,15 @@ type Episode {
 	network: String
 	country: String
 	language: String
-	isAnime: Boolean!
 	airedAt: NaiveDate
-	airedAtUtc: DateTime
 	year: Int
 	genres: JSON
 	rating: Float
 	contentRating: ContentRating
 	state: MediaItemState!
 	failedAttempts: Int!
-	lastScrapeAttemptAt: DateTime
 	itemType: MediaItemType!
 	isRequested: Boolean!
-	networkTimezone: String
 	showStatus: ShowStatus
 	seasonNumber: Int
 	isSpecial: Boolean
@@ -143,6 +139,10 @@ type Episode {
 	runtime: Int
 	itemRequestId: Int
 	activeStreamId: Int
+	isAnime: Boolean!
+	networkTimezone: String
+	airedAtUtc: DateTime
+	lastScrapeAttemptAt: DateTime
 	streams(infoHashes: [String!]): [Stream!]!
 	season: Season!
 	lookupKeys: [String!]!
@@ -166,19 +166,15 @@ type EpisodeFull {
 	network: String
 	country: String
 	language: String
-	isAnime: Boolean!
 	airedAt: NaiveDate
-	airedAtUtc: DateTime
 	year: Int
 	genres: JSON
 	rating: Float
 	contentRating: ContentRating
 	state: MediaItemState!
 	failedAttempts: Int!
-	lastScrapeAttemptAt: DateTime
 	itemType: MediaItemType!
 	isRequested: Boolean!
-	networkTimezone: String
 	showStatus: ShowStatus
 	seasonNumber: Int
 	isSpecial: Boolean
@@ -188,6 +184,10 @@ type EpisodeFull {
 	runtime: Int
 	itemRequestId: Int
 	activeStreamId: Int
+	isAnime: Boolean!
+	networkTimezone: String
+	airedAtUtc: DateTime
+	lastScrapeAttemptAt: DateTime
 	filesystemEntry: FileSystemEntry
 	filesystemEntries: [FileSystemEntry!]!
 }
@@ -220,11 +220,11 @@ type FileSystemEntry {
 	fileHash: String
 	videoFileSize: Int
 	opensubtitlesId: String
-	sourceProvider: String
-	sourceId: String
 	streamId: Int
 	resolution: String
 	rankingProfileName: String
+	sourceProvider: String
+	sourceId: String
 	usenetInfoHash: String
 	usenetFileIndex: Int
 }
@@ -389,19 +389,15 @@ type MediaItem {
 	network: String
 	country: String
 	language: String
-	isAnime: Boolean!
 	airedAt: NaiveDate
-	airedAtUtc: DateTime
 	year: Int
 	genres: JSON
 	rating: Float
 	contentRating: ContentRating
 	state: MediaItemState!
 	failedAttempts: Int!
-	lastScrapeAttemptAt: DateTime
 	itemType: MediaItemType!
 	isRequested: Boolean!
-	networkTimezone: String
 	showStatus: ShowStatus
 	seasonNumber: Int
 	isSpecial: Boolean
@@ -411,6 +407,10 @@ type MediaItem {
 	runtime: Int
 	itemRequestId: Int
 	activeStreamId: Int
+	isAnime: Boolean!
+	networkTimezone: String
+	airedAtUtc: DateTime
+	lastScrapeAttemptAt: DateTime
 }
 
 type MediaItemFull {
@@ -430,19 +430,15 @@ type MediaItemFull {
 	network: String
 	country: String
 	language: String
-	isAnime: Boolean!
 	airedAt: NaiveDate
-	airedAtUtc: DateTime
 	year: Int
 	genres: JSON
 	rating: Float
 	contentRating: ContentRating
 	state: MediaItemState!
 	failedAttempts: Int!
-	lastScrapeAttemptAt: DateTime
 	itemType: MediaItemType!
 	isRequested: Boolean!
-	networkTimezone: String
 	showStatus: ShowStatus
 	seasonNumber: Int
 	isSpecial: Boolean
@@ -452,6 +448,10 @@ type MediaItemFull {
 	runtime: Int
 	itemRequestId: Int
 	activeStreamId: Int
+	isAnime: Boolean!
+	networkTimezone: String
+	airedAtUtc: DateTime
+	lastScrapeAttemptAt: DateTime
 	filesystemEntry: FileSystemEntry
 	filesystemEntries: [FileSystemEntry!]!
 	seasons: [SeasonFull!]!
@@ -474,19 +474,15 @@ type MediaItemListRow {
 	network: String
 	country: String
 	language: String
-	isAnime: Boolean!
 	airedAt: NaiveDate
-	airedAtUtc: DateTime
 	year: Int
 	genres: JSON
 	rating: Float
 	contentRating: ContentRating
 	state: MediaItemState!
 	failedAttempts: Int!
-	lastScrapeAttemptAt: DateTime
 	itemType: MediaItemType!
 	isRequested: Boolean!
-	networkTimezone: String
 	showStatus: ShowStatus
 	seasonNumber: Int
 	isSpecial: Boolean
@@ -496,6 +492,10 @@ type MediaItemListRow {
 	runtime: Int
 	itemRequestId: Int
 	activeStreamId: Int
+	isAnime: Boolean!
+	networkTimezone: String
+	airedAtUtc: DateTime
+	lastScrapeAttemptAt: DateTime
 	showId: Int
 	showTitle: String
 	showTmdbId: String
@@ -550,19 +550,15 @@ type Movie {
 	network: String
 	country: String
 	language: String
-	isAnime: Boolean!
 	airedAt: NaiveDate
-	airedAtUtc: DateTime
 	year: Int
 	genres: JSON
 	rating: Float
 	contentRating: ContentRating
 	state: MediaItemState!
 	failedAttempts: Int!
-	lastScrapeAttemptAt: DateTime
 	itemType: MediaItemType!
 	isRequested: Boolean!
-	networkTimezone: String
 	showStatus: ShowStatus
 	seasonNumber: Int
 	isSpecial: Boolean
@@ -572,6 +568,10 @@ type Movie {
 	runtime: Int
 	itemRequestId: Int
 	activeStreamId: Int
+	isAnime: Boolean!
+	networkTimezone: String
+	airedAtUtc: DateTime
+	lastScrapeAttemptAt: DateTime
 	streams(infoHashes: [String!]): [Stream!]!
 	expectedFileCount: Int!
 }
@@ -616,6 +616,7 @@ type MutationRoot {
 	downloadDiscoveredStream(itemType: MediaItemType!, title: String!, imdbId: String, tmdbId: String, tvdbId: String, seasonNumber: Int, seasons: [Int!], infoHash: String!, magnet: String!, parsedData: JSON, rank: Int): String!
 	regrabUsenetTitle(mediaItemId: Int!): String!
 	rescanUsenetHealth(infoHash: String!, fileIndex: Int!): String!
+	seerrHandleWebhook(payload: JSON!): Boolean!
 }
 
 enum MutationStatusText {
@@ -818,19 +819,15 @@ type Season {
 	network: String
 	country: String
 	language: String
-	isAnime: Boolean!
 	airedAt: NaiveDate
-	airedAtUtc: DateTime
 	year: Int
 	genres: JSON
 	rating: Float
 	contentRating: ContentRating
 	state: MediaItemState!
 	failedAttempts: Int!
-	lastScrapeAttemptAt: DateTime
 	itemType: MediaItemType!
 	isRequested: Boolean!
-	networkTimezone: String
 	showStatus: ShowStatus
 	seasonNumber: Int
 	isSpecial: Boolean
@@ -840,6 +837,10 @@ type Season {
 	runtime: Int
 	itemRequestId: Int
 	activeStreamId: Int
+	isAnime: Boolean!
+	networkTimezone: String
+	airedAtUtc: DateTime
+	lastScrapeAttemptAt: DateTime
 	streams(infoHashes: [String!]): [Stream!]!
 	show: Show!
 	episodes: [Episode!]!
@@ -864,19 +865,15 @@ type SeasonFull {
 	network: String
 	country: String
 	language: String
-	isAnime: Boolean!
 	airedAt: NaiveDate
-	airedAtUtc: DateTime
 	year: Int
 	genres: JSON
 	rating: Float
 	contentRating: ContentRating
 	state: MediaItemState!
 	failedAttempts: Int!
-	lastScrapeAttemptAt: DateTime
 	itemType: MediaItemType!
 	isRequested: Boolean!
-	networkTimezone: String
 	showStatus: ShowStatus
 	seasonNumber: Int
 	isSpecial: Boolean
@@ -886,6 +883,10 @@ type SeasonFull {
 	runtime: Int
 	itemRequestId: Int
 	activeStreamId: Int
+	isAnime: Boolean!
+	networkTimezone: String
+	airedAtUtc: DateTime
+	lastScrapeAttemptAt: DateTime
 	episodes: [EpisodeFull!]!
 }
 
@@ -935,19 +936,15 @@ type Show {
 	network: String
 	country: String
 	language: String
-	isAnime: Boolean!
 	airedAt: NaiveDate
-	airedAtUtc: DateTime
 	year: Int
 	genres: JSON
 	rating: Float
 	contentRating: ContentRating
 	state: MediaItemState!
 	failedAttempts: Int!
-	lastScrapeAttemptAt: DateTime
 	itemType: MediaItemType!
 	isRequested: Boolean!
-	networkTimezone: String
 	showStatus: ShowStatus
 	seasonNumber: Int
 	isSpecial: Boolean
@@ -957,6 +954,10 @@ type Show {
 	runtime: Int
 	itemRequestId: Int
 	activeStreamId: Int
+	isAnime: Boolean!
+	networkTimezone: String
+	airedAtUtc: DateTime
+	lastScrapeAttemptAt: DateTime
 	streams(infoHashes: [String!]): [Stream!]!
 	seasons(includeSpecials: Boolean! = false): [Season!]!
 	expectedFileCount: Int!
@@ -979,12 +980,12 @@ enum ShowStatus {
 type Stream {
 	id: Int!
 	infoHash: String!
-	magnet: String!
-	createdAt: DateTime!
-	updatedAt: DateTime
 	parsedData: JSON
 	rank: Int
 	fileSizeBytes: Int
+	magnet: String!
+	createdAt: DateTime!
+	updatedAt: DateTime
 }
 
 type SubscriptionRoot {
