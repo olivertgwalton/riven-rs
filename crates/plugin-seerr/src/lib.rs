@@ -87,19 +87,42 @@ impl Plugin for SeerrPlugin {
 
         let request_id = get_seerr_request_id(info.id).await;
         if let Some(rid) = request_id {
-            let mark_url = format!("{base_url}/api/v1/request/{rid}/available");
-            tracing::debug!(request_id = rid, target_url = %mark_url, "marking seerr request as available");
-            if let Err(e) = ctx
+            // Seerr tracks availability on the media record, not the request, so
+            // resolve the request's media id first, then mark that media available.
+            let request_url = format!("{base_url}/api/v1/request/{rid}");
+            let fetched: anyhow::Result<SeerrRequest> = ctx
                 .http
-                .send(PROFILE, |client| {
-                    client.post(&mark_url).header("x-api-key", api_key)
+                .get_json(PROFILE, request_url.clone(), |client| {
+                    client.get(&request_url).header("x-api-key", api_key)
                 })
-                .await
-                .and_then(|r| r.error_for_status())
-            {
-                tracing::warn!(error = %e, request_id = rid, "failed to mark seerr request as available");
-            } else {
-                tracing::info!(request_id = rid, "marked seerr request as available");
+                .await;
+            let media_id = match fetched {
+                Ok(request) => request.media.and_then(|media| media.id),
+                Err(e) => {
+                    tracing::warn!(error = %e, request_id = rid, "failed to fetch seerr request for media id");
+                    None
+                }
+            };
+
+            if let Some(media_id) = media_id {
+                let mark_url = format!("{base_url}/api/v1/media/{media_id}/available");
+                tracing::debug!(request_id = rid, media_id, target_url = %mark_url, "marking seerr media as available");
+                if let Err(e) = ctx
+                    .http
+                    .send(PROFILE, |client| {
+                        client
+                            .post(&mark_url)
+                            .header("x-api-key", api_key)
+                            .header("content-type", "application/json")
+                            .body("{}")
+                    })
+                    .await
+                    .and_then(|r| r.error_for_status())
+                {
+                    tracing::warn!(error = %e, request_id = rid, media_id, "failed to mark seerr media as available");
+                } else {
+                    tracing::info!(request_id = rid, media_id, "marked seerr media as available");
+                }
             }
         }
         Ok(HookResponse::Empty)
@@ -243,6 +266,7 @@ struct SeerrRequest {
 
 #[derive(Deserialize)]
 struct SeerrMedia {
+    id: Option<i64>,
     #[serde(rename = "tmdbId")]
     tmdb_id: Option<i64>,
     #[serde(rename = "tvdbId")]
