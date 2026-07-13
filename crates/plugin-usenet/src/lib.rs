@@ -228,6 +228,14 @@ impl Plugin for UsenetPlugin {
                     "Check every file in the release before committing to it. The only reliable way \
                      to catch a single missing file. Slower, but recommended if titles keep stalling mid-playback.",
                 ),
+            SettingField::new("verifypar2blocks", "PAR2 Block Verification", FieldType::Boolean)
+                .with_default("false")
+                .with_description(
+                    "Check RAR volumes against the release's PAR2 checksums before committing to it. \
+                     Catches a volume with the wrong content entirely, not just a missing one. Downloads \
+                     real data to check (unlike the other options here), adding a few percent to every \
+                     grab's bandwidth — off by default for that reason.",
+                ),
             SettingField::new(
                 "acceptablemissingpercent",
                 "Acceptable Missing Segments %",
@@ -317,8 +325,9 @@ impl Plugin for UsenetPlugin {
             "availabilitysamplepercent",
             riven_usenet::DEFAULT_AVAILABILITY_SAMPLE_PERCENT,
         );
+        let verify_par2 = ctx.settings.get_bool("verifypar2blocks");
         let meta = match streamer
-            .ingest(info_hash, &xml_arc, password, sample_percent)
+            .ingest(info_hash, &xml_arc, password, sample_percent, verify_par2)
             .await
         {
             Ok(m) => m,

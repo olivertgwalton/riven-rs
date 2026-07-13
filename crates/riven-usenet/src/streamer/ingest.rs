@@ -7,7 +7,10 @@ use crate::nzb::{
     NzbFile, NzbSegment, detect_rar_volume_groups, filename_from_subject, looks_like_media,
     looks_obfuscated, parse_nzb_document,
 };
-use crate::par2::{Par2FileDesc, looks_like_par2, parse_file_descriptors};
+use crate::par2::{
+    Par2Block, Par2FileDesc, looks_like_par2, parse_file_descriptors, parse_ifsc_packets,
+    parse_slice_size,
+};
 use crate::rar::{self, RarEncryption, RarVolumeFileEntry};
 
 use crate::nntp::Priority;
@@ -54,6 +57,57 @@ pub(crate) fn first_slice_gap(slices: &[NzbRarSlice]) -> Option<(usize, usize)> 
         .windows(2)
         .find(|w| w[1].part_index > w[0].part_index + 1)
         .map(|w| (w[0].part_index, w[1].part_index))
+}
+
+/// Per-NZB PAR2 index used to verify a RAR volume's actual content, not just
+/// its existence or header shape: block-level CRC32 checksums from the
+/// release's own PAR2 set, keyed by [`normalize_par2_name`] of the volume
+/// filename. Neither `probe_availability` (confirms articles exist) nor the
+/// RAR header parse (confirms the bytes *parse* as a valid volume) can catch
+/// a volume whose segments point at entirely different, but validly-shaped,
+/// content — this can.
+struct Par2Index {
+    slice_size: u64,
+    blocks_by_filename: std::collections::HashMap<String, Vec<Par2Block>>,
+}
+
+/// Normalizes a filename for matching a PAR2 `FileDesc` name against an NZB
+/// volume's own filename. These are supposed to be the same string, but in
+/// the wild some posting tools write the `FileDesc` name with spaces where
+/// the actual filename (and NZB subject) uses dots — e.g. PAR2 says
+/// `"Show S01 x265.part07.rar"` while the NZB file is
+/// `Show.S01.x265.part07.rar`. An exact-match lookup silently misses every
+/// volume in that case (verified against a real release: this is not a
+/// hypothetical). Stripping all non-alphanumeric characters and
+/// lowercasing sidesteps every separator-style difference we've observed.
+fn normalize_par2_name(name: &str) -> String {
+    name.chars()
+        .filter(|c| c.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+/// Blocks to sample per volume when verifying against PAR2: first, middle,
+/// last. Unlike the free STAT-based segment-availability sampling above,
+/// each sampled block here is a real data fetch (a PAR2 slice is typically
+/// ~1 MB, versus a STAT's single round-trip), so the sample stays fixed and
+/// small rather than scaling with `sample_percent`. Three blocks are enough
+/// to catch whole-volume content substitution — segments that exist, STAT
+/// fine, and parse as a valid RAR header, but whose payload belongs to
+/// something else entirely (the failure mode this check exists for) — without
+/// materially slowing ingest.
+pub(crate) fn par2_sample_block_indices(total_blocks: usize) -> Vec<usize> {
+    match total_blocks {
+        0 => Vec::new(),
+        1 => vec![0],
+        2 => vec![0, 1],
+        n => {
+            let mut v = vec![0, n / 2, n - 1];
+            v.sort_unstable();
+            v.dedup();
+            v
+        }
+    }
 }
 
 /// Default fraction of a candidate file's segments to STAT-probe at ingest,
@@ -138,12 +192,18 @@ impl UsenetStreamer {
     /// RAR-contained file), and persist to Redis. `password` is consulted
     /// only when the archive's file headers report encryption; when omitted,
     /// the NZB's own `<meta type="password">` is used as a fallback.
+    /// `verify_par2` gates the PAR2 block-checksum check on RAR volumes
+    /// (see [`Self::fetch_par2_index`]) — opt-in because, unlike every other
+    /// ingest-time check, it fetches real slice-sized chunks of content
+    /// rather than just STATing existence, adding real bandwidth per volume
+    /// covered by the release's PAR2 set.
     pub async fn ingest(
         &self,
         info_hash: &str,
         nzb_xml: &str,
         password: Option<&str>,
         sample_percent: usize,
+        verify_par2: bool,
     ) -> Result<NzbMeta, StreamerError> {
         if let Some(existing) = store::load(&self.db, info_hash).await? {
             tracing::debug!(
@@ -174,8 +234,24 @@ impl UsenetStreamer {
             return Err(StreamerError::NoMediaFile);
         }
 
+        // Fetched at most once regardless of how many of the checks below end
+        // up needing it (PAR2 block verification, obfuscated-filename
+        // recovery) — see `fetch_par2_blob`/`recover_filenames_from_par2`.
+        // Only fetched at all when `verify_par2` opts in: unlike every other
+        // ingest-time check, it's a real content fetch (the blob itself, plus
+        // whatever `verify_volume_against_par2` samples per RAR volume below),
+        // not just a STAT or a single 32 KB header probe.
+        let par2_blob = if verify_par2 {
+            self.fetch_par2_blob(&files).await
+        } else {
+            None
+        };
+
         let (mut meta_files, file_password) =
-            match self.try_build_rar_virtual_files(&files, password).await? {
+            match self
+                .try_build_rar_virtual_files(&files, password, par2_blob.as_deref())
+                .await?
+            {
                 Some(virtual_files) if !virtual_files.is_empty() => {
                     let is_encrypted = virtual_files.iter().any(|vf| {
                         matches!(
@@ -227,7 +303,9 @@ impl UsenetStreamer {
             .map(|(i, _)| i)
             .collect();
         if !obfuscated_playable.is_empty()
-            && let Some(par2_names) = self.recover_filenames_from_par2(&files).await
+            && let Some(par2_names) = self
+                .recover_filenames_from_par2(&files, par2_blob.as_deref())
+                .await
         {
             if par2_names.len() == obfuscated_playable.len() {
                 for (slot, recovered) in obfuscated_playable.iter().zip(par2_names.iter()) {
@@ -326,16 +404,18 @@ impl UsenetStreamer {
         &self,
         files: &[NzbFile],
         password: Option<&str>,
+        par2_blob: Option<&[u8]>,
     ) -> Result<Option<Vec<NzbMetaFile>>, StreamerError> {
         let groups = detect_rar_volume_groups(files);
         if groups.is_empty() {
             return Ok(None);
         }
+        let par2_index = par2_blob.and_then(|blob| self.build_par2_index(blob));
         let mut all_virtual: Vec<NzbMetaFile> = Vec::new();
         let mut missing_password = false;
         for (group_idx, ordered_indices) in groups.iter().enumerate() {
             match self
-                .build_rar_group_virtual_files(files, ordered_indices, password)
+                .build_rar_group_virtual_files(files, ordered_indices, password, par2_index.as_ref())
                 .await
             {
                 Ok(Some(mut group_files)) => all_virtual.append(&mut group_files),
@@ -376,6 +456,7 @@ impl UsenetStreamer {
         files: &[NzbFile],
         ordered_indices: &[usize],
         password: Option<&str>,
+        par2_index: Option<&Par2Index>,
     ) -> Result<Option<Vec<NzbMetaFile>>, StreamerError> {
         if ordered_indices.is_empty() {
             return Ok(None);
@@ -452,6 +533,44 @@ impl UsenetStreamer {
             }
 
             volume_entries.push(entries);
+        }
+
+        if let Some(par2) = par2_index {
+            for part in &parts {
+                let key = normalize_par2_name(&part.filename);
+                let Some(blocks) = par2.blocks_by_filename.get(&key) else {
+                    continue;
+                };
+                if blocks.is_empty() {
+                    continue;
+                }
+                match self
+                    .verify_volume_against_par2(part, blocks, par2.slice_size)
+                    .await
+                {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        tracing::warn!(
+                            filename = %part.filename,
+                            "RAR volume's segments don't match this release's own PAR2 \
+                             checksums — the articles exist and parse as a valid RAR \
+                             header, but the payload doesn't match the archive's own \
+                             recovery set, meaning it's the wrong content rather than \
+                             missing content; bailing on this NZB rather than serving it"
+                        );
+                        return Ok(None);
+                    }
+                    Err(error) => {
+                        tracing::debug!(
+                            filename = %part.filename,
+                            error = %error,
+                            "PAR2 block verification fetch failed; skipping the check \
+                             for this volume rather than failing ingest on a transient \
+                             provider error"
+                        );
+                    }
+                }
+            }
         }
 
         let any_encrypted = volume_entries
@@ -673,6 +792,99 @@ impl UsenetStreamer {
         Ok(buf)
     }
 
+    /// Fetch and parse this NZB's PAR2 index — the smallest `.par2` file,
+    /// which (per the PAR2 spec) mirrors the Main/FileDesc/IFSC packets
+    /// across every volume in the set; only `RecvSlic` recovery-slice
+    /// packets scale with file size, and this doesn't need those. Returns
+    /// `None` (verification simply skipped, not failed) when there's no
+    /// PAR2 file, the fetch fails, or the blob is missing a Main or IFSC
+    /// packet — PAR2 cover is optional, releases without it ingest exactly
+    /// as before this check existed.
+    /// Fetch the smallest `.par2` file's full decoded body — the one blob
+    /// both PAR2 block verification and obfuscated-filename recovery parse.
+    /// Shared so a release needing both never fetches it twice.
+    async fn fetch_par2_blob(&self, files: &[NzbFile]) -> Option<Vec<u8>> {
+        let smallest = files
+            .iter()
+            .filter(|f| looks_like_par2(&filename_from_subject(&f.subject)))
+            .min_by_key(|f| f.segments.iter().map(|s| s.bytes).sum::<u64>())?;
+        if smallest.segments.is_empty() {
+            return None;
+        }
+        let total_bytes: u64 = smallest.segments.iter().map(|s| s.bytes).sum();
+        let mut buf: Vec<u8> = Vec::with_capacity(total_bytes as usize);
+        for seg in &smallest.segments {
+            match self
+                .fetch_decoded_cached(&seg.message_id, Priority::Low)
+                .await
+            {
+                Ok(decoded) => buf.extend_from_slice(&decoded),
+                Err(error) => {
+                    tracing::debug!(
+                        error = %error,
+                        message_id = %seg.message_id,
+                        "par2 blob fetch failed"
+                    );
+                    return None;
+                }
+            }
+        }
+        Some(buf)
+    }
+
+    /// Parse a fetched PAR2 blob into the block-checksum index used to
+    /// verify RAR volume content. Returns `None` when the blob is missing a
+    /// Main or IFSC packet — PAR2 cover is optional, releases without usable
+    /// IFSC data ingest exactly as before this check existed.
+    fn build_par2_index(&self, blob: &[u8]) -> Option<Par2Index> {
+        let slice_size = parse_slice_size(blob).ok().filter(|s| *s > 0)?;
+        let filedescs = parse_file_descriptors(blob).ok()?;
+        let ifsc = parse_ifsc_packets(blob).ok()?;
+
+        let mut blocks_by_filename = std::collections::HashMap::new();
+        for desc in filedescs {
+            if let Some(blocks) = ifsc.get(&desc.file_id) {
+                blocks_by_filename.insert(normalize_par2_name(&desc.filename), blocks.clone());
+            }
+        }
+        if blocks_by_filename.is_empty() {
+            return None;
+        }
+        Some(Par2Index {
+            slice_size,
+            blocks_by_filename,
+        })
+    }
+
+    /// Verify a sample of one RAR volume's blocks against the release's own
+    /// PAR2 checksums. `Ok(false)` means a sampled block's CRC32 doesn't
+    /// match — the volume's segments contain the wrong content. `Err` means
+    /// the fetch itself failed (treated leniently by the caller: skip the
+    /// check, don't reject the release over a transient provider hiccup).
+    async fn verify_volume_against_par2(
+        &self,
+        part: &NzbRarPart,
+        blocks: &[Par2Block],
+        slice_size: u64,
+    ) -> Result<bool, StreamerError> {
+        for idx in par2_sample_block_indices(blocks.len()) {
+            let block = &blocks[idx];
+            let start = idx as u64 * slice_size;
+            let end_inclusive = start + slice_size - 1;
+            let fetched = self
+                .read_decoded_range_within_part(part, start, end_inclusive, Priority::Low)
+                .await?;
+            // PAR2 checksums the slice zero-padded to `slice_size`; a file's
+            // final block is normally shorter than that on disk.
+            let mut chunk = fetched.to_vec();
+            chunk.resize(slice_size as usize, 0);
+            if crc32fast::hash(&chunk) != block.crc32 {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
     /// Replace a Direct file's encoded-byte offsets with decoded-byte
     /// offsets so the file we advertise to HTTP clients matches the bytes
     /// we actually serve. We fetch the first segment to learn its
@@ -729,47 +941,33 @@ impl UsenetStreamer {
         Ok(())
     }
 
-    /// Fetch and parse the NZB's smallest PAR2 file, returning the media
-    /// filenames it claims (one entry per FileDesc packet, NZB order). The
-    /// caller pairs these against obfuscated virtual files to recover real
-    /// names. Returns `None` if there's no PAR2 file, the fetch fails, the
-    /// blob has no FileDesc packets, or every recovered name is itself
-    /// obfuscated.
+    /// Parse the media filenames a PAR2 blob claims (one entry per FileDesc
+    /// packet, NZB order). The caller pairs these against obfuscated virtual
+    /// files to recover real names. Returns `None` if there's no PAR2 file,
+    /// the fetch fails, the blob has no FileDesc packets, or every recovered
+    /// name is itself obfuscated.
     ///
-    /// We pick the smallest par2 because the `*.par2` index packet is always
-    /// the smallest in a set; `*.volNN+NN.par2` slices duplicate the same
-    /// FileDesc packets but are larger and contain unused recovery data.
-    /// Fetching just the index keeps the NZB-download quota cost to one file.
-    async fn recover_filenames_from_par2(&self, files: &[NzbFile]) -> Option<Vec<String>> {
-        let smallest = files
-            .iter()
-            .filter(|f| {
-                let name = filename_from_subject(&f.subject);
-                looks_like_par2(&name)
-            })
-            .min_by_key(|f| f.segments.iter().map(|s| s.bytes).sum::<u64>())?;
-        if smallest.segments.is_empty() {
-            return None;
-        }
-        let total_bytes: u64 = smallest.segments.iter().map(|s| s.bytes).sum();
-        let mut buf: Vec<u8> = Vec::with_capacity(total_bytes as usize);
-        for seg in &smallest.segments {
-            match self
-                .fetch_decoded_cached(&seg.message_id, Priority::Low)
-                .await
-            {
-                Ok(decoded) => buf.extend_from_slice(&decoded),
-                Err(error) => {
-                    tracing::debug!(
-                        error = %error,
-                        message_id = %seg.message_id,
-                        "par2 segment fetch failed; skipping par2 recovery"
-                    );
-                    return None;
-                }
+    /// `prefetched_blob` lets a caller that already fetched the NZB's PAR2
+    /// blob this ingest (e.g. for block verification) hand it over instead
+    /// of triggering a second fetch of the same file; `None` fetches it here
+    /// via [`Self::fetch_par2_blob`], picking the smallest `.par2` — its
+    /// index packet is always the smallest in a set, `*.volNN+NN.par2`
+    /// slices duplicate the same FileDesc packets but are larger and carry
+    /// unused recovery data.
+    async fn recover_filenames_from_par2(
+        &self,
+        files: &[NzbFile],
+        prefetched_blob: Option<&[u8]>,
+    ) -> Option<Vec<String>> {
+        let owned_buf;
+        let buf = match prefetched_blob {
+            Some(b) => b,
+            None => {
+                owned_buf = self.fetch_par2_blob(files).await?;
+                &owned_buf
             }
-        }
-        let descs: Vec<Par2FileDesc> = match parse_file_descriptors(&buf) {
+        };
+        let descs: Vec<Par2FileDesc> = match parse_file_descriptors(buf) {
             Ok(d) => d,
             Err(error) => {
                 tracing::debug!(error = %error, "par2 FileDesc parse failed");
@@ -836,3 +1034,4 @@ pub(crate) fn pick_primary_media_index(files: &[NzbFile]) -> Option<usize> {
         .max_by_key(|(_, f)| f.segments.iter().map(|s| s.bytes).sum::<u64>())
         .map(|(i, _)| i)
 }
+

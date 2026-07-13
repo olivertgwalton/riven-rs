@@ -1,4 +1,4 @@
-use super::ingest::{first_slice_gap, pick_primary_media_index};
+use super::ingest::{first_slice_gap, par2_sample_block_indices, pick_primary_media_index};
 use super::NzbRarSlice;
 use crate::nzb::{NzbFile, NzbSegment};
 
@@ -59,4 +59,21 @@ fn first_slice_gap_detects_skipped_volume() {
 fn first_slice_gap_allows_contiguous_slices() {
     let slices = vec![mk_slice(11), mk_slice(12), mk_slice(13)];
     assert_eq!(first_slice_gap(&slices), None);
+}
+
+#[test]
+fn par2_sample_indices_cover_whole_volume_substitution() {
+    // Reproduces the Black Mirror S02E02 incident: a volume whose every
+    // block mismatched PAR2. First/middle/last must be enough to catch that
+    // regardless of which single block a test happens to look at.
+    assert_eq!(par2_sample_block_indices(94), vec![0, 47, 93]);
+}
+
+#[test]
+fn par2_sample_indices_handle_small_counts() {
+    assert_eq!(par2_sample_block_indices(0), Vec::<usize>::new());
+    assert_eq!(par2_sample_block_indices(1), vec![0]);
+    assert_eq!(par2_sample_block_indices(2), vec![0, 1]);
+    // n/2 collapsing onto first/last shouldn't produce duplicates.
+    assert_eq!(par2_sample_block_indices(3), vec![0, 1, 2]);
 }
