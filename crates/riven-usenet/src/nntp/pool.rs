@@ -4,6 +4,7 @@ use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
+use tokio::sync::oneshot;
 
 use super::priority_semaphore::{OwnedPermit, PrioritizedSemaphore, Priority};
 use super::{NntpConnection, NntpError, NntpProvider};
@@ -26,7 +27,7 @@ const REAPER_INTERVAL: Duration = Duration::from_secs(5);
 /// streamer doesn't consume the entire provider connection allowance
 /// before other consumers (ingest, scrape) can dial.
 const PREWARM_CAP: usize = 8;
-const MAX_DOWNLOAD_CONNECTIONS: usize = 15;
+const MAX_DOWNLOAD_CONNECTIONS: usize = 40;
 /// Fixed per-ingest NNTP fan-out budget. A single ingest never grabs more than
 /// this many connections, so many ingests run concurrently under the shared
 /// semaphore instead of one monopolising the whole pool.
@@ -142,6 +143,15 @@ struct ProviderSlot {
     /// LIFO: hottest conn at the back. Reaper sweeps the front (oldest)
     /// and can short-circuit at the first non-expired entry.
     idle: Arc<Mutex<VecDeque<Idle>>>,
+    /// Callers that found the idle pool empty and every permit already
+    /// spoken for. `release()` hands a freed connection directly to the
+    /// front of `waiters_high` (else `waiters_low`) instead of parking it
+    /// in `idle` — nothing else wakes a queued waiter promptly, since a
+    /// plain semaphore permit release only wakes the semaphore's own
+    /// (otherwise-unused) internal queue. High is always drained before
+    /// Low: streaming reads should never queue behind background ingest.
+    waiters_high: Arc<Mutex<VecDeque<oneshot::Sender<Idle>>>>,
+    waiters_low: Arc<Mutex<VecDeque<oneshot::Sender<Idle>>>>,
     breaker: Arc<CircuitBreaker>,
     /// Wire bytes (encoded article bodies) downloaded from this provider this
     /// process, and the number of article bodies served. Session counters; a
@@ -209,6 +219,8 @@ impl NntpPool {
                     provider: p,
                     permits,
                     idle: Arc::new(Mutex::new(VecDeque::new())),
+                    waiters_high: Arc::new(Mutex::new(VecDeque::new())),
+                    waiters_low: Arc::new(Mutex::new(VecDeque::new())),
                     breaker: Arc::new(CircuitBreaker::new()),
                     bytes_downloaded: AtomicU64::new(0),
                     articles_downloaded: AtomicU64::new(0),
@@ -318,58 +330,122 @@ impl NntpPool {
         }
     }
 
+    /// How long a waiter blocks on a direct hand-off before looping back to
+    /// re-check the idle pool and permit availability. A hand-off from
+    /// `release()` normally resolves this almost instantly; the timeout is
+    /// only a safety net for the paths that free a permit without a live
+    /// connection to hand off (idle-timeout reaper, transient-error drop),
+    /// which wake the semaphore's own (otherwise-unused) queue rather than
+    /// `waiters_high`/`waiters_low`.
+    const WAITER_RETRY_INTERVAL: Duration = Duration::from_secs(2);
+
     async fn acquire(&self, slot_idx: usize, priority: Priority) -> Result<Checkout, NntpError> {
         let slot = &self.slots[slot_idx];
-        let permit = slot.permits.acquire_owned(priority).await;
 
         loop {
-            let candidate = slot.idle.lock().pop_back();
-            let Some(idle) = candidate else { break };
-            let age = idle.last_used.elapsed();
-            if age > IDLE_TIMEOUT {
-                drop(idle);
-                continue;
-            }
-            if age > STALE_THRESHOLD {
-                let mut conn = idle.conn;
-                let idle_permit = idle.permit;
-                match tokio::time::timeout(PING_TIMEOUT, conn.date()).await {
-                    Ok(Ok(())) => {
-                        drop(permit);
-                        return Ok(Checkout {
-                            conn,
-                            permit: idle_permit,
-                            slot_idx,
-                        });
+            // Try the idle pool first, without acquiring a new permit: an
+            // idle connection already holds its own permit (see
+            // `Idle::permit`), so reusing it doesn't change the
+            // total-open-sockets count and needs no fresh permit.
+            loop {
+                let candidate = slot.idle.lock().pop_back();
+                let Some(idle) = candidate else { break };
+                let age = idle.last_used.elapsed();
+                if age > IDLE_TIMEOUT {
+                    drop(idle);
+                    continue;
+                }
+                if age > STALE_THRESHOLD {
+                    let mut conn = idle.conn;
+                    let idle_permit = idle.permit;
+                    let ping_started = std::time::Instant::now();
+                    let ping_result = tokio::time::timeout(PING_TIMEOUT, conn.date()).await;
+                    let ping_ms = ping_started.elapsed().as_millis();
+                    if ping_ms > 50 {
+                        tracing::debug!(host = %slot.provider.config.host, ping_ms, "NNTP acquire: stale ping");
                     }
-                    Ok(Err(e)) => {
-                        tracing::debug!(host = %slot.provider.config.host, error = %e, "NNTP idle ping failed");
-                        drop(conn);
-                        drop(idle_permit);
-                        continue;
-                    }
-                    Err(_) => {
-                        tracing::debug!(host = %slot.provider.config.host, "NNTP idle ping timed out");
-                        drop(conn);
-                        drop(idle_permit);
-                        continue;
+                    match ping_result {
+                        Ok(Ok(())) => {
+                            return Ok(Checkout {
+                                conn,
+                                permit: idle_permit,
+                                slot_idx,
+                            });
+                        }
+                        Ok(Err(e)) => {
+                            tracing::debug!(host = %slot.provider.config.host, error = %e, "NNTP idle ping failed");
+                            drop(conn);
+                            drop(idle_permit);
+                            continue;
+                        }
+                        Err(_) => {
+                            tracing::debug!(host = %slot.provider.config.host, "NNTP idle ping timed out");
+                            drop(conn);
+                            drop(idle_permit);
+                            continue;
+                        }
                     }
                 }
+                return Ok(Checkout {
+                    conn: idle.conn,
+                    permit: idle.permit,
+                    slot_idx,
+                });
             }
-            drop(permit);
-            return Ok(Checkout {
-                conn: idle.conn,
-                permit: idle.permit,
-                slot_idx,
-            });
-        }
 
-        let conn = NntpConnection::connect(&slot.provider.config).await?;
-        Ok(Checkout {
-            conn,
-            permit,
-            slot_idx,
-        })
+            // No usable idle connection. If the pool hasn't reached
+            // max_connections total open sockets yet, dial a fresh one.
+            if let Some(permit) = slot.permits.try_acquire_owned() {
+                let connect_started = std::time::Instant::now();
+                let conn = NntpConnection::connect(&slot.provider.config).await?;
+                let connect_ms = connect_started.elapsed().as_millis();
+                if connect_ms > 50 {
+                    tracing::debug!(host = %slot.provider.config.host, connect_ms, "NNTP acquire: fresh dial");
+                }
+                return Ok(Checkout {
+                    conn,
+                    permit,
+                    slot_idx,
+                });
+            }
+
+            // Every socket is either actively in use or sitting in idle
+            // (which we just drained). Register for a direct hand-off
+            // instead of blocking on the semaphore: `release()` sends a
+            // freed connection straight to the front of this queue, so a
+            // high-priority streaming read never queues behind whatever the
+            // reaper's 20s IDLE_TIMEOUT happens to be doing.
+            let acquire_started = std::time::Instant::now();
+            let (tx, rx) = oneshot::channel();
+            match priority {
+                Priority::High => slot.waiters_high.lock().push_back(tx),
+                Priority::Low => slot.waiters_low.lock().push_back(tx),
+            }
+            match tokio::time::timeout(Self::WAITER_RETRY_INTERVAL, rx).await {
+                Ok(Ok(idle)) => {
+                    let semaphore_wait_ms = acquire_started.elapsed().as_millis();
+                    if semaphore_wait_ms > 50 {
+                        tracing::debug!(
+                            host = %slot.provider.config.host,
+                            semaphore_wait_ms,
+                            "NNTP acquire: handoff wait"
+                        );
+                    }
+                    return Ok(Checkout {
+                        conn: idle.conn,
+                        permit: idle.permit,
+                        slot_idx,
+                    });
+                }
+                // Sender dropped (shouldn't normally happen) or the
+                // interval elapsed with no hand-off yet — loop back and
+                // retry idle/permit/waiter from the top. The now-orphaned
+                // `tx` (timeout case) is harmless: whichever `release()`
+                // pops it later finds the receiver gone and moves on to
+                // the next waiter or `idle`.
+                Ok(Err(_)) | Err(_) => continue,
+            }
+        }
     }
 
     /// Caller must only release a conn whose last op left the wire in a
@@ -380,11 +456,41 @@ impl NntpPool {
             permit,
             slot_idx,
         } = checkout;
-        self.slots[slot_idx].idle.lock().push_back(Idle {
+        let slot = &self.slots[slot_idx];
+        let mut idle = Idle {
             conn,
             permit,
             last_used: Instant::now(),
-        });
+        };
+
+        // Hand off directly to a queued waiter (High before Low) instead of
+        // parking in `idle`: nothing else wakes a waiter promptly, since a
+        // released connection never touches the semaphore's own permit
+        // count (see `Idle::permit`). `send` returns the value back on
+        // `Err` if the receiver was dropped (its `acquire()` call timed
+        // out and looped back already) — try the next waiter in that case.
+        loop {
+            let next = {
+                let mut hi = slot.waiters_high.lock();
+                let from_high = hi.pop_front();
+                if from_high.is_some() {
+                    from_high
+                } else {
+                    drop(hi);
+                    slot.waiters_low.lock().pop_front()
+                }
+            };
+            let Some(tx) = next else { break };
+            match tx.send(idle) {
+                Ok(()) => return,
+                Err(returned_idle) => {
+                    idle = returned_idle;
+                    continue;
+                }
+            }
+        }
+
+        slot.idle.lock().push_back(idle);
     }
 
     /// Runs `op` against providers in health/priority order, returning the

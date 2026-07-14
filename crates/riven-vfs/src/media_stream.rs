@@ -529,24 +529,60 @@ impl UsenetSession {
         }
         let end = end.min(self.file_size - 1);
 
+        tracing::debug!(
+            target: "streaming",
+            info_hash = %self.info_hash,
+            file_index = self.file_index,
+            start,
+            end,
+            len = end - start + 1,
+            prefetch_frontier = self.prefetch_frontier,
+            "usenet read() call"
+        );
+
         const DEFAULT_PREFETCH_LEAD: u64 = 46 * 1024 * 1024;
         let lead = std::env::var("RIVEN_USENET_STREAM_READAHEAD_BYTES")
             .ok()
             .and_then(|s| s.parse::<u64>().ok())
             .filter(|&n| n > 0)
             .unwrap_or(DEFAULT_PREFETCH_LEAD);
+        // Kernel FUSE reads on this handle arrive in much smaller chunks
+        // (observed ~128 KiB) than the mount's 4 MiB max_read ceiling. Since
+        // `want_through` tracks `start` almost 1:1, spawning a prefetch task
+        // on every call that merely clears the frontier meant one tokio task
+        // (+ meta lookup + pool acquire) per ~128 KiB of forward progress —
+        // hundreds of tasks all contending for the same connection pool to
+        // each fetch a sliver smaller than one NNTP segment. Only spawn once
+        // there's a real batch of new ground to cover; small increments
+        // accumulate against the still-unmoved frontier until a later call's
+        // `want_through` clears the threshold (or until EOF, which must
+        // always be covered even if the final remainder is small).
+        const MIN_PREFETCH_SPAWN_BYTES: u64 = 4 * 1024 * 1024;
         let want_through = (start + lead).min(self.file_size - 1);
         if want_through > self.prefetch_frontier {
             let from = self.prefetch_frontier.max(start);
-            self.prefetch_frontier = want_through;
-            let source = Arc::clone(&self.source);
-            let info_hash = Arc::clone(&self.info_hash);
-            let file_index = self.file_index;
-            runtime.spawn(async move {
-                source
-                    .prefetch(&info_hash, file_index, from, want_through)
-                    .await;
-            });
+            let span = want_through - from;
+            let near_eof = want_through >= self.file_size - 1;
+            if span >= MIN_PREFETCH_SPAWN_BYTES || near_eof {
+                self.prefetch_frontier = want_through;
+                tracing::debug!(
+                    target: "streaming",
+                    info_hash = %self.info_hash,
+                    file_index = self.file_index,
+                    from,
+                    want_through,
+                    span,
+                    "usenet prefetch spawned"
+                );
+                let source = Arc::clone(&self.source);
+                let info_hash = Arc::clone(&self.info_hash);
+                let file_index = self.file_index;
+                runtime.spawn(async move {
+                    source
+                        .prefetch(&info_hash, file_index, from, want_through)
+                        .await;
+                });
+            }
         }
 
         match runtime.block_on(

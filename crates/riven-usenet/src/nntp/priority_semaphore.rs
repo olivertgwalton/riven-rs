@@ -104,6 +104,19 @@ impl PrioritizedSemaphore {
         self.inner.lock().available
     }
 
+    /// Acquire a permit only if one is immediately available, without
+    /// parking the caller in a wait queue. Used to gate dialing a brand
+    /// new connection versus waiting for one to be freed.
+    pub fn try_acquire_owned(self: &Arc<Self>) -> Option<OwnedPermit> {
+        let mut g = self.inner.lock();
+        if g.available > 0 {
+            g.available -= 1;
+            Some(OwnedPermit { sem: self.clone() })
+        } else {
+            None
+        }
+    }
+
     /// Acquire one permit. Parks the caller in the appropriate queue if none
     /// are immediately available.
     pub async fn acquire_owned(self: &Arc<Self>, priority: Priority) -> OwnedPermit {
