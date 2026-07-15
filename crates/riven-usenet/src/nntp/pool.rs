@@ -27,7 +27,7 @@ const REAPER_INTERVAL: Duration = Duration::from_secs(5);
 /// streamer doesn't consume the entire provider connection allowance
 /// before other consumers (ingest, scrape) can dial.
 const PREWARM_CAP: usize = 8;
-const MAX_DOWNLOAD_CONNECTIONS: usize = 40;
+const MAX_DOWNLOAD_CONNECTIONS: usize = 15;
 /// Fixed per-ingest NNTP fan-out budget. A single ingest never grabs more than
 /// this many connections, so many ingests run concurrently under the shared
 /// semaphore instead of one monopolising the whole pool.
@@ -137,12 +137,19 @@ struct Idle {
     last_used: Instant,
 }
 
-struct ProviderSlot {
-    provider: NntpProvider,
-    permits: Arc<PrioritizedSemaphore>,
+/// `idle`, `waiters_high`, and `waiters_low` share one lock (rather than
+/// three independent ones) so that acquire()'s final "idle is empty, I must
+/// register as a waiter" determination and release()'s "no waiter queued, I
+/// must park in idle" determination can never interleave: both read the
+/// same locked snapshot before deciding, closing a race where a concurrent
+/// release() sees empty waiter queues (the acquirer hasn't registered yet)
+/// and parks a freed connection in `idle` a moment before the acquirer
+/// registers, stranding it for the full `WAITER_RETRY_INTERVAL` instead of
+/// getting the connection immediately.
+struct SlotQueues {
     /// LIFO: hottest conn at the back. Reaper sweeps the front (oldest)
     /// and can short-circuit at the first non-expired entry.
-    idle: Arc<Mutex<VecDeque<Idle>>>,
+    idle: VecDeque<Idle>,
     /// Callers that found the idle pool empty and every permit already
     /// spoken for. `release()` hands a freed connection directly to the
     /// front of `waiters_high` (else `waiters_low`) instead of parking it
@@ -150,8 +157,14 @@ struct ProviderSlot {
     /// plain semaphore permit release only wakes the semaphore's own
     /// (otherwise-unused) internal queue. High is always drained before
     /// Low: streaming reads should never queue behind background ingest.
-    waiters_high: Arc<Mutex<VecDeque<oneshot::Sender<Idle>>>>,
-    waiters_low: Arc<Mutex<VecDeque<oneshot::Sender<Idle>>>>,
+    waiters_high: VecDeque<oneshot::Sender<Idle>>,
+    waiters_low: VecDeque<oneshot::Sender<Idle>>,
+}
+
+struct ProviderSlot {
+    provider: NntpProvider,
+    permits: Arc<PrioritizedSemaphore>,
+    queues: Arc<Mutex<SlotQueues>>,
     breaker: Arc<CircuitBreaker>,
     /// Wire bytes (encoded article bodies) downloaded from this provider this
     /// process, and the number of article bodies served. Session counters; a
@@ -218,9 +231,11 @@ impl NntpPool {
                 ProviderSlot {
                     provider: p,
                     permits,
-                    idle: Arc::new(Mutex::new(VecDeque::new())),
-                    waiters_high: Arc::new(Mutex::new(VecDeque::new())),
-                    waiters_low: Arc::new(Mutex::new(VecDeque::new())),
+                    queues: Arc::new(Mutex::new(SlotQueues {
+                        idle: VecDeque::new(),
+                        waiters_high: VecDeque::new(),
+                        waiters_low: VecDeque::new(),
+                    })),
                     breaker: Arc::new(CircuitBreaker::new()),
                     bytes_downloaded: AtomicU64::new(0),
                     articles_downloaded: AtomicU64::new(0),
@@ -241,7 +256,7 @@ impl NntpPool {
                 let max = slot.provider.config.max_connections;
                 let available = slot.permits.available_permits() as u32;
                 let open = max.saturating_sub(available);
-                let idle = slot.idle.lock().len() as u32;
+                let idle = slot.queues.lock().idle.len() as u32;
                 let active = open.saturating_sub(idle);
                 ProviderHealth {
                     host: slot.provider.config.host.clone(),
@@ -276,10 +291,10 @@ impl NntpPool {
     }
 
     fn reap(slot: &ProviderSlot) {
-        let mut guard = slot.idle.lock();
-        while let Some(front) = guard.front() {
+        let mut guard = slot.queues.lock();
+        while let Some(front) = guard.idle.front() {
             if front.last_used.elapsed() > IDLE_TIMEOUT {
-                guard.pop_front();
+                guard.idle.pop_front();
             } else {
                 break;
             }
@@ -298,13 +313,13 @@ impl NntpPool {
             for _ in 0..target {
                 let cfg = slot.provider.config.clone();
                 let permits = slot.permits.clone();
-                let idle = slot.idle.clone();
+                let queues = slot.queues.clone();
                 let host = cfg.host.clone();
                 handles.push(tokio::spawn(async move {
                     let permit = permits.acquire_owned(Priority::Low).await;
                     match NntpConnection::connect(&cfg).await {
                         Ok(conn) => {
-                            idle.lock().push_back(Idle {
+                            queues.lock().idle.push_back(Idle {
                                 conn,
                                 permit,
                                 last_used: Instant::now(),
@@ -320,7 +335,7 @@ impl NntpPool {
             for h in handles {
                 drop(h.await);
             }
-            let warmed = slot.idle.lock().len();
+            let warmed = slot.queues.lock().idle.len();
             tracing::info!(
                 host = %slot.provider.config.host,
                 warmed,
@@ -348,7 +363,7 @@ impl NntpPool {
             // `Idle::permit`), so reusing it doesn't change the
             // total-open-sockets count and needs no fresh permit.
             loop {
-                let candidate = slot.idle.lock().pop_back();
+                let candidate = slot.queues.lock().idle.pop_back();
                 let Some(idle) = candidate else { break };
                 let age = idle.last_used.elapsed();
                 if age > IDLE_TIMEOUT {
@@ -415,11 +430,33 @@ impl NntpPool {
             // freed connection straight to the front of this queue, so a
             // high-priority streaming read never queues behind whatever the
             // reaper's 20s IDLE_TIMEOUT happens to be doing.
+            //
+            // The recheck-and-register below holds `queues`' lock for both
+            // steps, matching the single lock acquisition `release()` holds
+            // for its own "hand off or park in idle" decision. This closes
+            // a race where a connection freed between our last idle-check
+            // (above) and registering here would otherwise be invisible to
+            // both sides: release() would see empty waiter queues and park
+            // it in `idle`, while we'd already be parked as a waiter with
+            // nothing to wake us but the `WAITER_RETRY_INTERVAL` timeout.
+            // A connection popped here is guaranteed fresh (just released,
+            // `last_used` set to `Instant::now()`), so no staleness ping.
             let acquire_started = std::time::Instant::now();
             let (tx, rx) = oneshot::channel();
-            match priority {
-                Priority::High => slot.waiters_high.lock().push_back(tx),
-                Priority::Low => slot.waiters_low.lock().push_back(tx),
+            {
+                let mut guard = slot.queues.lock();
+                if let Some(idle) = guard.idle.pop_back() {
+                    drop(guard);
+                    return Ok(Checkout {
+                        conn: idle.conn,
+                        permit: idle.permit,
+                        slot_idx,
+                    });
+                }
+                match priority {
+                    Priority::High => guard.waiters_high.push_back(tx),
+                    Priority::Low => guard.waiters_low.push_back(tx),
+                }
             }
             match tokio::time::timeout(Self::WAITER_RETRY_INTERVAL, rx).await {
                 Ok(Ok(idle)) => {
@@ -469,18 +506,24 @@ impl NntpPool {
         // count (see `Idle::permit`). `send` returns the value back on
         // `Err` if the receiver was dropped (its `acquire()` call timed
         // out and looped back already) — try the next waiter in that case.
+        //
+        // Each iteration takes `queues`' lock for the whole "find a waiter,
+        // or give up and park in idle" decision, matching the single lock
+        // acquisition `acquire()` holds for its own recheck-and-register —
+        // see the comment there for why this must be one critical section
+        // rather than a separate check-then-act across two lock
+        // acquisitions.
         loop {
-            let next = {
-                let mut hi = slot.waiters_high.lock();
-                let from_high = hi.pop_front();
-                if from_high.is_some() {
-                    from_high
-                } else {
-                    drop(hi);
-                    slot.waiters_low.lock().pop_front()
-                }
+            let mut guard = slot.queues.lock();
+            let next = guard
+                .waiters_high
+                .pop_front()
+                .or_else(|| guard.waiters_low.pop_front());
+            let Some(tx) = next else {
+                guard.idle.push_back(idle);
+                return;
             };
-            let Some(tx) = next else { break };
+            drop(guard);
             match tx.send(idle) {
                 Ok(()) => return,
                 Err(returned_idle) => {
@@ -489,8 +532,6 @@ impl NntpPool {
                 }
             }
         }
-
-        slot.idle.lock().push_back(idle);
     }
 
     /// Runs `op` against providers in health/priority order, returning the
@@ -726,7 +767,7 @@ mod tests {
 
         let checkout1 = pool.acquire(0, Priority::High).await.unwrap();
         pool.release(checkout1);
-        assert_eq!(pool.slots[0].idle.lock().len(), 1);
+        assert_eq!(pool.slots[0].queues.lock().idle.len(), 1);
         assert_eq!(pool.slots[0].permits.available_permits(), 0);
 
         let checkout2 =
@@ -753,10 +794,15 @@ mod tests {
         let waiter_pool = pool.clone();
         let waiter = tokio::spawn(async move { waiter_pool.acquire(0, Priority::High).await });
 
-        // Give the waiter a chance to find idle empty, the permit exhausted,
-        // and park itself in `waiters_high` before we release.
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        assert_eq!(pool.slots[0].waiters_high.lock().len(), 1);
+        // Wait for observable proof the waiter has actually registered in
+        // `waiters_high`, rather than assuming a fixed sleep is long enough.
+        for _ in 0..1000 {
+            if pool.slots[0].queues.lock().waiters_high.len() == 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        assert_eq!(pool.slots[0].queues.lock().waiters_high.len(), 1);
 
         pool.release(checkout1);
 
@@ -766,5 +812,61 @@ mod tests {
             .unwrap()
             .unwrap();
         pool.release(checkout2);
+    }
+
+    /// Regression test for a narrower TOCTOU race in the two tests above:
+    /// acquire()'s final "idle is empty, I must register as a waiter"
+    /// check and release()'s "no waiter queued, I must park in idle" check
+    /// used to happen under separate lock acquisitions. A release()
+    /// squeezed into the gap between an acquirer's last idle-check and its
+    /// waiter registration could park a connection in `idle` that nothing
+    /// would find until the acquirer's `WAITER_RETRY_INTERVAL` (2s) timeout
+    /// expired and it looped back. `queues` now shares one lock across both
+    /// decisions, closing the gap.
+    ///
+    /// This can't be reproduced with a fixed interleaving (the whole point
+    /// of the fix is that the two decisions are now indivisible), so this
+    /// drives heavy concurrent acquire/release contention over many
+    /// iterations and asserts every acquire completes almost instantly —
+    /// pre-fix, the race would statistically strand at least one acquirer
+    /// for the full 2s retry interval somewhere in the run, blowing the
+    /// overall timeout badly.
+    // Needs genuine OS-thread parallelism (not just cooperative
+    // interleaving) for a meaningful stress test: the race this guards
+    // against is between two threads' lock acquisitions, which a
+    // current-thread runtime can never actually produce.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_acquire_release_never_stalls_on_retry_interval() {
+        const WORKERS: usize = 16;
+        const ITERATIONS_PER_WORKER: usize = 100;
+
+        let (addr, _server) = spawn_fake_nntp_server().await;
+        let pool = NntpPool::new_multi(vec![test_provider(addr, 4)]);
+
+        let run = async {
+            let mut handles = Vec::with_capacity(WORKERS);
+            for _ in 0..WORKERS {
+                let pool = pool.clone();
+                handles.push(tokio::spawn(async move {
+                    for _ in 0..ITERATIONS_PER_WORKER {
+                        let checkout = pool.acquire(0, Priority::High).await.unwrap();
+                        // Yield to encourage real interleaving between
+                        // acquires and releases across workers.
+                        tokio::task::yield_now().await;
+                        pool.release(checkout);
+                    }
+                }));
+            }
+            for h in handles {
+                h.await.unwrap();
+            }
+        };
+
+        // Generous relative to the sub-millisecond hand-offs this should
+        // take, but far below the 2s `WAITER_RETRY_INTERVAL` a single
+        // stranded acquirer would need — any real stall fails this.
+        tokio::time::timeout(Duration::from_secs(1), run)
+            .await
+            .expect("concurrent acquire/release contention must never stall on the retry interval");
     }
 }

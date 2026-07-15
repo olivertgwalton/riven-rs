@@ -205,9 +205,21 @@ mod tests {
         let waiter_sem = sem.clone();
         let waiter = tokio::spawn(async move { waiter_sem.acquire_owned(Priority::High).await });
 
-        // Give the spawned task a chance to park in the wait queue before
-        // the permit is released.
-        tokio::task::yield_now().await;
+        // Wait for observable proof the waiter has actually parked in the
+        // high-priority queue, rather than assuming a single yield is
+        // enough — a bare `yield_now` only happens to work here because
+        // `#[tokio::test]` defaults to the current-thread flavor.
+        for _ in 0..1000 {
+            if sem.inner.lock().high.len() == 1 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            sem.inner.lock().high.len(),
+            1,
+            "waiter should have parked in the high-priority queue"
+        );
 
         drop(held);
         let _woken_permit = tokio::time::timeout(Duration::from_secs(1), waiter)

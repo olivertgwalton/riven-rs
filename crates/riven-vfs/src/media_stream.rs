@@ -447,6 +447,45 @@ fn slice_request_bytes(full: &Bytes, start: u64, end: u64, base_start: u64) -> O
     let slice_len = requested_len.min(available_len);
     Some(full.slice(offset..offset + slice_len))
 }
+
+/// Decide whether `UsenetSession::read` should spawn a prefetch task for
+/// this call, and the `[from, want_through)` window to cover if so.
+///
+/// Kernel FUSE reads on the usenet mount arrive in much smaller chunks
+/// (observed ~128 KiB) than the mount's 4 MiB `max_read` ceiling. Since
+/// `want_through` tracks `start` almost 1:1, spawning a prefetch task on
+/// every call that merely clears the frontier meant one tokio task (+ meta
+/// lookup + pool acquire) per ~128 KiB of forward progress — hundreds of
+/// tasks all contending for the same connection pool to each fetch a sliver
+/// smaller than one NNTP segment. Only spawn once there's a real batch of
+/// new ground to cover; small increments accumulate against the
+/// still-unmoved frontier until a later call's `want_through` clears the
+/// threshold (or until EOF, which must always be covered even if the final
+/// remainder is small).
+///
+/// The coalescing threshold is capped to `lead`: otherwise a configured
+/// lead smaller than `MIN_PREFETCH_SPAWN_BYTES` could never accumulate
+/// enough span to cross a fixed 4 MiB threshold (the very first spawn's
+/// span is exactly `lead`, so `frontier` never gets its initial bump and
+/// `from` keeps re-anchoring to `start` on every call), silently disabling
+/// prefetch entirely instead of just batching it more finely.
+fn prefetch_decision(start: u64, lead: u64, file_size: u64, frontier: u64) -> Option<(u64, u64)> {
+    const MIN_PREFETCH_SPAWN_BYTES: u64 = 4 * 1024 * 1024;
+    let min_spawn_bytes = MIN_PREFETCH_SPAWN_BYTES.min(lead);
+    let want_through = (start + lead).min(file_size - 1);
+    if want_through <= frontier {
+        return None;
+    }
+    let from = frontier.max(start);
+    let span = want_through - from;
+    let near_eof = want_through >= file_size - 1;
+    if span >= min_spawn_bytes || near_eof {
+        Some((from, want_through))
+    } else {
+        None
+    }
+}
+
 /// In-process streaming session for usenet-backed files.
 ///
 /// Each FUSE read is served directly by the streamer's `read_range`
@@ -546,43 +585,27 @@ impl UsenetSession {
             .and_then(|s| s.parse::<u64>().ok())
             .filter(|&n| n > 0)
             .unwrap_or(DEFAULT_PREFETCH_LEAD);
-        // Kernel FUSE reads on this handle arrive in much smaller chunks
-        // (observed ~128 KiB) than the mount's 4 MiB max_read ceiling. Since
-        // `want_through` tracks `start` almost 1:1, spawning a prefetch task
-        // on every call that merely clears the frontier meant one tokio task
-        // (+ meta lookup + pool acquire) per ~128 KiB of forward progress —
-        // hundreds of tasks all contending for the same connection pool to
-        // each fetch a sliver smaller than one NNTP segment. Only spawn once
-        // there's a real batch of new ground to cover; small increments
-        // accumulate against the still-unmoved frontier until a later call's
-        // `want_through` clears the threshold (or until EOF, which must
-        // always be covered even if the final remainder is small).
-        const MIN_PREFETCH_SPAWN_BYTES: u64 = 4 * 1024 * 1024;
-        let want_through = (start + lead).min(self.file_size - 1);
-        if want_through > self.prefetch_frontier {
-            let from = self.prefetch_frontier.max(start);
-            let span = want_through - from;
-            let near_eof = want_through >= self.file_size - 1;
-            if span >= MIN_PREFETCH_SPAWN_BYTES || near_eof {
-                self.prefetch_frontier = want_through;
-                tracing::debug!(
-                    target: "streaming",
-                    info_hash = %self.info_hash,
-                    file_index = self.file_index,
-                    from,
-                    want_through,
-                    span,
-                    "usenet prefetch spawned"
-                );
-                let source = Arc::clone(&self.source);
-                let info_hash = Arc::clone(&self.info_hash);
-                let file_index = self.file_index;
-                runtime.spawn(async move {
-                    source
-                        .prefetch(&info_hash, file_index, from, want_through)
-                        .await;
-                });
-            }
+        if let Some((from, want_through)) =
+            prefetch_decision(start, lead, self.file_size, self.prefetch_frontier)
+        {
+            self.prefetch_frontier = want_through;
+            tracing::debug!(
+                target: "streaming",
+                info_hash = %self.info_hash,
+                file_index = self.file_index,
+                from,
+                want_through,
+                span = want_through - from,
+                "usenet prefetch spawned"
+            );
+            let source = Arc::clone(&self.source);
+            let info_hash = Arc::clone(&self.info_hash);
+            let file_index = self.file_index;
+            runtime.spawn(async move {
+                source
+                    .prefetch(&info_hash, file_index, from, want_through)
+                    .await;
+            });
         }
 
         match runtime.block_on(
@@ -726,7 +749,21 @@ mod tests {
 
         assert_eq!(*mock.read_range_calls.lock().unwrap(), NUM_READS as u32);
 
-        let prefetch_calls = mock.prefetch_calls.lock().unwrap();
+        // Sort by `from` before checking count/contiguity: prefetch spawns
+        // are independent fire-and-forget tokio tasks, so the order they
+        // land in `prefetch_calls` reflects task-completion order, not the
+        // chronological order they were spawned in — asserting on raw
+        // insertion order would be flaky under real scheduling.
+        let mut prefetch_calls = mock.prefetch_calls.lock().unwrap().clone();
+        prefetch_calls.sort_unstable();
+
+        // A zero-spawn regression (e.g. the coalescing threshold silently
+        // disabling prefetch entirely) must fail this test, not slip through
+        // an upper-bound-only check.
+        assert!(
+            !prefetch_calls.is_empty(),
+            "expected at least one prefetch spawn for {NUM_READS} forward reads, got none"
+        );
         // 40 MiB of forward progress in 4 MiB coalescing increments (plus the
         // initial big jump to `start + lead`) is a small, bounded number of
         // spawns — nowhere near one per 128 KiB read (which would be 320).
@@ -749,6 +786,92 @@ mod tests {
                 );
             }
             prev_end = Some(want_through);
+        }
+    }
+
+    /// Regression tests for the `prefetch_decision` coalescing logic in
+    /// isolation — pure function, no async/mocking needed.
+    mod prefetch_decision_tests {
+        use super::super::prefetch_decision;
+
+        const FILE_SIZE: u64 = 200 * 1024 * 1024;
+
+        #[test]
+        fn large_lead_spawns_immediately_and_advances_frontier() {
+            let decision = prefetch_decision(0, 46 * 1024 * 1024, FILE_SIZE, 0);
+            assert_eq!(decision, Some((0, 46 * 1024 * 1024)));
+        }
+
+        #[test]
+        fn small_increment_below_threshold_does_not_spawn() {
+            // Frontier already established well ahead of `start`; a small
+            // forward step shouldn't cross the 4 MiB coalescing threshold.
+            let frontier = 46 * 1024 * 1024;
+            let decision = prefetch_decision(128 * 1024, 46 * 1024 * 1024, FILE_SIZE, frontier);
+            assert_eq!(decision, None);
+        }
+
+        /// Regression test: a configured lead smaller than the 4 MiB
+        /// coalescing threshold must still spawn prefetch — not be silently
+        /// disabled by a fixed threshold the lead itself can never cross.
+        #[test]
+        fn lead_smaller_than_threshold_still_spawns_on_first_read() {
+            const SMALL_LEAD: u64 = 1024 * 1024; // 1 MiB, below MIN_PREFETCH_SPAWN_BYTES
+            let decision = prefetch_decision(0, SMALL_LEAD, FILE_SIZE, 0);
+            assert_eq!(
+                decision,
+                Some((0, SMALL_LEAD)),
+                "a lead below the coalescing threshold must still trigger prefetch"
+            );
+        }
+
+        /// Once the small-lead frontier is established, subsequent small
+        /// forward reads must keep accumulating span against it (not
+        /// re-anchor `from` to `start` and get stuck never spawning again).
+        #[test]
+        fn lead_smaller_than_threshold_keeps_accumulating_after_first_spawn() {
+            const SMALL_LEAD: u64 = 1024 * 1024;
+            let mut frontier = 0u64;
+            let first = prefetch_decision(0, SMALL_LEAD, FILE_SIZE, frontier);
+            frontier = first.expect("first read must spawn").1;
+
+            // Advance in tiny steps; span accumulates against `frontier`
+            // (fixed) rather than resetting to `lead` on every call.
+            let initial_frontier = frontier;
+            let mut second_spawn: Option<(u64, u64)> = None;
+            let mut start = 0u64;
+            for _ in 0..64 {
+                start += 128 * 1024;
+                if let Some(decision) = prefetch_decision(start, SMALL_LEAD, FILE_SIZE, frontier) {
+                    second_spawn = Some(decision);
+                    break;
+                }
+            }
+            let (from, want_through) =
+                second_spawn.expect("prefetch must eventually spawn again as reads advance");
+            assert_eq!(
+                from, initial_frontier,
+                "the next spawn's window must pick up exactly where the first left off"
+            );
+            assert!(want_through > initial_frontier, "frontier must advance");
+        }
+
+        #[test]
+        fn near_eof_spawns_regardless_of_span() {
+            // frontier sits 1 MiB before `start`, well short of the 4 MiB
+            // threshold, but a large lead pins `want_through` at file_size-1
+            // (clamped) — this isolates near_eof as the only reason to spawn.
+            let frontier = FILE_SIZE - 2 * 1024 * 1024;
+            let start = FILE_SIZE - 1024 * 1024;
+            let decision = prefetch_decision(start, 46 * 1024 * 1024, FILE_SIZE, frontier);
+            let (_, want_through) = decision.expect("must always cover the tail up to EOF");
+            assert_eq!(want_through, FILE_SIZE - 1);
+        }
+
+        #[test]
+        fn frontier_already_covering_want_through_does_not_spawn() {
+            let decision = prefetch_decision(0, 46 * 1024 * 1024, FILE_SIZE, 46 * 1024 * 1024);
+            assert_eq!(decision, None);
         }
     }
 }
