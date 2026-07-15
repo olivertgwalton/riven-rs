@@ -631,3 +631,124 @@ impl Drop for UsenetSession {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Mutex;
+
+    use riven_core::local_source::LocalByteSource;
+
+    use super::*;
+
+    /// Records every `prefetch`/`read_range` call instead of doing real I/O,
+    /// so tests can assert on call counts and ranges without a network.
+    struct MockSource {
+        prefetch_calls: Mutex<Vec<(u64, u64)>>,
+        read_range_calls: Mutex<u32>,
+    }
+
+    impl MockSource {
+        fn new() -> Self {
+            Self {
+                prefetch_calls: Mutex::new(Vec::new()),
+                read_range_calls: Mutex::new(0),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl LocalByteSource for MockSource {
+        async fn read_range(
+            &self,
+            _info_hash: &str,
+            _file_index: usize,
+            start: u64,
+            end_inclusive: u64,
+        ) -> anyhow::Result<Bytes> {
+            *self.read_range_calls.lock().unwrap() += 1;
+            let len = (end_inclusive - start + 1) as usize;
+            Ok(Bytes::from(vec![0u8; len]))
+        }
+
+        async fn prefetch(
+            &self,
+            _info_hash: &str,
+            _file_index: usize,
+            start: u64,
+            end_inclusive: u64,
+        ) {
+            self.prefetch_calls
+                .lock()
+                .unwrap()
+                .push((start, end_inclusive));
+        }
+
+        fn stream_register(&self, _key: &str, _info_hash: &str, _filename: &str, _file_size: u64) {}
+        fn stream_touch(&self, _key: &str) {}
+        fn stream_unregister(&self, _key: &str) {}
+    }
+
+    /// Regression test for the prefetch-spawn-storm bug: real kernel FUSE
+    /// reads on the usenet mount arrive in ~128 KiB increments (far smaller
+    /// than the 4 MiB `max_read` ceiling), and the pre-fix code spawned a
+    /// prefetch task on almost every one of them — hundreds of tiny tasks
+    /// all contending for the same NNTP connection pool per 100MB read.
+    /// This drives many small sequential reads and asserts prefetch spawns
+    /// stay coalesced into large batches instead of firing on every read.
+    #[test]
+    fn small_sequential_reads_coalesce_prefetch_spawns() {
+        const FILE_SIZE: u64 = 200 * 1024 * 1024;
+        const READ_SIZE: u64 = 128 * 1024;
+        const NUM_READS: u64 = 320; // 40 MiB of forward progress
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mock = Arc::new(MockSource::new());
+        let source: Arc<dyn LocalByteSource> = mock.clone();
+        let mut session = UsenetSession::new(
+            source,
+            Arc::from("test-hash"),
+            0,
+            FILE_SIZE,
+            Arc::from("test.mkv"),
+        );
+
+        for i in 0..NUM_READS {
+            let start = i * READ_SIZE;
+            let end = start + READ_SIZE - 1;
+            match session.read(start, end, rt.handle()) {
+                ReadOutcome::Data(data) => assert_eq!(data.len(), READ_SIZE as usize),
+                ReadOutcome::Error(errno) => panic!("unexpected read error: {errno}"),
+            }
+        }
+
+        // Let any in-flight fire-and-forget prefetch tasks finish.
+        rt.block_on(async { tokio::time::sleep(std::time::Duration::from_millis(200)).await });
+
+        assert_eq!(*mock.read_range_calls.lock().unwrap(), NUM_READS as u32);
+
+        let prefetch_calls = mock.prefetch_calls.lock().unwrap();
+        // 40 MiB of forward progress in 4 MiB coalescing increments (plus the
+        // initial big jump to `start + lead`) is a small, bounded number of
+        // spawns — nowhere near one per 128 KiB read (which would be 320).
+        assert!(
+            prefetch_calls.len() < 20,
+            "expected prefetch spawns to be coalesced into a handful of batches, got {} for {NUM_READS} reads",
+            prefetch_calls.len()
+        );
+
+        // Coverage must be contiguous and monotonic: each spawned window
+        // should start where the previous one left off (or at the read
+        // position, for the very first spawn), with no gaps and no overlap.
+        let mut prev_end: Option<u64> = None;
+        for &(from, want_through) in prefetch_calls.iter() {
+            assert!(want_through > from, "spawned window must be non-empty");
+            if let Some(prev) = prev_end {
+                assert_eq!(
+                    from, prev,
+                    "prefetch windows must be contiguous, no gaps/overlap"
+                );
+            }
+            prev_end = Some(want_through);
+        }
+    }
+}

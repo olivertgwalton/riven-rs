@@ -152,3 +152,67 @@ impl Drop for OwnedPermit {
         self.sem.release();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+
+    #[test]
+    fn try_acquire_owned_succeeds_while_permits_available() {
+        let sem = PrioritizedSemaphore::new(2);
+        assert_eq!(sem.available_permits(), 2);
+
+        let p1 = sem.try_acquire_owned();
+        assert!(p1.is_some());
+        assert_eq!(sem.available_permits(), 1);
+
+        let p2 = sem.try_acquire_owned();
+        assert!(p2.is_some());
+        assert_eq!(sem.available_permits(), 0);
+    }
+
+    #[test]
+    fn try_acquire_owned_fails_without_parking_when_exhausted() {
+        let sem = PrioritizedSemaphore::new(1);
+        let _held = sem.try_acquire_owned().expect("first acquire succeeds");
+        assert_eq!(sem.available_permits(), 0);
+
+        // Must return None immediately rather than blocking/queuing the
+        // caller — this is what lets `NntpPool::acquire` use it as a
+        // non-blocking gate between "reuse idle" and "wait for hand-off".
+        assert!(sem.try_acquire_owned().is_none());
+        assert_eq!(sem.available_permits(), 0);
+    }
+
+    #[test]
+    fn dropping_permit_makes_it_available_again() {
+        let sem = PrioritizedSemaphore::new(1);
+        let held = sem.try_acquire_owned().expect("acquire succeeds");
+        assert_eq!(sem.available_permits(), 0);
+
+        drop(held);
+        assert_eq!(sem.available_permits(), 1);
+        assert!(sem.try_acquire_owned().is_some());
+    }
+
+    #[tokio::test]
+    async fn acquire_owned_wakes_on_release_rather_than_polling() {
+        let sem = PrioritizedSemaphore::new(1);
+        let held = sem.try_acquire_owned().expect("acquire succeeds");
+
+        let waiter_sem = sem.clone();
+        let waiter = tokio::spawn(async move { waiter_sem.acquire_owned(Priority::High).await });
+
+        // Give the spawned task a chance to park in the wait queue before
+        // the permit is released.
+        tokio::task::yield_now().await;
+
+        drop(held);
+        let _woken_permit = tokio::time::timeout(Duration::from_secs(1), waiter)
+            .await
+            .expect("waiter should be woken promptly by release, not left parked")
+            .expect("waiter task should not panic");
+    }
+}

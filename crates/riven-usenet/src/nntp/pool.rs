@@ -654,3 +654,117 @@ impl NntpPool {
         Ok(exists)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use tokio::net::TcpListener;
+
+    use super::*;
+    use crate::nntp::{NntpProvider, NntpServerConfig};
+
+    /// Spawns a loopback TCP listener that speaks just enough NNTP to satisfy
+    /// `NntpConnection::connect`: a `200` greeting per accepted connection,
+    /// no auth exchange (test providers carry no credentials). Good enough
+    /// for pool checkout/release regression tests, which never issue a real
+    /// `BODY`/`DATE` command.
+    async fn spawn_fake_nntp_server() -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                tokio::spawn(async move {
+                    use tokio::io::AsyncWriteExt;
+                    if socket.write_all(b"200 fake nntp ready\r\n").await.is_err() {
+                        return;
+                    }
+                    // Keep the socket open (idle) until the test drops its
+                    // end; a real reader isn't needed since these tests never
+                    // send BODY/DATE/AUTHINFO.
+                    let mut buf = [0u8; 64];
+                    loop {
+                        use tokio::io::AsyncReadExt;
+                        match socket.read(&mut buf).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(_) => {}
+                        }
+                    }
+                });
+            }
+        });
+        (addr, handle)
+    }
+
+    fn test_provider(addr: std::net::SocketAddr, max_connections: u32) -> NntpProvider {
+        NntpProvider {
+            config: NntpServerConfig {
+                host: addr.ip().to_string(),
+                port: addr.port(),
+                user: None,
+                pass: None,
+                use_tls: false,
+                max_connections,
+                timeout: Duration::from_secs(5),
+            },
+            priority: 0,
+            is_backup: false,
+        }
+    }
+
+    /// Regression test for the connection-pool-starvation bug: `acquire()`
+    /// must try the idle pool *before* asking the semaphore for a permit.
+    /// With `max_connections: 1`, the old ordering (permit first, idle
+    /// second) meant a second acquire after a release could only succeed
+    /// once the 20s reaper dropped the idle entry's permit — this asserts
+    /// the fixed path resolves near-instantly instead.
+    #[tokio::test]
+    async fn acquire_reuses_idle_connection_without_waiting_on_reaper() {
+        let (addr, _server) = spawn_fake_nntp_server().await;
+        let pool = NntpPool::new_multi(vec![test_provider(addr, 1)]);
+
+        let checkout1 = pool.acquire(0, Priority::High).await.unwrap();
+        pool.release(checkout1);
+        assert_eq!(pool.slots[0].idle.lock().len(), 1);
+        assert_eq!(pool.slots[0].permits.available_permits(), 0);
+
+        let checkout2 =
+            tokio::time::timeout(Duration::from_millis(500), pool.acquire(0, Priority::High))
+                .await
+                .expect("acquire should reuse the idle connection promptly, not wait on the reaper")
+                .unwrap();
+        pool.release(checkout2);
+    }
+
+    /// Regression test for the second half of the starvation bug: `release()`
+    /// must hand a freed connection directly to a queued waiter instead of
+    /// only ever pushing it to `idle`. With `max_connections: 1`, a waiter
+    /// parked behind an in-flight checkout must be woken the moment the
+    /// checkout is released, not left to poll.
+    #[tokio::test]
+    async fn release_hands_off_directly_to_a_queued_waiter() {
+        let (addr, _server) = spawn_fake_nntp_server().await;
+        let pool = NntpPool::new_multi(vec![test_provider(addr, 1)]);
+
+        let checkout1 = pool.acquire(0, Priority::High).await.unwrap();
+        assert_eq!(pool.slots[0].permits.available_permits(), 0);
+
+        let waiter_pool = pool.clone();
+        let waiter = tokio::spawn(async move { waiter_pool.acquire(0, Priority::High).await });
+
+        // Give the waiter a chance to find idle empty, the permit exhausted,
+        // and park itself in `waiters_high` before we release.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(pool.slots[0].waiters_high.lock().len(), 1);
+
+        pool.release(checkout1);
+
+        let checkout2 = tokio::time::timeout(Duration::from_millis(500), waiter)
+            .await
+            .expect("waiter should be woken directly by release, not left parked")
+            .unwrap()
+            .unwrap();
+        pool.release(checkout2);
+    }
+}
