@@ -18,7 +18,7 @@ use crate::nntp::Priority;
 use super::store;
 use super::{
     NzbMeta, NzbMetaFile, NzbMetaSource, NzbRarPart, NzbRarSlice, PREFETCH_FLOOR, StreamerError,
-    UsenetStreamer, select_validation_indices,
+    SweepCounts, UsenetStreamer, select_validation_indices, stat_sweep,
 };
 
 /// In-progress per-inner-file accumulator during multi-file RAR reconstruction.
@@ -151,31 +151,18 @@ impl UsenetStreamer {
             return Ok(());
         }
         let probe_concurrency = self.pool.ingest_concurrency().max(PREFETCH_FLOOR).min(n);
-        let pool = self.pool.clone();
-        let mut probes = stream::iter(mids)
-            .map(move |mid| {
-                let pool = pool.clone();
-                async move { pool.stat(&mid, Priority::Low).await }
-            })
-            .buffer_unordered(probe_concurrency);
-        let mut missing = 0usize;
-        let mut errors = 0usize;
-        let mut checked = 0usize;
-        while let Some(result) = probes.next().await {
-            checked += 1;
-            match result {
-                Ok(true) => {}
-                Ok(false) => missing += 1,
-                Err(error) => {
-                    tracing::debug!(error = %error, "availability probe error");
-                    errors += 1;
-                }
-            }
-        }
-        // Zero tolerance for confirmed-missing segments: there's no par2 data
-        // repair on the read path, so even one dead segment in the file stalls
-        // playback when it's reached. Reject and let the caller try the next
-        // ranked candidate.
+        // stop_on_first_miss: zero tolerance for confirmed-missing segments
+        // means the rest of the sample is wasted work the instant one hits —
+        // there's no par2 data repair on the read path, so even one dead
+        // segment in the file stalls playback when it's reached. Cancel and
+        // let the caller try the next ranked candidate (mirrors altmount's
+        // FastFailReleaseProbe cancelling on first miss).
+        let SweepCounts {
+            missing,
+            errors,
+            checked,
+        } = stat_sweep(&self.pool, mids, probe_concurrency, true).await;
+
         if missing > 0 {
             return Err(StreamerError::IncompleteRelease { missing, checked });
         }
@@ -473,41 +460,61 @@ impl UsenetStreamer {
 
         let header_fetch_concurrency = self.pool.ingest_concurrency().max(PREFETCH_FLOOR);
         let streamer = self.clone();
-        let header_results: Vec<Result<Vec<u8>, StreamerError>> = stream::iter(parts.clone())
-            .map(move |part| {
-                let s = streamer.clone();
-                async move {
-                    s.fetch_volume_header_bytes(&part, RAR_HEADER_PROBE_BYTES)
-                        .await
+        // Fetch every volume's header at bounded concurrency, but cancel the
+        // rest of the group the instant one volume fails: a missing or
+        // unreadable part dooms the whole RAR set (no par2 repair at ingest
+        // time), so paying for sibling volumes' header fetches after that is
+        // wasted work — mirrors altmount's per-group short-circuit in
+        // `FastFailCheckFiles`, where one broken group member skips every
+        // remaining Stat for that set. `buffer_unordered` (not `buffered`)
+        // so a failure anywhere in the batch is seen as soon as it resolves,
+        // not held back behind an earlier still-in-flight volume.
+        let mut header_bytes: Vec<Option<Vec<u8>>> = (0..parts.len()).map(|_| None).collect();
+        {
+            let mut fetches = stream::iter(parts.iter().cloned().enumerate())
+                .map(move |(vol_idx, part)| {
+                    let s = streamer.clone();
+                    async move {
+                        let result = s
+                            .fetch_volume_header_bytes(&part, RAR_HEADER_PROBE_BYTES)
+                            .await;
+                        (vol_idx, part.filename, result)
+                    }
+                })
+                .buffer_unordered(header_fetch_concurrency);
+
+            while let Some((vol_idx, filename, result)) = fetches.next().await {
+                match result {
+                    Ok(bytes) => header_bytes[vol_idx] = Some(bytes),
+                    Err(error) => {
+                        tracing::debug!(
+                            vol_idx,
+                            filename = %filename,
+                            error = %error,
+                            "RAR volume header fetch failed; treating as non-RAR NZB"
+                        );
+                        // Dropping `fetches` cancels the remaining in-flight
+                        // sibling-volume fetches.
+                        break;
+                    }
                 }
-            })
-            .buffered(header_fetch_concurrency)
-            .collect()
-            .await;
+            }
+        }
+        if header_bytes.iter().any(Option::is_none) {
+            return Ok(None);
+        }
+        let header_bytes: Vec<Vec<u8>> = header_bytes.into_iter().flatten().collect();
 
         let mut volume_entries: Vec<Vec<RarVolumeFileEntry>> = Vec::with_capacity(parts.len());
         let mut archive_format: Option<rar::RarFormat> = None;
 
-        for (vol_idx, (part, fetch_result)) in parts.iter_mut().zip(header_results).enumerate() {
-            let header_bytes = match fetch_result {
-                Ok(b) => b,
-                Err(error) => {
-                    tracing::debug!(
-                        vol_idx,
-                        filename = %part.filename,
-                        error = %error,
-                        "RAR volume header fetch failed; treating as non-RAR NZB"
-                    );
-                    return Ok(None);
-                }
-            };
-
+        for (vol_idx, (part, header)) in parts.iter_mut().zip(header_bytes).enumerate() {
             if let Some(first_seg) = part.segments.first()
                 && let Some(size) = self.state.decoded_sizes.get(&first_seg.message_id)
             {
                 part.decoded_seg_size = Some(size);
             }
-            let parsed = match rar::parse_volume_header(&header_bytes) {
+            let parsed = match rar::parse_volume_header(&header) {
                 Ok(h) => h,
                 Err(error) => {
                     tracing::debug!(
