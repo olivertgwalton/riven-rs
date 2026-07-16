@@ -19,5 +19,8 @@ futures = { workspace = true }
 bytes = { workspace = true }
 tokio-util = { workspace = true }
 
+[dev-dependencies]
+async-trait = { workspace = true }
+
 [lints]
 workspace = true
