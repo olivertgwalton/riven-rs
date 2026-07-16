@@ -427,8 +427,25 @@ pub async fn transition_unreleased_aired() -> Result<Vec<i64>> {
         .into_tuple()
         .all(orm())
         .await?;
+    if ids.is_empty() {
+        return Ok(ids);
+    }
     super::state::recompute(&ids).await?;
-    Ok(ids)
+
+    // A show/season can still legitimately be `Unreleased` after recompute —
+    // e.g. a show whose own air date has passed but has a season that hasn't
+    // aired yet. Only report ids that actually left `Unreleased`; otherwise
+    // this query re-matches the same stuck item on every caller tick
+    // forever, each time re-cascading a `process_media_item` push to its
+    // children for nothing.
+    Ok(media_items::Entity::find()
+        .filter(media_items::Column::Id.is_in(ids))
+        .filter(media_items::Column::State.ne(MediaItemState::Unreleased))
+        .select_only()
+        .column(media_items::Column::Id)
+        .into_tuple()
+        .all(orm())
+        .await?)
 }
 
 pub async fn blacklist_stream_by_hash(media_item_id: i64, info_hash: &str) -> Result<()> {
