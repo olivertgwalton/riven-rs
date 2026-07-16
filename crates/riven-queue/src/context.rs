@@ -171,10 +171,6 @@ pub async fn build_parse_item_context_with_hierarchy(
             .country
             .clone()
             .or_else(|| hierarchy.and_then(|h| h.resolved_show_country.clone())),
-        item_language: item
-            .language
-            .clone()
-            .or_else(|| hierarchy.and_then(|h| h.resolved_show_language.clone())),
         season_episodes,
         show_season_numbers,
         show_status,
