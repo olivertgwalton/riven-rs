@@ -157,6 +157,21 @@ pub(crate) const FAILED_ATTEMPTS_COOLDOWN_SQL: &str = "(
     END)
 )";
 
+/// Same escalating tiers as [`FAILED_ATTEMPTS_COOLDOWN_SQL`], for callers that
+/// schedule a delayed re-attempt directly (e.g. `handle_validate`'s
+/// job-level retry) instead of going through [`get_pending_items_for_retry`].
+/// That job-level retry doesn't consult the DB cooldown at all — without
+/// this, an item stuck failing every download keeps retrying every 30
+/// minutes forever instead of backing off. Keep both in sync.
+pub fn cooldown_for_failed_attempts(failed_attempts: i32) -> chrono::Duration {
+    match failed_attempts {
+        n if n >= 10 => chrono::Duration::hours(24),
+        n if n >= 5 => chrono::Duration::hours(6),
+        n if n >= 2 => chrono::Duration::hours(2),
+        _ => chrono::Duration::minutes(30),
+    }
+}
+
 /// Fetch all pending top-level items needing a retry: Indexed, Scraped, or PartiallyCompleted.
 pub async fn get_pending_items_for_retry(item_type: MediaItemType) -> Result<Vec<MediaItem>> {
     Ok(media_items::Entity::find()
@@ -412,8 +427,25 @@ pub async fn transition_unreleased_aired() -> Result<Vec<i64>> {
         .into_tuple()
         .all(orm())
         .await?;
+    if ids.is_empty() {
+        return Ok(ids);
+    }
     super::state::recompute(&ids).await?;
-    Ok(ids)
+
+    // A show/season can still legitimately be `Unreleased` after recompute —
+    // e.g. a show whose own air date has passed but has a season that hasn't
+    // aired yet. Only report ids that actually left `Unreleased`; otherwise
+    // this query re-matches the same stuck item on every caller tick
+    // forever, each time re-cascading a `process_media_item` push to its
+    // children for nothing.
+    Ok(media_items::Entity::find()
+        .filter(media_items::Column::Id.is_in(ids))
+        .filter(media_items::Column::State.ne(MediaItemState::Unreleased))
+        .select_only()
+        .column(media_items::Column::Id)
+        .into_tuple()
+        .all(orm())
+        .await?)
 }
 
 pub async fn blacklist_stream_by_hash(media_item_id: i64, info_hash: &str) -> Result<()> {

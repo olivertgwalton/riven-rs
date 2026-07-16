@@ -18,7 +18,7 @@
 //! `push_process_media_item`. This prevents multiple writers re-scheduling
 //! the same scrape into the future indefinitely.
 
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Utc};
 use riven_core::types::{MediaItemState, MediaItemType};
 use riven_db::entities::MediaItem;
 use riven_db::repo;
@@ -142,7 +142,11 @@ async fn handle_validate(job: &ProcessMediaItemJob, item: &MediaItem, queue: &Jo
         }
         MediaItemState::Failed | MediaItemState::Paused => {}
         MediaItemState::Scraped | MediaItemState::Indexed | MediaItemState::Unreleased => {
-            let at = Utc::now() + Duration::minutes(30);
+            // Mirrors `FAILED_ATTEMPTS_COOLDOWN_SQL`'s escalating tiers — this
+            // job-level re-push doesn't go through `get_pending_items_for_retry`,
+            // so without this it would keep retrying every 30 minutes forever
+            // regardless of how many times the item has already failed.
+            let at = Utc::now() + repo::cooldown_for_failed_attempts(item.failed_attempts);
             tracing::debug!(
                 id = item.id,
                 run_at = %at,

@@ -139,11 +139,15 @@ pub async fn persist_movie(
         );
         largest
     } else {
+        // Blacklist only — this is one candidate among possibly many the
+        // outer stream loop still has left to try; a per-candidate notify
+        // here would fire `MediaItemDownloadPartialSuccess` once per dead
+        // candidate, each independently pushing the item to `Validate` and
+        // scheduling its own 30-minute re-scrape. The loop's single
+        // exhausted-all-candidates check is the only place that should
+        // notify for this attempt.
         tracing::warn!(id, info_hash = %info_hash, "torrent has no files — blacklisting stream");
         blacklist_stream(id, info_hash).await;
-        queue
-            .notify(RivenEvent::MediaItemDownloadPartialSuccess { id })
-            .await;
         return false;
     };
 
@@ -156,14 +160,14 @@ pub async fn persist_movie(
     drop(config);
 
     if !has_playable_url(file) {
+        // See the "torrent has no files" branch above: blacklist and let
+        // the outer stream loop try the next candidate without firing a
+        // per-candidate notify.
         tracing::warn!(
             id, info_hash = %info_hash, filename = %file.filename,
             "matched movie file has no playable URL — blacklisting stream"
         );
         blacklist_stream(id, info_hash).await;
-        queue
-            .notify(RivenEvent::MediaItemDownloadPartialSuccess { id })
-            .await;
         return false;
     }
 
@@ -317,15 +321,14 @@ pub async fn persist_episode(
     }
 
     if matched.is_empty() {
+        // Blacklist only — see the equivalent branch in `persist_movie` for
+        // why this must not notify per candidate.
         tracing::warn!(
             id, season = season_number, episode = episode_number,
             info_hash = %info_hash,
             "no playable torrent file matched episode — blacklisting stream"
         );
         blacklist_stream(id, info_hash).await;
-        queue
-            .notify(RivenEvent::MediaItemDownloadPartialSuccess { id })
-            .await;
         return false;
     }
 
