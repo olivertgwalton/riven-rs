@@ -39,6 +39,24 @@ pub(crate) const PROFILE: HttpServiceProfile =
 
 pub(crate) use riven_core::nzb::{is_nzb_info_hash, nzb_url_redis_key};
 
+const DEFAULT_DOWNLOAD_VERIFY_TIMEOUT_SECS: u64 = 45;
+
+/// A candidate that fails ingest/verification at download time is permanently
+/// blacklisted immediately — it's a dead release, and retrying it every
+/// download cycle (with no way to ever stop) is what starves the queue.
+async fn blacklist_failed_download_candidate(media_item_id: i64, info_hash: &str) {
+    tracing::warn!(
+        info_hash,
+        media_item_id,
+        "usenet download verification failed; blacklisting release"
+    );
+    if let Err(error) =
+        riven_db::repo::blacklist_stream_permanent_by_hash(media_item_id, info_hash).await
+    {
+        tracing::warn!(info_hash, %error, "failed to blacklist failed release");
+    }
+}
+
 #[derive(Default)]
 pub struct UsenetPlugin;
 
@@ -246,6 +264,17 @@ impl Plugin for UsenetPlugin {
                 "How many missing files (%) to tolerate before rejecting a release. \
                  Leave at 0 — any missing file can cause playback to stall.",
             ),
+            SettingField::new(
+                "downloadverifytimeoutsecs",
+                "Download Verification Timeout (s)",
+                FieldType::Number,
+            )
+            .with_default("45")
+            .with_description(
+                "Max time to spend fetching and verifying a candidate at download time. \
+                 A release that hangs past this, or fails verification, is blacklisted \
+                 immediately instead of being retried forever.",
+            ),
             SettingField::new("autorepair", "Auto-Repair Unhealthy Titles", FieldType::Boolean)
                 .with_default("false")
                 .with_description(
@@ -301,7 +330,7 @@ impl Plugin for UsenetPlugin {
 
     async fn on_download_requested(
         &self,
-        _id: i64,
+        id: i64,
         info_hash: &str,
         _magnet: &str,
         _cached_stores: &[CachedStoreEntry],
@@ -326,40 +355,60 @@ impl Plugin for UsenetPlugin {
             riven_usenet::DEFAULT_AVAILABILITY_SAMPLE_PERCENT,
         );
         let verify_par2 = ctx.settings.get_bool("verifypar2blocks");
-        let meta = match streamer
-            .ingest(info_hash, &xml_arc, password, sample_percent, verify_par2)
-            .await
-        {
-            Ok(m) => m,
-            Err(riven_usenet::StreamerError::IngestQueueFull) => {
+        let check_all = ctx.settings.get_bool("checkallsegments");
+        let acceptable_missing = ctx
+            .settings
+            .get_parsed_or::<f64>("acceptablemissingpercent", 0.0)
+            .clamp(0.0, 50.0);
+        // Ingest (NNTP fetch + optional PAR2 content verify) and the optional
+        // full segment sweep are real network work against a candidate that
+        // might be a dead release. Bound the whole thing so one doomed
+        // candidate can't hang this hook for as long as the worker will let
+        // it — a timeout is treated the same as any other verification
+        // failure below.
+        let verify_timeout = Duration::from_secs(
+            ctx.settings
+                .get_parsed_or::<u64>(
+                    "downloadverifytimeoutsecs",
+                    DEFAULT_DOWNLOAD_VERIFY_TIMEOUT_SECS,
+                )
+                .max(1),
+        );
+
+        let verify = tokio::time::timeout(verify_timeout, async {
+            let meta = streamer
+                .ingest(info_hash, &xml_arc, password, sample_percent, verify_par2)
+                .await?;
+            if check_all {
+                streamer
+                    .verify_release_complete(info_hash, acceptable_missing)
+                    .await?;
+            }
+            Ok::<_, riven_usenet::StreamerError>(meta)
+        })
+        .await;
+
+        let meta = match verify {
+            Ok(Ok(m)) => m,
+            Ok(Err(riven_usenet::StreamerError::IngestQueueFull)) => {
                 tracing::debug!(info_hash, "ingest queue full; will retry next cycle");
                 return Ok(HookResponse::DownloadStreamUnavailable);
             }
-            Err(e) => {
-                tracing::warn!(info_hash, error = %e, "usenet ingest failed");
+            Ok(Err(e)) => {
+                tracing::warn!(info_hash, error = %e, "usenet ingest/verification failed");
+                blacklist_failed_download_candidate(id, info_hash).await;
+                return Ok(HookResponse::DownloadStreamUnavailable);
+            }
+            Err(_elapsed) => {
+                tracing::warn!(
+                    info_hash,
+                    timeout_secs = verify_timeout.as_secs(),
+                    "usenet ingest/verification timed out; treating candidate as failed"
+                );
+                blacklist_failed_download_candidate(id, info_hash).await;
                 return Ok(HookResponse::DownloadStreamUnavailable);
             }
         };
-
-        let check_all = ctx.settings.get_bool("checkallsegments");
-        if check_all {
-            let acceptable_missing = ctx
-                .settings
-                .get_parsed_or::<f64>("acceptablemissingpercent", 0.0)
-                .clamp(0.0, 50.0);
-            if let Err(e) = streamer
-                .verify_release_complete(info_hash, acceptable_missing)
-                .await
-            {
-                tracing::warn!(
-                    info_hash,
-                    error = %e,
-                    "usenet full segment verification failed; rejecting candidate"
-                );
-                return Ok(HookResponse::DownloadStreamUnavailable);
-            }
-            tracing::debug!(info_hash, "usenet full segment verification passed");
-        }
 
         let files: Vec<DownloadFile> = meta
             .files
