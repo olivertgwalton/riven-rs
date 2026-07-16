@@ -210,6 +210,20 @@ pub async fn run_rank_streams(id: i64, job: &RankStreamsJob, queue: &JobQueue) {
     queue.push_download(download_job).await;
 }
 
+/// Bump `failed_attempts` on a failed download attempt — the same counter
+/// (and `FAILED_ATTEMPTS_COOLDOWN_SQL` escalating backoff) a scrape that
+/// finds no new streams uses. Without this, an item stuck in `Scraped`
+/// state with a ranked-but-never-downloadable stream (e.g. cinema-only CAM
+/// releases) never re-enters the scrape flow at all: `handle_scrape`'s
+/// "already scraped, try download instead" shortcut keeps retrying the
+/// same failing download every `retry_library()` tick forever, since only
+/// an actual scrape completion stamps `last_scrape_attempt_at`.
+async fn record_download_failure(id: i64) {
+    if let Err(err) = repo::increment_failed_attempts(id).await {
+        tracing::warn!(id, %err, "failed to increment failed_attempts");
+    }
+}
+
 /// find-valid-torrent + download-item fused. Reloads the item (matches
 /// `findOneOrFail` semantics at the step boundary), iterates ranked streams
 /// per profile, and per stream walks `(plugin, provider)` combinations with
@@ -253,6 +267,7 @@ pub async fn run(id: i64, job: &DownloadJob, queue: &JobQueue) {
 
     if all_streams.is_empty() {
         tracing::debug!(id, "no streams available for download");
+        record_download_failure(id).await;
         queue
             .notify(RivenEvent::MediaItemDownloadError {
                 id,
@@ -655,6 +670,7 @@ async fn run_downloads(
 
     if !any_success {
         tracing::debug!(id, title = %item.title, "no valid torrent found after trying cached candidates");
+        record_download_failure(id).await;
         queue
             .notify(RivenEvent::MediaItemDownloadError {
                 id,

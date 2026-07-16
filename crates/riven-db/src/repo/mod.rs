@@ -63,6 +63,14 @@ pub async fn retry_items_by_ids(ids: Vec<i64>) -> Result<u64> {
     }
     let result = media_items::Entity::update_many()
         .col_expr(media_items::Column::FailedAttempts, Expr::value(0))
+        // A manual retry must take effect on the very next `retry_library()`
+        // tick, not remain subject to `FAILED_ATTEMPTS_COOLDOWN_SQL`'s
+        // recency check — that cooldown exists to throttle *automatic*
+        // re-attempts, not a user's explicit "retry now". Clearing
+        // `last_scrape_attempt_at` alongside `failed_attempts` is what
+        // actually restores eligibility; resetting `failed_attempts` alone
+        // does nothing if the item was scraped within the last 30 minutes.
+        .col_expr(media_items::Column::LastScrapeAttemptAt, Expr::cust("NULL"))
         .col_expr(media_items::Column::UpdatedAt, Expr::cust("NOW()"))
         .filter(media_items::Column::Id.is_in(ids.iter().copied()))
         .exec(orm())

@@ -138,12 +138,17 @@ pub async fn get_items_by_state(
         .await?)
 }
 
-/// Escalating cooldown applied to items with `failed_attempts > 0` so a
-/// repeatedly-failing item doesn't get re-enqueued every retry cycle and
-/// starve fresh content.
+/// Escalating cooldown applied to every pending item so a repeatedly-scraped
+/// item doesn't get re-enqueued every retry cycle and starve fresh content.
+/// `last_scrape_attempt_at IS NULL` alone covers "never scraped yet" —
+/// deliberately does NOT also bypass on `failed_attempts = 0`, since that's
+/// an item's normal resting state after *any* scrape that links at least
+/// one new (but not necessarily usable) stream: `reset_failed_attempts`
+/// zeroes the counter without meaning "skip the cooldown," and the `ELSE`
+/// tier below already covers `failed_attempts` 0/1 with the base 30-minute
+/// wait via the recency check.
 pub(crate) const FAILED_ATTEMPTS_COOLDOWN_SQL: &str = "(
-    failed_attempts = 0
-    OR last_scrape_attempt_at IS NULL
+    last_scrape_attempt_at IS NULL
     OR last_scrape_attempt_at < NOW() - (CASE
         WHEN failed_attempts >= 10 THEN INTERVAL '24 hours'
         WHEN failed_attempts >= 5  THEN INTERVAL '6 hours'
@@ -373,6 +378,15 @@ pub async fn update_scraped(id: i64) -> Result<()> {
             media_items::Column::ScrapedTimes,
             Expr::col(media_items::Column::ScrapedTimes).add(1),
         )
+        // Stamped on every scrape completion regardless of outcome — not
+        // just failures — so `FAILED_ATTEMPTS_COOLDOWN_SQL`'s recency check
+        // applies even to an item that keeps finding a trickle of new (but
+        // never good enough to download) streams each cycle, resetting
+        // `failed_attempts` to 0 without ever recording that a scrape just
+        // happened. Without this, such an item's `last_scrape_attempt_at`
+        // stays NULL forever and it gets re-scraped on every retry tick
+        // with no cooldown at all.
+        .col_expr(media_items::Column::LastScrapeAttemptAt, Expr::cust("NOW()"))
         .col_expr(media_items::Column::UpdatedAt, Expr::cust("NOW()"))
         .filter(media_items::Column::Id.eq(id))
         .exec(orm())
