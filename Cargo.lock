@@ -4117,6 +4117,7 @@ name = "riven-vfs"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "bytes",
  "dashmap",
  "fuser",
