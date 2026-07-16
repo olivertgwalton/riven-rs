@@ -14,13 +14,12 @@
 
 use std::sync::{Arc, Mutex, OnceLock};
 
-use futures::StreamExt;
-use futures::stream;
 use sea_orm::DatabaseConnection;
 
-use crate::nntp::{NntpConfig, NntpPool, Priority};
+use crate::nntp::{NntpConfig, NntpPool};
 use crate::state::StreamerState;
 
+mod availability;
 mod backfill;
 mod error;
 mod ingest;
@@ -35,6 +34,7 @@ pub use error::StreamerError;
 pub use ingest::DEFAULT_AVAILABILITY_SAMPLE_PERCENT;
 pub use meta::{NzbMeta, NzbMetaFile, NzbMetaSource, NzbRarPart, NzbRarSlice};
 
+pub(crate) use availability::{SweepCounts, stat_sweep};
 pub(crate) use meta::{concat_slices, segments_overlapping, select_validation_indices};
 
 /// Floor on the prefetch fan-out during ingest (background work).
@@ -228,27 +228,14 @@ impl UsenetStreamer {
         }
 
         let concurrency = self.pool.ingest_concurrency().max(PREFETCH_FLOOR).min(n);
-        let pool = self.pool.clone();
-        let mut probes = stream::iter(sample)
-            .map(move |mid| {
-                let pool = pool.clone();
-                async move { pool.stat(&mid, Priority::Low).await }
-            })
-            .buffer_unordered(concurrency);
+        let counts = stat_sweep(&self.pool, sample, concurrency, false).await;
 
-        let mut scan = AvailabilityScan {
+        Ok(AvailabilityScan {
             total_segments: total,
-            ..AvailabilityScan::default()
-        };
-        while let Some(result) = probes.next().await {
-            scan.sampled_segments += 1;
-            match result {
-                Ok(true) => {}
-                Ok(false) => scan.missing_segments += 1,
-                Err(_) => scan.error_segments += 1,
-            }
-        }
-        Ok(scan)
+            sampled_segments: counts.checked,
+            missing_segments: counts.missing,
+            error_segments: counts.errors,
+        })
     }
 
     /// Full STAT verification of **every** segment across **all** files in a
@@ -293,25 +280,11 @@ impl UsenetStreamer {
             .ingest_concurrency()
             .max(PREFETCH_FLOOR)
             .min(total);
-        let pool = self.pool.clone();
-        let mut probes = stream::iter(message_ids)
-            .map(move |mid| {
-                let pool = pool.clone();
-                async move { pool.stat(&mid, Priority::Low).await }
-            })
-            .buffer_unordered(concurrency);
-
-        let mut missing = 0usize;
-        let mut errors = 0usize;
-        let mut checked = 0usize;
-        while let Some(result) = probes.next().await {
-            checked += 1;
-            match result {
-                Ok(true) => {}
-                Ok(false) => missing += 1,
-                Err(_) => errors += 1,
-            }
-        }
+        let SweepCounts {
+            missing,
+            errors,
+            checked,
+        } = stat_sweep(&self.pool, message_ids, concurrency, false).await;
 
         let checked_f = checked.max(1) as f64;
         if (missing as f64 / checked_f) * 100.0 > acceptable_missing_pct {

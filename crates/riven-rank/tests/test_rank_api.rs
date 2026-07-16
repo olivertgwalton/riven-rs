@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use riven_rank::rank::{check_fetch, scores::get_rank};
+use riven_rank::settings::LanguageSettings;
 use riven_rank::{QualityProfile, RankSettings, RankingModel, parse, rank_torrent};
 
 #[test]
@@ -155,4 +156,105 @@ fn test_standard_profile_prefers_good_720p_source_over_480p_rip() {
         "standard fallback rejected: {fallback_failed:?}"
     );
     assert!(preferred_rank > fallback_rank);
+}
+
+// RTN's language handling is permissive by default (`required`/`allowed`/
+// `exclude` all empty, `remove_unknown_languages: false`) — language only
+// nudges ranking via `preferred` unless a user opts into a hard filter.
+// These pin that behavior down at the settings/check_fetch layer so it can't
+// silently regress back into a pre-RTN hard reject like the one that used
+// to live in `riven-queue`'s scrape-time `validate`.
+
+#[test]
+fn test_default_settings_do_not_reject_foreign_language_release() {
+    let settings = RankSettings::default().prepare();
+
+    let data = parse("Movie.Title.2024.GERMAN.1080p.WEB-DL.AVC.DDP5.1-GROUP");
+    let (fetch, failed) = check_fetch(&data, &settings);
+
+    assert!(fetch, "foreign-language release rejected: {failed:?}");
+}
+
+#[test]
+fn test_default_settings_do_not_reject_release_with_no_detected_language() {
+    let settings = RankSettings::default().prepare();
+
+    let data = parse("Movie.Title.2024.1080p.WEB-DL.AVC.DDP5.1-GROUP");
+    assert!(data.languages.is_empty());
+    let (fetch, failed) = check_fetch(&data, &settings);
+
+    assert!(fetch, "unknown-language release rejected: {failed:?}");
+}
+
+#[test]
+fn test_required_language_rejects_release_missing_it() {
+    let settings = RankSettings {
+        languages: LanguageSettings {
+            required: vec!["fr".into()],
+            ..LanguageSettings::default()
+        },
+        ..RankSettings::default()
+    }
+    .prepare();
+
+    let data = parse("Movie.Title.2024.GERMAN.1080p.WEB-DL.AVC.DDP5.1-GROUP");
+    let (fetch, failed) = check_fetch(&data, &settings);
+
+    assert!(!fetch);
+    assert!(failed.contains(&"missing_required_language".to_string()));
+}
+
+#[test]
+fn test_required_language_accepts_matching_release() {
+    let settings = RankSettings {
+        languages: LanguageSettings {
+            required: vec!["fr".into()],
+            ..LanguageSettings::default()
+        },
+        ..RankSettings::default()
+    }
+    .prepare();
+
+    let data = parse("Movie.Title.2024.FRENCH.1080p.WEB-DL.AVC.DDP5.1-GROUP");
+    let (fetch, failed) = check_fetch(&data, &settings);
+
+    assert!(fetch, "matching-language release rejected: {failed:?}");
+}
+
+#[test]
+fn test_excluded_language_rejects_matching_release() {
+    let settings = RankSettings {
+        languages: LanguageSettings {
+            exclude: vec!["de".into()],
+            ..LanguageSettings::default()
+        },
+        ..RankSettings::default()
+    }
+    .prepare();
+
+    let data = parse("Movie.Title.2024.GERMAN.1080p.WEB-DL.AVC.DDP5.1-GROUP");
+    let (fetch, failed) = check_fetch(&data, &settings);
+
+    assert!(!fetch);
+    assert!(failed.contains(&"excluded_language".to_string()));
+}
+
+#[test]
+fn test_english_is_always_allowed_over_exclude_list_by_default() {
+    let settings = RankSettings {
+        languages: LanguageSettings {
+            exclude: vec!["en".into()],
+            ..LanguageSettings::default()
+        },
+        ..RankSettings::default()
+    }
+    .prepare();
+
+    let data = parse("Movie.Title.2024.ENGLISH.1080p.WEB-DL.AVC.DDP5.1-GROUP");
+    let (fetch, failed) = check_fetch(&data, &settings);
+
+    assert!(
+        fetch,
+        "english release rejected despite allow_english_in_languages default: {failed:?}"
+    );
 }
