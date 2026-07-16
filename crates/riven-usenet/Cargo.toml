@@ -31,5 +31,8 @@ cbc = { workspace = true }
 hmac = { workspace = true }
 sha2 = { workspace = true }
 
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+
 [lints]
 workspace = true

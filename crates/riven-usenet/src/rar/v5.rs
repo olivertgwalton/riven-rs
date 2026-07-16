@@ -172,10 +172,7 @@ pub(super) fn parse_volume_header_v5(bytes: &[u8]) -> Result<RarVolumeHeader, Ra
 fn parse_rar5_file_extra(bytes: &[u8], start: usize, end: usize) -> Option<RarEncryption> {
     let mut pos = start;
     while pos < end {
-        let record_size = match read_vint(bytes, &mut pos) {
-            Some(v) => v as usize,
-            None => return None,
-        };
+        let record_size = read_vint(bytes, &mut pos)? as usize;
         let record_end = pos.checked_add(record_size)?;
         if record_end > end {
             return None;
