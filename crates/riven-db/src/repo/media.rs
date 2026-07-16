@@ -157,6 +157,21 @@ pub(crate) const FAILED_ATTEMPTS_COOLDOWN_SQL: &str = "(
     END)
 )";
 
+/// Same escalating tiers as [`FAILED_ATTEMPTS_COOLDOWN_SQL`], for callers that
+/// schedule a delayed re-attempt directly (e.g. `handle_validate`'s
+/// job-level retry) instead of going through [`get_pending_items_for_retry`].
+/// That job-level retry doesn't consult the DB cooldown at all — without
+/// this, an item stuck failing every download keeps retrying every 30
+/// minutes forever instead of backing off. Keep both in sync.
+pub fn cooldown_for_failed_attempts(failed_attempts: i32) -> chrono::Duration {
+    match failed_attempts {
+        n if n >= 10 => chrono::Duration::hours(24),
+        n if n >= 5 => chrono::Duration::hours(6),
+        n if n >= 2 => chrono::Duration::hours(2),
+        _ => chrono::Duration::minutes(30),
+    }
+}
+
 /// Fetch all pending top-level items needing a retry: Indexed, Scraped, or PartiallyCompleted.
 pub async fn get_pending_items_for_retry(item_type: MediaItemType) -> Result<Vec<MediaItem>> {
     Ok(media_items::Entity::find()
