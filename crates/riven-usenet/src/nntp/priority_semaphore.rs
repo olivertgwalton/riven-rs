@@ -104,6 +104,19 @@ impl PrioritizedSemaphore {
         self.inner.lock().available
     }
 
+    /// Acquire a permit only if one is immediately available, without
+    /// parking the caller in a wait queue. Used to gate dialing a brand
+    /// new connection versus waiting for one to be freed.
+    pub fn try_acquire_owned(self: &Arc<Self>) -> Option<OwnedPermit> {
+        let mut g = self.inner.lock();
+        if g.available > 0 {
+            g.available -= 1;
+            Some(OwnedPermit { sem: self.clone() })
+        } else {
+            None
+        }
+    }
+
     /// Acquire one permit. Parks the caller in the appropriate queue if none
     /// are immediately available.
     pub async fn acquire_owned(self: &Arc<Self>, priority: Priority) -> OwnedPermit {
@@ -137,5 +150,81 @@ pub struct OwnedPermit {
 impl Drop for OwnedPermit {
     fn drop(&mut self) {
         self.sem.release();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+
+    #[test]
+    fn try_acquire_owned_succeeds_while_permits_available() {
+        let sem = PrioritizedSemaphore::new(2);
+        assert_eq!(sem.available_permits(), 2);
+
+        let p1 = sem.try_acquire_owned();
+        assert!(p1.is_some());
+        assert_eq!(sem.available_permits(), 1);
+
+        let p2 = sem.try_acquire_owned();
+        assert!(p2.is_some());
+        assert_eq!(sem.available_permits(), 0);
+    }
+
+    #[test]
+    fn try_acquire_owned_fails_without_parking_when_exhausted() {
+        let sem = PrioritizedSemaphore::new(1);
+        let _held = sem.try_acquire_owned().expect("first acquire succeeds");
+        assert_eq!(sem.available_permits(), 0);
+
+        // Must return None immediately rather than blocking/queuing the
+        // caller — this is what lets `NntpPool::acquire` use it as a
+        // non-blocking gate between "reuse idle" and "wait for hand-off".
+        assert!(sem.try_acquire_owned().is_none());
+        assert_eq!(sem.available_permits(), 0);
+    }
+
+    #[test]
+    fn dropping_permit_makes_it_available_again() {
+        let sem = PrioritizedSemaphore::new(1);
+        let held = sem.try_acquire_owned().expect("acquire succeeds");
+        assert_eq!(sem.available_permits(), 0);
+
+        drop(held);
+        assert_eq!(sem.available_permits(), 1);
+        assert!(sem.try_acquire_owned().is_some());
+    }
+
+    #[tokio::test]
+    async fn acquire_owned_wakes_on_release_rather_than_polling() {
+        let sem = PrioritizedSemaphore::new(1);
+        let held = sem.try_acquire_owned().expect("acquire succeeds");
+
+        let waiter_sem = sem.clone();
+        let waiter = tokio::spawn(async move { waiter_sem.acquire_owned(Priority::High).await });
+
+        // Wait for observable proof the waiter has actually parked in the
+        // high-priority queue, rather than assuming a single yield is
+        // enough — a bare `yield_now` only happens to work here because
+        // `#[tokio::test]` defaults to the current-thread flavor.
+        for _ in 0..1000 {
+            if sem.inner.lock().high.len() == 1 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            sem.inner.lock().high.len(),
+            1,
+            "waiter should have parked in the high-priority queue"
+        );
+
+        drop(held);
+        let _woken_permit = tokio::time::timeout(Duration::from_secs(1), waiter)
+            .await
+            .expect("waiter should be woken promptly by release, not left parked")
+            .expect("waiter task should not panic");
     }
 }

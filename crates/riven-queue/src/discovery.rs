@@ -15,7 +15,6 @@ pub struct ParseContext {
     pub item_year: Option<i32>,
     pub parent_year: Option<i32>,
     pub item_country: Option<String>,
-    pub item_language: Option<String>,
     pub season_episodes: Vec<(i32, Option<i32>)>,
     pub show_season_numbers: Vec<i32>,
     pub show_status: Option<ShowStatus>,
@@ -85,44 +84,6 @@ fn year_candidates(year: i32) -> [i32; 3] {
     [year - 1, year, year + 1]
 }
 
-/// ISO 639-1 form of a language code, accepting the alpha-2 codes the release
-/// parser emits and the alpha-3 codes metadata providers store (e.g. TVDB's
-/// "eng"). Returns `None` for unrecognized values.
-fn normalize_lang_code(code: &str) -> Option<String> {
-    let lower = code.to_ascii_lowercase();
-    let two = match lower.as_str() {
-        "eng" => "en",
-        "deu" | "ger" => "de",
-        "fra" | "fre" => "fr",
-        "spa" => "es",
-        "ita" => "it",
-        "nld" | "dut" => "nl",
-        "jpn" => "ja",
-        "kor" => "ko",
-        "zho" | "chi" => "zh",
-        "rus" => "ru",
-        "por" => "pt",
-        "pol" => "pl",
-        "swe" => "sv",
-        "nor" => "no",
-        "dan" => "da",
-        "fin" => "fi",
-        "ces" | "cze" => "cs",
-        "hun" => "hu",
-        "tur" => "tr",
-        "ell" | "gre" => "el",
-        "heb" => "he",
-        "ara" => "ar",
-        "hin" => "hi",
-        "tha" => "th",
-        "vie" => "vi",
-        "ukr" => "uk",
-        other if other.len() == 2 => other,
-        _ => return None,
-    };
-    Some(two.to_string())
-}
-
 fn validate(ctx: &ParseContext, parsed: &riven_rank::ParsedData) -> Option<String> {
     let has_episodes = !parsed.episodes.is_empty();
     let has_seasons = !parsed.seasons.is_empty();
@@ -141,21 +102,6 @@ fn validate(ctx: &ParseContext, parsed: &riven_rank::ParsedData) -> Option<Strin
         && !riven_rank::countries_match(pc, ic)
     {
         return Some(format!("incorrect country: {pc} vs {ic}"));
-    }
-
-    if !parsed.anime
-        && !parsed.subbed
-        && !parsed.languages.is_empty()
-        && let Some(item_lang) = ctx.item_language.as_deref().and_then(normalize_lang_code)
-        && !parsed
-            .languages
-            .iter()
-            .any(|l| *l == item_lang || l == "en")
-    {
-        return Some(format!(
-            "incorrect language: {:?} vs {item_lang}",
-            parsed.languages
-        ));
     }
 
     if let Some(py) = parsed.year {
@@ -455,7 +401,6 @@ mod tests {
             item_year: None,
             parent_year: None,
             item_country: Some("gbr".to_string()),
-            item_language: Some("eng".to_string()),
             season_episodes: vec![],
             show_season_numbers: vec![],
             show_status: None,
@@ -469,11 +414,14 @@ mod tests {
     }
 
     #[test]
-    fn validate_rejects_foreign_language_release() {
+    fn validate_does_not_hard_reject_foreign_language_release() {
+        // Language is RTN's job, not a pre-RTN hard filter: `riven_rank`'s
+        // `language_handler` already ports RTN's permissive-by-default model
+        // (empty `required`/`exclude`, ranking-only `preferred`). `validate`
+        // itself has no language check, matching riven-ts's `validateTorrent`.
         let ctx = episode_ctx();
         let parsed = riven_rank::parse("Top.Gear.S09E01.GERMAN.DL.1080p.WEB.x264-TSCC");
-        let reason = validate(&ctx, &parsed).expect("German dub should be rejected");
-        assert!(reason.starts_with("incorrect language"), "{reason}");
+        assert_eq!(validate(&ctx, &parsed), None);
     }
 
     #[test]
