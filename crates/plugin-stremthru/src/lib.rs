@@ -74,15 +74,43 @@ fn get_configured_stores(settings: &PluginSettings) -> Vec<(&'static str, String
         .collect()
 }
 
-/// Newz-capable stores: the configured debrid stores plus `stremthru` itself
-/// when `stremthruauth` is set (a self-hosted StremThru with NNTP +
-/// Newznab indexers configured in its dashboard).
-fn get_newz_stores(settings: &PluginSettings) -> Vec<(&'static str, String)> {
+/// Candidate stores for stream-link generation/refresh: the configured debrid
+/// (torz) stores plus `stremthru` itself when `stremthruauth` is set. An
+/// entry originally served via newz needs `stremthru` in this list to remain
+/// reachable for the link refresh; entries served via a debrid store need
+/// that store. Unlike [`get_newz_dispatch_stores`], it's fine for this list
+/// to include stores that can't serve newz — the caller pins/filters by the
+/// specific store that already generated the link, so an irrelevant entry is
+/// simply never tried.
+fn get_link_stores(settings: &PluginSettings) -> Vec<(&'static str, String)> {
     let mut stores = get_configured_stores(settings);
     if let Some(auth) = settings.get("stremthruauth") {
         stores.push(("stremthru", auth.to_string()));
     }
     stores
+}
+
+/// Stores to try when dispatching a fresh NZB for download. `/v0/store/newz`
+/// only accepts a self-hosted StremThru instance (NNTP + Newznab indexers
+/// configured in its own dashboard) — debrid stores (realdebrid, alldebrid,
+/// torbox, ...) reject every newz dispatch with a 400 `store does not
+/// support newz`, so they must never be included here (unlike
+/// [`get_link_stores`], every store in this list is actually tried in a
+/// fresh, unpinned attempt, so an irrelevant one isn't just wasted — it
+/// spends a real request and dings that store's health score).
+///
+/// Deliberately gated on `stremthruauth` alone, not `newznabenabled`:
+/// `newznabenabled` only controls whether this plugin's own aggregator is
+/// queried when *scraping*, but download dispatch is broadcast to every
+/// plugin regardless of which one scraped the result — a self-hosted
+/// StremThru can serve as a pure download backend for NZBs found by another
+/// plugin (e.g. a dedicated Newznab plugin), so the download step must stay
+/// decoupled from the scrape-side toggle.
+fn get_newz_dispatch_stores(settings: &PluginSettings) -> Vec<(&'static str, String)> {
+    settings
+        .get("stremthruauth")
+        .map(|auth| vec![("stremthru", auth.to_string())])
+        .unwrap_or_default()
 }
 
 fn store_score_key(store: &str) -> String {
@@ -265,7 +293,7 @@ impl Plugin for StremthruPlugin {
         let mut any_network_error = false;
 
         if is_nzb_info_hash(info_hash) {
-            let newz_stores = get_newz_stores(&ctx.settings);
+            let newz_stores = get_newz_dispatch_stores(&ctx.settings);
             let newz_scores = get_store_scores(&ctx.redis, &newz_stores).await;
             return handle_newz_download(info_hash, &base_url, &newz_stores, &newz_scores, ctx)
                 .await;
@@ -528,7 +556,7 @@ impl Plugin for StremthruPlugin {
         ctx: &PluginContext,
     ) -> anyhow::Result<HookResponse> {
         let base_url = base_url(&ctx.settings);
-        let stores = get_newz_stores(&ctx.settings);
+        let stores = get_link_stores(&ctx.settings);
         let score_map = get_store_scores(&ctx.redis, &stores).await;
         let mut ordered_stores: Vec<(&str, &str)> = stores
             .iter()
