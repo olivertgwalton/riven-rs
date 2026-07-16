@@ -53,6 +53,15 @@ const STORE_NAMES: &[&str] = &[
 #[derive(Default)]
 pub struct StremthruPlugin;
 
+fn base_url(settings: &PluginSettings) -> String {
+    let raw = settings.get_or("stremthruurl", DEFAULT_URL);
+    if raw.ends_with('/') {
+        raw
+    } else {
+        format!("{raw}/")
+    }
+}
+
 fn get_configured_stores(settings: &PluginSettings) -> Vec<(&'static str, String)> {
     STORE_NAMES
         .iter()
@@ -204,7 +213,7 @@ impl Plugin for StremthruPlugin {
         req: &ScrapeRequest<'_>,
         ctx: &PluginContext,
     ) -> anyhow::Result<HookResponse> {
-        let base_url = ctx.settings.get_or("stremthruurl", DEFAULT_URL);
+        let base_url = base_url(&ctx.settings);
         let torz_enabled = ctx.settings.get_or("scrapenabled", "true") != "false";
         let newz_enabled = ctx.settings.get_or("newznabenabled", "false") != "false"
             && ctx.settings.get("stremthruauth").is_some();
@@ -250,7 +259,7 @@ impl Plugin for StremthruPlugin {
         cached_stores: &[riven_core::types::CachedStoreEntry],
         ctx: &PluginContext,
     ) -> anyhow::Result<HookResponse> {
-        let base_url = ctx.settings.get_or("stremthruurl", DEFAULT_URL);
+        let base_url = base_url(&ctx.settings);
         let stores = get_configured_stores(&ctx.settings);
         let score_map = get_store_scores(&ctx.redis, &stores).await;
         let mut any_network_error = false;
@@ -451,7 +460,7 @@ impl Plugin for StremthruPlugin {
             return Ok(HookResponse::CacheCheck(Vec::new()));
         }
         let hashes = hashes.as_slice();
-        let base_url = ctx.settings.get_or("stremthruurl", DEFAULT_URL);
+        let base_url = base_url(&ctx.settings);
         let mut stores = get_configured_stores(&ctx.settings);
 
         if let Some(filter) = provider {
@@ -518,7 +527,7 @@ impl Plugin for StremthruPlugin {
         provider: Option<&str>,
         ctx: &PluginContext,
     ) -> anyhow::Result<HookResponse> {
-        let base_url = ctx.settings.get_or("stremthruurl", DEFAULT_URL);
+        let base_url = base_url(&ctx.settings);
         let stores = get_newz_stores(&ctx.settings);
         let score_map = get_store_scores(&ctx.redis, &stores).await;
         let mut ordered_stores: Vec<(&str, &str)> = stores
@@ -571,7 +580,7 @@ impl Plugin for StremthruPlugin {
         &self,
         ctx: &PluginContext,
     ) -> anyhow::Result<HookResponse> {
-        let base_url = ctx.settings.get_or("stremthruurl", DEFAULT_URL);
+        let base_url = base_url(&ctx.settings);
         let stores = get_configured_stores(&ctx.settings);
         let mut infos = Vec::new();
         for (store, api_key) in &stores {

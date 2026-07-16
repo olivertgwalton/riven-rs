@@ -258,7 +258,18 @@ impl MainOrchestrator {
             })
             .await;
 
-        for item_type in [MediaItemType::Movie, MediaItemType::Show] {
+        // Movie/Show cover the common case (a stuck show fans out to its
+        // seasons/episodes on reprocess). Season/Episode are retried directly
+        // too: a leaf item can be actionable while its parent's rolled-up
+        // state hasn't caught up (e.g. an ongoing anime season), which would
+        // otherwise orphan it forever since it never surfaces via the
+        // Movie/Show sweep.
+        for item_type in [
+            MediaItemType::Movie,
+            MediaItemType::Show,
+            MediaItemType::Season,
+            MediaItemType::Episode,
+        ] {
             let items =
                 match repo::get_pending_items_for_retry(item_type).await {
                     Ok(items) => items,
