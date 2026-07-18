@@ -15,7 +15,7 @@ FROM chef AS builder
 COPY --from=planner /app/recipe.json recipe.json
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
-    --mount=type=cache,target=/app/target \
+    --mount=type=cache,target=/app/target,sharing=locked \
     SQLX_OFFLINE=true cargo chef cook --release --recipe-path recipe.json
 
 COPY . .
@@ -23,7 +23,7 @@ COPY . .
 # to a stable path before the layer ends.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
-    --mount=type=cache,target=/app/target \
+    --mount=type=cache,target=/app/target,sharing=locked \
     SQLX_OFFLINE=true cargo build --release --locked --bin riven && \
     cp target/release/riven /riven
 
