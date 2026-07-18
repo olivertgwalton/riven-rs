@@ -128,38 +128,24 @@ impl ScrapeJob {
         }
     }
 
-    pub fn for_season(
-        season: &MediaItem,
+    /// Build a scrape job for a season or episode item. Season rows never
+    /// carry an `episode_number` (the column is absent from `create_season`'s
+    /// INSERT, so it's always NULL at the DB level), so reading both numbers
+    /// straight off `item` covers both cases with no branch needed.
+    pub fn for_episode_or_season(
+        item: &MediaItem,
         show_title: String,
         show_imdb_id: Option<String>,
         show_tvdb_id: Option<String>,
     ) -> Self {
         Self {
-            id: season.id,
-            item_type: season.item_type,
+            id: item.id,
+            item_type: item.item_type,
             imdb_id: show_imdb_id,
             tvdb_id: show_tvdb_id,
             title: show_title,
-            season: season.season_number,
-            episode: None,
-            rate_limit_retries: 0,
-        }
-    }
-
-    pub fn for_episode(
-        ep: &MediaItem,
-        show_title: String,
-        show_imdb_id: Option<String>,
-        show_tvdb_id: Option<String>,
-    ) -> Self {
-        Self {
-            id: ep.id,
-            item_type: ep.item_type,
-            imdb_id: show_imdb_id,
-            tvdb_id: show_tvdb_id,
-            title: show_title,
-            season: ep.season_number,
-            episode: ep.episode_number,
+            season: item.season_number,
+            episode: item.episode_number,
             rate_limit_retries: 0,
         }
     }

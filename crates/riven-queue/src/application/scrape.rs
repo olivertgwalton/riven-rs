@@ -9,7 +9,7 @@ use riven_core::types::*;
 use riven_db::repo;
 
 use crate::context::{
-    build_parse_item_context_with_hierarchy, load_media_item_hierarchy_or_log,
+    build_parse_item_context_with_hierarchy, is_scrapeable, load_media_item_hierarchy_or_log,
     load_media_item_or_log,
 };
 use crate::discovery::rank_streams;
@@ -63,13 +63,7 @@ pub async fn start(id: i64, job: &ScrapeJob, queue: &JobQueue) {
         return;
     };
 
-    if !matches!(
-        item.state,
-        MediaItemState::Indexed
-            | MediaItemState::Ongoing
-            | MediaItemState::Scraped
-            | MediaItemState::PartiallyCompleted
-    ) {
+    if !is_scrapeable(item.state) {
         tracing::debug!(id, state = ?item.state, "skipping scrape");
         return;
     }
@@ -198,13 +192,7 @@ pub async fn parse_results(id: i64, _job: &ParseScrapeResultsJob, queue: &JobQue
         return;
     };
 
-    let processable = matches!(
-        item.state,
-        MediaItemState::Indexed
-            | MediaItemState::Ongoing
-            | MediaItemState::Scraped
-            | MediaItemState::PartiallyCompleted
-    );
+    let processable = is_scrapeable(item.state);
     if !processable {
         tracing::debug!(id, state = ?item.state, "item not in processable state for scrape persist; skipping");
         queue
