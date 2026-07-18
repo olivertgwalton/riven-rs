@@ -6,9 +6,8 @@ use apalis::prelude::*;
 
 use riven_core::events::{DispatchStrategy, EventType, HookResponse, RivenEvent};
 use riven_core::http::{RateLimitedError, RetryLaterError};
-use riven_core::types::MediaItemState;
 
-use crate::context::load_media_item_or_log;
+use crate::context::{is_scrapeable, load_media_item_or_log};
 use crate::dedup::DedupGuard;
 use crate::{
     DownloadJob, IndexJob, JobQueue, ParseScrapeResultsJob, PluginHookJob, ProcessMediaItemJob,
@@ -167,18 +166,6 @@ async fn handle_fan_in(
         finalize_event(q, &job.event, scope).await;
     }
     Ok(())
-}
-
-/// States the scrape pipeline accepts. Kept in sync with the dispatch-time
-/// gate in `scrape::start` and the post-fan-in gate in `parse_results`.
-fn is_scrapeable(state: MediaItemState) -> bool {
-    matches!(
-        state,
-        MediaItemState::Indexed
-            | MediaItemState::Ongoing
-            | MediaItemState::Scraped
-            | MediaItemState::PartiallyCompleted
-    )
 }
 
 /// Return the JSON value that should be stored under the per-plugin slot of

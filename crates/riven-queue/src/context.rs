@@ -41,11 +41,9 @@ pub struct DownloadHierarchyContext {
     pub show_is_anime: bool,
 }
 
-pub async fn load_media_item_hierarchy_or_log(
-    id: i64,
-    context: &str,
-) -> Option<MediaItemHierarchy> {
-    match repo::get_media_item_hierarchy(id).await {
+/// Unwrap a repo lookup's `Result<Option<T>>`, logging why it came up empty.
+fn log_lookup<T, E: std::fmt::Display>(id: i64, context: &str, result: Result<Option<T>, E>) -> Option<T> {
+    match result {
         Ok(Some(item)) => Some(item),
         Ok(None) => {
             tracing::debug!(id, "media item not found for {context}");
@@ -58,22 +56,32 @@ pub async fn load_media_item_hierarchy_or_log(
     }
 }
 
-/// Load a media item by id, logging an error and returning `None` on failure.
-pub async fn load_media_item_or_log(
+pub async fn load_media_item_hierarchy_or_log(
     id: i64,
     context: &str,
-) -> Option<MediaItem> {
-    match repo::get_media_item(id).await {
-        Ok(Some(item)) => Some(item),
-        Ok(None) => {
-            tracing::debug!(id, "media item not found for {context}");
-            None
-        }
-        Err(e) => {
-            tracing::error!(id, error = %e, "failed to load media item for {context}");
-            None
-        }
-    }
+) -> Option<MediaItemHierarchy> {
+    log_lookup(id, context, repo::get_media_item_hierarchy(id).await)
+}
+
+/// Load a media item by id, logging an error and returning `None` on failure.
+pub async fn load_media_item_or_log(id: i64, context: &str) -> Option<MediaItem> {
+    log_lookup(id, context, repo::get_media_item(id).await)
+}
+
+/// States the scrape pipeline accepts: item has been indexed (or is mid-flight
+/// through a prior scrape) and hasn't moved past scraping into a terminal or
+/// download-side state. Single source of truth for the dispatch-time gate in
+/// `application::scrape::start`, the post-fan-in gate in `parse_results`, and
+/// the plugin-hook drop check in `workers::handle_fan_in`.
+pub fn is_scrapeable(state: riven_core::types::MediaItemState) -> bool {
+    use riven_core::types::MediaItemState;
+    matches!(
+        state,
+        MediaItemState::Indexed
+            | MediaItemState::Ongoing
+            | MediaItemState::Scraped
+            | MediaItemState::PartiallyCompleted
+    )
 }
 
 pub async fn load_media_item_or_download_error(

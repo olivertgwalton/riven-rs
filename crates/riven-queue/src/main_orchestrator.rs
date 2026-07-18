@@ -18,7 +18,7 @@ use riven_core::types::*;
 use riven_db::entities::MediaItem;
 use riven_db::repo;
 
-use crate::application::process_media_item::fan_out_to_children;
+use crate::application::process_media_item::{fan_out_to_children, push_requested_seasons};
 use crate::context;
 use crate::lifecycle::LibraryOrchestrator;
 use crate::{IndexJob, JobQueue, ProcessMediaItemJob, ProcessStep};
@@ -168,21 +168,7 @@ impl MainOrchestrator {
         }
         match item.item_type {
             MediaItemType::Show => {
-                let seasons =
-                    repo::get_all_requested_seasons_for_show(item.id)
-                        .await
-                        .unwrap_or_default();
-                for season in seasons {
-                    if matches!(
-                        season.state,
-                        MediaItemState::Completed | MediaItemState::Failed | MediaItemState::Paused
-                    ) {
-                        continue;
-                    }
-                    self.queue
-                        .push_process_media_item(ProcessMediaItemJob::new(season.id))
-                        .await;
-                }
+                push_requested_seasons(item.id, &self.queue).await;
             }
             _ => {
                 self.queue

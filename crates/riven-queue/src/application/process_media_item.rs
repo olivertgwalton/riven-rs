@@ -84,21 +84,10 @@ async fn handle_scrape(job: &ProcessMediaItemJob, item: &MediaItem, queue: &JobQ
         MediaItemType::Movie => {
             queue.push_scrape(ScrapeJob::for_movie(item)).await;
         }
-        MediaItemType::Season => {
+        MediaItemType::Season | MediaItemType::Episode => {
             let ctx = load_show_context(item).await;
             queue
-                .push_scrape(ScrapeJob::for_season(
-                    item,
-                    ctx.title,
-                    ctx.imdb_id,
-                    ctx.tvdb_id,
-                ))
-                .await;
-        }
-        MediaItemType::Episode => {
-            let ctx = load_show_context(item).await;
-            queue
-                .push_scrape(ScrapeJob::for_episode(
+                .push_scrape(ScrapeJob::for_episode_or_season(
                     item,
                     ctx.title,
                     ctx.imdb_id,
@@ -164,23 +153,33 @@ async fn handle_validate(job: &ProcessMediaItemJob, item: &MediaItem, queue: &Jo
     }
 }
 
+/// Push a `ProcessMediaItemJob` for every requested season of `show_id` that
+/// hasn't already reached a terminal state. Shared by `fan_out_to_children`
+/// (the Show branch of a completed item's normal fan-out) and
+/// `MainOrchestrator::process_media_item` (the Show branch of the top-level
+/// dispatch), since both need the identical "which seasons still need work"
+/// gate.
+pub(crate) async fn push_requested_seasons(show_id: i64, queue: &JobQueue) {
+    let seasons = repo::get_all_requested_seasons_for_show(show_id)
+        .await
+        .unwrap_or_default();
+    for season in seasons {
+        if matches!(
+            season.state,
+            MediaItemState::Completed | MediaItemState::Failed | MediaItemState::Paused
+        ) {
+            continue;
+        }
+        queue
+            .push_process_media_item(ProcessMediaItemJob::new(season.id))
+            .await;
+    }
+}
+
 pub(crate) async fn fan_out_to_children(parent: &MediaItem, queue: &JobQueue) {
     match parent.item_type {
         MediaItemType::Show => {
-            let seasons = repo::get_all_requested_seasons_for_show(parent.id)
-                .await
-                .unwrap_or_default();
-            for season in seasons {
-                if matches!(
-                    season.state,
-                    MediaItemState::Completed | MediaItemState::Failed | MediaItemState::Paused
-                ) {
-                    continue;
-                }
-                queue
-                    .push_process_media_item(ProcessMediaItemJob::new(season.id))
-                    .await;
-            }
+            push_requested_seasons(parent.id, queue).await;
         }
         MediaItemType::Season => {
             let episodes = repo::get_incomplete_episodes_for_season(parent.id)

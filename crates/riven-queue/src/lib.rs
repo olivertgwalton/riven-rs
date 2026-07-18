@@ -16,7 +16,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64};
 
 use anyhow::Result;
-use apalis::prelude::{TaskBuilder, TaskSink};
+use apalis::prelude::{TaskBuilder, TaskId, TaskSink};
 use apalis_redis::{RedisConfig, RedisStorage};
 use chrono::{DateTime, Utc};
 use futures::future;
@@ -441,16 +441,9 @@ impl JobQueue {
             return;
         }
         let id = job.id;
-        let task_id = scheduled_index_task_id(id).to_string();
-        self.schedule_apalis_task(
-            "index",
-            id,
-            self.index_storage.get_config(),
-            &task_id,
-            &job,
-            run_at,
-        )
-        .await;
+        let task_id = scheduled_index_task_id(id);
+        self.schedule_apalis_task("index", id, &self.index_storage, task_id, job, run_at)
+            .await;
     }
 
     pub async fn clear_scheduled_index(&self, id: i64) {
@@ -459,31 +452,32 @@ impl JobQueue {
             .await;
     }
 
-    /// Force-overwrite an apalis-redis scheduled task: write payload, reset
-    /// metadata, ZADD into the scheduled set, and remove any prior entry for
-    /// this task_id from done/dead/failed/active. The deterministic task_id
-    /// per item gives us "latest call wins" semantics.
-    async fn schedule_apalis_task<Args: Serialize>(
+    /// Force-overwrite a scheduled task: clear any prior entry for this
+    /// deterministic `task_id` (data/meta/scheduled/done/dead/failed/active),
+    /// then push the fresh payload through apalis's own `push_task` so the
+    /// wire format (metadata hash, scheduled-set entry) is always whatever the
+    /// installed apalis-redis version actually expects — no hand-rolled copy
+    /// of its schema to drift out of sync. The deterministic task_id per item
+    /// gives us "latest call wins" semantics; the clear step is required
+    /// because apalis's own push is insert-if-absent (`HSETNX`) and won't
+    /// overwrite a still-present entry on its own.
+    async fn schedule_apalis_task<Args>(
         &self,
         kind: &'static str,
         id: i64,
-        config: &apalis_redis::RedisConfig,
-        task_id: &str,
-        job: &Args,
+        storage: &RedisStorage<Args>,
+        task_id: Ulid,
+        job: Args,
         run_at: DateTime<Utc>,
-    ) {
-        let payload = match serialize_job_payload(job) {
-            Ok(p) => p,
-            Err(error) => {
-                tracing::error!(id, kind, %error, "failed to serialize scheduled job");
-                return;
-            }
-        };
+    ) where
+        Args: Serialize + DeserializeOwned + Unpin + Send + Sync + 'static,
+    {
+        let config = storage.get_config();
         let mut conn = self.redis.clone();
 
         let existing: Option<i64> = redis::cmd("ZSCORE")
             .arg(config.scheduled_jobs_set())
-            .arg(task_id)
+            .arg(task_id.to_string())
             .query_async(&mut conn)
             .await
             .ok()
@@ -501,28 +495,29 @@ impl JobQueue {
             return;
         }
 
-        let meta_key = format!("{}:{}", config.job_meta_hash(), task_id);
-        let result: redis::RedisResult<()> = redis::pipe()
+        let task_id_str = task_id.to_string();
+        let meta_key = format!("{}:{}", config.job_meta_hash(), task_id_str);
+        let clear_result: redis::RedisResult<()> = redis::pipe()
             .atomic()
-            .hset(config.job_data_hash(), task_id, payload)
+            .hdel(config.job_data_hash(), &task_id_str)
             .del(&meta_key)
-            .hset_multiple(
-                &meta_key,
-                &[
-                    ("attempts", "0"),
-                    ("max_attempts", "5"),
-                    ("status", "Pending"),
-                ],
-            )
-            .zrem(config.scheduled_jobs_set(), task_id)
-            .zrem(config.done_jobs_set(), task_id)
-            .zrem(config.dead_jobs_set(), task_id)
-            .zrem(config.failed_jobs_set(), task_id)
-            .lrem(config.active_jobs_list(), 0, task_id)
-            .zadd(config.scheduled_jobs_set(), task_id, run_at.timestamp())
+            .zrem(config.scheduled_jobs_set(), &task_id_str)
+            .zrem(config.done_jobs_set(), &task_id_str)
+            .zrem(config.dead_jobs_set(), &task_id_str)
+            .zrem(config.failed_jobs_set(), &task_id_str)
+            .lrem(config.active_jobs_list(), 0, &task_id_str)
             .query_async(&mut conn)
             .await;
-        match result {
+        if let Err(error) = clear_result {
+            tracing::error!(id, kind, %error, "failed to clear prior scheduled task state");
+            return;
+        }
+
+        let task = TaskBuilder::new(job)
+            .with_task_id(TaskId::new(task_id))
+            .run_at_timestamp(run_at.timestamp().max(0).cast_unsigned())
+            .build();
+        match storage.clone().push_task(task).await {
             Ok(()) => tracing::debug!(id, kind, run_at = %run_at, "scheduled delayed job"),
             Err(error) => tracing::error!(id, kind, %error, "failed to schedule delayed job"),
         }
@@ -939,7 +934,7 @@ impl JobQueue {
                 .arg(task_id)
                 .ignore();
             pipe.cmd("ZREM").arg(&scheduled_set).arg(task_id).ignore();
-            pipe.cmd("ZREM").arg(&inflight_set).arg(task_id).ignore();
+            pipe.cmd("SREM").arg(&inflight_set).arg(task_id).ignore();
             pipe.cmd("ZREM").arg(&done_set).arg(task_id).ignore();
             pipe.cmd("ZREM").arg(&dead_set).arg(task_id).ignore();
             pipe.cmd("ZREM").arg(&failed_set).arg(task_id).ignore();
@@ -988,17 +983,6 @@ impl JobQueue {
         }
     }
 
-}
-
-/// Serialize a job payload into a single pre-sized heap allocation.
-///
-/// `serde_json::to_vec` starts with an empty `Vec` and grows as bytes are
-/// written (multiple reallocations for typical ~256-byte job payloads).
-/// Preallocating once avoids the growth doubling pattern.
-fn serialize_job_payload<T: Serialize>(job: &T) -> serde_json::Result<Vec<u8>> {
-    let mut buf = Vec::with_capacity(256);
-    serde_json::to_writer(&mut buf, job)?;
-    Ok(buf)
 }
 
 #[inline]
