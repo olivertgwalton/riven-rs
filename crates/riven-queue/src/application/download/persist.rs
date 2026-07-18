@@ -642,6 +642,7 @@ pub async fn persist_season(
 
     let duration = start_time.elapsed();
     let display_title = format!("{} - {}", show.title, item.title);
+    let filesystem_paths = download_success_paths(id).await;
     queue
         .notify(RivenEvent::MediaItemDownloadSuccess {
             id,
@@ -655,6 +656,7 @@ pub async fn persist_season(
             plugin_name: dl.plugin_name,
             provider: dl.provider,
             duration_seconds: duration.as_secs_f64(),
+            filesystem_paths,
         })
         .await;
     tracing::info!(
@@ -799,6 +801,7 @@ pub async fn persist_show(
         .fetch_add(1, Ordering::SeqCst);
 
     let duration = start_time.elapsed();
+    let filesystem_paths = download_success_paths(id).await;
     queue
         .notify(RivenEvent::MediaItemDownloadSuccess {
             id,
@@ -812,6 +815,7 @@ pub async fn persist_show(
             plugin_name: dl.plugin_name,
             provider: dl.provider,
             duration_seconds: duration.as_secs_f64(),
+            filesystem_paths,
         })
         .await;
     tracing::info!(
@@ -1066,6 +1070,25 @@ async fn persist_supplied_show_download(
     Ok(())
 }
 
+/// Resolve the VFS media paths a just-completed download exposes, for
+/// attaching to `MediaItemDownloadSuccess`. The recursive lookup walks child
+/// items, so a season/show id yields every completed episode's path. It is
+/// best-effort: a lookup failure logs and yields an empty list rather than
+/// blocking the success notification.
+async fn download_success_paths(id: i64) -> Vec<String> {
+    match repo::get_media_entry_paths_for_items(&[id]).await {
+        Ok(paths) => paths,
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                id,
+                "failed to resolve filesystem paths for download-success event"
+            );
+            Vec::new()
+        }
+    }
+}
+
 pub async fn finalize_download_success(
     id: i64,
     item: &MediaItem,
@@ -1083,6 +1106,7 @@ pub async fn finalize_download_success(
         .fetch_add(1, Ordering::SeqCst);
 
     let duration = start_time.elapsed();
+    let filesystem_paths = download_success_paths(id).await;
     queue
         .notify(RivenEvent::MediaItemDownloadSuccess {
             id,
@@ -1096,6 +1120,7 @@ pub async fn finalize_download_success(
             plugin_name: plugin_name.unwrap_or_default(),
             provider,
             duration_seconds: duration.as_secs_f64(),
+            filesystem_paths,
         })
         .await;
     tracing::info!(

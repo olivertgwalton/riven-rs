@@ -265,6 +265,9 @@ pub trait Plugin: Send + Sync + 'static {
                 plugin_name,
                 provider,
                 duration_seconds,
+                // Carried on the raw event for outbound consumers (webhooks);
+                // the in-process DownloadSuccessInfo dispatch doesn't need it.
+                filesystem_paths: _,
             } => {
                 let info = DownloadSuccessInfo {
                     id: *id,

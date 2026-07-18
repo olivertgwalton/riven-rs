@@ -128,6 +128,12 @@ pub enum RivenEvent {
         plugin_name: String,
         provider: Option<String>,
         duration_seconds: f64,
+        /// VFS paths of the media files this download made available, resolved
+        /// from `filesystem_entries` at emit time (a season/show carries every
+        /// child episode's path). Lets downstream consumers — e.g. an external
+        /// library scanner — act on the payload alone without a follow-up query.
+        #[serde(default)]
+        filesystem_paths: Vec<String>,
     },
     #[serde(rename = "riven.media-item.stream-link.requested")]
     MediaItemStreamLinkRequested {
