@@ -234,54 +234,52 @@ impl UsenetStreamer {
             None
         };
 
-        let (mut meta_files, file_password) =
-            match self
-                .try_build_rar_virtual_files(&files, password, par2_blob.as_deref())
-                .await?
-            {
-                Some(virtual_files) if !virtual_files.is_empty() => {
-                    let is_encrypted = virtual_files.iter().any(|vf| {
-                        matches!(
-                            &vf.source,
-                            NzbMetaSource::Rar { slices, .. }
-                                if slices.iter().any(|s| s.encryption.is_some())
-                        )
-                    });
-                    if let Some(NzbMetaSource::Rar { parts, .. }) =
-                        virtual_files.first().map(|vf| &vf.source)
-                    {
-                        let probe_segments: Vec<NzbSegment> = parts
-                            .iter()
-                            .flat_map(|p| p.segments.iter().cloned())
-                            .collect();
-                        self.probe_availability(&probe_segments, sample_percent)
-                            .await?;
-                    }
-                    let mut out = virtual_files;
-                    for f in &files {
-                        out.push(direct_meta_file(f));
-                    }
-                    let pw = if is_encrypted {
-                        password.map(str::to_string)
-                    } else {
-                        None
-                    };
-                    (out, pw)
+        let (mut meta_files, file_password) = match self
+            .try_build_rar_virtual_files(&files, password, par2_blob.as_deref())
+            .await?
+        {
+            Some(virtual_files) if !virtual_files.is_empty() => {
+                let is_encrypted = virtual_files.iter().any(|vf| {
+                    matches!(
+                        &vf.source,
+                        NzbMetaSource::Rar { slices, .. }
+                            if slices.iter().any(|s| s.encryption.is_some())
+                    )
+                });
+                if let Some(NzbMetaSource::Rar { parts, .. }) =
+                    virtual_files.first().map(|vf| &vf.source)
+                {
+                    let probe_segments: Vec<NzbSegment> = parts
+                        .iter()
+                        .flat_map(|p| p.segments.iter().cloned())
+                        .collect();
+                    self.probe_availability(&probe_segments, sample_percent)
+                        .await?;
                 }
-                _ => {
-                    let mut ordered: Vec<NzbMetaFile> =
-                        files.iter().map(direct_meta_file).collect();
-                    if let Some(primary_idx) = pick_primary_media_index(&files) {
-                        ordered.swap(0, primary_idx);
-                    }
-                    if let Some(primary) = ordered.first()
-                        && let NzbMetaSource::Direct { segments, .. } = &primary.source
-                    {
-                        self.probe_availability(segments, sample_percent).await?;
-                    }
-                    (ordered, None)
+                let mut out = virtual_files;
+                for f in &files {
+                    out.push(direct_meta_file(f));
                 }
-            };
+                let pw = if is_encrypted {
+                    password.map(str::to_string)
+                } else {
+                    None
+                };
+                (out, pw)
+            }
+            _ => {
+                let mut ordered: Vec<NzbMetaFile> = files.iter().map(direct_meta_file).collect();
+                if let Some(primary_idx) = pick_primary_media_index(&files) {
+                    ordered.swap(0, primary_idx);
+                }
+                if let Some(primary) = ordered.first()
+                    && let NzbMetaSource::Direct { segments, .. } = &primary.source
+                {
+                    self.probe_availability(segments, sample_percent).await?;
+                }
+                (ordered, None)
+            }
+        };
 
         let obfuscated_playable: Vec<usize> = meta_files
             .iter()
@@ -402,7 +400,12 @@ impl UsenetStreamer {
         let mut missing_password = false;
         for (group_idx, ordered_indices) in groups.iter().enumerate() {
             match self
-                .build_rar_group_virtual_files(files, ordered_indices, password, par2_index.as_ref())
+                .build_rar_group_virtual_files(
+                    files,
+                    ordered_indices,
+                    password,
+                    par2_index.as_ref(),
+                )
                 .await
             {
                 Ok(Some(mut group_files)) => all_virtual.append(&mut group_files),
@@ -1041,4 +1044,3 @@ pub(crate) fn pick_primary_media_index(files: &[NzbFile]) -> Option<usize> {
         .max_by_key(|(_, f)| f.segments.iter().map(|s| s.bytes).sum::<u64>())
         .map(|(i, _)| i)
 }
-

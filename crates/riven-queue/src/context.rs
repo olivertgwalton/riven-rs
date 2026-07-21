@@ -42,7 +42,11 @@ pub struct DownloadHierarchyContext {
 }
 
 /// Unwrap a repo lookup's `Result<Option<T>>`, logging why it came up empty.
-fn log_lookup<T, E: std::fmt::Display>(id: i64, context: &str, result: Result<Option<T>, E>) -> Option<T> {
+fn log_lookup<T, E: std::fmt::Display>(
+    id: i64,
+    context: &str,
+    result: Result<Option<T>, E>,
+) -> Option<T> {
     match result {
         Ok(Some(item)) => Some(item),
         Ok(None) => {
@@ -115,8 +119,7 @@ pub async fn load_requested_seasons(item: &MediaItem) -> Option<Vec<i32>> {
 }
 
 pub async fn load_show_context(item: &MediaItem) -> ShowContext {
-    let Some(hierarchy) =
-        load_media_item_hierarchy_or_log(item.id, "load show context").await
+    let Some(hierarchy) = load_media_item_hierarchy_or_log(item.id, "load show context").await
     else {
         return ShowContext {
             title: item.title.clone(),
@@ -141,8 +144,7 @@ pub async fn load_show_context(item: &MediaItem) -> ShowContext {
 }
 
 pub async fn build_parse_item_context(item: MediaItem) -> ParseItemContext {
-    let hierarchy =
-        load_media_item_hierarchy_or_log(item.id, "build parse item context").await;
+    let hierarchy = load_media_item_hierarchy_or_log(item.id, "build parse item context").await;
     build_parse_item_context_with_hierarchy(item, hierarchy.as_ref()).await
 }
 
@@ -198,9 +200,7 @@ pub async fn build_parse_item_context_with_hierarchy(
     }
 }
 
-pub async fn load_download_hierarchy_context(
-    item: &MediaItem,
-) -> DownloadHierarchyContext {
+pub async fn load_download_hierarchy_context(item: &MediaItem) -> DownloadHierarchyContext {
     let (hierarchy, (season_episodes, _, _)) = tokio::join!(
         load_media_item_hierarchy_or_log(item.id, "load download hierarchy context"),
         load_episode_or_season_data(item),

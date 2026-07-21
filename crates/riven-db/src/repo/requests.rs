@@ -42,9 +42,7 @@ fn parse_request_seasons(request: &ItemRequest) -> Option<Vec<i32>> {
 
 /// Collect the non-null `external_request_id`s for the item_requests linked to
 /// the given media_item IDs.  Used to notify content services before deletion.
-pub async fn get_external_request_ids_for_items(
-    media_item_ids: &[i64],
-) -> Result<Vec<String>> {
+pub async fn get_external_request_ids_for_items(media_item_ids: &[i64]) -> Result<Vec<String>> {
     if media_item_ids.is_empty() {
         return Ok(Vec::new());
     }
@@ -91,9 +89,7 @@ pub async fn get_request_root_item(request_id: i64) -> Result<Option<MediaItem>>
     // matching the original `ORDER BY CASE item_type ...` ranking.
     Ok(media_items::Entity::find()
         .filter(media_items::Column::ItemRequestId.eq(request_id))
-        .filter(
-            media_items::Column::ItemType.is_in([MediaItemType::Movie, MediaItemType::Show]),
-        )
+        .filter(media_items::Column::ItemType.is_in([MediaItemType::Movie, MediaItemType::Show]))
         .order_by_asc(Expr::cust(
             "CASE item_type \
                  WHEN 'movie'::media_item_type THEN 0 \
@@ -168,8 +164,8 @@ pub async fn create_item_request(
                         | ItemRequestState::Ongoing
                         | ItemRequestState::Unreleased
                 );
-                let seasons_json = desired_seasons
-                    .map(|values| serde_json::to_value(values).unwrap_or_default());
+                let seasons_json =
+                    desired_seasons.map(|values| serde_json::to_value(values).unwrap_or_default());
                 // state = CASE WHEN bump THEN 'requested_additional_seasons' ELSE state END:
                 // only touch the state column when we're actually bumping it.
                 let mut active = item_requests::ActiveModel {
@@ -181,11 +177,9 @@ pub async fn create_item_request(
                     active.state = Set(ItemRequestState::RequestedAdditionalSeasons);
                 }
                 active.update(orm()).await?;
-                let updated = get_item_request_by_id(existing.id)
-                    .await?
-                    .ok_or_else(|| {
-                        anyhow::anyhow!("updated item request {} not found", existing.id)
-                    })?;
+                let updated = get_item_request_by_id(existing.id).await?.ok_or_else(|| {
+                    anyhow::anyhow!("updated item request {} not found", existing.id)
+                })?;
                 return Ok(UpsertedItemRequest {
                     request: updated,
                     action: ItemRequestUpsertAction::Updated,
@@ -301,20 +295,19 @@ pub async fn recompute_is_partial_request(request_id: i64, show_id: i64) -> Resu
     Ok(())
 }
 
-pub async fn update_item_request_state(
-    id: i64,
-    state: ItemRequestState,
-) -> Result<ItemRequest> {
+pub async fn update_item_request_state(id: i64, state: ItemRequestState) -> Result<ItemRequest> {
     // completed_at = CASE WHEN <new state> = 'completed'
     //                     THEN COALESCE(completed_at, NOW()) ELSE completed_at END.
     // The CASE only fires when we are transitioning to Completed, and COALESCE
     // preserves any earlier timestamp. Done in one statement so it stays atomic;
     // re-fetch afterwards to return the public struct (RETURNING * equivalent).
-    let mut update =
-        item_requests::Entity::update_many().col_expr(item_requests::Column::State, state.as_enum());
+    let mut update = item_requests::Entity::update_many()
+        .col_expr(item_requests::Column::State, state.as_enum());
     if state == ItemRequestState::Completed {
-        update =
-            update.col_expr(item_requests::Column::CompletedAt, Expr::cust("COALESCE(completed_at, NOW())"));
+        update = update.col_expr(
+            item_requests::Column::CompletedAt,
+            Expr::cust("COALESCE(completed_at, NOW())"),
+        );
     }
     update
         .filter(item_requests::Column::Id.eq(id))
@@ -350,7 +343,11 @@ pub async fn get_retryable_item_requests() -> Result<Vec<ItemRequest>> {
 /// Run one of the COUNT(*) episode rollup queries. `season_numbers`, when set,
 /// is inlined into the SQL (plain integers, no injection risk) because SeaORM
 /// can't bind a PG array without the `postgres-array` feature.
-async fn count_episodes_raw(sql: &str, show_id: i64, season_numbers: Option<&[i32]>) -> Result<i64> {
+async fn count_episodes_raw(
+    sql: &str,
+    show_id: i64,
+    season_numbers: Option<&[i32]>,
+) -> Result<i64> {
     let sql = match season_numbers {
         Some(nums) => {
             let list = nums

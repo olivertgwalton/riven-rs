@@ -147,8 +147,7 @@ impl Plugin for SubdlPlugin {
 
         let mut saved = 0usize;
         for (language, sub) in best_per_lang {
-            match download_and_save(&ctx.http, info.id, &media_entry, &language, &sub).await
-            {
+            match download_and_save(&ctx.http, info.id, &media_entry, &language, &sub).await {
                 Ok(()) => saved += 1,
                 Err(e) => tracing::warn!(
                     item_id = info.id,

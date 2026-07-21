@@ -19,10 +19,7 @@ fn index_event(job: &IndexJob) -> RivenEvent {
 }
 
 pub async fn start(job: &IndexJob, queue: &JobQueue) {
-    if load_media_item_or_log(job.id, "indexing")
-        .await
-        .is_none()
-    {
+    if load_media_item_or_log(job.id, "indexing").await.is_none() {
         return;
     }
 
@@ -64,9 +61,7 @@ pub async fn finalize(id: i64, queue: &JobQueue) {
             acc.merge(indexed)
         });
 
-    if let Err(e) =
-        apply_indexed_media_item(&item, &merged, requested_seasons.as_deref()).await
-    {
+    if let Err(e) = apply_indexed_media_item(&item, &merged, requested_seasons.as_deref()).await {
         tracing::error!(id, error = %e, "failed to persist indexed data");
         if let Err(err) = repo::increment_failed_attempts(id).await {
             tracing::warn!(id, %err, "failed to increment failed_attempts");

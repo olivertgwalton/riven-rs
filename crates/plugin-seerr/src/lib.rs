@@ -200,7 +200,10 @@ async fn validate_webhook_settings(
         })
         .await?;
 
-    let enabled = current.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false);
+    let enabled = current
+        .get("enabled")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     if !enabled {
         // riven never enables the webhook or sets its URL on Seerr's behalf;
         // the user opts in manually by pointing it at riven's /graphql
@@ -208,10 +211,7 @@ async fn validate_webhook_settings(
         return Ok(());
     }
 
-    let current_types = current
-        .get("types")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0) as u32;
+    let current_types = current.get("types").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
     let has_required_types = (current_types & REQUIRED_WEBHOOK_TYPES) == REQUIRED_WEBHOOK_TYPES;
     let has_extra_types = (current_types & !REQUIRED_WEBHOOK_TYPES) != 0;
 

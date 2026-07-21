@@ -90,7 +90,10 @@ fn content_collection_merges_seasons_and_fills_missing_fields_on_collision() {
     let response = collection.into_response();
     let show = &response.shows[0];
     // ...seasons are unioned rather than one request's seasons being lost...
-    assert_eq!(show.requested_seasons.as_deref(), Some([1, 2, 3, 4].as_slice()));
+    assert_eq!(
+        show.requested_seasons.as_deref(),
+        Some([1, 2, 3, 4].as_slice())
+    );
     // ...and a field missing from the first insert is filled in from the second.
     assert_eq!(show.external_request_id.as_deref(), Some("req-1"));
     assert_eq!(show.requested_by.as_deref(), Some("later@example.test"));

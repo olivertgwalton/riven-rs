@@ -113,8 +113,7 @@ impl StreamsMutations {
             }
         };
 
-        let stream =
-            repo::upsert_stream(&info_hash, &magnet, parsed_data, rank, None).await?;
+        let stream = repo::upsert_stream(&info_hash, &magnet, parsed_data, rank, None).await?;
         repo::link_stream_to_item(target.id, stream.id).await?;
 
         job_queue

@@ -316,35 +316,20 @@ mod tests {
         // for the main show includes several derivative/compilation titles
         // alongside one genuine foreign-language alias.
         let mut aliases = HashMap::new();
-        aliases.insert(
-            "eng".to_string(),
-            vec!["Top Gear: The Races".to_string()],
-        );
+        aliases.insert("eng".to_string(), vec!["Top Gear: The Races".to_string()]);
         aliases.insert("hun".to_string(), vec!["Csúcsmodellek".to_string()]);
 
         let settings = RankSettings::default();
 
         let races_release = parse("Top.Gear.The.Races.S01E01.1080p.WEB-DL.DDP2.0.H-264.mkv");
         assert!(
-            !title_matches(
-                &races_release,
-                "Top Gear",
-                None,
-                &aliases,
-                &settings
-            ),
+            !title_matches(&races_release, "Top Gear", None, &aliases, &settings),
             "a release for a derivative spin-off must not match the parent show via its own alias"
         );
 
         let genuine_release = parse("Csucsmodellek.S01E01.1080p.WEB-DL.mkv");
         assert!(
-            title_matches(
-                &genuine_release,
-                "Top Gear",
-                None,
-                &aliases,
-                &settings
-            ),
+            title_matches(&genuine_release, "Top Gear", None, &aliases, &settings),
             "a genuine foreign-language alias must still match"
         );
     }
@@ -358,6 +343,9 @@ mod tests {
         ));
         assert!(!is_derivative_alias("csucsmodellek", "top gear"));
         assert!(!is_derivative_alias("top gear", "top gear"));
-        assert!(!is_derivative_alias("top gear australia", "top gear australia"));
+        assert!(!is_derivative_alias(
+            "top gear australia",
+            "top gear australia"
+        ));
     }
 }

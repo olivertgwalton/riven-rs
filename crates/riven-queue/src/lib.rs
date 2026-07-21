@@ -325,11 +325,9 @@ impl JobQueue {
 
         for (_, info_hash) in &entries {
             if let Some(info_hash) = info_hash
-                && let Err(error) = riven_db::repo::blacklist_stream_permanent_by_hash(
-                    media_item_id,
-                    info_hash,
-                )
-                .await
+                && let Err(error) =
+                    riven_db::repo::blacklist_stream_permanent_by_hash(media_item_id, info_hash)
+                        .await
             {
                 tracing::warn!(%error, info_hash, "regrab: failed to blacklist release");
             }
@@ -982,7 +980,6 @@ impl JobQueue {
             }
         }
     }
-
 }
 
 #[inline]

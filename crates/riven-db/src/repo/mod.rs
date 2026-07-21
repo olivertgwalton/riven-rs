@@ -47,7 +47,10 @@ pub async fn reset_items_by_ids(ids: Vec<i64>) -> Result<u64> {
         return Ok(0);
     }
     let result = media_items::Entity::update_many()
-        .col_expr(media_items::Column::State, MediaItemState::Indexed.as_enum())
+        .col_expr(
+            media_items::Column::State,
+            MediaItemState::Indexed.as_enum(),
+        )
         .col_expr(media_items::Column::FailedAttempts, Expr::value(0))
         .col_expr(media_items::Column::UpdatedAt, Expr::cust("NOW()"))
         .filter(media_items::Column::Id.is_in(ids.iter().copied()))

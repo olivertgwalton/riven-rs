@@ -150,8 +150,7 @@ async fn get_vfs_entry_stat(path: &str) -> async_graphql::Result<VfsEntryStat> {
             if stat.entry_count == 0 {
                 return Err(Error::new("Entry not found"));
             }
-            let season_count =
-                repo::count_vfs_distinct_dirs(&format!("{prefix}/%/%"), 4).await?;
+            let season_count = repo::count_vfs_distinct_dirs(&format!("{prefix}/%/%"), 4).await?;
             Ok(VfsEntryStat {
                 mtime: stat.mtime.unwrap_or(now),
                 ctime: stat.ctime.unwrap_or(now),

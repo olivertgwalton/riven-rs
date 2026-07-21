@@ -68,13 +68,8 @@ impl<'a> LibraryOrchestrator<'a> {
         )
         .await?;
 
-        let (item, _) = repo::create_movie(
-            title,
-            imdb_id,
-            tmdb_id,
-            Some(request.request.id),
-        )
-        .await?;
+        let (item, _) =
+            repo::create_movie(title, imdb_id, tmdb_id, Some(request.request.id)).await?;
 
         Ok(RequestedItemOutcome {
             item,
@@ -103,13 +98,8 @@ impl<'a> LibraryOrchestrator<'a> {
         )
         .await?;
 
-        let (item, _) = repo::create_show(
-            title,
-            imdb_id,
-            tvdb_id,
-            Some(request.request.id),
-        )
-        .await?;
+        let (item, _) =
+            repo::create_show(title, imdb_id, tvdb_id, Some(request.request.id)).await?;
 
         Ok(RequestedItemOutcome {
             item,
@@ -197,11 +187,7 @@ impl<'a> LibraryOrchestrator<'a> {
             }
         };
 
-        let request_state = match repo::derive_item_request_state_for_request(
-            &request,
-        )
-        .await
-        {
+        let request_state = match repo::derive_item_request_state_for_request(&request).await {
             Ok(state) => state,
             Err(error) => {
                 tracing::error!(
@@ -214,9 +200,7 @@ impl<'a> LibraryOrchestrator<'a> {
             }
         };
 
-        if let Err(error) =
-            repo::update_item_request_state(request_id, request_state).await
-        {
+        if let Err(error) = repo::update_item_request_state(request_id, request_state).await {
             tracing::error!(
                 item_id = item.id,
                 request_id,

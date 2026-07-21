@@ -2,8 +2,8 @@ use anyhow::Result;
 use chrono::{DateTime, NaiveDate, Utc};
 use riven_core::entities::{media_items, ranking_profiles, settings};
 use riven_core::types::MediaItemState;
-use sea_orm::sea_query::{Expr, OnConflict};
 use sea_orm::ActiveValue::Set;
+use sea_orm::sea_query::{Expr, OnConflict};
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, DbBackend, EntityTrait, FromQueryResult, QueryFilter,
     QueryOrder, QuerySelect, Statement,

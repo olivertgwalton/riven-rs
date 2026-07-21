@@ -284,7 +284,10 @@ pub async fn unpause_items(ids: &[i64]) -> Result<()> {
         return Ok(());
     }
     media_items::Entity::update_many()
-        .col_expr(media_items::Column::State, MediaItemState::Indexed.as_enum())
+        .col_expr(
+            media_items::Column::State,
+            MediaItemState::Indexed.as_enum(),
+        )
         .col_expr(media_items::Column::UpdatedAt, Expr::cust("NOW()"))
         .filter(media_items::Column::Id.is_in(ids.iter().copied()))
         .filter(media_items::Column::State.eq(MediaItemState::Paused))

@@ -80,8 +80,7 @@ impl MovieMutations {
             ..Default::default()
         };
 
-        if let Err(e) =
-            riven_queue::indexing::apply_indexed_media_item(&item, &indexed, None).await
+        if let Err(e) = riven_queue::indexing::apply_indexed_media_item(&item, &indexed, None).await
         {
             return Ok(IndexMovieMutationResponse {
                 success: false,
