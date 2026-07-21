@@ -1,9 +1,13 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use riven_db::entities::{MediaItem, Stream};
 use riven_rank::{ParsedData, RankSettings};
 
 use super::helpers::stream_resolution;
+
+fn year_candidates(year: i32) -> [i32; 3] {
+    [year - 1, year, year + 1]
+}
 
 /// The item-side facts needed to re-validate a persisted stream's title
 /// against the item it is linked to.
@@ -11,6 +15,11 @@ pub struct TitleMatchContext {
     pub correct_title: String,
     pub item_country: Option<String>,
     pub aliases: HashMap<String, Vec<String>>,
+    /// The item's own year (episode air year / movie year).
+    pub item_year: Option<i32>,
+    /// The parent show's year, used so that a wrong-year remake (e.g. the 2021
+    /// reboot of a 2007 show) is rejected even when the title matches.
+    pub parent_year: Option<i32>,
 }
 
 impl TitleMatchContext {
@@ -35,7 +44,26 @@ impl TitleMatchContext {
                 .and_then(|h| h.show_country.clone())
                 .or_else(|| item.country.clone()),
             aliases,
+            item_year: item.year,
+            parent_year: hierarchy.and_then(|h| h.show_year),
         }
+    }
+
+    /// Returns true when the parsed release's year is incompatible with the
+    /// item's year (and its parent show's year), mirroring the scrape-time
+    /// check in `discovery::validate`. A release with no parsed year passes.
+    fn year_mismatch(&self, parsed: &ParsedData) -> bool {
+        let Some(py) = parsed.year else {
+            return false;
+        };
+        let mut candidates: HashSet<i32> = HashSet::new();
+        if let Some(y) = self.item_year {
+            candidates.extend(year_candidates(y));
+        }
+        if let Some(y) = self.parent_year {
+            candidates.extend(year_candidates(y));
+        }
+        !candidates.is_empty() && !candidates.contains(&py)
     }
 }
 
@@ -99,6 +127,20 @@ pub fn rank_streams_for_profile<'a>(
                     raw_title = %parsed.raw_title,
                     correct_title = %title_ctx.correct_title,
                     "stream rejected: title does not match item"
+                );
+                return None;
+            }
+
+            if title_ctx.year_mismatch(&parsed) {
+                tracing::debug!(
+                    item_id = item.id,
+                    title = %item.title,
+                    info_hash = %stream.info_hash,
+                    raw_title = %parsed.raw_title,
+                    parsed_year = ?parsed.year,
+                    item_year = ?title_ctx.item_year,
+                    parent_year = ?title_ctx.parent_year,
+                    "stream rejected: incorrect year"
                 );
                 return None;
             }
@@ -277,6 +319,8 @@ mod tests {
             correct_title: correct_title.to_string(),
             item_country: country.map(str::to_string),
             aliases: HashMap::new(),
+            item_year: None,
+            parent_year: None,
         }
     }
 
@@ -326,6 +370,25 @@ mod tests {
 
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].info_hash, "hashcorrect");
+    }
+
+    #[test]
+    fn wrong_year_reboot_streams_are_not_download_candidates() {
+        // Requesting the 2007 "iCarly" must not match the 2021 reboot when the
+        // season pack fails and we fall back to per-episode downloads.
+        let profile = RankSettings::default();
+        let mut ctx = title_ctx("iCarly", None);
+        ctx.item_year = Some(2010); // a S03 episode's air year
+        ctx.parent_year = Some(2007); // the show's year
+
+        let reboot = stream(1, "hashreboot", "iCarly.2021.S01E01.1080p.WEB.h264-EDITH");
+        let original = stream(2, "hashoriginal", "iCarly.S03E18.1080p.WEB.h264-DiRT");
+        let streams = [reboot, original];
+
+        let candidates = rank_streams_for_profile(&streams, &media_item(), &profile, &ctx);
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].info_hash, "hashoriginal");
     }
 
     #[test]

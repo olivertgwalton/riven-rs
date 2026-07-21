@@ -481,10 +481,15 @@ pub async fn list_filesystem_profile_entry_candidates()
                    WHEN item.item_type = 'movie' THEN item.network
                    ELSE show_item.network
                END AS network,
-               CASE
+               -- Cast the enum to text: SeaORM's generated SELECTs cast enum
+               -- columns to text automatically, but a raw `find_by_statement`
+               -- does not, and decoding a bare `content_rating` enum into
+               -- `Option<ContentRating>` (which reads via String) fails with a
+               -- type mismatch, aborting the whole rematch query.
+               (CASE
                    WHEN item.item_type = 'movie' THEN item.content_rating
                    ELSE show_item.content_rating
-               END AS content_rating,
+               END)::text AS content_rating,
                CASE
                    WHEN item.item_type = 'movie' THEN item.language
                    ELSE show_item.language
