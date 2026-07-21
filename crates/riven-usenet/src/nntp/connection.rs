@@ -33,6 +33,19 @@ fn invalidate_dns(host: &str, _port: u16) {
     riven_core::dns::invalidate(host);
 }
 
+/// True if a greeting/status line is the provider telling us we're already
+/// at our account's connection limit, rather than a generic server error.
+/// NNTP has no standardized code for this (unlike HTTP's 429); `502` and
+/// `400` are both used as the de-facto convention by commercial providers
+/// (confirmed against `javi11/nntppool`'s `greetingError.Is`, which matches
+/// both codes for `ErrMaxConnections`). Match on the wording too in case a
+/// provider sends a different code with the same meaning.
+fn is_too_many_connections(status: &str) -> bool {
+    status.starts_with("502")
+        || status.starts_with("400")
+        || status.to_ascii_lowercase().contains("too many connections")
+}
+
 /// Connect to the first reachable address, returning the last error if none work.
 async fn connect_first(addrs: &[SocketAddr]) -> Result<TcpStream, NntpError> {
     let mut last_err: Option<std::io::Error> = None;
@@ -98,6 +111,9 @@ impl NntpConnection {
         };
         let greeting = conn.read_status().await?;
         if !(greeting.starts_with("200") || greeting.starts_with("201")) {
+            if is_too_many_connections(&greeting) {
+                return Err(NntpError::TooManyConnections(greeting));
+            }
             return Err(NntpError::ServerError(greeting));
         }
 

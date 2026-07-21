@@ -59,6 +59,8 @@ pub enum NntpError {
     ServerError(String),
     #[error("article not found: {0}")]
     ArticleNotFound(String),
+    #[error("provider connection limit reached: {0}")]
+    TooManyConnections(String),
     #[error("protocol error: {0}")]
     Protocol(&'static str),
     #[error("timed out")]
