@@ -155,6 +155,20 @@ async fn main() -> Result<()> {
         riven_queue::prune_queue_history(&mut redis, &queues).await;
     }
 
+    // Reconcile stored library-profile membership against the current filesystem
+    // settings once at boot. Membership is otherwise only written at download
+    // time and on settings changes, so a profile added while a save failed — or
+    // any drift from the active filter rules — would leave its library view
+    // empty until the next edit. Only diffs are written, so this is a no-op in
+    // steady state.
+    match riven_queue::reconcile_library_profiles(&settings.filesystem).await {
+        Ok(0) => {}
+        Ok(updated) => {
+            tracing::info!(updated, "reconciled library-profile membership at startup")
+        }
+        Err(error) => tracing::error!(%error, "failed to reconcile library-profile membership"),
+    }
+
     let (link_tx, mut link_rx) = tokio::sync::mpsc::channel(64);
 
     let vfs_mount_path = settings.effective_vfs_mount_path().to_string();

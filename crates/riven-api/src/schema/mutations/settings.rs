@@ -2,7 +2,7 @@ use async_graphql::*;
 use riven_core::downloader::DownloaderConfig;
 use riven_core::logging::{LogControl, LogSettings};
 use riven_core::plugin::PluginRegistry;
-use riven_core::settings::{FilesystemSettings, LibraryProfileMembership};
+use riven_core::settings::FilesystemSettings;
 use riven_core::vfs_layout::VfsLibraryLayout;
 use riven_db::repo;
 use riven_queue::JobQueue;
@@ -60,20 +60,7 @@ fn log_settings_from_json(settings: &serde_json::Value, enabled: bool) -> LogSet
 pub(super) async fn rematch_filesystem_library_profiles_inner(
     filesystem_settings: &FilesystemSettings,
 ) -> Result<i64> {
-    let candidates = repo::list_filesystem_profile_entry_candidates().await?;
-    let updates = candidates
-        .into_iter()
-        .filter_map(|candidate| {
-            let next = filesystem_settings.matching_profile_keys(
-                &candidate.filesystem_metadata(),
-                candidate.filesystem_content_type(),
-            );
-            let current = LibraryProfileMembership::from_json(candidate.library_profiles.as_ref());
-            (next != current).then(|| (candidate.id, next.into_json()))
-        })
-        .collect::<Vec<_>>();
-
-    Ok(repo::update_library_profiles_batch(&updates).await? as i64)
+    Ok(riven_queue::reconcile_library_profiles(filesystem_settings).await? as i64)
 }
 
 #[derive(Default)]
@@ -283,10 +270,22 @@ async fn apply_general_settings(ctx: &Context<'_>, settings: serde_json::Value) 
     if filesystem.mount_path.trim().is_empty() {
         filesystem.mount_path = previous_filesystem.mount_path.clone();
     }
+    // Rematch BEFORE mutating the in-memory snapshot: if the rematch fails,
+    // `previous_filesystem` stays intact so the retry re-runs it. Updating the
+    // snapshot first (as this used to) meant a failed rematch left `previous`
+    // equal to the new value, so the retry skipped the rematch entirely and
+    // stranded every entry with stale (empty) profile membership.
+    let filesystem_changed = previous_filesystem != filesystem;
+    let rematch_count = if filesystem_changed {
+        rematch_filesystem_library_profiles_inner(&filesystem).await?
+    } else {
+        0
+    };
+
     *queue.filesystem_settings.write().await = filesystem.clone();
     *queue.vfs_layout.write().await = VfsLibraryLayout::new(filesystem.clone());
-    if previous_filesystem != filesystem {
-        let rematch_count = rematch_filesystem_library_profiles_inner(&filesystem).await?;
+
+    if filesystem_changed {
         queue
             .filesystem_settings_revision
             .fetch_add(1, Ordering::SeqCst);

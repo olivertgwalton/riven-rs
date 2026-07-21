@@ -2,6 +2,36 @@ use std::collections::HashSet;
 
 use apalis_redis::RedisConfig;
 use chrono::Utc;
+use riven_core::settings::{FilesystemSettings, LibraryProfileMembership};
+use riven_db::repo;
+
+/// Recompute each media filesystem entry's stored library-profile membership
+/// against `settings` and persist the rows whose membership changed. Returns the
+/// number of rows updated.
+///
+/// This is the single source of truth for "which custom library profiles claim
+/// this entry": it runs when filesystem settings change (a profile added,
+/// removed, or its filter rules edited) and once at startup so an install whose
+/// membership drifted from the current rules self-heals. Only diffs are written,
+/// so a steady-state call updates nothing.
+pub async fn reconcile_library_profiles(
+    settings: &FilesystemSettings,
+) -> anyhow::Result<u64> {
+    let candidates = repo::list_filesystem_profile_entry_candidates().await?;
+    let updates = candidates
+        .into_iter()
+        .filter_map(|candidate| {
+            let next = settings.matching_profile_keys(
+                &candidate.filesystem_metadata(),
+                candidate.filesystem_content_type(),
+            );
+            let current = LibraryProfileMembership::from_json(candidate.library_profiles.as_ref());
+            (next != current).then(|| (candidate.id, next.into_json()))
+        })
+        .collect::<Vec<_>>();
+
+    Ok(repo::update_library_profiles_batch(&updates).await?)
+}
 
 /// `register_worker.lua` writes the metadata hash for each worker at
 /// `{workers_set}:metadata{worker_name}` (no separator before the worker name,
