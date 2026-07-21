@@ -1,5 +1,4 @@
 use std::sync::Arc;
-use std::time::Duration;
 
 use tokio::sync::RwLock;
 
@@ -8,13 +7,6 @@ use crate::events::{EventType, HookResponse, RivenEvent};
 use crate::settings::PluginSettings;
 
 pub const PLUGIN_ENABLED_PREFIX: &str = "plugin_enabled.";
-
-/// Per-plugin cap on `dispatch()`'s synchronous `handle_event` call. Without
-/// this, a single plugin blocked on a slow/hung network call (e.g. an NNTP
-/// connection with no client-side timeout) stalls every other subscriber and
-/// the calling job for as long as the caller's own timeout allows — up to the
-/// 10-minute `riven-download` worker timeout in practice.
-const DISPATCH_TIMEOUT: Duration = Duration::from_secs(60);
 
 pub struct PluginInfo {
     pub name: String,
@@ -157,28 +149,19 @@ impl PluginRegistry {
             })
             .collect();
 
+        // No per-plugin timeout here: a healthy plugin under load (e.g. usenet
+        // ingest contending with playback for NNTP connections) should be
+        // allowed to take as long as it takes rather than being falsely
+        // treated as failed. Each caller's own job-level timeout (60s-600s
+        // depending on job type, see `riven-queue`'s `register_worker!`
+        // invocations) is the real outer bound, matching riven-ts's
+        // single-timeout-per-job design — a second, smaller cap nested inside
+        // that was redundant and, worse, fired during ordinary contention
+        // instead of only on a genuinely wedged plugin.
         let futures = targets
             .into_iter()
             .map(|(name, plugin, context)| async move {
-                let result = match tokio::time::timeout(
-                    DISPATCH_TIMEOUT,
-                    plugin.handle_event(event, &context),
-                )
-                .await
-                {
-                    Ok(result) => result,
-                    Err(_) => {
-                        tracing::error!(
-                            plugin = name,
-                            timeout_secs = DISPATCH_TIMEOUT.as_secs(),
-                            "plugin handle_event timed out"
-                        );
-                        Err(anyhow::anyhow!(
-                            "plugin '{name}' timed out after {}s",
-                            DISPATCH_TIMEOUT.as_secs()
-                        ))
-                    }
-                };
+                let result = plugin.handle_event(event, &context).await;
                 (name, result)
             });
         futures::future::join_all(futures).await

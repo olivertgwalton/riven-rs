@@ -22,7 +22,7 @@ pub enum Priority {
 
 /// Percentage of releases awarded to High-priority waiters when both queues
 /// are non-empty. 80 ≈ nzbdav default.
-const HIGH_ODDS: i32 = 80;
+pub(super) const HIGH_ODDS: i32 = 80;
 
 struct Inner {
     available: usize,

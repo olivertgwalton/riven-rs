@@ -39,8 +39,6 @@ pub(crate) const PROFILE: HttpServiceProfile =
 
 pub(crate) use riven_core::nzb::{is_nzb_info_hash, nzb_url_redis_key};
 
-const DEFAULT_DOWNLOAD_VERIFY_TIMEOUT_SECS: u64 = 45;
-
 /// A candidate that fails ingest/verification at download time is permanently
 /// blacklisted immediately — it's a dead release, and retrying it every
 /// download cycle (with no way to ever stop) is what starves the queue.
@@ -54,6 +52,23 @@ async fn blacklist_failed_download_candidate(media_item_id: i64, info_hash: &str
         riven_db::repo::blacklist_stream_permanent_by_hash(media_item_id, info_hash).await
     {
         tracing::warn!(info_hash, %error, "failed to blacklist failed release");
+    }
+}
+
+/// A candidate that fails only because the provider(s) reported their own
+/// connection limit ("502 too many connections") after the pool's bounded
+/// retry gave up is *not* known to be dead — that's the account being at
+/// capacity, not a bad release. Skip it for the rest of this download
+/// attempt via the non-permanent blacklist (cleared on the next scrape by
+/// `clear_blacklisted_streams`) instead of ruling it out for good.
+async fn defer_transient_download_candidate(media_item_id: i64, info_hash: &str) {
+    tracing::warn!(
+        info_hash,
+        media_item_id,
+        "usenet ingest/verification hit a transient provider-capacity error; deferring candidate this cycle"
+    );
+    if let Err(error) = riven_db::repo::blacklist_stream_by_hash(media_item_id, info_hash).await {
+        tracing::warn!(info_hash, %error, "failed to defer transient-failure release");
     }
 }
 
@@ -264,17 +279,6 @@ impl Plugin for UsenetPlugin {
                 "How many missing files (%) to tolerate before rejecting a release. \
                  Leave at 0 — any missing file can cause playback to stall.",
             ),
-            SettingField::new(
-                "downloadverifytimeoutsecs",
-                "Download Verification Timeout (s)",
-                FieldType::Number,
-            )
-            .with_default("45")
-            .with_description(
-                "Max time to spend fetching and verifying a candidate at download time. \
-                 A release that hangs past this, or fails verification, is blacklisted \
-                 immediately instead of being retried forever.",
-            ),
             SettingField::new("autorepair", "Auto-Repair Unhealthy Titles", FieldType::Boolean)
                 .with_default("false")
                 .with_description(
@@ -362,20 +366,15 @@ impl Plugin for UsenetPlugin {
             .clamp(0.0, 50.0);
         // Ingest (NNTP fetch + optional PAR2 content verify) and the optional
         // full segment sweep are real network work against a candidate that
-        // might be a dead release. Bound the whole thing so one doomed
-        // candidate can't hang this hook for as long as the worker will let
-        // it — a timeout is treated the same as any other verification
-        // failure below.
-        let verify_timeout = Duration::from_secs(
-            ctx.settings
-                .get_parsed_or::<u64>(
-                    "downloadverifytimeoutsecs",
-                    DEFAULT_DOWNLOAD_VERIFY_TIMEOUT_SECS,
-                )
-                .max(1),
-        );
-
-        let verify = tokio::time::timeout(verify_timeout, async {
+        // might be a dead release. No wall-clock timeout here: a healthy
+        // release under heavy pool contention should be allowed to take as
+        // long as it takes rather than being falsely treated as dead. The
+        // pool itself already bounds provider-capacity retries (see
+        // `NntpPool::acquire`'s handling of "too many connections"), so a
+        // hang here means either a genuinely dead release (surfaces as a
+        // verification error below) or every provider's own read/connect
+        // timeout, neither of which needs a second timer wrapped around them.
+        let verify = async {
             let meta = streamer
                 .ingest(info_hash, &xml_arc, password, sample_percent, verify_par2)
                 .await?;
@@ -385,26 +384,29 @@ impl Plugin for UsenetPlugin {
                     .await?;
             }
             Ok::<_, riven_usenet::StreamerError>(meta)
-        })
+        }
         .await;
 
         let meta = match verify {
-            Ok(Ok(m)) => m,
-            Ok(Err(riven_usenet::StreamerError::IngestQueueFull)) => {
+            Ok(m) => m,
+            Err(riven_usenet::StreamerError::IngestQueueFull) => {
                 tracing::debug!(info_hash, "ingest queue full; will retry next cycle");
                 return Ok(HookResponse::DownloadStreamUnavailable);
             }
-            Ok(Err(e)) => {
-                tracing::warn!(info_hash, error = %e, "usenet ingest/verification failed");
-                blacklist_failed_download_candidate(id, info_hash).await;
-                return Ok(HookResponse::DownloadStreamUnavailable);
-            }
-            Err(_elapsed) => {
+            Err(riven_usenet::StreamerError::Nntp(
+                riven_usenet::nntp::NntpError::TooManyConnections(status),
+            )) => {
                 tracing::warn!(
                     info_hash,
-                    timeout_secs = verify_timeout.as_secs(),
-                    "usenet ingest/verification timed out; treating candidate as failed"
+                    status,
+                    "usenet ingest/verification failed because provider(s) are at their own \
+                     connection limit"
                 );
+                defer_transient_download_candidate(id, info_hash).await;
+                return Ok(HookResponse::DownloadStreamUnavailable);
+            }
+            Err(e) => {
+                tracing::warn!(info_hash, error = %e, "usenet ingest/verification failed");
                 blacklist_failed_download_candidate(id, info_hash).await;
                 return Ok(HookResponse::DownloadStreamUnavailable);
             }

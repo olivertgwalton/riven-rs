@@ -42,6 +42,17 @@ const BREAKER_INITIAL_COOLDOWN: Duration = Duration::from_secs(60);
 /// Cap on the exponential backoff so a permanently-broken provider doesn't
 /// vanish forever — a probe still runs every 5 min to check recovery.
 const BREAKER_MAX_COOLDOWN: Duration = Duration::from_secs(5 * 60);
+/// Backoff before retrying a fresh dial after the provider itself reports
+/// its connection limit is exceeded (NNTP "502 too many connections"). This
+/// is the account being at capacity, not the provider being down, so it
+/// must never trip the circuit breaker or fail the caller outright — just
+/// wait a moment and try again.
+const TOO_MANY_CONNECTIONS_BACKOFF: Duration = Duration::from_millis(500);
+/// Bound on those retries. Not a wall-clock timeout on the overall
+/// operation — just a cap on one pathological dial loop, so a genuinely
+/// misconfigured `max_connections` (set higher than the account actually
+/// allows) still eventually surfaces as an error instead of looping forever.
+const TOO_MANY_CONNECTIONS_MAX_RETRIES: u32 = 20;
 
 /// Per-provider circuit breaker. Records consecutive transient failures and
 /// suppresses provider use for a cooldown window once `FAILURE_THRESHOLD` is
@@ -152,13 +163,41 @@ struct SlotQueues {
     idle: VecDeque<Idle>,
     /// Callers that found the idle pool empty and every permit already
     /// spoken for. `release()` hands a freed connection directly to the
-    /// front of `waiters_high` (else `waiters_low`) instead of parking it
-    /// in `idle` — nothing else wakes a queued waiter promptly, since a
-    /// plain semaphore permit release only wakes the semaphore's own
-    /// (otherwise-unused) internal queue. High is always drained before
-    /// Low: streaming reads should never queue behind background ingest.
+    /// front of `waiters_high` or `waiters_low` (picked by the same
+    /// `HIGH_ODDS`-weighted lottery `PrioritizedSemaphore` uses) instead of
+    /// parking it in `idle` — nothing else wakes a queued waiter promptly,
+    /// since a plain semaphore permit release only wakes the semaphore's
+    /// own (otherwise-unused) internal queue. Weighted rather than strict
+    /// so a continuously-busy High stream (someone actively watching
+    /// something) can never fully starve Low background ingest.
     waiters_high: VecDeque<oneshot::Sender<Idle>>,
     waiters_low: VecDeque<oneshot::Sender<Idle>>,
+    /// Accumulated "debt" toward serving a High waiter; see
+    /// `PrioritizedSemaphore`'s field of the same name for the algorithm.
+    accumulated: i32,
+}
+
+impl SlotQueues {
+    /// Pop the next waiter to hand a freed connection to, honoring the same
+    /// `HIGH_ODDS`% weighted lottery as `PrioritizedSemaphore` when both
+    /// queues are non-empty, so Low is bounded to roughly 1-in-5 hand-offs
+    /// rather than being starved outright by continuous High demand.
+    fn next_waiter(&mut self) -> Option<oneshot::Sender<Idle>> {
+        match (self.waiters_high.is_empty(), self.waiters_low.is_empty()) {
+            (true, true) => None,
+            (false, true) => self.waiters_high.pop_front(),
+            (true, false) => self.waiters_low.pop_front(),
+            (false, false) => {
+                self.accumulated += super::priority_semaphore::HIGH_ODDS;
+                if self.accumulated >= 100 {
+                    self.accumulated -= 100;
+                    self.waiters_high.pop_front()
+                } else {
+                    self.waiters_low.pop_front()
+                }
+            }
+        }
+    }
 }
 
 struct ProviderSlot {
@@ -235,6 +274,7 @@ impl NntpPool {
                         idle: VecDeque::new(),
                         waiters_high: VecDeque::new(),
                         waiters_low: VecDeque::new(),
+                        accumulated: 0,
                     })),
                     breaker: Arc::new(CircuitBreaker::new()),
                     bytes_downloaded: AtomicU64::new(0),
@@ -356,6 +396,7 @@ impl NntpPool {
 
     async fn acquire(&self, slot_idx: usize, priority: Priority) -> Result<Checkout, NntpError> {
         let slot = &self.slots[slot_idx];
+        let mut too_many_connections_retries: u32 = 0;
 
         loop {
             // Try the idle pool first, without acquiring a new permit: an
@@ -412,16 +453,40 @@ impl NntpPool {
             // max_connections total open sockets yet, dial a fresh one.
             if let Some(permit) = slot.permits.try_acquire_owned() {
                 let connect_started = std::time::Instant::now();
-                let conn = NntpConnection::connect(&slot.provider.config).await?;
-                let connect_ms = connect_started.elapsed().as_millis();
-                if connect_ms > 50 {
-                    tracing::debug!(host = %slot.provider.config.host, connect_ms, "NNTP acquire: fresh dial");
+                match NntpConnection::connect(&slot.provider.config).await {
+                    Ok(conn) => {
+                        let connect_ms = connect_started.elapsed().as_millis();
+                        if connect_ms > 50 {
+                            tracing::debug!(host = %slot.provider.config.host, connect_ms, "NNTP acquire: fresh dial");
+                        }
+                        return Ok(Checkout {
+                            conn,
+                            permit,
+                            slot_idx,
+                        });
+                    }
+                    // The account's own connection limit, not a broken
+                    // provider — release the permit we just took (so
+                    // someone else's release() hand-off or the idle pool
+                    // isn't starved by it) and back off instead of
+                    // propagating this as a normal dial failure.
+                    Err(NntpError::TooManyConnections(status)) => {
+                        drop(permit);
+                        too_many_connections_retries += 1;
+                        if too_many_connections_retries > TOO_MANY_CONNECTIONS_MAX_RETRIES {
+                            return Err(NntpError::TooManyConnections(status));
+                        }
+                        tracing::debug!(
+                            host = %slot.provider.config.host,
+                            status,
+                            attempt = too_many_connections_retries,
+                            "NNTP provider at its own connection limit; backing off and retrying"
+                        );
+                        tokio::time::sleep(TOO_MANY_CONNECTIONS_BACKOFF).await;
+                        continue;
+                    }
+                    Err(e) => return Err(e),
                 }
-                return Ok(Checkout {
-                    conn,
-                    permit,
-                    slot_idx,
-                });
             }
 
             // Every socket is either actively in use or sitting in idle
@@ -515,10 +580,7 @@ impl NntpPool {
         // acquisitions.
         loop {
             let mut guard = slot.queues.lock();
-            let next = guard
-                .waiters_high
-                .pop_front()
-                .or_else(|| guard.waiters_low.pop_front());
+            let next = guard.next_waiter();
             let Some(tx) = next else {
                 guard.idle.push_back(idle);
                 return;
@@ -812,6 +874,49 @@ mod tests {
             .unwrap()
             .unwrap();
         pool.release(checkout2);
+    }
+
+    /// Regression test for the connection-pool-starvation fix's weighted
+    /// hand-off: with both queues continuously non-empty, `next_waiter()`
+    /// must still surface Low waiters periodically (bounded by `HIGH_ODDS`)
+    /// rather than draining `waiters_high` to empty before ever touching
+    /// `waiters_low`, which is what let a continuously-busy stream starve
+    /// background ingest indefinitely.
+    #[test]
+    fn low_priority_waiter_is_not_starved_by_continuous_high_priority_demand() {
+        let mut queues = SlotQueues {
+            idle: VecDeque::new(),
+            waiters_high: VecDeque::new(),
+            waiters_low: VecDeque::new(),
+            accumulated: 0,
+        };
+
+        // One Low waiter parked once; High waiters keep refilling after each
+        // hand-off, simulating continuous streaming demand contending with a
+        // single background ingest request.
+        let (low_tx, _low_rx) = oneshot::channel::<Idle>();
+        queues.waiters_low.push_back(low_tx);
+
+        let mut low_served = false;
+        for _ in 0..100 {
+            if queues.waiters_high.is_empty() {
+                let (tx, _rx) = oneshot::channel::<Idle>();
+                queues.waiters_high.push_back(tx);
+            }
+            // Drop the picked sender to simulate the hand-off completing,
+            // same as `release()` does after a successful `tx.send`.
+            drop(queues.next_waiter());
+            if queues.waiters_low.is_empty() {
+                low_served = true;
+                break;
+            }
+        }
+
+        assert!(
+            low_served,
+            "Low waiter should have been served within a bounded number of \
+             contested hand-offs under continuous High demand"
+        );
     }
 
     /// Regression test for a narrower TOCTOU race in the two tests above:

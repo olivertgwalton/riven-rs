@@ -55,6 +55,7 @@ impl LibraryMutations {
         let count = repo::delete_items_by_ids(ids.clone()).await? as i64;
 
         if !ids.is_empty() {
+            job_queue.cancel_items(&ids).await;
             job_queue
                 .notify(RivenEvent::MediaItemsDeleted {
                     item_ids: ids,
