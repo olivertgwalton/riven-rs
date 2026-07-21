@@ -126,8 +126,7 @@ fn push_item_dirs(
     profile_key: Option<&str>,
     exclusive_keys: &[&str],
 ) {
-    let Ok(paths) =
-        runtime.block_on(repo::list_vfs_dir_names(pattern, (dir_index + 2) as u32))
+    let Ok(paths) = runtime.block_on(repo::list_vfs_dir_names(pattern, (dir_index + 2) as u32))
     else {
         return;
     };

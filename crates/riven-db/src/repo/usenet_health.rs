@@ -3,11 +3,10 @@
 
 use anyhow::Result;
 use riven_core::entities::usenet_file_health;
-use sea_orm::sea_query::{Expr, OnConflict};
 use sea_orm::ActiveValue::Set;
+use sea_orm::sea_query::{Expr, OnConflict};
 use sea_orm::{
-    ColumnTrait, DbBackend, EntityTrait, FromQueryResult, QueryFilter,
-    QuerySelect, Statement,
+    ColumnTrait, DbBackend, EntityTrait, FromQueryResult, QueryFilter, QuerySelect, Statement,
 };
 
 use crate::orm;
@@ -135,9 +134,9 @@ pub async fn usenet_repair_due(
         .filter(usenet_file_health::Column::FileIndex.eq(file_index))
         .filter(usenet_file_health::Column::RepairAttempts.lt(max_retries))
         .filter(
-            usenet_file_health::Column::NextRepairAt.is_null().or(
-                Expr::col(usenet_file_health::Column::NextRepairAt).lte(Expr::cust("now()")),
-            ),
+            usenet_file_health::Column::NextRepairAt
+                .is_null()
+                .or(Expr::col(usenet_file_health::Column::NextRepairAt).lte(Expr::cust("now()"))),
         )
         .select_only()
         .column(usenet_file_health::Column::RepairAttempts)
@@ -158,7 +157,10 @@ pub async fn record_usenet_repair_attempt(
             usenet_file_health::Column::RepairAttempts,
             Expr::col(usenet_file_health::Column::RepairAttempts).add(1),
         )
-        .col_expr(usenet_file_health::Column::LastRepairAt, Expr::cust("now()"))
+        .col_expr(
+            usenet_file_health::Column::LastRepairAt,
+            Expr::cust("now()"),
+        )
         .col_expr(
             usenet_file_health::Column::NextRepairAt,
             Expr::cust_with_values("now() + ($1 * interval '1 second')", [backoff_secs]),

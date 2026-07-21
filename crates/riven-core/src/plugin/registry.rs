@@ -119,7 +119,12 @@ impl PluginRegistry {
         let Some(active) = plugins.iter_mut().find(|p| p.plugin.name() == name) else {
             return false;
         };
-        active.context = Arc::new(PluginContext::new(new_settings, http, redis, vfs_mount_path));
+        active.context = Arc::new(PluginContext::new(
+            new_settings,
+            http,
+            redis,
+            vfs_mount_path,
+        ));
         active.enabled = enabled;
         active.valid = valid;
         log_plugin_state(
@@ -152,28 +157,30 @@ impl PluginRegistry {
             })
             .collect();
 
-        let futures = targets.into_iter().map(|(name, plugin, context)| async move {
-            let result = match tokio::time::timeout(
-                DISPATCH_TIMEOUT,
-                plugin.handle_event(event, &context),
-            )
-            .await
-            {
-                Ok(result) => result,
-                Err(_) => {
-                    tracing::error!(
-                        plugin = name,
-                        timeout_secs = DISPATCH_TIMEOUT.as_secs(),
-                        "plugin handle_event timed out"
-                    );
-                    Err(anyhow::anyhow!(
-                        "plugin '{name}' timed out after {}s",
-                        DISPATCH_TIMEOUT.as_secs()
-                    ))
-                }
-            };
-            (name, result)
-        });
+        let futures = targets
+            .into_iter()
+            .map(|(name, plugin, context)| async move {
+                let result = match tokio::time::timeout(
+                    DISPATCH_TIMEOUT,
+                    plugin.handle_event(event, &context),
+                )
+                .await
+                {
+                    Ok(result) => result,
+                    Err(_) => {
+                        tracing::error!(
+                            plugin = name,
+                            timeout_secs = DISPATCH_TIMEOUT.as_secs(),
+                            "plugin handle_event timed out"
+                        );
+                        Err(anyhow::anyhow!(
+                            "plugin '{name}' timed out after {}s",
+                            DISPATCH_TIMEOUT.as_secs()
+                        ))
+                    }
+                };
+                (name, result)
+            });
         futures::future::join_all(futures).await
     }
 
@@ -250,7 +257,6 @@ impl PluginRegistry {
             .find(|p| p.plugin.name() == name)
             .map(|p| p.context.settings.to_json())
     }
-
 }
 
 fn plugin_settings_schema(plugin: &dyn Plugin) -> Vec<SettingField> {

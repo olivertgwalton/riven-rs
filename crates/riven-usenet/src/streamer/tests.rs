@@ -1,5 +1,5 @@
-use super::ingest::{first_slice_gap, par2_sample_block_indices, pick_primary_media_index};
 use super::NzbRarSlice;
+use super::ingest::{first_slice_gap, par2_sample_block_indices, pick_primary_media_index};
 use crate::nzb::{NzbFile, NzbSegment};
 
 fn mk_slice(part_index: usize) -> NzbRarSlice {

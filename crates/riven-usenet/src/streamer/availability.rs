@@ -216,10 +216,8 @@ mod tests {
     #[tokio::test]
     async fn stop_on_first_miss_cancels_remaining_probes() {
         let missing_id = "seg-0".to_string();
-        let (addr, _server) = spawn_stat_server(std::collections::HashSet::from([missing_id
-            .clone()
-        ]))
-        .await;
+        let (addr, _server) =
+            spawn_stat_server(std::collections::HashSet::from([missing_id.clone()])).await;
         let pool = NntpPool::new_multi(vec![test_provider(addr, 8)]);
 
         let mids: Vec<String> = (0..10).map(|i| format!("seg-{i}")).collect();
@@ -238,8 +236,10 @@ mod tests {
     /// `verify_release_complete` rely on for accurate counts.
     #[tokio::test]
     async fn full_sweep_reports_every_miss_when_not_stopping_early() {
-        let missing_ids: std::collections::HashSet<String> =
-            ["seg-1", "seg-4", "seg-7"].iter().map(|s| s.to_string()).collect();
+        let missing_ids: std::collections::HashSet<String> = ["seg-1", "seg-4", "seg-7"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         let (addr, _server) = spawn_stat_server(missing_ids).await;
         let pool = NntpPool::new_multi(vec![test_provider(addr, 8)]);
 

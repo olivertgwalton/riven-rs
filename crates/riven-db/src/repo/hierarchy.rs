@@ -3,8 +3,8 @@ use chrono::Utc;
 use riven_core::entities::media_items;
 use riven_core::types::*;
 use sea_orm::{
-    ColumnTrait, ConnectionTrait, DbBackend, EntityTrait, FromQueryResult,
-    PaginatorTrait, QueryFilter, QueryOrder, Statement,
+    ColumnTrait, ConnectionTrait, DbBackend, EntityTrait, FromQueryResult, PaginatorTrait,
+    QueryFilter, QueryOrder, Statement,
 };
 
 use crate::entities::*;
@@ -67,11 +67,7 @@ pub async fn find_episode_by_show_tvdb(
     Ok(MediaItem::find_by_statement(Statement::from_sql_and_values(
         DbBackend::Postgres,
         sql,
-        [
-            tvdb_id.into(),
-            episode_number.into(),
-            season_number.into(),
-        ],
+        [tvdb_id.into(), episode_number.into(), season_number.into()],
     ))
     .one(orm())
     .await?)
@@ -388,8 +384,14 @@ pub async fn mark_seasons_requested_and_get_episodes(
 ) -> Result<Vec<MediaItem>> {
     let db = orm();
     media_items::Entity::update_many()
-        .col_expr(media_items::Column::IsRequested, sea_orm::sea_query::Expr::value(true))
-        .col_expr(media_items::Column::UpdatedAt, sea_orm::sea_query::Expr::cust("NOW()"))
+        .col_expr(
+            media_items::Column::IsRequested,
+            sea_orm::sea_query::Expr::value(true),
+        )
+        .col_expr(
+            media_items::Column::UpdatedAt,
+            sea_orm::sea_query::Expr::cust("NOW()"),
+        )
         .filter(media_items::Column::ParentId.eq(show_id))
         .filter(media_items::Column::ItemType.eq(MediaItemType::Season))
         .filter(media_items::Column::SeasonNumber.is_in(season_numbers.iter().copied()))

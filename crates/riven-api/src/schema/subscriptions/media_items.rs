@@ -45,10 +45,7 @@ async fn load_item_state_by_tmdb(
     let Some(item) = repo::get_media_item_by_tmdb(tmdb_id).await? else {
         return Ok(None);
     };
-    MediaQuery
-        .media_item_state_tree_inner(item)
-        .await
-        .map(Some)
+    MediaQuery.media_item_state_tree_inner(item).await.map(Some)
 }
 
 async fn load_item_state_by_tvdb(
@@ -57,10 +54,7 @@ async fn load_item_state_by_tvdb(
     let Some(item) = repo::get_media_item_by_tvdb(tvdb_id).await? else {
         return Ok(None);
     };
-    MediaQuery
-        .media_item_state_tree_inner(item)
-        .await
-        .map(Some)
+    MediaQuery.media_item_state_tree_inner(item).await.map(Some)
 }
 
 async fn should_emit_for_external_target(event: &RivenEvent, target: &MediaItem) -> bool {

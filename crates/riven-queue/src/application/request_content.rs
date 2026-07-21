@@ -117,9 +117,7 @@ pub async fn finalize(scope: i64, queue: &JobQueue) {
         .collect();
 
     if !active_external_ids.is_empty() {
-        match repo::delete_items_removed_from_content_services(&active_external_ids)
-            .await
-        {
+        match repo::delete_items_removed_from_content_services(&active_external_ids).await {
             Ok(count) if count > 0 => {
                 tracing::info!(count, "deleted items removed from content services")
             }

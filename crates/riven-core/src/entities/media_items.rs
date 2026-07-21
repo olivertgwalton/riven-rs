@@ -11,13 +11,7 @@ use sea_orm::entity::prelude::*;
 use serde::{Deserialize, Serialize};
 
 #[derive(
-    Clone,
-    Debug,
-    PartialEq,
-    DeriveEntityModel,
-    Serialize,
-    Deserialize,
-    async_graphql::SimpleObject,
+    Clone, Debug, PartialEq, DeriveEntityModel, Serialize, Deserialize, async_graphql::SimpleObject,
 )]
 #[graphql(name = "MediaItem")]
 #[sea_orm(table_name = "media_items")]

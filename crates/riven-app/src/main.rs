@@ -364,7 +364,9 @@ async fn main() -> Result<()> {
                     ))
                     .await
                 {
-                    Ok(Some(row)) => row.try_get::<Option<i64>>("", "media_item_id").unwrap_or(None),
+                    Ok(Some(row)) => row
+                        .try_get::<Option<i64>>("", "media_item_id")
+                        .unwrap_or(None),
                     Ok(None) => None,
                     Err(error) => {
                         tracing::debug!(%error, "read-time repair: media entry lookup failed");

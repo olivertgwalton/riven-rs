@@ -4,8 +4,8 @@ use riven_core::entities::{
     filesystem_entries, media_item_blacklisted_streams, media_item_streams, streams, usenet_meta,
 };
 use riven_core::types::FileSystemEntryType;
-use sea_orm::sea_query::{Expr, OnConflict};
 use sea_orm::ActiveValue::{Set, Unchanged};
+use sea_orm::sea_query::{Expr, OnConflict};
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectionTrait, DbBackend, EntityTrait, FromQueryResult,
     QueryFilter, QuerySelect, Statement,
@@ -25,8 +25,7 @@ pub async fn upsert_stream(
     // Kept as a raw Statement: the magnet column uses a CASE expression on
     // conflict (`CASE WHEN $2 <> '' THEN $2 ELSE streams.magnet END`) that the
     // ActiveModel upsert path can't express cleanly.
-    let file_size = file_size_bytes
-        .map(|s| i64::try_from(s).unwrap_or(i64::MAX));
+    let file_size = file_size_bytes.map(|s| i64::try_from(s).unwrap_or(i64::MAX));
     let stream = Stream::find_by_statement(Statement::from_sql_and_values(
         DbBackend::Postgres,
         "INSERT INTO streams (info_hash, magnet, parsed_data, rank, file_size_bytes) \
@@ -267,9 +266,10 @@ pub async fn get_media_entries(media_item_id: i64) -> Result<Vec<FileSystemEntry
 /// Needed for season-level IDs where entries are stored on child episodes.
 pub async fn get_media_entries_recursive(root_id: i64) -> Result<Vec<FileSystemEntry>> {
     // Raw Statement: recursive CTE walking the media tree.
-    Ok(FileSystemEntry::find_by_statement(Statement::from_sql_and_values(
-        DbBackend::Postgres,
-        "WITH RECURSIVE media_tree AS (
+    Ok(
+        FileSystemEntry::find_by_statement(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "WITH RECURSIVE media_tree AS (
              SELECT id FROM media_items WHERE id = $1
              UNION
              SELECT child.id
@@ -286,10 +286,11 @@ pub async fn get_media_entries_recursive(root_id: i64) -> Result<Vec<FileSystemE
          FROM filesystem_entries fe
          INNER JOIN media_tree mt ON fe.media_item_id = mt.id
          WHERE fe.entry_type = 'media'",
-        [root_id.into()],
-    ))
-    .all(orm())
-    .await?)
+            [root_id.into()],
+        ))
+        .all(orm())
+        .await?,
+    )
 }
 
 pub async fn get_media_entry_paths_for_items(root_ids: &[i64]) -> Result<Vec<String>> {
@@ -458,8 +459,8 @@ pub async fn get_next_playback_entry(entry_id: i64) -> Result<Option<FileSystemE
     .await?)
 }
 
-pub async fn list_filesystem_profile_entry_candidates(
-) -> Result<Vec<FilesystemProfileEntryCandidate>> {
+pub async fn list_filesystem_profile_entry_candidates()
+-> Result<Vec<FilesystemProfileEntryCandidate>> {
     // Raw Statement: large multi-CASE projection across self-joins. item_type
     // is consumed only inside CASE expressions (not selected), so no enum cast
     // is needed on the output.
@@ -703,13 +704,15 @@ pub async fn list_vfs_dir_names(pattern: &str, depth: u32) -> Result<Vec<VfsDirN
          WHERE path LIKE $1 AND entry_type = 'media' \
          ORDER BY 1"
     );
-    Ok(VfsDirName::find_by_statement(Statement::from_sql_and_values(
-        DbBackend::Postgres,
-        sql,
-        [pattern.into()],
-    ))
-    .all(orm())
-    .await?)
+    Ok(
+        VfsDirName::find_by_statement(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            sql,
+            [pattern.into()],
+        ))
+        .all(orm())
+        .await?,
+    )
 }
 
 pub async fn list_vfs_file_names(dir_path: &str) -> Result<Vec<VfsFileName>> {
@@ -718,13 +721,15 @@ pub async fn list_vfs_file_names(dir_path: &str) -> Result<Vec<VfsFileName>> {
          FROM filesystem_entries \
          WHERE path LIKE ($1 || '/%') AND entry_type IN ('media', 'subtitle') \
          ORDER BY 1";
-    Ok(VfsFileName::find_by_statement(Statement::from_sql_and_values(
-        DbBackend::Postgres,
-        sql,
-        [dir_path.into()],
-    ))
-    .all(orm())
-    .await?)
+    Ok(
+        VfsFileName::find_by_statement(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            sql,
+            [dir_path.into()],
+        ))
+        .all(orm())
+        .await?,
+    )
 }
 
 /// Aggregate stat (timestamps + entry count) for all media entries under `path_prefix`.
@@ -845,9 +850,7 @@ pub async fn update_stream_url(entry_id: i64, stream_url: &str) -> Result<()> {
     Ok(())
 }
 
-pub async fn update_library_profiles_batch(
-    updates: &[(i64, serde_json::Value)],
-) -> Result<u64> {
+pub async fn update_library_profiles_batch(updates: &[(i64, serde_json::Value)]) -> Result<u64> {
     if updates.is_empty() {
         return Ok(0);
     }

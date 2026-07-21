@@ -28,9 +28,7 @@ async fn upsert_top_level_item(
         "movie" => (MediaItemType::Movie, second_id_val, None),
         _ => (MediaItemType::Show, None, second_id_val),
     };
-    if let Some(existing) =
-        find_existing_media_item(type_val, imdb_id, tmdb_id, tvdb_id).await?
-    {
+    if let Some(existing) = find_existing_media_item(type_val, imdb_id, tmdb_id, tvdb_id).await? {
         let needs_update = is_requested
             && (!existing.is_requested
                 || (item_request_id.is_some() && existing.item_request_id != item_request_id));
@@ -202,10 +200,7 @@ pub async fn get_pending_items_for_retry(item_type: MediaItemType) -> Result<Vec
 pub async fn get_ongoing_container_ids() -> Result<Vec<i64>> {
     Ok(media_items::Entity::find()
         .filter(media_items::Column::State.eq(MediaItemState::Ongoing))
-        .filter(
-            media_items::Column::ItemType
-                .is_in([MediaItemType::Show, MediaItemType::Season]),
-        )
+        .filter(media_items::Column::ItemType.is_in([MediaItemType::Show, MediaItemType::Season]))
         .select_only()
         .column(media_items::Column::Id)
         .into_tuple::<i64>()
@@ -334,8 +329,7 @@ pub async fn update_media_item_index(
     // `COALESCE($n, col)` keeps the existing value when the new one is NULL —
     // which is exactly SeaORM's `Set` vs `NotSet`: a `None` field leaves the
     // column untouched.
-    let opt_str =
-        |o: Option<&str>| o.map_or(NotSet, |v| Set(Some(v.to_owned())));
+    let opt_str = |o: Option<&str>| o.map_or(NotSet, |v| Set(Some(v.to_owned())));
     media_items::ActiveModel {
         id: Unchanged(id),
         title: indexed.title.clone().map_or(NotSet, Set),
@@ -489,7 +483,10 @@ pub async fn increment_failed_attempts(id: i64) -> Result<()> {
             media_items::Column::FailedAttempts,
             Expr::col(media_items::Column::FailedAttempts).add(1),
         )
-        .col_expr(media_items::Column::LastScrapeAttemptAt, Expr::cust("NOW()"))
+        .col_expr(
+            media_items::Column::LastScrapeAttemptAt,
+            Expr::cust("NOW()"),
+        )
         .col_expr(media_items::Column::UpdatedAt, Expr::cust("NOW()"))
         .filter(media_items::Column::Id.eq(id))
         .exec(orm())

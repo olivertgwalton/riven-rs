@@ -38,7 +38,10 @@ impl ExternalIds {
         self.imdb_id = self.imdb_id.take().or(other.imdb_id);
         self.tvdb_id = self.tvdb_id.take().or(other.tvdb_id);
         self.tmdb_id = self.tmdb_id.take().or(other.tmdb_id);
-        self.external_request_id = self.external_request_id.take().or(other.external_request_id);
+        self.external_request_id = self
+            .external_request_id
+            .take()
+            .or(other.external_request_id);
         self.requested_by = self.requested_by.take().or(other.requested_by);
 
         self.requested_seasons = match (self.requested_seasons.take(), other.requested_seasons) {

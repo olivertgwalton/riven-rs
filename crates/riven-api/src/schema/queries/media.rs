@@ -2,8 +2,8 @@ use async_graphql::*;
 use riven_core::entities::{filesystem_entries, media_items};
 use riven_core::types::*;
 use riven_db::entities::*;
-use riven_db::repo;
 use riven_db::orm;
+use riven_db::repo;
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
 
 use crate::schema::helpers::derive_media_metadata;
@@ -61,7 +61,11 @@ pub struct MediaQuery;
 
 #[Object]
 impl MediaQuery {
-    async fn media_item_by_id(&self, _ctx: &Context<'_>, id: i64) -> Result<Option<MediaItemUnion>> {
+    async fn media_item_by_id(
+        &self,
+        _ctx: &Context<'_>,
+        id: i64,
+    ) -> Result<Option<MediaItemUnion>> {
         Ok(repo::get_media_item(id).await?.map(MediaItemUnion::from))
     }
 
@@ -262,10 +266,7 @@ impl MediaQuery {
 impl MediaQuery {
     /// Build a `MediaItemFull` from an already-resolved lookup result,
     /// short-circuiting to `None` when the item was not found.
-    async fn media_item_full_for(
-        &self,
-        item: Option<MediaItem>,
-    ) -> Result<Option<MediaItemFull>> {
+    async fn media_item_full_for(&self, item: Option<MediaItem>) -> Result<Option<MediaItemFull>> {
         let Some(item) = item else {
             return Ok(None);
         };
@@ -395,12 +396,9 @@ impl MediaQuery {
                 Vec::new()
             } else {
                 filesystem_entries::Entity::find()
+                    .filter(filesystem_entries::Column::EntryType.eq(FileSystemEntryType::Media))
                     .filter(
-                        filesystem_entries::Column::EntryType.eq(FileSystemEntryType::Media),
-                    )
-                    .filter(
-                        filesystem_entries::Column::MediaItemId
-                            .is_in(episode_ids.iter().copied()),
+                        filesystem_entries::Column::MediaItemId.is_in(episode_ids.iter().copied()),
                     )
                     .into_model::<FileSystemEntry>()
                     .all(orm())

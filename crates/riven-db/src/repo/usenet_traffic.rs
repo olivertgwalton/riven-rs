@@ -3,8 +3,8 @@
 
 use anyhow::Result;
 use riven_core::entities::{usenet_provider_traffic, usenet_traffic_daily};
-use sea_orm::sea_query::{Expr, OnConflict};
 use sea_orm::ActiveValue::Set;
+use sea_orm::sea_query::{Expr, OnConflict};
 use sea_orm::{DbBackend, EntityTrait, FromQueryResult, QueryOrder, Statement};
 
 use crate::orm;
@@ -28,11 +28,7 @@ pub struct DailyTraffic {
 /// Add a provider's traffic delta to both the lifetime total and today's
 /// bucket. No-op for a non-positive delta — callers guard, but it's cheap
 /// insurance.
-pub async fn add_provider_traffic(
-    host: &str,
-    bytes_delta: i64,
-    articles_delta: i64,
-) -> Result<()> {
+pub async fn add_provider_traffic(host: &str, bytes_delta: i64, articles_delta: i64) -> Result<()> {
     if bytes_delta <= 0 && articles_delta <= 0 {
         return Ok(());
     }
@@ -120,16 +116,18 @@ pub async fn list_provider_traffic_daily(days: i32) -> Result<Vec<DailyTraffic>>
     // `day` is a PG date; the original projected it with to_char(...) as a
     // YYYY-MM-DD string, which `DailyTraffic.day: String` expects. Keep the raw
     // statement so the formatting and the `current_date - (n-1)` window match.
-    Ok(DailyTraffic::find_by_statement(Statement::from_sql_and_values(
-        DbBackend::Postgres,
-        r#"
+    Ok(
+        DailyTraffic::find_by_statement(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            r#"
         SELECT to_char(day, 'YYYY-MM-DD') AS day, host, bytes_downloaded, articles_downloaded
         FROM usenet_traffic_daily
         WHERE day >= current_date - ($1::int - 1)
         ORDER BY day ASC, host ASC
         "#,
-        [days.into()],
-    ))
-    .all(orm())
-    .await?)
+            [days.into()],
+        ))
+        .all(orm())
+        .await?,
+    )
 }

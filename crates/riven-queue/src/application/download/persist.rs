@@ -336,14 +336,7 @@ pub async fn persist_episode(
     let config = queue.downloader_config.read().await;
     if !skip_bitrate_check && !config.episode_passes(largest.file_size, item.runtime) {
         drop(config);
-        handle_bitrate_failure(
-            id,
-            info_hash,
-            largest.file_size,
-            item.runtime,
-            "episode",
-        )
-        .await;
+        handle_bitrate_failure(id, info_hash, largest.file_size, item.runtime, "episode").await;
         return false;
     }
     drop(config);

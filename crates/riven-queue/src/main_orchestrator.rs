@@ -194,9 +194,7 @@ impl MainOrchestrator {
 
         let target_date = match item.item_type {
             MediaItemType::Show => {
-                match repo::get_next_unreleased_air_date_for_show(item.id)
-                    .await
-                {
+                match repo::get_next_unreleased_air_date_for_show(item.id).await {
                     Ok(Some(date)) => Some(date),
                     Ok(None) | Err(_) => {
                         if item.state == MediaItemState::Unreleased {
@@ -256,14 +254,13 @@ impl MainOrchestrator {
             MediaItemType::Season,
             MediaItemType::Episode,
         ] {
-            let items =
-                match repo::get_pending_items_for_retry(item_type).await {
-                    Ok(items) => items,
-                    Err(error) => {
-                        tracing::error!(%error, "retry_library: failed to fetch pending items");
-                        vec![]
-                    }
-                };
+            let items = match repo::get_pending_items_for_retry(item_type).await {
+                Ok(items) => items,
+                Err(error) => {
+                    tracing::error!(%error, "retry_library: failed to fetch pending items");
+                    vec![]
+                }
+            };
             for item in items {
                 self.process_media_item(&item).await;
             }

@@ -31,11 +31,7 @@ use crate::{JobQueue, ProcessMediaItemJob, ProcessStep, ScrapeJob};
 pub async fn run(job: &ProcessMediaItemJob, queue: &JobQueue) {
     let id = job.id;
 
-    let Some(item) = repo::get_media_item(id)
-        .await
-        .ok()
-        .flatten()
-    else {
+    let Some(item) = repo::get_media_item(id).await.ok().flatten() else {
         tracing::debug!(id, step = ?job.step, "process-media-item: item gone");
         return;
     };

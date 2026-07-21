@@ -100,11 +100,9 @@ pub async fn persist_manual_download(
         return Err(ManualDownloadError::incorrect_state(item));
     }
 
-    let streams = repo::get_streams_for_item(id)
-        .await
-        .map_err(|error| {
-            ManualDownloadError::download_error(Some(item.clone()), error.to_string())
-        })?;
+    let streams = repo::get_streams_for_item(id).await.map_err(|error| {
+        ManualDownloadError::download_error(Some(item.clone()), error.to_string())
+    })?;
     let Some(stream) = streams
         .into_iter()
         .find(|stream| stream.info_hash.eq_ignore_ascii_case(&torrent.info_hash))
@@ -684,10 +682,7 @@ async fn run_downloads(
     // Season/Show persists already emit their own Success/PartialSuccess events
     // and library-state updates per profile (see persist_season/persist_show);
     // the notify+finalize below is the Movie/Episode-only completion path.
-    if matches!(
-        item.item_type,
-        MediaItemType::Season | MediaItemType::Show
-    ) {
+    if matches!(item.item_type, MediaItemType::Season | MediaItemType::Show) {
         return true;
     }
 

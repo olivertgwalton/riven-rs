@@ -3,10 +3,7 @@ use riven_core::types::MediaItemType;
 use riven_db::entities::{MediaItem, Stream};
 use riven_db::repo;
 
-async fn load_streams(
-    media_item_id: i64,
-    info_hashes: Option<Vec<String>>,
-) -> Result<Vec<Stream>> {
+async fn load_streams(media_item_id: i64, info_hashes: Option<Vec<String>>) -> Result<Vec<Stream>> {
     let mut streams = repo::get_streams_for_item(media_item_id).await?;
     if let Some(info_hashes) = info_hashes {
         streams.retain(|stream| {

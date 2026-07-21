@@ -187,8 +187,7 @@ pub async fn parse_results(id: i64, _job: &ParseScrapeResultsJob, queue: &JobQue
 
     let responses: Vec<ScrapeResponse> = queue.drain_flow_results("scrape", id).await;
 
-    let Some(item) = load_media_item_or_log(id, "parse-scrape-results").await
-    else {
+    let Some(item) = load_media_item_or_log(id, "parse-scrape-results").await else {
         return;
     };
 
@@ -202,10 +201,8 @@ pub async fn parse_results(id: i64, _job: &ParseScrapeResultsJob, queue: &JobQue
     }
 
     let hierarchy =
-        load_media_item_hierarchy_or_log(item.id, "parse-scrape-results hierarchy")
-            .await;
-    let parse_context =
-        build_parse_item_context_with_hierarchy(item, hierarchy.as_ref()).await;
+        load_media_item_hierarchy_or_log(item.id, "parse-scrape-results hierarchy").await;
+    let parse_context = build_parse_item_context_with_hierarchy(item, hierarchy.as_ref()).await;
     let item = parse_context.item;
     let item_title = parse_context.item_title;
     let item_type = parse_context.item_type;

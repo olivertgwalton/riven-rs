@@ -26,24 +26,22 @@ impl RequestsSubscription {
     ) -> async_graphql::Result<impl Stream<Item = async_graphql::Result<ItemRequest>>> {
         let queue = Arc::clone(ctx.data::<Arc<riven_queue::JobQueue>>()?);
         Ok(
-            broadcast_stream(queue.event_tx.subscribe()).filter_map(move |event| {
-                async move {
-                    let RivenEvent::ItemRequestCreated {
-                        request_id,
-                        request_type,
-                        ..
-                    } = event
-                    else {
-                        return None;
-                    };
-                    if request_type != ItemRequestType::Movie {
-                        return None;
-                    }
-                    match load_item_request(request_id).await {
-                        Ok(Some(request)) => Some(Ok(request)),
-                        Ok(None) => None,
-                        Err(error) => Some(Err(error)),
-                    }
+            broadcast_stream(queue.event_tx.subscribe()).filter_map(move |event| async move {
+                let RivenEvent::ItemRequestCreated {
+                    request_id,
+                    request_type,
+                    ..
+                } = event
+                else {
+                    return None;
+                };
+                if request_type != ItemRequestType::Movie {
+                    return None;
+                }
+                match load_item_request(request_id).await {
+                    Ok(Some(request)) => Some(Ok(request)),
+                    Ok(None) => None,
+                    Err(error) => Some(Err(error)),
                 }
             }),
         )
@@ -56,24 +54,22 @@ impl RequestsSubscription {
     ) -> async_graphql::Result<impl Stream<Item = async_graphql::Result<ItemRequest>>> {
         let queue = Arc::clone(ctx.data::<Arc<riven_queue::JobQueue>>()?);
         Ok(
-            broadcast_stream(queue.event_tx.subscribe()).filter_map(move |event| {
-                async move {
-                    let RivenEvent::ItemRequestCreated {
-                        request_id,
-                        request_type,
-                        ..
-                    } = event
-                    else {
-                        return None;
-                    };
-                    if request_type != ItemRequestType::Show {
-                        return None;
-                    }
-                    match load_item_request(request_id).await {
-                        Ok(Some(request)) => Some(Ok(request)),
-                        Ok(None) => None,
-                        Err(error) => Some(Err(error)),
-                    }
+            broadcast_stream(queue.event_tx.subscribe()).filter_map(move |event| async move {
+                let RivenEvent::ItemRequestCreated {
+                    request_id,
+                    request_type,
+                    ..
+                } = event
+                else {
+                    return None;
+                };
+                if request_type != ItemRequestType::Show {
+                    return None;
+                }
+                match load_item_request(request_id).await {
+                    Ok(Some(request)) => Some(Ok(request)),
+                    Ok(None) => None,
+                    Err(error) => Some(Err(error)),
                 }
             }),
         )
@@ -86,24 +82,22 @@ impl RequestsSubscription {
     ) -> async_graphql::Result<impl Stream<Item = async_graphql::Result<ItemRequest>>> {
         let queue = Arc::clone(ctx.data::<Arc<riven_queue::JobQueue>>()?);
         Ok(
-            broadcast_stream(queue.event_tx.subscribe()).filter_map(move |event| {
-                async move {
-                    let RivenEvent::ItemRequestUpdated {
-                        request_id,
-                        request_type,
-                        ..
-                    } = event
-                    else {
-                        return None;
-                    };
-                    if request_type != ItemRequestType::Show {
-                        return None;
-                    }
-                    match load_item_request(request_id).await {
-                        Ok(Some(request)) => Some(Ok(request)),
-                        Ok(None) => None,
-                        Err(error) => Some(Err(error)),
-                    }
+            broadcast_stream(queue.event_tx.subscribe()).filter_map(move |event| async move {
+                let RivenEvent::ItemRequestUpdated {
+                    request_id,
+                    request_type,
+                    ..
+                } = event
+                else {
+                    return None;
+                };
+                if request_type != ItemRequestType::Show {
+                    return None;
+                }
+                match load_item_request(request_id).await {
+                    Ok(Some(request)) => Some(Ok(request)),
+                    Ok(None) => None,
+                    Err(error) => Some(Err(error)),
                 }
             }),
         )

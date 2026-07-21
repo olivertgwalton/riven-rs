@@ -69,18 +69,16 @@ impl UsenetHealthMutations {
             Err(_) => ("unknown", 0, 0, 0, 0),
         };
 
-        riven_db::repo::upsert_usenet_file_health(
-            riven_db::repo::UsenetHealthUpdate {
-                info_hash: &info_hash,
-                file_index,
-                media_item_id,
-                status,
-                total_segments: total,
-                sampled_segments: sampled,
-                missing_segments: missing,
-                error_segments: errors,
-            },
-        )
+        riven_db::repo::upsert_usenet_file_health(riven_db::repo::UsenetHealthUpdate {
+            info_hash: &info_hash,
+            file_index,
+            media_item_id,
+            status,
+            total_segments: total,
+            sampled_segments: sampled,
+            missing_segments: missing,
+            error_segments: errors,
+        })
         .await?;
 
         Ok(status.to_string())
