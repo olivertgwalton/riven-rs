@@ -70,6 +70,41 @@ fn file_stat(entry: &FileSystemEntry) -> VfsEntryStat {
     }
 }
 
+fn directory_stat(
+    stat: &repo::VfsDirStatResult,
+    fallback_time: DateTime<Utc>,
+    nlink: i32,
+) -> VfsEntryStat {
+    let mtime = stat.mtime.unwrap_or(fallback_time);
+    VfsEntryStat {
+        mtime,
+        ctime: stat.ctime.unwrap_or(fallback_time),
+        atime: mtime,
+        mode: MODE_DIR,
+        nlink,
+        size: 0,
+        uid: 0,
+        gid: 0,
+    }
+}
+
+fn entry_names<T>(
+    entries: impl IntoIterator<Item = T>,
+    name: impl Fn(T) -> Option<String>,
+) -> Vec<String> {
+    entries.into_iter().filter_map(name).collect()
+}
+
+fn unique_entry_names<T>(
+    entries: impl IntoIterator<Item = T>,
+    name: impl Fn(T) -> Option<String>,
+) -> Vec<String> {
+    let mut names = entry_names(entries, name);
+    let mut seen = std::collections::HashSet::new();
+    names.retain(|name| seen.insert(name.clone()));
+    names
+}
+
 async fn get_vfs_entry_stat(path: &str) -> async_graphql::Result<VfsEntryStat> {
     let now = Utc::now();
     let segments = path_segments(path);
@@ -77,46 +112,19 @@ async fn get_vfs_entry_stat(path: &str) -> async_graphql::Result<VfsEntryStat> {
     match segments.as_slice() {
         [] => {
             let stat = repo::get_vfs_dir_stat("").await?;
-            Ok(VfsEntryStat {
-                mtime: stat.mtime.unwrap_or(now),
-                ctime: stat.ctime.unwrap_or(now),
-                atime: stat.mtime.unwrap_or(now),
-                mode: MODE_DIR,
-                nlink: 4,
-                size: 0,
-                uid: 0,
-                gid: 0,
-            })
+            Ok(directory_stat(&stat, now, 4))
         }
 
         ["movies"] => {
             let stat = repo::get_vfs_dir_stat("/movies").await?;
             let count = repo::count_vfs_distinct_dirs("/movies/%/%", 3).await?;
-            Ok(VfsEntryStat {
-                mtime: stat.mtime.unwrap_or(now),
-                ctime: stat.ctime.unwrap_or(now),
-                atime: stat.mtime.unwrap_or(now),
-                mode: MODE_DIR,
-                nlink: 2 + count as i32,
-                size: 0,
-                uid: 0,
-                gid: 0,
-            })
+            Ok(directory_stat(&stat, now, 2 + count as i32))
         }
 
         ["shows"] => {
             let stat = repo::get_vfs_dir_stat("/shows").await?;
             let count = repo::count_vfs_distinct_dirs("/shows/%/%/%", 3).await?;
-            Ok(VfsEntryStat {
-                mtime: stat.mtime.unwrap_or(now),
-                ctime: stat.ctime.unwrap_or(now),
-                atime: stat.mtime.unwrap_or(now),
-                mode: MODE_DIR,
-                nlink: 2 + count as i32,
-                size: 0,
-                uid: 0,
-                gid: 0,
-            })
+            Ok(directory_stat(&stat, now, 2 + count as i32))
         }
 
         ["movies", dir] => {
@@ -125,16 +133,7 @@ async fn get_vfs_entry_stat(path: &str) -> async_graphql::Result<VfsEntryStat> {
             if stat.entry_count == 0 {
                 return Err(Error::new("Entry not found"));
             }
-            Ok(VfsEntryStat {
-                mtime: stat.mtime.unwrap_or(now),
-                ctime: stat.ctime.unwrap_or(now),
-                atime: stat.mtime.unwrap_or(now),
-                mode: MODE_DIR,
-                nlink: 2,
-                size: 0,
-                uid: 0,
-                gid: 0,
-            })
+            Ok(directory_stat(&stat, now, 2))
         }
 
         ["movies", _, _] => {
@@ -151,16 +150,7 @@ async fn get_vfs_entry_stat(path: &str) -> async_graphql::Result<VfsEntryStat> {
                 return Err(Error::new("Entry not found"));
             }
             let season_count = repo::count_vfs_distinct_dirs(&format!("{prefix}/%/%"), 4).await?;
-            Ok(VfsEntryStat {
-                mtime: stat.mtime.unwrap_or(now),
-                ctime: stat.ctime.unwrap_or(now),
-                atime: stat.mtime.unwrap_or(now),
-                mode: MODE_DIR,
-                nlink: 2 + season_count as i32,
-                size: 0,
-                uid: 0,
-                gid: 0,
-            })
+            Ok(directory_stat(&stat, now, 2 + season_count as i32))
         }
 
         ["shows", dir, season] => {
@@ -169,16 +159,7 @@ async fn get_vfs_entry_stat(path: &str) -> async_graphql::Result<VfsEntryStat> {
             if stat.entry_count == 0 {
                 return Err(Error::new("Entry not found"));
             }
-            Ok(VfsEntryStat {
-                mtime: stat.mtime.unwrap_or(now),
-                ctime: stat.ctime.unwrap_or(now),
-                atime: stat.mtime.unwrap_or(now),
-                mode: MODE_DIR,
-                nlink: 2,
-                size: 0,
-                uid: 0,
-                gid: 0,
-            })
+            Ok(directory_stat(&stat, now, 2))
         }
 
         ["shows", _, _, _] => {
@@ -198,47 +179,38 @@ async fn get_vfs_directory_entry_paths(path: &str) -> async_graphql::Result<Vec<
     match segments.as_slice() {
         [] => Ok(vec!["movies".to_string(), "shows".to_string()]),
 
-        ["movies"] => {
-            let entries = repo::list_vfs_dir_names("/movies/%/%", 3).await?;
-            let mut seen = std::collections::HashSet::new();
-            Ok(entries
-                .into_iter()
-                .filter_map(|e| e.name)
-                .filter(|name| seen.insert(name.clone()))
-                .collect())
-        }
+        ["movies"] => Ok(unique_entry_names(
+            repo::list_vfs_dir_names("/movies/%/%", 3).await?,
+            |entry| entry.name,
+        )),
 
         ["movies", dir] => {
             let dir_path = format!("/movies/{dir}");
-            let entries = repo::list_vfs_file_names(&dir_path).await?;
-            Ok(entries.into_iter().filter_map(|e| e.name).collect())
+            Ok(entry_names(
+                repo::list_vfs_file_names(&dir_path).await?,
+                |entry| entry.name,
+            ))
         }
 
-        ["shows"] => {
-            let entries = repo::list_vfs_dir_names("/shows/%/%/%", 3).await?;
-            let mut seen = std::collections::HashSet::new();
-            Ok(entries
-                .into_iter()
-                .filter_map(|e| e.name)
-                .filter(|name| seen.insert(name.clone()))
-                .collect())
-        }
+        ["shows"] => Ok(unique_entry_names(
+            repo::list_vfs_dir_names("/shows/%/%/%", 3).await?,
+            |entry| entry.name,
+        )),
 
         ["shows", dir] => {
             let pattern = format!("/shows/{dir}/%/%");
-            let entries = repo::list_vfs_dir_names(&pattern, 4).await?;
-            let mut seen = std::collections::HashSet::new();
-            Ok(entries
-                .into_iter()
-                .filter_map(|e| e.name)
-                .filter(|name| seen.insert(name.clone()))
-                .collect())
+            Ok(unique_entry_names(
+                repo::list_vfs_dir_names(&pattern, 4).await?,
+                |entry| entry.name,
+            ))
         }
 
         ["shows", dir, season] => {
             let dir_path = format!("/shows/{dir}/{season}");
-            let entries = repo::list_vfs_file_names(&dir_path).await?;
-            Ok(entries.into_iter().filter_map(|e| e.name).collect())
+            Ok(entry_names(
+                repo::list_vfs_file_names(&dir_path).await?,
+                |entry| entry.name,
+            ))
         }
 
         ["shows", _, _, file] => Ok(vec![file.to_string()]),

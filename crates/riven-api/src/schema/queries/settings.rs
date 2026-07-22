@@ -7,6 +7,23 @@ use std::sync::Arc;
 use crate::schema::auth::require_settings_access;
 use crate::schema::types::{InstanceStatus, SettingsSection, SetupGroup};
 
+fn effective_profile_settings(
+    profile: riven_rank::QualityProfile,
+    stored: Option<&serde_json::Value>,
+) -> serde_json::Value {
+    stored
+        .filter(|value| {
+            !value.is_null() && !value.as_object().is_some_and(serde_json::Map::is_empty)
+        })
+        .and_then(|value| {
+            riven_queue::discovery::merge_builtin_profile_settings(profile, value).ok()
+        })
+        .and_then(|settings| serde_json::to_value(settings).ok())
+        .unwrap_or_else(|| {
+            serde_json::to_value(profile.base_settings()).unwrap_or(serde_json::Value::Null)
+        })
+}
+
 #[derive(Default)]
 pub struct CoreSettingsQuery;
 
@@ -27,22 +44,7 @@ impl CoreSettingsQuery {
             .map(|&p| {
                 let db_row = db_profiles.iter().find(|r| r.name == p.id());
 
-                let effective_settings = db_row
-                    .and_then(|row| {
-                        let is_empty = matches!(&row.settings, serde_json::Value::Object(m) if m.is_empty())
-                            || matches!(&row.settings, serde_json::Value::Null);
-                        if is_empty {
-                            return None;
-                        }
-                        riven_queue::discovery::merge_builtin_profile_settings(p, &row.settings)
-                            .ok()
-                            .and_then(|s| serde_json::to_value(&s).ok())
-                    })
-                    .unwrap_or_else(|| {
-                        serde_json::to_value(p.base_settings()).unwrap_or(serde_json::Value::Null)
-                    });
-
-                let mut settings = effective_settings;
+                let mut settings = effective_profile_settings(p, db_row.map(|row| &row.settings));
                 inject_rank_defaults(&mut settings);
                 serde_json::json!({
                     "id":          p.id(),
@@ -71,20 +73,7 @@ impl CoreSettingsQuery {
             .find(|p| db_profiles.iter().any(|r| r.enabled && r.name == p.id()))
         {
             let row = db_profiles.iter().find(|r| r.name == preset.id());
-            let mut settings = row
-                .and_then(|row| {
-                    let is_empty = matches!(&row.settings, serde_json::Value::Object(m) if m.is_empty())
-                        || matches!(&row.settings, serde_json::Value::Null);
-                    if is_empty {
-                        return None;
-                    }
-                    riven_queue::discovery::merge_builtin_profile_settings(*preset, &row.settings)
-                        .ok()
-                        .and_then(|s| serde_json::to_value(&s).ok())
-                })
-                .unwrap_or_else(|| {
-                    serde_json::to_value(preset.base_settings()).unwrap_or(serde_json::Value::Null)
-                });
+            let mut settings = effective_profile_settings(*preset, row.map(|row| &row.settings));
             inject_rank_defaults(&mut settings);
             return Ok(serde_json::json!({ "name": preset.id(), "settings": settings }));
         }
@@ -167,25 +156,29 @@ impl CoreSettingsQuery {
     /// This is the single source of truth for setup-step grouping, labels, and order.
     async fn setup_groups(&self, ctx: &Context<'_>) -> Result<Vec<SetupGroup>> {
         require_settings_access(ctx)?;
-        Ok(vec![
-            SetupGroup {
-                id: "media".to_string(),
-                title: "Media Servers".to_string(),
-                description: "Pick the server Riven should update after downloads finish."
-                    .to_string(),
-            },
-            SetupGroup {
-                id: "sources".to_string(),
-                title: "Content Sources".to_string(),
-                description: "Pick the sources Riven should scrape from.".to_string(),
-            },
-            SetupGroup {
-                id: "services".to_string(),
-                title: "Metadata & Requests".to_string(),
-                description: "Connect metadata, lists, calendars, and request services."
-                    .to_string(),
-            },
-        ])
+        Ok([
+            (
+                "media",
+                "Media Servers",
+                "Pick the server Riven should update after downloads finish.",
+            ),
+            (
+                "sources",
+                "Content Sources",
+                "Pick the sources Riven should scrape from.",
+            ),
+            (
+                "services",
+                "Metadata & Requests",
+                "Connect metadata, lists, calendars, and request services.",
+            ),
+        ]
+        .map(|(id, title, description)| SetupGroup {
+            id: id.into(),
+            title: title.into(),
+            description: description.into(),
+        })
+        .into())
     }
 
     /// Every configurable settings surface — the instance-wide "general"
