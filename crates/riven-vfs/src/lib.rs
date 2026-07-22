@@ -104,12 +104,21 @@ pub fn mount(
 
     let mut config = fuser::Config::default();
     config.acl = fuser::SessionACL::All;
+    // Network-backed reads may spend time waiting on an upstream CDN. Keep
+    // several kernel request loops available so metadata and unrelated files
+    // continue to make progress while a read is outstanding. A cloned FUSE
+    // fd avoids contention between those loops on Linux 4.5+.
+    config.n_threads = Some(4);
+    config.clone_fd = cfg!(target_os = "linux");
     config.mount_options = vec![
         fuser::MountOption::RO,
         fuser::MountOption::FSName("riven".to_string()),
         fuser::MountOption::AutoUnmount,
         fuser::MountOption::DefaultPermissions,
-        fuser::MountOption::CUSTOM("max_read=4194304".to_string()),
+        // Align the largest kernel request with the VFS cache granularity.
+        // Larger requests can delay a reply while several chunks are fetched;
+        // smaller requests add avoidable FUSE round trips.
+        fuser::MountOption::CUSTOM("max_read=1048576".to_string()),
     ];
     let session = fuser::spawn_mount2(fs, mount_path, &config)?;
     tracing::info!(path = %mount_path.display(), "VFS mounted");

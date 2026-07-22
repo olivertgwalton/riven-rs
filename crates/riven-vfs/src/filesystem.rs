@@ -7,8 +7,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use dashmap::DashMap;
 use fuser::{
     Errno, FileAttr, FileHandle as FuseFh, FileType, Filesystem, FopenFlags, Generation, INodeNo,
-    KernelConfig, LockOwner, OpenFlags, ReplyAttr, ReplyData, ReplyDirectory, ReplyEmpty,
-    ReplyEntry, ReplyOpen, Request,
+    LockOwner, OpenFlags, ReplyAttr, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen,
+    Request,
 };
 use parking_lot::Mutex;
 use tokio::sync::mpsc;
@@ -90,6 +90,7 @@ struct RivenFsInner {
 
     range_cache: Arc<RangeCache>,
     prewarm_semaphore: Arc<Semaphore>,
+    read_semaphore: Arc<Semaphore>,
     link_refresh_locks: DashMap<i64, Arc<Mutex<()>>>,
     local_source: Option<Arc<dyn riven_core::local_source::LocalByteSource>>,
 }
@@ -143,6 +144,10 @@ impl RivenFsInner {
             state: VfsState::new(),
             range_cache: Arc::new(RangeCache::new(cache_capacity_bytes)),
             prewarm_semaphore: Arc::new(Semaphore::new(8)),
+            // Bound upstream reads independently of tokio's much larger
+            // blocking-task pool. This prevents scans or concurrent players
+            // from creating hundreds of live HTTP buffers at once.
+            read_semaphore: Arc::new(Semaphore::new(32)),
             link_refresh_locks: DashMap::new(),
             local_source,
         }
@@ -371,11 +376,6 @@ async fn prewarm_header_footer(
 }
 
 impl Filesystem for RivenFs {
-    fn init(&mut self, _req: &Request, config: &mut KernelConfig) -> std::io::Result<()> {
-        let _previous = config.set_max_readahead(128 * 1024 * 1024);
-        Ok(())
-    }
-
     fn lookup(&self, _req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEntry) {
         let s = &self.inner;
         let parent = parent.0;
@@ -618,20 +618,28 @@ impl Filesystem for RivenFs {
         // synchronously and can take seconds (NNTP fetch, dead-link refresh,
         // retry); running it on the FUSE thread head-of-line blocks every
         // other op on the mount, which is what wedged playback whenever
-        // Plex's analyzer fan-out hammered a file. `spawn_blocking` uses
-        // tokio's blocking-task pool (default ~512 threads, grown on demand),
-        // so concurrency scales naturally with load instead of an arbitrary
-        // worker cap. Per-handle serialisation is still preserved by the
-        // `Mutex<OpenedFile>` inside `file_handles`.
+        // Plex's analyzer fan-out hammered a file. Admission to tokio's
+        // blocking-task pool is bounded so a burst of kernel reads cannot
+        // create hundreds of blocked network workers. Per-handle
+        // serialisation is still preserved by the `Mutex<OpenedFile>` inside
+        // `file_handles`.
         let inner = Arc::clone(&self.inner);
         let fh = fh.0;
-        inner.runtime.clone().spawn_blocking(move || {
-            let s = inner.as_ref();
-            let Some(entry) = s.state.file_handles.get(&fh) else {
-                reply.error(Errno::EBADF);
+        let runtime = inner.runtime.clone();
+        let read_semaphore = Arc::clone(&inner.read_semaphore);
+        runtime.clone().spawn(async move {
+            let Ok(permit) = read_semaphore.acquire_owned().await else {
+                reply.error(Errno::EIO);
                 return;
             };
-            let mut handle = entry.lock();
+            if let Err(error) = runtime.spawn_blocking(move || {
+                let _permit = permit;
+                let s = inner.as_ref();
+                let Some(entry) = s.state.file_handles.get(&fh) else {
+                    reply.error(Errno::EBADF);
+                    return;
+                };
+                let mut handle = entry.lock();
 
             if let OpenedFile::Subtitle { content } = &*handle {
                 let len = content.len() as u64;
@@ -728,9 +736,12 @@ impl Filesystem for RivenFs {
                 }
             };
 
-            match outcome {
-                ReadOutcome::Data(buf) => reply.data(&buf),
-                ReadOutcome::Error(code) => reply.error(Errno::from_i32(code)),
+                match outcome {
+                    ReadOutcome::Data(buf) => reply.data(&buf),
+                    ReadOutcome::Error(code) => reply.error(Errno::from_i32(code)),
+                }
+            }).await {
+                tracing::error!(%error, fh, "FUSE read worker failed");
             }
         });
     }
