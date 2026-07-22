@@ -217,21 +217,32 @@ impl MainOrchestrator {
         match repo::get_ongoing_container_ids().await {
             Ok(ids) => {
                 if let Err(error) = repo::force_recompute(&ids).await {
-                    tracing::error!(%error, "retry_library: failed to recompute ongoing items");
+                    tracing::error!(
+                        %error,
+                        items = ids.len(),
+                        "library sweep: could not refresh the state of ongoing shows/seasons; their state may be stale until the next sweep"
+                    );
                 }
             }
             Err(error) => {
-                tracing::error!(%error, "retry_library: failed to fetch ongoing items");
+                tracing::error!(
+                    %error,
+                    "library sweep: could not list ongoing shows/seasons, skipping their state refresh this pass"
+                );
             }
         }
 
         let requests = match repo::get_retryable_item_requests().await {
             Ok(r) => r,
             Err(error) => {
-                tracing::error!(%error, "retry_library: failed to fetch item requests");
+                tracing::error!(
+                    %error,
+                    "library sweep: could not list requests that need retrying, skipping them this pass"
+                );
                 vec![]
             }
         };
+        let request_count = requests.len();
         let lib = LibraryOrchestrator::new(&self.queue);
         stream::iter(requests)
             .for_each_concurrent(32, |request| {
@@ -248,6 +259,7 @@ impl MainOrchestrator {
         // state hasn't caught up (e.g. an ongoing anime season), which would
         // otherwise orphan it forever since it never surfaces via the
         // Movie/Show sweep.
+        let mut retried = 0usize;
         for item_type in [
             MediaItemType::Movie,
             MediaItemType::Show,
@@ -257,13 +269,26 @@ impl MainOrchestrator {
             let items = match repo::get_pending_items_for_retry(item_type).await {
                 Ok(items) => items,
                 Err(error) => {
-                    tracing::error!(%error, "retry_library: failed to fetch pending items");
+                    tracing::error!(
+                        %error,
+                        item_type = ?item_type,
+                        "library sweep: could not list items that need retrying, skipping this type this pass"
+                    );
                     vec![]
                 }
             };
+            retried += items.len();
             for item in items {
                 self.process_media_item(&item).await;
             }
+        }
+
+        if request_count > 0 || retried > 0 {
+            tracing::info!(
+                requests = request_count,
+                items = retried,
+                "library sweep: re-queued incomplete items whose retry cooldown has expired"
+            );
         }
     }
 
@@ -271,7 +296,10 @@ impl MainOrchestrator {
         let ids = match repo::transition_unreleased_aired().await {
             Ok(ids) => ids,
             Err(error) => {
-                tracing::error!(%error, "failed to transition unreleased aired items");
+                tracing::error!(
+                    %error,
+                    "air-date check: could not move newly aired items out of Unreleased; they stay unreleased until the next check"
+                );
                 return;
             }
         };
@@ -280,7 +308,7 @@ impl MainOrchestrator {
         }
         tracing::info!(
             count = ids.len(),
-            "transitioned unreleased items that have aired"
+            "air-date check: items have now aired and are queued for scraping"
         );
         for id in ids {
             if let Some(item) = self.load_item(id).await {

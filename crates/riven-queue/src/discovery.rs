@@ -45,7 +45,7 @@ fn log_rank_rejection(info_hash: &str, title: &str, profile_name: Option<&str>, 
                 title,
                 profile = profile_name,
                 checks = ?checks,
-                "stream rejected by ranking fetch checks"
+                "parse: release rejected, it fails this profile's requirements"
             );
         }
         RankError::TitleSimilarity { ratio, threshold } => {
@@ -55,7 +55,7 @@ fn log_rank_rejection(info_hash: &str, title: &str, profile_name: Option<&str>, 
                 profile = profile_name,
                 ratio,
                 threshold,
-                "stream rejected by title similarity"
+                "parse: release rejected, its title is too different from the item's title"
             );
         }
         RankError::RankUnderThreshold { rank, threshold } => {
@@ -65,7 +65,7 @@ fn log_rank_rejection(info_hash: &str, title: &str, profile_name: Option<&str>, 
                 profile = profile_name,
                 rank,
                 threshold,
-                "stream rejected by rank threshold"
+                "parse: release rejected, its quality score is below the profile's minimum"
             );
         }
         _ => {
@@ -74,7 +74,7 @@ fn log_rank_rejection(info_hash: &str, title: &str, profile_name: Option<&str>, 
                 title,
                 profile = profile_name,
                 error = %error,
-                "stream rejected by ranking"
+                "parse: release rejected while ranking it"
             );
         }
     }
@@ -234,7 +234,12 @@ pub fn rank_streams(
             let parsed = riven_rank::parse(title);
 
             if let Some(reason) = validate(&ctx, &parsed) {
-                tracing::debug!(info_hash, title, reason, "torrent skipped");
+                tracing::debug!(
+                    info_hash,
+                    title,
+                    reason,
+                    "parse: release does not belong to this item"
+                );
                 return None;
             }
 
@@ -272,15 +277,24 @@ pub fn rank_streams(
                             rank = ranked.rank,
                             bitrate,
                             title,
-                            "stream ranked"
+                            "parse: release accepted as a download candidate"
                         );
                     } else {
-                        tracing::debug!(info_hash, rank = ranked.rank, title, "stream ranked");
+                        tracing::debug!(
+                            info_hash,
+                            rank = ranked.rank,
+                            title,
+                            "parse: release accepted as a download candidate"
+                        );
                     }
                     (serde_json::to_value(&ranked.data).ok(), Some(ranked.rank))
                 }
                 None => {
-                    tracing::debug!(info_hash, title, "stream rejected by all ranking profiles");
+                    tracing::debug!(
+                        info_hash,
+                        title,
+                        "parse: release rejected by every enabled quality profile"
+                    );
                     (serde_json::to_value(&parsed).ok(), None)
                 }
             };
@@ -300,7 +314,7 @@ pub async fn load_active_profiles() -> Vec<(String, RankSettings)> {
     let profiles = match repo::get_enabled_profiles().await {
         Ok(p) => p,
         Err(e) => {
-            tracing::warn!(error = %e, "failed to load enabled ranking profiles");
+            tracing::warn!(error = %e, "parse: could not load the configured quality profiles; falling back to the built-in defaults");
             return vec![(
                 "ultra_hd".to_string(),
                 QualityProfile::UltraHd.base_settings().prepare(),
@@ -324,7 +338,7 @@ pub async fn load_active_profiles() -> Vec<(String, RankSettings)> {
                         match merge_builtin_profile_settings(*q, &p.settings) {
                             Ok(s) => s,
                             Err(e) => {
-                                tracing::warn!(profile = p.name, error = %e, "failed to parse DB settings, falling back to Rust defaults");
+                                tracing::warn!(profile = p.name, error = %e, "parse: this quality profile's saved settings could not be read; using the built-in defaults for it");
                                 q.base_settings().prepare()
                             }
                         }

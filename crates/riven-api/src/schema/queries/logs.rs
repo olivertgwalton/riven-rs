@@ -22,6 +22,11 @@ pub struct LogEntry {
     pub level: Option<String>,
     pub message: Option<String>,
     pub target: Option<String>,
+    /// The line's structured fields (media item id, title, info hash, error,
+    /// …) as a JSON object, with `message` removed since it is exposed above.
+    /// Without these a log line reads as a sentence with no subject — "no
+    /// scraper returned any stream for this item", but which item?
+    pub fields: Option<String>,
 }
 
 #[derive(Default)]
@@ -95,11 +100,20 @@ impl LogsQuery {
                         .as_str()
                         .or_else(|| v["message"].as_str())
                         .map(String::from);
+                    let fields = v["fields"].as_object().and_then(|fields| {
+                        let rest: serde_json::Map<_, _> = fields
+                            .iter()
+                            .filter(|(key, _)| key.as_str() != "message")
+                            .map(|(key, value)| (key.clone(), value.clone()))
+                            .collect();
+                        (!rest.is_empty()).then(|| serde_json::Value::Object(rest).to_string())
+                    });
                     Some(LogEntry {
                         timestamp: v["timestamp"].as_str().map(String::from),
                         level: v["level"].as_str().map(String::from),
                         message,
                         target: v["target"].as_str().map(String::from),
+                        fields,
                     })
                 })
                 .take(limit)

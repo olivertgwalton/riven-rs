@@ -166,17 +166,27 @@ pub async fn persist_manual_download(
 /// `download::run`'s per-iteration loop so an early hit on the first provider
 /// short-circuits slower providers.
 pub async fn run_rank_streams(id: i64, job: &RankStreamsJob, queue: &JobQueue) {
-    tracing::debug!(id, "running rank-streams step");
-
     let Some(item) = load_item_silently(id, "rank-streams").await else {
         return;
     };
+
+    tracing::debug!(
+        id,
+        title = %item.title,
+        manual_info_hash = job.preferred_info_hash.as_deref().unwrap_or("-"),
+        "download: picking which stream to try"
+    );
 
     if !matches!(
         item.state,
         MediaItemState::Scraped | MediaItemState::Ongoing | MediaItemState::PartiallyCompleted
     ) {
-        tracing::debug!(id, state = ?item.state, "download requested for non-processable item");
+        tracing::debug!(
+            id,
+            title = %item.title,
+            state = ?item.state,
+            "download: skipped, the item is not waiting for a download (needs Scraped/Ongoing/PartiallyCompleted)"
+        );
         queue
             .notify(RivenEvent::MediaItemDownloadErrorIncorrectState { id })
             .await;
@@ -218,7 +228,11 @@ pub async fn run_rank_streams(id: i64, job: &RankStreamsJob, queue: &JobQueue) {
 /// an actual scrape completion stamps `last_scrape_attempt_at`.
 async fn record_download_failure(id: i64) {
     if let Err(err) = repo::increment_failed_attempts(id).await {
-        tracing::warn!(id, %err, "failed to increment failed_attempts");
+        tracing::warn!(
+            id,
+            %err,
+            "download: could not record the failed attempt, so this item's retry backoff will not grow"
+        );
     }
 }
 
@@ -228,7 +242,6 @@ async fn record_download_failure(id: i64) {
 /// per-iteration cache-check + early exit on the first hit.
 pub async fn run(id: i64, job: &DownloadJob, queue: &JobQueue) {
     let start_time = Instant::now();
-    tracing::debug!(id, "running download (find-valid-torrent + persist) step");
 
     let Some(item) = load_item_silently(id, "download").await else {
         return;
@@ -238,7 +251,12 @@ pub async fn run(id: i64, job: &DownloadJob, queue: &JobQueue) {
         item.state,
         MediaItemState::Scraped | MediaItemState::Ongoing | MediaItemState::PartiallyCompleted
     ) {
-        tracing::debug!(id, state = ?item.state, "download requested for non-processable item");
+        tracing::debug!(
+            id,
+            title = %item.title,
+            state = ?item.state,
+            "download: skipped, the item is not waiting for a download (needs Scraped/Ongoing/PartiallyCompleted)"
+        );
         queue
             .notify(RivenEvent::MediaItemDownloadErrorIncorrectState { id })
             .await;
@@ -258,13 +276,22 @@ pub async fn run(id: i64, job: &DownloadJob, queue: &JobQueue) {
     let all_streams = match repo::get_non_blacklisted_streams(id, &ranks).await {
         Ok(streams) => streams,
         Err(error) => {
-            tracing::error!(id, error = %error, "failed to fetch streams for download");
+            tracing::error!(
+                id,
+                title = %item.title,
+                error = %error,
+                "download: could not read this item's streams from the database, giving up on this attempt"
+            );
             return;
         }
     };
 
     if all_streams.is_empty() {
-        tracing::debug!(id, "no streams available for download");
+        tracing::debug!(
+            id,
+            title = %item.title,
+            "download: no usable streams left, every scraped stream has already been tried and blacklisted"
+        );
         record_download_failure(id).await;
         queue
             .notify(RivenEvent::MediaItemDownloadError {
@@ -285,6 +312,15 @@ pub async fn run(id: i64, job: &DownloadJob, queue: &JobQueue) {
 
     let plugin_providers = build_plugin_provider_iterations(queue).await;
     let mut cache = CacheMemo::new(all_streams.iter().map(|s| s.info_hash.clone()).collect());
+
+    tracing::debug!(
+        id,
+        title = %item.title,
+        candidate_streams = all_streams.len(),
+        profiles = active_profiles.len(),
+        debrid_providers = plugin_providers.len(),
+        "download: trying candidate streams best-first until one is cached and matches"
+    );
 
     if let Some(preferred_info_hash) = job.preferred_info_hash.as_ref() {
         let _ = run_preferred_stream(
@@ -325,13 +361,18 @@ async fn load_item_silently(id: i64, phase: &str) -> Option<MediaItem> {
         Ok(None) => {
             tracing::debug!(
                 id,
-                phase,
-                "media item disappeared before phase ran; skipping"
+                step = phase,
+                "download: item no longer exists (deleted or unrequested), abandoning this step"
             );
             None
         }
         Err(error) => {
-            tracing::error!(id, phase, %error, "failed to load media item");
+            tracing::error!(
+                id,
+                step = phase,
+                %error,
+                "download: could not read the item from the database, abandoning this step"
+            );
             None
         }
     }
@@ -417,8 +458,9 @@ async fn fetch_provider_cache(
             tracing::warn!(
                 plugin = plugin_name,
                 provider,
+                hashes = hashes.len(),
                 error = %error,
-                "cache check failed"
+                "download: could not ask this debrid service which torrents it has cached; treating them all as uncached"
             );
         }
     }
@@ -492,6 +534,12 @@ async fn run_preferred_stream(
         .iter()
         .find(|s| s.info_hash.eq_ignore_ascii_case(preferred_info_hash))
     else {
+        tracing::warn!(
+            id,
+            title = %item.title,
+            info_hash = preferred_info_hash,
+            "download: the manually chosen stream is not among this item's streams; it may have been blacklisted or re-scraped away"
+        );
         queue
             .notify(RivenEvent::MediaItemDownloadError {
                 id,
@@ -534,6 +582,13 @@ async fn run_preferred_stream(
         }
     }
 
+    tracing::warn!(
+        id,
+        title = %item.title,
+        info_hash = preferred_info_hash,
+        providers = plugin_providers.len(),
+        "download: the manually chosen stream could not be downloaded from any configured debrid service"
+    );
     queue
         .notify(RivenEvent::MediaItemDownloadError {
             id,
@@ -574,15 +629,22 @@ async fn run_downloads(
         if done_profiles.contains(profile_name.as_str()) {
             tracing::debug!(
                 id,
+                title = %item.title,
                 profile = profile_name,
-                "profile already downloaded, skipping"
+                "download: this quality profile is already satisfied for the item"
             );
             continue;
         }
 
         let ranked = rank_streams_for_profile(streams, item, profile_settings, &title_ctx);
         if ranked.is_empty() {
-            tracing::debug!(id, profile = profile_name, "no stream found for profile");
+            tracing::debug!(
+                id,
+                title = %item.title,
+                profile = profile_name,
+                candidates = streams.len(),
+                "download: none of the scraped streams meet this quality profile's requirements"
+            );
             continue;
         }
 
@@ -592,7 +654,11 @@ async fn run_downloads(
                 break;
             }
             if queue.is_cancelled(id).await {
-                tracing::debug!(id, "item cancelled; aborting stream loop");
+                tracing::debug!(
+                    id,
+                    title = %item.title,
+                    "download: cancelled by the user, stopping without trying the remaining streams"
+                );
                 return any_success;
             }
 
@@ -604,7 +670,9 @@ async fn run_downloads(
                     id,
                     info_hash = %stream.info_hash,
                     file_size = size,
-                    "stream pre-filter: known size violates bitrate threshold; skipping"
+                    max_size_bytes,
+                    min_size_bytes,
+                    "download: skipping stream, its file size is outside the configured bitrate limits"
                 );
                 continue;
             }
@@ -667,7 +735,13 @@ async fn run_downloads(
     }
 
     if !any_success {
-        tracing::debug!(id, title = %item.title, "no valid torrent found after trying cached candidates");
+        tracing::debug!(
+            id,
+            title = %item.title,
+            candidates = streams.len(),
+            attempts = attempted.len(),
+            "download: no candidate worked — none were cached on a debrid service, or the cached ones did not contain the right files"
+        );
         record_download_failure(id).await;
         queue
             .notify(RivenEvent::MediaItemDownloadError {
@@ -690,7 +764,13 @@ async fn run_downloads(
         .iter()
         .all(|(name, _)| done_profiles.contains(name.as_str()))
     {
-        tracing::debug!(id, "some profiles still missing a download; re-queuing");
+        tracing::debug!(
+            id,
+            title = %item.title,
+            satisfied_profiles = done_profiles.len(),
+            total_profiles = profiles.len(),
+            "download: downloaded something, but not every quality profile is satisfied yet"
+        );
         queue
             .notify(RivenEvent::MediaItemDownloadPartialSuccess { id })
             .await;

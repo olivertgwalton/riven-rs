@@ -48,7 +48,7 @@ pub async fn attempt_download(
         resolution,
         profile = profile_name,
         raw_title,
-        "attempting stream download"
+        "download: asking the debrid services for this release"
     );
 
     let event = RivenEvent::MediaItemDownloadRequested {
@@ -73,7 +73,7 @@ pub async fn attempt_download(
                         plugin = plugin_name,
                         info_hash,
                         files = download.files.len(),
-                        "download responded"
+                        "download: debrid service returned the torrent's file list"
                     );
                     download_result = Some(download);
                     break;
@@ -83,7 +83,7 @@ pub async fn attempt_download(
                     tracing::debug!(
                         plugin = plugin_name,
                         info_hash,
-                        "stream unexpectedly not cached"
+                        "download: the debrid service reported this torrent as cached earlier but no longer has it"
                     );
                 }
                 Ok(_) => {}
@@ -92,7 +92,7 @@ pub async fn attempt_download(
                         plugin = plugin_name,
                         info_hash,
                         error = %error,
-                        "download hook failed (transient)"
+                        "download: debrid service errored on this release; moving on to the next service or stream"
                     );
                 }
             }
@@ -108,13 +108,13 @@ pub async fn attempt_download(
                 id,
                 info_hash,
                 error = %error,
-                "failed to clear stale stremthru cache-check keys before retry"
+                "download: could not clear the stale cached-availability entry, so the retry would hit the same wrong answer; skipping the retry"
             );
         } else {
             tracing::debug!(
                 id,
                 info_hash,
-                "retrying download after clearing stale cache-check"
+                "download: cleared the stale cached-availability entry, asking the debrid services again"
             );
             let retry_event = RivenEvent::MediaItemDownloadRequested {
                 id,
@@ -137,10 +137,14 @@ pub async fn attempt_download(
                 id,
                 info_hash,
                 error = %error,
-                "failed to clear stale stremthru cache-check keys"
+                "download: could not clear the stale cached-availability entry; the next attempt may repeat this failure"
             );
         }
-        tracing::debug!(id, info_hash, "no download provider accepted cached stream");
+        tracing::debug!(
+            id,
+            info_hash,
+            "download: no debrid service could provide this release"
+        );
         return DownloadAttemptOutcome::Failed;
     };
     let download = *download;
@@ -151,12 +155,17 @@ pub async fn attempt_download(
             tracing::debug!(
                 id,
                 info_hash,
-                "media item disappeared before persist; skipping"
+                "download: item was deleted while the download was being set up; discarding it"
             );
             return DownloadAttemptOutcome::Failed;
         }
         Err(error) => {
-            tracing::error!(id, info_hash, %error, "failed to reload item before persist");
+            tracing::error!(
+                id,
+                info_hash,
+                %error,
+                "download: could not re-read the item from the database before saving the files; discarding this download"
+            );
             return DownloadAttemptOutcome::Failed;
         }
     };
@@ -177,10 +186,18 @@ pub async fn attempt_download(
             )
             .await
             {
-                tracing::debug!(id, info_hash, "movie download persisted");
+                tracing::debug!(
+                    id,
+                    info_hash,
+                    "download: movie files saved and linked to the item"
+                );
                 DownloadAttemptOutcome::Succeeded
             } else {
-                tracing::debug!(id, info_hash, "movie download rejected during persist");
+                tracing::debug!(
+                    id,
+                    info_hash,
+                    "download: release rejected, its files did not match this movie (wrong title, no video file, or size outside the limits)"
+                );
                 DownloadAttemptOutcome::Failed
             }
         }
@@ -200,10 +217,18 @@ pub async fn attempt_download(
             )
             .await
             {
-                tracing::debug!(id, info_hash, "episode download persisted");
+                tracing::debug!(
+                    id,
+                    info_hash,
+                    "download: episode files saved and linked to the item"
+                );
                 DownloadAttemptOutcome::Succeeded
             } else {
-                tracing::debug!(id, info_hash, "episode download rejected during persist");
+                tracing::debug!(
+                    id,
+                    info_hash,
+                    "download: release rejected, its files did not match this episode (wrong episode, no video file, or size outside the limits)"
+                );
                 DownloadAttemptOutcome::Failed
             }
         }
@@ -223,11 +248,19 @@ pub async fn attempt_download(
             .await
             {
                 SeasonPersistOutcome::Complete | SeasonPersistOutcome::Partial => {
-                    tracing::debug!(id, info_hash, "season download handled during persist");
+                    tracing::debug!(
+                        id,
+                        info_hash,
+                        "download: season pack processed, matching episodes saved"
+                    );
                     DownloadAttemptOutcome::TerminalHandled
                 }
                 SeasonPersistOutcome::Failed => {
-                    tracing::debug!(id, info_hash, "season download rejected during persist");
+                    tracing::debug!(
+                        id,
+                        info_hash,
+                        "download: season pack rejected, none of its files matched the episodes of this season"
+                    );
                     DownloadAttemptOutcome::Failed
                 }
             }
@@ -247,11 +280,19 @@ pub async fn attempt_download(
             .await
             {
                 SeasonPersistOutcome::Complete | SeasonPersistOutcome::Partial => {
-                    tracing::debug!(id, info_hash, "show pack download handled during persist");
+                    tracing::debug!(
+                        id,
+                        info_hash,
+                        "download: show pack processed, matching episodes saved"
+                    );
                     DownloadAttemptOutcome::TerminalHandled
                 }
                 SeasonPersistOutcome::Failed => {
-                    tracing::debug!(id, info_hash, "show pack download rejected during persist");
+                    tracing::debug!(
+                        id,
+                        info_hash,
+                        "download: show pack rejected, none of its files matched the episodes of this show"
+                    );
                     DownloadAttemptOutcome::Failed
                 }
             }
@@ -289,7 +330,7 @@ async fn clear_stremthru_cache_check_keys(queue: &JobQueue, info_hash: &str) -> 
         tracing::debug!(
             info_hash,
             cleared = keys.len(),
-            "cleared stale stremthru cache-check keys"
+            "download: dropped cached-availability entries for this release so it gets re-checked"
         );
     }
 
