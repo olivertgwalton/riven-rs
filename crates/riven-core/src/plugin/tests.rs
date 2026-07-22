@@ -32,6 +32,22 @@ fn setting_field_builder_populates_optional_metadata() {
 }
 
 #[test]
+fn setting_field_builder_accepts_dynamic_options() {
+    let field = SettingField::new("genre", "Genre", FieldType::FilterArray)
+        .with_dynamic_options(vec!["Science Fiction".to_string(), "TV Movie".to_string()])
+        .allow_custom_options();
+
+    assert_eq!(
+        field.options,
+        Some(vec![
+            Cow::Owned("Science Fiction".to_string()),
+            Cow::Owned("TV Movie".to_string()),
+        ])
+    );
+    assert_eq!(field.allow_custom_options, Some(true));
+}
+
+#[test]
 fn content_collection_deduplicates_movies_and_shows_by_preferred_keys() {
     let mut collection = ContentCollection::default();
 

@@ -10,6 +10,7 @@ use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectionTrait, DbBackend, EntityTrait, FromQueryResult,
     QueryFilter, QuerySelect, Statement,
 };
+use std::collections::BTreeSet;
 
 use crate::entities::*;
 use crate::orm;
@@ -530,6 +531,57 @@ pub async fn list_filesystem_profile_entry_candidates()
     ))
     .all(orm())
     .await?)
+}
+
+#[derive(Debug, Default)]
+pub struct FilesystemLibraryFilterOptions {
+    pub genres: Vec<String>,
+    pub networks: Vec<String>,
+    pub languages: Vec<String>,
+    pub countries: Vec<String>,
+    pub content_ratings: Vec<String>,
+}
+
+/// Return the exact metadata values present in the current filesystem library.
+/// Values are only deduplicated; their spelling and casing are left untouched.
+pub async fn list_filesystem_library_filter_options() -> Result<FilesystemLibraryFilterOptions> {
+    let candidates = list_filesystem_profile_entry_candidates().await?;
+    let mut genres = BTreeSet::new();
+    let mut networks = BTreeSet::new();
+    let mut languages = BTreeSet::new();
+    let mut countries = BTreeSet::new();
+    let mut content_ratings = BTreeSet::new();
+
+    for candidate in candidates {
+        if let Some(values) = candidate
+            .genres
+            .as_ref()
+            .and_then(serde_json::Value::as_array)
+        {
+            genres.extend(
+                values
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .map(str::to_string),
+            );
+        }
+        networks.extend(candidate.network);
+        languages.extend(candidate.language);
+        countries.extend(candidate.country);
+        if let Some(rating) = candidate.content_rating
+            && let Ok(serde_json::Value::String(value)) = serde_json::to_value(rating)
+        {
+            content_ratings.insert(value);
+        }
+    }
+
+    Ok(FilesystemLibraryFilterOptions {
+        genres: genres.into_iter().collect(),
+        networks: networks.into_iter().collect(),
+        languages: languages.into_iter().collect(),
+        countries: countries.into_iter().collect(),
+        content_ratings: content_ratings.into_iter().collect(),
+    })
 }
 
 /// Return the ranking profile names that already have a downloaded entry for this item.

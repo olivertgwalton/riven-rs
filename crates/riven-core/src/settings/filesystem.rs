@@ -13,13 +13,20 @@ pub enum FilesystemContentType {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
+pub struct FilesystemFilterSelection {
+    pub include: Vec<String>,
+    pub exclude: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
 pub struct FilesystemFilterRules {
     pub content_types: Vec<FilesystemContentType>,
-    pub genres: Vec<String>,
-    pub networks: Vec<String>,
-    pub languages: Vec<String>,
-    pub countries: Vec<String>,
-    pub content_ratings: Vec<String>,
+    pub genres: FilesystemFilterSelection,
+    pub networks: FilesystemFilterSelection,
+    pub languages: FilesystemFilterSelection,
+    pub countries: FilesystemFilterSelection,
+    pub content_ratings: FilesystemFilterSelection,
     pub min_year: Option<i32>,
     pub max_year: Option<i32>,
     pub min_rating: Option<f64>,
@@ -147,48 +154,47 @@ impl FilesystemFilterRules {
     }
 }
 
-fn matches_text_filter(value: Option<&str>, filters: &[String]) -> bool {
+fn matches_text_filter(value: Option<&str>, filters: &FilesystemFilterSelection) -> bool {
     match value.map(str::trim).filter(|value| !value.is_empty()) {
         Some(v) => matches_token_filter(&[v], filters),
         None => matches_token_filter(&[], filters),
     }
 }
 
-fn matches_content_rating_filter(rating: Option<ContentRating>, filters: &[String]) -> bool {
+fn matches_content_rating_filter(
+    rating: Option<ContentRating>,
+    filters: &FilesystemFilterSelection,
+) -> bool {
     match rating.map(content_rating_key) {
         Some(v) => matches_token_filter(&[v], filters),
         None => matches_token_filter(&[], filters),
     }
 }
 
-fn matches_token_filter(values: &[&str], filters: &[String]) -> bool {
-    let mut any_inclusion = false;
-    let mut inclusion_hit = false;
-    for filter in filters {
+fn matches_token_filter(values: &[&str], filters: &FilesystemFilterSelection) -> bool {
+    let excluded = filters.exclude.iter().any(|filter| {
         let filter = filter.trim();
-        if filter.is_empty() {
-            continue;
-        }
-        if let Some(exclusion) = filter.strip_prefix('!') {
-            if values
+        !filter.is_empty()
+            && values
                 .iter()
-                .any(|value| value.eq_ignore_ascii_case(exclusion))
-            {
-                return false;
-            }
-        } else {
-            any_inclusion = true;
-            if !inclusion_hit
-                && values
-                    .iter()
-                    .any(|value| value.eq_ignore_ascii_case(filter))
-            {
-                inclusion_hit = true;
-            }
-        }
+                .any(|value| value.eq_ignore_ascii_case(filter))
+    });
+    if excluded {
+        return false;
     }
 
-    !any_inclusion || inclusion_hit
+    let included: Vec<&str> = filters
+        .include
+        .iter()
+        .map(|filter| filter.trim())
+        .filter(|filter| !filter.is_empty())
+        .collect();
+    included.is_empty()
+        || included.iter().any(|filter| {
+            values
+                .iter()
+                .any(|value| value.eq_ignore_ascii_case(filter))
+        })
 }
 
 fn within_bounds<T>(value: Option<T>, min: Option<T>, max: Option<T>) -> bool

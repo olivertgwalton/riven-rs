@@ -17,6 +17,7 @@ pub enum FieldType {
     Object,
     Dictionary,
     StringArray,
+    FilterArray,
     NullableBoolean,
     CustomRank,
 }
@@ -50,6 +51,8 @@ pub struct SettingField {
     pub description: Option<Cow<'static, str>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub options: Option<Vec<Cow<'static, str>>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub allow_custom_options: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fields: Option<Vec<SettingField>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -92,6 +95,7 @@ impl SettingField {
             placeholder: None,
             description: None,
             options: None,
+            allow_custom_options: None,
             fields: None,
             item_fields: None,
             key_placeholder: None,
@@ -125,6 +129,20 @@ impl SettingField {
 
     pub fn with_options(mut self, values: &[&'static str]) -> Self {
         self.options = Some(values.iter().map(|s| Cow::Borrowed(*s)).collect());
+        self
+    }
+
+    pub fn with_dynamic_options<I, S>(mut self, values: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<Cow<'static, str>>,
+    {
+        self.options = Some(values.into_iter().map(Into::into).collect());
+        self
+    }
+
+    pub fn allow_custom_options(mut self) -> Self {
+        self.allow_custom_options = Some(true);
         self
     }
 
