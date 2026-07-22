@@ -17,6 +17,7 @@ THIS IS AN ALTERNATIVE, RIVEN-TS IS THE MAIN DEVELOPMENT EFFORT
 | Path | Purpose |
 | --- | --- |
 | `crates/riven-app` | `riven` binary, startup wiring, plugin registration, logging, API, queues, and VFS mount lifecycle. |
+| `crates/riven-plugins` | The list of plugins compiled into the binary, plus the `gen-docs` documentation generator. |
 | `crates/riven-core` | Shared settings, events, plugin traits/registry, HTTP helpers, downloader config, and domain types. |
 | `crates/riven-api` | Axum and async-graphql API server, GraphQL schema, subscriptions, webhooks, media bridge, and board routes. |
 | `crates/riven-db` | SeaORM database connection, migrations, entities, and repositories. |
@@ -119,17 +120,21 @@ When browser traffic goes through `riven-frontend`, the frontend signs the authe
 
 ## Plugins
 
-Plugins implement the `Plugin` trait in `riven-core` and register themselves with `register_plugin!`. The app crate links every `plugin-*` dependency found in `crates/riven-app/Cargo.toml` so inventory can collect plugin registrations at runtime.
+Plugins implement the `Plugin` trait in `riven-core`. The set compiled into the binary is the explicit list in `crates/riven-plugins/src/lib.rs`, which is also the order they are registered and dispatched in.
+
+**[Full plugin documentation lives in `docs/plugins`](docs/plugins/README.md)** — one page per plugin, with settings tables generated from each plugin's `settings_schema()`.
 
 The current workspace includes plugins for:
 
-- Metadata and IDs: TMDB, TVDB.
-- Stream providers and debrid: Comet, Torrentio, AIOStreams, StremThru.
+- Metadata: TMDB, TVDB.
+- Torrent scrapers: Comet, Torrentio, AIOStreams.
+- Usenet: Newznab (search), Usenet (direct NNTP streaming).
+- Debrid: StremThru.
 - Request and list sources: Seerr, Listrr, MDBList, Trakt.
 - Media servers: Plex, Emby, Jellyfin.
-- Product features: Calendar, Dashboard, Logs, Notifications.
+- Product features: Calendar, Dashboard, Notifications, Subdl, Webhooks.
 
-To add a built-in plugin, create a new `crates/plugin-*` crate, register the plugin, add it to the workspace, and add it as a dependency of `crates/riven-app`.
+To add a built-in plugin: create a new `crates/plugin-*` crate, add it to the workspace members and to `crates/riven-plugins/Cargo.toml`, then add one line to `all_plugins()`. Give it a `settings_schema()` and run `make docs` to generate its page.
 
 ## Development Commands
 
@@ -139,7 +144,9 @@ make fmt-check    # cargo fmt --all --check
 make check        # cargo check --workspace --all-targets
 make lint         # cargo clippy --workspace --all-targets -- -D warnings
 make test         # cargo test --workspace
-make verify       # fmt-check, check, lint, and test
+make docs         # regenerate docs/plugins from the plugins' settings schemas
+make docs-check   # fail if docs/plugins is out of date
+make verify       # fmt-check, check, lint, test, and docs-check
 ```
 
 For a direct release build:

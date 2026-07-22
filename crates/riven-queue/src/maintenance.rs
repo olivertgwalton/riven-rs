@@ -14,9 +14,7 @@ use riven_db::repo;
 /// removed, or its filter rules edited) and once at startup so an install whose
 /// membership drifted from the current rules self-heals. Only diffs are written,
 /// so a steady-state call updates nothing.
-pub async fn reconcile_library_profiles(
-    settings: &FilesystemSettings,
-) -> anyhow::Result<u64> {
+pub async fn reconcile_library_profiles(settings: &FilesystemSettings) -> anyhow::Result<u64> {
     let candidates = repo::list_filesystem_profile_entry_candidates().await?;
     let updates = candidates
         .into_iter()

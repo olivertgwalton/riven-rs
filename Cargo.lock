@@ -3922,30 +3922,13 @@ name = "riven-app"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "plugin-aiostreams",
- "plugin-calendar",
- "plugin-comet",
- "plugin-dashboard",
- "plugin-emby-jellyfin",
- "plugin-listrr",
- "plugin-mdblist",
- "plugin-newznab",
- "plugin-notifications",
- "plugin-plex",
- "plugin-seerr",
- "plugin-stremthru",
- "plugin-subdl",
- "plugin-tmdb",
- "plugin-torrentio",
- "plugin-trakt",
- "plugin-tvdb",
  "plugin-usenet",
- "plugin-webhooks",
  "redis",
  "reqwest",
  "riven-api",
  "riven-core",
  "riven-db",
+ "riven-plugins",
  "riven-queue",
  "riven-usenet",
  "sea-orm",
@@ -4008,6 +3991,33 @@ dependencies = [
  "serde",
  "serde_json",
  "tracing",
+]
+
+[[package]]
+name = "riven-plugins"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "plugin-aiostreams",
+ "plugin-calendar",
+ "plugin-comet",
+ "plugin-dashboard",
+ "plugin-emby-jellyfin",
+ "plugin-listrr",
+ "plugin-mdblist",
+ "plugin-newznab",
+ "plugin-notifications",
+ "plugin-plex",
+ "plugin-seerr",
+ "plugin-stremthru",
+ "plugin-subdl",
+ "plugin-tmdb",
+ "plugin-torrentio",
+ "plugin-trakt",
+ "plugin-tvdb",
+ "plugin-usenet",
+ "plugin-webhooks",
+ "riven-core",
 ]
 
 [[package]]

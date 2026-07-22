@@ -1,4 +1,4 @@
-.PHONY: fmt fmt-check check lint test verify
+.PHONY: fmt fmt-check check lint test docs docs-check verify
 
 fmt:
 	cargo fmt --all
@@ -15,4 +15,11 @@ lint:
 test:
 	cargo test --workspace
 
-verify: fmt-check check lint test
+docs:
+	cargo run --quiet --bin gen-docs
+
+# Fails when docs/plugins is out of date with the plugins' settings schemas.
+docs-check:
+	cargo run --quiet --bin gen-docs -- --check
+
+verify: fmt-check check lint test docs-check

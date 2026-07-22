@@ -8,6 +8,7 @@ members = [
     "crates/riven-queue",
     "crates/riven-rank",
     "crates/riven-app",
+    "crates/riven-plugins",
     "crates/plugin-tmdb",
     "crates/plugin-tvdb",
     "crates/plugin-comet",

@@ -3,7 +3,7 @@ use std::sync::Arc;
 use riven_core::plugin::PluginRegistry;
 use riven_core::settings::{PluginSettings, RivenSettings};
 
-use crate::plugins::all_plugins;
+use riven_plugins::all_plugins;
 
 pub async fn register_plugins(
     http: riven_core::http::HttpClient,
