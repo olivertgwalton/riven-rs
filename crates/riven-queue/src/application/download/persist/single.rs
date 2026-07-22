@@ -33,18 +33,6 @@ pub async fn persist_movie(
 
     let file = if let Some(first) = video_files.first() {
         first.0
-    } else if let Some(largest) = dl
-        .files
-        .iter()
-        .filter(|f| is_persistable_video_file(&f.filename))
-        .max_by_key(|f| f.file_size)
-    {
-        tracing::warn!(
-            id,
-            info_hash,
-            "no movie-typed video file found; falling back to largest video file"
-        );
-        largest
     } else {
         // Blacklist only — this is one candidate among possibly many the
         // outer stream loop still has left to try; a per-candidate notify
@@ -53,7 +41,11 @@ pub async fn persist_movie(
         // scheduling its own 30-minute re-scrape. The loop's single
         // exhausted-all-candidates check is the only place that should
         // notify for this attempt.
-        tracing::warn!(id, info_hash = %info_hash, "torrent has no files — blacklisting stream");
+        tracing::warn!(
+            id,
+            info_hash = %info_hash,
+            "no movie-typed video file found — blacklisting stream"
+        );
         blacklist_stream(id, info_hash).await;
         return false;
     };
