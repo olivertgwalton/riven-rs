@@ -20,6 +20,9 @@ const NNTP_FETCH_ATTEMPTS: usize = 3;
 /// Base backoff between retries (linear, not exponential — NNTP errors
 /// are usually transient connectivity issues that clear within a second).
 const NNTP_RETRY_DELAY_MS: u64 = 300;
+/// Speculative cache warming must leave capacity for the foreground range
+/// reads that feed the media server. Exact reads retain the pool-wide cap.
+const STREAM_PREFETCH_CONCURRENCY: usize = 8;
 
 impl UsenetStreamer {
     /// Fetch and yEnc-decode a segment's body. Routes through the LRU
@@ -171,10 +174,9 @@ impl UsenetStreamer {
 
     /// Background-warm the segment cache for the segments that overlap
     /// `[start, end_inclusive]` of `file_index`. Concurrency is capped at
-    /// `pool.download_concurrency()` — `min(pool_size, 15)` matching nzbdav —
-    /// so a large pool (e.g. 100 connections) doesn't open 100 simultaneous
-    /// BODY downloads. Fetches use `Priority::High` — this runs on behalf of
-    /// a live stream.
+    /// `STREAM_PREFETCH_CONCURRENCY`, and globally serialized across open
+    /// files. The cache is opportunistic: actual bytes requested by the
+    /// media server retain `Priority::High`; warming runs at `Priority::Low`.
     pub async fn prefetch_range(
         &self,
         info_hash: &str,
@@ -182,7 +184,14 @@ impl UsenetStreamer {
         start: u64,
         end_inclusive: u64,
     ) {
-        let prefetch_concurrency = self.pool.download_concurrency().max(PREFETCH_FLOOR);
+        let Ok(_prefetch_permit) = self.state.stream_prefetch_sem.acquire().await else {
+            return;
+        };
+        let prefetch_concurrency = self
+            .pool
+            .download_concurrency()
+            .min(STREAM_PREFETCH_CONCURRENCY)
+            .max(PREFETCH_FLOOR);
 
         let Ok(meta) = self.load_meta(info_hash).await else {
             return;
@@ -236,7 +245,7 @@ impl UsenetStreamer {
         let mut stream = stream::iter(cold)
             .map(move |mid| {
                 let s = streamer.clone();
-                async move { s.fetch_decoded_cached(&mid, Priority::High).await }
+                async move { s.fetch_decoded_cached(&mid, Priority::Low).await }
             })
             .buffer_unordered(prefetch_concurrency);
         while stream.next().await.is_some() {}
