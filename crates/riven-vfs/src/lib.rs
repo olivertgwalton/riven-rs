@@ -6,6 +6,7 @@ pub mod media_stream;
 pub mod path_info;
 pub mod query;
 pub mod readdir;
+mod state;
 pub mod stream;
 
 use std::path::Path;
