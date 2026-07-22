@@ -2,7 +2,16 @@ use super::*;
 
 /// The SettingField schema describing the general (non-plugin) settings.
 /// Single source of truth, shared by `settingsSections` and the writer.
-fn general_settings_schema_fields() -> Vec<SettingField> {
+fn general_settings_schema_fields(
+    options: riven_db::repo::FilesystemLibraryFilterOptions,
+) -> Vec<SettingField> {
+    let riven_db::repo::FilesystemLibraryFilterOptions {
+        genres,
+        networks,
+        languages,
+        countries,
+        content_ratings,
+    } = options;
     vec![
             SettingField::new("dubbed_anime_only", "Dubbed anime only", FieldType::Boolean)
                 .with_section("Content")
@@ -86,21 +95,31 @@ fn general_settings_schema_fields() -> Vec<SettingField> {
                             SettingField::new("exclusive", "Exclusive", FieldType::Boolean)
                                 .with_description("Hide these items from the main library — only show them under this profile."),
                             SettingField::new("filter_rules", "Filter rules", FieldType::Object)
-                                .with_description("Only items matching these filters will appear in this profile. Prefix a value with ! to exclude it.")
+                                .with_description("Only items matching these filters will appear in this profile.")
                                 .with_fields(vec![
                                     SettingField::new("content_types", "Content types", FieldType::StringArray)
                                         .with_options(&["movie", "show"])
                                         .with_description("Restrict the profile to movies, shows, or both."),
-                                    SettingField::new("genres", "Genres", FieldType::StringArray)
-                                        .with_description("Filter by genre. Prefix with ! to exclude."),
-                                    SettingField::new("networks", "Networks", FieldType::StringArray)
-                                        .with_description("Filter by network. Prefix with ! to exclude."),
-                                    SettingField::new("languages", "Languages", FieldType::StringArray)
-                                        .with_description("Filter by language. Prefix with ! to exclude."),
-                                    SettingField::new("countries", "Countries", FieldType::StringArray)
-                                        .with_description("Filter by country. Prefix with ! to exclude."),
-                                    SettingField::new("content_ratings", "Content ratings", FieldType::StringArray)
-                                        .with_description("Filter by content rating. Prefix with ! to exclude."),
+                                    SettingField::new("genres", "Genres", FieldType::FilterArray)
+                                        .with_dynamic_options(genres)
+                                        .allow_custom_options()
+                                        .with_description("Choose genres to include or exclude."),
+                                    SettingField::new("networks", "Networks", FieldType::FilterArray)
+                                        .with_dynamic_options(networks)
+                                        .allow_custom_options()
+                                        .with_description("Choose networks to include or exclude."),
+                                    SettingField::new("languages", "Languages", FieldType::FilterArray)
+                                        .with_dynamic_options(languages)
+                                        .allow_custom_options()
+                                        .with_description("Choose languages to include or exclude."),
+                                    SettingField::new("countries", "Countries", FieldType::FilterArray)
+                                        .with_dynamic_options(countries)
+                                        .allow_custom_options()
+                                        .with_description("Choose countries to include or exclude."),
+                                    SettingField::new("content_ratings", "Content ratings", FieldType::FilterArray)
+                                        .with_dynamic_options(content_ratings)
+                                        .allow_custom_options()
+                                        .with_description("Choose content ratings to include or exclude."),
                                     SettingField::new("min_year", "Min year", FieldType::Number)
                                         .with_description("Minimum release year for matching items."),
                                     SettingField::new("max_year", "Max year", FieldType::Number)
@@ -152,7 +171,14 @@ async fn general_settings_values() -> Result<serde_json::Value> {
 
 /// Build the instance-wide "general" settings section.
 pub(crate) async fn build_general_section() -> Result<SettingsSection> {
-    let schema = general_settings_schema_fields();
+    let options = match repo::list_filesystem_library_filter_options().await {
+        Ok(options) => options,
+        Err(error) => {
+            tracing::warn!(%error, "could not load filesystem library filter options");
+            Default::default()
+        }
+    };
+    let schema = general_settings_schema_fields(options);
     Ok(SettingsSection {
         id: "general".to_string(),
         title: "General".to_string(),

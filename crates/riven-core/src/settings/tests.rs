@@ -7,6 +7,13 @@ fn plugin_settings(values: &[(&str, &str)]) -> PluginSettings {
     PluginSettings::from_pairs("TEST", values)
 }
 
+fn filter_selection(include: &[&str], exclude: &[&str]) -> FilesystemFilterSelection {
+    FilesystemFilterSelection {
+        include: include.iter().map(|value| (*value).to_string()).collect(),
+        exclude: exclude.iter().map(|value| (*value).to_string()).collect(),
+    }
+}
+
 #[test]
 fn matching_profiles_allow_any_positive_token_and_respect_exclusions() {
     let mut library_profiles = HashMap::new();
@@ -19,15 +26,11 @@ fn matching_profiles_allow_any_positive_token_and_respect_exclusions() {
             exclusive: false,
             filter_rules: FilesystemFilterRules {
                 content_types: vec![FilesystemContentType::Movie],
-                genres: vec![
-                    "animation".to_string(),
-                    "family".to_string(),
-                    "!horror".to_string(),
-                ],
-                networks: vec![],
-                content_ratings: vec!["pg".to_string(), "tv-pg".to_string(), "!r".to_string()],
-                languages: vec![],
-                countries: vec![],
+                genres: filter_selection(&["animation", "family"], &["horror"]),
+                networks: Default::default(),
+                content_ratings: filter_selection(&["pg", "tv-pg"], &["r"]),
+                languages: Default::default(),
+                countries: Default::default(),
                 min_year: None,
                 max_year: None,
                 min_rating: None,
@@ -70,11 +73,11 @@ fn matching_profiles_reject_when_no_positive_token_matches() {
                 exclusive: false,
                 filter_rules: FilesystemFilterRules {
                     content_types: vec![FilesystemContentType::Movie, FilesystemContentType::Show],
-                    genres: vec!["family".to_string(), "children".to_string()],
-                    networks: vec![],
-                    content_ratings: vec!["tv-14".to_string(), "r".to_string()],
-                    languages: vec![],
-                    countries: vec![],
+                    genres: filter_selection(&["family", "children"], &[]),
+                    networks: Default::default(),
+                    content_ratings: filter_selection(&["tv-14", "r"], &[]),
+                    languages: Default::default(),
+                    countries: Default::default(),
                     min_year: None,
                     max_year: None,
                     min_rating: None,
@@ -115,11 +118,11 @@ fn matching_profiles_support_language_country_year_and_rating_filters() {
                 exclusive: false,
                 filter_rules: FilesystemFilterRules {
                     content_types: vec![FilesystemContentType::Movie],
-                    genres: vec![],
-                    networks: vec!["netflix".to_string(), "!fox".to_string()],
-                    languages: vec!["en".to_string(), "!jp".to_string()],
-                    countries: vec!["us".to_string()],
-                    content_ratings: vec![],
+                    genres: Default::default(),
+                    networks: filter_selection(&["netflix"], &["fox"]),
+                    languages: filter_selection(&["en"], &["jp"]),
+                    countries: filter_selection(&["us"], &[]),
+                    content_ratings: Default::default(),
                     min_year: Some(2000),
                     max_year: Some(2020),
                     min_rating: Some(7.0),
@@ -145,6 +148,24 @@ fn matching_profiles_support_language_country_year_and_rating_filters() {
         settings.matching_profile_keys(&metadata, FilesystemContentType::Movie),
         LibraryProfileMembership(vec!["curated".to_string()])
     );
+}
+
+#[test]
+fn filesystem_filter_selections_serialize_include_and_exclude_explicitly() {
+    let rules = FilesystemFilterRules {
+        genres: filter_selection(&["Animation"], &["Horror"]),
+        ..Default::default()
+    };
+
+    let value = serde_json::to_value(rules).unwrap();
+    assert_eq!(
+        value["genres"],
+        serde_json::json!({
+            "include": ["Animation"],
+            "exclude": ["Horror"]
+        })
+    );
+    assert!(!value.to_string().contains("!Horror"));
 }
 
 #[test]

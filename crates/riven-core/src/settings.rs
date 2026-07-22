@@ -4,8 +4,8 @@ mod plugin;
 
 pub use app::RivenSettings;
 pub use filesystem::{
-    FilesystemContentType, FilesystemFilterRules, FilesystemItemMetadata, FilesystemLibraryProfile,
-    FilesystemSettings, LibraryProfileMembership,
+    FilesystemContentType, FilesystemFilterRules, FilesystemFilterSelection,
+    FilesystemItemMetadata, FilesystemLibraryProfile, FilesystemSettings, LibraryProfileMembership,
 };
 pub use plugin::PluginSettings;
 

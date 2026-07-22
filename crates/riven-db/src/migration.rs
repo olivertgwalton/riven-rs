@@ -135,4 +135,9 @@ sql_migrations![
         "m034_updated_at_orphan_gc_identity",
         "034_updated_at_orphan_gc_identity.sql"
     ),
+    (
+        M035,
+        "m035_structured_library_profile_filters",
+        "035_structured_library_profile_filters.sql"
+    ),
 ];
