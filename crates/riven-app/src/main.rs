@@ -538,7 +538,11 @@ async fn main() -> Result<()> {
             const RESTART_BACKOFF: Duration = Duration::from_secs(5);
             while !cancel.is_cancelled() {
                 let maintenance = async {
-                    riven_queue::clear_worker_registrations(&mut redis_conn, &queues).await;
+                    if let Err(error) =
+                        riven_queue::clear_worker_registrations(&mut redis_conn, &queues).await
+                    {
+                        tracing::error!(%error, "failed to recover startup worker registrations");
+                    }
                     riven_queue::purge_orphaned_worker_sets(&mut redis_conn, &queues).await;
                     riven_queue::purge_orphaned_active_jobs(&mut redis_conn, &queues).await;
                     riven_queue::purge_stale_dedup_keys(&mut redis_conn).await;

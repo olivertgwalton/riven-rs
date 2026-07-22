@@ -14,6 +14,16 @@ async fn load_item_request(request_id: i64) -> async_graphql::Result<Option<Item
         .map_err(Into::into)
 }
 
+fn request_stream(
+    rx: tokio::sync::broadcast::Receiver<RivenEvent>,
+    select_id: impl Fn(RivenEvent) -> Option<i64> + Copy,
+) -> impl Stream<Item = async_graphql::Result<ItemRequest>> {
+    broadcast_stream(rx).filter_map(move |event| async move {
+        let request_id = select_id(event)?;
+        load_item_request(request_id).await.transpose()
+    })
+}
+
 #[derive(Default)]
 pub struct RequestsSubscription;
 
@@ -24,27 +34,18 @@ impl RequestsSubscription {
         &self,
         ctx: &Context<'_>,
     ) -> async_graphql::Result<impl Stream<Item = async_graphql::Result<ItemRequest>>> {
-        let queue = Arc::clone(ctx.data::<Arc<riven_queue::JobQueue>>()?);
-        Ok(
-            broadcast_stream(queue.event_tx.subscribe()).filter_map(move |event| async move {
-                let RivenEvent::ItemRequestCreated {
+        let queue = ctx.data::<Arc<riven_queue::JobQueue>>()?;
+        Ok(request_stream(
+            queue.event_tx.subscribe(),
+            |event| match event {
+                RivenEvent::ItemRequestCreated {
                     request_id,
-                    request_type,
+                    request_type: ItemRequestType::Movie,
                     ..
-                } = event
-                else {
-                    return None;
-                };
-                if request_type != ItemRequestType::Movie {
-                    return None;
-                }
-                match load_item_request(request_id).await {
-                    Ok(Some(request)) => Some(Ok(request)),
-                    Ok(None) => None,
-                    Err(error) => Some(Err(error)),
-                }
-            }),
-        )
+                } => Some(request_id),
+                _ => None,
+            },
+        ))
     }
 
     /// Fires when a new show item request is created.
@@ -52,27 +53,18 @@ impl RequestsSubscription {
         &self,
         ctx: &Context<'_>,
     ) -> async_graphql::Result<impl Stream<Item = async_graphql::Result<ItemRequest>>> {
-        let queue = Arc::clone(ctx.data::<Arc<riven_queue::JobQueue>>()?);
-        Ok(
-            broadcast_stream(queue.event_tx.subscribe()).filter_map(move |event| async move {
-                let RivenEvent::ItemRequestCreated {
+        let queue = ctx.data::<Arc<riven_queue::JobQueue>>()?;
+        Ok(request_stream(
+            queue.event_tx.subscribe(),
+            |event| match event {
+                RivenEvent::ItemRequestCreated {
                     request_id,
-                    request_type,
+                    request_type: ItemRequestType::Show,
                     ..
-                } = event
-                else {
-                    return None;
-                };
-                if request_type != ItemRequestType::Show {
-                    return None;
-                }
-                match load_item_request(request_id).await {
-                    Ok(Some(request)) => Some(Ok(request)),
-                    Ok(None) => None,
-                    Err(error) => Some(Err(error)),
-                }
-            }),
-        )
+                } => Some(request_id),
+                _ => None,
+            },
+        ))
     }
 
     /// Fires when an existing show item request is updated (e.g. new seasons added).
@@ -80,26 +72,17 @@ impl RequestsSubscription {
         &self,
         ctx: &Context<'_>,
     ) -> async_graphql::Result<impl Stream<Item = async_graphql::Result<ItemRequest>>> {
-        let queue = Arc::clone(ctx.data::<Arc<riven_queue::JobQueue>>()?);
-        Ok(
-            broadcast_stream(queue.event_tx.subscribe()).filter_map(move |event| async move {
-                let RivenEvent::ItemRequestUpdated {
+        let queue = ctx.data::<Arc<riven_queue::JobQueue>>()?;
+        Ok(request_stream(
+            queue.event_tx.subscribe(),
+            |event| match event {
+                RivenEvent::ItemRequestUpdated {
                     request_id,
-                    request_type,
+                    request_type: ItemRequestType::Show,
                     ..
-                } = event
-                else {
-                    return None;
-                };
-                if request_type != ItemRequestType::Show {
-                    return None;
-                }
-                match load_item_request(request_id).await {
-                    Ok(Some(request)) => Some(Ok(request)),
-                    Ok(None) => None,
-                    Err(error) => Some(Err(error)),
-                }
-            }),
-        )
+                } => Some(request_id),
+                _ => None,
+            },
+        ))
     }
 }

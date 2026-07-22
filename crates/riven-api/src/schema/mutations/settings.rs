@@ -310,6 +310,11 @@ async fn apply_plugin_settings(
     plugin: &str,
     mut settings: serde_json::Value,
 ) -> Result<()> {
+    let registry = ctx.data::<Arc<PluginRegistry>>()?;
+    let _update_guard = registry
+        .lock_plugin_update(plugin)
+        .await
+        .ok_or_else(|| Error::new(format!("unknown plugin settings section: {plugin}")))?;
     let key = format!("plugin.{plugin}");
     let enabled = match settings
         .as_object_mut()
@@ -324,7 +329,6 @@ async fn apply_plugin_settings(
     repo::set_setting(&key, settings.clone()).await?;
     repo::set_plugin_enabled(plugin, enabled).await?;
 
-    let registry = ctx.data::<Arc<PluginRegistry>>()?;
     registry.revalidate_plugin(plugin, enabled, &settings).await;
 
     // The logging pseudo-plugin drives the live log subscriber.

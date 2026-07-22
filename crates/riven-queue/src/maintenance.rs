@@ -107,12 +107,18 @@ const FAILED_JOB_MAX_AGE_SECS: i64 = 60 * 60 * 24;
 const COMPLETED_JOB_MAX_COUNT: isize = 500;
 const FAILED_JOB_MAX_COUNT: isize = 5_000;
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RecoveryReport {
+    pub workers: u64,
+    pub jobs: u64,
+}
+
 /// Re-enqueue all inflight jobs and clear all worker registrations (called at startup).
 pub async fn clear_worker_registrations(
     redis: &mut redis::aio::ConnectionManager,
     queues: &[String],
-) {
-    rescue_workers(redis, queues, None).await;
+) -> redis::RedisResult<RecoveryReport> {
+    rescue_workers(redis, queues, None).await
 }
 
 /// Re-enqueue inflight jobs from workers whose heartbeat is older than `stale_threshold_secs`.
@@ -120,118 +126,107 @@ pub async fn recover_stale_workers(
     redis: &mut redis::aio::ConnectionManager,
     queues: &[String],
     stale_threshold_secs: i64,
-) {
+) -> redis::RedisResult<RecoveryReport> {
     rescue_workers(
         redis,
         queues,
         Some(Utc::now().timestamp() - stale_threshold_secs),
     )
-    .await;
+    .await
 }
 
 async fn rescue_workers(
     redis: &mut redis::aio::ConnectionManager,
     queues: &[String],
     max_score: Option<i64>,
-) {
+) -> redis::RedisResult<RecoveryReport> {
+    let mut report = RecoveryReport::default();
     for queue_name in queues {
         let config = RedisConfig::new(queue_name);
-
-        let members: Vec<String> = match max_score {
-            None => redis::cmd("ZRANGE")
-                .arg(config.workers_set())
-                .arg(0i64)
-                .arg(-1i64)
-                .query_async(redis)
-                .await
-                .unwrap_or_default(),
-            Some(cutoff) => redis::cmd("ZRANGEBYSCORE")
-                .arg(config.workers_set())
-                .arg(0i64)
-                .arg(cutoff)
-                .query_async(redis)
-                .await
-                .unwrap_or_default(),
+        let workers: Vec<String> = match max_score {
+            None => {
+                redis::cmd("ZRANGE")
+                    .arg(config.workers_set())
+                    .arg(0i64)
+                    .arg(-1i64)
+                    .query_async(redis)
+                    .await?
+            }
+            Some(cutoff) => {
+                redis::cmd("ZRANGEBYSCORE")
+                    .arg(config.workers_set())
+                    .arg(0i64)
+                    .arg(cutoff)
+                    .query_async(redis)
+                    .await?
+            }
         };
-
-        if members.is_empty() {
+        if workers.is_empty() {
             continue;
         }
 
-        let all_job_sets: Vec<Vec<String>> = {
+        let worker_jobs: Vec<Vec<String>> = {
             let mut pipe = redis::pipe();
-            for key in &members {
-                pipe.cmd("SMEMBERS").arg(key);
+            for worker in &workers {
+                pipe.cmd("SMEMBERS").arg(worker);
             }
-            pipe.query_async(redis).await.unwrap_or_default()
+            pipe.query_async(redis).await?
         };
+        let candidates: HashSet<String> = worker_jobs.into_iter().flatten().collect();
+        let candidate_ids: Vec<String> = candidates.into_iter().collect();
+        let exists: Vec<bool> = {
+            let mut pipe = redis::pipe();
+            for id in &candidate_ids {
+                pipe.cmd("HEXISTS").arg(config.job_data_hash()).arg(id);
+            }
+            pipe.query_async(redis).await?
+        };
+        let rescued: Vec<String> = candidate_ids
+            .into_iter()
+            .zip(exists)
+            .filter_map(|(id, exists)| exists.then_some(id))
+            .collect();
 
+        // Redis executes an atomic pipeline as MULTI/EXEC. Requeueing and
+        // registration cleanup therefore commit together, so a connection
+        // failure cannot leave jobs detached from both locations.
         let workers_set = config.workers_set();
-        let mut candidates: Vec<String> = Vec::new();
-        let mut del_pipe = redis::pipe();
-        for (key, jobs) in members.iter().zip(all_job_sets) {
-            candidates.extend(jobs);
-            del_pipe
-                .del(worker_metadata_key(&workers_set, key))
-                .del(key);
-        }
-        let _result: Result<(), _> = del_pipe.query_async(redis).await;
-
-        let rescued: Vec<String> = if candidates.is_empty() {
-            Vec::new()
-        } else {
-            let exists: Vec<bool> = {
-                let mut pipe = redis::pipe();
-                for id in &candidates {
-                    pipe.cmd("HEXISTS").arg(config.job_data_hash()).arg(id);
-                }
-                pipe.query_async(redis)
-                    .await
-                    .unwrap_or_else(|e| {
-                        tracing::error!(error = %e, "rescue_workers: failed to check job data existence; assuming all jobs present to avoid data loss");
-                        vec![true; candidates.len()]
-                    })
-            };
-            candidates
-                .into_iter()
-                .zip(exists)
-                .filter_map(|(id, ok)| if ok { Some(id) } else { None })
-                .collect()
-        };
-
+        let mut transaction = redis::pipe();
+        transaction.atomic();
         if !rescued.is_empty() {
-            let _result: Result<(), _> = redis::pipe()
+            transaction
                 .rpush(config.active_jobs_list(), &rescued)
+                .ignore()
                 .del(config.signal_list())
+                .ignore()
                 .lpush(config.signal_list(), 1u8)
-                .query_async(redis)
-                .await;
+                .ignore();
+        }
+        for worker in &workers {
+            transaction
+                .del(worker_metadata_key(&workers_set, worker))
+                .ignore()
+                .del(worker)
+                .ignore()
+                .zrem(&workers_set, worker)
+                .ignore();
+        }
+        transaction.query_async::<()>(redis).await?;
+
+        let worker_count = workers.len() as u64;
+        let job_count = rescued.len() as u64;
+        report.workers += worker_count;
+        report.jobs += job_count;
+        if worker_count > 0 {
             tracing::info!(
                 queue = queue_name,
-                count = rescued.len(),
-                "re-enqueued inflight jobs from stale workers"
+                workers = worker_count,
+                jobs = job_count,
+                "recovered stale workers"
             );
         }
-
-        if max_score.is_none() {
-            let _result: Result<(), _> = redis::cmd("DEL")
-                .arg(config.workers_set())
-                .query_async(redis)
-                .await;
-        } else {
-            let _result: Result<(), _> = redis::cmd("ZREM")
-                .arg(config.workers_set())
-                .arg(&members)
-                .query_async(redis)
-                .await;
-        }
-
-        tracing::info!(
-            queue = queue_name,
-            count = members.len(),
-            "cleared stale worker registrations"
-        );
     }
+    Ok(report)
 }
 
 /// Remove job IDs from each queue's active list that have no corresponding
