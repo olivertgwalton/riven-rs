@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use dashmap::DashMap;
 use fuser::{
@@ -15,11 +15,9 @@ use tokio::sync::mpsc;
 use tokio::sync::{RwLock, Semaphore};
 
 use riven_core::config::vfs::*;
-use riven_core::settings::LibraryProfileMembership;
 use riven_core::stream_link::request_stream_url_blocking;
 use riven_core::types::FileSystemEntryType;
 use riven_core::vfs_layout::VfsLibraryLayout;
-use riven_db::entities::FileSystemEntry;
 use riven_db::repo;
 
 use crate::cache::RangeCache;
@@ -27,16 +25,11 @@ use crate::chunks::FileLayout;
 use crate::media_stream::{MediaStream, ReadOutcome, UsenetSession};
 use crate::path_info::{CanonicalPath, PathTarget, parse_path};
 use crate::readdir::{DirEntry, populate_entries};
+use crate::state::{CachedEntry, MOVIES_INO, OpenedFile, ROOT_INO, SHOWS_INO, VfsState};
 use crate::stream::fetch_range;
 use riven_core::local_source::parse_usenet_url;
 
 const TTL: Duration = Duration::from_secs(300);
-const READDIR_CACHE_TTL: Duration = Duration::from_secs(30);
-
-const ROOT_INO: u64 = 1;
-const MOVIES_INO: u64 = 2;
-const SHOWS_INO: u64 = 3;
-const FIRST_DYNAMIC_INO: u64 = 100;
 
 /// Reject hidden files (`.trickplay`, `.nfo`, etc.) and known ignored names
 /// that media servers probe for but the VFS never serves.
@@ -78,92 +71,6 @@ fn file_attr(ino: u64, size: u64, mtime: SystemTime) -> FileAttr {
     make_attr(ino, FileType::RegularFile, size, mtime)
 }
 
-fn entry_mtime(entry: &FileSystemEntry) -> SystemTime {
-    // VFS file mtimes must be stable across ephemeral metadata churn such as
-    // refreshed stream URLs, or media servers will treat the file as changed
-    // and re-probe/prune extracted metadata. Use the creation time as the
-    // content timestamp for the virtual file.
-    let ts = entry.created_at;
-    UNIX_EPOCH + Duration::from_secs(ts.timestamp().max(0).cast_unsigned())
-}
-
-enum OpenedFile {
-    Media {
-        entry_id: i64,
-        path: Arc<str>,
-        stream_url: Arc<str>,
-        download_url: Option<Arc<str>>,
-        provider: Option<Arc<str>>,
-        stream_session: MediaStream,
-    },
-    /// Usenet-backed media read in-process via the streamer (no loopback
-    /// HTTP). The segment map is permanent, so there's no stream-URL refresh
-    /// dance — failures surface as EIO directly.
-    Usenet {
-        path: Arc<str>,
-        session: UsenetSession,
-    },
-    /// Subtitle entries are tiny and stored inline in the DB; we hold the full
-    /// payload in the open handle and serve byte-range reads from memory.
-    Subtitle { content: Arc<[u8]> },
-}
-
-#[derive(Clone)]
-struct CachedEntry {
-    id: i64,
-    entry_type: FileSystemEntryType,
-    file_size: u64,
-    mtime: SystemTime,
-    download_url: Option<Arc<str>>,
-    stream_url: Option<Arc<str>>,
-    provider: Option<Arc<str>>,
-    /// For subtitle entries: the inline content. `None` for media entries.
-    subtitle_content: Option<Arc<[u8]>>,
-    library_profiles: LibraryProfileMembership,
-    /// Usenet article address for in-process streaming. Set for usenet-backed
-    /// media entries; identifies them without parsing a URL.
-    usenet_info_hash: Option<Arc<str>>,
-    usenet_file_index: Option<usize>,
-}
-
-impl CachedEntry {
-    fn from_db(entry: FileSystemEntry) -> Self {
-        let subtitle_content = match entry.entry_type {
-            FileSystemEntryType::Subtitle => entry
-                .subtitle_content
-                .as_deref()
-                .map(|s| Arc::<[u8]>::from(s.as_bytes())),
-            FileSystemEntryType::Media => None,
-        };
-        let file_size = match (&entry.entry_type, &subtitle_content) {
-            (FileSystemEntryType::Subtitle, Some(content)) => content.len() as u64,
-            _ => u64::try_from(entry.file_size).unwrap_or(0),
-        };
-        Self {
-            id: entry.id,
-            entry_type: entry.entry_type,
-            file_size,
-            mtime: entry_mtime(&entry),
-            download_url: entry.download_url.map(Arc::from),
-            stream_url: entry.stream_url.map(Arc::from),
-            provider: entry.provider.map(Arc::from),
-            subtitle_content,
-            library_profiles: LibraryProfileMembership::from_json(entry.library_profiles.as_ref()),
-            usenet_info_hash: entry.usenet_info_hash.map(Arc::from),
-            usenet_file_index: entry
-                .usenet_file_index
-                .and_then(|i| usize::try_from(i).ok()),
-        }
-    }
-
-    fn matches_profile(&self, profile_key: Option<&str>) -> bool {
-        let Some(profile_key) = profile_key else {
-            return true;
-        };
-        self.library_profiles.contains(profile_key)
-    }
-}
-
 /// Inner state shared via `Arc` so FUSE handlers can hand the heavy I/O work
 /// off to tokio without borrowing from `&self`. The fuser session has one
 /// dispatcher thread that loops reading kernel requests; if a handler does a
@@ -172,23 +79,16 @@ impl CachedEntry {
 /// `spawn_blocking` closure lets the dispatcher return immediately while the
 /// real work runs on tokio's blocking-task pool, so a slow read on one file
 /// no longer wedges every other FUSE op.
-pub struct RivenFsInner {
+struct RivenFsInner {
     vfs_layout: Arc<RwLock<VfsLibraryLayout>>,
     filesystem_settings_revision: Arc<AtomicU64>,
-    cache_revision: AtomicU64,
     stream_client: reqwest::Client,
     link_request_tx: mpsc::Sender<riven_core::stream_link::LinkRequest>,
     runtime: tokio::runtime::Handle,
 
-    next_fd: AtomicU64,
-    file_handles: DashMap<u64, Mutex<OpenedFile>>,
-
-    path_to_ino: DashMap<Arc<str>, u64>,
-    ino_to_path: DashMap<u64, Arc<str>>,
-    next_ino: AtomicU64,
+    state: VfsState,
 
     range_cache: Arc<RangeCache>,
-    readdir_cache: DashMap<u64, (Vec<DirEntry>, Instant)>,
     prewarm_semaphore: Arc<Semaphore>,
     link_refresh_locks: DashMap<i64, Arc<Mutex<()>>>,
     local_source: Option<Arc<dyn riven_core::local_source::LocalByteSource>>,
@@ -234,29 +134,14 @@ impl RivenFsInner {
         } else {
             (cache_max_size_mb * 1024 * 1024) as usize
         };
-        let path_to_ino = DashMap::new();
-        let ino_to_path = DashMap::new();
-        let movies_path: Arc<str> = Arc::from("/movies");
-        let shows_path: Arc<str> = Arc::from("/shows");
-        path_to_ino.insert(Arc::clone(&movies_path), MOVIES_INO);
-        path_to_ino.insert(Arc::clone(&shows_path), SHOWS_INO);
-        ino_to_path.insert(MOVIES_INO, movies_path);
-        ino_to_path.insert(SHOWS_INO, shows_path);
-
         Self {
             vfs_layout,
             filesystem_settings_revision,
-            cache_revision: AtomicU64::new(0),
             stream_client,
             link_request_tx,
             runtime: tokio::runtime::Handle::current(),
-            next_fd: AtomicU64::new(1),
-            file_handles: DashMap::new(),
-            path_to_ino,
-            ino_to_path,
-            next_ino: AtomicU64::new(FIRST_DYNAMIC_INO),
+            state: VfsState::new(),
             range_cache: Arc::new(RangeCache::new(cache_capacity_bytes)),
-            readdir_cache: DashMap::new(),
             prewarm_semaphore: Arc::new(Semaphore::new(8)),
             link_refresh_locks: DashMap::new(),
             local_source,
@@ -269,24 +154,7 @@ impl RivenFsInner {
 
     fn refresh_caches_if_needed(&self) {
         let revision = self.filesystem_settings_revision.load(Ordering::SeqCst);
-        let cached = self.cache_revision.load(Ordering::SeqCst);
-        if revision == cached {
-            return;
-        }
-
-        self.readdir_cache.clear();
-        self.cache_revision.store(revision, Ordering::SeqCst);
-    }
-
-    fn get_or_create_ino(&self, path: &str) -> u64 {
-        if let Some(ino) = self.path_to_ino.get(path) {
-            return *ino;
-        }
-        let ino = self.next_ino.fetch_add(1, Ordering::SeqCst);
-        let arc: Arc<str> = Arc::from(path);
-        self.path_to_ino.insert(Arc::clone(&arc), ino);
-        self.ino_to_path.insert(ino, arc);
-        ino
+        self.state.refresh(revision);
     }
 
     /// Resolve a VFS path to its current `filesystem_entries` row. Always
@@ -433,24 +301,6 @@ impl RivenFsInner {
         Some(url)
     }
 
-    fn resolve_path(&self, parent_ino: u64, name: &str) -> Arc<str> {
-        let parent = match parent_ino {
-            ROOT_INO => Arc::<str>::from("/"),
-            MOVIES_INO => Arc::<str>::from("/movies"),
-            SHOWS_INO => Arc::<str>::from("/shows"),
-            _ => self
-                .ino_to_path
-                .get(&parent_ino)
-                .map_or_else(|| Arc::<str>::from("/"), |path| Arc::clone(&path)),
-        };
-
-        Arc::from(if parent.as_ref() == "/" {
-            format!("/{name}")
-        } else {
-            format!("{parent}/{name}")
-        })
-    }
-
     fn read_handle(
         &self,
         handle: &mut OpenedFile,
@@ -458,26 +308,17 @@ impl RivenFsInner {
         end: u64,
         stream_url: &str,
     ) -> ReadOutcome {
-        match handle {
-            OpenedFile::Media { stream_session, .. } => stream_session.read(
-                start,
-                end,
-                stream_url,
-                &self.range_cache,
-                &self.stream_client,
-                &self.runtime,
-            ),
-            OpenedFile::Usenet { session, .. } => session.read(start, end, &self.runtime),
-            OpenedFile::Subtitle { content } => {
-                let len = content.len() as u64;
-                if start >= len {
-                    return ReadOutcome::Data(bytes::Bytes::new());
-                }
-                let end = end.min(len - 1);
-                let buf = bytes::Bytes::copy_from_slice(&content[start as usize..=end as usize]);
-                ReadOutcome::Data(buf)
-            }
-        }
+        let OpenedFile::Media { stream_session, .. } = handle else {
+            return ReadOutcome::Error(libc::EIO);
+        };
+        stream_session.read(
+            start,
+            end,
+            stream_url,
+            &self.range_cache,
+            &self.stream_client,
+            &self.runtime,
+        )
     }
 }
 
@@ -543,15 +384,17 @@ impl Filesystem for RivenFs {
             reply.error(Errno::ENOENT);
             return;
         }
-        let path = s.resolve_path(parent, &name);
+        let path = s.state.resolve_path(parent, &name);
         tracing::debug!(target: "streaming", path = %path, "lookup");
         s.refresh_caches_if_needed();
         let layout = s.current_layout();
         match parse_path(&layout, &path) {
             PathTarget::Root => reply.entry(&TTL, &dir_attr(ROOT_INO), Generation(0)),
-            PathTarget::ProfilePrefixDir => {
-                reply.entry(&TTL, &dir_attr(s.get_or_create_ino(&path)), Generation(0))
-            }
+            PathTarget::ProfilePrefixDir => reply.entry(
+                &TTL,
+                &dir_attr(s.state.get_or_create_ino(&path)),
+                Generation(0),
+            ),
             PathTarget::Canonical {
                 profile_key,
                 path: canonical,
@@ -559,7 +402,7 @@ impl Filesystem for RivenFs {
                 CanonicalPath::Root => reply.entry(&TTL, &dir_attr(ROOT_INO), Generation(0)),
                 CanonicalPath::AllMovies => {
                     let ino = if profile_key.is_some() {
-                        s.get_or_create_ino(&path)
+                        s.state.get_or_create_ino(&path)
                     } else {
                         MOVIES_INO
                     };
@@ -567,7 +410,7 @@ impl Filesystem for RivenFs {
                 }
                 CanonicalPath::AllShows => {
                     let ino = if profile_key.is_some() {
-                        s.get_or_create_ino(&path)
+                        s.state.get_or_create_ino(&path)
                     } else {
                         SHOWS_INO
                     };
@@ -576,12 +419,16 @@ impl Filesystem for RivenFs {
                 CanonicalPath::MovieDir { .. }
                 | CanonicalPath::ShowDir { .. }
                 | CanonicalPath::SeasonDir { .. } => {
-                    reply.entry(&TTL, &dir_attr(s.get_or_create_ino(&path)), Generation(0));
+                    reply.entry(
+                        &TTL,
+                        &dir_attr(s.state.get_or_create_ino(&path)),
+                        Generation(0),
+                    );
                 }
                 CanonicalPath::MovieFile { .. } | CanonicalPath::EpisodeFile { .. } => {
                     match s.get_entry(&path) {
                         Some(entry) => {
-                            let ino = s.get_or_create_ino(&path);
+                            let ino = s.state.get_or_create_ino(&path);
                             reply.entry(
                                 &TTL,
                                 &file_attr(ino, entry.file_size, entry.mtime),
@@ -605,7 +452,7 @@ impl Filesystem for RivenFs {
             MOVIES_INO => reply.attr(&TTL, &dir_attr(MOVIES_INO)),
             SHOWS_INO => reply.attr(&TTL, &dir_attr(SHOWS_INO)),
             _ => {
-                let Some(path) = s.ino_to_path.get(&ino) else {
+                let Some(path) = s.state.path(ino) else {
                     reply.error(Errno::ENOENT);
                     return;
                 };
@@ -638,10 +485,7 @@ impl Filesystem for RivenFs {
         let s = &self.inner;
         let ino = ino.0;
         s.refresh_caches_if_needed();
-        let cached = s
-            .readdir_cache
-            .get(&ino)
-            .and_then(|e| (e.1.elapsed() < READDIR_CACHE_TTL).then(|| e.0.clone()));
+        let cached = s.state.directory_entries(ino);
 
         let entries = if let Some(entries) = cached {
             entries
@@ -650,8 +494,8 @@ impl Filesystem for RivenFs {
                 (ino, FileType::Directory, ".".into()),
                 (ino, FileType::Directory, "..".into()),
             ];
-            let ino_to_path = s.ino_to_path.get(&ino).map(|r| Arc::clone(&r));
-            let mut get_ino = |path: &str| s.get_or_create_ino(path);
+            let ino_to_path = s.state.path(ino);
+            let mut get_ino = |path: &str| s.state.get_or_create_ino(path);
             let layout = s.current_layout();
             populate_entries(
                 ino,
@@ -667,8 +511,7 @@ impl Filesystem for RivenFs {
                 .into_iter()
                 .filter(|(_, _, n)| seen.insert(n.clone()))
                 .collect();
-            s.readdir_cache
-                .insert(ino, (deduped.clone(), Instant::now()));
+            s.state.cache_directory_entries(ino, deduped.clone());
             deduped
         };
 
@@ -683,7 +526,7 @@ impl Filesystem for RivenFs {
     fn open(&self, _req: &Request, ino: INodeNo, _flags: OpenFlags, reply: ReplyOpen) {
         let s = &self.inner;
         let ino = ino.0;
-        let Some(path) = s.ino_to_path.get(&ino).map(|r| Arc::clone(&r)) else {
+        let Some(path) = s.state.path(ino) else {
             reply.error(Errno::ENOENT);
             return;
         };
@@ -698,14 +541,11 @@ impl Filesystem for RivenFs {
                 reply.error(Errno::ENOENT);
                 return;
             };
-            let fd = s.next_fd.fetch_add(1, Ordering::SeqCst);
-            s.file_handles
-                .insert(fd, Mutex::new(OpenedFile::Subtitle { content }));
+            let fd = s.state.open(OpenedFile::Subtitle { content });
             reply.opened(FuseFh(fd), FopenFlags::FOPEN_KEEP_CACHE);
             return;
         }
 
-        let fd = s.next_fd.fetch_add(1, Ordering::SeqCst);
         let file_size = entry.file_size;
 
         let usenet_id = match (&entry.usenet_info_hash, entry.usenet_file_index) {
@@ -718,19 +558,16 @@ impl Filesystem for RivenFs {
         };
         if let (Some(source), Some((info_hash, file_index))) = (s.local_source.clone(), usenet_id) {
             let filename: Arc<str> = Arc::from(path.rsplit('/').next().unwrap_or(&path));
-            s.file_handles.insert(
-                fd,
-                Mutex::new(OpenedFile::Usenet {
-                    path,
-                    session: UsenetSession::new(
-                        source,
-                        Arc::from(info_hash.as_str()),
-                        file_index,
-                        file_size,
-                        filename,
-                    ),
-                }),
-            );
+            let fd = s.state.open(OpenedFile::Usenet {
+                path,
+                session: UsenetSession::new(
+                    source,
+                    Arc::from(info_hash.as_str()),
+                    file_index,
+                    file_size,
+                    filename,
+                ),
+            });
             reply.opened(FuseFh(fd), FopenFlags::FOPEN_KEEP_CACHE);
             return;
         }
@@ -753,17 +590,14 @@ impl Filesystem for RivenFs {
             file_size,
         ));
 
-        s.file_handles.insert(
-            fd,
-            Mutex::new(OpenedFile::Media {
-                entry_id: entry.id,
-                path,
-                stream_url: Arc::from(stream_url),
-                download_url: entry.download_url.clone(),
-                provider: entry.provider.clone(),
-                stream_session: MediaStream::new(ino, file_size),
-            }),
-        );
+        let fd = s.state.open(OpenedFile::Media {
+            entry_id: entry.id,
+            path,
+            stream_url: Arc::from(stream_url),
+            download_url: entry.download_url.clone(),
+            provider: entry.provider.clone(),
+            stream_session: MediaStream::new(ino, file_size),
+        });
         reply.opened(FuseFh(fd), FopenFlags::FOPEN_KEEP_CACHE);
     }
 
@@ -793,7 +627,7 @@ impl Filesystem for RivenFs {
         let fh = fh.0;
         inner.runtime.clone().spawn_blocking(move || {
             let s = inner.as_ref();
-            let Some(entry) = s.file_handles.get(&fh) else {
+            let Some(entry) = s.state.file_handles.get(&fh) else {
                 reply.error(Errno::EBADF);
                 return;
             };
@@ -928,7 +762,7 @@ impl Filesystem for RivenFs {
         let s = &self.inner;
         let fh = fh.0;
         tracing::debug!(target: "streaming", fh, "release");
-        s.file_handles.remove(&fh);
+        s.state.close(fh);
         reply.ok();
     }
 }
