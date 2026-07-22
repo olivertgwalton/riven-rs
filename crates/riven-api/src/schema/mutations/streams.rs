@@ -72,7 +72,6 @@ impl StreamsMutations {
         let target = if item_type == MediaItemType::Movie {
             ensure_download_target(
                 registry.as_ref(),
-                job_queue,
                 item_type,
                 &title,
                 imdb_id.as_deref(),
@@ -89,7 +88,6 @@ impl StreamsMutations {
                 [single] => {
                     ensure_download_target(
                         registry.as_ref(),
-                        job_queue,
                         MediaItemType::Season,
                         &title,
                         imdb_id.as_deref(),
@@ -102,7 +100,6 @@ impl StreamsMutations {
                 many => {
                     ensure_show_target(
                         registry.as_ref(),
-                        job_queue,
                         &title,
                         imdb_id.as_deref(),
                         tvdb_id.as_deref(),

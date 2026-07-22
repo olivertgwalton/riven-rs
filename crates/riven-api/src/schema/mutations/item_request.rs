@@ -2,7 +2,7 @@ use async_graphql::*;
 use riven_db::entities::ItemRequest;
 use riven_db::repo::ItemRequestUpsertAction;
 use riven_queue::JobQueue;
-use riven_queue::lifecycle::LibraryOrchestrator;
+use riven_queue::lifecycle::{upsert_requested_movie, upsert_requested_show};
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -83,17 +83,14 @@ impl ItemRequestMutations {
     ) -> Result<RequestItemMutationResponse> {
         require_request_access(ctx)?;
         let job_queue = ctx.data::<Arc<JobQueue>>()?;
-        let orchestrator = LibraryOrchestrator::new(job_queue.as_ref());
-
-        let outcome = match orchestrator
-            .upsert_requested_movie(
-                &input.title,
-                input.imdb_id.as_deref(),
-                input.tmdb_id.as_deref(),
-                input.requested_by.as_deref(),
-                input.external_request_id.as_deref(),
-            )
-            .await
+        let outcome = match upsert_requested_movie(
+            &input.title,
+            input.imdb_id.as_deref(),
+            input.tmdb_id.as_deref(),
+            input.requested_by.as_deref(),
+            input.external_request_id.as_deref(),
+        )
+        .await
         {
             Ok(outcome) => outcome,
             Err(error) => {
@@ -142,18 +139,15 @@ impl ItemRequestMutations {
     ) -> Result<RequestItemMutationResponse> {
         require_request_access(ctx)?;
         let job_queue = ctx.data::<Arc<JobQueue>>()?;
-        let orchestrator = LibraryOrchestrator::new(job_queue.as_ref());
-
-        let outcome = match orchestrator
-            .upsert_requested_show(
-                &input.title,
-                input.imdb_id.as_deref(),
-                input.tvdb_id.as_deref(),
-                input.requested_by.as_deref(),
-                input.external_request_id.as_deref(),
-                input.seasons.as_deref(),
-            )
-            .await
+        let outcome = match upsert_requested_show(
+            &input.title,
+            input.imdb_id.as_deref(),
+            input.tvdb_id.as_deref(),
+            input.requested_by.as_deref(),
+            input.external_request_id.as_deref(),
+            input.seasons.as_deref(),
+        )
+        .await
         {
             Ok(outcome) => outcome,
             Err(error) => {
@@ -219,8 +213,6 @@ impl ItemRequestMutations {
     ) -> Result<RequestItemsResult> {
         require_request_access(ctx)?;
         let job_queue = ctx.data::<Arc<JobQueue>>()?;
-        let orchestrator = LibraryOrchestrator::new(job_queue.as_ref());
-
         let mut seen: HashSet<String> = HashSet::new();
         let mut new_items: Vec<ItemRequest> = Vec::new();
         let mut updated_items: Vec<ItemRequest> = Vec::new();
@@ -241,16 +233,15 @@ impl ItemRequestMutations {
 
             count += 1;
 
-            let outcome = orchestrator
-                .upsert_requested_movie(
-                    &movie.title,
-                    movie.imdb_id.as_deref(),
-                    movie.tmdb_id.as_deref(),
-                    movie.requested_by.as_deref(),
-                    movie.external_request_id.as_deref(),
-                )
-                .await
-                .map_err(Error::from)?;
+            let outcome = upsert_requested_movie(
+                &movie.title,
+                movie.imdb_id.as_deref(),
+                movie.tmdb_id.as_deref(),
+                movie.requested_by.as_deref(),
+                movie.external_request_id.as_deref(),
+            )
+            .await
+            .map_err(Error::from)?;
 
             match outcome.action {
                 ItemRequestUpsertAction::Created => {
@@ -286,17 +277,16 @@ impl ItemRequestMutations {
 
             let seasons = show.seasons.as_deref();
 
-            let outcome = orchestrator
-                .upsert_requested_show(
-                    &show.title,
-                    show.imdb_id.as_deref(),
-                    show.tvdb_id.as_deref(),
-                    show.requested_by.as_deref(),
-                    show.external_request_id.as_deref(),
-                    seasons,
-                )
-                .await
-                .map_err(Error::from)?;
+            let outcome = upsert_requested_show(
+                &show.title,
+                show.imdb_id.as_deref(),
+                show.tvdb_id.as_deref(),
+                show.requested_by.as_deref(),
+                show.external_request_id.as_deref(),
+                seasons,
+            )
+            .await
+            .map_err(Error::from)?;
 
             match outcome.action {
                 ItemRequestUpsertAction::Created => {

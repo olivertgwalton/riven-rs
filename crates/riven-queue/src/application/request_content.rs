@@ -4,7 +4,7 @@ use riven_core::types::ContentServiceResponse;
 use riven_db::repo;
 
 use crate::JobQueue;
-use crate::lifecycle::LibraryOrchestrator;
+use crate::lifecycle::{upsert_requested_movie, upsert_requested_show};
 
 /// Singleton flow scope for content-service polling. Only one content-service
 /// fan-in runs at a time (the scheduler's 120s tick is the sole producer plus
@@ -44,7 +44,6 @@ pub async fn finalize(scope: i64, queue: &JobQueue) {
         }
     }
 
-    let orchestrator = LibraryOrchestrator::new(queue);
     let response = content.into_response();
     let all_movies = response.movies;
     let all_shows = response.shows;
@@ -56,15 +55,14 @@ pub async fn finalize(scope: i64, queue: &JobQueue) {
             .or(movie.tmdb_id.as_deref())
             .unwrap_or("Unknown");
 
-        match orchestrator
-            .upsert_requested_movie(
-                title,
-                movie.imdb_id.as_deref(),
-                movie.tmdb_id.as_deref(),
-                movie.requested_by.as_deref(),
-                movie.external_request_id.as_deref(),
-            )
-            .await
+        match upsert_requested_movie(
+            title,
+            movie.imdb_id.as_deref(),
+            movie.tmdb_id.as_deref(),
+            movie.requested_by.as_deref(),
+            movie.external_request_id.as_deref(),
+        )
+        .await
         {
             Ok(outcome) => {
                 if let Some(event) = outcome.lifecycle_event(None) {
@@ -84,16 +82,15 @@ pub async fn finalize(scope: i64, queue: &JobQueue) {
             .or(show.tvdb_id.as_deref())
             .unwrap_or("Unknown");
 
-        match orchestrator
-            .upsert_requested_show(
-                title,
-                show.imdb_id.as_deref(),
-                show.tvdb_id.as_deref(),
-                show.requested_by.as_deref(),
-                show.external_request_id.as_deref(),
-                show.requested_seasons.as_deref(),
-            )
-            .await
+        match upsert_requested_show(
+            title,
+            show.imdb_id.as_deref(),
+            show.tvdb_id.as_deref(),
+            show.requested_by.as_deref(),
+            show.external_request_id.as_deref(),
+            show.requested_seasons.as_deref(),
+        )
+        .await
         {
             Ok(outcome) => {
                 if let Some(event) = outcome.lifecycle_event(show.requested_seasons.as_deref()) {

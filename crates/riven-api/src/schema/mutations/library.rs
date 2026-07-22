@@ -3,7 +3,7 @@ use riven_core::events::RivenEvent;
 use riven_core::types::MediaItemType;
 use riven_db::entities::MediaItem;
 use riven_db::repo;
-use riven_queue::lifecycle::LibraryOrchestrator;
+use riven_queue::lifecycle::{upsert_requested_movie, upsert_requested_show};
 use riven_queue::{IndexJob, JobQueue};
 use std::sync::Arc;
 
@@ -126,24 +126,22 @@ impl LibraryMutations {
     ) -> Result<MediaItem> {
         require_library_access(ctx)?;
         let job_queue = ctx.data::<Arc<JobQueue>>()?;
-        let orchestrator = LibraryOrchestrator::new(job_queue.as_ref());
-
         let outcome = match item_type {
-            MediaItemType::Movie => orchestrator
-                .upsert_requested_movie(&title, imdb_id.as_deref(), tmdb_id.as_deref(), None, None)
-                .await
-                .map_err(Error::from)?,
-            MediaItemType::Show => orchestrator
-                .upsert_requested_show(
-                    &title,
-                    imdb_id.as_deref(),
-                    tvdb_id.as_deref(),
-                    None,
-                    None,
-                    seasons.as_deref(),
-                )
-                .await
-                .map_err(Error::from)?,
+            MediaItemType::Movie => {
+                upsert_requested_movie(&title, imdb_id.as_deref(), tmdb_id.as_deref(), None, None)
+                    .await
+                    .map_err(Error::from)?
+            }
+            MediaItemType::Show => upsert_requested_show(
+                &title,
+                imdb_id.as_deref(),
+                tvdb_id.as_deref(),
+                None,
+                None,
+                seasons.as_deref(),
+            )
+            .await
+            .map_err(Error::from)?,
             _ => {
                 return Err(Error::new(
                     "Only Movie and Show types can be added directly",

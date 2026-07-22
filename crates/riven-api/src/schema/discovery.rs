@@ -1,5 +1,4 @@
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
 
 use async_graphql::{Error, Result};
 use riven_core::events::{HookResponse, RivenEvent};
@@ -7,12 +6,11 @@ use riven_core::plugin::PluginRegistry;
 use riven_core::types::*;
 use riven_db::entities::MediaItem;
 use riven_db::repo;
-use riven_queue::JobQueue;
 use riven_queue::discovery::{
     ParseContext, load_active_profiles, load_dubbed_anime_only, rank_streams,
 };
 use riven_queue::indexing::apply_indexed_media_item;
-use riven_queue::lifecycle::LibraryOrchestrator;
+use riven_queue::lifecycle::{upsert_requested_movie, upsert_requested_show};
 
 use super::types::DiscoveredStream;
 
@@ -366,7 +364,6 @@ pub fn resolve_pack_seasons(
 /// missing, and return the show `MediaItem` to link the stream against.
 pub async fn ensure_show_target(
     registry: &PluginRegistry,
-    queue: &Arc<JobQueue>,
     title: &str,
     imdb_id: Option<&str>,
     tvdb_id: Option<&str>,
@@ -376,9 +373,7 @@ pub async fn ensure_show_target(
         return Err(Error::new("At least one season is required"));
     }
 
-    let orchestrator = LibraryOrchestrator::new(queue.as_ref());
-    let outcome = orchestrator
-        .upsert_requested_show(title, imdb_id, tvdb_id, None, None, Some(seasons))
+    let outcome = upsert_requested_show(title, imdb_id, tvdb_id, None, None, Some(seasons))
         .await
         .map_err(Error::from)?;
 
@@ -413,7 +408,6 @@ pub async fn ensure_show_target(
 
 pub async fn ensure_download_target(
     registry: &PluginRegistry,
-    queue: &Arc<JobQueue>,
     item_type: MediaItemType,
     title: &str,
     imdb_id: Option<&str>,
@@ -421,12 +415,9 @@ pub async fn ensure_download_target(
     tvdb_id: Option<&str>,
     season_number: Option<i32>,
 ) -> Result<MediaItem> {
-    let orchestrator = LibraryOrchestrator::new(queue.as_ref());
-
     match item_type {
         MediaItemType::Movie => {
-            let outcome = orchestrator
-                .upsert_requested_movie(title, imdb_id, tmdb_id, None, None)
+            let outcome = upsert_requested_movie(title, imdb_id, tmdb_id, None, None)
                 .await
                 .map_err(Error::from)?;
 
@@ -448,10 +439,10 @@ pub async fn ensure_download_target(
             let season_number =
                 season_number.ok_or_else(|| Error::new("Season number is required"))?;
             let requested = [season_number];
-            let outcome = orchestrator
-                .upsert_requested_show(title, imdb_id, tvdb_id, None, None, Some(&requested))
-                .await
-                .map_err(Error::from)?;
+            let outcome =
+                upsert_requested_show(title, imdb_id, tvdb_id, None, None, Some(&requested))
+                    .await
+                    .map_err(Error::from)?;
 
             let mut needs_index = outcome.item.imdb_id.is_none();
             let existing_seasons = repo::list_seasons(outcome.item.id).await?;
