@@ -78,7 +78,7 @@ async fn main() -> Result<()> {
     let registry = setup::register_plugins(
         http_client.clone(),
         redis_conn,
-        settings.effective_vfs_mount_path().to_string(),
+        settings.filesystem.mount_path.clone(),
         &settings,
     )
     .await;
@@ -148,7 +148,7 @@ async fn main() -> Result<()> {
 
     let (link_tx, mut link_rx) = tokio::sync::mpsc::channel(64);
 
-    let vfs_mount_path = settings.effective_vfs_mount_path().to_string();
+    let vfs_mount_path = settings.filesystem.mount_path.clone();
     let usenet_local_source: Option<Arc<dyn riven_core::local_source::LocalByteSource>> =
         usenet_streamer
             .clone()

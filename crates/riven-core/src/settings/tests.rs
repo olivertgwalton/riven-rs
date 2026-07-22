@@ -150,7 +150,6 @@ fn matching_profiles_support_language_country_year_and_rating_filters() {
 #[test]
 fn apply_general_db_override_updates_supported_fields() {
     let mut settings = RivenSettings {
-        vfs_mount_path: "/vfs".to_string(),
         minimum_average_bitrate_movies: Some(10),
         retry_interval_secs: 60,
         ..RivenSettings::default()
@@ -176,7 +175,7 @@ fn apply_general_db_override_updates_supported_fields() {
         "unknown_air_date_offset_days": 3
     }));
 
-    assert_eq!(settings.filesystem.mount_path, "/vfs");
+    assert_eq!(settings.filesystem.mount_path, "");
     assert!(settings.filesystem.library_profiles.contains_key("kids"));
     assert!(settings.dubbed_anime_only);
     assert_eq!(settings.minimum_average_bitrate_movies, Some(15));
@@ -184,6 +183,34 @@ fn apply_general_db_override_updates_supported_fields() {
     assert_eq!(settings.retry_interval_secs, 3600);
     assert_eq!(settings.schedule_offset_minutes, 45);
     assert_eq!(settings.unknown_air_date_offset_days, 3);
+}
+
+#[test]
+fn apply_general_db_override_restores_filesystem_with_string_shaped_scalar() {
+    let mut settings = RivenSettings {
+        logging_enabled: false,
+        ..RivenSettings::default()
+    };
+
+    settings.apply_general_db_override(&serde_json::json!({
+        "filesystem": {
+            "mount_path": "/mount",
+            "library_profiles": {
+                "kids": {
+                    "name": "Kids",
+                    "library_path": "/kids",
+                    "enabled": true,
+                    "filter_rules": {}
+                }
+            }
+        },
+        "logging_enabled": "true"
+    }));
+
+    assert_eq!(settings.filesystem.mount_path, "/mount");
+    assert!(settings.filesystem.library_profiles.contains_key("kids"));
+    // String-shaped scalar values accepted by the settings API are restored too.
+    assert!(settings.logging_enabled);
 }
 
 #[test]
