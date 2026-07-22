@@ -550,6 +550,12 @@ pub struct UsenetSession {
     /// Highest offset the look-ahead prefetch has already been scheduled up
     /// to. Monotonic: forward reads extend it, backward reads leave it alone.
     prefetch_frontier: u64,
+    /// One bounded producer per open file, rather than a new detached task
+    /// for every read that advances the frontier. The producer only warms
+    /// Riven's decoded-segment cache; it never changes the bytes returned to
+    /// the FUSE caller.
+    prefetch_target_tx: Option<tokio::sync::watch::Sender<u64>>,
+    prefetch_task: Option<tokio::task::JoinHandle<()>>,
     /// Active-streams registry key (`"{info_hash}:{file_index}"`). Registered
     /// on first read, touched periodically, unregistered on drop — restoring
     /// the dashboard "now playing" view for in-process FUSE playback.
@@ -574,6 +580,8 @@ impl UsenetSession {
             file_index,
             file_size,
             prefetch_frontier: 0,
+            prefetch_target_tx: None,
+            prefetch_task: None,
             stream_key,
             filename,
             registered: false,
@@ -583,6 +591,39 @@ impl UsenetSession {
 
     pub fn file_size(&self) -> u64 {
         self.file_size
+    }
+
+    fn ensure_prefetch_worker(&mut self, runtime: &tokio::runtime::Handle) {
+        if self.prefetch_target_tx.is_some() {
+            return;
+        }
+
+        // A watch channel retains only the latest requested watermark. If
+        // NNTP is slower than the consumer, obsolete intermediate windows
+        // are discarded instead of building an unbounded work queue.
+        let (tx, mut targets) = tokio::sync::watch::channel(0_u64);
+        let source = Arc::clone(&self.source);
+        let info_hash = Arc::clone(&self.info_hash);
+        let file_index = self.file_index;
+        let file_size = self.file_size;
+
+        self.prefetch_task = Some(runtime.spawn(async move {
+            let mut warmed_through: Option<u64> = None;
+            while targets.changed().await.is_ok() {
+                // Coalesce advances received while a previous cache window
+                // was being filled. This keeps exactly one producer per file
+                // and bounds NNTP work to the latest read-ahead watermark.
+                let mut target = *targets.borrow_and_update();
+                target = target.min(file_size.saturating_sub(1));
+                let from = warmed_through.map_or(0, |end| end.saturating_add(1));
+                if from > target {
+                    continue;
+                }
+                source.prefetch(&info_hash, file_index, from, target).await;
+                warmed_through = Some(target);
+            }
+        }));
+        self.prefetch_target_tx = Some(tx);
     }
 
     pub fn read(&mut self, start: u64, end: u64, runtime: &tokio::runtime::Handle) -> ReadOutcome {
@@ -638,14 +679,12 @@ impl UsenetSession {
                 span = want_through - from,
                 "usenet prefetch spawned"
             );
-            let source = Arc::clone(&self.source);
-            let info_hash = Arc::clone(&self.info_hash);
-            let file_index = self.file_index;
-            runtime.spawn(async move {
-                source
-                    .prefetch(&info_hash, file_index, from, want_through)
-                    .await;
-            });
+            self.ensure_prefetch_worker(runtime);
+            if let Some(tx) = &self.prefetch_target_tx {
+                // The worker always starts at the last fully warmed byte, so
+                // `from` is diagnostic only; the target is the cache-watermark.
+                tx.send_replace(want_through);
+            }
         }
 
         match runtime.block_on(
@@ -689,6 +728,12 @@ impl UsenetSession {
 
 impl Drop for UsenetSession {
     fn drop(&mut self) {
+        // Closing the sender lets an idle worker exit; abort also stops an
+        // in-flight prefetch promptly when the media server closes the file.
+        self.prefetch_target_tx.take();
+        if let Some(task) = self.prefetch_task.take() {
+            task.abort();
+        }
         if self.registered {
             self.source.stream_unregister(&self.stream_key);
         }
@@ -879,15 +924,17 @@ mod tests {
             prefetch_calls.len()
         );
 
-        // Coverage must be contiguous and monotonic: each spawned window
-        // should start where the previous one left off (or at the read
-        // position, for the very first spawn), with no gaps and no overlap.
+        // Coverage must be contiguous and monotonic: each inclusive spawned
+        // window should begin immediately after the previous one (or at the
+        // read position, for the first spawn), with no gaps or duplicate
+        // boundary fetches.
         let mut prev_end: Option<u64> = None;
         for &(from, want_through) in prefetch_calls.iter() {
             assert!(want_through > from, "spawned window must be non-empty");
             if let Some(prev) = prev_end {
                 assert_eq!(
-                    from, prev,
+                    from,
+                    prev + 1,
                     "prefetch windows must be contiguous, no gaps/overlap"
                 );
             }
