@@ -3,6 +3,10 @@
 //! This explicit list is the single source of truth for which plugins are
 //! built in. Adding a plugin means adding its crate to `Cargo.toml` and one
 //! line here. The order is the order plugins are registered and dispatched in.
+//!
+//! The list lives in its own crate rather than in `riven-app` so the docs
+//! generator (`cargo run --bin gen-docs`) can read every plugin's settings
+//! schema without pulling in the binary's FUSE and database dependencies.
 
 use riven_core::plugin::Plugin;
 
