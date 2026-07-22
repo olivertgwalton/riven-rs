@@ -23,6 +23,12 @@ pub struct MediaStream {
     layout: FileLayout,
     last_read_end: Option<u64>,
     sequential: Option<SequentialReader>,
+    partial_body_chunk: Option<PartialBodyChunk>,
+}
+
+struct PartialBodyChunk {
+    range: ChunkRange,
+    data: BytesMut,
 }
 
 struct ReadContext<'a> {
@@ -62,7 +68,7 @@ impl SequentialReader {
             .map_or(u64::MAX, |end_inclusive| end_inclusive.saturating_add(1));
         let stream = response.bytes_stream().map_err(io::Error::other).boxed();
         let reader = BufReader::with_capacity(
-            riven_core::config::vfs::CHUNK_SIZE as usize * 2,
+            riven_core::config::vfs::CHUNK_SIZE as usize,
             StreamReader::new(stream),
         );
 
@@ -80,12 +86,13 @@ impl SequentialReader {
         start >= self.read_pos && end_inclusive < self.body_end_exclusive
     }
 
-    fn read_chunk(
+    fn read_range(
         &mut self,
-        chunk: ChunkRange,
+        start: u64,
+        size: usize,
         runtime: &tokio::runtime::Handle,
     ) -> io::Result<Bytes> {
-        runtime.block_on(self.read_exact_at(chunk.start, chunk.len()))
+        runtime.block_on(self.read_exact_at(start, size))
     }
 
     async fn read_exact_at(&mut self, pos: u64, size: usize) -> io::Result<Bytes> {
@@ -144,6 +151,7 @@ impl MediaStream {
             layout: FileLayout::new(file_size),
             last_read_end: None,
             sequential: None,
+            partial_body_chunk: None,
         }
     }
 
@@ -339,37 +347,109 @@ impl MediaStream {
             return self.read_cached_chunks(start, end, chunks, ctx.cache);
         }
 
+        // Cache entries remain whole 1 MiB chunks, but a small FUSE request
+        // must not wait for the rest of its containing chunk. Read and return
+        // exactly the requested range; sequential requests accumulate into a
+        // complete cache entry in the background of normal playback.
+        let requested_len = (end - start + 1) as usize;
         for attempt in 0..2 {
-            let mut failed = false;
+            if !self.ensure_sequential_reader_for(start, end, ctx) {
+                tracing::error!(ino = self.ino, "failed to start sequential reader");
+                return ReadOutcome::Error(libc::EIO);
+            }
 
-            for chunk in chunks {
-                if ctx.cache.get((self.ino, chunk.start, chunk.end)).is_some() {
-                    continue;
+            let result = self
+                .sequential
+                .as_mut()
+                .expect("sequential reader must exist after ensure_sequential_reader")
+                .read_range(start, requested_len, ctx.runtime);
+            match result {
+                Ok(data) => {
+                    self.cache_sequential_body_bytes(start, &data, chunks, ctx.cache);
+                    return ReadOutcome::Data(data);
                 }
-
-                if !self.ensure_sequential_reader_for(chunk.start, chunk.end, ctx) {
-                    tracing::error!(ino = self.ino, "failed to start sequential reader");
+                Err(error) if attempt == 0 => {
+                    tracing::warn!(
+                        ino = self.ino,
+                        error = %error,
+                        "stream read failed, retrying once"
+                    );
+                    self.sequential = None;
+                    self.partial_body_chunk = None;
+                }
+                Err(error) => {
+                    tracing::error!(
+                        ino = self.ino,
+                        error = %error,
+                        "stream read failed after retry"
+                    );
+                    self.sequential = None;
+                    self.partial_body_chunk = None;
                     return ReadOutcome::Error(libc::EIO);
                 }
-
-                match self.read_body_chunk(*chunk, ctx, attempt) {
-                    Ok(data) => ctx.cache.put((self.ino, chunk.start, chunk.end), data),
-                    Err(BodyReadError::Retryable) => {
-                        failed = true;
-                        break;
-                    }
-                    Err(BodyReadError::Fatal) => return ReadOutcome::Error(libc::EIO),
-                }
             }
-
-            if failed {
-                continue;
-            }
-
-            return self.read_cached_chunks(start, end, chunks, ctx.cache);
         }
 
         ReadOutcome::Error(libc::EIO)
+    }
+
+    fn cache_sequential_body_bytes(
+        &mut self,
+        start: u64,
+        data: &Bytes,
+        chunks: &[ChunkRange],
+        cache: &RangeCache,
+    ) {
+        let mut cursor = start;
+        let mut data_offset = 0usize;
+
+        for chunk in chunks {
+            if cursor > chunk.end || data_offset >= data.len() {
+                continue;
+            }
+            let segment_start = cursor.max(chunk.start);
+            let segment_offset = (segment_start - start) as usize;
+            if segment_offset >= data.len() {
+                break;
+            }
+            let segment_len =
+                ((chunk.end - segment_start + 1) as usize).min(data.len() - segment_offset);
+
+            let can_append = self.partial_body_chunk.as_ref().is_some_and(|partial| {
+                partial.range == *chunk && chunk.start + partial.data.len() as u64 == segment_start
+            });
+            if segment_start == chunk.start && !can_append {
+                self.partial_body_chunk = Some(PartialBodyChunk {
+                    range: *chunk,
+                    data: BytesMut::with_capacity(chunk.len()),
+                });
+            } else if !can_append {
+                self.partial_body_chunk = None;
+                cursor = segment_start + segment_len as u64;
+                data_offset = segment_offset + segment_len;
+                continue;
+            }
+
+            let partial = self
+                .partial_body_chunk
+                .as_mut()
+                .expect("partial chunk initialized above");
+            partial
+                .data
+                .extend_from_slice(&data[segment_offset..segment_offset + segment_len]);
+            cursor = segment_start + segment_len as u64;
+            data_offset = segment_offset + segment_len;
+
+            if partial.data.len() == chunk.len() {
+                let complete = self
+                    .partial_body_chunk
+                    .take()
+                    .expect("complete partial chunk")
+                    .data
+                    .freeze();
+                cache.put((self.ino, chunk.start, chunk.end), complete);
+            }
+        }
     }
 
     fn ensure_sequential_reader_for(
@@ -395,46 +475,6 @@ impl MediaStream {
 
         self.sequential.is_some()
     }
-
-    fn read_body_chunk(
-        &mut self,
-        chunk: ChunkRange,
-        ctx: &ReadContext<'_>,
-        attempt: usize,
-    ) -> Result<Bytes, BodyReadError> {
-        match self
-            .sequential
-            .as_mut()
-            .expect("sequential reader must exist after ensure_sequential_reader")
-            .read_chunk(chunk, ctx.runtime)
-        {
-            Ok(data) => Ok(data),
-            Err(error) => {
-                if attempt == 0 {
-                    tracing::warn!(
-                        ino = self.ino,
-                        error = %error,
-                        "stream read failed, retrying once"
-                    );
-                    self.sequential = None;
-                    Err(BodyReadError::Retryable)
-                } else {
-                    tracing::error!(
-                        ino = self.ino,
-                        error = %error,
-                        "stream read failed after retry"
-                    );
-                    self.sequential = None;
-                    Err(BodyReadError::Fatal)
-                }
-            }
-        }
-    }
-}
-
-enum BodyReadError {
-    Retryable,
-    Fatal,
 }
 
 fn slice_request_bytes(full: &Bytes, start: u64, end: u64, base_start: u64) -> Option<Bytes> {
@@ -452,7 +492,7 @@ fn slice_request_bytes(full: &Bytes, start: u64, end: u64, base_start: u64) -> O
 /// this call, and the `[from, want_through)` window to cover if so.
 ///
 /// Kernel FUSE reads on the usenet mount arrive in much smaller chunks
-/// (observed ~128 KiB) than the mount's 4 MiB `max_read` ceiling. Since
+/// (observed ~128 KiB) than the mount's 1 MiB `max_read` ceiling. Since
 /// `want_through` tracks `start` almost 1:1, spawning a prefetch task on
 /// every call that merely clears the frontier meant one tokio task (+ meta
 /// lookup + pool acquire) per ~128 KiB of forward progress — hundreds of
@@ -663,6 +703,72 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn sequential_body_reads_publish_only_complete_cache_chunks() {
+        const READ_SIZE: usize = 128 * 1024;
+
+        let mut stream = MediaStream::new(7, 64 * 1024 * 1024);
+        let cache = RangeCache::new(2 * riven_core::config::vfs::CHUNK_SIZE as usize);
+        let chunk = stream
+            .layout
+            .request_chunks(stream.layout.header_end, stream.layout.header_end)
+            .into_iter()
+            .next()
+            .expect("body chunk");
+
+        for offset in (0..chunk.len()).step_by(READ_SIZE) {
+            let len = READ_SIZE.min(chunk.len() - offset);
+            let bytes = Bytes::from(vec![(offset / READ_SIZE) as u8; len]);
+            stream.cache_sequential_body_bytes(
+                chunk.start + offset as u64,
+                &bytes,
+                &[chunk],
+                &cache,
+            );
+
+            if offset + len < chunk.len() {
+                assert!(
+                    cache.get((stream.ino, chunk.start, chunk.end)).is_none(),
+                    "a partial chunk must never be visible to cache readers"
+                );
+            }
+        }
+
+        let cached = cache
+            .get((stream.ino, chunk.start, chunk.end))
+            .expect("complete sequential chunk should be cached");
+        assert_eq!(cached.len(), chunk.len());
+        for (index, block) in cached.chunks(READ_SIZE).enumerate() {
+            assert!(block.iter().all(|byte| *byte == index as u8));
+        }
+    }
+
+    #[test]
+    fn discontinuous_body_read_discards_partial_cache_chunk() {
+        const READ_SIZE: usize = 128 * 1024;
+
+        let mut stream = MediaStream::new(8, 64 * 1024 * 1024);
+        let cache = RangeCache::new(riven_core::config::vfs::CHUNK_SIZE as usize);
+        let chunk = stream
+            .layout
+            .request_chunks(stream.layout.header_end, stream.layout.header_end)
+            .into_iter()
+            .next()
+            .expect("body chunk");
+        let bytes = Bytes::from(vec![1u8; READ_SIZE]);
+
+        stream.cache_sequential_body_bytes(chunk.start, &bytes, &[chunk], &cache);
+        stream.cache_sequential_body_bytes(
+            chunk.start + (2 * READ_SIZE) as u64,
+            &bytes,
+            &[chunk],
+            &cache,
+        );
+
+        assert!(stream.partial_body_chunk.is_none());
+        assert!(cache.get((stream.ino, chunk.start, chunk.end)).is_none());
+    }
+
     /// Records every `prefetch`/`read_range` call instead of doing real I/O,
     /// so tests can assert on call counts and ranges without a network.
     struct MockSource {
@@ -713,7 +819,7 @@ mod tests {
 
     /// Regression test for the prefetch-spawn-storm bug: real kernel FUSE
     /// reads on the usenet mount arrive in ~128 KiB increments (far smaller
-    /// than the 4 MiB `max_read` ceiling), and the pre-fix code spawned a
+    /// than the 1 MiB `max_read` ceiling), and the pre-fix code spawned a
     /// prefetch task on almost every one of them — hundreds of tiny tasks
     /// all contending for the same NNTP connection pool per 100MB read.
     /// This drives many small sequential reads and asserts prefetch spawns
