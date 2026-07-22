@@ -554,7 +554,7 @@ pub struct UsenetSession {
     /// for every read that advances the frontier. The producer only warms
     /// Riven's decoded-segment cache; it never changes the bytes returned to
     /// the FUSE caller.
-    prefetch_target_tx: Option<tokio::sync::watch::Sender<u64>>,
+    prefetch_target_tx: Option<tokio::sync::watch::Sender<Option<(u64, u64)>>>,
     prefetch_task: Option<tokio::task::JoinHandle<()>>,
     /// Active-streams registry key (`"{info_hash}:{file_index}"`). Registered
     /// on first read, touched periodically, unregistered on drop — restoring
@@ -601,7 +601,7 @@ impl UsenetSession {
         // A watch channel retains only the latest requested watermark. If
         // NNTP is slower than the consumer, obsolete intermediate windows
         // are discarded instead of building an unbounded work queue.
-        let (tx, mut targets) = tokio::sync::watch::channel(0_u64);
+        let (tx, mut targets) = tokio::sync::watch::channel(None::<(u64, u64)>);
         let source = Arc::clone(&self.source);
         let info_hash = Arc::clone(&self.info_hash);
         let file_index = self.file_index;
@@ -613,9 +613,15 @@ impl UsenetSession {
                 // Coalesce advances received while a previous cache window
                 // was being filled. This keeps exactly one producer per file
                 // and bounds NNTP work to the latest read-ahead watermark.
-                let mut target = *targets.borrow_and_update();
+                let Some((requested_from, mut target)) = *targets.borrow_and_update() else {
+                    continue;
+                };
                 target = target.min(file_size.saturating_sub(1));
-                let from = warmed_through.map_or(0, |end| end.saturating_add(1));
+                // A newly opened FUSE handle may begin at a resume offset.
+                // Its first cache window must start there, never at byte 0:
+                // otherwise seeking into a film turns read-ahead into a
+                // full prefix download that competes with playback.
+                let from = warmed_through.map_or(requested_from, |end| end.saturating_add(1));
                 if from > target {
                     continue;
                 }
@@ -681,9 +687,7 @@ impl UsenetSession {
             );
             self.ensure_prefetch_worker(runtime);
             if let Some(tx) = &self.prefetch_target_tx {
-                // The worker always starts at the last fully warmed byte, so
-                // `from` is diagnostic only; the target is the cache-watermark.
-                tx.send_replace(want_through);
+                tx.send_replace(Some((from, want_through)));
             }
         }
 
@@ -728,12 +732,12 @@ impl UsenetSession {
 
 impl Drop for UsenetSession {
     fn drop(&mut self) {
-        // Closing the sender lets an idle worker exit; abort also stops an
-        // in-flight prefetch promptly when the media server closes the file.
+        // Closing the sender makes the worker exit after its current cache
+        // window. Do not abort it: cancelling an in-flight NNTP BODY drops
+        // the socket instead of returning it to the pool, causing the next
+        // playback range to pay for a fresh TLS dial.
         self.prefetch_target_tx.take();
-        if let Some(task) = self.prefetch_task.take() {
-            task.abort();
-        }
+        self.prefetch_task.take();
         if self.registered {
             self.source.stream_unregister(&self.stream_key);
         }
@@ -940,6 +944,37 @@ mod tests {
             }
             prev_end = Some(want_through);
         }
+    }
+
+    #[test]
+    fn resumed_read_prefetch_starts_at_the_resume_offset() {
+        const FILE_SIZE: u64 = 200 * 1024 * 1024;
+        const RESUME_AT: u64 = 120 * 1024 * 1024;
+        const READ_SIZE: u64 = 128 * 1024;
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mock = Arc::new(MockSource::new());
+        let source: Arc<dyn LocalByteSource> = mock.clone();
+        let mut session = UsenetSession::new(
+            source,
+            Arc::from("test-hash"),
+            0,
+            FILE_SIZE,
+            Arc::from("test.mkv"),
+        );
+
+        assert!(matches!(
+            session.read(RESUME_AT, RESUME_AT + READ_SIZE - 1, rt.handle()),
+            ReadOutcome::Data(_)
+        ));
+        rt.block_on(async { tokio::task::yield_now().await });
+
+        let calls = mock.prefetch_calls.lock().unwrap().clone();
+        assert_eq!(calls.len(), 1, "expected exactly one initial cache window");
+        assert_eq!(
+            calls[0].0, RESUME_AT,
+            "a resumed stream must not warm the whole file prefix"
+        );
     }
 
     /// Regression tests for the `prefetch_decision` coalescing logic in
