@@ -1,7 +1,8 @@
 use bytes::Bytes;
 use std::collections::HashMap;
 use std::collections::VecDeque;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, Weak};
+use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
 
 pub type CacheKey = (u64, u64, u64);
 
@@ -9,6 +10,11 @@ pub type CacheKey = (u64, u64, u64);
 ///
 pub struct RangeCache {
     inner: Mutex<Inner>,
+    /// Per-range admission locks. The TypeScript VFS lets a read use a chunk
+    /// that another file descriptor cached while it was waiting. Rust can do
+    /// that without polling: one reader owns the miss and the others await the
+    /// same async mutex, then re-check the cache.
+    inflight: Mutex<HashMap<CacheKey, Weak<AsyncMutex<()>>>>,
 }
 
 struct Inner {
@@ -29,7 +35,25 @@ impl RangeCache {
                 bytes_used: 0,
                 bytes_capacity: capacity_bytes,
             }),
+            inflight: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Serialise population of one cache range across all open file handles.
+    /// Weak entries make the coordination table self-cleaning once the last
+    /// waiter/owner releases its lock.
+    pub async fn lock_miss(&self, key: CacheKey) -> OwnedMutexGuard<()> {
+        let lock = {
+            let mut inflight = self.inflight.lock().expect("range cache poisoned");
+            if let Some(lock) = inflight.get(&key).and_then(Weak::upgrade) {
+                lock
+            } else {
+                let lock = Arc::new(AsyncMutex::new(()));
+                inflight.insert(key, Arc::downgrade(&lock));
+                lock
+            }
+        };
+        lock.lock_owned().await
     }
 
     pub fn get(&self, key: CacheKey) -> Option<Bytes> {
@@ -84,6 +108,8 @@ impl RangeCache {
 #[cfg(test)]
 mod tests {
     use bytes::Bytes;
+    use std::sync::Arc;
+    use std::time::Duration;
 
     use super::RangeCache;
 
@@ -124,5 +150,35 @@ mod tests {
         let cache = RangeCache::new(8);
         cache.put((1, 0, 9), Bytes::from_static(b"1234567890"));
         assert!(cache.get((1, 0, 9)).is_none());
+    }
+
+    #[tokio::test]
+    async fn concurrent_misses_share_one_population_lock() {
+        let cache = Arc::new(RangeCache::new(1024));
+        let key = (7, 0, 9);
+        let leader = cache.lock_miss(key).await;
+
+        let follower_cache = Arc::clone(&cache);
+        let mut follower = tokio::spawn(async move {
+            let _guard = follower_cache.lock_miss(key).await;
+            follower_cache.get(key)
+        });
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), &mut follower)
+                .await
+                .is_err(),
+            "a second reader must wait for the active population"
+        );
+
+        cache.put(key, Bytes::from_static(b"1234567890"));
+        drop(leader);
+
+        let cached = tokio::time::timeout(Duration::from_secs(1), follower)
+            .await
+            .expect("follower should wake")
+            .expect("follower task should succeed")
+            .expect("follower should observe the populated cache");
+        assert_eq!(cached, Bytes::from_static(b"1234567890"));
     }
 }

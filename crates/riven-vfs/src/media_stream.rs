@@ -1,5 +1,6 @@
 use std::io;
 use std::sync::Arc;
+use std::time::Duration;
 
 use bytes::{Bytes, BytesMut};
 use futures::{StreamExt, TryStreamExt, stream::BoxStream};
@@ -11,6 +12,7 @@ use crate::cache::RangeCache;
 use crate::chunks::{ChunkRange, FileLayout};
 use crate::detect::{ReadType, detect_read_type};
 use crate::stream::{fetch_range, open_stream, response_body_end};
+use riven_core::config::vfs::CHUNK_TIMEOUT_SECS;
 
 pub enum ReadOutcome {
     Data(Bytes),
@@ -23,12 +25,6 @@ pub struct MediaStream {
     layout: FileLayout,
     last_read_end: Option<u64>,
     sequential: Option<SequentialReader>,
-    partial_body_chunk: Option<PartialBodyChunk>,
-}
-
-struct PartialBodyChunk {
-    range: ChunkRange,
-    data: BytesMut,
 }
 
 struct ReadContext<'a> {
@@ -61,9 +57,29 @@ impl SequentialReader {
         start_pos: u64,
         runtime: &tokio::runtime::Handle,
     ) -> Option<Self> {
-        let response = runtime
-            .block_on(open_stream(&client, &url, start_pos))
-            .ok()?;
+        // `open_stream` waits for response headers. Debrid origins can stall
+        // before sending them, so the body-read timeout below would never
+        // start and playback would sit on reqwest's 60-second request timeout.
+        // Keep stream establishment on the same short recovery path as each
+        // body chunk; a failure bubbles up to the VFS URL-refresh retry.
+        let response = match runtime.block_on(tokio::time::timeout(
+            Duration::from_secs(CHUNK_TIMEOUT_SECS),
+            open_stream(&client, &url, start_pos),
+        )) {
+            Ok(Ok(response)) => response,
+            Ok(Err(error)) => {
+                tracing::debug!(error = %error, start_pos, "failed to open sequential stream");
+                return None;
+            }
+            Err(_) => {
+                tracing::debug!(
+                    start_pos,
+                    timeout_secs = CHUNK_TIMEOUT_SECS,
+                    "sequential stream open timed out"
+                );
+                return None;
+            }
+        };
         let body_end_exclusive = response_body_end(&response)
             .map_or(u64::MAX, |end_inclusive| end_inclusive.saturating_add(1));
         let stream = response.bytes_stream().map_err(io::Error::other).boxed();
@@ -83,7 +99,12 @@ impl SequentialReader {
     /// Returns false when `end_inclusive` falls past the body window so
     /// the caller will reopen at `start` instead of reading an early-EOF.
     fn can_serve(&self, start: u64, end_inclusive: u64) -> bool {
-        start >= self.read_pos && end_inclusive < self.body_end_exclusive
+        sequential_request_is_contiguous(
+            self.read_pos,
+            self.body_end_exclusive,
+            start,
+            end_inclusive,
+        )
     }
 
     fn read_range(
@@ -92,7 +113,21 @@ impl SequentialReader {
         size: usize,
         runtime: &tokio::runtime::Handle,
     ) -> io::Result<Bytes> {
-        runtime.block_on(self.read_exact_at(start, size))
+        // A debrid CDN can leave an open response stalled until reqwest's
+        // request-wide timeout expires. Bound each 1 MiB playback chunk so a
+        // dead body is retried/refreshed quickly instead of making the player
+        // buffer for a minute. This matches the TypeScript VFS chunk timeout.
+        runtime
+            .block_on(tokio::time::timeout(
+                Duration::from_secs(CHUNK_TIMEOUT_SECS),
+                self.read_exact_at(start, size),
+            ))
+            .map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!("stream chunk did not complete within {CHUNK_TIMEOUT_SECS}s"),
+                )
+            })?
     }
 
     async fn read_exact_at(&mut self, pos: u64, size: usize) -> io::Result<Bytes> {
@@ -143,6 +178,15 @@ impl SequentialReader {
     }
 }
 
+fn sequential_request_is_contiguous(
+    read_pos: u64,
+    body_end_exclusive: u64,
+    start: u64,
+    end_inclusive: u64,
+) -> bool {
+    start == read_pos && end_inclusive < body_end_exclusive
+}
+
 impl MediaStream {
     pub fn new(ino: u64, file_size: u64) -> Self {
         Self {
@@ -151,7 +195,6 @@ impl MediaStream {
             layout: FileLayout::new(file_size),
             last_read_end: None,
             sequential: None,
-            partial_body_chunk: None,
         }
     }
 
@@ -277,7 +320,25 @@ impl MediaStream {
         self.sequential = None;
 
         let full = if should_cache {
-            match ctx.cache.get((self.ino, chunk.start, chunk.end)) {
+            let key = (self.ino, chunk.start, chunk.end);
+            let _miss_guard = match ctx.runtime.block_on(tokio::time::timeout(
+                Duration::from_secs(CHUNK_TIMEOUT_SECS),
+                ctx.cache.lock_miss(key),
+            )) {
+                Ok(guard) => guard,
+                Err(_) => {
+                    tracing::warn!(
+                        ino = self.ino,
+                        start = chunk.start,
+                        end = chunk.end,
+                        "timed out waiting for another reader to populate scan chunk"
+                    );
+                    return ReadOutcome::Error(libc::ETIMEDOUT);
+                }
+            };
+
+            // A different fd may have populated this range while we waited.
+            match ctx.cache.get(key) {
                 Some(data) => data,
                 None => match ctx.runtime.block_on(fetch_range(
                     ctx.client,
@@ -288,8 +349,7 @@ impl MediaStream {
                     Ok(data) => {
                         let expected = (chunk.end - chunk.start + 1) as usize;
                         if data.len() >= expected {
-                            ctx.cache
-                                .put((self.ino, chunk.start, chunk.end), data.clone());
+                            ctx.cache.put(key, data.clone());
                         }
                         data
                     }
@@ -347,109 +407,83 @@ impl MediaStream {
             return self.read_cached_chunks(start, end, chunks, ctx.cache);
         }
 
-        // Cache entries remain whole 1 MiB chunks, but a small FUSE request
-        // must not wait for the rest of its containing chunk. Read and return
-        // exactly the requested range; sequential requests accumulate into a
-        // complete cache entry in the background of normal playback.
-        let requested_len = (end - start + 1) as usize;
-        for attempt in 0..2 {
-            if !self.ensure_sequential_reader_for(start, end, ctx) {
-                tracing::error!(ino = self.ino, "failed to start sequential reader");
-                return ReadOutcome::Error(libc::EIO);
+        // Match the established TypeScript VFS behaviour: fetch and cache a
+        // complete 1 MiB body chunk before satisfying its first small FUSE
+        // read. This turns the following 128 KiB kernel reads into cache hits
+        // and gives the player a meaningful read-ahead buffer instead of
+        // making every individual read wait on the CDN.
+        for chunk in chunks {
+            let key = (self.ino, chunk.start, chunk.end);
+            if ctx.cache.get(key).is_some() {
+                continue;
             }
 
-            let result = self
-                .sequential
-                .as_mut()
-                .expect("sequential reader must exist after ensure_sequential_reader")
-                .read_range(start, requested_len, ctx.runtime);
-            match result {
-                Ok(data) => {
-                    self.cache_sequential_body_bytes(start, &data, chunks, ctx.cache);
-                    return ReadOutcome::Data(data);
-                }
-                Err(error) if attempt == 0 => {
+            let _miss_guard = match ctx.runtime.block_on(tokio::time::timeout(
+                Duration::from_secs(CHUNK_TIMEOUT_SECS),
+                ctx.cache.lock_miss(key),
+            )) {
+                Ok(guard) => guard,
+                Err(_) => {
                     tracing::warn!(
                         ino = self.ino,
-                        error = %error,
-                        "stream read failed, retrying once"
+                        start = chunk.start,
+                        end = chunk.end,
+                        "timed out waiting for another reader to populate body chunk"
                     );
-                    self.sequential = None;
-                    self.partial_body_chunk = None;
+                    return ReadOutcome::Error(libc::ETIMEDOUT);
                 }
-                Err(error) => {
-                    tracing::error!(
-                        ino = self.ino,
-                        error = %error,
-                        "stream read failed after retry"
-                    );
-                    self.sequential = None;
-                    self.partial_body_chunk = None;
+            };
+
+            // Equivalent to riven-ts `waitForChunk`: if another fd completed
+            // this chunk while we waited, use the shared cache. This fd's HTTP
+            // cursor stays where it was and will reconnect on the next miss.
+            if ctx.cache.get(key).is_some() {
+                continue;
+            }
+
+            let mut fetched = None;
+            for attempt in 0..2 {
+                if !self.ensure_sequential_reader_for(chunk.start, chunk.end, ctx) {
+                    tracing::error!(ino = self.ino, "failed to start sequential reader");
                     return ReadOutcome::Error(libc::EIO);
                 }
+
+                match self
+                    .sequential
+                    .as_mut()
+                    .expect("sequential reader must exist after ensure_sequential_reader")
+                    .read_range(chunk.start, chunk.len(), ctx.runtime)
+                {
+                    Ok(data) => {
+                        fetched = Some(data);
+                        break;
+                    }
+                    Err(error) if attempt == 0 => {
+                        tracing::warn!(ino = self.ino, error = %error, "stream chunk read failed, retrying once");
+                        self.sequential = None;
+                    }
+                    Err(error) => {
+                        tracing::error!(ino = self.ino, error = %error, "stream chunk read failed after retry");
+                        self.sequential = None;
+                        return ReadOutcome::Error(libc::EIO);
+                    }
+                }
             }
+
+            let data = fetched.expect("successful chunk read must set data");
+            if data.len() != chunk.len() {
+                tracing::error!(
+                    ino = self.ino,
+                    want = chunk.len(),
+                    got = data.len(),
+                    "stream returned a short body chunk"
+                );
+                return ReadOutcome::Error(libc::EIO);
+            }
+            ctx.cache.put(key, data);
         }
 
-        ReadOutcome::Error(libc::EIO)
-    }
-
-    fn cache_sequential_body_bytes(
-        &mut self,
-        start: u64,
-        data: &Bytes,
-        chunks: &[ChunkRange],
-        cache: &RangeCache,
-    ) {
-        let mut cursor = start;
-        let mut data_offset = 0usize;
-
-        for chunk in chunks {
-            if cursor > chunk.end || data_offset >= data.len() {
-                continue;
-            }
-            let segment_start = cursor.max(chunk.start);
-            let segment_offset = (segment_start - start) as usize;
-            if segment_offset >= data.len() {
-                break;
-            }
-            let segment_len =
-                ((chunk.end - segment_start + 1) as usize).min(data.len() - segment_offset);
-
-            let can_append = self.partial_body_chunk.as_ref().is_some_and(|partial| {
-                partial.range == *chunk && chunk.start + partial.data.len() as u64 == segment_start
-            });
-            if segment_start == chunk.start && !can_append {
-                self.partial_body_chunk = Some(PartialBodyChunk {
-                    range: *chunk,
-                    data: BytesMut::with_capacity(chunk.len()),
-                });
-            } else if !can_append {
-                self.partial_body_chunk = None;
-                cursor = segment_start + segment_len as u64;
-                data_offset = segment_offset + segment_len;
-                continue;
-            }
-
-            let partial = self
-                .partial_body_chunk
-                .as_mut()
-                .expect("partial chunk initialized above");
-            partial
-                .data
-                .extend_from_slice(&data[segment_offset..segment_offset + segment_len]);
-            cursor = segment_start + segment_len as u64;
-            data_offset = segment_offset + segment_len;
-
-            if partial.data.len() == chunk.len() {
-                let complete = self
-                    .partial_body_chunk
-                    .take()
-                    .expect("complete partial chunk")
-                    .data
-                    .freeze();
-                cache.put((self.ino, chunk.start, chunk.end), complete);
-            }
-        }
+        self.read_cached_chunks(start, end, chunks, ctx.cache)
     }
 
     fn ensure_sequential_reader_for(
@@ -458,6 +492,11 @@ impl MediaStream {
         end_inclusive: u64,
         ctx: &ReadContext<'_>,
     ) -> bool {
+        // An open CDN response is forward-only. Reconnect on *any*
+        // discontinuity rather than discarding bytes to catch up: FUSE issues
+        // concurrent readahead requests that can arrive out of order, and
+        // draining a large forward gap makes the later lower-offset request
+        // reopen again. This mirrors the TypeScript VFS seek handling.
         let need_restart = self
             .sequential
             .as_ref()
@@ -753,69 +792,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn sequential_body_reads_publish_only_complete_cache_chunks() {
-        const READ_SIZE: usize = 128 * 1024;
+    fn sequential_reader_reconnects_on_any_discontinuity() {
+        let read_pos = 10 * 1024 * 1024;
+        let body_end = read_pos + 32 * 1024 * 1024;
+        let chunk_end = read_pos + riven_core::config::vfs::CHUNK_SIZE - 1;
 
-        let mut stream = MediaStream::new(7, 64 * 1024 * 1024);
-        let cache = RangeCache::new(2 * riven_core::config::vfs::CHUNK_SIZE as usize);
-        let chunk = stream
-            .layout
-            .request_chunks(stream.layout.header_end, stream.layout.header_end)
-            .into_iter()
-            .next()
-            .expect("body chunk");
-
-        for offset in (0..chunk.len()).step_by(READ_SIZE) {
-            let len = READ_SIZE.min(chunk.len() - offset);
-            let bytes = Bytes::from(vec![(offset / READ_SIZE) as u8; len]);
-            stream.cache_sequential_body_bytes(
-                chunk.start + offset as u64,
-                &bytes,
-                &[chunk],
-                &cache,
-            );
-
-            if offset + len < chunk.len() {
-                assert!(
-                    cache.get((stream.ino, chunk.start, chunk.end)).is_none(),
-                    "a partial chunk must never be visible to cache readers"
-                );
-            }
-        }
-
-        let cached = cache
-            .get((stream.ino, chunk.start, chunk.end))
-            .expect("complete sequential chunk should be cached");
-        assert_eq!(cached.len(), chunk.len());
-        for (index, block) in cached.chunks(READ_SIZE).enumerate() {
-            assert!(block.iter().all(|byte| *byte == index as u8));
-        }
-    }
-
-    #[test]
-    fn discontinuous_body_read_discards_partial_cache_chunk() {
-        const READ_SIZE: usize = 128 * 1024;
-
-        let mut stream = MediaStream::new(8, 64 * 1024 * 1024);
-        let cache = RangeCache::new(riven_core::config::vfs::CHUNK_SIZE as usize);
-        let chunk = stream
-            .layout
-            .request_chunks(stream.layout.header_end, stream.layout.header_end)
-            .into_iter()
-            .next()
-            .expect("body chunk");
-        let bytes = Bytes::from(vec![1u8; READ_SIZE]);
-
-        stream.cache_sequential_body_bytes(chunk.start, &bytes, &[chunk], &cache);
-        stream.cache_sequential_body_bytes(
-            chunk.start + (2 * READ_SIZE) as u64,
-            &bytes,
-            &[chunk],
-            &cache,
+        assert!(sequential_request_is_contiguous(
+            read_pos, body_end, read_pos, chunk_end
+        ));
+        assert!(
+            !sequential_request_is_contiguous(read_pos, body_end, read_pos + 1, chunk_end),
+            "a forward gap must reconnect instead of being drained"
         );
-
-        assert!(stream.partial_body_chunk.is_none());
-        assert!(cache.get((stream.ino, chunk.start, chunk.end)).is_none());
+        assert!(
+            !sequential_request_is_contiguous(read_pos, body_end, read_pos - 1, chunk_end),
+            "a backward read must reconnect"
+        );
+        assert!(
+            !sequential_request_is_contiguous(read_pos, chunk_end, read_pos, chunk_end),
+            "a request extending beyond the CDN response window must reconnect"
+        );
     }
 
     /// Records every `prefetch`/`read_range` call instead of doing real I/O,
@@ -967,7 +963,15 @@ mod tests {
             session.read(RESUME_AT, RESUME_AT + READ_SIZE - 1, rt.handle()),
             ReadOutcome::Data(_)
         ));
-        rt.block_on(async { tokio::task::yield_now().await });
+        rt.block_on(async {
+            tokio::time::timeout(Duration::from_secs(1), async {
+                while mock.prefetch_calls.lock().unwrap().is_empty() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("prefetch worker should observe its initial target");
+        });
 
         let calls = mock.prefetch_calls.lock().unwrap().clone();
         assert_eq!(calls.len(), 1, "expected exactly one initial cache window");
