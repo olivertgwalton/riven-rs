@@ -12,6 +12,7 @@ use riven_core::logging::LogControl;
 use riven_core::plugin::PluginRegistry;
 use riven_core::stream_link::LinkRequest;
 use riven_queue::JobQueue;
+use riven_queue::main_orchestrator::start_event_controller;
 use tokio::sync::broadcast;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::services::{ServeDir, ServeFile};
@@ -19,7 +20,7 @@ use tower_http::services::{ServeDir, ServeFile};
 use apalis_board_api::framework::{ApiBuilder, RegisterRoute};
 use apalis_board_api::ui::ServeUI;
 
-use crate::schema::{build_schema, start_event_controller};
+use crate::schema::build_schema;
 use crate::vfs_mount::VfsMountManager;
 
 pub use state::ApiState;
