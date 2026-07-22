@@ -5,9 +5,9 @@
 //! means adding a match arm here, not scattering side-effects across
 //! `application/`. Events are the only public input.
 //!
-//! The `LibraryOrchestrator` is still used for *lifecycle* operations (upsert
-//! a request, sync request state, retry an item request) — those aren't
-//! event-driven and don't belong here.
+//! Request persistence and state synchronization are queue-independent
+//! lifecycle functions. `LibraryOrchestrator` retains only the follow-up work
+//! that actually needs a queue, such as enqueueing and retrying requests.
 
 use std::sync::Arc;
 
@@ -17,15 +17,38 @@ use riven_core::events::RivenEvent;
 use riven_core::types::*;
 use riven_db::entities::MediaItem;
 use riven_db::repo;
+use tokio::sync::broadcast;
 
 use crate::application::process_media_item::{fan_out_to_children, push_requested_seasons};
 use crate::context;
-use crate::lifecycle::LibraryOrchestrator;
+use crate::lifecycle::{LibraryOrchestrator, sync_item_request_state};
 use crate::{IndexJob, JobQueue, ProcessMediaItemJob, ProcessStep};
 
 /// Owns the queue and dispatches events to typed actor calls.
 pub struct MainOrchestrator {
     queue: Arc<JobQueue>,
+}
+
+/// Start the event listener that feeds [`RivenEvent`]s into the main
+/// orchestrator. The queue layer owns this bridge because event transitions
+/// are application behavior, independent of whichever API starts the app.
+pub fn start_event_controller(queue: Arc<JobQueue>) {
+    let mut events = queue.event_tx.subscribe();
+    let orchestrator = MainOrchestrator::new(queue);
+    tokio::spawn(async move {
+        loop {
+            match events.recv().await {
+                Ok(event) => orchestrator.on_event(&event).await,
+                Err(broadcast::error::RecvError::Lagged(dropped)) => {
+                    tracing::warn!(
+                        dropped,
+                        "event controller lagged; events were dropped and items may wait for the next retry cycle"
+                    );
+                }
+                Err(broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    });
 }
 
 impl MainOrchestrator {
@@ -132,9 +155,7 @@ impl MainOrchestrator {
         let Some(item) = self.load_item(id).await else {
             return;
         };
-        LibraryOrchestrator::new(&self.queue)
-            .sync_item_request_state(&item)
-            .await;
+        sync_item_request_state(&item).await;
 
         let needs_reindex = match item.item_type {
             MediaItemType::Show => {

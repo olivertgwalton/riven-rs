@@ -11,7 +11,6 @@ use tokio::sync::RwLock;
 
 pub(crate) mod auth;
 pub mod discovery;
-mod event_controller;
 mod helpers;
 mod metadata;
 mod mutations;
@@ -21,7 +20,6 @@ pub mod typed_items;
 pub mod types;
 mod vfs;
 
-pub use event_controller::start as start_event_controller;
 pub use mutations::MutationRoot;
 pub use queries::CoreQuery;
 pub use subscriptions::SubscriptionRoot;
