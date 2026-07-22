@@ -4,6 +4,7 @@ pub mod detect;
 pub mod filesystem;
 pub mod media_stream;
 pub mod path_info;
+pub mod query;
 pub mod readdir;
 pub mod stream;
 

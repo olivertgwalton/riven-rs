@@ -1,11 +1,8 @@
-use std::collections::HashSet;
-
 use fuser::FileType;
-use riven_core::settings::LibraryProfileMembership;
 use riven_core::vfs_layout::VfsLibraryLayout;
-use riven_db::repo;
 
 use crate::path_info::{CanonicalPath, PathTarget, parse_path};
+use crate::query::directory_entry_paths;
 
 /// A directory entry ready to hand back to FUSE.
 pub type DirEntry = (u64, FileType, String);
@@ -26,183 +23,31 @@ pub fn populate_entries(
     } else {
         ino_to_path.unwrap_or("/")
     };
+    let target = parse_path(layout, path);
+    if matches!(target, PathTarget::Invalid) {
+        return;
+    }
 
-    match parse_path(layout, path) {
-        PathTarget::Root => {
-            for name in layout.root_entries() {
-                push_dir_entry(entries, get_ino, path, &name);
-            }
-        }
-        PathTarget::ProfilePrefixDir => {
-            for name in layout.profile_prefix_children(path) {
-                push_dir_entry(entries, get_ino, path, &name);
-            }
-        }
+    let file_entries = matches!(
+        target,
         PathTarget::Canonical {
-            profile_key,
-            path: canonical,
-        } => {
-            let exclusive_keys = if profile_key.is_none() {
-                layout.exclusive_profile_keys()
-            } else {
-                vec![]
-            };
-            match canonical {
-                CanonicalPath::AllMovies => {
-                    push_item_dirs(
-                        runtime,
-                        entries,
-                        get_ino,
-                        path,
-                        "/movies/%/%",
-                        1,
-                        profile_key.as_deref(),
-                        &exclusive_keys,
-                    );
-                }
-                CanonicalPath::AllShows => {
-                    push_item_dirs(
-                        runtime,
-                        entries,
-                        get_ino,
-                        path,
-                        "/shows/%/%/%",
-                        1,
-                        profile_key.as_deref(),
-                        &exclusive_keys,
-                    );
-                }
-                CanonicalPath::MovieDir { actual_dir } => {
-                    push_file_entries(
-                        runtime,
-                        entries,
-                        get_ino,
-                        path,
-                        &actual_dir,
-                        profile_key.as_deref(),
-                        &exclusive_keys,
-                    );
-                }
-                CanonicalPath::ShowDir { actual_dir } => {
-                    push_item_dirs(
-                        runtime,
-                        entries,
-                        get_ino,
-                        path,
-                        &format!("{actual_dir}/%/%"),
-                        2,
-                        profile_key.as_deref(),
-                        &exclusive_keys,
-                    );
-                }
-                CanonicalPath::SeasonDir { actual_dir } => {
-                    push_file_entries(
-                        runtime,
-                        entries,
-                        get_ino,
-                        path,
-                        &actual_dir,
-                        profile_key.as_deref(),
-                        &exclusive_keys,
-                    );
-                }
-                CanonicalPath::Root
-                | CanonicalPath::MovieFile { .. }
-                | CanonicalPath::EpisodeFile { .. }
-                | CanonicalPath::Invalid => {}
-            }
+            path: CanonicalPath::MovieDir { .. } | CanonicalPath::SeasonDir { .. },
+            ..
         }
-        PathTarget::Invalid => {}
-    }
-}
-
-fn push_item_dirs(
-    runtime: &tokio::runtime::Handle,
-    entries: &mut Vec<DirEntry>,
-    get_ino: GetOrCreateIno<'_>,
-    virtual_parent: &str,
-    pattern: &str,
-    dir_index: usize,
-    profile_key: Option<&str>,
-    exclusive_keys: &[&str],
-) {
-    let Ok(paths) = runtime.block_on(repo::list_vfs_dir_names(pattern, (dir_index + 2) as u32))
-    else {
+    );
+    let Ok(names) = runtime.block_on(directory_entry_paths(layout, path)) else {
         return;
     };
-    let mut seen = HashSet::new();
-    for entry in paths {
-        let membership = LibraryProfileMembership::from_json(entry.library_profiles.as_ref());
-        if !profile_visible(&membership, profile_key, exclusive_keys) {
-            continue;
-        }
-        let Some(name) = entry.name.as_deref() else {
-            continue;
-        };
-        if seen.insert(name.to_string()) {
-            push_dir_entry(entries, get_ino, virtual_parent, name);
-        }
-    }
-}
 
-fn push_file_entries(
-    runtime: &tokio::runtime::Handle,
-    entries: &mut Vec<DirEntry>,
-    get_ino: GetOrCreateIno<'_>,
-    virtual_parent: &str,
-    actual_dir: &str,
-    profile_key: Option<&str>,
-    exclusive_keys: &[&str],
-) {
-    let Ok(paths) = runtime.block_on(repo::list_vfs_file_names(actual_dir)) else {
-        return;
+    let file_type = if file_entries {
+        FileType::RegularFile
+    } else {
+        FileType::Directory
     };
-    for entry in paths {
-        let membership = LibraryProfileMembership::from_json(entry.library_profiles.as_ref());
-        if !profile_visible(&membership, profile_key, exclusive_keys) {
-            continue;
-        }
-        let Some(name) = entry.name.as_deref() else {
-            continue;
-        };
-        push_file_entry(entries, get_ino, virtual_parent, name);
+    for name in names {
+        let child = child_path(path, &name);
+        entries.push((get_ino(&child), file_type, name));
     }
-}
-
-/// Whether an entry with the given profile `membership` is visible under the
-/// active profile: members of `profile_key` when set, otherwise entries not
-/// claimed exclusively by any other profile in `exclusive_keys`.
-fn profile_visible(
-    membership: &LibraryProfileMembership,
-    profile_key: Option<&str>,
-    exclusive_keys: &[&str],
-) -> bool {
-    match profile_key {
-        Some(key) => membership.contains(key),
-        None => !exclusive_keys.iter().any(|k| membership.contains(k)),
-    }
-}
-
-fn push_dir_entry(
-    entries: &mut Vec<DirEntry>,
-    get_ino: GetOrCreateIno<'_>,
-    parent_path: &str,
-    name: &str,
-) {
-    let child = child_path(parent_path, name);
-    let ino = get_ino(&child);
-    entries.push((ino, FileType::Directory, name.to_string()));
-}
-
-fn push_file_entry(
-    entries: &mut Vec<DirEntry>,
-    get_ino: GetOrCreateIno<'_>,
-    parent_path: &str,
-    name: &str,
-) {
-    let child = child_path(parent_path, name);
-    let ino = get_ino(&child);
-    entries.push((ino, FileType::RegularFile, name.to_string()));
 }
 
 fn child_path(parent_path: &str, name: &str) -> String {
