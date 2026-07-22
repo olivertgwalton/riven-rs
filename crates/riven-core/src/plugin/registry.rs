@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, OwnedMutexGuard, RwLock};
 
 use super::{FieldType, Plugin, PluginContext, SettingField};
 use crate::events::{EventType, HookResponse, RivenEvent};
@@ -22,6 +22,8 @@ pub struct ActivePlugin {
     pub context: Arc<PluginContext>,
     pub enabled: bool,
     pub valid: bool,
+    revision: u64,
+    update_lock: Arc<Mutex<()>>,
 }
 
 pub struct PluginRegistry {
@@ -74,7 +76,22 @@ impl PluginRegistry {
             context,
             enabled,
             valid,
+            revision: 0,
+            update_lock: Arc::new(Mutex::new(())),
         });
+    }
+
+    /// Serialize the complete persistence-and-revalidation flow for one plugin.
+    /// The caller should acquire this before writing settings to durable storage.
+    pub async fn lock_plugin_update(&self, name: &str) -> Option<OwnedMutexGuard<()>> {
+        let lock = self
+            .plugins
+            .read()
+            .await
+            .iter()
+            .find(|active| active.plugin.name() == name)
+            .map(|active| Arc::clone(&active.update_lock))?;
+        Some(lock.lock_owned().await)
     }
 
     pub async fn revalidate_plugin(
@@ -88,16 +105,18 @@ impl PluginRegistry {
             let Some(active) = plugins.iter_mut().find(|p| p.plugin.name() == name) else {
                 return false;
             };
+            active.revision = active.revision.wrapping_add(1);
+            let revision = active.revision;
             let mut new_settings = active.context.settings.clone();
             new_settings.merge_db_override(db_override);
             let plugin = Arc::clone(&active.plugin);
             let http = active.context.http.clone();
             let redis = active.context.redis.clone();
             let vfs_mount_path = active.context.vfs_mount_path.clone();
-            (plugin, new_settings, http, redis, vfs_mount_path)
+            (revision, plugin, new_settings, http, redis, vfs_mount_path)
         };
 
-        let (plugin, new_settings, http, redis, vfs_mount_path) = extracted;
+        let (revision, plugin, new_settings, http, redis, vfs_mount_path) = extracted;
         let valid = enabled
             && match plugin.validate(&new_settings, &http).await {
                 Ok(v) => v,
@@ -111,6 +130,14 @@ impl PluginRegistry {
         let Some(active) = plugins.iter_mut().find(|p| p.plugin.name() == name) else {
             return false;
         };
+        if active.revision != revision {
+            tracing::debug!(
+                plugin = name,
+                revision,
+                "discarding stale plugin revalidation"
+            );
+            return active.valid;
+        }
         active.context = Arc::new(PluginContext::new(
             new_settings,
             http,

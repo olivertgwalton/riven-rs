@@ -51,7 +51,9 @@ impl Scheduler {
                 _ = worker_recovery_tick.tick() => {
                     let mut redis = self.job_queue.redis.clone();
                     let queues = self.job_queue.queue_names();
-                    crate::recover_stale_workers(&mut redis, &queues, 60).await;
+                    if let Err(error) = crate::recover_stale_workers(&mut redis, &queues, 60).await {
+                        tracing::error!(%error, "failed to recover stale workers");
+                    }
                 }
             }
         }

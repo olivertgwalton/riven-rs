@@ -40,7 +40,7 @@ pub use jobs::{
     RankStreamsJob, ScrapeJob,
 };
 pub use maintenance::{
-    clear_worker_registrations, prune_queue_history, purge_orphaned_active_jobs,
+    RecoveryReport, clear_worker_registrations, prune_queue_history, purge_orphaned_active_jobs,
     purge_orphaned_worker_sets, purge_stale_dedup_keys, reconcile_library_profiles,
     recover_stale_workers,
 };

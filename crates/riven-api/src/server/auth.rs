@@ -12,7 +12,7 @@ pub(super) const FRONTEND_ROLE_HEADER: &str = "x-riven-user-role";
 pub(super) const FRONTEND_USER_ID_HEADER: &str = "x-riven-user-id";
 pub(super) const FRONTEND_AUTH_TIMESTAMP_HEADER: &str = "x-riven-auth-timestamp";
 pub(super) const FRONTEND_AUTH_SIGNATURE_HEADER: &str = "x-riven-auth-signature";
-const FRONTEND_AUTH_MAX_SKEW_SECS: i64 = 300;
+const FRONTEND_AUTH_MAX_SKEW_SECS: u64 = 300;
 
 /// `query` is the raw request query string (e.g. from `Uri::query()`), checked
 /// for `api_key=...` when no header credential is present. This exists for
@@ -50,6 +50,10 @@ pub(super) enum AuthError {
 
 fn signing_payload(user_id: &str, role: &str, timestamp: i64) -> String {
     format!("v1\n{user_id}\n{role}\n{timestamp}")
+}
+
+fn timestamp_within_allowed_skew(now: i64, timestamp: i64) -> bool {
+    now.abs_diff(timestamp) <= FRONTEND_AUTH_MAX_SKEW_SECS
 }
 
 pub(super) fn authorize_request(
@@ -112,8 +116,8 @@ pub(super) fn authorize_request(
     };
 
     let now = Utc::now().timestamp();
-    let skew = now - timestamp;
-    if skew.abs() > FRONTEND_AUTH_MAX_SKEW_SECS {
+    let skew = now.abs_diff(timestamp);
+    if !timestamp_within_allowed_skew(now, timestamp) {
         tracing::warn!(
             user_id,
             client_timestamp = timestamp,
@@ -198,4 +202,22 @@ pub(super) fn authorize_request(
 
     tracing::debug!(user_id, role = role_header, "frontend auth accepted");
     Ok(RequestAuth { role })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{FRONTEND_AUTH_MAX_SKEW_SECS, timestamp_within_allowed_skew};
+
+    #[test]
+    fn timestamp_skew_accepts_boundaries_and_rejects_extremes() {
+        let now = 1_750_000_000;
+        let limit = FRONTEND_AUTH_MAX_SKEW_SECS as i64;
+
+        assert!(timestamp_within_allowed_skew(now, now - limit));
+        assert!(timestamp_within_allowed_skew(now, now + limit));
+        assert!(!timestamp_within_allowed_skew(now, now - limit - 1));
+        assert!(!timestamp_within_allowed_skew(now, now + limit + 1));
+        assert!(!timestamp_within_allowed_skew(now, i64::MIN));
+        assert!(!timestamp_within_allowed_skew(now, i64::MAX));
+    }
 }

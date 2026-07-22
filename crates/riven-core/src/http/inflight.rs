@@ -18,7 +18,7 @@ impl InFlightRequest {
     }
 
     pub(super) fn finish(&self, result: Result<Arc<HttpResponseData>, String>) {
-        drop(self.tx.send(Some(result)));
+        self.tx.send_replace(Some(result));
     }
 
     pub(super) async fn wait(&self) -> Result<Arc<HttpResponseData>, String> {
@@ -28,5 +28,26 @@ impl InFlightRequest {
             .map_err(|_e| "inflight leader cancelled before completing request".to_string())?
             .clone()
             .unwrap()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use super::InFlightRequest;
+
+    #[tokio::test]
+    async fn late_subscriber_receives_completed_result() {
+        let request = Arc::new(InFlightRequest::new());
+        let late_subscriber = Arc::clone(&request);
+
+        request.finish(Err("completed before subscription".to_string()));
+
+        let result = tokio::time::timeout(Duration::from_millis(50), late_subscriber.wait())
+            .await
+            .expect("late subscriber should not wait indefinitely");
+        assert_eq!(result.unwrap_err(), "completed before subscription");
     }
 }
