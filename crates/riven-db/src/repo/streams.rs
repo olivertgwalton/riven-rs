@@ -569,22 +569,40 @@ pub async fn get_downloaded_profile_names_for_season(season_id: i64) -> Result<V
 ///
 /// Requires the partial unique index `idx_fs_entries_media_path_unique` on
 /// `(media_item_id, path) WHERE entry_type = 'media'` (migration 011).
-pub async fn create_media_entry(
-    media_item_id: i64,
-    path: &str,
-    file_size: i64,
-    original_filename: &str,
-    download_url: Option<&str>,
-    stream_url: Option<&str>,
-    plugin: &str,
-    provider: Option<&str>,
-    stream_id: Option<i64>,
-    resolution: Option<&str>,
-    ranking_profile_name: Option<&str>,
-    library_profiles: Option<&serde_json::Value>,
-    usenet_info_hash: Option<&str>,
-    usenet_file_index: Option<i32>,
-) -> Result<FileSystemEntry> {
+pub struct MediaEntryInput<'a> {
+    pub media_item_id: i64,
+    pub path: &'a str,
+    pub file_size: i64,
+    pub original_filename: &'a str,
+    pub download_url: Option<&'a str>,
+    pub stream_url: Option<&'a str>,
+    pub plugin: &'a str,
+    pub provider: Option<&'a str>,
+    pub stream_id: Option<i64>,
+    pub resolution: Option<&'a str>,
+    pub ranking_profile_name: Option<&'a str>,
+    pub library_profiles: Option<&'a serde_json::Value>,
+    pub usenet_info_hash: Option<&'a str>,
+    pub usenet_file_index: Option<i32>,
+}
+
+pub async fn create_media_entry(input: MediaEntryInput<'_>) -> Result<FileSystemEntry> {
+    let MediaEntryInput {
+        media_item_id,
+        path,
+        file_size,
+        original_filename,
+        download_url,
+        stream_url,
+        plugin,
+        provider,
+        stream_id,
+        resolution,
+        ranking_profile_name,
+        library_profiles,
+        usenet_info_hash,
+        usenet_file_index,
+    } = input;
     let media_metadata = parse_filename_metadata(original_filename);
 
     // Raw Statement: ON CONFLICT targets a *partial* unique index
