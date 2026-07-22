@@ -7,8 +7,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use dashmap::DashMap;
 use fuser::{
     Errno, FileAttr, FileHandle as FuseFh, FileType, Filesystem, FopenFlags, Generation, INodeNo,
-    LockOwner, OpenFlags, ReplyAttr, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen,
-    Request,
+    LockOwner, OpenFlags, PollEvents, PollFlags, PollNotifier, ReplyAttr, ReplyData,
+    ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen, ReplyPoll, Request,
 };
 use parking_lot::Mutex;
 use tokio::sync::mpsc;
@@ -21,12 +21,10 @@ use riven_core::vfs_layout::VfsLibraryLayout;
 use riven_db::repo;
 
 use crate::cache::RangeCache;
-use crate::chunks::FileLayout;
 use crate::media_stream::{MediaStream, ReadOutcome, UsenetSession};
 use crate::path_info::{CanonicalPath, PathTarget, parse_path};
 use crate::readdir::{DirEntry, populate_entries};
 use crate::state::{CachedEntry, MOVIES_INO, OpenedFile, ROOT_INO, SHOWS_INO, VfsState};
-use crate::stream::fetch_range;
 use riven_core::local_source::parse_usenet_url;
 
 const TTL: Duration = Duration::from_secs(300);
@@ -89,7 +87,6 @@ struct RivenFsInner {
     state: VfsState,
 
     range_cache: Arc<RangeCache>,
-    prewarm_semaphore: Arc<Semaphore>,
     read_semaphore: Arc<Semaphore>,
     link_refresh_locks: DashMap<i64, Arc<Mutex<()>>>,
     local_source: Option<Arc<dyn riven_core::local_source::LocalByteSource>>,
@@ -143,7 +140,6 @@ impl RivenFsInner {
             runtime: tokio::runtime::Handle::current(),
             state: VfsState::new(),
             range_cache: Arc::new(RangeCache::new(cache_capacity_bytes)),
-            prewarm_semaphore: Arc::new(Semaphore::new(8)),
             // Bound upstream reads independently of tokio's much larger
             // blocking-task pool. This prevents scans or concurrent players
             // from creating hundreds of live HTTP buffers at once.
@@ -171,7 +167,7 @@ impl RivenFsInner {
     /// debrid links forever. The hot per-FUSE-op caches (`vfs_layout`,
     /// `path_to_ino`, `readdir_cache`) are unaffected, so this only adds a
     /// single indexed lookup per `open()` / metadata-stat — measured impact
-    /// is sub-millisecond and dwarfed by the per-file CDN/NNTP prewarm.
+    /// is sub-millisecond compared with a media read.
     fn get_entry(&self, path: &str) -> Option<Arc<CachedEntry>> {
         let layout = self.current_layout();
         let (profile_key, actual_path) = match parse_path(&layout, path) {
@@ -325,54 +321,6 @@ impl RivenFsInner {
             &self.runtime,
         )
     }
-}
-
-/// Fetches header and footer byte ranges into the shared cache so that a
-/// media-server scan (Plex, Jellyfin, etc.) finds them already cached.
-///
-/// Header and footer are fetched concurrently: the footer fetch races the
-/// synchronous header read that the FUSE layer issues right after open,
-/// so by the time the first CDN round-trip completes the footer is usually
-/// already in cache and the second read returns instantly.
-async fn prewarm_header_footer(
-    cache: Arc<RangeCache>,
-    client: reqwest::Client,
-    semaphore: Arc<Semaphore>,
-    ino: u64,
-    stream_url: String,
-    file_size: u64,
-) {
-    let Ok(_permit) = semaphore.acquire_owned().await else {
-        return;
-    };
-
-    let layout = FileLayout::new(file_size);
-    let header = layout.header_chunk();
-    let footer = layout.footer_chunk();
-
-    let fetch_header = async {
-        if cache.get((ino, header.start, header.end)).is_none() {
-            match fetch_range(&client, &stream_url, header.start, header.end).await {
-                Ok(data) => cache.put((ino, header.start, header.end), data),
-                Err(e) => {
-                    tracing::debug!(target: "streaming", ino, error = %e, "pre-warm header failed")
-                }
-            }
-        }
-    };
-
-    let fetch_footer = async {
-        if footer != header && cache.get((ino, footer.start, footer.end)).is_none() {
-            match fetch_range(&client, &stream_url, footer.start, footer.end).await {
-                Ok(data) => cache.put((ino, footer.start, footer.end), data),
-                Err(e) => {
-                    tracing::debug!(target: "streaming", ino, error = %e, "pre-warm footer failed")
-                }
-            }
-        }
-    };
-
-    tokio::join!(fetch_header, fetch_footer);
 }
 
 impl Filesystem for RivenFs {
@@ -581,15 +529,6 @@ impl Filesystem for RivenFs {
             return;
         };
 
-        s.runtime.spawn(prewarm_header_footer(
-            Arc::clone(&s.range_cache),
-            s.stream_client.clone(),
-            Arc::clone(&s.prewarm_semaphore),
-            ino,
-            stream_url.clone(),
-            file_size,
-        ));
-
         let fd = s.state.open(OpenedFile::Media {
             entry_id: entry.id,
             path,
@@ -775,5 +714,22 @@ impl Filesystem for RivenFs {
         tracing::debug!(target: "streaming", fh, "release");
         s.state.close(fh);
         reply.ok();
+    }
+
+    fn poll(
+        &self,
+        _req: &Request,
+        _ino: INodeNo,
+        _fh: FuseFh,
+        _ph: PollNotifier,
+        _events: PollEvents,
+        _flags: PollFlags,
+        reply: ReplyPoll,
+    ) {
+        // Media files are immutable and a `read` will either return bytes or
+        // a regular I/O error. Report them immediately readable so media
+        // servers do not fall back after an ENOSYS response from fuser's
+        // default handler.
+        reply.poll(PollEvents::POLLIN);
     }
 }
