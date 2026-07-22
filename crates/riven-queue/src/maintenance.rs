@@ -28,7 +28,7 @@ pub async fn reconcile_library_profiles(settings: &FilesystemSettings) -> anyhow
         })
         .collect::<Vec<_>>();
 
-    Ok(repo::update_library_profiles_batch(&updates).await?)
+    repo::update_library_profiles_batch(&updates).await
 }
 
 /// `register_worker.lua` writes the metadata hash for each worker at
