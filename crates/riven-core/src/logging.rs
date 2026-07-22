@@ -21,7 +21,6 @@ use tracing_subscriber::{
     layer::SubscriberExt,
     registry::LookupSpan,
     reload,
-    util::SubscriberInitExt,
 };
 
 use crate::settings::RivenSettings;
@@ -138,14 +137,34 @@ pub fn init_logging(
         .as_ref()
         .map(|provider| tracing_opentelemetry::layer().with_tracer(provider.tracer("riven")));
 
-    tracing_subscriber::registry()
+    let subscriber = tracing_subscriber::registry()
         .with(filter_layer)
         .with(sentry_layer)
         .with(otel_layer)
         .with(console_layer)
         .with(file_layer)
-        .with(broadcast_layer)
-        .init();
+        .with(broadcast_layer);
+
+    tracing::subscriber::set_global_default(subscriber)
+        .map_err(|error| anyhow::anyhow!("failed to install tracing subscriber: {error}"))?;
+
+    // Install the `log` → `tracing` bridge ourselves rather than letting
+    // `SubscriberInitExt::init` do it, so we can drop the crates whose records
+    // arrive as `log` (see `NOISY_LOG_CRATES`). Every `log` record shares the
+    // single `log` tracing target, so `EnvFilter` cannot tell them apart — this
+    // is the only place they can be filtered per-crate.
+    if let Err(error) = tracing_log::LogTracer::builder()
+        .with_max_level(log_max_level(settings))
+        .ignore_all(NOISY_LOG_CRATES)
+        .init()
+    {
+        // Not fatal: everything that logs through `tracing` still works, we
+        // just lose records from dependencies that use the `log` crate.
+        tracing::warn!(
+            %error,
+            "could not install the log-crate bridge, so logs from dependencies using `log` will be missing"
+        );
+    }
 
     log::set_max_level(log_max_level(settings));
 
@@ -214,26 +233,48 @@ fn log_max_level(settings: &LogSettings) -> LevelFilter {
     }
 }
 
+/// Crates that log through the `log` crate and only ever emit transport-level
+/// chatter — TLS handshakes, socket readiness. They arrive on the single `log`
+/// tracing target, so raising Riven's own level to `debug` used to bury the
+/// pipeline in "Resuming session" / "Sending warning alert CloseNotify" lines.
+/// Matched by target prefix; dropped at the bridge, before any filter runs.
+const NOISY_LOG_CRATES: [&str; 4] = ["rustls", "mio", "want", "tungstenite"];
+
+/// Third-party crates pinned to `info` so that turning Riven's level up to
+/// `debug` shows Riven's own work rather than DNS packet dumps and per-job
+/// queue bookkeeping. Setting `RUST_LOG` bypasses this list entirely.
+const NOISY_TRACING_TARGETS: [&str; 7] = [
+    "apalis",
+    "apalis_core",
+    "hickory_resolver",
+    "hickory_proto",
+    "hickory_net",
+    "hyper_util",
+    "h2",
+];
+
 fn build_level_filter(settings: &LogSettings) -> anyhow::Result<EnvFilter> {
-    let filter = EnvFilter::try_from_default_env()
-        .or_else(|_| EnvFilter::try_new(&settings.level))
-        .map(|filter| {
-            filter
-                .add_directive("apalis_core=info".parse().unwrap())
-                .add_directive("hickory_resolver=info".parse().unwrap())
-                .add_directive("hickory_proto=info".parse().unwrap())
-                .add_directive("hyper_util=info".parse().unwrap())
-        })
+    // An explicit `RUST_LOG` is a deliberate act — hand it over untouched so it
+    // can be used to turn any of the defaults below back on.
+    if let Ok(filter) = EnvFilter::try_from_default_env() {
+        return Ok(filter);
+    }
+
+    let mut filter = EnvFilter::try_new(&settings.level)
         .map_err(|error| anyhow::anyhow!("invalid log level '{}': {error}", settings.level))?;
 
+    for target in NOISY_TRACING_TARGETS {
+        filter = filter.add_directive(format!("{target}=info").parse()?);
+    }
+
     if !settings.vfs_debug_logging {
-        Ok(filter
+        filter = filter
             .add_directive("streaming=off".parse()?)
             .add_directive("log=info".parse()?)
-            .add_directive("fuser=info".parse()?))
-    } else {
-        Ok(filter)
+            .add_directive("fuser=info".parse()?);
     }
+
+    Ok(filter)
 }
 
 fn build_file_appender(
@@ -353,5 +394,47 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for BroadcastMakeWriter {
             tx: self.tx.clone(),
             buf: Vec::new(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{LogSettings, build_level_filter};
+
+    fn directives(settings: &LogSettings) -> String {
+        build_level_filter(settings).unwrap().to_string()
+    }
+
+    #[test]
+    fn noisy_third_party_targets_stay_at_info_when_riven_goes_to_debug() {
+        let settings = LogSettings {
+            level: "debug".into(),
+            ..LogSettings::default()
+        };
+        let directives = directives(&settings);
+
+        // Riven's own level is what the operator asked for...
+        assert!(directives.contains("debug"), "{directives}");
+        // ...but DNS, queue bookkeeping and the `log` bridge stay quiet, so the
+        // pipeline's own lines aren't buried.
+        for target in ["hickory_net=info", "apalis=info", "log=info"] {
+            assert!(
+                directives.contains(target),
+                "missing {target} in {directives}"
+            );
+        }
+    }
+
+    #[test]
+    fn vfs_debug_logging_keeps_the_log_bridge_verbose() {
+        let settings = LogSettings {
+            level: "debug".into(),
+            vfs_debug_logging: true,
+            ..LogSettings::default()
+        };
+        let directives = directives(&settings);
+
+        assert!(!directives.contains("log=info"), "{directives}");
+        assert!(!directives.contains("fuser=info"), "{directives}");
     }
 }

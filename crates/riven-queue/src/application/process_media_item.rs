@@ -32,12 +32,21 @@ pub async fn run(job: &ProcessMediaItemJob, queue: &JobQueue) {
     let id = job.id;
 
     let Some(item) = repo::get_media_item(id).await.ok().flatten() else {
-        tracing::debug!(id, step = ?job.step, "process-media-item: item gone");
+        tracing::debug!(
+            id,
+            step = ?job.step,
+            "pipeline: item no longer exists (deleted or unrequested), abandoning it"
+        );
         return;
     };
 
     if matches!(item.state, MediaItemState::Failed | MediaItemState::Paused) {
-        tracing::debug!(id, state = ?item.state, "process-media-item: terminal state, stopping");
+        tracing::debug!(
+            id,
+            title = %item.title,
+            state = ?item.state,
+            "pipeline: stopping, the item is failed or paused and will not be retried automatically"
+        );
         return;
     }
 
@@ -46,7 +55,13 @@ pub async fn run(job: &ProcessMediaItemJob, queue: &JobQueue) {
         return;
     }
 
-    tracing::debug!(id, step = ?job.step, state = ?item.state, "process-media-item step");
+    tracing::debug!(
+        id,
+        title = %item.title,
+        step = ?job.step,
+        state = ?item.state,
+        "pipeline: advancing item to its next step"
+    );
 
     match job.step {
         ProcessStep::Scrape => handle_scrape(job, &item, queue).await,
@@ -62,7 +77,12 @@ async fn handle_scrape(job: &ProcessMediaItemJob, item: &MediaItem, queue: &JobQ
     if let Some(at) = job.next_scrape_attempt_at
         && at > Utc::now()
     {
-        tracing::debug!(id = item.id, run_at = %at, "deferring scrape until backoff expires");
+        tracing::debug!(
+            id = item.id,
+            title = %item.title,
+            retry_at = %at,
+            "pipeline: too soon to scrape again after the last failure, re-queued for later"
+        );
         queue.push_process_media_item_at(job.clone(), at).await;
         return;
     }
@@ -71,7 +91,8 @@ async fn handle_scrape(job: &ProcessMediaItemJob, item: &MediaItem, queue: &JobQ
     {
         tracing::debug!(
             id = item.id,
-            "already scraped with an available stream; downloading instead of re-scraping"
+            title = %item.title,
+            "pipeline: already has untried streams from an earlier scrape, downloading one instead of scraping again"
         );
         return;
     }
@@ -103,7 +124,11 @@ async fn handle_scrape(job: &ProcessMediaItemJob, item: &MediaItem, queue: &JobQ
 /// next-scrape backoff kicks in.
 async fn handle_download(job: &ProcessMediaItemJob, item: &MediaItem, queue: &JobQueue) {
     if !queue.push_download_from_best_stream(item.id).await {
-        tracing::debug!(id = item.id, "no streams available; advancing to Validate");
+        tracing::debug!(
+            id = item.id,
+            title = %item.title,
+            "pipeline: nothing left to download (no untried streams), checking whether the item is complete"
+        );
         queue
             .push_process_media_item(job.clone().at_step(ProcessStep::Validate))
             .await;
@@ -134,8 +159,11 @@ async fn handle_validate(job: &ProcessMediaItemJob, item: &MediaItem, queue: &Jo
             let at = Utc::now() + repo::cooldown_for_failed_attempts(item.failed_attempts);
             tracing::debug!(
                 id = item.id,
-                run_at = %at,
-                "scheduling re-scrape after download failure"
+                title = %item.title,
+                state = ?item.state,
+                failed_attempts = item.failed_attempts,
+                retry_at = %at,
+                "pipeline: item still isn't complete after the download step; scheduling another scrape once its cooldown expires"
             );
             queue
                 .push_process_media_item_at(
@@ -197,7 +225,8 @@ fn log_completion(item: &MediaItem, started_at: DateTime<Utc>) {
     tracing::info!(
         id = item.id,
         title = %item.title,
-        elapsed_secs = secs,
-        "process-media-item: completed"
+        item_type = ?item.item_type,
+        took_secs = secs,
+        "pipeline: item is complete and available"
     );
 }

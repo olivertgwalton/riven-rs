@@ -76,6 +76,7 @@ fuser = "0.17"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 tracing-appender = "0.2"
+tracing-log = "0.2"
 
 
 tracing-opentelemetry = "0.33"

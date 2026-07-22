@@ -87,7 +87,7 @@ pub fn rank_streams_for_profile<'a>(
                     item_id = item.id,
                     title = %item.title,
                     info_hash = %stream.info_hash,
-                    "stream rejected: missing parsed_data"
+                    "download: stream rejected, it was stored without parsed release data (re-scrape the item to fix)"
                 );
                 return None;
             };
@@ -97,7 +97,7 @@ pub fn rank_streams_for_profile<'a>(
                     item_id = item.id,
                     title = %item.title,
                     info_hash = %stream.info_hash,
-                    "stream rejected: invalid parsed_data"
+                    "download: stream rejected, its stored release data could not be read (re-scrape the item to fix)"
                 );
                 return None;
             };
@@ -108,7 +108,7 @@ pub fn rank_streams_for_profile<'a>(
                     title = %item.title,
                     info_hash = %stream.info_hash,
                     raw_title = %parsed.raw_title,
-                    "stream rejected: extras-only release"
+                    "download: stream rejected, the release only contains extras/bonus material"
                 );
                 return None;
             }
@@ -126,7 +126,7 @@ pub fn rank_streams_for_profile<'a>(
                     info_hash = %stream.info_hash,
                     raw_title = %parsed.raw_title,
                     correct_title = %title_ctx.correct_title,
-                    "stream rejected: title does not match item"
+                    "download: stream rejected, the release title is for a different title than this item"
                 );
                 return None;
             }
@@ -158,7 +158,7 @@ pub fn rank_streams_for_profile<'a>(
                     audio = ?parsed.audio,
                     hdr = ?parsed.hdr,
                     checks = ?failed_checks,
-                    "stream does not match download preference checks"
+                    "download: stream rejected by the quality profile"
                 );
                 return None;
             }
