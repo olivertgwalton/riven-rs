@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use async_graphql::{Context, Object};
 use riven_queue::JobQueue;
-use riven_queue::lifecycle::LibraryOrchestrator;
+use riven_queue::lifecycle::{LibraryOrchestrator, upsert_requested_movie, upsert_requested_show};
 use serde::Deserialize;
 
 /// GraphQL surface for Seerr's inbound webhook, merged into `MutationRoot`
@@ -79,31 +79,29 @@ async fn handle_notification(job_queue: &Arc<JobQueue>, n: NotificationPayload) 
     let result = match media_type {
         "movie" => {
             let title = imdb_id.or(tmdb_id).unwrap_or("Unknown");
-            orchestrator
-                .upsert_requested_movie(
-                    title,
-                    imdb_id,
-                    tmdb_id,
-                    requested_by.as_deref(),
-                    external_request_id.as_deref(),
-                )
-                .await
-                .map(|outcome| (outcome, None::<Vec<i32>>))
+            upsert_requested_movie(
+                title,
+                imdb_id,
+                tmdb_id,
+                requested_by.as_deref(),
+                external_request_id.as_deref(),
+            )
+            .await
+            .map(|outcome| (outcome, None::<Vec<i32>>))
         }
         "tv" => {
             let title = imdb_id.or(tvdb_id).unwrap_or("Unknown");
             let seasons = parse_requested_seasons(&n.extra);
-            orchestrator
-                .upsert_requested_show(
-                    title,
-                    imdb_id,
-                    tvdb_id,
-                    requested_by.as_deref(),
-                    external_request_id.as_deref(),
-                    seasons.as_deref(),
-                )
-                .await
-                .map(|outcome| (outcome, seasons))
+            upsert_requested_show(
+                title,
+                imdb_id,
+                tvdb_id,
+                requested_by.as_deref(),
+                external_request_id.as_deref(),
+                seasons.as_deref(),
+            )
+            .await
+            .map(|outcome| (outcome, seasons))
         }
         other => {
             tracing::warn!(media_type = %other, "seerr webhook: unknown media type");

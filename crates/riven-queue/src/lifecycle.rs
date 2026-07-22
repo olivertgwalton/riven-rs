@@ -40,6 +40,81 @@ impl RequestedItemOutcome {
     }
 }
 
+pub async fn upsert_requested_movie(
+    title: &str,
+    imdb_id: Option<&str>,
+    tmdb_id: Option<&str>,
+    requested_by: Option<&str>,
+    external_request_id: Option<&str>,
+) -> Result<RequestedItemOutcome> {
+    let request = repo::create_item_request(
+        imdb_id,
+        tmdb_id,
+        None,
+        ItemRequestType::Movie,
+        requested_by,
+        external_request_id,
+        None,
+    )
+    .await?;
+    let (item, _) = repo::create_movie(title, imdb_id, tmdb_id, Some(request.request.id)).await?;
+    Ok(RequestedItemOutcome {
+        item,
+        request: request.request,
+        action: request.action,
+    })
+}
+
+pub async fn upsert_requested_show(
+    title: &str,
+    imdb_id: Option<&str>,
+    tvdb_id: Option<&str>,
+    requested_by: Option<&str>,
+    external_request_id: Option<&str>,
+    requested_seasons: Option<&[i32]>,
+) -> Result<RequestedItemOutcome> {
+    let request = repo::create_item_request(
+        imdb_id,
+        None,
+        tvdb_id,
+        ItemRequestType::Show,
+        requested_by,
+        external_request_id,
+        requested_seasons,
+    )
+    .await?;
+    let (item, _) = repo::create_show(title, imdb_id, tvdb_id, Some(request.request.id)).await?;
+    Ok(RequestedItemOutcome {
+        item,
+        request: request.request,
+        action: request.action,
+    })
+}
+
+pub async fn sync_item_request_state(item: &MediaItem) {
+    let Some(request_id) = item.item_request_id else {
+        return;
+    };
+    let request = match repo::get_item_request_by_id(request_id).await {
+        Ok(Some(request)) => request,
+        Ok(None) => return,
+        Err(error) => {
+            tracing::error!(item_id = item.id, request_id, %error, "failed to load item request");
+            return;
+        }
+    };
+    let request_state = match repo::derive_item_request_state_for_request(&request).await {
+        Ok(state) => state,
+        Err(error) => {
+            tracing::error!(item_id = item.id, request_id, %error, "failed to derive item request state");
+            return;
+        }
+    };
+    if let Err(error) = repo::update_item_request_state(request_id, request_state).await {
+        tracing::error!(item_id = item.id, request_id, %error, "failed to update item request state");
+    }
+}
+
 pub struct LibraryOrchestrator<'a> {
     queue: &'a JobQueue,
 }
@@ -47,65 +122,6 @@ pub struct LibraryOrchestrator<'a> {
 impl<'a> LibraryOrchestrator<'a> {
     pub fn new(queue: &'a JobQueue) -> Self {
         Self { queue }
-    }
-
-    pub async fn upsert_requested_movie(
-        &self,
-        title: &str,
-        imdb_id: Option<&str>,
-        tmdb_id: Option<&str>,
-        requested_by: Option<&str>,
-        external_request_id: Option<&str>,
-    ) -> Result<RequestedItemOutcome> {
-        let request = repo::create_item_request(
-            imdb_id,
-            tmdb_id,
-            None,
-            ItemRequestType::Movie,
-            requested_by,
-            external_request_id,
-            None,
-        )
-        .await?;
-
-        let (item, _) =
-            repo::create_movie(title, imdb_id, tmdb_id, Some(request.request.id)).await?;
-
-        Ok(RequestedItemOutcome {
-            item,
-            request: request.request,
-            action: request.action,
-        })
-    }
-
-    pub async fn upsert_requested_show(
-        &self,
-        title: &str,
-        imdb_id: Option<&str>,
-        tvdb_id: Option<&str>,
-        requested_by: Option<&str>,
-        external_request_id: Option<&str>,
-        requested_seasons: Option<&[i32]>,
-    ) -> Result<RequestedItemOutcome> {
-        let request = repo::create_item_request(
-            imdb_id,
-            None,
-            tvdb_id,
-            ItemRequestType::Show,
-            requested_by,
-            external_request_id,
-            requested_seasons,
-        )
-        .await?;
-
-        let (item, _) =
-            repo::create_show(title, imdb_id, tvdb_id, Some(request.request.id)).await?;
-
-        Ok(RequestedItemOutcome {
-            item,
-            request: request.request,
-            action: request.action,
-        })
     }
 
     pub async fn enqueue_after_request_action(
@@ -166,47 +182,5 @@ impl<'a> LibraryOrchestrator<'a> {
         if let Some(item) = item {
             self.queue.push_index(IndexJob::from_item(&item)).await;
         }
-    }
-
-    pub async fn sync_item_request_state(&self, item: &MediaItem) {
-        let Some(request_id) = item.item_request_id else {
-            return;
-        };
-
-        let request = match repo::get_item_request_by_id(request_id).await {
-            Ok(Some(request)) => request,
-            Ok(None) => return,
-            Err(error) => {
-                tracing::error!(
-                    item_id = item.id,
-                    request_id,
-                    error = %error,
-                    "failed to load item request"
-                );
-                return;
-            }
-        };
-
-        let request_state = match repo::derive_item_request_state_for_request(&request).await {
-            Ok(state) => state,
-            Err(error) => {
-                tracing::error!(
-                    item_id = item.id,
-                    request_id,
-                    error = %error,
-                    "failed to derive item request state"
-                );
-                return;
-            }
-        };
-
-        if let Err(error) = repo::update_item_request_state(request_id, request_state).await {
-            tracing::error!(
-                item_id = item.id,
-                request_id,
-                error = %error,
-                "failed to update item request state"
-            );
-        };
     }
 }

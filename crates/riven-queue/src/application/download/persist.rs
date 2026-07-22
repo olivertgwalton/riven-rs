@@ -39,7 +39,7 @@ fn has_playable_url(file: &DownloadFile) -> bool {
         || file.stream_url.as_deref().is_some_and(|s| !s.is_empty())
 }
 use crate::context::{DownloadHierarchyContext, load_download_hierarchy_context};
-use crate::lifecycle::LibraryOrchestrator;
+use crate::lifecycle::sync_item_request_state;
 pub enum SeasonPersistOutcome {
     Failed,
     Partial,
@@ -612,9 +612,7 @@ pub async fn persist_season(
     // episode (via the repo layer), and the recompute cascade walked them up to
     // the season and show. Just sync the request state and read the now-current
     // season state.
-    LibraryOrchestrator::new(queue)
-        .sync_item_request_state(item)
-        .await;
+    sync_item_request_state(item).await;
 
     let season_complete = repo::get_media_item(item.id)
         .await
@@ -784,9 +782,7 @@ pub async fn persist_show(
         return SeasonPersistOutcome::Failed;
     }
 
-    LibraryOrchestrator::new(queue)
-        .sync_item_request_state(item)
-        .await;
+    sync_item_request_state(item).await;
     queue
         .filesystem_settings_revision
         .fetch_add(1, Ordering::SeqCst);
@@ -1030,9 +1026,7 @@ async fn persist_supplied_show_download(
         anyhow::bail!("no episode files were persisted from the torrent");
     }
 
-    LibraryOrchestrator::new(queue)
-        .sync_item_request_state(item)
-        .await;
+    sync_item_request_state(item).await;
 
     let completed = repo::get_media_item(item.id)
         .await
@@ -1067,9 +1061,7 @@ pub async fn finalize_download_success(
     provider: Option<String>,
     plugin_name: Option<String>,
 ) {
-    LibraryOrchestrator::new(queue)
-        .sync_item_request_state(item)
-        .await;
+    sync_item_request_state(item).await;
 
     queue
         .filesystem_settings_revision
