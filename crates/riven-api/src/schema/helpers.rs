@@ -36,6 +36,18 @@ pub(super) fn resolution_to_dims(res: &str) -> (Option<i64>, Option<i64>) {
     }
 }
 
+pub(super) fn episode_lookup_keys(item: &riven_db::entities::MediaItem) -> Vec<String> {
+    item.absolute_number
+        .map(|number| format!("abs:{number}"))
+        .into_iter()
+        .chain(
+            item.season_number
+                .zip(item.episode_number)
+                .map(|(season, episode)| format!("{season}:{episode}")),
+        )
+        .collect()
+}
+
 /// Parse `original_filename` using riven-rank and return a `media_metadata` JSON value
 /// matching the shape the frontend's `MediaMetadata` type expects.
 pub fn derive_media_metadata(filename: &str) -> serde_json::Value {

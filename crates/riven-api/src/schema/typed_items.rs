@@ -3,6 +3,8 @@ use riven_core::types::MediaItemType;
 use riven_db::entities::{MediaItem, Stream};
 use riven_db::repo;
 
+use super::helpers::episode_lookup_keys;
+
 async fn load_streams(media_item_id: i64, info_hashes: Option<Vec<String>>) -> Result<Vec<Stream>> {
     let mut streams = repo::get_streams_for_item(media_item_id).await?;
     if let Some(info_hashes) = info_hashes {
@@ -13,15 +15,6 @@ async fn load_streams(media_item_id: i64, info_hashes: Option<Vec<String>>) -> R
         });
     }
     Ok(streams)
-}
-
-/// Shared body for the `streams` resolver on every typed media item.
-async fn load_streams_for(
-    item: &MediaItem,
-    _ctx: &Context<'_>,
-    info_hashes: Option<Vec<String>>,
-) -> Result<Vec<Stream>> {
-    load_streams(item.id, info_hashes).await
 }
 
 pub struct Movie {
@@ -37,10 +30,10 @@ impl Movie {
 
     async fn streams(
         &self,
-        ctx: &Context<'_>,
+        _ctx: &Context<'_>,
         info_hashes: Option<Vec<String>>,
     ) -> Result<Vec<Stream>> {
-        load_streams_for(&self.item, ctx, info_hashes).await
+        load_streams(self.item.id, info_hashes).await
     }
 
     /// Always 1 — a movie has exactly one expected media file.
@@ -62,10 +55,10 @@ impl Show {
 
     async fn streams(
         &self,
-        ctx: &Context<'_>,
+        _ctx: &Context<'_>,
         info_hashes: Option<Vec<String>>,
     ) -> Result<Vec<Stream>> {
-        load_streams_for(&self.item, ctx, info_hashes).await
+        load_streams(self.item.id, info_hashes).await
     }
 
     /// Seasons for this show. Excludes season 0 (specials) by default.
@@ -102,10 +95,10 @@ impl Season {
 
     async fn streams(
         &self,
-        ctx: &Context<'_>,
+        _ctx: &Context<'_>,
         info_hashes: Option<Vec<String>>,
     ) -> Result<Vec<Stream>> {
-        load_streams_for(&self.item, ctx, info_hashes).await
+        load_streams(self.item.id, info_hashes).await
     }
 
     /// The parent show for this season.
@@ -150,10 +143,10 @@ impl Episode {
 
     async fn streams(
         &self,
-        ctx: &Context<'_>,
+        _ctx: &Context<'_>,
         info_hashes: Option<Vec<String>>,
     ) -> Result<Vec<Stream>> {
-        load_streams_for(&self.item, ctx, info_hashes).await
+        load_streams(self.item.id, info_hashes).await
     }
 
     /// The parent season for this episode.
@@ -170,14 +163,7 @@ impl Episode {
 
     /// Lookup keys: `["abs:{absoluteNumber}", "{seasonNumber}:{episodeNumber}"]`.
     async fn lookup_keys(&self) -> Vec<String> {
-        let mut keys = Vec::new();
-        if let Some(abs) = self.item.absolute_number {
-            keys.push(format!("abs:{abs}"));
-        }
-        if let (Some(season), Some(episode)) = (self.item.season_number, self.item.episode_number) {
-            keys.push(format!("{season}:{episode}"));
-        }
-        keys
+        episode_lookup_keys(&self.item)
     }
 
     /// Always 1 — an episode has exactly one expected media file.

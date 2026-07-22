@@ -6,7 +6,7 @@ use riven_db::orm;
 use riven_db::repo;
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
 
-use crate::schema::helpers::derive_media_metadata;
+use crate::schema::helpers::{derive_media_metadata, episode_lookup_keys};
 use crate::schema::typed_items::MediaItemUnion;
 use crate::schema::types::*;
 
@@ -27,6 +27,14 @@ where
         }
     }
     groups
+}
+
+fn take_group<T, K: PartialEq>(groups: &mut Vec<(K, Vec<T>)>, key: &K) -> Vec<T> {
+    groups
+        .iter()
+        .position(|(candidate, _)| candidate == key)
+        .map(|index| groups.swap_remove(index).1)
+        .unwrap_or_default()
 }
 
 /// Load a show's seasons together with its episodes grouped per season.
@@ -252,14 +260,7 @@ impl MediaQuery {
         let item = repo::get_media_item(id)
             .await?
             .ok_or_else(|| Error::new("Item not found"))?;
-        let mut keys = Vec::new();
-        if let Some(abs) = item.absolute_number {
-            keys.push(format!("abs:{abs}"));
-        }
-        if let (Some(season), Some(episode)) = (item.season_number, item.episode_number) {
-            keys.push(format!("{season}:{episode}"));
-        }
-        Ok(keys)
+        Ok(episode_lookup_keys(&item))
     }
 }
 
@@ -322,20 +323,14 @@ impl MediaQuery {
             let seasons: Vec<SeasonState> = seasons
                 .into_iter()
                 .map(|season| {
-                    let eps: Vec<EpisodeState> = match episodes_by_season
-                        .iter()
-                        .position(|(pid, _)| *pid == season.id)
-                    {
-                        Some(idx) => episodes_by_season.swap_remove(idx).1,
-                        None => Vec::new(),
-                    }
-                    .into_iter()
-                    .map(|episode| EpisodeState {
-                        id: episode.id,
-                        episode_number: episode.episode_number,
-                        state: episode.state,
-                    })
-                    .collect();
+                    let eps: Vec<EpisodeState> = take_group(&mut episodes_by_season, &season.id)
+                        .into_iter()
+                        .map(|episode| EpisodeState {
+                            id: episode.id,
+                            episode_number: episode.episode_number,
+                            state: episode.state,
+                        })
+                        .collect();
                     let expected_file_count = eps.len() as i64;
                     SeasonState {
                         id: season.id,
@@ -413,22 +408,10 @@ impl MediaQuery {
 
             let mut season_fulls = Vec::with_capacity(seasons.len());
             for season in seasons {
-                let season_episodes = match episodes_by_season
-                    .iter()
-                    .position(|(pid, _)| *pid == season.id)
-                {
-                    Some(idx) => episodes_by_season.swap_remove(idx).1,
-                    None => Vec::new(),
-                };
+                let season_episodes = take_group(&mut episodes_by_season, &season.id);
                 let mut episode_fulls = Vec::with_capacity(season_episodes.len());
                 for episode in season_episodes {
-                    let ep_media = match entries_by_episode
-                        .iter()
-                        .position(|(mid, _)| *mid == episode.id)
-                    {
-                        Some(idx) => entries_by_episode.swap_remove(idx).1,
-                        None => Vec::new(),
-                    };
+                    let ep_media = take_group(&mut entries_by_episode, &episode.id);
                     let ep_fs = ep_media.first().cloned();
                     episode_fulls.push(EpisodeFull {
                         item: episode,

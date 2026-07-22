@@ -370,6 +370,7 @@ type LogEntry {
 	level: String
 	message: String
 	target: String
+	fields: String
 }
 
 type MediaItem {
