@@ -13,7 +13,6 @@ use super::FilesystemSettings;
 pub struct RivenSettings {
     pub database_url: String,
     pub redis_url: String,
-    pub vfs_mount_path: String,
     /// Enable debug logging for the virtual file system.
     pub vfs_debug_logging: bool,
     pub filesystem: FilesystemSettings,
@@ -83,33 +82,11 @@ pub struct RivenSettings {
     pub enabled_plugins: Option<Vec<String>>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(default)]
-struct GeneralSettingsOverride {
-    filesystem: Option<FilesystemSettings>,
-    dubbed_anime_only: Option<bool>,
-    attempt_unknown_downloads: Option<bool>,
-    minimum_average_bitrate_movies: Option<u32>,
-    minimum_average_bitrate_episodes: Option<u32>,
-    maximum_average_bitrate_movies: Option<u32>,
-    maximum_average_bitrate_episodes: Option<u32>,
-    retry_interval_secs: Option<u64>,
-    maximum_scrape_attempts: Option<u32>,
-    schedule_offset_minutes: Option<u64>,
-    unknown_air_date_offset_days: Option<u64>,
-    logging_enabled: Option<bool>,
-    log_level: Option<String>,
-    log_rotation: Option<String>,
-    log_max_files: Option<usize>,
-    vfs_debug_logging: Option<bool>,
-}
-
 impl Default for RivenSettings {
     fn default() -> Self {
         Self {
             database_url: "postgresql://localhost/riven".into(),
             redis_url: "redis://localhost:6379".into(),
-            vfs_mount_path: String::new(),
             vfs_debug_logging: false,
             filesystem: FilesystemSettings::default(),
             unsafe_wipe_redis_on_startup: false,
@@ -159,89 +136,108 @@ impl RivenSettings {
     }
 
     pub fn load() -> anyhow::Result<Self> {
-        let mut settings: Self = Figment::new()
+        let settings: Self = Figment::new()
             .merge(Serialized::defaults(Self::default()))
             .merge(Env::prefixed("RIVEN_SETTING__").split("__"))
             .extract()?;
-        settings.fill_legacy_filesystem_mount_path();
         Ok(settings)
     }
 
-    pub fn effective_vfs_mount_path(&self) -> &str {
-        if self.filesystem.mount_path.is_empty() {
-            &self.vfs_mount_path
-        } else {
-            &self.filesystem.mount_path
-        }
-    }
-
     pub fn apply_general_db_override(&mut self, value: &serde_json::Value) {
-        let Ok(override_settings) =
-            serde_json::from_value::<GeneralSettingsOverride>(value.clone())
-        else {
+        let Some(settings) = value.as_object() else {
             return;
         };
 
-        if let Some(filesystem) = override_settings.filesystem {
+        if let Some(filesystem) = settings
+            .get("filesystem")
+            .and_then(|value| serde_json::from_value(value.clone()).ok())
+        {
             self.filesystem = filesystem;
-            self.fill_legacy_filesystem_mount_path();
         }
 
         set_if_some(
             &mut self.dubbed_anime_only,
-            override_settings.dubbed_anime_only,
+            setting_bool(settings, "dubbed_anime_only"),
         );
         set_if_some(
             &mut self.attempt_unknown_downloads,
-            override_settings.attempt_unknown_downloads,
+            setting_bool(settings, "attempt_unknown_downloads"),
         );
         set_option_if_some(
             &mut self.minimum_average_bitrate_movies,
-            override_settings.minimum_average_bitrate_movies,
+            setting_u32(settings, "minimum_average_bitrate_movies"),
         );
         set_option_if_some(
             &mut self.minimum_average_bitrate_episodes,
-            override_settings.minimum_average_bitrate_episodes,
+            setting_u32(settings, "minimum_average_bitrate_episodes"),
         );
         set_option_if_some(
             &mut self.maximum_average_bitrate_movies,
-            override_settings.maximum_average_bitrate_movies,
+            setting_u32(settings, "maximum_average_bitrate_movies"),
         );
         set_option_if_some(
             &mut self.maximum_average_bitrate_episodes,
-            override_settings.maximum_average_bitrate_episodes,
+            setting_u32(settings, "maximum_average_bitrate_episodes"),
         );
         set_if_some(
             &mut self.retry_interval_secs,
-            override_settings.retry_interval_secs,
+            setting_u64(settings, "retry_interval_secs"),
         );
         set_if_some(
             &mut self.maximum_scrape_attempts,
-            override_settings.maximum_scrape_attempts,
+            setting_u32(settings, "maximum_scrape_attempts"),
         );
         set_if_some(
             &mut self.schedule_offset_minutes,
-            override_settings.schedule_offset_minutes,
+            setting_u64(settings, "schedule_offset_minutes"),
         );
         set_if_some(
             &mut self.unknown_air_date_offset_days,
-            override_settings.unknown_air_date_offset_days,
+            setting_u64(settings, "unknown_air_date_offset_days"),
         );
-        set_if_some(&mut self.logging_enabled, override_settings.logging_enabled);
-        set_if_some(&mut self.log_level, override_settings.log_level);
-        set_if_some(&mut self.log_rotation, override_settings.log_rotation);
-        set_if_some(&mut self.log_max_files, override_settings.log_max_files);
+        set_if_some(
+            &mut self.logging_enabled,
+            setting_bool(settings, "logging_enabled"),
+        );
+        set_if_some(&mut self.log_level, setting_string(settings, "log_level"));
+        set_if_some(
+            &mut self.log_rotation,
+            setting_string(settings, "log_rotation"),
+        );
+        set_if_some(
+            &mut self.log_max_files,
+            setting_u64(settings, "log_max_files").and_then(|value| value.try_into().ok()),
+        );
         set_if_some(
             &mut self.vfs_debug_logging,
-            override_settings.vfs_debug_logging,
+            setting_bool(settings, "vfs_debug_logging"),
         );
     }
+}
 
-    fn fill_legacy_filesystem_mount_path(&mut self) {
-        if self.filesystem.mount_path.is_empty() {
-            self.filesystem.mount_path = self.vfs_mount_path.clone();
-        }
-    }
+fn setting_bool(settings: &serde_json::Map<String, serde_json::Value>, key: &str) -> Option<bool> {
+    let value = settings.get(key)?;
+    value
+        .as_bool()
+        .or_else(|| value.as_str().and_then(|value| value.parse().ok()))
+}
+
+fn setting_u64(settings: &serde_json::Map<String, serde_json::Value>, key: &str) -> Option<u64> {
+    let value = settings.get(key)?;
+    value
+        .as_u64()
+        .or_else(|| value.as_str().and_then(|value| value.parse().ok()))
+}
+
+fn setting_u32(settings: &serde_json::Map<String, serde_json::Value>, key: &str) -> Option<u32> {
+    setting_u64(settings, key).and_then(|value| value.try_into().ok())
+}
+
+fn setting_string(
+    settings: &serde_json::Map<String, serde_json::Value>,
+    key: &str,
+) -> Option<String> {
+    settings.get(key)?.as_str().map(str::to_string)
 }
 
 fn set_if_some<T>(slot: &mut T, value: Option<T>) {
