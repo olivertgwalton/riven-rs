@@ -260,6 +260,13 @@ fn build_level_filter(settings: &LogSettings) -> anyhow::Result<EnvFilter> {
         return Ok(filter);
     }
 
+    build_default_level_filter(settings)
+}
+
+/// Construct Riven's built-in directives without consulting process-global
+/// environment. Kept separate so tests remain deterministic when the caller
+/// running `cargo test` has set `RUST_LOG`.
+fn build_default_level_filter(settings: &LogSettings) -> anyhow::Result<EnvFilter> {
     let mut filter = EnvFilter::try_new(&settings.level)
         .map_err(|error| anyhow::anyhow!("invalid log level '{}': {error}", settings.level))?;
 
@@ -399,10 +406,10 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for BroadcastMakeWriter {
 
 #[cfg(test)]
 mod tests {
-    use super::{LogSettings, build_level_filter};
+    use super::{LogSettings, build_default_level_filter};
 
     fn directives(settings: &LogSettings) -> String {
-        build_level_filter(settings).unwrap().to_string()
+        build_default_level_filter(settings).unwrap().to_string()
     }
 
     #[test]
