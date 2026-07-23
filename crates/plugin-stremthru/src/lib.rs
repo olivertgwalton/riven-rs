@@ -626,18 +626,16 @@ fn magnet_display_name(magnet: &str) -> Option<String> {
                 out.push(b' ');
                 i += 1;
             }
-            b'%' if i + 2 < bytes.len() => {
-                match u8::from_str_radix(&raw[i + 1..i + 3], 16) {
-                    Ok(decoded) => {
-                        out.push(decoded);
-                        i += 3;
-                    }
-                    Err(_) => {
-                        out.push(bytes[i]);
-                        i += 1;
-                    }
+            b'%' if i + 2 < bytes.len() => match u8::from_str_radix(&raw[i + 1..i + 3], 16) {
+                Ok(decoded) => {
+                    out.push(decoded);
+                    i += 3;
                 }
-            }
+                Err(_) => {
+                    out.push(bytes[i]);
+                    i += 1;
+                }
+            },
             b => {
                 out.push(b);
                 i += 1;

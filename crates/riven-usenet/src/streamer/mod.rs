@@ -97,13 +97,10 @@ impl UsenetStreamer {
     /// path, which runs *before* the meta load precisely to stay cheap.
     /// Returns the placeholder when the release isn't resident.
     pub fn cached_file_label(&self, info_hash: &str, file_index: usize) -> String {
-        self.state
-            .meta_cache
-            .get(info_hash)
-            .map_or_else(
-                || meta::UNKNOWN_FILE_LABEL.to_string(),
-                |meta| meta.file_label(file_index).to_string(),
-            )
+        self.state.meta_cache.get(info_hash).map_or_else(
+            || meta::UNKNOWN_FILE_LABEL.to_string(),
+            |meta| meta.file_label(file_index).to_string(),
+        )
     }
 
     /// Keep one operation's fan-out small even when a provider permits many

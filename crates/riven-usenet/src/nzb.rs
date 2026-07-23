@@ -112,7 +112,8 @@ pub fn peek_release_title(xml: &str) -> Option<String> {
                         .flatten()
                         .find(|attr| attr.key.as_ref() == b"type")
                         .and_then(|attr| {
-                            attr.normalized_value(quick_xml::XmlVersion::Implicit1_0).ok()
+                            attr.normalized_value(quick_xml::XmlVersion::Implicit1_0)
+                                .ok()
                         })
                         .map(|v| v.to_ascii_lowercase());
                 }
@@ -123,7 +124,8 @@ pub fn peek_release_title(xml: &str) -> Option<String> {
                         .flatten()
                         .find(|attr| attr.key.as_ref() == b"subject")
                         .and_then(|attr| {
-                            attr.normalized_value(quick_xml::XmlVersion::Implicit1_0).ok()
+                            attr.normalized_value(quick_xml::XmlVersion::Implicit1_0)
+                                .ok()
                         })
                         .map(std::borrow::Cow::into_owned)
                         .unwrap_or_default();
