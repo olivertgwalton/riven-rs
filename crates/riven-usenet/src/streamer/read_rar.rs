@@ -23,6 +23,7 @@ impl UsenetStreamer {
         start: u64,
         end_inclusive: u64,
         client: &NntpClient,
+        file: &str,
     ) -> Result<Bytes, StreamerError> {
         let mut parts_out: Vec<Bytes> = Vec::new();
 
@@ -51,8 +52,14 @@ impl UsenetStreamer {
                 None => {
                     let part_byte_lo = slice.start_in_part + slice_plain_lo;
                     let part_byte_hi = slice.start_in_part + slice_plain_hi;
-                    self.read_decoded_range_within_part(part, part_byte_lo, part_byte_hi, client)
-                        .await?
+                    self.read_decoded_range_within_part(
+                        part,
+                        part_byte_lo,
+                        part_byte_hi,
+                        client,
+                        file,
+                    )
+                    .await?
                 }
                 Some(enc) => {
                     let pw = password.ok_or(StreamerError::MissingPassword)?;
@@ -64,6 +71,7 @@ impl UsenetStreamer {
                         slice_plain_lo,
                         slice_plain_hi,
                         client,
+                        file,
                     )
                     .await?
                 }
@@ -86,6 +94,7 @@ impl UsenetStreamer {
         slice_plain_lo: u64,
         slice_plain_hi: u64,
         client: &NntpClient,
+        file: &str,
     ) -> Result<Bytes, StreamerError> {
         use crate::crypto::{AES_BLOCK, decrypt_blocks_in_place, derive_key};
 
@@ -102,7 +111,13 @@ impl UsenetStreamer {
         }
 
         let fetched_bytes = self
-            .read_decoded_range_within_part(part, cipher_lo_in_part, cipher_hi_in_part, client)
+            .read_decoded_range_within_part(
+                part,
+                cipher_lo_in_part,
+                cipher_hi_in_part,
+                client,
+                file,
+            )
             .await?;
         if fetched_bytes.len() < AES_BLOCK {
             return Err(StreamerError::BadRange);
@@ -140,6 +155,7 @@ impl UsenetStreamer {
         dec_start: u64,
         dec_end_inclusive: u64,
         client: &NntpClient,
+        file: &str,
     ) -> Result<Bytes, StreamerError> {
         match part.decoded_seg_size {
             Some(seg_size) if seg_size > 0 => {
@@ -149,11 +165,12 @@ impl UsenetStreamer {
                     dec_start,
                     dec_end_inclusive,
                     client,
+                    file,
                 )
                 .await
             }
             _ => {
-                self.read_decoded_range_walk(part, dec_start, dec_end_inclusive, client)
+                self.read_decoded_range_walk(part, dec_start, dec_end_inclusive, client, file)
                     .await
             }
         }
@@ -176,6 +193,7 @@ impl UsenetStreamer {
         dec_start: u64,
         dec_end_inclusive: u64,
         client: &NntpClient,
+        file: &str,
     ) -> Result<Bytes, StreamerError> {
         let total_segs = part.segments.len();
         let first_seg = (dec_start / seg_size) as usize;
@@ -194,6 +212,7 @@ impl UsenetStreamer {
             batch_last,
             skip,
             client,
+            file,
         )
         .await
     }
@@ -207,6 +226,7 @@ impl UsenetStreamer {
         dec_start: u64,
         dec_end_inclusive: u64,
         client: &NntpClient,
+        file: &str,
     ) -> Result<Bytes, StreamerError> {
         let total_segs = part.segments.len();
 
@@ -239,6 +259,7 @@ impl UsenetStreamer {
             batch_last,
             skip,
             client,
+            file,
         )
         .await
     }
@@ -267,6 +288,7 @@ impl UsenetStreamer {
         first_batch_last: usize,
         mut skip: usize,
         client: &NntpClient,
+        file: &str,
     ) -> Result<Bytes, StreamerError> {
         let want = (dec_end_inclusive - dec_start + 1) as usize;
         let total_segs = part.segments.len();
@@ -289,7 +311,7 @@ impl UsenetStreamer {
                     let s = streamer.clone();
                     let client = client.clone();
                     async move {
-                        s.fetch_decoded_cached(&client, &segments[i].message_id)
+                        s.fetch_decoded_cached(&client, &segments[i].message_id, file)
                             .await
                     }
                 })

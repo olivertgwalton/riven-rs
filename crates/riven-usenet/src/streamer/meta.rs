@@ -20,6 +20,45 @@ pub struct NzbMeta {
     pub password: Option<String>,
 }
 
+/// Placeholder used in log fields when a name genuinely isn't available, so a
+/// log line always has the `file`/`release` field present and greppable rather
+/// than silently dropping it.
+pub const UNKNOWN_FILE_LABEL: &str = "<unknown>";
+
+/// Match against the same extensions the downstream persist step accepts as
+/// playable video — see `crates/riven-queue/src/flows/download_item/helpers.rs`
+/// `is_video_file`. Kept in sync intentionally: returning a virtual file
+/// whose extension the queue ignores wastes an ingest cycle.
+pub(crate) fn is_media_filename(name: &str) -> bool {
+    let ext = name.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+    matches!(
+        ext.as_str(),
+        "mp4" | "mkv" | "avi" | "mov" | "wmv" | "flv" | "webm"
+    )
+}
+
+impl NzbMeta {
+    /// Name for the release as a whole, for log fields. An `info_hash` is a
+    /// SHA-1 of the NZB URL and says nothing about what is playing, so every
+    /// log line about a release carries this alongside it. The primary media
+    /// file is the closest thing a meta row has to a title — ingest orders it
+    /// first, and for a season pack it at least identifies the show.
+    pub fn label(&self) -> &str {
+        self.files
+            .iter()
+            .find(|f| is_media_filename(&f.filename))
+            .or_else(|| self.files.first())
+            .map_or(UNKNOWN_FILE_LABEL, |f| f.filename.as_str())
+    }
+
+    /// Name of the file at `file_index`, for log fields.
+    pub fn file_label(&self, file_index: usize) -> &str {
+        self.files
+            .get(file_index)
+            .map_or(UNKNOWN_FILE_LABEL, |f| f.filename.as_str())
+    }
+}
+
 impl std::fmt::Debug for NzbMeta {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("NzbMeta")

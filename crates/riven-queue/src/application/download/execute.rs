@@ -45,9 +45,9 @@ pub async fn attempt_download(
     tracing::debug!(
         id,
         info_hash,
+        raw_title,
         resolution,
         profile = profile_name,
-        raw_title,
         "download: asking the debrid services for this release"
     );
 
@@ -62,6 +62,7 @@ pub async fn attempt_download(
         queue: &JobQueue,
         event: &RivenEvent,
         info_hash: &str,
+        raw_title: &str,
     ) -> (Option<Box<DownloadResult>>, bool) {
         let results = queue.registry.dispatch(event).await;
         let mut download_result: Option<Box<DownloadResult>> = None;
@@ -72,6 +73,7 @@ pub async fn attempt_download(
                     tracing::debug!(
                         plugin = plugin_name,
                         info_hash,
+                        raw_title,
                         files = download.files.len(),
                         "download: debrid service returned the torrent's file list"
                     );
@@ -83,6 +85,7 @@ pub async fn attempt_download(
                     tracing::debug!(
                         plugin = plugin_name,
                         info_hash,
+                        raw_title,
                         "download: the debrid service reported this torrent as cached earlier but no longer has it"
                     );
                 }
@@ -91,6 +94,7 @@ pub async fn attempt_download(
                     tracing::warn!(
                         plugin = plugin_name,
                         info_hash,
+                        raw_title,
                         error = %error,
                         "download: debrid service errored on this release; moving on to the next service or stream"
                     );
@@ -100,13 +104,15 @@ pub async fn attempt_download(
         (download_result, saw_unavailable)
     }
 
-    let (mut download_result, mut saw_unavailable) = dispatch_once(queue, &event, info_hash).await;
+    let (mut download_result, mut saw_unavailable) =
+        dispatch_once(queue, &event, info_hash, raw_title).await;
 
     if download_result.is_none() && saw_unavailable {
-        if let Err(error) = clear_stremthru_cache_check_keys(queue, info_hash).await {
+        if let Err(error) = clear_stremthru_cache_check_keys(queue, info_hash, raw_title).await {
             tracing::error!(
                 id,
                 info_hash,
+                raw_title,
                 error = %error,
                 "download: could not clear the stale cached-availability entry, so the retry would hit the same wrong answer; skipping the retry"
             );
@@ -114,6 +120,7 @@ pub async fn attempt_download(
             tracing::debug!(
                 id,
                 info_hash,
+                raw_title,
                 "download: cleared the stale cached-availability entry, asking the debrid services again"
             );
             let retry_event = RivenEvent::MediaItemDownloadRequested {
@@ -123,7 +130,7 @@ pub async fn attempt_download(
                 cached_stores: Vec::new(),
             };
             let (retry_result, retry_unavailable) =
-                dispatch_once(queue, &retry_event, info_hash).await;
+                dispatch_once(queue, &retry_event, info_hash, raw_title).await;
             download_result = retry_result;
             saw_unavailable = retry_unavailable;
         }
@@ -131,11 +138,12 @@ pub async fn attempt_download(
 
     let Some(download) = download_result else {
         if saw_unavailable
-            && let Err(error) = clear_stremthru_cache_check_keys(queue, info_hash).await
+            && let Err(error) = clear_stremthru_cache_check_keys(queue, info_hash, raw_title).await
         {
             tracing::error!(
                 id,
                 info_hash,
+                raw_title,
                 error = %error,
                 "download: could not clear the stale cached-availability entry; the next attempt may repeat this failure"
             );
@@ -143,6 +151,7 @@ pub async fn attempt_download(
         tracing::debug!(
             id,
             info_hash,
+            raw_title,
             "download: no debrid service could provide this release"
         );
         return DownloadAttemptOutcome::Failed;
@@ -155,6 +164,7 @@ pub async fn attempt_download(
             tracing::debug!(
                 id,
                 info_hash,
+                raw_title,
                 "download: item was deleted while the download was being set up; discarding it"
             );
             return DownloadAttemptOutcome::Failed;
@@ -163,6 +173,7 @@ pub async fn attempt_download(
             tracing::error!(
                 id,
                 info_hash,
+                raw_title,
                 %error,
                 "download: could not re-read the item from the database before saving the files; discarding this download"
             );
@@ -189,6 +200,7 @@ pub async fn attempt_download(
                 tracing::debug!(
                     id,
                     info_hash,
+                    raw_title,
                     "download: movie files saved and linked to the item"
                 );
                 DownloadAttemptOutcome::Succeeded
@@ -196,6 +208,7 @@ pub async fn attempt_download(
                 tracing::debug!(
                     id,
                     info_hash,
+                    raw_title,
                     "download: release rejected, its files did not match this movie (wrong title, no video file, or size outside the limits)"
                 );
                 DownloadAttemptOutcome::Failed
@@ -220,6 +233,7 @@ pub async fn attempt_download(
                 tracing::debug!(
                     id,
                     info_hash,
+                    raw_title,
                     "download: episode files saved and linked to the item"
                 );
                 DownloadAttemptOutcome::Succeeded
@@ -227,6 +241,7 @@ pub async fn attempt_download(
                 tracing::debug!(
                     id,
                     info_hash,
+                    raw_title,
                     "download: release rejected, its files did not match this episode (wrong episode, no video file, or size outside the limits)"
                 );
                 DownloadAttemptOutcome::Failed
@@ -251,6 +266,7 @@ pub async fn attempt_download(
                     tracing::debug!(
                         id,
                         info_hash,
+                        raw_title,
                         "download: season pack processed, matching episodes saved"
                     );
                     DownloadAttemptOutcome::TerminalHandled
@@ -259,6 +275,7 @@ pub async fn attempt_download(
                     tracing::debug!(
                         id,
                         info_hash,
+                        raw_title,
                         "download: season pack rejected, none of its files matched the episodes of this season"
                     );
                     DownloadAttemptOutcome::Failed
@@ -283,6 +300,7 @@ pub async fn attempt_download(
                     tracing::debug!(
                         id,
                         info_hash,
+                        raw_title,
                         "download: show pack processed, matching episodes saved"
                     );
                     DownloadAttemptOutcome::TerminalHandled
@@ -291,6 +309,7 @@ pub async fn attempt_download(
                     tracing::debug!(
                         id,
                         info_hash,
+                        raw_title,
                         "download: show pack rejected, none of its files matched the episodes of this show"
                     );
                     DownloadAttemptOutcome::Failed
@@ -300,7 +319,11 @@ pub async fn attempt_download(
     }
 }
 
-async fn clear_stremthru_cache_check_keys(queue: &JobQueue, info_hash: &str) -> Result<()> {
+async fn clear_stremthru_cache_check_keys(
+    queue: &JobQueue,
+    info_hash: &str,
+    raw_title: &str,
+) -> Result<()> {
     let mut conn = queue.redis.clone();
     let pattern = format!(
         "plugin:stremthru:cache-check:*:{}",
@@ -329,6 +352,7 @@ async fn clear_stremthru_cache_check_keys(queue: &JobQueue, info_hash: &str) -> 
         let _: () = redis::cmd("DEL").arg(&keys).query_async(&mut conn).await?;
         tracing::debug!(
             info_hash,
+            raw_title,
             cleared = keys.len(),
             "download: dropped cached-availability entries for this release so it gets re-checked"
         );

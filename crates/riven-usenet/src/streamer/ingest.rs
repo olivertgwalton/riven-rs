@@ -13,6 +13,7 @@ use crate::par2::{
 };
 use crate::rar::{self, RarEncryption, RarVolumeFileEntry};
 
+use super::meta::{UNKNOWN_FILE_LABEL, is_media_filename};
 use super::store;
 use super::{
     NzbMeta, NzbMetaFile, NzbMetaSource, NzbRarPart, NzbRarSlice, StreamerError, SweepCounts,
@@ -29,18 +30,6 @@ struct RarFileGroup {
     /// after every volume has been visited, the file's coverage is complete
     /// and it's safe to expose as a virtual file.
     plaintext_sum: u64,
-}
-
-/// Match against the same extensions the downstream persist step accepts as
-/// playable video — see `crates/riven-queue/src/flows/download_item/helpers.rs`
-/// `is_video_file`. Kept in sync intentionally: returning a virtual file
-/// whose extension the queue ignores wastes an ingest cycle.
-fn is_media_filename(name: &str) -> bool {
-    let ext = name.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
-    matches!(
-        ext.as_str(),
-        "mp4" | "mkv" | "avi" | "mov" | "wmv" | "flv" | "webm"
-    )
 }
 
 /// Whether a group's slices (assumed already in ascending `part_index`
@@ -136,6 +125,7 @@ impl UsenetStreamer {
         &self,
         segments: &[NzbSegment],
         sample_percent: usize,
+        file: &str,
     ) -> Result<(), StreamerError> {
         if segments.is_empty() {
             return Ok(());
@@ -161,7 +151,7 @@ impl UsenetStreamer {
             missing,
             errors,
             checked,
-        } = stat_sweep(&self.pool.bulk_client(), mids, probe_concurrency, true).await;
+        } = stat_sweep(&self.pool.bulk_client(), mids, probe_concurrency, true, file).await;
 
         if missing > 0 {
             return Err(StreamerError::IncompleteRelease { missing, checked });
@@ -195,6 +185,7 @@ impl UsenetStreamer {
         if let Some(existing) = store::load(&self.db, info_hash).await? {
             tracing::debug!(
                 info_hash,
+                release = %existing.label(),
                 file_count = existing.files.len(),
                 "usenet ingest: reusing persisted NZB meta (idempotent hit)"
             );
@@ -240,14 +231,14 @@ impl UsenetStreamer {
                             if slices.iter().any(|s| s.encryption.is_some())
                     )
                 });
-                if let Some(NzbMetaSource::Rar { parts, .. }) =
-                    virtual_files.first().map(|vf| &vf.source)
+                if let Some(first) = virtual_files.first()
+                    && let NzbMetaSource::Rar { parts, .. } = &first.source
                 {
                     let probe_segments: Vec<NzbSegment> = parts
                         .iter()
                         .flat_map(|p| p.segments.iter().cloned())
                         .collect();
-                    self.probe_availability(&probe_segments, sample_percent)
+                    self.probe_availability(&probe_segments, sample_percent, &first.filename)
                         .await?;
                 }
                 let mut out = virtual_files;
@@ -269,7 +260,8 @@ impl UsenetStreamer {
                 if let Some(primary) = ordered.first()
                     && let NzbMetaSource::Direct { segments, .. } = &primary.source
                 {
-                    self.probe_availability(segments, sample_percent).await?;
+                    self.probe_availability(segments, sample_percent, &primary.filename)
+                        .await?;
                 }
                 (ordered, None)
             }
@@ -300,6 +292,7 @@ impl UsenetStreamer {
             } else {
                 tracing::debug!(
                     info_hash,
+                    release = release_title.as_deref().unwrap_or(UNKNOWN_FILE_LABEL),
                     par2_count = par2_names.len(),
                     obfuscated_count = obfuscated_playable.len(),
                     "par2 FileDesc count differs from obfuscated file count; skipping rename"
@@ -664,7 +657,7 @@ impl UsenetStreamer {
             let probe_end = prev_data_end.saturating_add(1023);
             let client = self.pool.bulk_client();
             let probe = match self
-                .read_decoded_range_within_part(part, prev_data_end, probe_end, &client)
+                .read_decoded_range_within_part(part, prev_data_end, probe_end, &client, &g.name)
                 .await
             {
                 Ok(p) => p,
@@ -788,7 +781,9 @@ impl UsenetStreamer {
         let mut buf: Vec<u8> = Vec::with_capacity(wanted as usize + 4096);
         let client = self.pool.bulk_client();
         for seg in &part.segments {
-            let decoded = self.fetch_decoded_cached(&client, &seg.message_id).await?;
+            let decoded = self
+                .fetch_decoded_cached(&client, &seg.message_id, &part.filename)
+                .await?;
             buf.extend_from_slice(&decoded);
             if (buf.len() as u64) >= wanted {
                 break;
@@ -816,16 +811,21 @@ impl UsenetStreamer {
         if smallest.segments.is_empty() {
             return None;
         }
+        let par2_name = filename_from_subject(&smallest.subject);
         let total_bytes: u64 = smallest.segments.iter().map(|s| s.bytes).sum();
         let mut buf: Vec<u8> = Vec::with_capacity(total_bytes as usize);
         let client = self.pool.bulk_client();
         for seg in &smallest.segments {
-            match self.fetch_decoded_cached(&client, &seg.message_id).await {
+            match self
+                .fetch_decoded_cached(&client, &seg.message_id, &par2_name)
+                .await
+            {
                 Ok(decoded) => buf.extend_from_slice(&decoded),
                 Err(error) => {
                     tracing::debug!(
                         error = %error,
                         message_id = %seg.message_id,
+                        file = %par2_name,
                         "par2 blob fetch failed"
                     );
                     return None;
@@ -876,7 +876,7 @@ impl UsenetStreamer {
             let start = idx as u64 * slice_size;
             let end_inclusive = start + slice_size - 1;
             let fetched = self
-                .read_decoded_range_within_part(part, start, end_inclusive, &client)
+                .read_decoded_range_within_part(part, start, end_inclusive, &client, &part.filename)
                 .await?;
             // PAR2 checksums the slice zero-padded to `slice_size`; a file's
             // final block is normally shorter than that on disk.
@@ -902,6 +902,10 @@ impl UsenetStreamer {
         &self,
         file: &mut NzbMetaFile,
     ) -> Result<(), StreamerError> {
+        // Cloned up front: the `source` match below borrows `file` mutably for
+        // the rest of the function, and the fetches underneath need the name
+        // for their own logs.
+        let filename = file.filename.clone();
         let NzbMetaSource::Direct { offsets, segments } = &mut file.source else {
             return Ok(());
         };
@@ -913,7 +917,7 @@ impl UsenetStreamer {
         }
         let client = self.pool.bulk_client();
         let dec_first = self
-            .fetch_decoded_cached(&client, &first.message_id)
+            .fetch_decoded_cached(&client, &first.message_id, &filename)
             .await?
             .len() as u64;
         if dec_first == 0 {
@@ -927,7 +931,7 @@ impl UsenetStreamer {
             let measured = if last.bytes == 0 {
                 dec_first
             } else {
-                self.fetch_decoded_cached(&client, &last.message_id)
+                self.fetch_decoded_cached(&client, &last.message_id, &filename)
                     .await?
                     .len() as u64
             };

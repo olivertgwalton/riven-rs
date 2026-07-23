@@ -675,6 +675,7 @@ impl UsenetSession {
                 tracing::debug!(
                     target: "streaming",
                     info_hash = %self.info_hash,
+                    file = %self.filename,
                     file_index = self.file_index,
                     start,
                     "seek: demoting usenet read-ahead to probing"
@@ -692,6 +693,7 @@ impl UsenetSession {
             tracing::debug!(
                 target: "streaming",
                 info_hash = %self.info_hash,
+                file = %self.filename,
                 file_index = self.file_index,
                 start,
                 "sequential run established: arming usenet read-ahead"
@@ -731,6 +733,7 @@ impl UsenetSession {
         tracing::debug!(
             target: "streaming",
             info_hash = %self.info_hash,
+            file = %self.filename,
             file_index = self.file_index,
             start,
             end,
@@ -762,6 +765,7 @@ impl UsenetSession {
                     tracing::warn!(
                         target: "streaming",
                         info_hash = %self.info_hash,
+                        file = %self.filename,
                         file_index = self.file_index,
                         offset = start,
                         want,
@@ -776,6 +780,7 @@ impl UsenetSession {
                 tracing::warn!(
                     target: "streaming",
                     info_hash = %self.info_hash,
+                    file = %self.filename,
                     file_index = self.file_index,
                     offset = start,
                     error = %error,

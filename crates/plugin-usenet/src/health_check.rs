@@ -84,6 +84,9 @@ struct HealthCheckRow {
     id: i64,
     info_hash: String,
     media_item_id: i64,
+    /// Library path of the entry — the only human-readable identity available
+    /// here, and what every log line below is named by.
+    path: String,
 }
 
 async fn run_once(
@@ -93,7 +96,7 @@ async fn run_once(
 ) -> Result<PassSummary> {
     let rows = HealthCheckRow::find_by_statement(Statement::from_sql_and_values(
         DbBackend::Postgres,
-        "SELECT fe.id, COALESCE(s.info_hash, '') AS info_hash, fe.media_item_id \
+        "SELECT fe.id, COALESCE(s.info_hash, '') AS info_hash, fe.media_item_id, fe.path \
          FROM filesystem_entries fe \
          LEFT JOIN streams s ON s.id = fe.stream_id \
          WHERE fe.plugin = $1 AND fe.entry_type::text = 'media' \
@@ -111,6 +114,7 @@ async fn run_once(
         id: entry_id,
         info_hash,
         media_item_id,
+        path,
     } in rows
     {
         if info_hash.is_empty() {
@@ -133,7 +137,12 @@ async fn run_once(
         let meta = match streamer.load_meta(&info_hash).await {
             Ok(m) => m,
             Err(error) => {
-                tracing::debug!(entry_id, %error, "health check: meta load failed; bumping cooldown");
+                tracing::debug!(
+                    entry_id,
+                    file = %path,
+                    %error,
+                    "health check: meta load failed; bumping cooldown"
+                );
                 set_state(&mut redis, &key, &prior, PER_ENTRY_INTERVAL).await;
                 continue;
             }
@@ -172,6 +181,7 @@ async fn run_once(
                 entry_id,
                 media_item_id,
                 info_hash = %info_hash,
+                file = %path,
                 alive,
                 total,
                 consecutive_failures = new_failures,
@@ -180,13 +190,24 @@ async fn run_once(
             if let Err(error) =
                 riven_db::repo::blacklist_stream_by_hash(media_item_id, &info_hash).await
             {
-                tracing::warn!(entry_id, info_hash, %error, "health check: failed to blacklist stream");
+                tracing::warn!(
+                    entry_id,
+                    info_hash,
+                    file = %path,
+                    %error,
+                    "health check: failed to blacklist stream"
+                );
             }
             match riven_db::repo::delete_filesystem_entry(entry_id).await {
                 Ok((true, _)) => summary.removed += 1,
                 Ok((false, _)) => {}
                 Err(error) => {
-                    tracing::warn!(entry_id, %error, "health check: failed to delete entry");
+                    tracing::warn!(
+                        entry_id,
+                        file = %path,
+                        %error,
+                        "health check: failed to delete entry"
+                    );
                 }
             }
             let _del: redis::RedisResult<()> = AsyncCommands::del(&mut redis, &key).await;

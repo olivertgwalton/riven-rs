@@ -29,10 +29,15 @@ impl UsenetStreamer {
     ///
     /// The workload-bound client owns dispatch policy for the whole reader or
     /// job; individual segments do not assign their own priority.
+    /// `file` is the name of the file this segment belongs to. It exists only
+    /// so the article-level logs below can say *what* is failing: a message-id
+    /// is meaningless on its own, and by the time a fetch fails the caller
+    /// that knew the filename is several frames up the stack.
     pub(crate) async fn fetch_decoded_cached(
         &self,
         client: &NntpClient,
         message_id: &str,
+        file: &str,
     ) -> Result<Bytes, StreamerError> {
         loop {
             if let Some(hit) = self.state.cache.get(message_id) {
@@ -86,17 +91,19 @@ impl UsenetStreamer {
                     // message-id. The guard's Drop runs even on
                     // cancellation, ensuring the slot is always released.
                     // `mid` is the one shared `Arc<str>` key for this fetch.
-                    struct OwnerGuard {
+                    struct OwnerGuard<'a> {
                         state: Arc<StreamerState>,
                         slot: Arc<PromiseSlot>,
                         message_id: Arc<str>,
+                        file: &'a str,
                         finished: bool,
                     }
-                    impl Drop for OwnerGuard {
+                    impl Drop for OwnerGuard<'_> {
                         fn drop(&mut self) {
                             if !self.finished {
                                 tracing::debug!(
                                     message_id = %self.message_id,
+                                    file = %self.file,
                                     "owner future cancelled mid-fetch; releasing slot"
                                 );
                                 self.state.in_flight.finish(&self.message_id, &self.slot);
@@ -107,10 +114,11 @@ impl UsenetStreamer {
                         state: self.state.clone(),
                         slot: slot.clone(),
                         message_id: mid.clone(),
+                        file,
                         finished: false,
                     };
 
-                    let result = self.do_fetch_with_retry(client, message_id).await;
+                    let result = self.do_fetch_with_retry(client, message_id, file).await;
                     if let Ok(bytes) = &result {
                         let size = bytes.len() as u64;
                         self.state.cache.put(mid.clone(), bytes.clone());
@@ -130,10 +138,11 @@ impl UsenetStreamer {
         &self,
         client: &NntpClient,
         message_id: &str,
+        file: &str,
     ) -> Result<Bytes, StreamerError> {
         let mut last_err: Option<NntpError> = None;
         for attempt in 0..NNTP_FETCH_ATTEMPTS {
-            tracing::debug!(attempt, message_id, "nntp fetch starting");
+            tracing::debug!(attempt, message_id, file, "nntp fetch starting");
             let started = std::time::Instant::now();
             match client.fetch_body(message_id).await {
                 Ok(body) => {
@@ -146,7 +155,12 @@ impl UsenetStreamer {
                         Ok(Ok((decoded, _info))) => decoded,
                         Ok(Err(e)) => return Err(StreamerError::Yenc(e)),
                         Err(join_err) => {
-                            tracing::warn!(message_id, error = %join_err, "yenc decode task panicked");
+                            tracing::warn!(
+                                message_id,
+                                file,
+                                error = %join_err,
+                                "yenc decode task panicked"
+                            );
                             return Err(StreamerError::Nntp(NntpError::Protocol(
                                 "yenc decode task panicked",
                             )));
@@ -157,6 +171,7 @@ impl UsenetStreamer {
                     tracing::debug!(
                         attempt,
                         message_id,
+                        file,
                         encoded_len,
                         decoded_len = decoded.len(),
                         wire_ms,
@@ -166,7 +181,7 @@ impl UsenetStreamer {
                     return Ok(decoded);
                 }
                 Err(NntpError::ArticleNotFound(s)) => {
-                    tracing::warn!(message_id, status = %s, "nntp article missing");
+                    tracing::warn!(message_id, file, status = %s, "nntp article missing");
                     self.state.fails.mark_dead(message_id.to_string());
                     self.state.fetch_metrics.record_failed();
                     return Err(StreamerError::Nntp(NntpError::ArticleNotFound(s)));
@@ -176,6 +191,7 @@ impl UsenetStreamer {
                     tracing::warn!(
                         attempt,
                         message_id,
+                        file,
                         error = %e,
                         elapsed_ms,
                         "nntp fetch failed; retrying"
@@ -188,7 +204,7 @@ impl UsenetStreamer {
                 }
             }
         }
-        tracing::error!(message_id, "nntp fetch exhausted retries");
+        tracing::error!(message_id, file, "nntp fetch exhausted retries");
         self.state.fetch_metrics.record_failed();
         Err(StreamerError::Nntp(last_err.unwrap_or(
             NntpError::Protocol("retry exhausted without error"),
@@ -254,7 +270,7 @@ impl UsenetStreamer {
         };
 
         let client = self.pool.bulk_client();
-        self.prefetch_mids(client, mids).await;
+        self.prefetch_mids(client, mids, &file.filename).await;
     }
 
     /// Fill a playback reader's ordered segment window beginning at `start`.
@@ -340,7 +356,7 @@ impl UsenetStreamer {
         };
 
         let client = self.pool.playback_client();
-        self.prefetch_mids(client, mids).await;
+        self.prefetch_mids(client, mids, &file.filename).await;
     }
 
     /// Global admission control for read-ahead. Read-ahead is *optional* work,
@@ -361,6 +377,7 @@ impl UsenetStreamer {
             Err(_) => {
                 tracing::debug!(
                     info_hash,
+                    file = %self.cached_file_label(info_hash, file_index),
                     file_index,
                     "usenet prefetch window shed: global read-ahead budget full"
                 );
@@ -369,9 +386,13 @@ impl UsenetStreamer {
         }
     }
 
-    async fn prefetch_mids(&self, client: NntpClient, mids: Vec<String>) {
+    /// `file` names the file these segments belong to, purely so a read-ahead
+    /// fetch failure logs like a playback one. Shared as an `Arc<str>` because
+    /// every segment in the window carries it into its own future.
+    async fn prefetch_mids(&self, client: NntpClient, mids: Vec<String>, file: &str) {
         let prefetch_concurrency = self.prefetch_concurrency(client.capacity());
         let streamer = self.clone();
+        let file: Arc<str> = Arc::from(file);
         let cold: Vec<String> = mids
             .into_iter()
             .filter(|mid| !streamer.state.cache.contains(mid))
@@ -380,12 +401,13 @@ impl UsenetStreamer {
             .map(move |mid| {
                 let s = streamer.clone();
                 let client = client.clone();
+                let file = file.clone();
                 async move {
                     // Read-ahead may only ever hold part of the global segment
                     // gate, so a read a player is actually blocked on never
                     // waits behind speculative work.
                     let _bg = s.state.background_sem.acquire().await;
-                    s.fetch_decoded_cached(&client, &mid).await
+                    s.fetch_decoded_cached(&client, &mid, &file).await
                 }
             })
             .buffer_unordered(prefetch_concurrency);
@@ -431,6 +453,7 @@ impl UsenetStreamer {
         }
         tracing::info!(
             info_hash,
+            file = %file.filename,
             file_index,
             elapsed_ms = started.elapsed().as_millis(),
             "usenet precache done"
@@ -486,7 +509,7 @@ impl UsenetStreamer {
 
         let result = match &file.source {
             NzbMetaSource::Direct { offsets, segments } => {
-                self.read_direct(offsets, segments, start, end_inclusive)
+                self.read_direct(offsets, segments, start, end_inclusive, &file.filename)
                     .await
             }
             NzbMetaSource::Rar { parts, slices } => {
@@ -498,6 +521,7 @@ impl UsenetStreamer {
                     start,
                     end_inclusive,
                     &client,
+                    &file.filename,
                 )
                 .await
                 .map(|buf| {
@@ -511,7 +535,7 @@ impl UsenetStreamer {
         };
 
         if let Err(StreamerError::Nntp(NntpError::ArticleNotFound(status))) = &result {
-            crate::state::report_dead_segment(info_hash, file_index, status);
+            crate::state::report_dead_segment(info_hash, file_index, &file.filename, status);
         }
         result
     }
@@ -542,6 +566,7 @@ impl UsenetStreamer {
         segments: &[NzbSegment],
         start: u64,
         end_inclusive: u64,
+        file: &str,
     ) -> Result<Vec<Bytes>, StreamerError> {
         let want = (end_inclusive - start + 1) as usize;
         if want == 0 || segments.is_empty() {
@@ -576,7 +601,7 @@ impl UsenetStreamer {
                     let client = batch_client.clone();
                     async move {
                         let mid = &segments[i].message_id;
-                        s.fetch_decoded_cached(&client, mid).await
+                        s.fetch_decoded_cached(&client, mid, file).await
                     }
                 })
                 .buffered(read_concurrency);

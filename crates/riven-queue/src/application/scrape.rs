@@ -323,6 +323,7 @@ pub async fn parse_results(id: i64, _job: &ParseScrapeResultsJob, queue: &JobQue
                             id,
                             error = %e,
                             info_hash = %candidate.info_hash,
+                            release = %candidate.title,
                             "parse: saved the stream but could not attach it to the item, so it will not be downloaded"
                         );
                         false

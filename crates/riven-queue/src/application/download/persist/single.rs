@@ -19,7 +19,13 @@ pub async fn persist_movie(
 ) -> bool {
     let id = item.id;
 
-    tracing::debug!(id, info_hash, files = dl.files.len(), "persisting movie");
+    tracing::debug!(
+        id,
+        info_hash,
+        title = %item.title,
+        files = dl.files.len(),
+        "persisting movie"
+    );
 
     let mut video_files: Vec<(&DownloadFile, riven_rank::ParsedData)> = dl
         .files
@@ -44,16 +50,25 @@ pub async fn persist_movie(
         tracing::warn!(
             id,
             info_hash = %info_hash,
+            title = %item.title,
             "no movie-typed video file found — blacklisting stream"
         );
-        blacklist_stream(id, info_hash).await;
+        blacklist_stream(id, info_hash, &item.title).await;
         return false;
     };
 
     let config = queue.downloader_config.read().await;
     if !skip_bitrate_check && !config.movie_passes(file.file_size, item.runtime) {
         drop(config);
-        handle_bitrate_failure(id, info_hash, file.file_size, item.runtime, "movie").await;
+        handle_bitrate_failure(
+            id,
+            info_hash,
+            &file.filename,
+            file.file_size,
+            item.runtime,
+            "movie",
+        )
+        .await;
         return false;
     }
     drop(config);
@@ -66,7 +81,7 @@ pub async fn persist_movie(
             id, info_hash = %info_hash, filename = %file.filename,
             "matched movie file has no playable URL — blacklisting stream"
         );
-        blacklist_stream(id, info_hash).await;
+        blacklist_stream(id, info_hash, &item.title).await;
         return false;
     }
 
@@ -162,7 +177,13 @@ pub async fn persist_episode(
     let library_profiles_json = library_profiles.into_json();
     drop(filesystem_settings);
 
-    tracing::debug!(id, info_hash, files = dl.files.len(), "persisting episode");
+    tracing::debug!(
+        id,
+        info_hash,
+        title = %item.title,
+        files = dl.files.len(),
+        "persisting episode"
+    );
 
     let playable_videos: Vec<(&DownloadFile, riven_rank::ParsedData)> = dl
         .files
@@ -229,9 +250,10 @@ pub async fn persist_episode(
         tracing::warn!(
             id, season = season_number, episode = episode_number,
             info_hash = %info_hash,
+            title = %item.title,
             "no playable torrent file matched episode — blacklisting stream"
         );
-        blacklist_stream(id, info_hash).await;
+        blacklist_stream(id, info_hash, &item.title).await;
         return false;
     }
 
@@ -239,7 +261,15 @@ pub async fn persist_episode(
     let config = queue.downloader_config.read().await;
     if !skip_bitrate_check && !config.episode_passes(largest.file_size, item.runtime) {
         drop(config);
-        handle_bitrate_failure(id, info_hash, largest.file_size, item.runtime, "episode").await;
+        handle_bitrate_failure(
+            id,
+            info_hash,
+            &largest.filename,
+            largest.file_size,
+            item.runtime,
+            "episode",
+        )
+        .await;
         return false;
     }
     drop(config);
