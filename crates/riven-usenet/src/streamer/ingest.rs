@@ -13,8 +13,6 @@ use crate::par2::{
 };
 use crate::rar::{self, RarEncryption, RarVolumeFileEntry};
 
-use crate::nntp::Priority;
-
 use super::store;
 use super::{
     NzbMeta, NzbMetaFile, NzbMetaSource, NzbRarPart, NzbRarSlice, PREFETCH_FLOOR, StreamerError,
@@ -150,7 +148,12 @@ impl UsenetStreamer {
         if n == 0 {
             return Ok(());
         }
-        let probe_concurrency = self.pool.ingest_concurrency().max(PREFETCH_FLOOR).min(n);
+        let probe_concurrency = self
+            .pool
+            .bulk_client()
+            .capacity()
+            .max(PREFETCH_FLOOR)
+            .min(n);
         // stop_on_first_miss: zero tolerance for confirmed-missing segments
         // means the rest of the sample is wasted work the instant one hits —
         // there's no par2 data repair on the read path, so even one dead
@@ -161,7 +164,7 @@ impl UsenetStreamer {
             missing,
             errors,
             checked,
-        } = stat_sweep(&self.pool, mids, probe_concurrency, true).await;
+        } = stat_sweep(&self.pool.bulk_client(), mids, probe_concurrency, true).await;
 
         if missing > 0 {
             return Err(StreamerError::IncompleteRelease { missing, checked });
@@ -203,12 +206,6 @@ impl UsenetStreamer {
                 .put(info_hash.to_string(), Arc::new(existing.clone()));
             return Ok(existing);
         }
-
-        let _ingest_permit = self
-            .ingest_sem
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_e| StreamerError::IngestQueueFull)?;
 
         let document = parse_nzb_document(nzb_xml)?;
         let release_title = document.release_title();
@@ -340,7 +337,7 @@ impl UsenetStreamer {
             file.filename = new_name;
         }
 
-        let rescale_concurrency = self.pool.ingest_concurrency().max(PREFETCH_FLOOR);
+        let rescale_concurrency = self.pool.bulk_client().capacity().max(PREFETCH_FLOOR);
         stream::iter(
             meta_files
                 .iter_mut()
@@ -461,7 +458,7 @@ impl UsenetStreamer {
             parts.push(build_rar_part(f));
         }
 
-        let header_fetch_concurrency = self.pool.ingest_concurrency().max(PREFETCH_FLOOR);
+        let header_fetch_concurrency = self.pool.bulk_client().capacity().max(PREFETCH_FLOOR);
         let streamer = self.clone();
         // Fetch every volume's header at bounded concurrency, but cancel the
         // rest of the group the instant one volume fails: a missing or
@@ -667,8 +664,9 @@ impl UsenetStreamer {
                 continue;
             };
             let probe_end = prev_data_end.saturating_add(1023);
+            let client = self.pool.bulk_client();
             let probe = match self
-                .read_decoded_range_within_part(part, prev_data_end, probe_end, Priority::Low)
+                .read_decoded_range_within_part(part, prev_data_end, probe_end, &client)
                 .await
             {
                 Ok(p) => p,
@@ -790,10 +788,9 @@ impl UsenetStreamer {
         wanted: u64,
     ) -> Result<Vec<u8>, StreamerError> {
         let mut buf: Vec<u8> = Vec::with_capacity(wanted as usize + 4096);
+        let client = self.pool.bulk_client();
         for seg in &part.segments {
-            let decoded = self
-                .fetch_decoded_cached(&seg.message_id, Priority::Low)
-                .await?;
+            let decoded = self.fetch_decoded_cached(&client, &seg.message_id).await?;
             buf.extend_from_slice(&decoded);
             if (buf.len() as u64) >= wanted {
                 break;
@@ -823,11 +820,9 @@ impl UsenetStreamer {
         }
         let total_bytes: u64 = smallest.segments.iter().map(|s| s.bytes).sum();
         let mut buf: Vec<u8> = Vec::with_capacity(total_bytes as usize);
+        let client = self.pool.bulk_client();
         for seg in &smallest.segments {
-            match self
-                .fetch_decoded_cached(&seg.message_id, Priority::Low)
-                .await
-            {
+            match self.fetch_decoded_cached(&client, &seg.message_id).await {
                 Ok(decoded) => buf.extend_from_slice(&decoded),
                 Err(error) => {
                     tracing::debug!(
@@ -877,12 +872,13 @@ impl UsenetStreamer {
         blocks: &[Par2Block],
         slice_size: u64,
     ) -> Result<bool, StreamerError> {
+        let client = self.pool.bulk_client();
         for idx in par2_sample_block_indices(blocks.len()) {
             let block = &blocks[idx];
             let start = idx as u64 * slice_size;
             let end_inclusive = start + slice_size - 1;
             let fetched = self
-                .read_decoded_range_within_part(part, start, end_inclusive, Priority::Low)
+                .read_decoded_range_within_part(part, start, end_inclusive, &client)
                 .await?;
             // PAR2 checksums the slice zero-padded to `slice_size`; a file's
             // final block is normally shorter than that on disk.
@@ -917,8 +913,9 @@ impl UsenetStreamer {
         if first.bytes == 0 {
             return Ok(());
         }
+        let client = self.pool.bulk_client();
         let dec_first = self
-            .fetch_decoded_cached(&first.message_id, Priority::Low)
+            .fetch_decoded_cached(&client, &first.message_id)
             .await?
             .len() as u64;
         if dec_first == 0 {
@@ -932,7 +929,7 @@ impl UsenetStreamer {
             let measured = if last.bytes == 0 {
                 dec_first
             } else {
-                self.fetch_decoded_cached(&last.message_id, Priority::Low)
+                self.fetch_decoded_cached(&client, &last.message_id)
                     .await?
                     .len() as u64
             };

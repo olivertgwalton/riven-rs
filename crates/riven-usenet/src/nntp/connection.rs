@@ -21,12 +21,6 @@ async fn resolve_cached(host: &str, port: u16) -> Result<Vec<SocketAddr>, NntpEr
         .collect())
 }
 
-/// Populate the DNS cache for a host before a burst of concurrent dials, so a
-/// cold cache doesn't let every prewarm dial hit the resolver at once.
-pub(crate) async fn warm_dns(host: &str, _port: u16) {
-    riven_core::dns::warm(host).await;
-}
-
 /// Drop a host's cached address so the next dial re-resolves — used when a
 /// cached address fails to connect (e.g. the provider rotated IPs).
 fn invalidate_dns(host: &str, _port: u16) {

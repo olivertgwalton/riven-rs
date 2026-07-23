@@ -527,44 +527,6 @@ fn slice_request_bytes(full: &Bytes, start: u64, end: u64, base_start: u64) -> O
     Some(full.slice(offset..offset + slice_len))
 }
 
-/// Decide whether `UsenetSession::read` should spawn a prefetch task for
-/// this call, and the `[from, want_through)` window to cover if so.
-///
-/// Kernel FUSE reads on the usenet mount arrive in much smaller chunks
-/// (observed ~128 KiB) than the mount's 1 MiB `max_read` ceiling. Since
-/// `want_through` tracks `start` almost 1:1, spawning a prefetch task on
-/// every call that merely clears the frontier meant one tokio task (+ meta
-/// lookup + pool acquire) per ~128 KiB of forward progress — hundreds of
-/// tasks all contending for the same connection pool to each fetch a sliver
-/// smaller than one NNTP segment. Only spawn once there's a real batch of
-/// new ground to cover; small increments accumulate against the
-/// still-unmoved frontier until a later call's `want_through` clears the
-/// threshold (or until EOF, which must always be covered even if the final
-/// remainder is small).
-///
-/// The coalescing threshold is capped to `lead`: otherwise a configured
-/// lead smaller than `MIN_PREFETCH_SPAWN_BYTES` could never accumulate
-/// enough span to cross a fixed 4 MiB threshold (the very first spawn's
-/// span is exactly `lead`, so `frontier` never gets its initial bump and
-/// `from` keeps re-anchoring to `start` on every call), silently disabling
-/// prefetch entirely instead of just batching it more finely.
-fn prefetch_decision(start: u64, lead: u64, file_size: u64, frontier: u64) -> Option<(u64, u64)> {
-    const MIN_PREFETCH_SPAWN_BYTES: u64 = 4 * 1024 * 1024;
-    let min_spawn_bytes = MIN_PREFETCH_SPAWN_BYTES.min(lead);
-    let want_through = (start + lead).min(file_size - 1);
-    if want_through <= frontier {
-        return None;
-    }
-    let from = frontier.max(start);
-    let span = want_through - from;
-    let near_eof = want_through >= file_size - 1;
-    if span >= min_spawn_bytes || near_eof {
-        Some((from, want_through))
-    } else {
-        None
-    }
-}
-
 /// In-process streaming session for usenet-backed files.
 ///
 /// Each FUSE read is served directly by the streamer's `read_range`
@@ -575,25 +537,20 @@ fn prefetch_decision(start: u64, lead: u64, file_size: u64, frontier: u64) -> Op
 /// 4 MB `max_read`), but order no longer matters: an out-of-order or backward
 /// read just hits the cache instead of forcing a stream reopen.
 ///
-/// The read-ahead *lead* that keeps a slow segment from stalling playback is
-/// built by a separate fire-and-forget `prefetch`: each read warms a
-/// `PREFETCH_LEAD`-byte window ahead of `start`, advancing a monotonic
-/// `prefetch_frontier` so the warm work runs ahead of the read position
-/// independent of the per-handle read serialization, and never re-warms or
-/// runs backward.
+/// A single producer maintains an ordered window of NZB segments ahead of the
+/// latest read offset. Kernel-sized reads only update a watch value; they do
+/// not create detached tasks or assign request priorities. The source owns
+/// provider scheduling and skips segments already cached or in flight.
 pub struct UsenetSession {
     source: Arc<dyn LocalByteSource>,
     info_hash: Arc<str>,
     file_index: usize,
     file_size: u64,
-    /// Highest offset the look-ahead prefetch has already been scheduled up
-    /// to. Monotonic: forward reads extend it, backward reads leave it alone.
-    prefetch_frontier: u64,
     /// One bounded producer per open file, rather than a new detached task
     /// for every read that advances the frontier. The producer only warms
     /// Riven's decoded-segment cache; it never changes the bytes returned to
     /// the FUSE caller.
-    prefetch_target_tx: Option<tokio::sync::watch::Sender<Option<(u64, u64)>>>,
+    prefetch_target_tx: Option<tokio::sync::watch::Sender<Option<u64>>>,
     prefetch_task: Option<tokio::task::JoinHandle<()>>,
     /// Active-streams registry key (`"{info_hash}:{file_index}"`). Registered
     /// on first read, touched periodically, unregistered on drop — restoring
@@ -618,7 +575,6 @@ impl UsenetSession {
             info_hash,
             file_index,
             file_size,
-            prefetch_frontier: 0,
             prefetch_target_tx: None,
             prefetch_task: None,
             stream_key,
@@ -640,32 +596,25 @@ impl UsenetSession {
         // A watch channel retains only the latest requested watermark. If
         // NNTP is slower than the consumer, obsolete intermediate windows
         // are discarded instead of building an unbounded work queue.
-        let (tx, mut targets) = tokio::sync::watch::channel(None::<(u64, u64)>);
+        let (tx, mut targets) = tokio::sync::watch::channel(None::<u64>);
         let source = Arc::clone(&self.source);
         let info_hash = Arc::clone(&self.info_hash);
         let file_index = self.file_index;
-        let file_size = self.file_size;
 
         self.prefetch_task = Some(runtime.spawn(async move {
-            let mut warmed_through: Option<u64> = None;
             while targets.changed().await.is_ok() {
-                // Coalesce advances received while a previous cache window
-                // was being filled. This keeps exactly one producer per file
-                // and bounds NNTP work to the latest read-ahead watermark.
-                let Some((requested_from, mut target)) = *targets.borrow_and_update() else {
+                let Some(start) = *targets.borrow_and_update() else {
                     continue;
                 };
-                target = target.min(file_size.saturating_sub(1));
-                // A newly opened FUSE handle may begin at a resume offset.
-                // Its first cache window must start there, never at byte 0:
-                // otherwise seeking into a film turns read-ahead into a
-                // full prefix download that competes with playback.
-                let from = warmed_through.map_or(requested_from, |end| end.saturating_add(1));
-                if from > target {
-                    continue;
-                }
-                source.prefetch(&info_hash, file_index, from, target).await;
-                warmed_through = Some(target);
+                const DEFAULT_SEGMENT_WINDOW: usize = 60;
+                let segment_window = std::env::var("RIVEN_USENET_PLAYBACK_SEGMENT_WINDOW")
+                    .ok()
+                    .and_then(|value| value.parse::<usize>().ok())
+                    .filter(|value| *value > 0)
+                    .unwrap_or(DEFAULT_SEGMENT_WINDOW);
+                source
+                    .prefetch(&info_hash, file_index, start, segment_window)
+                    .await;
             }
         }));
         self.prefetch_target_tx = Some(tx);
@@ -701,33 +650,12 @@ impl UsenetSession {
             start,
             end,
             len = end - start + 1,
-            prefetch_frontier = self.prefetch_frontier,
             "usenet read() call"
         );
 
-        const DEFAULT_PREFETCH_LEAD: u64 = 46 * 1024 * 1024;
-        let lead = std::env::var("RIVEN_USENET_STREAM_READAHEAD_BYTES")
-            .ok()
-            .and_then(|s| s.parse::<u64>().ok())
-            .filter(|&n| n > 0)
-            .unwrap_or(DEFAULT_PREFETCH_LEAD);
-        if let Some((from, want_through)) =
-            prefetch_decision(start, lead, self.file_size, self.prefetch_frontier)
-        {
-            self.prefetch_frontier = want_through;
-            tracing::debug!(
-                target: "streaming",
-                info_hash = %self.info_hash,
-                file_index = self.file_index,
-                from,
-                want_through,
-                span = want_through - from,
-                "usenet prefetch spawned"
-            );
-            self.ensure_prefetch_worker(runtime);
-            if let Some(tx) = &self.prefetch_target_tx {
-                tx.send_replace(Some((from, want_through)));
-            }
+        self.ensure_prefetch_worker(runtime);
+        if let Some(tx) = &self.prefetch_target_tx {
+            tx.send_replace(Some(start));
         }
 
         match runtime.block_on(
@@ -817,7 +745,7 @@ mod tests {
     /// Records every `prefetch`/`read_range` call instead of doing real I/O,
     /// so tests can assert on call counts and ranges without a network.
     struct MockSource {
-        prefetch_calls: Mutex<Vec<(u64, u64)>>,
+        prefetch_calls: Mutex<Vec<(u64, usize)>>,
         read_range_calls: Mutex<u32>,
     }
 
@@ -849,12 +777,13 @@ mod tests {
             _info_hash: &str,
             _file_index: usize,
             start: u64,
-            end_inclusive: u64,
+            segments_ahead: usize,
         ) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
             self.prefetch_calls
                 .lock()
                 .unwrap()
-                .push((start, end_inclusive));
+                .push((start, segments_ahead));
         }
 
         fn stream_register(&self, _key: &str, _info_hash: &str, _filename: &str, _file_size: u64) {}
@@ -862,13 +791,8 @@ mod tests {
         fn stream_unregister(&self, _key: &str) {}
     }
 
-    /// Regression test for the prefetch-spawn-storm bug: real kernel FUSE
-    /// reads on the usenet mount arrive in ~128 KiB increments (far smaller
-    /// than the 1 MiB `max_read` ceiling), and the pre-fix code spawned a
-    /// prefetch task on almost every one of them — hundreds of tiny tasks
-    /// all contending for the same NNTP connection pool per 100MB read.
-    /// This drives many small sequential reads and asserts prefetch spawns
-    /// stay coalesced into large batches instead of firing on every read.
+    /// Kernel-sized reads update one producer's latest offset rather than
+    /// spawning one prefetch task per read.
     #[test]
     fn small_sequential_reads_coalesce_prefetch_spawns() {
         const FILE_SIZE: u64 = 200 * 1024 * 1024;
@@ -900,46 +824,27 @@ mod tests {
 
         assert_eq!(*mock.read_range_calls.lock().unwrap(), NUM_READS as u32);
 
-        // Sort by `from` before checking count/contiguity: prefetch spawns
-        // are independent fire-and-forget tokio tasks, so the order they
-        // land in `prefetch_calls` reflects task-completion order, not the
-        // chronological order they were spawned in — asserting on raw
-        // insertion order would be flaky under real scheduling.
-        let mut prefetch_calls = mock.prefetch_calls.lock().unwrap().clone();
-        prefetch_calls.sort_unstable();
+        let prefetch_calls = mock.prefetch_calls.lock().unwrap().clone();
 
         // A zero-spawn regression (e.g. the coalescing threshold silently
         // disabling prefetch entirely) must fail this test, not slip through
         // an upper-bound-only check.
         assert!(
             !prefetch_calls.is_empty(),
-            "expected at least one prefetch spawn for {NUM_READS} forward reads, got none"
+            "expected the playback window producer to run"
         );
-        // 40 MiB of forward progress in 4 MiB coalescing increments (plus the
-        // initial big jump to `start + lead`) is a small, bounded number of
-        // spawns — nowhere near one per 128 KiB read (which would be 320).
         assert!(
             prefetch_calls.len() < 20,
-            "expected prefetch spawns to be coalesced into a handful of batches, got {} for {NUM_READS} reads",
+            "expected one coalescing producer, got {} windows for {NUM_READS} reads",
             prefetch_calls.len()
         );
-
-        // Coverage must be contiguous and monotonic: each inclusive spawned
-        // window should begin immediately after the previous one (or at the
-        // read position, for the first spawn), with no gaps or duplicate
-        // boundary fetches.
-        let mut prev_end: Option<u64> = None;
-        for &(from, want_through) in prefetch_calls.iter() {
-            assert!(want_through > from, "spawned window must be non-empty");
-            if let Some(prev) = prev_end {
-                assert_eq!(
-                    from,
-                    prev + 1,
-                    "prefetch windows must be contiguous, no gaps/overlap"
-                );
-            }
-            prev_end = Some(want_through);
+        for &(_, segments) in &prefetch_calls {
+            assert_eq!(segments, 60);
         }
+        assert!(
+            prefetch_calls.last().unwrap().0 >= (NUM_READS - 2) * READ_SIZE,
+            "the coalesced producer must converge on the latest read offset"
+        );
     }
 
     #[test]
@@ -977,93 +882,8 @@ mod tests {
         assert_eq!(calls.len(), 1, "expected exactly one initial cache window");
         assert_eq!(
             calls[0].0, RESUME_AT,
-            "a resumed stream must not warm the whole file prefix"
+            "a resumed stream must start its segment window at the resume offset"
         );
-    }
-
-    /// Regression tests for the `prefetch_decision` coalescing logic in
-    /// isolation — pure function, no async/mocking needed.
-    mod prefetch_decision_tests {
-        use super::super::prefetch_decision;
-
-        const FILE_SIZE: u64 = 200 * 1024 * 1024;
-
-        #[test]
-        fn large_lead_spawns_immediately_and_advances_frontier() {
-            let decision = prefetch_decision(0, 46 * 1024 * 1024, FILE_SIZE, 0);
-            assert_eq!(decision, Some((0, 46 * 1024 * 1024)));
-        }
-
-        #[test]
-        fn small_increment_below_threshold_does_not_spawn() {
-            // Frontier already established well ahead of `start`; a small
-            // forward step shouldn't cross the 4 MiB coalescing threshold.
-            let frontier = 46 * 1024 * 1024;
-            let decision = prefetch_decision(128 * 1024, 46 * 1024 * 1024, FILE_SIZE, frontier);
-            assert_eq!(decision, None);
-        }
-
-        /// Regression test: a configured lead smaller than the 4 MiB
-        /// coalescing threshold must still spawn prefetch — not be silently
-        /// disabled by a fixed threshold the lead itself can never cross.
-        #[test]
-        fn lead_smaller_than_threshold_still_spawns_on_first_read() {
-            const SMALL_LEAD: u64 = 1024 * 1024; // 1 MiB, below MIN_PREFETCH_SPAWN_BYTES
-            let decision = prefetch_decision(0, SMALL_LEAD, FILE_SIZE, 0);
-            assert_eq!(
-                decision,
-                Some((0, SMALL_LEAD)),
-                "a lead below the coalescing threshold must still trigger prefetch"
-            );
-        }
-
-        /// Once the small-lead frontier is established, subsequent small
-        /// forward reads must keep accumulating span against it (not
-        /// re-anchor `from` to `start` and get stuck never spawning again).
-        #[test]
-        fn lead_smaller_than_threshold_keeps_accumulating_after_first_spawn() {
-            const SMALL_LEAD: u64 = 1024 * 1024;
-            let mut frontier = 0u64;
-            let first = prefetch_decision(0, SMALL_LEAD, FILE_SIZE, frontier);
-            frontier = first.expect("first read must spawn").1;
-
-            // Advance in tiny steps; span accumulates against `frontier`
-            // (fixed) rather than resetting to `lead` on every call.
-            let initial_frontier = frontier;
-            let mut second_spawn: Option<(u64, u64)> = None;
-            let mut start = 0u64;
-            for _ in 0..64 {
-                start += 128 * 1024;
-                if let Some(decision) = prefetch_decision(start, SMALL_LEAD, FILE_SIZE, frontier) {
-                    second_spawn = Some(decision);
-                    break;
-                }
-            }
-            let (from, want_through) =
-                second_spawn.expect("prefetch must eventually spawn again as reads advance");
-            assert_eq!(
-                from, initial_frontier,
-                "the next spawn's window must pick up exactly where the first left off"
-            );
-            assert!(want_through > initial_frontier, "frontier must advance");
-        }
-
-        #[test]
-        fn near_eof_spawns_regardless_of_span() {
-            // frontier sits 1 MiB before `start`, well short of the 4 MiB
-            // threshold, but a large lead pins `want_through` at file_size-1
-            // (clamped) — this isolates near_eof as the only reason to spawn.
-            let frontier = FILE_SIZE - 2 * 1024 * 1024;
-            let start = FILE_SIZE - 1024 * 1024;
-            let decision = prefetch_decision(start, 46 * 1024 * 1024, FILE_SIZE, frontier);
-            let (_, want_through) = decision.expect("must always cover the tail up to EOF");
-            assert_eq!(want_through, FILE_SIZE - 1);
-        }
-
-        #[test]
-        fn frontier_already_covering_want_through_does_not_spawn() {
-            let decision = prefetch_decision(0, 46 * 1024 * 1024, FILE_SIZE, 46 * 1024 * 1024);
-            assert_eq!(decision, None);
-        }
+        assert_eq!(calls[0].1, 60);
     }
 }

@@ -44,10 +44,6 @@ pub(crate) const PREFETCH_FLOOR: usize = 4;
 pub struct UsenetStreamer {
     pub(crate) pool: Arc<NntpPool>,
     pub(crate) state: Arc<StreamerState>,
-    /// Bounds concurrent NZB ingests. Sized from the NNTP connection budget
-    /// (`pool.total_capacity()`) so large accounts drain a scrape backlog fast
-    /// while small ones stay conservative — see `ingest_concurrency_for`.
-    pub(crate) ingest_sem: Arc<tokio::sync::Semaphore>,
     pub(crate) db: DatabaseConnection,
 }
 
@@ -55,19 +51,9 @@ impl UsenetStreamer {
     pub fn new(cfg: NntpConfig, db: DatabaseConnection) -> Self {
         crate::nntp::init_crypto();
         let pool = NntpPool::new_multi(cfg.providers);
-        let ingest_sem = Arc::new(tokio::sync::Semaphore::new(
-            crate::state::ingest_concurrency_for(pool.total_capacity()),
-        ));
-        {
-            let pool = pool.clone();
-            tokio::spawn(async move {
-                pool.prewarm().await;
-            });
-        }
         Self {
             pool,
             state: StreamerState::global(),
-            ingest_sem,
             db,
         }
     }
@@ -188,8 +174,8 @@ impl UsenetStreamer {
     /// STAT-sample a file's segments across providers to gauge availability,
     /// returning counts (not a verdict). Mirrors the ingest probe's sampling
     /// but reports missing/error counts so the health view can show *how*
-    /// degraded a title is. Uses `Priority::Low` so it never competes with
-    /// live playback.
+    /// degraded a title is. Uses a workload-bound bulk client so it yields to
+    /// live playback without assigning priority per article.
     pub async fn scan_availability(
         &self,
         info_hash: &str,
@@ -227,8 +213,14 @@ impl UsenetStreamer {
             return Ok(AvailabilityScan::default());
         }
 
-        let concurrency = self.pool.ingest_concurrency().max(PREFETCH_FLOOR).min(n);
-        let counts = stat_sweep(&self.pool, sample, concurrency, false).await;
+        let concurrency = self
+            .pool
+            .bulk_client()
+            .capacity()
+            .max(PREFETCH_FLOOR)
+            .min(n);
+        let client = self.pool.bulk_client();
+        let counts = stat_sweep(&client, sample, concurrency, false).await;
 
         Ok(AvailabilityScan {
             total_segments: total,
@@ -277,14 +269,15 @@ impl UsenetStreamer {
 
         let concurrency = self
             .pool
-            .ingest_concurrency()
+            .bulk_client()
+            .capacity()
             .max(PREFETCH_FLOOR)
             .min(total);
         let SweepCounts {
             missing,
             errors,
             checked,
-        } = stat_sweep(&self.pool, message_ids, concurrency, false).await;
+        } = stat_sweep(&self.pool.bulk_client(), message_ids, concurrency, false).await;
 
         let checked_f = checked.max(1) as f64;
         if (missing as f64 / checked_f) * 100.0 > acceptable_missing_pct {
@@ -440,8 +433,14 @@ impl riven_core::local_source::LocalByteSource for UsenetStreamer {
         Ok(UsenetStreamer::read_range(self, info_hash, file_index, start, end_inclusive).await?)
     }
 
-    async fn prefetch(&self, info_hash: &str, file_index: usize, start: u64, end_inclusive: u64) {
-        self.prefetch_range(info_hash, file_index, start, end_inclusive)
+    async fn prefetch(
+        &self,
+        info_hash: &str,
+        file_index: usize,
+        start: u64,
+        segments_ahead: usize,
+    ) {
+        self.prefetch_window(info_hash, file_index, start, segments_ahead)
             .await;
     }
 
@@ -460,6 +459,7 @@ impl riven_core::local_source::LocalByteSource for UsenetStreamer {
                 client: "vfs".to_string(),
             },
         );
+        self.pool.stream_started();
     }
 
     fn stream_touch(&self, key: &str) {
@@ -471,5 +471,6 @@ impl riven_core::local_source::LocalByteSource for UsenetStreamer {
 
     fn stream_unregister(&self, key: &str) {
         active_streams().unregister(key);
+        self.pool.stream_ended();
     }
 }

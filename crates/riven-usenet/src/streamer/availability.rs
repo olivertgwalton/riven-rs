@@ -14,7 +14,7 @@ use std::time::Duration;
 use futures::StreamExt;
 use futures::stream;
 
-use crate::nntp::{NntpPool, Priority};
+use crate::nntp::NntpClient;
 
 /// Per-wave STAT budget: mirrors altmount's `pool.StatManyTimeout`
 /// (`javi11/altmount/internal/pool/stat_timeout.go`) — a sweep's deadline
@@ -62,7 +62,7 @@ pub(crate) struct SweepCounts {
 /// a proper error on the next stage's own network calls rather than being
 /// misreported as "release confirmed missing."
 pub(crate) async fn stat_sweep(
-    pool: &NntpPool,
+    client: &NntpClient,
     mids: Vec<String>,
     concurrency: usize,
     stop_on_first_miss: bool,
@@ -80,7 +80,7 @@ pub(crate) async fn stat_sweep(
 
     let sweep = async {
         let mut probes = stream::iter(mids)
-            .map(|mid| async move { pool.stat(&mid, Priority::Low).await })
+            .map(|mid| async move { client.stat(&mid).await })
             .buffer_unordered(concurrency);
 
         while let Some(result) = probes.next().await {
@@ -121,6 +121,7 @@ pub(crate) async fn stat_sweep(
 
 #[cfg(test)]
 mod tests {
+    use crate::nntp::NntpPool;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::TcpListener;
 
@@ -221,7 +222,8 @@ mod tests {
         let pool = NntpPool::new_multi(vec![test_provider(addr, 8)]);
 
         let mids: Vec<String> = (0..10).map(|i| format!("seg-{i}")).collect();
-        let counts = stat_sweep(&pool, mids, 3, true).await;
+        let client = pool.bulk_client();
+        let counts = stat_sweep(&client, mids, 3, true).await;
 
         assert_eq!(counts.missing, 1);
         assert!(
@@ -244,7 +246,8 @@ mod tests {
         let pool = NntpPool::new_multi(vec![test_provider(addr, 8)]);
 
         let mids: Vec<String> = (0..10).map(|i| format!("seg-{i}")).collect();
-        let counts = stat_sweep(&pool, mids, 4, false).await;
+        let client = pool.bulk_client();
+        let counts = stat_sweep(&client, mids, 4, false).await;
 
         assert_eq!(counts.checked, 10);
         assert_eq!(counts.missing, 3);

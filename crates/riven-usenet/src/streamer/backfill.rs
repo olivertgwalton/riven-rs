@@ -10,8 +10,6 @@ use futures::stream;
 
 use super::meta::{NzbMeta, NzbMetaSource};
 use super::store;
-use crate::nntp::Priority;
-
 use super::{StreamerError, UsenetStreamer};
 
 const BACKFILL_CONCURRENCY: usize = 8;
@@ -60,12 +58,14 @@ impl UsenetStreamer {
         let total = to_probe.len();
 
         let streamer = self.clone();
+        let client = self.pool.bulk_client();
         let mut probes = stream::iter(to_probe)
             .map(move |(fi, pi, mid)| {
                 let s = streamer.clone();
+                let client = client.clone();
                 async move {
                     let r = s
-                        .fetch_decoded_cached(&mid, Priority::Low)
+                        .fetch_decoded_cached(&client, &mid)
                         .await
                         .map(|b| b.len() as u64);
                     (fi, pi, r)

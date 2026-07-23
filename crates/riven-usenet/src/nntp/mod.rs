@@ -15,12 +15,11 @@ use tokio_rustls::TlsConnector;
 use tokio_rustls::rustls::ClientConfig;
 
 mod connection;
+mod connection_slots;
 mod pool;
-mod priority_semaphore;
 
 pub use connection::NntpConnection;
-pub use pool::{NntpPool, ProviderHealth, ProviderTraffic};
-pub use priority_semaphore::Priority;
+pub use pool::{NntpClient, NntpPool, ProviderHealth, ProviderTraffic};
 
 #[derive(Clone)]
 pub struct NntpServerConfig {
