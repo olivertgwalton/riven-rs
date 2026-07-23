@@ -1,6 +1,6 @@
 services:
     riven-frontend:
-        image: docker.io/library/riven-frontend
+        image: docker.io/spoked/riven-frontend:graphql
         container_name: riven-frontend
         restart: unless-stopped
         env_file: .env
@@ -68,7 +68,7 @@ services:
 #                  propagation: slave
 
     riven:
-        build: .
+        image: ghcr.io/olivertgwalton/riven-rs:latest
         env_file: .env
         depends_on:
             postgres:
