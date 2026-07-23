@@ -174,6 +174,7 @@ pub async fn persist_season(
         let example = ordered.first().map_or("", |(f, _)| f.filename.as_str());
         tracing::debug!(
             id, season = season_number, info_hash = %info_hash,
+            title = %item.title,
             file_count = parsed_video_files.len(),
             episode_count = episodes.len(),
             example_filename = %example,
@@ -223,9 +224,10 @@ pub async fn persist_season(
     if completed_episode_ids.is_empty() {
         tracing::warn!(
             id, season = season_number, info_hash = %info_hash,
+            title = %item.title,
             "season pack matched episodes but no entries were persisted — blacklisting stream"
         );
-        blacklist_stream(id, info_hash).await;
+        blacklist_stream(id, info_hash, &item.title).await;
         return SeasonPersistOutcome::Failed;
     }
 
@@ -394,9 +396,10 @@ pub async fn persist_show(
     if completed_episode_ids.is_empty() {
         tracing::warn!(
             id, info_hash = %info_hash,
+            title = %item.title,
             "show pack matched no episodes — blacklisting stream"
         );
-        blacklist_stream(id, info_hash).await;
+        blacklist_stream(id, info_hash, &item.title).await;
         queue
             .notify(RivenEvent::MediaItemDownloadPartialSuccess { id })
             .await;

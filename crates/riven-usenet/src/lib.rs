@@ -28,8 +28,8 @@ pub(crate) mod rar;
 pub(crate) mod yenc;
 
 pub use nntp::{DEFAULT_DOWNLOAD_WORKERS, NntpConfig};
-pub use nzb::{NzbDocument, NzbFile, NzbSegment, parse_nzb, parse_nzb_document};
+pub use nzb::{NzbDocument, NzbFile, NzbSegment, parse_nzb, parse_nzb_document, peek_release_title};
 pub use streamer::{
     DEFAULT_AVAILABILITY_SAMPLE_PERCENT, NzbMeta, NzbMetaFile, NzbMetaSource, StreamerError,
-    UsenetStreamer, active_streams,
+    UNKNOWN_FILE_LABEL, UsenetStreamer, active_streams,
 };

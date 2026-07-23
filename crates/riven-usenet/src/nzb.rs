@@ -88,6 +88,76 @@ pub fn parse_nzb(xml: &str) -> Result<Vec<NzbFile>, NzbError> {
     parse_nzb_document(xml).map(|d| d.files)
 }
 
+/// Release title without parsing the whole document — for log lines only.
+///
+/// [`parse_nzb_document`] materializes every segment of every file, which for
+/// a season pack is tens of megabytes of allocation; naming a release in a
+/// warning must never cost that. This reads the head `<meta>` entries and
+/// stops at the first `<file>` subject, which is all [`NzbDocument::release_title`]
+/// would have used anyway.
+pub fn peek_release_title(xml: &str) -> Option<String> {
+    let mut reader = Reader::from_str(xml);
+    reader.config_mut().trim_text(true);
+
+    let mut meta: HashMap<String, String> = HashMap::new();
+    let mut cur_meta_type: Option<String> = None;
+
+    loop {
+        match reader.read_event() {
+            Err(_) | Ok(Event::Eof) => break,
+            Ok(Event::Start(e)) => match e.name().as_ref() {
+                b"meta" => {
+                    cur_meta_type = e
+                        .attributes()
+                        .flatten()
+                        .find(|attr| attr.key.as_ref() == b"type")
+                        .and_then(|attr| {
+                            attr.normalized_value(quick_xml::XmlVersion::Implicit1_0).ok()
+                        })
+                        .map(|v| v.to_ascii_lowercase());
+                }
+                b"file" => {
+                    // Head metadata is complete by the first file element.
+                    let subject = e
+                        .attributes()
+                        .flatten()
+                        .find(|attr| attr.key.as_ref() == b"subject")
+                        .and_then(|attr| {
+                            attr.normalized_value(quick_xml::XmlVersion::Implicit1_0).ok()
+                        })
+                        .map(std::borrow::Cow::into_owned)
+                        .unwrap_or_default();
+                    return title_from_meta(&meta).or_else(|| {
+                        let raw = filename_from_subject(&subject);
+                        let stem = match raw.rfind('.') {
+                            Some(i) if i > 0 => raw[..i].to_string(),
+                            _ => raw,
+                        };
+                        (!stem.is_empty()).then_some(stem)
+                    });
+                }
+                _ => {}
+            },
+            Ok(Event::Text(t)) => {
+                if let Some(key) = cur_meta_type.take()
+                    && let Ok(v) = t.decode()
+                {
+                    meta.insert(key, v.into_owned());
+                }
+            }
+            Ok(_) => {}
+        }
+    }
+    title_from_meta(&meta)
+}
+
+fn title_from_meta(meta: &HashMap<String, String>) -> Option<String> {
+    meta.get("name")
+        .or_else(|| meta.get("title"))
+        .filter(|s| !s.is_empty())
+        .cloned()
+}
+
 /// Full NZB parse: head `<meta>` entries plus per-file segments. Tolerant in
 /// the same way as [`parse_nzb`]; head metadata is best-effort and missing
 /// entries don't fail the parse.

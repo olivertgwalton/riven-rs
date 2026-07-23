@@ -469,6 +469,10 @@ impl PermanentFails {
 pub struct DeadSegmentEvent {
     pub info_hash: String,
     pub file_index: usize,
+    /// Name of the file that hit the dead segment. Carried on the event
+    /// because the consumer (the repair loop in riven-app) has no meta of its
+    /// own, and a bare info_hash tells nobody which title just died.
+    pub filename: String,
     pub detail: String,
 }
 
@@ -490,7 +494,7 @@ fn dead_segment_channel() -> &'static DeadSegmentChannel {
     })
 }
 
-pub fn report_dead_segment(info_hash: &str, file_index: usize, detail: &str) {
+pub fn report_dead_segment(info_hash: &str, file_index: usize, filename: &str, detail: &str) {
     let ch = dead_segment_channel();
     let key = format!("{info_hash}:{file_index}");
     if !ch.claimed.lock().insert(key) {
@@ -499,6 +503,7 @@ pub fn report_dead_segment(info_hash: &str, file_index: usize, detail: &str) {
     drop(ch.tx.send(DeadSegmentEvent {
         info_hash: info_hash.to_string(),
         file_index,
+        filename: filename.to_string(),
         detail: detail.to_string(),
     }));
 }

@@ -28,9 +28,10 @@ impl UsenetStreamer {
         }
         let streamer = self.clone();
         let info_hash = meta.info_hash.clone();
+        let release = meta.label().to_string();
         tokio::spawn(async move {
             if let Err(e) = streamer.backfill_decoded_seg_sizes(&info_hash).await {
-                tracing::warn!(info_hash, error = %e, "decoded_seg_size backfill failed");
+                tracing::warn!(info_hash, release, error = %e, "decoded_seg_size backfill failed");
             }
         });
     }
@@ -40,14 +41,17 @@ impl UsenetStreamer {
         let mut meta = (*arc).clone();
         let started = std::time::Instant::now();
 
-        let mut to_probe: Vec<(usize, usize, String)> = Vec::new();
+        // The probe carries the volume's own filename: each probe is a real
+        // article fetch, and its failure logs deep in the fetch path have no
+        // other way to say which volume of which release went bad.
+        let mut to_probe: Vec<(usize, usize, String, String)> = Vec::new();
         for (fi, f) in meta.files.iter().enumerate() {
             if let NzbMetaSource::Rar { parts, .. } = &f.source {
                 for (pi, p) in parts.iter().enumerate() {
                     if p.decoded_seg_size.is_none()
                         && let Some(seg) = p.segments.first()
                     {
-                        to_probe.push((fi, pi, seg.message_id.clone()));
+                        to_probe.push((fi, pi, seg.message_id.clone(), p.filename.clone()));
                     }
                 }
             }
@@ -60,7 +64,7 @@ impl UsenetStreamer {
         let streamer = self.clone();
         let client = self.pool.bulk_client();
         let mut probes = stream::iter(to_probe)
-            .map(move |(fi, pi, mid)| {
+            .map(move |(fi, pi, mid, volume)| {
                 let s = streamer.clone();
                 let client = client.clone();
                 async move {
@@ -69,7 +73,7 @@ impl UsenetStreamer {
                     // can't starve live playback while it probes.
                     let _bg = s.state.background_sem.acquire().await;
                     let r = s
-                        .fetch_decoded_cached(&client, &mid)
+                        .fetch_decoded_cached(&client, &mid, &volume)
                         .await
                         .map(|b| b.len() as u64);
                     (fi, pi, r)
@@ -88,7 +92,14 @@ impl UsenetStreamer {
                 }
                 Ok(_) => {}
                 Err(e) => {
-                    tracing::debug!(info_hash, fi, pi, error = %e, "backfill probe failed");
+                    tracing::debug!(
+                        info_hash,
+                        file = %meta.file_label(fi),
+                        fi,
+                        pi,
+                        error = %e,
+                        "backfill probe failed"
+                    );
                 }
             }
         }
@@ -98,11 +109,13 @@ impl UsenetStreamer {
         }
 
         store::store(&self.db, info_hash, &meta).await?;
+        let release = meta.label().to_string();
         let arc = Arc::new(meta);
         self.state.meta_cache.put(info_hash.to_string(), arc);
 
         tracing::info!(
             info_hash,
+            release,
             filled,
             total,
             elapsed_ms = started.elapsed().as_millis(),

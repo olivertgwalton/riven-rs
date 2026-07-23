@@ -93,11 +93,11 @@ pub(crate) fn pretty_show_name(ctx: &DownloadHierarchyContext, fallback_title: &
 
 /// Blacklist the stream behind `info_hash` for this media item (best-effort;
 /// a non-empty hash is required and failures are logged, not propagated).
-async fn blacklist_stream(id: i64, info_hash: &str) {
+async fn blacklist_stream(id: i64, info_hash: &str, title: &str) {
     if !info_hash.is_empty()
         && let Err(err) = repo::blacklist_stream_by_hash(id, info_hash).await
     {
-        tracing::warn!(id, info_hash, %err, "failed to blacklist stream");
+        tracing::warn!(id, info_hash, title, %err, "failed to blacklist stream");
     }
 }
 

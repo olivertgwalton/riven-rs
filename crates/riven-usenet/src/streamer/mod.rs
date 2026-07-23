@@ -32,7 +32,7 @@ mod tests;
 
 pub use error::StreamerError;
 pub use ingest::DEFAULT_AVAILABILITY_SAMPLE_PERCENT;
-pub use meta::{NzbMeta, NzbMetaFile, NzbMetaSource, NzbRarPart, NzbRarSlice};
+pub use meta::{NzbMeta, NzbMetaFile, NzbMetaSource, NzbRarPart, NzbRarSlice, UNKNOWN_FILE_LABEL};
 
 pub(crate) use availability::{SweepCounts, stat_sweep};
 pub(crate) use meta::{concat_slices, segments_overlapping, select_validation_indices};
@@ -88,6 +88,22 @@ impl UsenetStreamer {
 
     pub fn pool(&self) -> Arc<NntpPool> {
         self.pool.clone()
+    }
+
+    /// Filename for a log field, from the in-memory meta cache only. Never
+    /// touches Postgres and never waits on an in-flight load: naming a file in
+    /// a log line must not add a database round-trip (or a single-flight wait)
+    /// to a path that is otherwise cache-only — notably the read-ahead shed
+    /// path, which runs *before* the meta load precisely to stay cheap.
+    /// Returns the placeholder when the release isn't resident.
+    pub fn cached_file_label(&self, info_hash: &str, file_index: usize) -> String {
+        self.state
+            .meta_cache
+            .get(info_hash)
+            .map_or_else(
+                || meta::UNKNOWN_FILE_LABEL.to_string(),
+                |meta| meta.file_label(file_index).to_string(),
+            )
     }
 
     /// Keep one operation's fan-out small even when a provider permits many
@@ -160,7 +176,8 @@ impl UsenetStreamer {
         // from the actual decoded length).
         const MAX_AUTOHEAL_FILES_PER_LOAD: usize = 4;
         let mut healed_indices: Vec<usize> = Vec::new();
-        let mut pending_heals = 0usize;
+        let mut healed_names: Vec<String> = Vec::new();
+        let mut pending_names: Vec<String> = Vec::new();
         for (file_index, file) in meta.files.iter_mut().enumerate() {
             let approximate = matches!(
                 &file.source,
@@ -169,23 +186,29 @@ impl UsenetStreamer {
             if !approximate {
                 continue;
             }
+            let filename = file.filename.clone();
             if healed_indices.len() >= MAX_AUTOHEAL_FILES_PER_LOAD {
-                pending_heals += 1;
+                pending_names.push(filename);
                 continue;
             }
             match self.rescale_direct_to_decoded(file).await {
-                Ok(()) => healed_indices.push(file_index),
+                Ok(()) => {
+                    healed_indices.push(file_index);
+                    healed_names.push(filename);
+                }
                 Err(error) => tracing::warn!(
                     info_hash,
+                    file = %filename,
                     %error,
                     "usenet meta auto-heal: rescale failed; serving stored offsets"
                 ),
             }
         }
-        if pending_heals > 0 {
+        if !pending_names.is_empty() {
             tracing::info!(
                 info_hash,
-                pending_heals,
+                pending_heals = pending_names.len(),
+                files = %summarize_filenames(&pending_names),
                 "usenet meta auto-heal: deferred remaining files to a later load"
             );
         }
@@ -194,10 +217,12 @@ impl UsenetStreamer {
                 Ok(()) => tracing::info!(
                     info_hash,
                     healed = healed_indices.len(),
+                    files = %summarize_filenames(&healed_names),
                     "usenet meta auto-heal: rescaled Direct offsets to exact decoded space"
                 ),
                 Err(error) => tracing::warn!(
                     info_hash,
+                    files = %summarize_filenames(&healed_names),
                     %error,
                     "usenet meta auto-heal: persist failed; healed in memory only"
                 ),
@@ -210,10 +235,12 @@ impl UsenetStreamer {
             // any tail read past the real end then fails with EIO. Sync it now.
             for file_index in &healed_indices {
                 let file_size = meta.files[*file_index].total_size;
+                let filename = meta.files[*file_index].filename.as_str();
                 match store::sync_file_size(&self.db, info_hash, *file_index, file_size).await {
                     Ok(rows) if rows > 0 => tracing::info!(
                         info_hash,
                         file_index,
+                        file = %filename,
                         file_size,
                         rows,
                         "usenet meta auto-heal: synced filesystem_entries.file_size"
@@ -222,6 +249,7 @@ impl UsenetStreamer {
                     Err(error) => tracing::warn!(
                         info_hash,
                         file_index,
+                        file = %filename,
                         %error,
                         "usenet meta auto-heal: failed to sync filesystem_entries.file_size"
                     ),
@@ -283,7 +311,7 @@ impl UsenetStreamer {
             .prefetch_concurrency(self.pool.bulk_client().capacity())
             .min(n);
         let client = self.pool.bulk_client();
-        let counts = stat_sweep(&client, sample, concurrency, false).await;
+        let counts = stat_sweep(&client, sample, concurrency, false, &file.filename).await;
 
         Ok(AvailabilityScan {
             total_segments: total,
@@ -337,7 +365,14 @@ impl UsenetStreamer {
             missing,
             errors,
             checked,
-        } = stat_sweep(&self.pool.bulk_client(), message_ids, concurrency, false).await;
+        } = stat_sweep(
+            &self.pool.bulk_client(),
+            message_ids,
+            concurrency,
+            false,
+            meta.label(),
+        )
+        .await;
 
         let checked_f = checked.max(1) as f64;
         if (missing as f64 / checked_f) * 100.0 > acceptable_missing_pct {
@@ -399,6 +434,21 @@ impl AvailabilityScan {
             "healthy"
         }
     }
+}
+
+/// Render a file list for a log line: a season pack can defer dozens of files,
+/// so name the first few and count the rest rather than emitting a multi-KB
+/// log field.
+fn summarize_filenames(names: &[String]) -> String {
+    const MAX_NAMED: usize = 5;
+    if names.len() <= MAX_NAMED {
+        return names.join(", ");
+    }
+    format!(
+        "{}, +{} more",
+        names[..MAX_NAMED].join(", "),
+        names.len() - MAX_NAMED
+    )
 }
 
 /// Heuristic (no I/O): does a `Direct` offset table look like a pre-exact-offset

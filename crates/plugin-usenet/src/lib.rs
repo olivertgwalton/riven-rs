@@ -42,16 +42,22 @@ pub(crate) use riven_core::nzb::{is_nzb_info_hash, nzb_url_redis_key};
 /// A candidate that fails ingest/verification at download time is permanently
 /// blacklisted immediately — it's a dead release, and retrying it every
 /// download cycle (with no way to ever stop) is what starves the queue.
-async fn blacklist_failed_download_candidate(media_item_id: i64, info_hash: &str) {
+async fn blacklist_failed_download_candidate(media_item_id: i64, info_hash: &str, release: &str) {
     tracing::warn!(
         info_hash,
+        release,
         media_item_id,
         "usenet download verification failed; blacklisting release"
     );
     if let Err(error) =
         riven_db::repo::blacklist_stream_permanent_by_hash(media_item_id, info_hash).await
     {
-        tracing::warn!(info_hash, %error, "failed to blacklist failed release");
+        tracing::warn!(
+            info_hash,
+            release,
+            %error,
+            "failed to blacklist failed release"
+        );
     }
 }
 
@@ -61,14 +67,20 @@ async fn blacklist_failed_download_candidate(media_item_id: i64, info_hash: &str
 /// capacity, not a bad release. Skip it for the rest of this download
 /// attempt via the non-permanent blacklist (cleared on the next scrape by
 /// `clear_blacklisted_streams`) instead of ruling it out for good.
-async fn defer_transient_download_candidate(media_item_id: i64, info_hash: &str) {
+async fn defer_transient_download_candidate(media_item_id: i64, info_hash: &str, release: &str) {
     tracing::warn!(
         info_hash,
+        release,
         media_item_id,
         "usenet ingest/verification hit a transient provider-capacity error; deferring candidate this cycle"
     );
     if let Err(error) = riven_db::repo::blacklist_stream_by_hash(media_item_id, info_hash).await {
-        tracing::warn!(info_hash, %error, "failed to defer transient-failure release");
+        tracing::warn!(
+            info_hash,
+            release,
+            %error,
+            "failed to defer transient-failure release"
+        );
     }
 }
 
@@ -348,9 +360,21 @@ impl Plugin for UsenetPlugin {
         };
 
         let Some(xml_arc) = fetch_nzb_xml(info_hash, ctx).await else {
-            tracing::warn!(info_hash, "no NZB body available; cannot ingest");
+            // No NZB body means no release name exists anywhere yet — the
+            // media item id is the only handle a reader has here.
+            tracing::warn!(
+                info_hash,
+                media_item_id = id,
+                "no NZB body available; cannot ingest"
+            );
             return Ok(HookResponse::DownloadStreamUnavailable);
         };
+        // Cheap head-only peek (never a full parse — see `peek_release_title`),
+        // so every log below this point names the release rather than only its
+        // synthetic hash. Ingest failures happen before any meta exists, so
+        // this is the only name available on those paths.
+        let release = riven_usenet::peek_release_title(&xml_arc)
+            .unwrap_or_else(|| riven_usenet::UNKNOWN_FILE_LABEL.to_string());
 
         let streamer = UsenetStreamer::shared(nntp_cfg, riven_db::orm().clone());
         let password = ctx.settings.get("archivepassword");
@@ -390,7 +414,11 @@ impl Plugin for UsenetPlugin {
         let meta = match verify {
             Ok(m) => m,
             Err(riven_usenet::StreamerError::IngestQueueFull) => {
-                tracing::debug!(info_hash, "ingest queue full; will retry next cycle");
+                tracing::debug!(
+                    info_hash,
+                    release,
+                    "ingest queue full; will retry next cycle"
+                );
                 return Ok(HookResponse::DownloadStreamUnavailable);
             }
             Err(riven_usenet::StreamerError::Nntp(
@@ -398,16 +426,17 @@ impl Plugin for UsenetPlugin {
             )) => {
                 tracing::warn!(
                     info_hash,
+                    release,
                     status,
                     "usenet ingest/verification failed because provider(s) are at their own \
                      connection limit"
                 );
-                defer_transient_download_candidate(id, info_hash).await;
+                defer_transient_download_candidate(id, info_hash, &release).await;
                 return Ok(HookResponse::DownloadStreamUnavailable);
             }
             Err(e) => {
-                tracing::warn!(info_hash, error = %e, "usenet ingest/verification failed");
-                blacklist_failed_download_candidate(id, info_hash).await;
+                tracing::warn!(info_hash, release, error = %e, "usenet ingest/verification failed");
+                blacklist_failed_download_candidate(id, info_hash, &release).await;
                 return Ok(HookResponse::DownloadStreamUnavailable);
             }
         };
@@ -431,6 +460,7 @@ impl Plugin for UsenetPlugin {
 
         tracing::debug!(
             info_hash,
+            release,
             file_count = files.len(),
             primary = files.first().map(|f| f.filename.as_str()),
             "usenet stream registered"

@@ -125,7 +125,9 @@ impl JobQueue {
     /// manual "Re-grab" mutation and the usenet auto-repair worker.
     pub async fn regrab_media_item(&self, media_item_id: i64) -> anyhow::Result<()> {
         use riven_core::entities::filesystem_entries;
-        let entries: Vec<(i64, Option<String>)> = filesystem_entries::Entity::find()
+        // The path comes along only so the failure log below can name the
+        // entry being re-grabbed rather than printing a bare hash.
+        let entries: Vec<(i64, Option<String>, String)> = filesystem_entries::Entity::find()
             .filter(filesystem_entries::Column::MediaItemId.eq(media_item_id))
             .filter(
                 filesystem_entries::Column::EntryType
@@ -134,21 +136,27 @@ impl JobQueue {
             .select_only()
             .column(filesystem_entries::Column::Id)
             .column(filesystem_entries::Column::UsenetInfoHash)
-            .into_tuple::<(i64, Option<String>)>()
+            .column(filesystem_entries::Column::Path)
+            .into_tuple::<(i64, Option<String>, String)>()
             .all(riven_db::orm())
             .await?;
 
-        for (_, info_hash) in &entries {
+        for (_, info_hash, path) in &entries {
             if let Some(info_hash) = info_hash
                 && let Err(error) =
                     riven_db::repo::blacklist_stream_permanent_by_hash(media_item_id, info_hash)
                         .await
             {
-                tracing::warn!(%error, info_hash, "regrab: failed to blacklist release");
+                tracing::warn!(
+                    %error,
+                    info_hash,
+                    file = %path,
+                    "regrab: failed to blacklist release"
+                );
             }
         }
 
-        for (id, _) in &entries {
+        for (id, _, _) in &entries {
             if let Err(error) = riven_db::repo::delete_filesystem_entry(*id).await {
                 tracing::warn!(%error, entry_id = *id, "regrab: failed to delete filesystem entry");
             }

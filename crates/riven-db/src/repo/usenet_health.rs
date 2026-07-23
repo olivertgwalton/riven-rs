@@ -18,6 +18,9 @@ pub struct UsenetFileToCheck {
     pub info_hash: String,
     pub file_index: i32,
     pub media_item_id: Option<i64>,
+    /// Library path of the entry, carried purely so the scanner's logs can
+    /// name the title they are talking about instead of only its info_hash.
+    pub path: String,
 }
 
 /// Distinct usenet files ordered least-recently-checked first (never-checked
@@ -29,12 +32,13 @@ pub async fn usenet_files_due_for_check(limit: i64) -> Result<Vec<UsenetFileToCh
         UsenetFileToCheck::find_by_statement(Statement::from_sql_and_values(
             DbBackend::Postgres,
             r#"
-        SELECT u.info_hash, u.file_index, u.media_item_id
+        SELECT u.info_hash, u.file_index, u.media_item_id, u.path
         FROM (
             SELECT DISTINCT ON (usenet_info_hash, usenet_file_index)
                    usenet_info_hash AS info_hash,
                    usenet_file_index AS file_index,
-                   media_item_id
+                   media_item_id,
+                   path
             FROM filesystem_entries
             WHERE usenet_info_hash IS NOT NULL
               AND usenet_file_index IS NOT NULL

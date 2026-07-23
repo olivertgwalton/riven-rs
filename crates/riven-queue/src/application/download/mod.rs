@@ -669,6 +669,7 @@ async fn run_downloads(
                 tracing::debug!(
                     id,
                     info_hash = %stream.info_hash,
+                    title = %item.title,
                     file_size = size,
                     max_size_bytes,
                     min_size_bytes,

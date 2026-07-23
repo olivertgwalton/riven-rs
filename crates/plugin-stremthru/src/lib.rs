@@ -255,10 +255,15 @@ impl Plugin for StremthruPlugin {
         &self,
         _id: i64,
         info_hash: &str,
-        _magnet: &str,
+        magnet: &str,
         cached_stores: &[riven_core::types::CachedStoreEntry],
         ctx: &PluginContext,
     ) -> anyhow::Result<HookResponse> {
+        // The magnet's own display name is the only release name this hook is
+        // handed; without it every line below identifies the release by a bare
+        // hash, which tells nobody which title failed at which store.
+        let release = magnet_display_name(magnet);
+        let release = release.as_deref().unwrap_or("<unknown>");
         let base_url = base_url(&ctx.settings);
         let stores = get_configured_stores(&ctx.settings);
         let score_map = get_store_scores(&ctx.redis, &stores).await;
@@ -330,6 +335,7 @@ impl Plugin for StremthruPlugin {
                             tracing::debug!(
                                 store,
                                 info_hash,
+                                release,
                                 "torrent not cached in store; skipping"
                             );
                         }
@@ -389,6 +395,7 @@ impl Plugin for StremthruPlugin {
                     tracing::debug!(
                         store = attempt.store,
                         info_hash,
+                        release,
                         files = torz.files.len(),
                         "torrent added"
                     );
@@ -400,6 +407,7 @@ impl Plugin for StremthruPlugin {
                     tracing::debug!(
                         store = attempt.store,
                         info_hash,
+                        release,
                         "add_torrent returned unavailable"
                     );
                 }
@@ -407,6 +415,7 @@ impl Plugin for StremthruPlugin {
                     tracing::debug!(
                         store = attempt.store,
                         info_hash,
+                        release,
                         "torrent already queued at store; treating as in progress"
                     );
                 }
@@ -415,6 +424,7 @@ impl Plugin for StremthruPlugin {
                     tracing::warn!(
                         store = attempt.store,
                         info_hash,
+                        release,
                         reason,
                         "store rejected add_torrent"
                     );
@@ -596,6 +606,45 @@ impl Plugin for StremthruPlugin {
         }
         Ok(HookResponse::UserInfo(infos))
     }
+}
+
+/// Release name from a magnet's `dn=` parameter, for log fields only. Decodes
+/// just enough (percent escapes and `+`) to be readable; a malformed escape is
+/// left as-is rather than failing, since this only ever feeds a log line.
+fn magnet_display_name(magnet: &str) -> Option<String> {
+    let raw = magnet
+        .split(['?', '&'])
+        .find_map(|part| part.strip_prefix("dn="))
+        .filter(|value| !value.is_empty())?;
+
+    let bytes = raw.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            b'%' if i + 2 < bytes.len() => {
+                match u8::from_str_radix(&raw[i + 1..i + 3], 16) {
+                    Ok(decoded) => {
+                        out.push(decoded);
+                        i += 3;
+                    }
+                    Err(_) => {
+                        out.push(bytes[i]);
+                        i += 1;
+                    }
+                }
+            }
+            b => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    Some(String::from_utf8_lossy(&out).into_owned())
 }
 
 async fn handle_newz_download(

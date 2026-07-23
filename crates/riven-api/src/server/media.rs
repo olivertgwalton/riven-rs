@@ -434,9 +434,12 @@ async fn serve_usenet_media(
 
     const CHUNK: u64 = 8 * 1024 * 1024;
     let info_hash: Arc<str> = Arc::from(info_hash.as_str());
+    // The entry path rides along with the stream state purely so a mid-stream
+    // read failure names the title instead of only its info_hash.
+    let entry_path: Arc<str> = Arc::from(entry.path.as_str());
     let body_stream = futures::stream::unfold(
-        (streamer, info_hash, file_index, start, end_inclusive),
-        move |(streamer, info_hash, file_index, pos, end)| async move {
+        (streamer, info_hash, entry_path, file_index, start, end_inclusive),
+        move |(streamer, info_hash, entry_path, file_index, pos, end)| async move {
             if pos > end {
                 return None;
             }
@@ -448,13 +451,14 @@ async fn serve_usenet_media(
                     let next = pos + bytes.len() as u64;
                     Some((
                         Ok::<bytes::Bytes, std::io::Error>(bytes),
-                        (streamer, info_hash, file_index, next, end),
+                        (streamer, info_hash, entry_path, file_index, next, end),
                     ))
                 }
                 Ok(_) => None,
                 Err(error) => {
                     tracing::warn!(
                         info_hash = %info_hash,
+                        file = %entry_path,
                         file_index,
                         pos,
                         error = %error,
@@ -462,7 +466,7 @@ async fn serve_usenet_media(
                     );
                     Some((
                         Err(std::io::Error::other("usenet read failed")),
-                        (streamer, info_hash, file_index, end + 1, end),
+                        (streamer, info_hash, entry_path, file_index, end + 1, end),
                     ))
                 }
             }

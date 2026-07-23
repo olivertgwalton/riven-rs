@@ -112,7 +112,12 @@ pub(crate) fn spawn_background_tasks(
                             ("not_ingested", 0, 0, 0, 0)
                         }
                         Err(error) => {
-                            tracing::debug!(info_hash = %file.info_hash, %error, "usenet health: scan failed");
+                            tracing::debug!(
+                                info_hash = %file.info_hash,
+                                file = %file.path,
+                                %error,
+                                "usenet health: scan failed"
+                            );
                             ("unknown", 0, 0, 0, 0)
                         }
                     };
@@ -130,7 +135,7 @@ pub(crate) fn spawn_background_tasks(
                     )
                     .await
                     {
-                        tracing::debug!(%error, "usenet health: upsert failed");
+                        tracing::debug!(%error, file = %file.path, "usenet health: upsert failed");
                     }
 
                     if !auto_repair {
@@ -144,7 +149,11 @@ pub(crate) fn spawn_background_tasks(
                             )
                             .await
                             {
-                                tracing::debug!(%error, "usenet auto-repair: clear state failed");
+                                tracing::debug!(
+                                    %error,
+                                    file = %file.path,
+                                    "usenet auto-repair: clear state failed"
+                                );
                             }
                         }
                         "unhealthy" | "not_ingested" => {
@@ -166,6 +175,7 @@ pub(crate) fn spawn_background_tasks(
                                         as i64;
                                     tracing::info!(
                                         info_hash = %file.info_hash,
+                                        file = %file.path,
                                         attempt = attempts + 1,
                                         max = repair_max_retries,
                                         status,
@@ -174,7 +184,11 @@ pub(crate) fn spawn_background_tasks(
                                     if let Err(error) =
                                         repair_queue.regrab_media_item(media_item_id).await
                                     {
-                                        tracing::warn!(%error, "usenet auto-repair: regrab failed");
+                                        tracing::warn!(
+                                            %error,
+                                            file = %file.path,
+                                            "usenet auto-repair: regrab failed"
+                                        );
                                     }
                                     if let Err(error) =
                                         riven_db::repo::record_usenet_repair_attempt(
@@ -184,12 +198,20 @@ pub(crate) fn spawn_background_tasks(
                                         )
                                         .await
                                     {
-                                        tracing::debug!(%error, "usenet auto-repair: record attempt failed");
+                                        tracing::debug!(
+                                            %error,
+                                            file = %file.path,
+                                            "usenet auto-repair: record attempt failed"
+                                        );
                                     }
                                 }
                                 Ok(None) => {}
                                 Err(error) => {
-                                    tracing::debug!(%error, "usenet auto-repair: due check failed")
+                                    tracing::debug!(
+                                        %error,
+                                        file = %file.path,
+                                        "usenet auto-repair: due check failed"
+                                    )
                                 }
                             }
                         }
@@ -238,6 +260,7 @@ pub(crate) fn spawn_background_tasks(
                 let Some(media_item_id) = media_item_id else {
                     tracing::debug!(
                         info_hash = %ev.info_hash,
+                        file = %ev.filename,
                         file_index = ev.file_index,
                         "read-time repair: no media entry for dead stream; skipping"
                     );
@@ -245,6 +268,7 @@ pub(crate) fn spawn_background_tasks(
                 };
                 tracing::warn!(
                     info_hash = %ev.info_hash,
+                    file = %ev.filename,
                     file_index = ev.file_index,
                     media_item_id,
                     detail = %ev.detail,

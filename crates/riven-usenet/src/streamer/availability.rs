@@ -66,6 +66,7 @@ pub(crate) async fn stat_sweep(
     mids: Vec<String>,
     concurrency: usize,
     stop_on_first_miss: bool,
+    file: &str,
 ) -> SweepCounts {
     let n = mids.len();
     if n == 0 {
@@ -95,7 +96,7 @@ pub(crate) async fn stat_sweep(
                     }
                 }
                 Err(error) => {
-                    tracing::debug!(error = %error, "availability probe error");
+                    tracing::debug!(error = %error, file, "availability probe error");
                     errors.fetch_add(1, Ordering::Relaxed);
                 }
             }
@@ -104,6 +105,7 @@ pub(crate) async fn stat_sweep(
 
     if tokio::time::timeout(deadline, sweep).await.is_err() {
         tracing::debug!(
+            file,
             total = n,
             concurrency,
             deadline_secs = deadline.as_secs(),
@@ -223,7 +225,7 @@ mod tests {
 
         let mids: Vec<String> = (0..10).map(|i| format!("seg-{i}")).collect();
         let client = pool.bulk_client();
-        let counts = stat_sweep(&client, mids, 3, true).await;
+        let counts = stat_sweep(&client, mids, 3, true, "test.mkv").await;
 
         assert_eq!(counts.missing, 1);
         assert!(
@@ -247,7 +249,7 @@ mod tests {
 
         let mids: Vec<String> = (0..10).map(|i| format!("seg-{i}")).collect();
         let client = pool.bulk_client();
-        let counts = stat_sweep(&client, mids, 4, false).await;
+        let counts = stat_sweep(&client, mids, 4, false, "test.mkv").await;
 
         assert_eq!(counts.checked, 10);
         assert_eq!(counts.missing, 3);
