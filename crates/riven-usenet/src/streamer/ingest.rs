@@ -151,7 +151,14 @@ impl UsenetStreamer {
             missing,
             errors,
             checked,
-        } = stat_sweep(&self.pool.bulk_client(), mids, probe_concurrency, true, file).await;
+        } = stat_sweep(
+            &self.pool.bulk_client(),
+            mids,
+            probe_concurrency,
+            true,
+            file,
+        )
+        .await;
 
         if missing > 0 {
             return Err(StreamerError::IncompleteRelease { missing, checked });

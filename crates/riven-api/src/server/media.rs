@@ -438,7 +438,14 @@ async fn serve_usenet_media(
     // read failure names the title instead of only its info_hash.
     let entry_path: Arc<str> = Arc::from(entry.path.as_str());
     let body_stream = futures::stream::unfold(
-        (streamer, info_hash, entry_path, file_index, start, end_inclusive),
+        (
+            streamer,
+            info_hash,
+            entry_path,
+            file_index,
+            start,
+            end_inclusive,
+        ),
         move |(streamer, info_hash, entry_path, file_index, pos, end)| async move {
             if pos > end {
                 return None;

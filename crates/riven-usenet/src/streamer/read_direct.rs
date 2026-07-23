@@ -149,23 +149,22 @@ impl UsenetStreamer {
                     let wire_ms = started.elapsed().as_millis();
                     let encoded_len = body.len();
                     let decode_started = std::time::Instant::now();
-                    let decoded = match tokio::task::spawn_blocking(move || yenc::decode(&body))
-                        .await
-                    {
-                        Ok(Ok((decoded, _info))) => decoded,
-                        Ok(Err(e)) => return Err(StreamerError::Yenc(e)),
-                        Err(join_err) => {
-                            tracing::warn!(
-                                message_id,
-                                file,
-                                error = %join_err,
-                                "yenc decode task panicked"
-                            );
-                            return Err(StreamerError::Nntp(NntpError::Protocol(
-                                "yenc decode task panicked",
-                            )));
-                        }
-                    };
+                    let decoded =
+                        match tokio::task::spawn_blocking(move || yenc::decode(&body)).await {
+                            Ok(Ok((decoded, _info))) => decoded,
+                            Ok(Err(e)) => return Err(StreamerError::Yenc(e)),
+                            Err(join_err) => {
+                                tracing::warn!(
+                                    message_id,
+                                    file,
+                                    error = %join_err,
+                                    "yenc decode task panicked"
+                                );
+                                return Err(StreamerError::Nntp(NntpError::Protocol(
+                                    "yenc decode task panicked",
+                                )));
+                            }
+                        };
                     let decode_ms = decode_started.elapsed().as_millis();
                     self.state.fetch_metrics.record_ok(decoded.len() as u64);
                     tracing::debug!(
