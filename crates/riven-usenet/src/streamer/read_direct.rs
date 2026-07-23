@@ -9,10 +9,7 @@ use crate::nzb::NzbSegment;
 use crate::state::{FetchEntry, PromiseSlot, StreamerState};
 use crate::yenc;
 
-use super::{
-    NzbMetaSource, PREFETCH_FLOOR, StreamerError, UsenetStreamer, concat_slices,
-    segments_overlapping,
-};
+use super::{NzbMetaSource, StreamerError, UsenetStreamer, concat_slices, segments_overlapping};
 
 /// Max attempts when fetching an NNTP segment body. ArticleNotFound is
 /// permanent and never retried.
@@ -47,8 +44,37 @@ impl UsenetStreamer {
                 )));
             }
 
+            // Reserve the process-wide slot *before* registering an owner in
+            // `in_flight`.  A fetch-only gate below the owner registration
+            // limits BODY requests but still lets every FUSE read-ahead
+            // window enqueue a distinct promise.  During a library scan that
+            // became hundreds of queued segment owners (and their retained
+            // futures) even though only a few were downloading.  Bounding
+            // ownership makes this a true global backpressure point.
+            let Ok(permit) = self.state.fetch_sem.acquire().await else {
+                return Err(StreamerError::Nntp(NntpError::Protocol(
+                    "usenet fetch semaphore closed",
+                )));
+            };
+
+            // A queued caller may have waited long enough for this segment
+            // to enter the cache, or for another caller to mark it missing.
+            // Re-check after acquiring so it never creates needless work.
+            if let Some(hit) = self.state.cache.get(message_id) {
+                return Ok(hit);
+            }
+            if self.state.fails.is_dead(message_id) {
+                return Err(StreamerError::Nntp(NntpError::ArticleNotFound(
+                    "previously marked as missing".into(),
+                )));
+            }
+
             match self.state.in_flight.enter_or_wait(message_id) {
                 FetchEntry::Wait(slot) => {
+                    // Only owners consume the scarce slot.  A follower is
+                    // already deduplicated and can wait without occupying a
+                    // segment budget permit.
+                    drop(permit);
                     slot.wait().await;
                     continue;
                 }
@@ -170,9 +196,9 @@ impl UsenetStreamer {
     }
 
     /// Background-warm the segment cache for the segments that overlap
-    /// `[start, end_inclusive]` of `file_index`. Provider capacity and the
-    /// adaptive bulk budget own concurrency; this method does not add another
-    /// hardcoded connection limit.
+    /// `[start, end_inclusive]` of `file_index`. Per-operation fan-out is
+    /// bounded by `RIVEN_USENET_MAX_PREFETCH`, and the actual BODY/decode work
+    /// is further gated by the process-wide fetch semaphore.
     pub async fn prefetch_range(
         &self,
         info_hash: &str,
@@ -180,6 +206,9 @@ impl UsenetStreamer {
         start: u64,
         end_inclusive: u64,
     ) {
+        let Some(_admission) = self.admit_prefetch(info_hash, file_index) else {
+            return;
+        };
         let Ok(meta) = self.load_meta(info_hash).await else {
             return;
         };
@@ -242,6 +271,9 @@ impl UsenetStreamer {
         if max_segments == 0 {
             return;
         }
+        let Some(_admission) = self.admit_prefetch(info_hash, file_index) else {
+            return;
+        };
         let Ok(meta) = self.load_meta(info_hash).await else {
             return;
         };
@@ -311,8 +343,34 @@ impl UsenetStreamer {
         self.prefetch_mids(client, mids).await;
     }
 
+    /// Global admission control for read-ahead. Read-ahead is *optional* work,
+    /// so a window that can't get a permit is dropped rather than queued: a
+    /// library scan opening a whole season pack at once starts one prefetch
+    /// worker per episode, and letting them all queue means their combined
+    /// windows still get scheduled — thousands of articles for eight real
+    /// streams, which is exactly the burst that drove the process into OOM.
+    /// A genuinely playing stream re-requests its window on the next read, so
+    /// it recovers immediately; a scanner touch does not, which is the point.
+    fn admit_prefetch(
+        &self,
+        info_hash: &str,
+        file_index: usize,
+    ) -> Option<tokio::sync::SemaphorePermit<'_>> {
+        match self.state.prefetch_sem.try_acquire() {
+            Ok(permit) => Some(permit),
+            Err(_) => {
+                tracing::debug!(
+                    info_hash,
+                    file_index,
+                    "usenet prefetch window shed: global read-ahead budget full"
+                );
+                None
+            }
+        }
+    }
+
     async fn prefetch_mids(&self, client: NntpClient, mids: Vec<String>) {
-        let prefetch_concurrency = client.capacity().max(PREFETCH_FLOOR);
+        let prefetch_concurrency = self.prefetch_concurrency(client.capacity());
         let streamer = self.clone();
         let cold: Vec<String> = mids
             .into_iter()
@@ -322,7 +380,13 @@ impl UsenetStreamer {
             .map(move |mid| {
                 let s = streamer.clone();
                 let client = client.clone();
-                async move { s.fetch_decoded_cached(&client, &mid).await }
+                async move {
+                    // Read-ahead may only ever hold part of the global segment
+                    // gate, so a read a player is actually blocked on never
+                    // waits behind speculative work.
+                    let _bg = s.state.background_sem.acquire().await;
+                    s.fetch_decoded_cached(&client, &mid).await
+                }
             })
             .buffer_unordered(prefetch_concurrency);
         while stream.next().await.is_some() {}
@@ -487,7 +551,7 @@ impl UsenetStreamer {
         let (first, last) = direct_segment_span(offsets, segments.len(), start, end_inclusive);
         let mut skip = start.saturating_sub(offsets[first]) as usize;
         let client = self.pool.playback_client();
-        let read_concurrency = client.capacity().max(PREFETCH_FLOOR);
+        let read_concurrency = self.prefetch_concurrency(client.capacity());
 
         let mut slices: Vec<Bytes> = Vec::new();
         let mut produced: usize = 0;

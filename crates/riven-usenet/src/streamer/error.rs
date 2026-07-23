@@ -26,4 +26,6 @@ pub enum StreamerError {
     Crypto(#[from] crate::crypto::CryptoError),
     #[error("ingest queue full")]
     IngestQueueFull,
+    #[error("blocking task failed: {0}")]
+    TaskJoin(#[from] tokio::task::JoinError),
 }

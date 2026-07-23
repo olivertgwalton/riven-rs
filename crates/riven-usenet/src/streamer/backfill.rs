@@ -64,6 +64,10 @@ impl UsenetStreamer {
                 let s = streamer.clone();
                 let client = client.clone();
                 async move {
+                    // Background migration: bounded to the background share of
+                    // the global segment gate so a multi-hundred-part release
+                    // can't starve live playback while it probes.
+                    let _bg = s.state.background_sem.acquire().await;
                     let r = s
                         .fetch_decoded_cached(&client, &mid)
                         .await

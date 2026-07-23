@@ -541,6 +541,17 @@ fn slice_request_bytes(full: &Bytes, start: u64, end: u64, base_start: u64) -> O
 /// latest read offset. Kernel-sized reads only update a watch value; they do
 /// not create detached tasks or assign request priorities. The source owns
 /// provider scheduling and skips segments already cached or in flight.
+///
+/// Read-ahead is *armed*, not automatic. The session starts in probing mode:
+/// reads pass straight through to the source and no producer exists. Only
+/// after [`READAHEAD_ARM_THRESHOLD`] consecutive sequential reads does it
+/// promote to streaming and start filling a window; a seek demotes it again.
+/// This is what separates a stream from a touch. A library scanner opens a
+/// file, reads the container header, reads the tail, and closes — that never
+/// produces a sequential run, so it now schedules no read-ahead at all. Before
+/// this, every scanner-opened file became a streaming session, and a season
+/// pack's worth of episodes opened together multiplied one window into
+/// thousands of queued articles.
 pub struct UsenetSession {
     source: Arc<dyn LocalByteSource>,
     info_hash: Arc<str>,
@@ -559,7 +570,26 @@ pub struct UsenetSession {
     filename: Arc<str>,
     registered: bool,
     reads_since_touch: u32,
+    /// One past the furthest byte served for this handle. A read that starts
+    /// here is the continuation of a sequential run.
+    frontier: u64,
+    /// Consecutive sequential reads observed. Reset by any seek.
+    seq_run: u32,
+    /// Whether read-ahead is armed. False while probing.
+    streaming: bool,
 }
+
+/// Consecutive sequential reads required before read-ahead arms. Keeps
+/// speculative work off during a player's header-probe phase and during
+/// seek/scrub bursts, neither of which sustains a sequential run.
+const READAHEAD_ARM_THRESHOLD: u32 = 3;
+
+/// How far a read may land from the frontier and still count as sequential.
+/// The kernel issues parallel read-ahead requests for one handle that arrive
+/// slightly out of order, so a strict equality test would keep a genuinely
+/// streaming reader stuck in probing mode. Applied in both directions: a real
+/// seek moves megabytes, far outside this window.
+const SEQUENTIAL_TOLERANCE: u64 = 256 * 1024;
 
 impl UsenetSession {
     pub fn new(
@@ -581,6 +611,9 @@ impl UsenetSession {
             filename,
             registered: false,
             reads_since_touch: 0,
+            frontier: 0,
+            seq_run: 0,
+            streaming: false,
         }
     }
 
@@ -620,24 +653,76 @@ impl UsenetSession {
         self.prefetch_target_tx = Some(tx);
     }
 
-    pub fn read(&mut self, start: u64, end: u64, runtime: &tokio::runtime::Handle) -> ReadOutcome {
-        const TOUCH_EVERY_N_READS: u32 = 16;
-        if !self.registered {
-            self.source.stream_register(
-                &self.stream_key,
-                &self.info_hash,
-                &self.filename,
-                self.file_size,
-            );
-            self.registered = true;
-            self.reads_since_touch = 0;
+    /// Is `start` the continuation of the current sequential run?
+    fn is_near_frontier(&self, start: u64) -> bool {
+        start.abs_diff(self.frontier) <= SEQUENTIAL_TOLERANCE
+    }
+
+    /// Advance the probing/streaming state machine for one read, arming or
+    /// tearing down read-ahead as the access pattern warrants, and publish the
+    /// new window target while streaming.
+    fn observe_access(&mut self, start: u64, end: u64, runtime: &tokio::runtime::Handle) {
+        let sequential = self.is_near_frontier(start);
+        self.frontier = self.frontier.max(end.saturating_add(1));
+
+        if sequential {
+            self.seq_run = self.seq_run.saturating_add(1);
         } else {
-            self.reads_since_touch = self.reads_since_touch.wrapping_add(1);
-            if self.reads_since_touch >= TOUCH_EVERY_N_READS {
-                self.source.stream_touch(&self.stream_key);
-                self.reads_since_touch = 0;
+            // A seek. Count this read as the start of a possible new run, and
+            // stop feeding a window the consumer has just walked away from.
+            self.seq_run = 1;
+            if self.streaming {
+                tracing::debug!(
+                    target: "streaming",
+                    info_hash = %self.info_hash,
+                    file_index = self.file_index,
+                    start,
+                    "seek: demoting usenet read-ahead to probing"
+                );
+                self.streaming = false;
+                // Closing the sender lets the producer finish its current
+                // window and exit; never abort it, or an in-flight NNTP BODY
+                // takes its pooled connection down with it.
+                self.prefetch_target_tx.take();
+                self.prefetch_task.take();
             }
         }
+
+        if !self.streaming && self.seq_run >= READAHEAD_ARM_THRESHOLD {
+            tracing::debug!(
+                target: "streaming",
+                info_hash = %self.info_hash,
+                file_index = self.file_index,
+                start,
+                "sequential run established: arming usenet read-ahead"
+            );
+            self.streaming = true;
+            // Only a handle that is actually streaming counts as an active
+            // stream: the registry drives both the dashboard and the pool's
+            // adaptive background budget, and a scan that merely opens files
+            // must not shrink background capacity as if a library were playing.
+            if !self.registered {
+                self.source.stream_register(
+                    &self.stream_key,
+                    &self.info_hash,
+                    &self.filename,
+                    self.file_size,
+                );
+                self.registered = true;
+                self.reads_since_touch = 0;
+            }
+            self.ensure_prefetch_worker(runtime);
+        }
+
+        if self.streaming
+            && let Some(tx) = &self.prefetch_target_tx
+        {
+            tx.send_replace(Some(start));
+        }
+    }
+
+    pub fn read(&mut self, start: u64, end: u64, runtime: &tokio::runtime::Handle) -> ReadOutcome {
+        const TOUCH_EVERY_N_READS: u32 = 16;
         if start >= self.file_size {
             return ReadOutcome::Data(Bytes::new());
         }
@@ -653,9 +738,14 @@ impl UsenetSession {
             "usenet read() call"
         );
 
-        self.ensure_prefetch_worker(runtime);
-        if let Some(tx) = &self.prefetch_target_tx {
-            tx.send_replace(Some(start));
+        self.observe_access(start, end, runtime);
+
+        if self.registered {
+            self.reads_since_touch = self.reads_since_touch.wrapping_add(1);
+            if self.reads_since_touch >= TOUCH_EVERY_N_READS {
+                self.source.stream_touch(&self.stream_key);
+                self.reads_since_touch = 0;
+            }
         }
 
         match runtime.block_on(
@@ -747,6 +837,7 @@ mod tests {
     struct MockSource {
         prefetch_calls: Mutex<Vec<(u64, usize)>>,
         read_range_calls: Mutex<u32>,
+        registered: std::sync::atomic::AtomicBool,
     }
 
     impl MockSource {
@@ -754,6 +845,7 @@ mod tests {
             Self {
                 prefetch_calls: Mutex::new(Vec::new()),
                 read_range_calls: Mutex::new(0),
+                registered: std::sync::atomic::AtomicBool::new(false),
             }
         }
     }
@@ -786,9 +878,15 @@ mod tests {
                 .push((start, segments_ahead));
         }
 
-        fn stream_register(&self, _key: &str, _info_hash: &str, _filename: &str, _file_size: u64) {}
+        fn stream_register(&self, _key: &str, _info_hash: &str, _filename: &str, _file_size: u64) {
+            self.registered
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
         fn stream_touch(&self, _key: &str) {}
-        fn stream_unregister(&self, _key: &str) {}
+        fn stream_unregister(&self, _key: &str) {
+            self.registered
+                .store(false, std::sync::atomic::Ordering::Release);
+        }
     }
 
     /// Kernel-sized reads update one producer's latest offset rather than
@@ -864,10 +962,15 @@ mod tests {
             Arc::from("test.mkv"),
         );
 
-        assert!(matches!(
-            session.read(RESUME_AT, RESUME_AT + READ_SIZE - 1, rt.handle()),
-            ReadOutcome::Data(_)
-        ));
+        // Read-ahead arms on a sustained sequential run, so a resume needs the
+        // arming reads before a window exists at all.
+        for i in 0..u64::from(READAHEAD_ARM_THRESHOLD) {
+            let start = RESUME_AT + i * READ_SIZE;
+            assert!(matches!(
+                session.read(start, start + READ_SIZE - 1, rt.handle()),
+                ReadOutcome::Data(_)
+            ));
+        }
         rt.block_on(async {
             tokio::time::timeout(Duration::from_secs(1), async {
                 while mock.prefetch_calls.lock().unwrap().is_empty() {
@@ -879,11 +982,90 @@ mod tests {
         });
 
         let calls = mock.prefetch_calls.lock().unwrap().clone();
-        assert_eq!(calls.len(), 1, "expected exactly one initial cache window");
-        assert_eq!(
-            calls[0].0, RESUME_AT,
-            "a resumed stream must start its segment window at the resume offset"
+        assert!(
+            calls[0].0 >= RESUME_AT,
+            "a resumed stream must start its segment window at the resume point, not at 0 (got {})",
+            calls[0].0
         );
         assert_eq!(calls[0].1, 60);
+    }
+
+    /// The library-scan case that drove the process into OOM: a scanner opens
+    /// a file, reads the container header, reads the tail, and closes. That is
+    /// not a stream, and it must schedule no read-ahead — otherwise every
+    /// episode of a season pack touched in one burst arms its own window.
+    #[test]
+    fn probe_reads_never_arm_read_ahead() {
+        const FILE_SIZE: u64 = 2 * 1024 * 1024 * 1024;
+        const READ_SIZE: u64 = 128 * 1024;
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mock = Arc::new(MockSource::new());
+        let source: Arc<dyn LocalByteSource> = mock.clone();
+        let mut session = UsenetSession::new(
+            source,
+            Arc::from("test-hash"),
+            0,
+            FILE_SIZE,
+            Arc::from("test.mkv"),
+        );
+
+        // Header probe, then a tail probe ~1.45 GB in, then a second header
+        // read — the access pattern observed from the scanner.
+        for start in [0, FILE_SIZE - READ_SIZE, 0] {
+            assert!(matches!(
+                session.read(start, start + READ_SIZE - 1, rt.handle()),
+                ReadOutcome::Data(_)
+            ));
+        }
+
+        rt.block_on(async { tokio::time::sleep(Duration::from_millis(100)).await });
+
+        assert!(
+            mock.prefetch_calls.lock().unwrap().is_empty(),
+            "probe reads must not arm read-ahead"
+        );
+        assert!(
+            !mock.registered.load(std::sync::atomic::Ordering::Acquire),
+            "a probed file must not register as an active stream"
+        );
+    }
+
+    /// A seek tears read-ahead back down, so scrubbing does not keep a window
+    /// producer alive chasing positions the player has already left.
+    #[test]
+    fn seek_demotes_read_ahead_until_sequential_resumes() {
+        const FILE_SIZE: u64 = 2 * 1024 * 1024 * 1024;
+        const READ_SIZE: u64 = 128 * 1024;
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mock = Arc::new(MockSource::new());
+        let source: Arc<dyn LocalByteSource> = mock.clone();
+        let mut session = UsenetSession::new(
+            source,
+            Arc::from("test-hash"),
+            0,
+            FILE_SIZE,
+            Arc::from("test.mkv"),
+        );
+
+        for i in 0..u64::from(READAHEAD_ARM_THRESHOLD) {
+            let start = i * READ_SIZE;
+            let _ = session.read(start, start + READ_SIZE - 1, rt.handle());
+        }
+        assert!(session.streaming, "sequential run should arm read-ahead");
+
+        let seek_to = FILE_SIZE / 2;
+        let _ = session.read(seek_to, seek_to + READ_SIZE - 1, rt.handle());
+        assert!(!session.streaming, "a seek must demote back to probing");
+
+        for i in 1..u64::from(READAHEAD_ARM_THRESHOLD) {
+            let start = seek_to + i * READ_SIZE;
+            let _ = session.read(start, start + READ_SIZE - 1, rt.handle());
+        }
+        assert!(
+            session.streaming,
+            "read-ahead must re-arm once sequential reads resume"
+        );
     }
 }

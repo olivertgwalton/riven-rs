@@ -37,9 +37,6 @@ pub use meta::{NzbMeta, NzbMetaFile, NzbMetaSource, NzbRarPart, NzbRarSlice};
 pub(crate) use availability::{SweepCounts, stat_sweep};
 pub(crate) use meta::{concat_slices, segments_overlapping, select_validation_indices};
 
-/// Floor on the prefetch fan-out during ingest (background work).
-pub(crate) const PREFETCH_FLOOR: usize = 4;
-
 #[derive(Clone)]
 pub struct UsenetStreamer {
     pub(crate) pool: Arc<NntpPool>,
@@ -93,35 +90,104 @@ impl UsenetStreamer {
         self.pool.clone()
     }
 
+    /// Keep one operation's fan-out small even when a provider permits many
+    /// connections. This mirrors AltMount's explicit per-reader prefetch
+    /// window instead of equating provider capacity with work concurrency.
+    pub(crate) fn prefetch_concurrency(&self, client_capacity: usize) -> usize {
+        client_capacity.min(self.state.max_prefetch()).max(1)
+    }
+
     /// Load NZB meta for `info_hash`. Order: in-memory LRU → Postgres.
     /// Postgres is the source of truth; the LRU just absorbs the hot path
     /// during playback. There's no Redis layer and no TTL: as long as the
     /// `usenet_meta` row exists, the file remains streamable.
+    ///
+    /// Single-flighted per info_hash. Every episode of a season pack shares
+    /// one `usenet_meta` row, so a scanner opening a whole season at once
+    /// produced N simultaneous cold loads of the *same* document — N database
+    /// round-trips, N parses and N peak-sized deserialize allocations for a
+    /// single cache fill. With an 80 MB record and two dozen episodes that
+    /// alone is a multi-gigabyte spike (which musl then never returns to the
+    /// OS). Now the first caller loads and the rest wait on its promise.
     pub async fn load_meta(&self, info_hash: &str) -> Result<Arc<NzbMeta>, StreamerError> {
-        if let Some(hit) = self.state.meta_cache.get(info_hash) {
-            self.maybe_kick_backfill(&hit);
-            return Ok(hit);
+        // A waiter whose owner failed retries as owner itself; bounded so a
+        // permanently-failing load can't bounce callers around the loop.
+        const MAX_LOAD_ATTEMPTS: usize = 4;
+        for _ in 0..MAX_LOAD_ATTEMPTS {
+            if let Some(hit) = self.state.meta_cache.get(info_hash) {
+                self.maybe_kick_backfill(&hit);
+                return Ok(hit);
+            }
+            match self.state.meta_loads.enter_or_wait(info_hash) {
+                crate::state::FetchEntry::Wait(slot) => {
+                    slot.wait().await;
+                }
+                crate::state::FetchEntry::Owner(slot, key) => {
+                    // Release waiters even if this future is cancelled
+                    // mid-load (a FUSE handle closing, say) — otherwise every
+                    // other opener of this release hangs forever.
+                    let guard = MetaLoadGuard {
+                        state: self.state.clone(),
+                        slot,
+                        key,
+                    };
+                    let result = self.load_meta_cold(info_hash).await;
+                    drop(guard);
+                    return result;
+                }
+            }
         }
+        // Owner churn (every attempt lost the race and then found nothing
+        // cached). Fall back to loading directly rather than failing a read.
+        self.load_meta_cold(info_hash).await
+    }
+
+    /// Cold path of [`load_meta`]: Postgres load, offset auto-heal, cache fill.
+    /// Only ever entered by one caller at a time per info_hash.
+    async fn load_meta_cold(&self, info_hash: &str) -> Result<Arc<NzbMeta>, StreamerError> {
         let mut meta = store::load(&self.db, info_hash)
             .await?
             .ok_or_else(|| StreamerError::NotIngested(info_hash.to_string()))?;
 
+        // Healing one file costs up to two full article downloads, so a
+        // release with hundreds of files (a season pack ships one meta for the
+        // whole season) would otherwise download hundreds of megabytes inline
+        // on a single cache miss — with every other opener of that release
+        // blocked behind it on the single-flight promise. Heal a few files per
+        // load instead: the result is persisted, so successive loads converge,
+        // and an unhealed file still serves correctly from its stored offsets
+        // (`read_direct` anchors on the offset table but sizes every slice
+        // from the actual decoded length).
+        const MAX_AUTOHEAL_FILES_PER_LOAD: usize = 4;
         let mut healed_indices: Vec<usize> = Vec::new();
+        let mut pending_heals = 0usize;
         for (file_index, file) in meta.files.iter_mut().enumerate() {
             let approximate = matches!(
                 &file.source,
                 NzbMetaSource::Direct { offsets, .. } if direct_offsets_look_approximate(offsets)
             );
-            if approximate {
-                match self.rescale_direct_to_decoded(file).await {
-                    Ok(()) => healed_indices.push(file_index),
-                    Err(error) => tracing::warn!(
-                        info_hash,
-                        %error,
-                        "usenet meta auto-heal: rescale failed; serving stored offsets"
-                    ),
-                }
+            if !approximate {
+                continue;
             }
+            if healed_indices.len() >= MAX_AUTOHEAL_FILES_PER_LOAD {
+                pending_heals += 1;
+                continue;
+            }
+            match self.rescale_direct_to_decoded(file).await {
+                Ok(()) => healed_indices.push(file_index),
+                Err(error) => tracing::warn!(
+                    info_hash,
+                    %error,
+                    "usenet meta auto-heal: rescale failed; serving stored offsets"
+                ),
+            }
+        }
+        if pending_heals > 0 {
+            tracing::info!(
+                info_hash,
+                pending_heals,
+                "usenet meta auto-heal: deferred remaining files to a later load"
+            );
         }
         if !healed_indices.is_empty() {
             match store::store(&self.db, info_hash, &meta).await {
@@ -214,10 +280,7 @@ impl UsenetStreamer {
         }
 
         let concurrency = self
-            .pool
-            .bulk_client()
-            .capacity()
-            .max(PREFETCH_FLOOR)
+            .prefetch_concurrency(self.pool.bulk_client().capacity())
             .min(n);
         let client = self.pool.bulk_client();
         let counts = stat_sweep(&client, sample, concurrency, false).await;
@@ -268,10 +331,7 @@ impl UsenetStreamer {
         }
 
         let concurrency = self
-            .pool
-            .bulk_client()
-            .capacity()
-            .max(PREFETCH_FLOOR)
+            .prefetch_concurrency(self.pool.bulk_client().capacity())
             .min(total);
         let SweepCounts {
             missing,
@@ -290,6 +350,22 @@ impl UsenetStreamer {
             });
         }
         Ok(())
+    }
+}
+
+/// Releases the `meta_loads` single-flight slot on scope exit, including when
+/// the owning future is cancelled. Without the `Drop`, a cancelled load would
+/// leave the slot present and never-completed, hanging every other caller that
+/// asked for the same release.
+struct MetaLoadGuard {
+    state: Arc<StreamerState>,
+    slot: Arc<crate::state::PromiseSlot>,
+    key: Arc<str>,
+}
+
+impl Drop for MetaLoadGuard {
+    fn drop(&mut self) {
+        self.state.meta_loads.finish(&self.key, &self.slot);
     }
 }
 

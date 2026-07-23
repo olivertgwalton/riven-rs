@@ -43,6 +43,37 @@ const DEFAULT_DECODED_SIZES_ENTRIES: usize = 500_000;
 /// scan spawn hundreds of simultaneous fetch+decode pipelines.
 const DEFAULT_PRECACHE_CONCURRENCY: usize = 4;
 
+/// Maximum in-flight segment operations per reader/precache/import task.
+/// Provider connection capacity is a shared transport limit, not a safe
+/// per-operation prefetch target: using a 100-connection provider as the
+/// latter creates hundreds of simultaneous encoded/decoded allocations.
+const DEFAULT_MAX_PREFETCH: usize = 4;
+
+/// Process-wide ceiling on concurrent NNTP BODY fetch + decode pipelines.
+/// FUSE creates one read-ahead worker per open handle, so a per-reader window
+/// alone still multiplies when a library scan opens many files. This shared
+/// gate is the final memory safety boundary for encoded and decoded bodies.
+const DEFAULT_MAX_IN_FLIGHT_SEGMENTS: usize = 8;
+
+/// Process-wide ceiling on concurrent *read-ahead windows*. Admission
+/// control, not queueing: read-ahead is optional work, so a window that can't
+/// get a permit is *dropped*, not deferred, and the next read re-requests it.
+/// Deferring would only postpone the same fan-out.
+///
+/// The VFS arms read-ahead only for handles in a sustained sequential run, so
+/// in practice this bounds *concurrent playback*, not scan bursts — keep it at
+/// or above the number of streams the box is expected to serve at once, or
+/// their windows take turns. It remains the backstop for anything that opens
+/// many handles at once.
+const DEFAULT_MAX_PREFETCH_WINDOWS: usize = 4;
+
+/// Share of [`DEFAULT_MAX_IN_FLIGHT_SEGMENTS`] that background work
+/// (read-ahead, decoded-size backfill) may occupy at once. Without this,
+/// background fetches can hold every global slot and a live playback read
+/// then waits behind work nobody is blocked on. Keeping it well below the
+/// global gate guarantees headroom for reads that a player is waiting on.
+const DEFAULT_MAX_BACKGROUND_SEGMENTS: usize = 2;
+
 /// Aggregated process-wide state shared by every `UsenetStreamer`
 /// instance. Sharing means RAR header bytes fetched at ingest time stay
 /// hot for subsequent read-path serves, and a single in-flight fetch
@@ -68,6 +99,19 @@ pub struct StreamerState {
     /// only that head/tail warming during a mass scan happens a few
     /// files at a time. `RIVEN_USENET_PRECACHE_CONCURRENCY` overrides.
     pub precache_sem: tokio::sync::Semaphore,
+    max_prefetch: usize,
+    pub fetch_sem: tokio::sync::Semaphore,
+    /// Global admission gate for read-ahead windows. Acquired with
+    /// `try_acquire` so surplus windows are shed rather than queued.
+    pub prefetch_sem: tokio::sync::Semaphore,
+    /// Reserves capacity in `fetch_sem` for playback by capping how much of
+    /// it background work may hold.
+    pub background_sem: tokio::sync::Semaphore,
+    /// Single-flight for `load_meta`. A season pack's episodes all resolve to
+    /// one `usenet_meta` row, so a scanner opening 24 of them at once used to
+    /// run 24 simultaneous loads + deserializes of the same (here 80 MB)
+    /// document — gigabytes of transient heap for one cache fill.
+    pub meta_loads: InFlight,
 }
 
 impl StreamerState {
@@ -83,17 +127,42 @@ impl StreamerState {
             "RIVEN_USENET_PRECACHE_CONCURRENCY",
             DEFAULT_PRECACHE_CONCURRENCY,
         );
+        let max_prefetch = env_positive("RIVEN_USENET_MAX_PREFETCH", DEFAULT_MAX_PREFETCH);
+        let max_in_flight_segments = env_positive(
+            "RIVEN_USENET_MAX_IN_FLIGHT_SEGMENTS",
+            DEFAULT_MAX_IN_FLIGHT_SEGMENTS,
+        );
+        let max_prefetch_windows = env_positive(
+            "RIVEN_USENET_MAX_PREFETCH_WINDOWS",
+            DEFAULT_MAX_PREFETCH_WINDOWS,
+        );
+        let max_background_segments = background_budget(
+            env_positive(
+                "RIVEN_USENET_MAX_BACKGROUND_SEGMENTS",
+                DEFAULT_MAX_BACKGROUND_SEGMENTS,
+            ),
+            max_in_flight_segments,
+        );
         Self {
             cache: SegmentCache::new(cache_bytes),
             meta_cache: MetaCache::new(meta_cache_bytes),
             decoded_sizes: DecodedSizes::new(decoded_sizes_entries),
             precache_sem: tokio::sync::Semaphore::new(precache_concurrency),
+            max_prefetch,
+            fetch_sem: tokio::sync::Semaphore::new(max_in_flight_segments),
+            prefetch_sem: tokio::sync::Semaphore::new(max_prefetch_windows),
+            background_sem: tokio::sync::Semaphore::new(max_background_segments),
+            meta_loads: InFlight::default(),
             fails: PermanentFails::default(),
             in_flight: InFlight::default(),
             precached: PrecachedFiles::default(),
             migrated: MigratedMetas::default(),
             fetch_metrics: FetchMetrics::default(),
         }
+    }
+
+    pub fn max_prefetch(&self) -> usize {
+        self.max_prefetch
     }
 
     pub fn global() -> Arc<Self> {
@@ -141,6 +210,15 @@ impl FetchMetrics {
 pub fn global_active_streams() -> Arc<ActiveStreams> {
     static C: OnceLock<Arc<ActiveStreams>> = OnceLock::new();
     C.get_or_init(|| Arc::new(ActiveStreams::default())).clone()
+}
+
+/// How much of the global segment gate background work may hold at once.
+/// Always leaves at least one slot for a read a player is blocked on, however
+/// the two limits are configured — a background reservation equal to (or
+/// larger than) the global gate would reintroduce exactly the starvation the
+/// split exists to prevent.
+fn background_budget(configured: usize, max_in_flight: usize) -> usize {
+    configured.min(max_in_flight.saturating_sub(1)).max(1)
 }
 
 /// Read a positive number from an env var, falling back to `default` when
@@ -553,6 +631,14 @@ mod tests {
         cache.put("big".into(), big);
         assert!(cache.get("big").is_some());
         assert_eq!(cache.entry_count(), 1);
+    }
+
+    #[test]
+    fn background_budget_always_leaves_a_slot_for_playback() {
+        assert_eq!(background_budget(2, 8), 2);
+        assert_eq!(background_budget(16, 8), 7, "clamped below the global gate");
+        assert_eq!(background_budget(8, 8), 7, "equal config still leaves one");
+        assert_eq!(background_budget(4, 1), 1, "degenerate gate stays usable");
     }
 
     #[test]
