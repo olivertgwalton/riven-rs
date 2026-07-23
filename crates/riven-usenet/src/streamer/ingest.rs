@@ -15,8 +15,8 @@ use crate::rar::{self, RarEncryption, RarVolumeFileEntry};
 
 use super::store;
 use super::{
-    NzbMeta, NzbMetaFile, NzbMetaSource, NzbRarPart, NzbRarSlice, PREFETCH_FLOOR, StreamerError,
-    SweepCounts, UsenetStreamer, select_validation_indices, stat_sweep,
+    NzbMeta, NzbMetaFile, NzbMetaSource, NzbRarPart, NzbRarSlice, StreamerError, SweepCounts,
+    UsenetStreamer, select_validation_indices, stat_sweep,
 };
 
 /// In-progress per-inner-file accumulator during multi-file RAR reconstruction.
@@ -149,10 +149,7 @@ impl UsenetStreamer {
             return Ok(());
         }
         let probe_concurrency = self
-            .pool
-            .bulk_client()
-            .capacity()
-            .max(PREFETCH_FLOOR)
+            .prefetch_concurrency(self.pool.bulk_client().capacity())
             .min(n);
         // stop_on_first_miss: zero tolerance for confirmed-missing segments
         // means the rest of the sample is wasted work the instant one hits —
@@ -337,7 +334,7 @@ impl UsenetStreamer {
             file.filename = new_name;
         }
 
-        let rescale_concurrency = self.pool.bulk_client().capacity().max(PREFETCH_FLOOR);
+        let rescale_concurrency = self.prefetch_concurrency(self.pool.bulk_client().capacity());
         stream::iter(
             meta_files
                 .iter_mut()
@@ -458,7 +455,8 @@ impl UsenetStreamer {
             parts.push(build_rar_part(f));
         }
 
-        let header_fetch_concurrency = self.pool.bulk_client().capacity().max(PREFETCH_FLOOR);
+        let header_fetch_concurrency =
+            self.prefetch_concurrency(self.pool.bulk_client().capacity());
         let streamer = self.clone();
         // Fetch every volume's header at bounded concurrency, but cancel the
         // rest of the group the instant one volume fails: a missing or
