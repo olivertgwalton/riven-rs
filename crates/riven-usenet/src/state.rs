@@ -43,35 +43,6 @@ const DEFAULT_DECODED_SIZES_ENTRIES: usize = 500_000;
 /// scan spawn hundreds of simultaneous fetch+decode pipelines.
 const DEFAULT_PRECACHE_CONCURRENCY: usize = 4;
 
-/// One cache-warming job is enough to keep a sequential player ahead while
-/// preserving NNTP sockets for the exact byte ranges the player is waiting
-/// on. More jobs only multiply speculative BODY requests across open FUSE
-/// handles. Override with `RIVEN_USENET_STREAM_PREFETCH_CONCURRENCY`.
-const DEFAULT_STREAM_PREFETCH_CONCURRENCY: usize = 1;
-
-/// Floor for ingest concurrency when the connection budget is tiny or
-/// unknown — preserves the historical default so small setups behave as before.
-pub(crate) const MIN_INGEST_CONCURRENCY: usize = 4;
-
-/// Derive the number of NZBs that may ingest concurrently from the NNTP
-/// connection budget (`max_connections` summed across primary providers).
-///
-/// Ingest is gated separately from streaming so a backlog of new releases
-/// can't monopolise the provider and stall playback. Rather than a fixed
-/// cap (which left large connection allowances idle — 4 ingests against a
-/// 100-connection account), we take half the budget: enough to drain a
-/// scrape backlog quickly while leaving the other half as headroom for
-/// streaming, which already preempts ingest via NNTP `Priority`. The pool's
-/// own `PrioritizedSemaphore(max_connections)` stays the hard ceiling, so
-/// this can never oversubscribe the provider. `RIVEN_USENET_INGEST_CONCURRENCY`
-/// overrides the derived value for manual tuning.
-pub fn ingest_concurrency_for(total_capacity: usize) -> usize {
-    env_positive(
-        "RIVEN_USENET_INGEST_CONCURRENCY",
-        (total_capacity / 2).max(MIN_INGEST_CONCURRENCY),
-    )
-}
-
 /// Aggregated process-wide state shared by every `UsenetStreamer`
 /// instance. Sharing means RAR header bytes fetched at ingest time stay
 /// hot for subsequent read-path serves, and a single in-flight fetch
@@ -97,10 +68,6 @@ pub struct StreamerState {
     /// only that head/tail warming during a mass scan happens a few
     /// files at a time. `RIVEN_USENET_PRECACHE_CONCURRENCY` overrides.
     pub precache_sem: tokio::sync::Semaphore,
-    /// Global budget for speculative stream cache warming. This is separate
-    /// from `precache_sem`: it covers the moving read-ahead window driven by
-    /// active FUSE reads, across all open media files.
-    pub stream_prefetch_sem: tokio::sync::Semaphore,
 }
 
 impl StreamerState {
@@ -116,16 +83,11 @@ impl StreamerState {
             "RIVEN_USENET_PRECACHE_CONCURRENCY",
             DEFAULT_PRECACHE_CONCURRENCY,
         );
-        let stream_prefetch_concurrency = env_positive(
-            "RIVEN_USENET_STREAM_PREFETCH_CONCURRENCY",
-            DEFAULT_STREAM_PREFETCH_CONCURRENCY,
-        );
         Self {
             cache: SegmentCache::new(cache_bytes),
             meta_cache: MetaCache::new(meta_cache_bytes),
             decoded_sizes: DecodedSizes::new(decoded_sizes_entries),
             precache_sem: tokio::sync::Semaphore::new(precache_concurrency),
-            stream_prefetch_sem: tokio::sync::Semaphore::new(stream_prefetch_concurrency),
             fails: PermanentFails::default(),
             in_flight: InFlight::default(),
             precached: PrecachedFiles::default(),

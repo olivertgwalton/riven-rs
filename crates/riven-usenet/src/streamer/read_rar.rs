@@ -2,7 +2,7 @@ use bytes::Bytes;
 use futures::StreamExt;
 use futures::stream;
 
-use crate::nntp::Priority;
+use crate::nntp::NntpClient;
 use crate::rar;
 
 use super::{
@@ -24,7 +24,7 @@ impl UsenetStreamer {
         password: Option<&str>,
         start: u64,
         end_inclusive: u64,
-        priority: Priority,
+        client: &NntpClient,
     ) -> Result<Bytes, StreamerError> {
         let mut parts_out: Vec<Bytes> = Vec::new();
 
@@ -53,7 +53,7 @@ impl UsenetStreamer {
                 None => {
                     let part_byte_lo = slice.start_in_part + slice_plain_lo;
                     let part_byte_hi = slice.start_in_part + slice_plain_hi;
-                    self.read_decoded_range_within_part(part, part_byte_lo, part_byte_hi, priority)
+                    self.read_decoded_range_within_part(part, part_byte_lo, part_byte_hi, client)
                         .await?
                 }
                 Some(enc) => {
@@ -65,7 +65,7 @@ impl UsenetStreamer {
                         pw,
                         slice_plain_lo,
                         slice_plain_hi,
-                        priority,
+                        client,
                     )
                     .await?
                 }
@@ -87,7 +87,7 @@ impl UsenetStreamer {
         password: &str,
         slice_plain_lo: u64,
         slice_plain_hi: u64,
-        priority: Priority,
+        client: &NntpClient,
     ) -> Result<Bytes, StreamerError> {
         use crate::crypto::{AES_BLOCK, decrypt_blocks_in_place, derive_key};
 
@@ -104,7 +104,7 @@ impl UsenetStreamer {
         }
 
         let fetched_bytes = self
-            .read_decoded_range_within_part(part, cipher_lo_in_part, cipher_hi_in_part, priority)
+            .read_decoded_range_within_part(part, cipher_lo_in_part, cipher_hi_in_part, client)
             .await?;
         if fetched_bytes.len() < AES_BLOCK {
             return Err(StreamerError::BadRange);
@@ -141,7 +141,7 @@ impl UsenetStreamer {
         part: &NzbRarPart,
         dec_start: u64,
         dec_end_inclusive: u64,
-        priority: Priority,
+        client: &NntpClient,
     ) -> Result<Bytes, StreamerError> {
         match part.decoded_seg_size {
             Some(seg_size) if seg_size > 0 => {
@@ -150,12 +150,12 @@ impl UsenetStreamer {
                     seg_size,
                     dec_start,
                     dec_end_inclusive,
-                    priority,
+                    client,
                 )
                 .await
             }
             _ => {
-                self.read_decoded_range_walk(part, dec_start, dec_end_inclusive, priority)
+                self.read_decoded_range_walk(part, dec_start, dec_end_inclusive, client)
                     .await
             }
         }
@@ -177,7 +177,7 @@ impl UsenetStreamer {
         seg_size: u64,
         dec_start: u64,
         dec_end_inclusive: u64,
-        priority: Priority,
+        client: &NntpClient,
     ) -> Result<Bytes, StreamerError> {
         let total_segs = part.segments.len();
         let first_seg = (dec_start / seg_size) as usize;
@@ -195,7 +195,7 @@ impl UsenetStreamer {
             first_seg,
             batch_last,
             skip,
-            priority,
+            client,
         )
         .await
     }
@@ -208,7 +208,7 @@ impl UsenetStreamer {
         part: &NzbRarPart,
         dec_start: u64,
         dec_end_inclusive: u64,
-        priority: Priority,
+        client: &NntpClient,
     ) -> Result<Bytes, StreamerError> {
         let total_segs = part.segments.len();
 
@@ -230,7 +230,7 @@ impl UsenetStreamer {
             return Ok(Bytes::new());
         }
         let skip = dec_start.saturating_sub(decoded_cursor) as usize;
-        let read_concurrency = self.pool.download_concurrency().max(PREFETCH_FLOOR);
+        let read_concurrency = client.capacity().max(PREFETCH_FLOOR);
         let batch_last = (first_seg + read_concurrency - 1).min(total_segs - 1);
 
         self.assemble_decoded_forward(
@@ -240,7 +240,7 @@ impl UsenetStreamer {
             first_seg,
             batch_last,
             skip,
-            priority,
+            client,
         )
         .await
     }
@@ -268,7 +268,7 @@ impl UsenetStreamer {
         first_seg: usize,
         first_batch_last: usize,
         mut skip: usize,
-        priority: Priority,
+        client: &NntpClient,
     ) -> Result<Bytes, StreamerError> {
         let want = (dec_end_inclusive - dec_start + 1) as usize;
         let total_segs = part.segments.len();
@@ -276,7 +276,7 @@ impl UsenetStreamer {
             return Ok(Bytes::new());
         }
 
-        let read_concurrency = self.pool.download_concurrency().max(PREFETCH_FLOOR);
+        let read_concurrency = client.capacity().max(PREFETCH_FLOOR);
         let segments = part.segments.as_slice();
         let mut slices: Vec<Bytes> = Vec::new();
         let mut produced: usize = 0;
@@ -285,11 +285,13 @@ impl UsenetStreamer {
         let mut batch_last = first_batch_last.max(first_seg).min(total_segs - 1);
         loop {
             let streamer = self.clone();
+            let client = client.clone();
             let mut stream = stream::iter(batch_start..=batch_last)
                 .map(move |i| {
                     let s = streamer.clone();
+                    let client = client.clone();
                     async move {
-                        s.fetch_decoded_cached(&segments[i].message_id, priority)
+                        s.fetch_decoded_cached(&client, &segments[i].message_id)
                             .await
                     }
                 })

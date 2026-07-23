@@ -1,13 +1,20 @@
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
+use tokio::sync::Notify;
 use tokio::sync::oneshot;
 
-use super::priority_semaphore::{OwnedPermit, PrioritizedSemaphore, Priority};
+use super::connection_slots::{ConnectionSlots, OwnedPermit};
 use super::{NntpConnection, NntpError, NntpProvider};
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum WorkloadLane {
+    Playback,
+    Bulk,
+}
 
 /// Drop an idle connection that has been sitting in the pool longer than
 /// this. Aggressive on purpose: several commercial NNTP providers silently
@@ -23,16 +30,6 @@ const STALE_THRESHOLD: Duration = Duration::from_secs(10);
 const PING_TIMEOUT: Duration = Duration::from_millis(1500);
 /// How often the background reaper sweeps each provider's idle stack.
 const REAPER_INTERVAL: Duration = Duration::from_secs(5);
-/// Cap on connections opened eagerly per provider at startup, so the
-/// streamer doesn't consume the entire provider connection allowance
-/// before other consumers (ingest, scrape) can dial.
-const PREWARM_CAP: usize = 8;
-const MAX_DOWNLOAD_CONNECTIONS: usize = 15;
-/// Fixed per-ingest NNTP fan-out budget. A single ingest never grabs more than
-/// this many connections, so many ingests run concurrently under the shared
-/// semaphore instead of one monopolising the whole pool.
-/// Modelled on altmount's `MaxImportConnections` (default 5).
-pub const INGEST_CONNECTIONS: usize = 6;
 /// Consecutive transient/connection failures before a provider is muted by
 /// its circuit breaker.
 const BREAKER_FAILURE_THRESHOLD: u32 = 3;
@@ -148,7 +145,7 @@ struct Idle {
     last_used: Instant,
 }
 
-/// `idle`, `waiters_high`, and `waiters_low` share one lock (rather than
+/// `idle` and both workload waiter queues share one lock (rather than
 /// three independent ones) so that acquire()'s final "idle is empty, I must
 /// register as a waiter" determination and release()'s "no waiter queued, I
 /// must park in idle" determination can never interleave: both read the
@@ -163,46 +160,28 @@ struct SlotQueues {
     idle: VecDeque<Idle>,
     /// Callers that found the idle pool empty and every permit already
     /// spoken for. `release()` hands a freed connection directly to the
-    /// front of `waiters_high` or `waiters_low` (picked by the same
-    /// `HIGH_ODDS`-weighted lottery `PrioritizedSemaphore` uses) instead of
-    /// parking it in `idle` — nothing else wakes a queued waiter promptly,
-    /// since a plain semaphore permit release only wakes the semaphore's
-    /// own (otherwise-unused) internal queue. Weighted rather than strict
-    /// so a continuously-busy High stream (someone actively watching
-    /// something) can never fully starve Low background ingest.
-    waiters_high: VecDeque<oneshot::Sender<Idle>>,
-    waiters_low: VecDeque<oneshot::Sender<Idle>>,
-    /// Accumulated "debt" toward serving a High waiter; see
-    /// `PrioritizedSemaphore`'s field of the same name for the algorithm.
-    accumulated: i32,
+    /// front of the relevant workload queue instead of parking it in idle.
+    /// Playback is served first; the adaptive bulk budget leaves provider
+    /// capacity available for it without encoding a second priority policy
+    /// in the connection-slot counter.
+    playback_waiters: VecDeque<oneshot::Sender<Idle>>,
+    bulk_waiters: VecDeque<oneshot::Sender<Idle>>,
 }
 
 impl SlotQueues {
-    /// Pop the next waiter to hand a freed connection to, honoring the same
-    /// `HIGH_ODDS`% weighted lottery as `PrioritizedSemaphore` when both
-    /// queues are non-empty, so Low is bounded to roughly 1-in-5 hand-offs
-    /// rather than being starved outright by continuous High demand.
+    /// Pop the next waiter to hand a freed connection to. Bulk admission is
+    /// constrained before it reaches this queue, so playback can safely take
+    /// the next available socket without scattered per-call priorities.
     fn next_waiter(&mut self) -> Option<oneshot::Sender<Idle>> {
-        match (self.waiters_high.is_empty(), self.waiters_low.is_empty()) {
-            (true, true) => None,
-            (false, true) => self.waiters_high.pop_front(),
-            (true, false) => self.waiters_low.pop_front(),
-            (false, false) => {
-                self.accumulated += super::priority_semaphore::HIGH_ODDS;
-                if self.accumulated >= 100 {
-                    self.accumulated -= 100;
-                    self.waiters_high.pop_front()
-                } else {
-                    self.waiters_low.pop_front()
-                }
-            }
-        }
+        self.playback_waiters
+            .pop_front()
+            .or_else(|| self.bulk_waiters.pop_front())
     }
 }
 
 struct ProviderSlot {
     provider: NntpProvider,
-    permits: Arc<PrioritizedSemaphore>,
+    permits: Arc<ConnectionSlots>,
     queues: Arc<Mutex<SlotQueues>>,
     breaker: Arc<CircuitBreaker>,
     /// Wire bytes (encoded article bodies) downloaded from this provider this
@@ -254,6 +233,127 @@ pub struct ProviderTraffic {
 pub struct NntpPool {
     /// Primaries (by priority asc), then backups (by priority asc).
     slots: Vec<ProviderSlot>,
+    background: Arc<BackgroundBudget>,
+}
+
+/// Adaptive pool-wide admission for work that may wait behind playback.
+///
+/// This is deliberately attached to the workload-bound bulk client, rather
+/// than acquired by ingest/health/repair call sites. It can therefore enforce
+/// one invariant for every background BODY and STAT request. When streams are
+/// active, a small amount of provider capacity remains free for urgent work;
+/// in-flight background requests drain naturally after a shrink.
+struct BackgroundBudget {
+    capacity: usize,
+    active_streams: AtomicUsize,
+    in_flight: AtomicUsize,
+    changed: Notify,
+}
+
+impl BackgroundBudget {
+    fn new(capacity: usize) -> Arc<Self> {
+        Arc::new(Self {
+            capacity: capacity.max(1),
+            active_streams: AtomicUsize::new(0),
+            in_flight: AtomicUsize::new(0),
+            changed: Notify::new(),
+        })
+    }
+
+    fn effective_capacity(&self) -> usize {
+        let streams = self.active_streams.load(Ordering::Acquire);
+        let reserve = streams
+            .saturating_mul(2)
+            .min(self.capacity.saturating_sub(1));
+        self.capacity.saturating_sub(reserve).max(1)
+    }
+
+    async fn acquire(self: &Arc<Self>) -> BackgroundPermit {
+        loop {
+            let notified = self.changed.notified();
+            let cap = self.effective_capacity();
+            let current = self.in_flight.load(Ordering::Acquire);
+            if current < cap
+                && self
+                    .in_flight
+                    .compare_exchange_weak(
+                        current,
+                        current + 1,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    )
+                    .is_ok()
+            {
+                return BackgroundPermit {
+                    budget: self.clone(),
+                };
+            }
+            notified.await;
+        }
+    }
+
+    fn stream_started(&self) {
+        self.active_streams.fetch_add(1, Ordering::AcqRel);
+        self.changed.notify_waiters();
+    }
+
+    fn stream_ended(&self) {
+        let _ = self
+            .active_streams
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_sub(1));
+        self.changed.notify_waiters();
+    }
+}
+
+struct BackgroundPermit {
+    budget: Arc<BackgroundBudget>,
+}
+
+impl Drop for BackgroundPermit {
+    fn drop(&mut self) {
+        self.budget.in_flight.fetch_sub(1, Ordering::AcqRel);
+        self.budget.changed.notify_one();
+    }
+}
+
+/// A workload-bound view of the NNTP pool.
+///
+/// Callers choose a profile once when they create a reader or background job;
+/// individual article requests cannot assign their own priority. This keeps
+/// dispatch policy inside the pool while retaining the urgent/normal lanes
+/// used by nntppool-style schedulers.
+#[derive(Clone)]
+pub struct NntpClient {
+    pool: Arc<NntpPool>,
+    lane: WorkloadLane,
+    background: bool,
+}
+
+impl NntpClient {
+    pub(crate) async fn fetch_body(
+        &self,
+        message_id: &str,
+    ) -> Result<crate::bufpool::PooledBuf, NntpError> {
+        let _permit = if self.background {
+            Some(self.pool.background.acquire().await)
+        } else {
+            None
+        };
+        self.pool.fetch_body(message_id, self.lane).await
+    }
+
+    pub async fn stat(&self, message_id: &str) -> Result<bool, NntpError> {
+        let _permit = if self.background {
+            Some(self.pool.background.acquire().await)
+        } else {
+            None
+        };
+        self.pool.stat(message_id, self.lane).await
+    }
+
+    pub fn capacity(&self) -> usize {
+        self.pool.total_capacity()
+    }
 }
 
 impl NntpPool {
@@ -263,18 +363,17 @@ impl NntpPool {
                 .cmp(&b.is_backup)
                 .then(a.priority.cmp(&b.priority))
         });
-        let slots = providers
+        let slots: Vec<ProviderSlot> = providers
             .into_iter()
             .map(|p| {
-                let permits = PrioritizedSemaphore::new(p.config.max_connections.max(1) as usize);
+                let permits = ConnectionSlots::new(p.config.max_connections.max(1) as usize);
                 ProviderSlot {
                     provider: p,
                     permits,
                     queues: Arc::new(Mutex::new(SlotQueues {
                         idle: VecDeque::new(),
-                        waiters_high: VecDeque::new(),
-                        waiters_low: VecDeque::new(),
-                        accumulated: 0,
+                        playback_waiters: VecDeque::new(),
+                        bulk_waiters: VecDeque::new(),
                     })),
                     breaker: Arc::new(CircuitBreaker::new()),
                     bytes_downloaded: AtomicU64::new(0),
@@ -282,9 +381,47 @@ impl NntpPool {
                 }
             })
             .collect();
-        let pool = Arc::new(Self { slots });
+        let capacity = slots
+            .iter()
+            .filter(|s| !s.provider.is_backup)
+            .map(|s| s.provider.config.max_connections.max(1) as usize)
+            .sum::<usize>()
+            .max(1);
+        let pool = Arc::new(Self {
+            slots,
+            background: BackgroundBudget::new(capacity),
+        });
         Self::spawn_reaper(Arc::downgrade(&pool));
         pool
+    }
+
+    /// Client used by a stateful playback reader. Requests enter the pool's
+    /// latency-sensitive lane for the lifetime of that reader.
+    pub fn playback_client(self: &Arc<Self>) -> NntpClient {
+        NntpClient {
+            pool: self.clone(),
+            lane: WorkloadLane::Playback,
+            background: false,
+        }
+    }
+
+    /// Client used by import, health, precache, and repair jobs. Capacity is
+    /// still owned by the provider pool; background admission is layered
+    /// above this client rather than encoded as per-request priorities.
+    pub fn bulk_client(self: &Arc<Self>) -> NntpClient {
+        NntpClient {
+            pool: self.clone(),
+            lane: WorkloadLane::Bulk,
+            background: true,
+        }
+    }
+
+    pub fn stream_started(&self) {
+        self.background.stream_started();
+    }
+
+    pub fn stream_ended(&self) {
+        self.background.stream_ended();
     }
 
     /// Per-provider health snapshot in pool order (primaries first, then
@@ -341,60 +478,16 @@ impl NntpPool {
         }
     }
 
-    /// Pre-establish up to `PREWARM_CAP` authenticated connections per
-    /// provider so the first stream request finds hot sockets in the pool.
-    /// Failures are logged and skipped; callers dial on demand instead.
-    pub async fn prewarm(&self) {
-        for slot in &self.slots {
-            super::connection::warm_dns(&slot.provider.config.host, slot.provider.config.port)
-                .await;
-            let target = (slot.provider.config.max_connections as usize).min(PREWARM_CAP);
-            let mut handles = Vec::with_capacity(target);
-            for _ in 0..target {
-                let cfg = slot.provider.config.clone();
-                let permits = slot.permits.clone();
-                let queues = slot.queues.clone();
-                let host = cfg.host.clone();
-                handles.push(tokio::spawn(async move {
-                    let permit = permits.acquire_owned(Priority::Low).await;
-                    match NntpConnection::connect(&cfg).await {
-                        Ok(conn) => {
-                            queues.lock().idle.push_back(Idle {
-                                conn,
-                                permit,
-                                last_used: Instant::now(),
-                            });
-                        }
-                        Err(e) => {
-                            drop(permit);
-                            tracing::debug!(host = %host, error = %e, "NNTP prewarm dial failed");
-                        }
-                    }
-                }));
-            }
-            for h in handles {
-                drop(h.await);
-            }
-            let warmed = slot.queues.lock().idle.len();
-            tracing::info!(
-                host = %slot.provider.config.host,
-                warmed,
-                target,
-                "NNTP pool prewarmed"
-            );
-        }
-    }
-
     /// How long a waiter blocks on a direct hand-off before looping back to
     /// re-check the idle pool and permit availability. A hand-off from
     /// `release()` normally resolves this almost instantly; the timeout is
     /// only a safety net for the paths that free a permit without a live
     /// connection to hand off (idle-timeout reaper, transient-error drop),
     /// which wake the semaphore's own (otherwise-unused) queue rather than
-    /// `waiters_high`/`waiters_low`.
+    /// the workload waiter queues.
     const WAITER_RETRY_INTERVAL: Duration = Duration::from_secs(2);
 
-    async fn acquire(&self, slot_idx: usize, priority: Priority) -> Result<Checkout, NntpError> {
+    async fn acquire(&self, slot_idx: usize, lane: WorkloadLane) -> Result<Checkout, NntpError> {
         let slot = &self.slots[slot_idx];
         let mut too_many_connections_retries: u32 = 0;
 
@@ -493,7 +586,7 @@ impl NntpPool {
             // (which we just drained). Register for a direct hand-off
             // instead of blocking on the semaphore: `release()` sends a
             // freed connection straight to the front of this queue, so a
-            // high-priority streaming read never queues behind whatever the
+            // playback read never queues behind whatever the
             // reaper's 20s IDLE_TIMEOUT happens to be doing.
             //
             // The recheck-and-register below holds `queues`' lock for both
@@ -518,9 +611,9 @@ impl NntpPool {
                         slot_idx,
                     });
                 }
-                match priority {
-                    Priority::High => guard.waiters_high.push_back(tx),
-                    Priority::Low => guard.waiters_low.push_back(tx),
+                match lane {
+                    WorkloadLane::Playback => guard.playback_waiters.push_back(tx),
+                    WorkloadLane::Bulk => guard.bulk_waiters.push_back(tx),
                 }
             }
             match tokio::time::timeout(Self::WAITER_RETRY_INTERVAL, rx).await {
@@ -599,7 +692,7 @@ impl NntpPool {
     /// Runs `op` against providers in health/priority order, returning the
     /// value and the index of the slot that served it (so callers can attribute
     /// per-provider traffic).
-    async fn try_each<F, Fut, T>(&self, priority: Priority, op: F) -> Result<(T, usize), NntpError>
+    async fn try_each<F, Fut, T>(&self, lane: WorkloadLane, op: F) -> Result<(T, usize), NntpError>
     where
         F: Fn(NntpConnection) -> Fut,
         Fut: std::future::Future<Output = (NntpConnection, Result<T, NntpError>)>,
@@ -622,7 +715,7 @@ impl NntpPool {
             let host = self.slots[slot_idx].provider.config.host.clone();
             let is_backup = self.slots[slot_idx].provider.is_backup;
             let breaker = self.slots[slot_idx].breaker.clone();
-            let checkout = match self.acquire(slot_idx, priority).await {
+            let checkout = match self.acquire(slot_idx, lane).await {
                 Ok(c) => c,
                 Err(e) => {
                     tracing::debug!(
@@ -689,11 +782,11 @@ impl NntpPool {
     pub(crate) async fn fetch_body(
         &self,
         message_id: &str,
-        priority: Priority,
+        lane: WorkloadLane,
     ) -> Result<crate::bufpool::PooledBuf, NntpError> {
         let mid = message_id.to_string();
         let (buf, slot_idx) = self
-            .try_each(priority, |mut conn| {
+            .try_each(lane, |mut conn| {
                 let mid = mid.clone();
                 async move {
                     let r = conn.fetch_body(&mid).await;
@@ -732,21 +825,13 @@ impl NntpPool {
     }
 
     pub fn download_concurrency(&self) -> usize {
-        self.total_capacity().min(MAX_DOWNLOAD_CONNECTIONS)
+        self.total_capacity()
     }
 
-    /// Fixed per-ingest fan-out cap (see [`INGEST_CONNECTIONS`]), bounded by the
-    /// pool's own capacity so a tiny account never asks for more than it has.
-    /// One ingest can't take the whole pool — letting `pool ÷ INGEST_CONNECTIONS`
-    /// ingests run at once.
-    pub fn ingest_concurrency(&self) -> usize {
-        self.total_capacity().clamp(1, INGEST_CONNECTIONS)
-    }
-
-    pub async fn stat(&self, message_id: &str, priority: Priority) -> Result<bool, NntpError> {
+    async fn stat(&self, message_id: &str, lane: WorkloadLane) -> Result<bool, NntpError> {
         let mid = message_id.to_string();
         let (exists, _slot_idx) = self
-            .try_each(priority, |mut conn| {
+            .try_each(lane, |mut conn| {
                 let mid = mid.clone();
                 async move {
                     let r = conn.stat(&mid).await;
@@ -827,16 +912,18 @@ mod tests {
         let (addr, _server) = spawn_fake_nntp_server().await;
         let pool = NntpPool::new_multi(vec![test_provider(addr, 1)]);
 
-        let checkout1 = pool.acquire(0, Priority::High).await.unwrap();
+        let checkout1 = pool.acquire(0, WorkloadLane::Playback).await.unwrap();
         pool.release(checkout1);
         assert_eq!(pool.slots[0].queues.lock().idle.len(), 1);
         assert_eq!(pool.slots[0].permits.available_permits(), 0);
 
-        let checkout2 =
-            tokio::time::timeout(Duration::from_millis(500), pool.acquire(0, Priority::High))
-                .await
-                .expect("acquire should reuse the idle connection promptly, not wait on the reaper")
-                .unwrap();
+        let checkout2 = tokio::time::timeout(
+            Duration::from_millis(500),
+            pool.acquire(0, WorkloadLane::Playback),
+        )
+        .await
+        .expect("acquire should reuse the idle connection promptly, not wait on the reaper")
+        .unwrap();
         pool.release(checkout2);
     }
 
@@ -850,21 +937,22 @@ mod tests {
         let (addr, _server) = spawn_fake_nntp_server().await;
         let pool = NntpPool::new_multi(vec![test_provider(addr, 1)]);
 
-        let checkout1 = pool.acquire(0, Priority::High).await.unwrap();
+        let checkout1 = pool.acquire(0, WorkloadLane::Playback).await.unwrap();
         assert_eq!(pool.slots[0].permits.available_permits(), 0);
 
         let waiter_pool = pool.clone();
-        let waiter = tokio::spawn(async move { waiter_pool.acquire(0, Priority::High).await });
+        let waiter =
+            tokio::spawn(async move { waiter_pool.acquire(0, WorkloadLane::Playback).await });
 
         // Wait for observable proof the waiter has actually registered in
-        // `waiters_high`, rather than assuming a fixed sleep is long enough.
+        // `playback_waiters`, rather than assuming a fixed sleep is long enough.
         for _ in 0..1000 {
-            if pool.slots[0].queues.lock().waiters_high.len() == 1 {
+            if pool.slots[0].queues.lock().playback_waiters.len() == 1 {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(1)).await;
         }
-        assert_eq!(pool.slots[0].queues.lock().waiters_high.len(), 1);
+        assert_eq!(pool.slots[0].queues.lock().playback_waiters.len(), 1);
 
         pool.release(checkout1);
 
@@ -876,47 +964,21 @@ mod tests {
         pool.release(checkout2);
     }
 
-    /// Regression test for the connection-pool-starvation fix's weighted
-    /// hand-off: with both queues continuously non-empty, `next_waiter()`
-    /// must still surface Low waiters periodically (bounded by `HIGH_ODDS`)
-    /// rather than draining `waiters_high` to empty before ever touching
-    /// `waiters_low`, which is what let a continuously-busy stream starve
-    /// background ingest indefinitely.
     #[test]
-    fn low_priority_waiter_is_not_starved_by_continuous_high_priority_demand() {
+    fn playback_waiter_is_handed_off_before_bulk() {
         let mut queues = SlotQueues {
             idle: VecDeque::new(),
-            waiters_high: VecDeque::new(),
-            waiters_low: VecDeque::new(),
-            accumulated: 0,
+            playback_waiters: VecDeque::new(),
+            bulk_waiters: VecDeque::new(),
         };
+        let (bulk_tx, _bulk_rx) = oneshot::channel::<Idle>();
+        let (playback_tx, _playback_rx) = oneshot::channel::<Idle>();
+        queues.bulk_waiters.push_back(bulk_tx);
+        queues.playback_waiters.push_back(playback_tx);
 
-        // One Low waiter parked once; High waiters keep refilling after each
-        // hand-off, simulating continuous streaming demand contending with a
-        // single background ingest request.
-        let (low_tx, _low_rx) = oneshot::channel::<Idle>();
-        queues.waiters_low.push_back(low_tx);
-
-        let mut low_served = false;
-        for _ in 0..100 {
-            if queues.waiters_high.is_empty() {
-                let (tx, _rx) = oneshot::channel::<Idle>();
-                queues.waiters_high.push_back(tx);
-            }
-            // Drop the picked sender to simulate the hand-off completing,
-            // same as `release()` does after a successful `tx.send`.
-            drop(queues.next_waiter());
-            if queues.waiters_low.is_empty() {
-                low_served = true;
-                break;
-            }
-        }
-
-        assert!(
-            low_served,
-            "Low waiter should have been served within a bounded number of \
-             contested hand-offs under continuous High demand"
-        );
+        drop(queues.next_waiter());
+        assert!(queues.playback_waiters.is_empty());
+        assert_eq!(queues.bulk_waiters.len(), 1);
     }
 
     /// Regression test for a narrower TOCTOU race in the two tests above:
@@ -954,7 +1016,7 @@ mod tests {
                 let pool = pool.clone();
                 handles.push(tokio::spawn(async move {
                     for _ in 0..ITERATIONS_PER_WORKER {
-                        let checkout = pool.acquire(0, Priority::High).await.unwrap();
+                        let checkout = pool.acquire(0, WorkloadLane::Playback).await.unwrap();
                         // Yield to encourage real interleaving between
                         // acquires and releases across workers.
                         tokio::task::yield_now().await;
@@ -973,5 +1035,40 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(1), run)
             .await
             .expect("concurrent acquire/release contention must never stall on the retry interval");
+    }
+
+    #[tokio::test]
+    async fn background_budget_reserves_capacity_for_active_streams() {
+        let budget = BackgroundBudget::new(10);
+        budget.stream_started();
+        assert_eq!(budget.effective_capacity(), 8);
+
+        let mut held = Vec::new();
+        for _ in 0..8 {
+            held.push(budget.acquire().await);
+        }
+
+        let blocked_budget = budget.clone();
+        let blocked = tokio::spawn(async move { blocked_budget.acquire().await });
+        tokio::task::yield_now().await;
+        assert!(!blocked.is_finished());
+
+        budget.stream_ended();
+        let permit = tokio::time::timeout(Duration::from_millis(250), blocked)
+            .await
+            .expect("growing the adaptive budget must wake a waiter")
+            .unwrap();
+        drop(permit);
+        drop(held);
+    }
+
+    #[test]
+    fn background_budget_never_underflows_stream_count_or_capacity() {
+        let budget = BackgroundBudget::new(1);
+        budget.stream_ended();
+        assert_eq!(budget.active_streams.load(Ordering::Acquire), 0);
+        budget.stream_started();
+        budget.stream_started();
+        assert_eq!(budget.effective_capacity(), 1);
     }
 }

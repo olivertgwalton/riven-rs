@@ -4,7 +4,7 @@ use bytes::Bytes;
 use futures::StreamExt;
 use futures::stream;
 
-use crate::nntp::{NntpError, Priority};
+use crate::nntp::{NntpClient, NntpError};
 use crate::nzb::NzbSegment;
 use crate::state::{FetchEntry, PromiseSlot, StreamerState};
 use crate::yenc;
@@ -20,9 +20,6 @@ const NNTP_FETCH_ATTEMPTS: usize = 3;
 /// Base backoff between retries (linear, not exponential — NNTP errors
 /// are usually transient connectivity issues that clear within a second).
 const NNTP_RETRY_DELAY_MS: u64 = 300;
-/// Speculative cache warming must leave capacity for the foreground range
-/// reads that feed the media server. Exact reads retain the pool-wide cap.
-const STREAM_PREFETCH_CONCURRENCY: usize = 8;
 
 impl UsenetStreamer {
     /// Fetch and yEnc-decode a segment's body. Routes through the LRU
@@ -33,12 +30,12 @@ impl UsenetStreamer {
     /// only one NNTP `BODY` round-trip happens and both observers share
     /// the result via a `Notify` promise.
     ///
-    /// `priority` is passed through to the NNTP pool: streaming reads
-    /// use `Priority::High`; background ingest uses `Priority::Low`.
+    /// The workload-bound client owns dispatch policy for the whole reader or
+    /// job; individual segments do not assign their own priority.
     pub(crate) async fn fetch_decoded_cached(
         &self,
+        client: &NntpClient,
         message_id: &str,
-        priority: Priority,
     ) -> Result<Bytes, StreamerError> {
         loop {
             if let Some(hit) = self.state.cache.get(message_id) {
@@ -87,7 +84,7 @@ impl UsenetStreamer {
                         finished: false,
                     };
 
-                    let result = self.do_fetch_with_retry(message_id, priority).await;
+                    let result = self.do_fetch_with_retry(client, message_id).await;
                     if let Ok(bytes) = &result {
                         let size = bytes.len() as u64;
                         self.state.cache.put(mid.clone(), bytes.clone());
@@ -105,14 +102,14 @@ impl UsenetStreamer {
     /// the caller's responsibility — keeps this fn purely about fetching.
     async fn do_fetch_with_retry(
         &self,
+        client: &NntpClient,
         message_id: &str,
-        priority: Priority,
     ) -> Result<Bytes, StreamerError> {
         let mut last_err: Option<NntpError> = None;
         for attempt in 0..NNTP_FETCH_ATTEMPTS {
             tracing::debug!(attempt, message_id, "nntp fetch starting");
             let started = std::time::Instant::now();
-            match self.pool.fetch_body(message_id, priority).await {
+            match client.fetch_body(message_id).await {
                 Ok(body) => {
                     let wire_ms = started.elapsed().as_millis();
                     let encoded_len = body.len();
@@ -173,10 +170,9 @@ impl UsenetStreamer {
     }
 
     /// Background-warm the segment cache for the segments that overlap
-    /// `[start, end_inclusive]` of `file_index`. Concurrency is capped at
-    /// `STREAM_PREFETCH_CONCURRENCY`, and globally serialized across open
-    /// files. The cache is opportunistic: actual bytes requested by the
-    /// media server retain `Priority::High`; warming runs at `Priority::Low`.
+    /// `[start, end_inclusive]` of `file_index`. Provider capacity and the
+    /// adaptive bulk budget own concurrency; this method does not add another
+    /// hardcoded connection limit.
     pub async fn prefetch_range(
         &self,
         info_hash: &str,
@@ -184,15 +180,6 @@ impl UsenetStreamer {
         start: u64,
         end_inclusive: u64,
     ) {
-        let Ok(_prefetch_permit) = self.state.stream_prefetch_sem.acquire().await else {
-            return;
-        };
-        let prefetch_concurrency = self
-            .pool
-            .download_concurrency()
-            .min(STREAM_PREFETCH_CONCURRENCY)
-            .max(PREFETCH_FLOOR);
-
         let Ok(meta) = self.load_meta(info_hash).await else {
             return;
         };
@@ -237,6 +224,95 @@ impl UsenetStreamer {
             }
         };
 
+        let client = self.pool.bulk_client();
+        self.prefetch_mids(client, mids).await;
+    }
+
+    /// Fill a playback reader's ordered segment window beginning at `start`.
+    /// The window is expressed in NZB transfer units rather than guessed
+    /// bytes, so high-bitrate files naturally maintain the same number of
+    /// completed articles ahead of the consumer.
+    pub async fn prefetch_window(
+        &self,
+        info_hash: &str,
+        file_index: usize,
+        start: u64,
+        max_segments: usize,
+    ) {
+        if max_segments == 0 {
+            return;
+        }
+        let Ok(meta) = self.load_meta(info_hash).await else {
+            return;
+        };
+        let Some(file) = meta.files.get(file_index) else {
+            return;
+        };
+        if start >= file.total_size {
+            return;
+        }
+
+        let mids = match &file.source {
+            NzbMetaSource::Direct { offsets, segments } => {
+                let first = offsets
+                    .partition_point(|&offset| offset <= start)
+                    .saturating_sub(1)
+                    .min(segments.len().saturating_sub(1));
+                segments
+                    .iter()
+                    .skip(first)
+                    .take(max_segments)
+                    .map(|segment| segment.message_id.clone())
+                    .collect()
+            }
+            NzbMetaSource::Rar { parts, slices } => {
+                let mut mids = Vec::with_capacity(max_segments);
+                let mut virtual_pos = 0u64;
+                for slice in slices {
+                    let slice_end = virtual_pos.saturating_add(slice.length);
+                    if slice_end <= start {
+                        virtual_pos = slice_end;
+                        continue;
+                    }
+                    let offset_in_slice = start.saturating_sub(virtual_pos);
+                    let offset_in_part = slice.start_in_part.saturating_add(offset_in_slice);
+                    if let Some(part) = parts.get(slice.part_index) {
+                        let first = part
+                            .decoded_seg_size
+                            .filter(|size| *size > 0)
+                            .map_or_else(
+                                || {
+                                    part.offsets
+                                        .partition_point(|&offset| offset <= offset_in_part)
+                                        .saturating_sub(1)
+                                },
+                                |size| (offset_in_part / size) as usize,
+                            )
+                            .min(part.segments.len().saturating_sub(1));
+                        for segment in part.segments.iter().skip(first) {
+                            if mids.len() >= max_segments {
+                                break;
+                            }
+                            if !mids.iter().any(|mid| mid == &segment.message_id) {
+                                mids.push(segment.message_id.clone());
+                            }
+                        }
+                    }
+                    if mids.len() >= max_segments {
+                        break;
+                    }
+                    virtual_pos = slice_end;
+                }
+                mids
+            }
+        };
+
+        let client = self.pool.playback_client();
+        self.prefetch_mids(client, mids).await;
+    }
+
+    async fn prefetch_mids(&self, client: NntpClient, mids: Vec<String>) {
+        let prefetch_concurrency = client.capacity().max(PREFETCH_FLOOR);
         let streamer = self.clone();
         let cold: Vec<String> = mids
             .into_iter()
@@ -245,7 +321,8 @@ impl UsenetStreamer {
         let mut stream = stream::iter(cold)
             .map(move |mid| {
                 let s = streamer.clone();
-                async move { s.fetch_decoded_cached(&mid, Priority::Low).await }
+                let client = client.clone();
+                async move { s.fetch_decoded_cached(&client, &mid).await }
             })
             .buffer_unordered(prefetch_concurrency);
         while stream.next().await.is_some() {}
@@ -348,14 +425,15 @@ impl UsenetStreamer {
                 self.read_direct(offsets, segments, start, end_inclusive)
                     .await
             }
-            NzbMetaSource::Rar { parts, slices } => self
-                .read_rar(
+            NzbMetaSource::Rar { parts, slices } => {
+                let client = self.pool.playback_client();
+                self.read_rar(
                     parts,
                     slices,
                     meta.password.as_deref(),
                     start,
                     end_inclusive,
-                    Priority::High,
+                    &client,
                 )
                 .await
                 .map(|buf| {
@@ -364,7 +442,8 @@ impl UsenetStreamer {
                     } else {
                         vec![buf]
                     }
-                }),
+                })
+            }
         };
 
         if let Err(StreamerError::Nntp(NntpError::ArticleNotFound(status))) = &result {
@@ -407,7 +486,8 @@ impl UsenetStreamer {
 
         let (first, last) = direct_segment_span(offsets, segments.len(), start, end_inclusive);
         let mut skip = start.saturating_sub(offsets[first]) as usize;
-        let read_concurrency = self.pool.download_concurrency().max(PREFETCH_FLOOR);
+        let client = self.pool.playback_client();
+        let read_concurrency = client.capacity().max(PREFETCH_FLOOR);
 
         let mut slices: Vec<Bytes> = Vec::new();
         let mut produced: usize = 0;
@@ -425,12 +505,14 @@ impl UsenetStreamer {
         let mut batch_last = (last + 2).min(segments.len() - 1);
         loop {
             let streamer = self.clone();
+            let batch_client = client.clone();
             let mut stream = stream::iter(batch_start..=batch_last)
                 .map(move |i| {
                     let s = streamer.clone();
+                    let client = batch_client.clone();
                     async move {
                         let mid = &segments[i].message_id;
-                        s.fetch_decoded_cached(mid, Priority::High).await
+                        s.fetch_decoded_cached(&client, mid).await
                     }
                 })
                 .buffered(read_concurrency);

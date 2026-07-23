@@ -7,7 +7,7 @@ use anyhow::Result;
 use redis::AsyncCommands;
 use riven_core::settings::PluginSettings;
 use riven_usenet::UsenetStreamer;
-use riven_usenet::nntp::NntpPool;
+use riven_usenet::nntp::NntpClient;
 use riven_usenet::nzb::NzbSegment;
 use riven_usenet::streamer::{NzbMeta, NzbMetaSource};
 use sea_orm::{DbBackend, FromQueryResult, Statement};
@@ -146,7 +146,8 @@ async fn run_once(
         }
         summary.checked += 1;
         let pool = streamer.pool();
-        let (alive, total) = stat_sample(pool.as_ref(), &segments).await;
+        let client = pool.bulk_client();
+        let (alive, total) = stat_sample(&client, &segments).await;
         if total == 0 {
             set_state(&mut redis, &key, &prior, FAILURE_BACKOFF).await;
             continue;
@@ -263,15 +264,12 @@ fn sample_segments(meta: &NzbMeta) -> Vec<NzbSegment> {
     indices.into_iter().map(|i| all[i].clone()).collect()
 }
 
-async fn stat_sample(pool: &NntpPool, segments: &[NzbSegment]) -> (usize, usize) {
+async fn stat_sample(client: &NntpClient, segments: &[NzbSegment]) -> (usize, usize) {
     let mut alive = 0usize;
     let mut total = 0usize;
     for seg in segments {
         total += 1;
-        match pool
-            .stat(&seg.message_id, riven_usenet::nntp::Priority::Low)
-            .await
-        {
+        match client.stat(&seg.message_id).await {
             Ok(true) => alive += 1,
             Ok(false) => {}
             Err(error) => {
