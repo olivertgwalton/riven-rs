@@ -1,4 +1,5 @@
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use tokio::io::BufReader;
@@ -41,9 +42,27 @@ fn is_too_many_connections(status: &str) -> bool {
 }
 
 /// Connect to the first reachable address, returning the last error if none work.
+/// Rotating start index so successive dials spread over every address the
+/// host resolves to.
+///
+/// [`resolve_cached`] returns a *stable, cached* order, so a plain
+/// first-success loop sends every connection in the pool to `addrs[0]`: a
+/// 100-connection account funnels into one server while its siblings sit
+/// unused. Aggregate throughput then caps at whatever that single endpoint
+/// allows, and adding connections only queues more work behind the same
+/// bottleneck rather than fetching faster.
+static DIAL_ROTATION: AtomicUsize = AtomicUsize::new(0);
+
+/// Connect to one of `addrs`, starting from a rotating offset and falling
+/// back through the rest so a single dead address still fails over.
 async fn connect_first(addrs: &[SocketAddr]) -> Result<TcpStream, NntpError> {
+    if addrs.is_empty() {
+        return Err(std::io::Error::other("no addresses to connect").into());
+    }
+    let start = DIAL_ROTATION.fetch_add(1, Ordering::Relaxed);
     let mut last_err: Option<std::io::Error> = None;
-    for addr in addrs {
+    for offset in 0..addrs.len() {
+        let addr = addrs[start.wrapping_add(offset) % addrs.len()];
         match TcpStream::connect(addr).await {
             Ok(stream) => return Ok(stream),
             Err(error) => last_err = Some(error),

@@ -16,6 +16,8 @@ use super::{NzbMetaSource, StreamerError, UsenetStreamer, concat_slices, segment
 const NNTP_FETCH_ATTEMPTS: usize = 3;
 /// Base backoff between retries (linear, not exponential — NNTP errors
 /// are usually transient connectivity issues that clear within a second).
+/// Skipped entirely after a timeout, which has already waited out its own
+/// deadline on a connection the pool then discarded.
 const NNTP_RETRY_DELAY_MS: u64 = 300;
 
 impl UsenetStreamer {
@@ -159,6 +161,13 @@ impl UsenetStreamer {
                 }
                 Err(e) => {
                     let elapsed_ms = started.elapsed().as_millis();
+                    // A timeout already spent its whole deadline waiting, and
+                    // the pool dropped that connection — the retry dials or
+                    // pops a different one, so there is nothing to back off
+                    // from. Sleeping would only extend a stall the player is
+                    // already feeling.
+                    let timed_out =
+                        matches!(e, NntpError::Timeout | NntpError::DeadlineExceeded);
                     tracing::warn!(
                         attempt,
                         message_id,
@@ -168,7 +177,7 @@ impl UsenetStreamer {
                         "nntp fetch failed; retrying"
                     );
                     last_err = Some(e);
-                    if attempt + 1 < NNTP_FETCH_ATTEMPTS {
+                    if attempt + 1 < NNTP_FETCH_ATTEMPTS && !timed_out {
                         tokio::time::sleep(std::time::Duration::from_millis(NNTP_RETRY_DELAY_MS))
                             .await;
                     }
