@@ -11,6 +11,7 @@ use riven_core::events::{EventType, HookResponse, RivenEvent};
 use riven_core::types::*;
 use riven_db::entities::{MediaItem, Stream};
 use riven_db::repo;
+use riven_core::downloader::BitrateLimits;
 use riven_rank::RankSettings;
 use serde::Deserialize;
 
@@ -303,13 +304,6 @@ pub async fn run(id: i64, job: &DownloadJob, queue: &JobQueue) {
         return;
     }
 
-    let is_manual = job.preferred_info_hash.is_some();
-    let (max_size_bytes, min_size_bytes) = if is_manual {
-        (None, None)
-    } else {
-        load_bitrate_limits(queue, &item).await
-    };
-
     let plugin_providers = build_plugin_provider_iterations(queue).await;
     let mut cache = CacheMemo::new(all_streams.iter().map(|s| s.info_hash.clone()).collect());
 
@@ -346,8 +340,6 @@ pub async fn run(id: i64, job: &DownloadJob, queue: &JobQueue) {
             &plugin_providers,
             &mut cache,
             hierarchy.as_ref(),
-            max_size_bytes,
-            min_size_bytes,
         )
         .await;
     }
@@ -496,25 +488,37 @@ async fn build_plugin_provider_iterations(queue: &JobQueue) -> Vec<(String, Opti
     out
 }
 
-async fn load_bitrate_limits(queue: &JobQueue, item: &MediaItem) -> (Option<u64>, Option<u64>) {
-    let config = queue.downloader_config.read().await;
-    let bitrate_threshold = |movies: Option<u32>, episodes: Option<u32>| {
+/// Convert a ranking profile's bitrate settings into runtime [`BitrateLimits`].
+fn profile_bitrate_limits(settings: &RankSettings) -> BitrateLimits {
+    BitrateLimits {
+        minimum_average_bitrate_movies: settings.bitrate.minimum_average_bitrate_movies,
+        minimum_average_bitrate_episodes: settings.bitrate.minimum_average_bitrate_episodes,
+        maximum_average_bitrate_movies: settings.bitrate.maximum_average_bitrate_movies,
+        maximum_average_bitrate_episodes: settings.bitrate.maximum_average_bitrate_episodes,
+    }
+}
+
+/// Resolve the min/max file-size bounds (in bytes) that a profile's bitrate
+/// limits imply for this item, given its type and runtime. `None` for either
+/// bound means "no limit".
+fn profile_size_bounds(limits: &BitrateLimits, item: &MediaItem) -> (Option<u64>, Option<u64>) {
+    let bound = |movies: Option<u32>, episodes: Option<u32>| {
         let mbps = match item.item_type {
             MediaItemType::Movie => movies,
             MediaItemType::Episode => episodes,
             _ => None,
         };
         mbps.zip(item.runtime)
-            .map(|(m, rt)| riven_core::downloader::DownloaderConfig::threshold_bytes(m, rt))
+            .map(|(m, rt)| BitrateLimits::threshold_bytes(m, rt))
     };
 
-    let max_size_bytes = bitrate_threshold(
-        config.maximum_average_bitrate_movies,
-        config.maximum_average_bitrate_episodes,
+    let max_size_bytes = bound(
+        limits.maximum_average_bitrate_movies,
+        limits.maximum_average_bitrate_episodes,
     );
-    let min_size_bytes = bitrate_threshold(
-        config.minimum_average_bitrate_movies,
-        config.minimum_average_bitrate_episodes,
+    let min_size_bytes = bound(
+        limits.minimum_average_bitrate_movies,
+        limits.minimum_average_bitrate_episodes,
     );
     (max_size_bytes, min_size_bytes)
 }
@@ -569,7 +573,7 @@ async fn run_preferred_stream(
         let stores = stores_for_attempt(provider, cached_files);
 
         match attempt_download(
-            id, item, queue, stream, stores, None, None, start_time, hierarchy, true,
+            id, item, queue, stream, stores, None, None, start_time, hierarchy, None,
         )
         .await
         {
@@ -609,8 +613,6 @@ async fn run_downloads(
     plugin_providers: &[(String, Option<String>)],
     cache: &mut CacheMemo,
     hierarchy: Option<&DownloadHierarchyContext>,
-    max_size_bytes: Option<u64>,
-    min_size_bytes: Option<u64>,
 ) -> bool {
     let mut done_profiles: HashSet<String> = fetch_done_profiles(id, item.item_type)
         .await
@@ -647,6 +649,9 @@ async fn run_downloads(
             );
             continue;
         }
+
+        let bitrate_limits = profile_bitrate_limits(profile_settings);
+        let (max_size_bytes, min_size_bytes) = profile_size_bounds(&bitrate_limits, item);
 
         let mut profile_done = false;
         'streams: for stream in ranked {
@@ -717,7 +722,7 @@ async fn run_downloads(
                     Some(profile_name.as_str()),
                     start_time,
                     hierarchy,
-                    false,
+                    Some(bitrate_limits),
                 )
                 .await
                 {

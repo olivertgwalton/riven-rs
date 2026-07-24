@@ -15,7 +15,7 @@ pub async fn persist_movie(
     resolution: Option<&str>,
     path_tag: Option<&str>,
     profile_name: Option<&str>,
-    skip_bitrate_check: bool,
+    bitrate: Option<riven_core::downloader::BitrateLimits>,
 ) -> bool {
     let id = item.id;
 
@@ -57,9 +57,9 @@ pub async fn persist_movie(
         return false;
     };
 
-    let config = queue.downloader_config.read().await;
-    if !skip_bitrate_check && !config.movie_passes(file.file_size, item.runtime) {
-        drop(config);
+    if let Some(limits) = &bitrate
+        && !limits.movie_passes(file.file_size, item.runtime)
+    {
         handle_bitrate_failure(
             id,
             info_hash,
@@ -71,7 +71,6 @@ pub async fn persist_movie(
         .await;
         return false;
     }
-    drop(config);
 
     if !has_playable_url(file) {
         // See the "torrent has no files" branch above: blacklist and let
@@ -149,7 +148,7 @@ pub async fn persist_episode(
     resolution: Option<&str>,
     path_tag: Option<&str>,
     profile_name: Option<&str>,
-    skip_bitrate_check: bool,
+    bitrate: Option<riven_core::downloader::BitrateLimits>,
 ) -> bool {
     let id = item.id;
 
@@ -258,9 +257,9 @@ pub async fn persist_episode(
     }
 
     let largest = matched.iter().max_by_key(|(f, _)| f.file_size).unwrap().0;
-    let config = queue.downloader_config.read().await;
-    if !skip_bitrate_check && !config.episode_passes(largest.file_size, item.runtime) {
-        drop(config);
+    if let Some(limits) = &bitrate
+        && !limits.episode_passes(largest.file_size, item.runtime)
+    {
         handle_bitrate_failure(
             id,
             info_hash,
@@ -272,7 +271,6 @@ pub async fn persist_episode(
         .await;
         return false;
     }
-    drop(config);
 
     let show_name = pretty_show_name(hierarchy, &item.title);
     for (file, part) in select_episode_files(&matched) {

@@ -867,6 +867,18 @@ impl Default for FetchRankOptions {
     }
 }
 
+/// Per-profile minimum/maximum average-bitrate limits (Mbps). `None` = no
+/// limit. Applied at download/persist time to reject streams whose file size
+/// (relative to runtime) falls outside the configured average bitrate.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BitrateSettings {
+    pub minimum_average_bitrate_movies: Option<u32>,
+    pub minimum_average_bitrate_episodes: Option<u32>,
+    pub maximum_average_bitrate_movies: Option<u32>,
+    pub maximum_average_bitrate_episodes: Option<u32>,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LanguageSettings {
@@ -901,6 +913,8 @@ pub struct RankSettings {
     pub options: RankOptions,
     pub languages: LanguageSettings,
     pub custom_ranks: CustomRanksConfig,
+    /// Per-profile average-bitrate limits. Defaults to no limits.
+    pub bitrate: BitrateSettings,
 }
 
 impl Default for RankSettings {
@@ -918,6 +932,7 @@ impl Default for RankSettings {
             options: RankOptions::default(),
             languages: LanguageSettings::default(),
             custom_ranks: CustomRanksConfig::default(),
+            bitrate: BitrateSettings::default(),
         }
     }
 }

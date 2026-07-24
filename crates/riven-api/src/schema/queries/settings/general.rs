@@ -35,22 +35,6 @@ fn general_settings_schema_fields(
                 .with_section("Scheduling")
                 .with_default("7")
                 .with_description("How many days to wait before rechecking an item with no known release date."),
-            SettingField::new("minimum_average_bitrate_movies", "Min bitrate — movies (Mbps)", FieldType::Number)
-                .with_section("Bitrate Limits")
-                .with_placeholder("Disabled")
-                .with_description("Reject movie streams below this average bitrate. Leave blank to disable."),
-            SettingField::new("minimum_average_bitrate_episodes", "Min bitrate — episodes (Mbps)", FieldType::Number)
-                .with_section("Bitrate Limits")
-                .with_placeholder("Disabled")
-                .with_description("Reject episode streams below this average bitrate. Leave blank to disable."),
-            SettingField::new("maximum_average_bitrate_movies", "Max bitrate — movies (Mbps)", FieldType::Number)
-                .with_section("Bitrate Limits")
-                .with_placeholder("Disabled")
-                .with_description("Skip movies above this bitrate (e.g. 50 to avoid large REMUXes). Leave blank to disable."),
-            SettingField::new("maximum_average_bitrate_episodes", "Max bitrate — episodes (Mbps)", FieldType::Number)
-                .with_section("Bitrate Limits")
-                .with_placeholder("Disabled")
-                .with_description("Reject episode streams above this average bitrate. Leave blank to disable."),
             SettingField::new("logging_enabled", "Application logging", FieldType::Boolean)
                 .with_section("Logging")
                 .with_description("Turn application logging on or off."),
@@ -144,10 +128,6 @@ async fn general_settings_values() -> Result<serde_json::Value> {
     let mut result = serde_json::json!({
         "dubbed_anime_only": defaults.dubbed_anime_only,
         "attempt_unknown_downloads": defaults.attempt_unknown_downloads,
-        "minimum_average_bitrate_movies": defaults.minimum_average_bitrate_movies,
-        "minimum_average_bitrate_episodes": defaults.minimum_average_bitrate_episodes,
-        "maximum_average_bitrate_movies": defaults.maximum_average_bitrate_movies,
-        "maximum_average_bitrate_episodes": defaults.maximum_average_bitrate_episodes,
         "retry_interval_secs": defaults.retry_interval_secs,
         "maximum_scrape_attempts": defaults.maximum_scrape_attempts,
         "schedule_offset_minutes": defaults.schedule_offset_minutes,
