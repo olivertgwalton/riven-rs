@@ -171,7 +171,6 @@ fn filesystem_filter_selections_serialize_include_and_exclude_explicitly() {
 #[test]
 fn apply_general_db_override_updates_supported_fields() {
     let mut settings = RivenSettings {
-        minimum_average_bitrate_movies: Some(10),
         retry_interval_secs: 60,
         ..RivenSettings::default()
     };
@@ -189,8 +188,6 @@ fn apply_general_db_override_updates_supported_fields() {
             }
         },
         "dubbed_anime_only": true,
-        "minimum_average_bitrate_movies": 15,
-        "maximum_average_bitrate_episodes": 20,
         "retry_interval_secs": 3600,
         "schedule_offset_minutes": 45,
         "unknown_air_date_offset_days": 3
@@ -199,8 +196,6 @@ fn apply_general_db_override_updates_supported_fields() {
     assert_eq!(settings.filesystem.mount_path, "");
     assert!(settings.filesystem.library_profiles.contains_key("kids"));
     assert!(settings.dubbed_anime_only);
-    assert_eq!(settings.minimum_average_bitrate_movies, Some(15));
-    assert_eq!(settings.maximum_average_bitrate_episodes, Some(20));
     assert_eq!(settings.retry_interval_secs, 3600);
     assert_eq!(settings.schedule_offset_minutes, 45);
     assert_eq!(settings.unknown_air_date_offset_days, 3);

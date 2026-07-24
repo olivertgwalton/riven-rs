@@ -19,7 +19,7 @@ pub async fn persist_supplied_download(
                 Some(stream_resolution(stream)),
                 None,
                 None,
-                true,
+                None,
             )
             .await
             {
@@ -49,7 +49,7 @@ pub async fn persist_supplied_download(
                 Some(stream_resolution(stream)),
                 None,
                 None,
-                true,
+                None,
             )
             .await
             {

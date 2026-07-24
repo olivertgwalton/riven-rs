@@ -32,7 +32,7 @@ use serde::de::DeserializeOwned;
 use tokio::sync::{RwLock, broadcast};
 use ulid::Ulid;
 
-pub use riven_core::downloader::DownloaderConfig;
+pub use riven_core::downloader::{BitrateLimits, DownloaderConfig};
 use riven_core::events::{DispatchStrategy, EventType, RivenEvent};
 use riven_core::plugin::PluginRegistry;
 use riven_core::reindex::ReindexConfig;

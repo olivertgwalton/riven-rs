@@ -29,7 +29,7 @@ pub async fn attempt_download(
     profile_name: Option<&str>,
     start_time: Instant,
     hierarchy: Option<&DownloadHierarchyContext>,
-    skip_bitrate_check: bool,
+    bitrate: Option<riven_core::downloader::BitrateLimits>,
 ) -> DownloadAttemptOutcome {
     let info_hash = &stream.info_hash;
     let stream_id = Some(stream.id);
@@ -193,7 +193,7 @@ pub async fn attempt_download(
                 resolution_ref,
                 path_tag,
                 profile_name,
-                skip_bitrate_check,
+                bitrate,
             )
             .await
             {
@@ -226,7 +226,7 @@ pub async fn attempt_download(
                 resolution_ref,
                 path_tag,
                 profile_name,
-                skip_bitrate_check,
+                bitrate,
             )
             .await
             {

@@ -167,6 +167,42 @@ pub(super) fn build_rank_settings_schema() -> Vec<SettingField> {
             ]),
     );
 
+    fields.push(
+        SettingField::new("bitrate", "Bitrate limits", FieldType::Object)
+            .with_section("Bitrate")
+            .with_display(Display::Grid)
+            .with_description(
+                "Reject streams whose average bitrate (file size relative to runtime) falls \
+                 outside these limits, for this profile only. Leave blank to disable.",
+            )
+            .with_fields(vec![
+                SettingField::new(
+                    "minimum_average_bitrate_movies",
+                    "Min bitrate — movies (Mbps)",
+                    FieldType::Number,
+                )
+                .with_placeholder("Disabled"),
+                SettingField::new(
+                    "minimum_average_bitrate_episodes",
+                    "Min bitrate — episodes (Mbps)",
+                    FieldType::Number,
+                )
+                .with_placeholder("Disabled"),
+                SettingField::new(
+                    "maximum_average_bitrate_movies",
+                    "Max bitrate — movies (Mbps)",
+                    FieldType::Number,
+                )
+                .with_placeholder("Disabled"),
+                SettingField::new(
+                    "maximum_average_bitrate_episodes",
+                    "Max bitrate — episodes (Mbps)",
+                    FieldType::Number,
+                )
+                .with_placeholder("Disabled"),
+            ]),
+    );
+
     let defaults = riven_rank::RankingModel::default().to_category_map();
     if let Some(categories) = defaults.as_object() {
         let category_fields: Vec<SettingField> = categories

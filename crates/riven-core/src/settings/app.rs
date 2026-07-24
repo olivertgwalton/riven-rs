@@ -38,14 +38,6 @@ pub struct RivenSettings {
     /// When true, torrents with unknown cache status are included as download candidates.
     /// Defaults to false because attempting unknown torrents degrades performance.
     pub attempt_unknown_downloads: bool,
-    /// Minimum average bitrate for movies (Mbps). `None` = disabled.
-    pub minimum_average_bitrate_movies: Option<u32>,
-    /// Minimum average bitrate for episodes (Mbps). `None` = disabled.
-    pub minimum_average_bitrate_episodes: Option<u32>,
-    /// Maximum average bitrate for movies (Mbps). `None` = disabled.
-    pub maximum_average_bitrate_movies: Option<u32>,
-    /// Maximum average bitrate for episodes (Mbps). `None` = disabled.
-    pub maximum_average_bitrate_episodes: Option<u32>,
 
     /// Retry items that have been stuck (failed_attempts > 0) for longer than
     /// this many seconds. 0 = disabled. Default: 600 (10 m). Controls the
@@ -100,10 +92,6 @@ impl Default for RivenSettings {
             gql_port: 8080,
             dubbed_anime_only: false,
             attempt_unknown_downloads: false,
-            minimum_average_bitrate_movies: None,
-            minimum_average_bitrate_episodes: None,
-            maximum_average_bitrate_movies: None,
-            maximum_average_bitrate_episodes: None,
             retry_interval_secs: 60 * 10, // 10 minutes
             maximum_scrape_attempts: 0,
             schedule_offset_minutes: 30,
@@ -162,22 +150,6 @@ impl RivenSettings {
         set_if_some(
             &mut self.attempt_unknown_downloads,
             setting_bool(settings, "attempt_unknown_downloads"),
-        );
-        set_option_if_some(
-            &mut self.minimum_average_bitrate_movies,
-            setting_u32(settings, "minimum_average_bitrate_movies"),
-        );
-        set_option_if_some(
-            &mut self.minimum_average_bitrate_episodes,
-            setting_u32(settings, "minimum_average_bitrate_episodes"),
-        );
-        set_option_if_some(
-            &mut self.maximum_average_bitrate_movies,
-            setting_u32(settings, "maximum_average_bitrate_movies"),
-        );
-        set_option_if_some(
-            &mut self.maximum_average_bitrate_episodes,
-            setting_u32(settings, "maximum_average_bitrate_episodes"),
         );
         set_if_some(
             &mut self.retry_interval_secs,
@@ -243,11 +215,5 @@ fn setting_string(
 fn set_if_some<T>(slot: &mut T, value: Option<T>) {
     if let Some(value) = value {
         *slot = value;
-    }
-}
-
-fn set_option_if_some<T>(slot: &mut Option<T>, value: Option<T>) {
-    if let Some(value) = value {
-        *slot = Some(value);
     }
 }
