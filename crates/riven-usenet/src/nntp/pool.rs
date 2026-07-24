@@ -41,6 +41,35 @@ pub(crate) enum Lane {
     Bulk,
 }
 
+impl Lane {
+    /// Total wall-clock bound on one attempt at this lane's job.
+    ///
+    /// The connection's own `read_timeout` is an *inactivity* deadline: it
+    /// resets on every chunk, so a provider trickling a body never trips it.
+    /// Playback needs a bound on total fetch time, not just on stalls, so the
+    /// player-facing lanes cap the whole attempt — the pool then drops the
+    /// wedged connection and the caller's retry lands on a fresh one.
+    ///
+    /// `Bulk` keeps only the inactivity backstop: ingesting a large body over
+    /// a genuinely slow link is legitimate and nothing is blocked on it.
+    fn attempt_deadline(self) -> Option<Duration> {
+        match self {
+            Lane::Hot => Some(HOT_ATTEMPT_DEADLINE),
+            Lane::Stream => Some(STREAM_ATTEMPT_DEADLINE),
+            Lane::Bulk => None,
+        }
+    }
+}
+
+/// Total deadline for one `Hot` attempt — a read the player is blocked on.
+/// A ~700 KB body completes in well under a second on a healthy link, so
+/// past this the connection is wedged or trickling and a fresh one will beat
+/// continuing to wait.
+const HOT_ATTEMPT_DEADLINE: Duration = Duration::from_secs(15);
+/// Total deadline for one `Stream` (read-ahead) attempt. Longer than `Hot`:
+/// no read is blocked on it directly, so tolerate more before spending
+/// another connection on a retry.
+const STREAM_ATTEMPT_DEADLINE: Duration = Duration::from_secs(20);
 /// Send a `DATE` keepalive on a warm parked connection this often. Must stay
 /// below the ~30s silent idle-drop several commercial providers apply.
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(25);
@@ -542,7 +571,14 @@ impl NntpPool {
                         error = %e,
                         "NNTP op failed; trying next provider"
                     );
-                    rt.breaker.record_failure(&rt.provider.config.host);
+                    // Our own lane deadline is not evidence about the
+                    // provider: under heavy fan-out it fires on connections
+                    // that are answering perfectly well, just slowly. Letting
+                    // it feed the breaker mutes a healthy provider — fatal
+                    // when it is the only one configured.
+                    if !matches!(e, NntpError::DeadlineExceeded) {
+                        rt.breaker.record_failure(&rt.provider.config.host);
+                    }
                     last_err = Some(e);
                 }
                 Err(_) => {
@@ -695,7 +731,16 @@ async fn run_slot(rt: Arc<ProviderRt>, active_streams: Arc<AtomicUsize>, slot_id
         }
 
         let c = conn.as_mut().expect("connection ensured above");
-        let result = execute(c, &job.kind).await;
+        // Player-facing lanes bound the whole attempt, not just inactivity;
+        // on expiry `drop_conn` below discards the connection (a timed-out
+        // BODY leaves an unread response on the wire) so the next attempt
+        // dials fresh.
+        let result = match job.lane.attempt_deadline() {
+            Some(limit) => tokio::time::timeout(limit, execute(c, &job.kind))
+                .await
+                .unwrap_or(Err(NntpError::DeadlineExceeded)),
+            None => execute(c, &job.kind).await,
+        };
         last_used = Instant::now();
 
         // A transport-level failure poisons the connection: drop it so the

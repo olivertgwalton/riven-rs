@@ -15,8 +15,9 @@
 //!   resumes; pacing falls out of the buffer level. The window is small
 //!   relative to the cache, so LRU never evicts an unread segment during
 //!   single-stream playback.
-//! - **Fixed fan-out.** At most `MAX_IN_FLIGHT` fetches run at once, bounded
-//!   further by the provider's connection count. The window cap is the real
+//! - **Capacity-derived fan-out.** Concurrent fetches scale with the
+//!   provider's configured connection count (see [`readahead_fanout`]),
+//!   holding back headroom for blocked reads. The window cap is the real
 //!   throttle — once full, scheduling simply stops.
 //!
 //! Fetches ride the pool's `Stream` lane: they yield only to reads a player
@@ -40,10 +41,46 @@ use super::{NzbMetaFile, NzbMetaSource, UsenetStreamer};
 /// (relative to the ≥256 MB cache) that an unread segment is never evicted
 /// during normal playback.
 const TARGET_BYTES: u64 = 48 * 1024 * 1024;
-/// Max concurrent fetches for the whole stream, across all cursors. The
-/// window cap usually holds actual in-flight below this; it only bounds the
-/// initial cold-buffer fill. Further clamped to the provider's connections.
-const MAX_IN_FLIGHT: usize = 24;
+/// Hard cap on how many segments a cursor may run ahead of its consumer,
+/// whichever comes first with `TARGET_BYTES`.
+///
+/// Depth and parallelism are separate concerns: the connection count adapts
+/// to whatever the account allows (see [`readahead_fanout`]), while *depth*
+/// stays a fixed segment count so behaviour does not swing with segment size
+/// or with how many connections a provider happens to grant. Bounding it in
+/// segments rather than only in bytes also keeps in-flight fetches bounded
+/// on files whose segments are unusually small. 60 matches the prefetch
+/// depth altmount settles on.
+const MAX_PREFETCH_SEGMENTS: usize = 60;
+/// Max concurrent fetches for the whole stream, across all cursors, derived
+/// from the provider's own connection allowance.
+///
+/// Read-ahead throughput is `concurrency × article_size ÷ latency`, and
+/// latency is the provider's to set — so when a provider answers a ~700 KB
+/// article slowly, parallelism is the only lever that keeps supply above a
+/// high-bitrate title's demand. A fixed ceiling silently throttled large
+/// accounts: 24 held a 100-connection account to ~5 MB/s, under a 2160p
+/// stream, leaving the window permanently short of `TARGET_BYTES`.
+///
+/// Only a small constant is held back, for the `Hot` lane: a read the player
+/// is *blocked* on should find an idle slot rather than wait out an in-flight
+/// read-ahead fetch. Hot already preempts at pop time, so this covers just
+/// the gap until a slot frees. Bulk work needs no reserve here: the pool
+/// already shrinks bulk admission while a stream is active.
+///
+/// There is deliberately no fixed ceiling on the *connection* count on top of
+/// that — the account's own limit is the input, and the read-ahead window is
+/// what bounds useful concurrency. Depth is capped separately, in segments,
+/// by [`MAX_PREFETCH_SEGMENTS`].
+fn readahead_fanout(capacity: usize) -> usize {
+    // Proportional only on tiny accounts, so an 8-connection provider still
+    // reserves 2 rather than half its pool.
+    capacity.saturating_sub(HOT_RESERVE.min(capacity / 4)).max(1)
+}
+
+/// Connections kept free for reads a player is blocked on. See
+/// [`readahead_fanout`].
+const HOT_RESERVE: usize = 4;
 /// Max simultaneous read sequences tracked per stream. Real players use two
 /// (video + a probing/second range); a third absorbs transient jumps.
 const MAX_CURSORS: usize = 3;
@@ -268,7 +305,13 @@ async fn run(
         return;
     };
     let client = streamer.pool.stream_client();
-    let max_in_flight = client.capacity().saturating_sub(2).clamp(1, MAX_IN_FLIGHT);
+    let max_in_flight = readahead_fanout(client.capacity());
+    // Byte span of `MAX_PREFETCH_SEGMENTS` segments for *this* file, measured
+    // with the same layout logic scheduling uses, so the segment bound holds
+    // for RAR (estimated spans) as well as Direct. Computed once: segment
+    // size is fixed per file.
+    let (_, seg_limit_end) = window_from(file, 0, MAX_PREFETCH_SEGMENTS);
+    let window_cap = TARGET_BYTES.min(seg_limit_end.max(1));
     let file_label: Arc<str> = Arc::from(file.filename.as_str());
 
     let mut cursors: Vec<Cursor> = vec![Cursor::new(*positions.borrow())];
@@ -298,7 +341,7 @@ async fn run(
         while in_flight.len() < max_in_flight {
             let Some(cursor) = cursors
                 .iter_mut()
-                .filter(|c| c.frontier < file.total_size && c.buffered() < TARGET_BYTES)
+                .filter(|c| c.frontier < file.total_size && c.buffered() < window_cap)
                 .min_by_key(|c| c.buffered())
             else {
                 break;
@@ -345,6 +388,44 @@ async fn run(
 mod tests {
     use super::*;
     use crate::nzb::NzbSegment;
+
+    #[test]
+    fn fanout_scales_with_configured_capacity() {
+        // The whole point: a large account is not clipped to a constant, and
+        // what it gives up is a small fixed reserve — not a share that grows
+        // with the account and leaves connections parked doing nothing.
+        // Large accounts spend what they are entitled to, minus the reserve;
+        // the read-ahead window, not a constant, bounds what is useful.
+        assert_eq!(readahead_fanout(100), 96);
+        assert_eq!(readahead_fanout(50), 46);
+        assert_eq!(readahead_fanout(20), 16);
+        // Small accounts keep the previous `capacity - 2` behaviour.
+        assert_eq!(readahead_fanout(8), 6);
+        assert_eq!(readahead_fanout(4), 3);
+    }
+
+    #[test]
+    fn fanout_always_leaves_a_usable_slot() {
+        // Degenerate capacities must still yield a runnable fetch rather
+        // than 0, which would park read-ahead forever. Below the point where
+        // the reserve applies, a tiny account spends everything it has —
+        // holding a connection back from a 2-connection provider would halve
+        // it to protect a lane that already preempts.
+        assert_eq!(readahead_fanout(0), 1);
+        assert_eq!(readahead_fanout(1), 1);
+        assert_eq!(readahead_fanout(2), 2);
+        assert_eq!(readahead_fanout(3), 3);
+        for capacity in 0..=512 {
+            assert!(readahead_fanout(capacity) >= 1, "capacity={capacity}");
+        }
+    }
+
+    #[test]
+    fn fanout_never_exceeds_capacity() {
+        for capacity in 0..=512 {
+            assert!(readahead_fanout(capacity) <= capacity.max(1));
+        }
+    }
     use crate::streamer::NzbMetaFile;
 
     fn direct_file(n: usize, seg: u64) -> NzbMetaFile {
@@ -434,6 +515,42 @@ mod tests {
                 .any(|c| c.position == 10_000_000_000 && c.last_report.elapsed().as_secs() >= 19),
             "the stale cursor is the one recycled"
         );
+    }
+
+    #[test]
+    fn segment_limit_caps_window_below_target_bytes() {
+        // Segments small enough that 60 of them are far short of
+        // TARGET_BYTES: the segment cap must be what binds, so a cursor
+        // never runs more than MAX_PREFETCH_SEGMENTS ahead.
+        let seg = 64 * 1024;
+        let file = direct_file(500, seg);
+        let (mids, end) = window_from(&file, 0, MAX_PREFETCH_SEGMENTS);
+        assert_eq!(mids.len(), MAX_PREFETCH_SEGMENTS);
+        let window_cap = TARGET_BYTES.min(end.max(1));
+        assert_eq!(window_cap, seg * MAX_PREFETCH_SEGMENTS as u64);
+        assert!(window_cap < TARGET_BYTES, "segment cap should bind here");
+    }
+
+    #[test]
+    fn target_bytes_binds_when_segments_are_large() {
+        // Above ~800 KB per segment, 60 segments exceed TARGET_BYTES, so the
+        // byte window is the governor and memory stays bounded regardless of
+        // how large a provider's segments are.
+        let file = direct_file(500, 1024 * 1024);
+        let (_, end) = window_from(&file, 0, MAX_PREFETCH_SEGMENTS);
+        assert_eq!(TARGET_BYTES.min(end.max(1)), TARGET_BYTES);
+    }
+
+    #[test]
+    fn segment_cap_binds_at_typical_segment_size() {
+        // Documents the real-world crossover: at the ~704 KB segments these
+        // providers use, 60 segments is ~41 MB — under TARGET_BYTES, so the
+        // segment cap is what actually governs a normal stream.
+        let file = direct_file(500, 704 * 1024);
+        let (_, end) = window_from(&file, 0, MAX_PREFETCH_SEGMENTS);
+        let window_cap = TARGET_BYTES.min(end.max(1));
+        assert_eq!(window_cap, 704 * 1024 * MAX_PREFETCH_SEGMENTS as u64);
+        assert!(window_cap < TARGET_BYTES);
     }
 
     #[test]

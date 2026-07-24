@@ -63,6 +63,12 @@ pub enum NntpError {
     Protocol(&'static str),
     #[error("timed out")]
     Timeout,
+    /// A *client-side* lane deadline elapsed while the provider was still
+    /// responding. Distinct from [`NntpError::Timeout`] (a dead socket)
+    /// because it says nothing about provider health: it is our own
+    /// impatience, so it must never count toward the circuit breaker.
+    #[error("lane deadline exceeded")]
+    DeadlineExceeded,
 }
 
 pub(crate) enum NntpStream {
