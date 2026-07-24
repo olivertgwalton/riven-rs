@@ -59,64 +59,46 @@ impl UsenetStreamer {
                     continue;
                 }
                 FetchEntry::Owner(slot, mid) => {
-                    // The fetch runs as a *detached* task: FUSE reads are
-                    // routinely interrupted (a player aborting one of its
-                    // range requests), and cancelling the wire fetch with
-                    // them throws away a half-downloaded article that the
-                    // very next read re-requests — a refetch stall on the
-                    // critical path. Detached, the article always completes
-                    // into the cache; a cancelled caller costs nothing.
-                    //
-                    // RAII guard inside the task: if the fetch itself
-                    // panics, Drop still releases the in_flight slot so
-                    // waiters for this message-id are never hung.
-                    struct OwnerGuard {
+                    // RAII guard: if this future is cancelled mid-fetch (a
+                    // FUSE read aborted by the player), Drop still releases
+                    // the in_flight slot so waiters for this message-id are
+                    // never hung.
+                    struct OwnerGuard<'a> {
                         state: Arc<StreamerState>,
                         slot: Arc<PromiseSlot>,
                         message_id: Arc<str>,
+                        file: &'a str,
                         finished: bool,
                     }
-                    impl Drop for OwnerGuard {
+                    impl Drop for OwnerGuard<'_> {
                         fn drop(&mut self) {
                             if !self.finished {
+                                tracing::debug!(
+                                    message_id = %self.message_id,
+                                    file = %self.file,
+                                    "owner future cancelled mid-fetch; releasing slot"
+                                );
                                 self.state.in_flight.finish(&self.message_id, &self.slot);
                             }
                         }
                     }
+                    let mut guard = OwnerGuard {
+                        state: self.state.clone(),
+                        slot: slot.clone(),
+                        message_id: mid.clone(),
+                        file,
+                        finished: false,
+                    };
 
-                    let task = {
-                        let streamer = self.clone();
-                        let client = client.clone();
-                        let mid = mid.clone();
-                        let file: Arc<str> = Arc::from(file);
-                        tokio::spawn(async move {
-                            let mut guard = OwnerGuard {
-                                state: streamer.state.clone(),
-                                slot: slot.clone(),
-                                message_id: mid.clone(),
-                                finished: false,
-                            };
-                            let result =
-                                streamer.do_fetch_with_retry(&client, &mid, &file).await;
-                            if let Ok(bytes) = &result {
-                                let size = bytes.len() as u64;
-                                streamer.state.cache.put(mid.clone(), bytes.clone());
-                                streamer.state.decoded_sizes.put(mid.clone(), size);
-                            }
-                            streamer.state.in_flight.finish(&mid, &slot);
-                            guard.finished = true;
-                            result
-                        })
-                    };
-                    return match task.await {
-                        Ok(result) => result,
-                        Err(join_err) => {
-                            tracing::warn!(message_id, file, error = %join_err, "fetch task panicked");
-                            Err(StreamerError::Nntp(NntpError::Protocol(
-                                "fetch task panicked",
-                            )))
-                        }
-                    };
+                    let result = self.do_fetch_with_retry(client, message_id, file).await;
+                    if let Ok(bytes) = &result {
+                        let size = bytes.len() as u64;
+                        self.state.cache.put(mid.clone(), bytes.clone());
+                        self.state.decoded_sizes.put(mid.clone(), size);
+                    }
+                    self.state.in_flight.finish(&mid, &slot);
+                    guard.finished = true;
+                    return result;
                 }
             }
         }
