@@ -26,6 +26,7 @@ mod ingest;
 mod meta;
 mod read_direct;
 mod read_rar;
+pub mod readahead;
 mod store;
 #[cfg(test)]
 mod tests;
@@ -36,6 +37,16 @@ pub use meta::{NzbMeta, NzbMetaFile, NzbMetaSource, NzbRarPart, NzbRarSlice, UNK
 
 pub(crate) use availability::{SweepCounts, stat_sweep};
 pub(crate) use meta::{concat_slices, segments_overlapping, select_validation_indices};
+
+/// Task fan-out for availability STAT sweeps. STATs are tiny; real socket
+/// use is bounded by the pool's Bulk lane admission, this only caps how many
+/// sweep futures are queued at once.
+const STAT_SWEEP_FANOUT: usize = 16;
+
+/// Fixed per-operation fetch fan-out for on-demand reads and bulk probes.
+/// Deliberately small: deep pipelining belongs to the adaptive per-stream
+/// read-ahead, and real socket use is bounded by the pool's slot actors.
+pub(crate) const OP_FANOUT: usize = 4;
 
 #[derive(Clone)]
 pub struct UsenetStreamer {
@@ -101,13 +112,6 @@ impl UsenetStreamer {
             || meta::UNKNOWN_FILE_LABEL.to_string(),
             |meta| meta.file_label(file_index).to_string(),
         )
-    }
-
-    /// Keep one operation's fan-out small even when a provider permits many
-    /// connections. This mirrors AltMount's explicit per-reader prefetch
-    /// window instead of equating provider capacity with work concurrency.
-    pub(crate) fn prefetch_concurrency(&self, client_capacity: usize) -> usize {
-        client_capacity.min(self.state.max_prefetch()).max(1)
     }
 
     /// Load NZB meta for `info_hash`. Order: in-memory LRU → Postgres.
@@ -304,9 +308,7 @@ impl UsenetStreamer {
             return Ok(AvailabilityScan::default());
         }
 
-        let concurrency = self
-            .prefetch_concurrency(self.pool.bulk_client().capacity())
-            .min(n);
+        let concurrency = STAT_SWEEP_FANOUT.min(n);
         let client = self.pool.bulk_client();
         let counts = stat_sweep(&client, sample, concurrency, false, &file.filename).await;
 
@@ -355,9 +357,7 @@ impl UsenetStreamer {
             return Ok(());
         }
 
-        let concurrency = self
-            .prefetch_concurrency(self.pool.bulk_client().capacity())
-            .min(total);
+        let concurrency = STAT_SWEEP_FANOUT.min(total);
         let SweepCounts {
             missing,
             errors,
@@ -556,15 +556,12 @@ impl riven_core::local_source::LocalByteSource for UsenetStreamer {
         Ok(UsenetStreamer::read_range(self, info_hash, file_index, start, end_inclusive).await?)
     }
 
-    async fn prefetch(
-        &self,
-        info_hash: &str,
-        file_index: usize,
-        start: u64,
-        segments_ahead: usize,
-    ) {
-        self.prefetch_window(info_hash, file_index, start, segments_ahead)
-            .await;
+    async fn prefetch(&self, info_hash: &str, file_index: usize, position: u64) {
+        // Position report only: the per-stream adaptive read-ahead task
+        // (spawned on first report) owns depth, parallelism, and pacing.
+        self.state
+            .readaheads
+            .report(self, info_hash, file_index, position);
     }
 
     fn stream_register(&self, key: &str, info_hash: &str, filename: &str, file_size: u64) {
@@ -594,6 +591,7 @@ impl riven_core::local_source::LocalByteSource for UsenetStreamer {
 
     fn stream_unregister(&self, key: &str) {
         active_streams().unregister(key);
+        self.state.readaheads.remove_key(key);
         self.pool.stream_ended();
     }
 }

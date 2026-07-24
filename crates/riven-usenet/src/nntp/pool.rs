@@ -1,35 +1,57 @@
+//! NNTP connection pool: per-provider slot actors with priority lanes.
+//!
+//! Modeled on javi11/nntppool + altmount's budget, simplified:
+//!
+//! - Each provider owns `max_connections` *slot actors* — small tasks that
+//!   each hold at most one live NNTP connection. Work arrives as jobs on
+//!   three priority lanes; an idle slot pops the highest-priority job under
+//!   a single mutex, so there is no waiter/hand-off machinery and no reaper.
+//! - Lanes: `Hot` (a read the player is blocked on) > `Stream` (read-ahead
+//!   fill, head/tail precache) > `Bulk` (ingest, health, repair, backfill).
+//!   Priority is absolute at pop time; additionally Bulk admission shrinks
+//!   while streams are active (altmount's import budget), so bulk work can
+//!   never occupy the sockets a live stream is about to need.
+//! - Slots with a live connection park "warm" and keep it alive with a
+//!   periodic `DATE` keepalive (providers silently drop idle TLS sockets
+//!   after ~30s). Slots without a connection park "cold" and only dial when
+//!   warm capacity is saturated — job submission wakes warm slots first, so
+//!   the read path almost never pays a TLS handshake.
+
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Weak};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
 use tokio::sync::Notify;
 use tokio::sync::oneshot;
 
-use super::connection_slots::{ConnectionSlots, OwnedPermit};
 use super::{NntpConnection, NntpError, NntpProvider};
 
-#[derive(Clone, Copy, Debug)]
-pub(crate) enum WorkloadLane {
-    Playback,
+/// Which queue a job enters. Priority is strictly `Hot > Stream > Bulk`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Lane {
+    /// A fetch a player is actively blocked on.
+    Hot,
+    /// Read-ahead / precache for a live stream: latency-tolerant but
+    /// throughput-critical. Never throttled — a stream fills its window
+    /// across the whole pool.
+    Stream,
+    /// Ingest, availability sweeps, PAR2 verify, repair, backfill.
     Bulk,
 }
 
-/// Drop an idle connection that has been sitting in the pool longer than
-/// this. Aggressive on purpose: several commercial NNTP providers silently
-/// close idle TLS sockets after ~30s without sending `205`, so the next
-/// `BODY` fails mid-stream.
-const IDLE_TIMEOUT: Duration = Duration::from_secs(20);
-/// If a pooled connection has been idle this long but not yet expired,
-/// ping it with `DATE` before reuse to confirm it's still alive.
-const STALE_THRESHOLD: Duration = Duration::from_secs(10);
-/// Deadline for the pre-reuse `DATE` ping. Long enough to absorb a
-/// network blip, short enough that a dead socket doesn't add measurable
-/// latency to first-byte.
+/// Send a `DATE` keepalive on a warm parked connection this often. Must stay
+/// below the ~30s silent idle-drop several commercial providers apply.
+const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(25);
+/// Deadline for the keepalive probe round trip.
 const PING_TIMEOUT: Duration = Duration::from_millis(1500);
-/// How often the background reaper sweeps each provider's idle stack.
-const REAPER_INTERVAL: Duration = Duration::from_secs(5);
+/// A warm connection unused this long is closed (slot goes cold) — except
+/// for the first `WARM_FLOOR` slots, which stay warm indefinitely so a
+/// resuming stream never cold-dials.
+const IDLE_CLOSE: Duration = Duration::from_secs(120);
+/// Number of slots per provider that never idle-close their connection.
+const WARM_FLOOR: usize = 4;
 /// Consecutive transient/connection failures before a provider is muted by
 /// its circuit breaker.
 const BREAKER_FAILURE_THRESHOLD: u32 = 3;
@@ -39,33 +61,29 @@ const BREAKER_INITIAL_COOLDOWN: Duration = Duration::from_secs(60);
 /// Cap on the exponential backoff so a permanently-broken provider doesn't
 /// vanish forever — a probe still runs every 5 min to check recovery.
 const BREAKER_MAX_COOLDOWN: Duration = Duration::from_secs(5 * 60);
-/// Backoff before retrying a fresh dial after the provider itself reports
-/// its connection limit is exceeded (NNTP "502 too many connections"). This
-/// is the account being at capacity, not the provider being down, so it
-/// must never trip the circuit breaker or fail the caller outright — just
-/// wait a moment and try again.
+/// Backoff between dial retries after the provider reports its own account
+/// connection limit ("502 too many connections"). Not a failure of the
+/// provider — just wait and retry.
 const TOO_MANY_CONNECTIONS_BACKOFF: Duration = Duration::from_millis(500);
-/// Bound on those retries. Not a wall-clock timeout on the overall
-/// operation — just a cap on one pathological dial loop, so a genuinely
-/// misconfigured `max_connections` (set higher than the account actually
-/// allows) still eventually surfaces as an error instead of looping forever.
+/// Bound on those retries so a misconfigured `max_connections` still
+/// eventually surfaces as an error instead of looping forever.
 const TOO_MANY_CONNECTIONS_MAX_RETRIES: u32 = 20;
+/// How many connections each active stream reserves out of Bulk's admission
+/// (altmount's `streamHeadroom`). Bulk expands to the full pool when no
+/// stream is playing and shrinks automatically while one is.
+const STREAM_HEADROOM: usize = 2;
 
 /// Per-provider circuit breaker. Records consecutive transient failures and
-/// suppresses provider use for a cooldown window once `FAILURE_THRESHOLD` is
-/// crossed. Successful ops reset the failure counter; an op completing while
-/// the breaker is tripped (a single probe `try_each` allows when every
-/// provider is tripped) either resets the breaker or re-trips it with a
-/// doubled cooldown.
+/// suppresses provider use for a cooldown window once the threshold is
+/// crossed. Successful ops reset it; an op completing while tripped (the
+/// single probe allowed when every provider is tripped) either resets or
+/// re-trips with a doubled cooldown.
 #[derive(Default)]
 struct CircuitBreaker {
-    /// Consecutive failure count; reset to 0 on success.
     consecutive_failures: AtomicU64,
-    /// Next attempt allowed at, as `Instant::elapsed_since` reference epoch.
-    /// 0 = not tripped. We can't store `Instant` atomically; store millis
-    /// from a process-local epoch instead.
+    /// Next attempt allowed at, in millis from a process-local epoch
+    /// (0 = not tripped) — `Instant` can't be stored atomically.
     tripped_until_ms: AtomicU64,
-    /// Current cooldown duration in millis. Doubled on re-trip.
     current_cooldown_ms: AtomicU64,
 }
 
@@ -81,17 +99,14 @@ impl CircuitBreaker {
     fn now_ms() -> u64 {
         use std::sync::OnceLock;
         static EPOCH: OnceLock<Instant> = OnceLock::new();
-        let epoch = EPOCH.get_or_init(Instant::now);
-        epoch.elapsed().as_millis() as u64
+        EPOCH.get_or_init(Instant::now).elapsed().as_millis() as u64
     }
 
-    /// True if the breaker is currently muting this provider.
     fn is_tripped(&self) -> bool {
         let until = self.tripped_until_ms.load(Ordering::Relaxed);
         until != 0 && Self::now_ms() < until
     }
 
-    /// Seconds until the breaker re-allows this provider (0 if not tripped).
     fn cooldown_remaining_secs(&self) -> u64 {
         let until = self.tripped_until_ms.load(Ordering::Relaxed);
         let now = Self::now_ms();
@@ -136,69 +151,143 @@ impl CircuitBreaker {
     }
 }
 
-struct Idle {
-    conn: NntpConnection,
-    /// Held while the conn sits idle so the semaphore reflects total
-    /// open sockets, not in-flight ones. Dropping the permit (expiry,
-    /// ping failure, op error) frees the slot for a new dial.
-    permit: OwnedPermit,
-    last_used: Instant,
+enum JobKind {
+    Body(String),
+    Stat(String),
 }
 
-/// `idle` and both workload waiter queues share one lock (rather than
-/// three independent ones) so that acquire()'s final "idle is empty, I must
-/// register as a waiter" determination and release()'s "no waiter queued, I
-/// must park in idle" determination can never interleave: both read the
-/// same locked snapshot before deciding, closing a race where a concurrent
-/// release() sees empty waiter queues (the acquirer hasn't registered yet)
-/// and parks a freed connection in `idle` a moment before the acquirer
-/// registers, stranding it for the full `WAITER_RETRY_INTERVAL` instead of
-/// getting the connection immediately.
-struct SlotQueues {
-    /// LIFO: hottest conn at the back. Reaper sweeps the front (oldest)
-    /// and can short-circuit at the first non-expired entry.
-    idle: VecDeque<Idle>,
-    /// Callers that found the idle pool empty and every permit already
-    /// spoken for. `release()` hands a freed connection directly to the
-    /// front of the relevant workload queue instead of parking it in idle.
-    /// Playback is served first; the adaptive bulk budget leaves provider
-    /// capacity available for it without encoding a second priority policy
-    /// in the connection-slot counter.
-    playback_waiters: VecDeque<oneshot::Sender<Idle>>,
-    bulk_waiters: VecDeque<oneshot::Sender<Idle>>,
+enum JobOutput {
+    Body(crate::bufpool::PooledBuf),
+    Stat(bool),
 }
 
-impl SlotQueues {
-    /// Pop the next waiter to hand a freed connection to. Bulk admission is
-    /// constrained before it reaches this queue, so playback can safely take
-    /// the next available socket without scattered per-call priorities.
-    fn next_waiter(&mut self) -> Option<oneshot::Sender<Idle>> {
-        self.playback_waiters
-            .pop_front()
-            .or_else(|| self.bulk_waiters.pop_front())
+struct Job {
+    kind: JobKind,
+    lane: Lane,
+    reply: oneshot::Sender<Result<JobOutput, NntpError>>,
+}
+
+/// One provider's scheduler state. A single mutex covers queues, budget
+/// accounting, and slot parking counters so every scheduling decision reads
+/// one consistent snapshot — there is no cross-lock ordering to get wrong.
+struct Sched {
+    hot: VecDeque<Job>,
+    stream: VecDeque<Job>,
+    bulk: VecDeque<Job>,
+    /// Bulk jobs currently claimed by a slot (executing or dialing).
+    bulk_inflight: usize,
+    /// Slots parked holding a live connection.
+    warm_parked: usize,
+    /// Slots parked without a connection.
+    cold_parked: usize,
+    /// Live connections held by slots (executing or parked warm).
+    open: usize,
+    /// Slots currently executing a job.
+    active: usize,
+    shutdown: bool,
+}
+
+impl Sched {
+    fn new() -> Self {
+        Self {
+            hot: VecDeque::new(),
+            stream: VecDeque::new(),
+            bulk: VecDeque::new(),
+            bulk_inflight: 0,
+            warm_parked: 0,
+            cold_parked: 0,
+            open: 0,
+            active: 0,
+            shutdown: false,
+        }
+    }
+
+    /// Pop the highest-priority eligible job. Bulk admission shrinks by
+    /// `STREAM_HEADROOM` connections per active stream so playback always
+    /// finds free sockets (altmount's import budget).
+    fn pop(&mut self, capacity: usize, active_streams: usize) -> Option<Job> {
+        if let Some(job) = self.hot.pop_front() {
+            return Some(job);
+        }
+        if let Some(job) = self.stream.pop_front() {
+            return Some(job);
+        }
+        let reserve = (active_streams * STREAM_HEADROOM).min(capacity.saturating_sub(1));
+        let bulk_cap = capacity.saturating_sub(reserve).max(1);
+        if self.bulk_inflight < bulk_cap
+            && let Some(job) = self.bulk.pop_front()
+        {
+            self.bulk_inflight += 1;
+            return Some(job);
+        }
+        None
+    }
+
+    fn queue_mut(&mut self, lane: Lane) -> &mut VecDeque<Job> {
+        match lane {
+            Lane::Hot => &mut self.hot,
+            Lane::Stream => &mut self.stream,
+            Lane::Bulk => &mut self.bulk,
+        }
     }
 }
 
-struct ProviderSlot {
+struct ProviderRt {
     provider: NntpProvider,
-    permits: Arc<ConnectionSlots>,
-    queues: Arc<Mutex<SlotQueues>>,
-    breaker: Arc<CircuitBreaker>,
-    /// Wire bytes (encoded article bodies) downloaded from this provider this
-    /// process, and the number of article bodies served. Session counters; a
-    /// flusher persists deltas to the DB for lifetime totals + usage trends.
+    sched: Mutex<Sched>,
+    /// Wakes one warm-parked slot (has a live connection).
+    warm_notify: Notify,
+    /// Wakes one cold-parked slot (must dial first).
+    cold_notify: Notify,
+    breaker: CircuitBreaker,
+    /// Wire bytes (encoded article bodies) and article bodies served this
+    /// process; a flusher persists deltas for lifetime totals.
     bytes_downloaded: AtomicU64,
     articles_downloaded: AtomicU64,
 }
 
-struct Checkout {
-    conn: NntpConnection,
-    permit: OwnedPermit,
-    slot_idx: usize,
+impl ProviderRt {
+    fn capacity(&self) -> usize {
+        self.provider.config.max_connections.max(1) as usize
+    }
+
+    /// Enqueue a job and wake a slot: warm first (no dial cost), cold only
+    /// when every warm slot is busy — this is what makes the pool elastic
+    /// without ever cold-dialing while warm capacity is free.
+    fn submit(&self, job: Job) {
+        {
+            let mut s = self.sched.lock();
+            if s.shutdown {
+                let _ = job
+                    .reply
+                    .send(Err(NntpError::Protocol("nntp pool shut down")));
+                return;
+            }
+            s.queue_mut(job.lane).push_back(job);
+            if s.warm_parked > 0 {
+                self.warm_notify.notify_one();
+                return;
+            }
+        }
+        self.cold_notify.notify_one();
+    }
+
+    /// Wake parked slots after an admission change (bulk budget grew).
+    fn wake_for_bulk(&self) {
+        let s = self.sched.lock();
+        if s.bulk.is_empty() {
+            return;
+        }
+        if s.warm_parked > 0 {
+            self.warm_notify.notify_one();
+        } else if s.cold_parked > 0 {
+            self.cold_notify.notify_one();
+        }
+    }
 }
 
-/// Read-only health snapshot of one provider slot, for the API's
-/// provider-health view. Carries no credentials.
+/// Read-only health snapshot of one provider, for the API's provider-health
+/// view. Carries no credentials.
 #[derive(Debug, Clone)]
 pub struct ProviderHealth {
     pub host: String,
@@ -209,9 +298,9 @@ pub struct ProviderHealth {
     pub max_connections: u32,
     /// Open sockets right now (idle + in-flight).
     pub open_connections: u32,
-    /// Open sockets sitting idle in the pool.
+    /// Open sockets sitting idle (parked warm).
     pub idle_connections: u32,
-    /// Open sockets currently servicing a fetch.
+    /// Open sockets currently servicing a request.
     pub active_connections: u32,
     /// Circuit breaker is muting this provider.
     pub breaker_tripped: bool,
@@ -221,8 +310,7 @@ pub struct ProviderHealth {
     pub consecutive_failures: u64,
 }
 
-/// Per-provider session download counters (since process start). A flusher
-/// persists the deltas to the DB for lifetime totals and daily usage trends.
+/// Per-provider session download counters (since process start).
 #[derive(Debug, Clone)]
 pub struct ProviderTraffic {
     pub host: String,
@@ -232,101 +320,20 @@ pub struct ProviderTraffic {
 
 pub struct NntpPool {
     /// Primaries (by priority asc), then backups (by priority asc).
-    slots: Vec<ProviderSlot>,
-    background: Arc<BackgroundBudget>,
+    providers: Vec<Arc<ProviderRt>>,
+    /// Open playback handles — drives the Bulk admission reserve. Shared
+    /// with slot actors as a bare counter (never the pool itself) so tasks
+    /// don't keep the pool alive and `Drop`-driven shutdown can run.
+    active_streams: Arc<AtomicUsize>,
 }
 
-/// Adaptive pool-wide admission for work that may wait behind playback.
-///
-/// This is deliberately attached to the workload-bound bulk client, rather
-/// than acquired by ingest/health/repair call sites. It can therefore enforce
-/// one invariant for every background BODY and STAT request. When streams are
-/// active, a small amount of provider capacity remains free for urgent work;
-/// in-flight background requests drain naturally after a shrink.
-struct BackgroundBudget {
-    capacity: usize,
-    active_streams: AtomicUsize,
-    in_flight: AtomicUsize,
-    changed: Notify,
-}
-
-impl BackgroundBudget {
-    fn new(capacity: usize) -> Arc<Self> {
-        Arc::new(Self {
-            capacity: capacity.max(1),
-            active_streams: AtomicUsize::new(0),
-            in_flight: AtomicUsize::new(0),
-            changed: Notify::new(),
-        })
-    }
-
-    fn effective_capacity(&self) -> usize {
-        let streams = self.active_streams.load(Ordering::Acquire);
-        let reserve = streams
-            .saturating_mul(2)
-            .min(self.capacity.saturating_sub(1));
-        self.capacity.saturating_sub(reserve).max(1)
-    }
-
-    async fn acquire(self: &Arc<Self>) -> BackgroundPermit {
-        loop {
-            let notified = self.changed.notified();
-            let cap = self.effective_capacity();
-            let current = self.in_flight.load(Ordering::Acquire);
-            if current < cap
-                && self
-                    .in_flight
-                    .compare_exchange_weak(
-                        current,
-                        current + 1,
-                        Ordering::AcqRel,
-                        Ordering::Acquire,
-                    )
-                    .is_ok()
-            {
-                return BackgroundPermit {
-                    budget: self.clone(),
-                };
-            }
-            notified.await;
-        }
-    }
-
-    fn stream_started(&self) {
-        self.active_streams.fetch_add(1, Ordering::AcqRel);
-        self.changed.notify_waiters();
-    }
-
-    fn stream_ended(&self) {
-        let _ = self
-            .active_streams
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_sub(1));
-        self.changed.notify_waiters();
-    }
-}
-
-struct BackgroundPermit {
-    budget: Arc<BackgroundBudget>,
-}
-
-impl Drop for BackgroundPermit {
-    fn drop(&mut self) {
-        self.budget.in_flight.fetch_sub(1, Ordering::AcqRel);
-        self.budget.changed.notify_one();
-    }
-}
-
-/// A workload-bound view of the NNTP pool.
-///
-/// Callers choose a profile once when they create a reader or background job;
-/// individual article requests cannot assign their own priority. This keeps
-/// dispatch policy inside the pool while retaining the urgent/normal lanes
-/// used by nntppool-style schedulers.
+/// A workload-bound view of the pool. Callers choose a lane once when they
+/// create a reader or background job; individual requests can't assign their
+/// own priority. Dispatch policy stays inside the pool.
 #[derive(Clone)]
 pub struct NntpClient {
     pool: Arc<NntpPool>,
-    lane: WorkloadLane,
-    background: bool,
+    lane: Lane,
 }
 
 impl NntpClient {
@@ -334,21 +341,31 @@ impl NntpClient {
         &self,
         message_id: &str,
     ) -> Result<crate::bufpool::PooledBuf, NntpError> {
-        let _permit = if self.background {
-            Some(self.pool.background.acquire().await)
-        } else {
-            None
-        };
-        self.pool.fetch_body(message_id, self.lane).await
+        match self
+            .pool
+            .try_each(self.lane, || JobKind::Body(message_id.to_string()))
+            .await?
+        {
+            (JobOutput::Body(buf), idx) => {
+                let p = &self.pool.providers[idx];
+                p.bytes_downloaded
+                    .fetch_add(buf.len() as u64, Ordering::Relaxed);
+                p.articles_downloaded.fetch_add(1, Ordering::Relaxed);
+                Ok(buf)
+            }
+            (JobOutput::Stat(_), _) => Err(NntpError::Protocol("BODY answered as STAT")),
+        }
     }
 
     pub async fn stat(&self, message_id: &str) -> Result<bool, NntpError> {
-        let _permit = if self.background {
-            Some(self.pool.background.acquire().await)
-        } else {
-            None
-        };
-        self.pool.stat(message_id, self.lane).await
+        match self
+            .pool
+            .try_each(self.lane, || JobKind::Stat(message_id.to_string()))
+            .await?
+        {
+            (JobOutput::Stat(exists), _) => Ok(exists),
+            (JobOutput::Body(_), _) => Err(NntpError::Protocol("STAT answered as BODY")),
+        }
     }
 
     pub fn capacity(&self) -> usize {
@@ -363,347 +380,134 @@ impl NntpPool {
                 .cmp(&b.is_backup)
                 .then(a.priority.cmp(&b.priority))
         });
-        let slots: Vec<ProviderSlot> = providers
+        let providers: Vec<Arc<ProviderRt>> = providers
             .into_iter()
             .map(|p| {
-                let permits = ConnectionSlots::new(p.config.max_connections.max(1) as usize);
-                ProviderSlot {
+                Arc::new(ProviderRt {
                     provider: p,
-                    permits,
-                    queues: Arc::new(Mutex::new(SlotQueues {
-                        idle: VecDeque::new(),
-                        playback_waiters: VecDeque::new(),
-                        bulk_waiters: VecDeque::new(),
-                    })),
-                    breaker: Arc::new(CircuitBreaker::new()),
+                    sched: Mutex::new(Sched::new()),
+                    warm_notify: Notify::new(),
+                    cold_notify: Notify::new(),
+                    breaker: CircuitBreaker::new(),
                     bytes_downloaded: AtomicU64::new(0),
                     articles_downloaded: AtomicU64::new(0),
-                }
+                })
             })
             .collect();
-        let capacity = slots
-            .iter()
-            .filter(|s| !s.provider.is_backup)
-            .map(|s| s.provider.config.max_connections.max(1) as usize)
-            .sum::<usize>()
-            .max(1);
+        let active_streams = Arc::new(AtomicUsize::new(0));
         let pool = Arc::new(Self {
-            slots,
-            background: BackgroundBudget::new(capacity),
+            providers,
+            active_streams: active_streams.clone(),
         });
-        Self::spawn_reaper(Arc::downgrade(&pool));
+        for rt in &pool.providers {
+            for slot_idx in 0..rt.capacity() {
+                tokio::spawn(run_slot(rt.clone(), active_streams.clone(), slot_idx));
+            }
+        }
         pool
     }
 
-    /// Client used by a stateful playback reader. Requests enter the pool's
-    /// latency-sensitive lane for the lifetime of that reader.
+    /// Client for reads a player is blocked on: absolute priority.
     pub fn playback_client(self: &Arc<Self>) -> NntpClient {
         NntpClient {
             pool: self.clone(),
-            lane: WorkloadLane::Playback,
-            background: false,
+            lane: Lane::Hot,
         }
     }
 
-    /// Client used by import, health, precache, and repair jobs. Capacity is
-    /// still owned by the provider pool; background admission is layered
-    /// above this client rather than encoded as per-request priorities.
+    /// Client for a live stream's read-ahead fill and head/tail precache.
+    /// Yields only to blocked playback reads, never to bulk work.
+    pub fn stream_client(self: &Arc<Self>) -> NntpClient {
+        NntpClient {
+            pool: self.clone(),
+            lane: Lane::Stream,
+        }
+    }
+
+    /// Client for import, health, precache, and repair jobs. Admission
+    /// shrinks automatically while streams are active.
     pub fn bulk_client(self: &Arc<Self>) -> NntpClient {
         NntpClient {
             pool: self.clone(),
-            lane: WorkloadLane::Bulk,
-            background: true,
+            lane: Lane::Bulk,
         }
     }
 
     pub fn stream_started(&self) {
-        self.background.stream_started();
+        self.active_streams.fetch_add(1, Ordering::AcqRel);
     }
 
     pub fn stream_ended(&self) {
-        self.background.stream_ended();
+        let _ = self
+            .active_streams
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_sub(1));
+        // The bulk budget just grew; wake parked slots to drain any backlog.
+        for rt in &self.providers {
+            rt.wake_for_bulk();
+        }
     }
 
-    /// Per-provider health snapshot in pool order (primaries first, then
-    /// backups). Cheap and lock-light — used by the API's provider-health view.
+    /// Per-provider health snapshot in pool order.
     pub fn health(&self) -> Vec<ProviderHealth> {
-        self.slots
+        self.providers
             .iter()
-            .map(|slot| {
-                let max = slot.provider.config.max_connections;
-                let available = slot.permits.available_permits() as u32;
-                let open = max.saturating_sub(available);
-                let idle = slot.queues.lock().idle.len() as u32;
-                let active = open.saturating_sub(idle);
+            .map(|rt| {
+                let s = rt.sched.lock();
                 ProviderHealth {
-                    host: slot.provider.config.host.clone(),
-                    port: slot.provider.config.port,
-                    priority: slot.provider.priority,
-                    is_backup: slot.provider.is_backup,
-                    max_connections: max,
-                    open_connections: open,
-                    idle_connections: idle,
-                    active_connections: active,
-                    breaker_tripped: slot.breaker.is_tripped(),
-                    cooldown_seconds_remaining: slot.breaker.cooldown_remaining_secs(),
-                    consecutive_failures: slot.breaker.consecutive_failures.load(Ordering::Relaxed),
+                    host: rt.provider.config.host.clone(),
+                    port: rt.provider.config.port,
+                    priority: rt.provider.priority,
+                    is_backup: rt.provider.is_backup,
+                    max_connections: rt.provider.config.max_connections,
+                    open_connections: s.open as u32,
+                    idle_connections: s.warm_parked as u32,
+                    active_connections: s.active as u32,
+                    breaker_tripped: rt.breaker.is_tripped(),
+                    cooldown_seconds_remaining: rt.breaker.cooldown_remaining_secs(),
+                    consecutive_failures: rt.breaker.consecutive_failures.load(Ordering::Relaxed),
                 }
             })
             .collect()
     }
 
-    /// Weak ref so the task exits cleanly when the pool is dropped.
-    fn spawn_reaper(weak: Weak<Self>) {
-        tokio::spawn(async move {
-            let mut tick = tokio::time::interval(REAPER_INTERVAL);
-            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            loop {
-                tick.tick().await;
-                let Some(pool) = weak.upgrade() else { return };
-                for slot in &pool.slots {
-                    Self::reap(slot);
-                }
-            }
-        });
+    /// Per-provider session traffic counters, in pool order.
+    pub fn traffic_snapshot(&self) -> Vec<ProviderTraffic> {
+        self.providers
+            .iter()
+            .map(|rt| ProviderTraffic {
+                host: rt.provider.config.host.clone(),
+                bytes_downloaded: rt.bytes_downloaded.load(Ordering::Relaxed),
+                articles_downloaded: rt.articles_downloaded.load(Ordering::Relaxed),
+            })
+            .collect()
     }
 
-    fn reap(slot: &ProviderSlot) {
-        let mut guard = slot.queues.lock();
-        while let Some(front) = guard.idle.front() {
-            if front.last_used.elapsed() > IDLE_TIMEOUT {
-                guard.idle.pop_front();
-            } else {
-                break;
-            }
-        }
+    pub fn total_capacity(&self) -> usize {
+        self.providers
+            .iter()
+            .filter(|rt| !rt.provider.is_backup)
+            .map(|rt| rt.capacity())
+            .sum::<usize>()
+            .max(1)
     }
 
-    /// How long a waiter blocks on a direct hand-off before looping back to
-    /// re-check the idle pool and permit availability. A hand-off from
-    /// `release()` normally resolves this almost instantly; the timeout is
-    /// only a safety net for the paths that free a permit without a live
-    /// connection to hand off (idle-timeout reaper, transient-error drop),
-    /// which wake the semaphore's own (otherwise-unused) queue rather than
-    /// the workload waiter queues.
-    const WAITER_RETRY_INTERVAL: Duration = Duration::from_secs(2);
-
-    async fn acquire(&self, slot_idx: usize, lane: WorkloadLane) -> Result<Checkout, NntpError> {
-        let slot = &self.slots[slot_idx];
-        let mut too_many_connections_retries: u32 = 0;
-
-        loop {
-            // Try the idle pool first, without acquiring a new permit: an
-            // idle connection already holds its own permit (see
-            // `Idle::permit`), so reusing it doesn't change the
-            // total-open-sockets count and needs no fresh permit.
-            loop {
-                let candidate = slot.queues.lock().idle.pop_back();
-                let Some(idle) = candidate else { break };
-                let age = idle.last_used.elapsed();
-                if age > IDLE_TIMEOUT {
-                    drop(idle);
-                    continue;
-                }
-                if age > STALE_THRESHOLD {
-                    let mut conn = idle.conn;
-                    let idle_permit = idle.permit;
-                    let ping_started = std::time::Instant::now();
-                    let ping_result = tokio::time::timeout(PING_TIMEOUT, conn.date()).await;
-                    let ping_ms = ping_started.elapsed().as_millis();
-                    if ping_ms > 50 {
-                        tracing::debug!(host = %slot.provider.config.host, ping_ms, "NNTP acquire: stale ping");
-                    }
-                    match ping_result {
-                        Ok(Ok(())) => {
-                            return Ok(Checkout {
-                                conn,
-                                permit: idle_permit,
-                                slot_idx,
-                            });
-                        }
-                        Ok(Err(e)) => {
-                            tracing::debug!(host = %slot.provider.config.host, error = %e, "NNTP idle ping failed");
-                            drop(conn);
-                            drop(idle_permit);
-                            continue;
-                        }
-                        Err(_) => {
-                            tracing::debug!(host = %slot.provider.config.host, "NNTP idle ping timed out");
-                            drop(conn);
-                            drop(idle_permit);
-                            continue;
-                        }
-                    }
-                }
-                return Ok(Checkout {
-                    conn: idle.conn,
-                    permit: idle.permit,
-                    slot_idx,
-                });
-            }
-
-            // No usable idle connection. If the pool hasn't reached
-            // max_connections total open sockets yet, dial a fresh one.
-            if let Some(permit) = slot.permits.try_acquire_owned() {
-                let connect_started = std::time::Instant::now();
-                match NntpConnection::connect(&slot.provider.config).await {
-                    Ok(conn) => {
-                        let connect_ms = connect_started.elapsed().as_millis();
-                        if connect_ms > 50 {
-                            tracing::debug!(host = %slot.provider.config.host, connect_ms, "NNTP acquire: fresh dial");
-                        }
-                        return Ok(Checkout {
-                            conn,
-                            permit,
-                            slot_idx,
-                        });
-                    }
-                    // The account's own connection limit, not a broken
-                    // provider — release the permit we just took (so
-                    // someone else's release() hand-off or the idle pool
-                    // isn't starved by it) and back off instead of
-                    // propagating this as a normal dial failure.
-                    Err(NntpError::TooManyConnections(status)) => {
-                        drop(permit);
-                        too_many_connections_retries += 1;
-                        if too_many_connections_retries > TOO_MANY_CONNECTIONS_MAX_RETRIES {
-                            return Err(NntpError::TooManyConnections(status));
-                        }
-                        tracing::debug!(
-                            host = %slot.provider.config.host,
-                            status,
-                            attempt = too_many_connections_retries,
-                            "NNTP provider at its own connection limit; backing off and retrying"
-                        );
-                        tokio::time::sleep(TOO_MANY_CONNECTIONS_BACKOFF).await;
-                        continue;
-                    }
-                    Err(e) => return Err(e),
-                }
-            }
-
-            // Every socket is either actively in use or sitting in idle
-            // (which we just drained). Register for a direct hand-off
-            // instead of blocking on the semaphore: `release()` sends a
-            // freed connection straight to the front of this queue, so a
-            // playback read never queues behind whatever the
-            // reaper's 20s IDLE_TIMEOUT happens to be doing.
-            //
-            // The recheck-and-register below holds `queues`' lock for both
-            // steps, matching the single lock acquisition `release()` holds
-            // for its own "hand off or park in idle" decision. This closes
-            // a race where a connection freed between our last idle-check
-            // (above) and registering here would otherwise be invisible to
-            // both sides: release() would see empty waiter queues and park
-            // it in `idle`, while we'd already be parked as a waiter with
-            // nothing to wake us but the `WAITER_RETRY_INTERVAL` timeout.
-            // A connection popped here is guaranteed fresh (just released,
-            // `last_used` set to `Instant::now()`), so no staleness ping.
-            let acquire_started = std::time::Instant::now();
-            let (tx, rx) = oneshot::channel();
-            {
-                let mut guard = slot.queues.lock();
-                if let Some(idle) = guard.idle.pop_back() {
-                    drop(guard);
-                    return Ok(Checkout {
-                        conn: idle.conn,
-                        permit: idle.permit,
-                        slot_idx,
-                    });
-                }
-                match lane {
-                    WorkloadLane::Playback => guard.playback_waiters.push_back(tx),
-                    WorkloadLane::Bulk => guard.bulk_waiters.push_back(tx),
-                }
-            }
-            match tokio::time::timeout(Self::WAITER_RETRY_INTERVAL, rx).await {
-                Ok(Ok(idle)) => {
-                    let semaphore_wait_ms = acquire_started.elapsed().as_millis();
-                    if semaphore_wait_ms > 50 {
-                        tracing::debug!(
-                            host = %slot.provider.config.host,
-                            semaphore_wait_ms,
-                            "NNTP acquire: handoff wait"
-                        );
-                    }
-                    return Ok(Checkout {
-                        conn: idle.conn,
-                        permit: idle.permit,
-                        slot_idx,
-                    });
-                }
-                // Sender dropped (shouldn't normally happen) or the
-                // interval elapsed with no hand-off yet — loop back and
-                // retry idle/permit/waiter from the top. The now-orphaned
-                // `tx` (timeout case) is harmless: whichever `release()`
-                // pops it later finds the receiver gone and moves on to
-                // the next waiter or `idle`.
-                Ok(Err(_)) | Err(_) => continue,
-            }
-        }
+    pub fn download_concurrency(&self) -> usize {
+        self.total_capacity()
     }
 
-    /// Caller must only release a conn whose last op left the wire in a
-    /// clean state (Ok or ArticleNotFound). Other errors → drop the conn.
-    fn release(&self, checkout: Checkout) {
-        let Checkout {
-            conn,
-            permit,
-            slot_idx,
-        } = checkout;
-        let slot = &self.slots[slot_idx];
-        let mut idle = Idle {
-            conn,
-            permit,
-            last_used: Instant::now(),
-        };
-
-        // Hand off directly to a queued waiter (High before Low) instead of
-        // parking in `idle`: nothing else wakes a waiter promptly, since a
-        // released connection never touches the semaphore's own permit
-        // count (see `Idle::permit`). `send` returns the value back on
-        // `Err` if the receiver was dropped (its `acquire()` call timed
-        // out and looped back already) — try the next waiter in that case.
-        //
-        // Each iteration takes `queues`' lock for the whole "find a waiter,
-        // or give up and park in idle" decision, matching the single lock
-        // acquisition `acquire()` holds for its own recheck-and-register —
-        // see the comment there for why this must be one critical section
-        // rather than a separate check-then-act across two lock
-        // acquisitions.
-        loop {
-            let mut guard = slot.queues.lock();
-            let next = guard.next_waiter();
-            let Some(tx) = next else {
-                guard.idle.push_back(idle);
-                return;
-            };
-            drop(guard);
-            match tx.send(idle) {
-                Ok(()) => return,
-                Err(returned_idle) => {
-                    idle = returned_idle;
-                    continue;
-                }
-            }
-        }
-    }
-
-    /// Runs `op` against providers in health/priority order, returning the
-    /// value and the index of the slot that served it (so callers can attribute
-    /// per-provider traffic).
-    async fn try_each<F, Fut, T>(&self, lane: WorkloadLane, op: F) -> Result<(T, usize), NntpError>
-    where
-        F: Fn(NntpConnection) -> Fut,
-        Fut: std::future::Future<Output = (NntpConnection, Result<T, NntpError>)>,
-    {
-        let mut not_found = false;
-        let mut last_err: Option<NntpError> = None;
-
-        let mut order: Vec<usize> = Vec::with_capacity(self.slots.len());
+    /// Run one job against providers in health/priority order: healthy
+    /// providers first, tripped ones as a last-resort probe. `ArticleNotFound`
+    /// moves on to the next provider; transport errors record a breaker
+    /// failure and move on.
+    async fn try_each(
+        &self,
+        lane: Lane,
+        make_kind: impl Fn() -> JobKind,
+    ) -> Result<(JobOutput, usize), NntpError> {
+        let mut order: Vec<usize> = Vec::with_capacity(self.providers.len());
         let mut tripped: Vec<usize> = Vec::new();
-        for (idx, slot) in self.slots.iter().enumerate() {
-            if slot.breaker.is_tripped() {
+        for (idx, rt) in self.providers.iter().enumerate() {
+            if rt.breaker.is_tripped() {
                 tripped.push(idx);
             } else {
                 order.push(idx);
@@ -711,62 +515,37 @@ impl NntpPool {
         }
         order.extend(tripped);
 
-        for slot_idx in order {
-            let host = self.slots[slot_idx].provider.config.host.clone();
-            let is_backup = self.slots[slot_idx].provider.is_backup;
-            let breaker = self.slots[slot_idx].breaker.clone();
-            let checkout = match self.acquire(slot_idx, lane).await {
-                Ok(c) => c,
-                Err(e) => {
-                    tracing::debug!(
-                        host = %host,
-                        backup = is_backup,
-                        error = %e,
-                        "NNTP acquire failed; trying next provider"
-                    );
-                    breaker.record_failure(&host);
-                    last_err = Some(e);
-                    continue;
+        let mut not_found = false;
+        let mut last_err: Option<NntpError> = None;
+        for idx in order {
+            let rt = &self.providers[idx];
+            let (tx, rx) = oneshot::channel();
+            rt.submit(Job {
+                kind: make_kind(),
+                lane,
+                reply: tx,
+            });
+            match rx.await {
+                Ok(Ok(out)) => {
+                    rt.breaker.record_success();
+                    return Ok((out, idx));
                 }
-            };
-            let Checkout {
-                conn,
-                permit,
-                slot_idx,
-            } = checkout;
-            let (conn, result) = op(conn).await;
-            match result {
-                Ok(v) => {
-                    breaker.record_success();
-                    self.release(Checkout {
-                        conn,
-                        permit,
-                        slot_idx,
-                    });
-                    return Ok((v, slot_idx));
-                }
-                Err(NntpError::ArticleNotFound(s)) => {
-                    self.release(Checkout {
-                        conn,
-                        permit,
-                        slot_idx,
-                    });
-                    last_err = Some(NntpError::ArticleNotFound(s));
+                Ok(Err(NntpError::ArticleNotFound(s))) => {
                     not_found = true;
-                    continue;
+                    last_err = Some(NntpError::ArticleNotFound(s));
                 }
-                Err(e) => {
-                    drop(conn);
-                    drop(permit);
+                Ok(Err(e)) => {
                     tracing::debug!(
-                        host = %host,
-                        backup = is_backup,
+                        host = %rt.provider.config.host,
+                        backup = rt.provider.is_backup,
                         error = %e,
                         "NNTP op failed; trying next provider"
                     );
-                    breaker.record_failure(&host);
+                    rt.breaker.record_failure(&rt.provider.config.host);
                     last_err = Some(e);
-                    continue;
+                }
+                Err(_) => {
+                    last_err = Some(NntpError::Protocol("nntp pool shut down"));
                 }
             }
         }
@@ -778,68 +557,223 @@ impl NntpPool {
         }
         Err(last_err.unwrap_or(NntpError::Protocol("no providers configured")))
     }
+}
 
-    pub(crate) async fn fetch_body(
-        &self,
-        message_id: &str,
-        lane: WorkloadLane,
-    ) -> Result<crate::bufpool::PooledBuf, NntpError> {
-        let mid = message_id.to_string();
-        let (buf, slot_idx) = self
-            .try_each(lane, |mut conn| {
-                let mid = mid.clone();
-                async move {
-                    let r = conn.fetch_body(&mid).await;
-                    (conn, r)
+impl Drop for NntpPool {
+    fn drop(&mut self) {
+        for rt in &self.providers {
+            let pending: Vec<Job> = {
+                let mut s = rt.sched.lock();
+                s.shutdown = true;
+                let mut pending: Vec<Job> = s.hot.drain(..).collect();
+                pending.extend(s.stream.drain(..));
+                pending.extend(s.bulk.drain(..));
+                pending
+            };
+            for job in pending {
+                let _ = job
+                    .reply
+                    .send(Err(NntpError::Protocol("nntp pool shut down")));
+            }
+            rt.warm_notify.notify_waiters();
+            rt.cold_notify.notify_waiters();
+        }
+    }
+}
+
+/// Dial with backoff on the provider's own "too many connections" answer —
+/// that's the account at capacity, not the provider down, so it must never
+/// trip the breaker or fail the job outright.
+async fn dial(rt: &ProviderRt) -> Result<NntpConnection, NntpError> {
+    let mut retries: u32 = 0;
+    loop {
+        let started = Instant::now();
+        match NntpConnection::connect(&rt.provider.config).await {
+            Ok(conn) => {
+                let connect_ms = started.elapsed().as_millis();
+                if connect_ms > 50 {
+                    tracing::debug!(
+                        host = %rt.provider.config.host,
+                        connect_ms,
+                        "NNTP slot dialed"
+                    );
                 }
-            })
-            .await?;
-        let slot = &self.slots[slot_idx];
-        slot.bytes_downloaded
-            .fetch_add(buf.len() as u64, Ordering::Relaxed);
-        slot.articles_downloaded.fetch_add(1, Ordering::Relaxed);
-        Ok(buf)
-    }
-
-    /// Per-provider session traffic counters (encoded bytes + article bodies
-    /// downloaded since process start), in pool order.
-    pub fn traffic_snapshot(&self) -> Vec<ProviderTraffic> {
-        self.slots
-            .iter()
-            .map(|slot| ProviderTraffic {
-                host: slot.provider.config.host.clone(),
-                bytes_downloaded: slot.bytes_downloaded.load(Ordering::Relaxed),
-                articles_downloaded: slot.articles_downloaded.load(Ordering::Relaxed),
-            })
-            .collect()
-    }
-
-    pub fn total_capacity(&self) -> usize {
-        let cap: usize = self
-            .slots
-            .iter()
-            .filter(|s| !s.provider.is_backup)
-            .map(|s| s.provider.config.max_connections.max(1) as usize)
-            .sum();
-        cap.max(1)
-    }
-
-    pub fn download_concurrency(&self) -> usize {
-        self.total_capacity()
-    }
-
-    async fn stat(&self, message_id: &str, lane: WorkloadLane) -> Result<bool, NntpError> {
-        let mid = message_id.to_string();
-        let (exists, _slot_idx) = self
-            .try_each(lane, |mut conn| {
-                let mid = mid.clone();
-                async move {
-                    let r = conn.stat(&mid).await;
-                    (conn, r)
+                return Ok(conn);
+            }
+            Err(NntpError::TooManyConnections(status)) => {
+                retries += 1;
+                if retries > TOO_MANY_CONNECTIONS_MAX_RETRIES {
+                    return Err(NntpError::TooManyConnections(status));
                 }
-            })
-            .await?;
-        Ok(exists)
+                tracing::debug!(
+                    host = %rt.provider.config.host,
+                    status,
+                    attempt = retries,
+                    "NNTP provider at its own connection limit; backing off"
+                );
+                tokio::time::sleep(TOO_MANY_CONNECTIONS_BACKOFF).await;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+async fn execute(conn: &mut NntpConnection, kind: &JobKind) -> Result<JobOutput, NntpError> {
+    match kind {
+        JobKind::Body(mid) => conn.fetch_body(mid).await.map(JobOutput::Body),
+        JobKind::Stat(mid) => conn.stat(mid).await.map(JobOutput::Stat),
+    }
+}
+
+/// One slot actor: owns at most one live connection for its provider and
+/// serves jobs until pool shutdown. All scheduling state transitions happen
+/// under the provider's single sched mutex.
+async fn run_slot(rt: Arc<ProviderRt>, active_streams: Arc<AtomicUsize>, slot_idx: usize) {
+    let mut conn: Option<NntpConnection> = None;
+    let mut last_used = Instant::now();
+
+    loop {
+        // Claim the highest-priority eligible job, or decide to park.
+        let (job, backlog) = {
+            let mut s = rt.sched.lock();
+            if s.shutdown {
+                if conn.is_some() {
+                    s.open -= 1;
+                }
+                return;
+            }
+            let job = s.pop(rt.capacity(), active_streams.load(Ordering::Acquire));
+            if job.is_some() {
+                s.active += 1;
+            }
+            let backlog = !(s.hot.is_empty() && s.stream.is_empty());
+            (job, backlog)
+        };
+
+        // `Notify` stores at most one wake permit, so a submission burst can
+        // wake fewer slots than it queued jobs. Chain the wake: any slot that
+        // claims work while more is queued wakes the next parked slot, so a
+        // backlog fans out across slots instead of draining serially.
+        if job.is_some() && backlog {
+            let s = rt.sched.lock();
+            if s.warm_parked > 0 {
+                rt.warm_notify.notify_one();
+            } else if s.cold_parked > 0 {
+                rt.cold_notify.notify_one();
+            }
+        }
+
+        let Some(job) = job else {
+            park(&rt, &mut conn, slot_idx, last_used).await;
+            continue;
+        };
+
+        // The requester may have gone away (obsolete read-ahead window,
+        // cancelled caller) — don't spend a socket on it.
+        if job.reply.is_closed() {
+            finish_job(&rt, job.lane);
+            continue;
+        }
+
+        // Ensure a live connection.
+        if conn.is_none() {
+            match dial(&rt).await {
+                Ok(c) => {
+                    conn = Some(c);
+                    rt.sched.lock().open += 1;
+                }
+                Err(e) => {
+                    let lane = job.lane;
+                    let _ = job.reply.send(Err(e));
+                    finish_job(&rt, lane);
+                    // Don't spin every cold slot against an unreachable
+                    // provider: park; the next submission re-wakes us.
+                    continue;
+                }
+            }
+        }
+
+        let c = conn.as_mut().expect("connection ensured above");
+        let result = execute(c, &job.kind).await;
+        last_used = Instant::now();
+
+        // A transport-level failure poisons the connection: drop it so the
+        // next job dials fresh. `ArticleNotFound` leaves the wire clean.
+        let drop_conn = !matches!(result, Ok(_) | Err(NntpError::ArticleNotFound(_)));
+        if drop_conn && let Some(mut dead) = conn.take() {
+            dead.quit().await;
+            rt.sched.lock().open -= 1;
+        }
+
+        let lane = job.lane;
+        let _ = job.reply.send(result);
+        finish_job(&rt, lane);
+    }
+}
+
+/// Post-job bookkeeping: clear the active flag, release bulk admission, and
+/// wake another slot if freed budget makes a queued bulk job eligible.
+fn finish_job(rt: &ProviderRt, lane: Lane) {
+    let wake_bulk = {
+        let mut s = rt.sched.lock();
+        s.active -= 1;
+        if lane == Lane::Bulk {
+            s.bulk_inflight -= 1;
+        }
+        lane == Lane::Bulk && !s.bulk.is_empty()
+    };
+    if wake_bulk {
+        rt.wake_for_bulk();
+    }
+}
+
+/// Park this slot until new work arrives. Warm slots keep their connection
+/// alive with `DATE` keepalives and idle-close beyond the warm floor; cold
+/// slots simply sleep until warm capacity is saturated and they're woken.
+async fn park(
+    rt: &ProviderRt,
+    conn: &mut Option<NntpConnection>,
+    slot_idx: usize,
+    last_used: Instant,
+) {
+    if conn.is_some() {
+        let notified = rt.warm_notify.notified();
+        rt.sched.lock().warm_parked += 1;
+        let woken = tokio::time::timeout(KEEPALIVE_INTERVAL, notified)
+            .await
+            .is_ok();
+        rt.sched.lock().warm_parked -= 1;
+        if woken {
+            return;
+        }
+        // Keepalive tick. Past the warm floor, long-idle connections are
+        // returned to the OS; the floor keeps a base set permanently hot.
+        if slot_idx >= WARM_FLOOR && last_used.elapsed() >= IDLE_CLOSE {
+            if let Some(mut c) = conn.take() {
+                c.quit().await;
+                rt.sched.lock().open -= 1;
+            }
+            return;
+        }
+        // Note: the keepalive deliberately does NOT refresh `last_used` —
+        // only real jobs do. Otherwise the ping itself would keep resetting
+        // the idle clock and idle-close could never fire.
+        let c = conn.as_mut().expect("warm slot holds a connection");
+        let alive = matches!(
+            tokio::time::timeout(PING_TIMEOUT, c.date()).await,
+            Ok(Ok(()))
+        );
+        if !alive {
+            drop(conn.take());
+            rt.sched.lock().open -= 1;
+        }
+    } else {
+        let notified = rt.cold_notify.notified();
+        rt.sched.lock().cold_parked += 1;
+        // The timeout is a shutdown/lost-wake safety net: a cold slot woken
+        // by nothing simply re-checks the queues and re-parks.
+        let _ = tokio::time::timeout(Duration::from_secs(60), notified).await;
+        rt.sched.lock().cold_parked -= 1;
     }
 }
 
@@ -850,33 +784,38 @@ mod tests {
     use super::*;
     use crate::nntp::{NntpProvider, NntpServerConfig};
 
-    /// Spawns a loopback TCP listener that speaks just enough NNTP to satisfy
-    /// `NntpConnection::connect`: a `200` greeting per accepted connection,
-    /// no auth exchange (test providers carry no credentials). Good enough
-    /// for pool checkout/release regression tests, which never issue a real
-    /// `BODY`/`DATE` command.
+    /// Loopback listener speaking enough NNTP for pool tests: `200` greeting,
+    /// `111` to DATE, `223` to STAT (exists), `430` to BODY (not found).
     async fn spawn_fake_nntp_server() -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let handle = tokio::spawn(async move {
             loop {
-                let Ok((mut socket, _)) = listener.accept().await else {
+                let Ok((socket, _)) = listener.accept().await else {
                     return;
                 };
                 tokio::spawn(async move {
-                    use tokio::io::AsyncWriteExt;
-                    if socket.write_all(b"200 fake nntp ready\r\n").await.is_err() {
+                    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+                    let (r, mut w) = socket.into_split();
+                    if w.write_all(b"200 fake nntp ready\r\n").await.is_err() {
                         return;
                     }
-                    // Keep the socket open (idle) until the test drops its
-                    // end; a real reader isn't needed since these tests never
-                    // send BODY/DATE/AUTHINFO.
-                    let mut buf = [0u8; 64];
-                    loop {
-                        use tokio::io::AsyncReadExt;
-                        match socket.read(&mut buf).await {
-                            Ok(0) | Err(_) => return,
-                            Ok(_) => {}
+                    let mut lines = BufReader::new(r).lines();
+                    while let Ok(Some(line)) = lines.next_line().await {
+                        let reply: &[u8] = if line.starts_with("DATE") {
+                            b"111 20260101000000\r\n"
+                        } else if line.starts_with("STAT") {
+                            b"223 0 <exists>\r\n"
+                        } else if line.starts_with("BODY") {
+                            b"430 no such article\r\n"
+                        } else if line.starts_with("QUIT") {
+                            let _ = w.write_all(b"205 bye\r\n").await;
+                            return;
+                        } else {
+                            b"500 what\r\n"
+                        };
+                        if w.write_all(reply).await.is_err() {
+                            return;
                         }
                     }
                 });
@@ -901,174 +840,126 @@ mod tests {
         }
     }
 
-    /// Regression test for the connection-pool-starvation bug: `acquire()`
-    /// must try the idle pool *before* asking the semaphore for a permit.
-    /// With `max_connections: 1`, the old ordering (permit first, idle
-    /// second) meant a second acquire after a release could only succeed
-    /// once the 20s reaper dropped the idle entry's permit — this asserts
-    /// the fixed path resolves near-instantly instead.
-    #[tokio::test]
-    async fn acquire_reuses_idle_connection_without_waiting_on_reaper() {
-        let (addr, _server) = spawn_fake_nntp_server().await;
-        let pool = NntpPool::new_multi(vec![test_provider(addr, 1)]);
-
-        let checkout1 = pool.acquire(0, WorkloadLane::Playback).await.unwrap();
-        pool.release(checkout1);
-        assert_eq!(pool.slots[0].queues.lock().idle.len(), 1);
-        assert_eq!(pool.slots[0].permits.available_permits(), 0);
-
-        let checkout2 = tokio::time::timeout(
-            Duration::from_millis(500),
-            pool.acquire(0, WorkloadLane::Playback),
+    fn dummy_job(lane: Lane) -> (Job, oneshot::Receiver<Result<JobOutput, NntpError>>) {
+        let (tx, rx) = oneshot::channel();
+        (
+            Job {
+                kind: JobKind::Stat("x@test".into()),
+                lane,
+                reply: tx,
+            },
+            rx,
         )
-        .await
-        .expect("acquire should reuse the idle connection promptly, not wait on the reaper")
-        .unwrap();
-        pool.release(checkout2);
-    }
-
-    /// Regression test for the second half of the starvation bug: `release()`
-    /// must hand a freed connection directly to a queued waiter instead of
-    /// only ever pushing it to `idle`. With `max_connections: 1`, a waiter
-    /// parked behind an in-flight checkout must be woken the moment the
-    /// checkout is released, not left to poll.
-    #[tokio::test]
-    async fn release_hands_off_directly_to_a_queued_waiter() {
-        let (addr, _server) = spawn_fake_nntp_server().await;
-        let pool = NntpPool::new_multi(vec![test_provider(addr, 1)]);
-
-        let checkout1 = pool.acquire(0, WorkloadLane::Playback).await.unwrap();
-        assert_eq!(pool.slots[0].permits.available_permits(), 0);
-
-        let waiter_pool = pool.clone();
-        let waiter =
-            tokio::spawn(async move { waiter_pool.acquire(0, WorkloadLane::Playback).await });
-
-        // Wait for observable proof the waiter has actually registered in
-        // `playback_waiters`, rather than assuming a fixed sleep is long enough.
-        for _ in 0..1000 {
-            if pool.slots[0].queues.lock().playback_waiters.len() == 1 {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(1)).await;
-        }
-        assert_eq!(pool.slots[0].queues.lock().playback_waiters.len(), 1);
-
-        pool.release(checkout1);
-
-        let checkout2 = tokio::time::timeout(Duration::from_millis(500), waiter)
-            .await
-            .expect("waiter should be woken directly by release, not left parked")
-            .unwrap()
-            .unwrap();
-        pool.release(checkout2);
     }
 
     #[test]
-    fn playback_waiter_is_handed_off_before_bulk() {
-        let mut queues = SlotQueues {
-            idle: VecDeque::new(),
-            playback_waiters: VecDeque::new(),
-            bulk_waiters: VecDeque::new(),
-        };
-        let (bulk_tx, _bulk_rx) = oneshot::channel::<Idle>();
-        let (playback_tx, _playback_rx) = oneshot::channel::<Idle>();
-        queues.bulk_waiters.push_back(bulk_tx);
-        queues.playback_waiters.push_back(playback_tx);
+    fn pop_serves_hot_before_stream_before_bulk() {
+        let mut s = Sched::new();
+        let (bulk, _b) = dummy_job(Lane::Bulk);
+        let (stream, _s) = dummy_job(Lane::Stream);
+        let (hot, _h) = dummy_job(Lane::Hot);
+        s.bulk.push_back(bulk);
+        s.stream.push_back(stream);
+        s.hot.push_back(hot);
 
-        drop(queues.next_waiter());
-        assert!(queues.playback_waiters.is_empty());
-        assert_eq!(queues.bulk_waiters.len(), 1);
+        assert_eq!(s.pop(4, 0).unwrap().lane, Lane::Hot);
+        assert_eq!(s.pop(4, 0).unwrap().lane, Lane::Stream);
+        assert_eq!(s.pop(4, 0).unwrap().lane, Lane::Bulk);
+        assert!(s.pop(4, 0).is_none());
     }
 
-    /// Regression test for a narrower TOCTOU race in the two tests above:
-    /// acquire()'s final "idle is empty, I must register as a waiter"
-    /// check and release()'s "no waiter queued, I must park in idle" check
-    /// used to happen under separate lock acquisitions. A release()
-    /// squeezed into the gap between an acquirer's last idle-check and its
-    /// waiter registration could park a connection in `idle` that nothing
-    /// would find until the acquirer's `WAITER_RETRY_INTERVAL` (2s) timeout
-    /// expired and it looped back. `queues` now shares one lock across both
-    /// decisions, closing the gap.
-    ///
-    /// This can't be reproduced with a fixed interleaving (the whole point
-    /// of the fix is that the two decisions are now indivisible), so this
-    /// drives heavy concurrent acquire/release contention over many
-    /// iterations and asserts every acquire completes almost instantly —
-    /// pre-fix, the race would statistically strand at least one acquirer
-    /// for the full 2s retry interval somewhere in the run, blowing the
-    /// overall timeout badly.
-    // Needs genuine OS-thread parallelism (not just cooperative
-    // interleaving) for a meaningful stress test: the race this guards
-    // against is between two threads' lock acquisitions, which a
-    // current-thread runtime can never actually produce.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn concurrent_acquire_release_never_stalls_on_retry_interval() {
-        const WORKERS: usize = 16;
-        const ITERATIONS_PER_WORKER: usize = 100;
+    #[test]
+    fn bulk_admission_shrinks_while_streams_active() {
+        let mut s = Sched::new();
+        for _ in 0..4 {
+            let (job, rx) = dummy_job(Lane::Bulk);
+            std::mem::forget(rx);
+            s.bulk.push_back(job);
+        }
+        // capacity 4, one stream → reserve 2 → bulk cap 2.
+        assert!(s.pop(4, 1).is_some());
+        assert!(s.pop(4, 1).is_some());
+        assert!(s.pop(4, 1).is_none(), "third bulk job must wait");
+        // Stream gone → cap restored.
+        assert!(s.pop(4, 0).is_some());
+        // Hot is never budget-gated.
+        let (hot, _h) = dummy_job(Lane::Hot);
+        s.hot.push_back(hot);
+        assert_eq!(s.pop(4, 1).unwrap().lane, Lane::Hot);
+    }
 
+    #[test]
+    fn bulk_reserve_never_exceeds_capacity() {
+        let mut s = Sched::new();
+        let (job, rx) = dummy_job(Lane::Bulk);
+        std::mem::forget(rx);
+        s.bulk.push_back(job);
+        // capacity 1, many streams: cap clamps to 1, job still eligible.
+        assert!(s.pop(1, 50).is_some());
+    }
+
+    #[tokio::test]
+    async fn stat_round_trips_through_slot_actor() {
         let (addr, _server) = spawn_fake_nntp_server().await;
-        let pool = NntpPool::new_multi(vec![test_provider(addr, 4)]);
+        let pool = NntpPool::new_multi(vec![test_provider(addr, 2)]);
+        let client = pool.bulk_client();
+        let exists = tokio::time::timeout(Duration::from_secs(2), client.stat("abc@test"))
+            .await
+            .expect("stat must not hang")
+            .unwrap();
+        assert!(exists);
+    }
 
+    #[tokio::test]
+    async fn body_not_found_maps_to_article_not_found() {
+        let (addr, _server) = spawn_fake_nntp_server().await;
+        let pool = NntpPool::new_multi(vec![test_provider(addr, 1)]);
+        let client = pool.playback_client();
+        let result = tokio::time::timeout(Duration::from_secs(2), client.fetch_body("abc@test"))
+            .await
+            .expect("fetch must not hang");
+        assert!(matches!(result, Err(NntpError::ArticleNotFound(_))));
+    }
+
+    #[tokio::test]
+    async fn many_concurrent_stats_share_bounded_slots() {
+        let (addr, _server) = spawn_fake_nntp_server().await;
+        let pool = NntpPool::new_multi(vec![test_provider(addr, 3)]);
         let run = async {
-            let mut handles = Vec::with_capacity(WORKERS);
-            for _ in 0..WORKERS {
-                let pool = pool.clone();
-                handles.push(tokio::spawn(async move {
-                    for _ in 0..ITERATIONS_PER_WORKER {
-                        let checkout = pool.acquire(0, WorkloadLane::Playback).await.unwrap();
-                        // Yield to encourage real interleaving between
-                        // acquires and releases across workers.
-                        tokio::task::yield_now().await;
-                        pool.release(checkout);
-                    }
-                }));
+            let mut handles = Vec::new();
+            for _ in 0..64 {
+                let client = pool.bulk_client();
+                handles.push(tokio::spawn(async move { client.stat("x@test").await }));
             }
             for h in handles {
-                h.await.unwrap();
+                assert!(h.await.unwrap().unwrap());
             }
         };
-
-        // Generous relative to the sub-millisecond hand-offs this should
-        // take, but far below the 2s `WAITER_RETRY_INTERVAL` a single
-        // stranded acquirer would need — any real stall fails this.
-        tokio::time::timeout(Duration::from_secs(1), run)
+        tokio::time::timeout(Duration::from_secs(5), run)
             .await
-            .expect("concurrent acquire/release contention must never stall on the retry interval");
+            .expect("burst of stats must drain through 3 slots without stalling");
     }
 
     #[tokio::test]
-    async fn background_budget_reserves_capacity_for_active_streams() {
-        let budget = BackgroundBudget::new(10);
-        budget.stream_started();
-        assert_eq!(budget.effective_capacity(), 8);
-
-        let mut held = Vec::new();
-        for _ in 0..8 {
-            held.push(budget.acquire().await);
+    async fn connections_stay_warm_between_jobs() {
+        let (addr, _server) = spawn_fake_nntp_server().await;
+        let pool = NntpPool::new_multi(vec![test_provider(addr, 2)]);
+        let client = pool.stream_client();
+        client.stat("a@test").await.unwrap();
+        client.stat("b@test").await.unwrap();
+        // The reply arrives before the slot's post-job bookkeeping, so poll
+        // briefly rather than assert on an instantaneous snapshot.
+        for _ in 0..100 {
+            let health = &pool.health()[0];
+            if health.open_connections >= 1 && health.active_connections == 0 {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
         }
-
-        let blocked_budget = budget.clone();
-        let blocked = tokio::spawn(async move { blocked_budget.acquire().await });
-        tokio::task::yield_now().await;
-        assert!(!blocked.is_finished());
-
-        budget.stream_ended();
-        let permit = tokio::time::timeout(Duration::from_millis(250), blocked)
-            .await
-            .expect("growing the adaptive budget must wake a waiter")
-            .unwrap();
-        drop(permit);
-        drop(held);
-    }
-
-    #[test]
-    fn background_budget_never_underflows_stream_count_or_capacity() {
-        let budget = BackgroundBudget::new(1);
-        budget.stream_ended();
-        assert_eq!(budget.active_streams.load(Ordering::Acquire), 0);
-        budget.stream_started();
-        budget.stream_started();
-        assert_eq!(budget.effective_capacity(), 1);
+        let health = &pool.health()[0];
+        panic!(
+            "connections did not settle warm: open={} active={}",
+            health.open_connections, health.active_connections
+        );
     }
 }
