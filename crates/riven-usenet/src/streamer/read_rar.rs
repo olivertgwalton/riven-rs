@@ -248,7 +248,7 @@ impl UsenetStreamer {
             return Ok(Bytes::new());
         }
         let skip = dec_start.saturating_sub(decoded_cursor) as usize;
-        let read_concurrency = self.prefetch_concurrency(client.capacity());
+        let read_concurrency = super::OP_FANOUT;
         let batch_last = (first_seg + read_concurrency - 1).min(total_segs - 1);
 
         self.assemble_decoded_forward(
@@ -296,7 +296,7 @@ impl UsenetStreamer {
             return Ok(Bytes::new());
         }
 
-        let read_concurrency = self.prefetch_concurrency(client.capacity());
+        let read_concurrency = super::OP_FANOUT;
         let segments = part.segments.as_slice();
         let mut slices: Vec<Bytes> = Vec::new();
         let mut produced: usize = 0;

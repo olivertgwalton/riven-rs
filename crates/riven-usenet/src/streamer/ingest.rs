@@ -138,8 +138,7 @@ impl UsenetStreamer {
         if n == 0 {
             return Ok(());
         }
-        let probe_concurrency = self
-            .prefetch_concurrency(self.pool.bulk_client().capacity())
+        let probe_concurrency = super::OP_FANOUT
             .min(n);
         // stop_on_first_miss: zero tolerance for confirmed-missing segments
         // means the rest of the sample is wasted work the instant one hits —
@@ -334,7 +333,7 @@ impl UsenetStreamer {
             file.filename = new_name;
         }
 
-        let rescale_concurrency = self.prefetch_concurrency(self.pool.bulk_client().capacity());
+        let rescale_concurrency = super::OP_FANOUT;
         stream::iter(
             meta_files
                 .iter_mut()
@@ -456,7 +455,7 @@ impl UsenetStreamer {
         }
 
         let header_fetch_concurrency =
-            self.prefetch_concurrency(self.pool.bulk_client().capacity());
+            super::OP_FANOUT;
         let streamer = self.clone();
         // Fetch every volume's header at bounded concurrency, but cancel the
         // rest of the group the instant one volume fails: a missing or

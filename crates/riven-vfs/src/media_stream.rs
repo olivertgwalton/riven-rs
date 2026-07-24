@@ -626,9 +626,9 @@ impl UsenetSession {
             return;
         }
 
-        // A watch channel retains only the latest requested watermark. If
-        // NNTP is slower than the consumer, obsolete intermediate windows
-        // are discarded instead of building an unbounded work queue.
+        // A watch channel retains only the latest position. The source's
+        // adaptive read-ahead owns depth and pacing; this worker just
+        // forwards the freshest play position, discarding stale ones.
         let (tx, mut targets) = tokio::sync::watch::channel(None::<u64>);
         let source = Arc::clone(&self.source);
         let info_hash = Arc::clone(&self.info_hash);
@@ -636,18 +636,10 @@ impl UsenetSession {
 
         self.prefetch_task = Some(runtime.spawn(async move {
             while targets.changed().await.is_ok() {
-                let Some(start) = *targets.borrow_and_update() else {
+                let Some(position) = *targets.borrow_and_update() else {
                     continue;
                 };
-                const DEFAULT_SEGMENT_WINDOW: usize = 60;
-                let segment_window = std::env::var("RIVEN_USENET_PLAYBACK_SEGMENT_WINDOW")
-                    .ok()
-                    .and_then(|value| value.parse::<usize>().ok())
-                    .filter(|value| *value > 0)
-                    .unwrap_or(DEFAULT_SEGMENT_WINDOW);
-                source
-                    .prefetch(&info_hash, file_index, start, segment_window)
-                    .await;
+                source.prefetch(&info_hash, file_index, position).await;
             }
         }));
         self.prefetch_target_tx = Some(tx);
@@ -840,7 +832,7 @@ mod tests {
     /// Records every `prefetch`/`read_range` call instead of doing real I/O,
     /// so tests can assert on call counts and ranges without a network.
     struct MockSource {
-        prefetch_calls: Mutex<Vec<(u64, usize)>>,
+        prefetch_calls: Mutex<Vec<u64>>,
         read_range_calls: Mutex<u32>,
         registered: std::sync::atomic::AtomicBool,
     }
@@ -869,18 +861,9 @@ mod tests {
             Ok(Bytes::from(vec![0u8; len]))
         }
 
-        async fn prefetch(
-            &self,
-            _info_hash: &str,
-            _file_index: usize,
-            start: u64,
-            segments_ahead: usize,
-        ) {
+        async fn prefetch(&self, _info_hash: &str, _file_index: usize, position: u64) {
             tokio::time::sleep(Duration::from_millis(10)).await;
-            self.prefetch_calls
-                .lock()
-                .unwrap()
-                .push((start, segments_ahead));
+            self.prefetch_calls.lock().unwrap().push(position);
         }
 
         fn stream_register(&self, _key: &str, _info_hash: &str, _filename: &str, _file_size: u64) {
@@ -941,11 +924,8 @@ mod tests {
             "expected one coalescing producer, got {} windows for {NUM_READS} reads",
             prefetch_calls.len()
         );
-        for &(_, segments) in &prefetch_calls {
-            assert_eq!(segments, 60);
-        }
         assert!(
-            prefetch_calls.last().unwrap().0 >= (NUM_READS - 2) * READ_SIZE,
+            *prefetch_calls.last().unwrap() >= (NUM_READS - 2) * READ_SIZE,
             "the coalesced producer must converge on the latest read offset"
         );
     }
@@ -988,11 +968,10 @@ mod tests {
 
         let calls = mock.prefetch_calls.lock().unwrap().clone();
         assert!(
-            calls[0].0 >= RESUME_AT,
-            "a resumed stream must start its segment window at the resume point, not at 0 (got {})",
-            calls[0].0
+            calls[0] >= RESUME_AT,
+            "a resumed stream must report positions from the resume point, not 0 (got {})",
+            calls[0]
         );
-        assert_eq!(calls[0].1, 60);
     }
 
     /// The library-scan case that drove the process into OOM: a scanner opens

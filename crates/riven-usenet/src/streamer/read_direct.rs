@@ -49,84 +49,74 @@ impl UsenetStreamer {
                 )));
             }
 
-            // Reserve the process-wide slot *before* registering an owner in
-            // `in_flight`.  A fetch-only gate below the owner registration
-            // limits BODY requests but still lets every FUSE read-ahead
-            // window enqueue a distinct promise.  During a library scan that
-            // became hundreds of queued segment owners (and their retained
-            // futures) even though only a few were downloading.  Bounding
-            // ownership makes this a true global backpressure point.
-            let Ok(permit) = self.state.fetch_sem.acquire().await else {
-                return Err(StreamerError::Nntp(NntpError::Protocol(
-                    "usenet fetch semaphore closed",
-                )));
-            };
-
-            // A queued caller may have waited long enough for this segment
-            // to enter the cache, or for another caller to mark it missing.
-            // Re-check after acquiring so it never creates needless work.
-            if let Some(hit) = self.state.cache.get(message_id) {
-                return Ok(hit);
-            }
-            if self.state.fails.is_dead(message_id) {
-                return Err(StreamerError::Nntp(NntpError::ArticleNotFound(
-                    "previously marked as missing".into(),
-                )));
-            }
-
+            // Concurrency is bounded by the NNTP pool's slot actors (a fetch
+            // can't run without a connection), so no process-wide gate is
+            // needed here — only the single-flight dedup below, which keeps
+            // N readers of one segment to one wire fetch.
             match self.state.in_flight.enter_or_wait(message_id) {
                 FetchEntry::Wait(slot) => {
-                    // Only owners consume the scarce slot.  A follower is
-                    // already deduplicated and can wait without occupying a
-                    // segment budget permit.
-                    drop(permit);
                     slot.wait().await;
                     continue;
                 }
                 FetchEntry::Owner(slot, mid) => {
-                    // RAII guard: if this future is cancelled mid-fetch
-                    // the explicit `finish` below would be skipped, which
-                    // would leave the slot in the in_flight map with
-                    // `done = false` and hang any future waiter for this
-                    // message-id. The guard's Drop runs even on
-                    // cancellation, ensuring the slot is always released.
-                    // `mid` is the one shared `Arc<str>` key for this fetch.
-                    struct OwnerGuard<'a> {
+                    // The fetch runs as a *detached* task: FUSE reads are
+                    // routinely interrupted (a player aborting one of its
+                    // range requests), and cancelling the wire fetch with
+                    // them throws away a half-downloaded article that the
+                    // very next read re-requests — a refetch stall on the
+                    // critical path. Detached, the article always completes
+                    // into the cache; a cancelled caller costs nothing.
+                    //
+                    // RAII guard inside the task: if the fetch itself
+                    // panics, Drop still releases the in_flight slot so
+                    // waiters for this message-id are never hung.
+                    struct OwnerGuard {
                         state: Arc<StreamerState>,
                         slot: Arc<PromiseSlot>,
                         message_id: Arc<str>,
-                        file: &'a str,
                         finished: bool,
                     }
-                    impl Drop for OwnerGuard<'_> {
+                    impl Drop for OwnerGuard {
                         fn drop(&mut self) {
                             if !self.finished {
-                                tracing::debug!(
-                                    message_id = %self.message_id,
-                                    file = %self.file,
-                                    "owner future cancelled mid-fetch; releasing slot"
-                                );
                                 self.state.in_flight.finish(&self.message_id, &self.slot);
                             }
                         }
                     }
-                    let mut guard = OwnerGuard {
-                        state: self.state.clone(),
-                        slot: slot.clone(),
-                        message_id: mid.clone(),
-                        file,
-                        finished: false,
-                    };
 
-                    let result = self.do_fetch_with_retry(client, message_id, file).await;
-                    if let Ok(bytes) = &result {
-                        let size = bytes.len() as u64;
-                        self.state.cache.put(mid.clone(), bytes.clone());
-                        self.state.decoded_sizes.put(mid.clone(), size);
-                    }
-                    self.state.in_flight.finish(&mid, &slot);
-                    guard.finished = true;
-                    return result;
+                    let task = {
+                        let streamer = self.clone();
+                        let client = client.clone();
+                        let mid = mid.clone();
+                        let file: Arc<str> = Arc::from(file);
+                        tokio::spawn(async move {
+                            let mut guard = OwnerGuard {
+                                state: streamer.state.clone(),
+                                slot: slot.clone(),
+                                message_id: mid.clone(),
+                                finished: false,
+                            };
+                            let result =
+                                streamer.do_fetch_with_retry(&client, &mid, &file).await;
+                            if let Ok(bytes) = &result {
+                                let size = bytes.len() as u64;
+                                streamer.state.cache.put(mid.clone(), bytes.clone());
+                                streamer.state.decoded_sizes.put(mid.clone(), size);
+                            }
+                            streamer.state.in_flight.finish(&mid, &slot);
+                            guard.finished = true;
+                            result
+                        })
+                    };
+                    return match task.await {
+                        Ok(result) => result,
+                        Err(join_err) => {
+                            tracing::warn!(message_id, file, error = %join_err, "fetch task panicked");
+                            Err(StreamerError::Nntp(NntpError::Protocol(
+                                "fetch task panicked",
+                            )))
+                        }
+                    };
                 }
             }
         }
@@ -210,10 +200,10 @@ impl UsenetStreamer {
         )))
     }
 
-    /// Background-warm the segment cache for the segments that overlap
-    /// `[start, end_inclusive]` of `file_index`. Per-operation fan-out is
-    /// bounded by `RIVEN_USENET_MAX_PREFETCH`, and the actual BODY/decode work
-    /// is further gated by the process-wide fetch semaphore.
+    /// Warm the segment cache for the segments that overlap
+    /// `[start, end_inclusive]` of `file_index`. Rides the pool's `Stream`
+    /// lane (used by head/tail precache ahead of playback), with a small
+    /// fixed fan-out — the pool's slot actors bound real socket use.
     pub async fn prefetch_range(
         &self,
         info_hash: &str,
@@ -221,9 +211,6 @@ impl UsenetStreamer {
         start: u64,
         end_inclusive: u64,
     ) {
-        let Some(_admission) = self.admit_prefetch(info_hash, file_index) else {
-            return;
-        };
         let Ok(meta) = self.load_meta(info_hash).await else {
             return;
         };
@@ -268,128 +255,15 @@ impl UsenetStreamer {
             }
         };
 
-        let client = self.pool.bulk_client();
-        self.prefetch_mids(client, mids, &file.filename).await;
+        let client = self.pool.stream_client();
+        self.warm_mids(client, mids, &file.filename).await;
     }
 
-    /// Fill a playback reader's ordered segment window beginning at `start`.
-    /// The window is expressed in NZB transfer units rather than guessed
-    /// bytes, so high-bitrate files naturally maintain the same number of
-    /// completed articles ahead of the consumer.
-    pub async fn prefetch_window(
-        &self,
-        info_hash: &str,
-        file_index: usize,
-        start: u64,
-        max_segments: usize,
-    ) {
-        if max_segments == 0 {
-            return;
-        }
-        let Some(_admission) = self.admit_prefetch(info_hash, file_index) else {
-            return;
-        };
-        let Ok(meta) = self.load_meta(info_hash).await else {
-            return;
-        };
-        let Some(file) = meta.files.get(file_index) else {
-            return;
-        };
-        if start >= file.total_size {
-            return;
-        }
-
-        let mids = match &file.source {
-            NzbMetaSource::Direct { offsets, segments } => {
-                let first = offsets
-                    .partition_point(|&offset| offset <= start)
-                    .saturating_sub(1)
-                    .min(segments.len().saturating_sub(1));
-                segments
-                    .iter()
-                    .skip(first)
-                    .take(max_segments)
-                    .map(|segment| segment.message_id.clone())
-                    .collect()
-            }
-            NzbMetaSource::Rar { parts, slices } => {
-                let mut mids = Vec::with_capacity(max_segments);
-                let mut virtual_pos = 0u64;
-                for slice in slices {
-                    let slice_end = virtual_pos.saturating_add(slice.length);
-                    if slice_end <= start {
-                        virtual_pos = slice_end;
-                        continue;
-                    }
-                    let offset_in_slice = start.saturating_sub(virtual_pos);
-                    let offset_in_part = slice.start_in_part.saturating_add(offset_in_slice);
-                    if let Some(part) = parts.get(slice.part_index) {
-                        let first = part
-                            .decoded_seg_size
-                            .filter(|size| *size > 0)
-                            .map_or_else(
-                                || {
-                                    part.offsets
-                                        .partition_point(|&offset| offset <= offset_in_part)
-                                        .saturating_sub(1)
-                                },
-                                |size| (offset_in_part / size) as usize,
-                            )
-                            .min(part.segments.len().saturating_sub(1));
-                        for segment in part.segments.iter().skip(first) {
-                            if mids.len() >= max_segments {
-                                break;
-                            }
-                            if !mids.iter().any(|mid| mid == &segment.message_id) {
-                                mids.push(segment.message_id.clone());
-                            }
-                        }
-                    }
-                    if mids.len() >= max_segments {
-                        break;
-                    }
-                    virtual_pos = slice_end;
-                }
-                mids
-            }
-        };
-
-        let client = self.pool.playback_client();
-        self.prefetch_mids(client, mids, &file.filename).await;
-    }
-
-    /// Global admission control for read-ahead. Read-ahead is *optional* work,
-    /// so a window that can't get a permit is dropped rather than queued: a
-    /// library scan opening a whole season pack at once starts one prefetch
-    /// worker per episode, and letting them all queue means their combined
-    /// windows still get scheduled — thousands of articles for eight real
-    /// streams, which is exactly the burst that drove the process into OOM.
-    /// A genuinely playing stream re-requests its window on the next read, so
-    /// it recovers immediately; a scanner touch does not, which is the point.
-    fn admit_prefetch(
-        &self,
-        info_hash: &str,
-        file_index: usize,
-    ) -> Option<tokio::sync::SemaphorePermit<'_>> {
-        match self.state.prefetch_sem.try_acquire() {
-            Ok(permit) => Some(permit),
-            Err(_) => {
-                tracing::debug!(
-                    info_hash,
-                    file = %self.cached_file_label(info_hash, file_index),
-                    file_index,
-                    "usenet prefetch window shed: global read-ahead budget full"
-                );
-                None
-            }
-        }
-    }
-
-    /// `file` names the file these segments belong to, purely so a read-ahead
-    /// fetch failure logs like a playback one. Shared as an `Arc<str>` because
-    /// every segment in the window carries it into its own future.
-    async fn prefetch_mids(&self, client: NntpClient, mids: Vec<String>, file: &str) {
-        let prefetch_concurrency = self.prefetch_concurrency(client.capacity());
+    /// Warm a list of segments through the cache with a small fixed fan-out.
+    /// `file` names the file purely so a warm-fetch failure logs like a
+    /// playback one; shared as an `Arc<str>` into each segment future.
+    async fn warm_mids(&self, client: NntpClient, mids: Vec<String>, file: &str) {
+        const WARM_FANOUT: usize = 4;
         let streamer = self.clone();
         let file: Arc<str> = Arc::from(file);
         let cold: Vec<String> = mids
@@ -401,15 +275,9 @@ impl UsenetStreamer {
                 let s = streamer.clone();
                 let client = client.clone();
                 let file = file.clone();
-                async move {
-                    // Read-ahead may only ever hold part of the global segment
-                    // gate, so a read a player is actually blocked on never
-                    // waits behind speculative work.
-                    let _bg = s.state.background_sem.acquire().await;
-                    s.fetch_decoded_cached(&client, &mid, &file).await
-                }
+                async move { s.fetch_decoded_cached(&client, &mid, &file).await }
             })
-            .buffer_unordered(prefetch_concurrency);
+            .buffer_unordered(WARM_FANOUT);
         while stream.next().await.is_some() {}
     }
 
@@ -497,6 +365,35 @@ impl UsenetStreamer {
         start: u64,
         end_inclusive: u64,
     ) -> Result<Vec<Bytes>, StreamerError> {
+        // Any player-facing read that stalls is a visible stutter; make it
+        // observable with where and how long, so a stall is diagnosable from
+        // logs instead of averages.
+        let started = std::time::Instant::now();
+        let result = self
+            .read_range_slices_inner(info_hash, file_index, start, end_inclusive)
+            .await;
+        let elapsed_ms = started.elapsed().as_millis();
+        if elapsed_ms > 300 {
+            tracing::warn!(
+                info_hash,
+                file = %self.cached_file_label(info_hash, file_index),
+                start,
+                len = end_inclusive.saturating_sub(start) + 1,
+                elapsed_ms,
+                ok = result.is_ok(),
+                "slow playback read"
+            );
+        }
+        result
+    }
+
+    async fn read_range_slices_inner(
+        &self,
+        info_hash: &str,
+        file_index: usize,
+        start: u64,
+        end_inclusive: u64,
+    ) -> Result<Vec<Bytes>, StreamerError> {
         let meta = self.load_meta(info_hash).await?;
         let file = meta
             .files
@@ -572,10 +469,14 @@ impl UsenetStreamer {
             return Ok(Vec::new());
         }
 
+        // Per-read fan-out: a FUSE chunk covers a handful of segments; the
+        // adaptive read-ahead task owns deep pipelining, so on-demand reads
+        // only need enough parallelism to cover their own span.
+        const READ_FANOUT: usize = 4;
         let (first, last) = direct_segment_span(offsets, segments.len(), start, end_inclusive);
         let mut skip = start.saturating_sub(offsets[first]) as usize;
         let client = self.pool.playback_client();
-        let read_concurrency = self.prefetch_concurrency(client.capacity());
+        let read_concurrency = READ_FANOUT;
 
         let mut slices: Vec<Bytes> = Vec::new();
         let mut produced: usize = 0;

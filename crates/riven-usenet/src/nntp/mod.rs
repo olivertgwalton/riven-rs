@@ -15,7 +15,6 @@ use tokio_rustls::TlsConnector;
 use tokio_rustls::rustls::ClientConfig;
 
 mod connection;
-mod connection_slots;
 mod pool;
 
 pub use connection::NntpConnection;
