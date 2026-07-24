@@ -224,6 +224,21 @@ macro_rules! register_worker {
                 .build($handler)
         })
     }};
+    // No `.timeout(...)` layer — for jobs whose own work is deliberately
+    // unbounded (see the call site for why), a flat outer deadline would just
+    // reintroduce the thing the inner code was written to avoid.
+    ($monitor:expr, $queue:expr, $name:literal, $storage:ident, $n:expr, $handler:ident) => {{
+        let q = Arc::clone(&$queue);
+        $monitor.register(move |_| {
+            WorkerBuilder::new($name)
+                .backend(q.$storage.clone())
+                .enable_tracing()
+                .catch_panic()
+                .concurrency($n)
+                .data(q.clone())
+                .build($handler)
+        })
+    }};
 }
 
 /// `usenet_download_workers` is the connection-budget-derived concurrency for
@@ -269,14 +284,21 @@ pub fn start_workers(queue: Arc<JobQueue>, usenet_download_workers: Option<usize
         handle_parse_scrape_results_job,
         300
     );
+    // No outer job timeout — matches riven-ts, whose equivalent
+    // find-valid-torrent loop has none either (BullMQ workers there just
+    // renew their lock). A candidate's own work here (e.g. plugin-usenet's
+    // PAR2-verifying ingest) is deliberately unbounded by design — see the
+    // "No wall-clock timeout here" comment in plugin-usenet — for a healthy
+    // release under heavy pool contention; a flat deadline on top of that
+    // would just kill legitimate long-running ingests the same way the old
+    // 600s timeout did.
     let m = register_worker!(
         m,
         queue,
         "riven-download",
         download_storage,
         download_n,
-        handle_download_job,
-        600
+        handle_download_job
     );
     let m = register_worker!(
         m,
