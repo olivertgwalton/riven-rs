@@ -371,6 +371,7 @@ impl NntpClient {
     pub fn capacity(&self) -> usize {
         self.pool.total_capacity()
     }
+
 }
 
 impl NntpPool {

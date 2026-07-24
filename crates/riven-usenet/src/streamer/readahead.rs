@@ -1,31 +1,28 @@
-//! Adaptive per-stream read-ahead.
+//! Per-stream read-ahead.
 //!
-//! One task per armed playback stream keeps windows of decoded segments in
-//! the shared [`SegmentCache`](crate::cache::SegmentCache) ahead of the
-//! player. There are no estimators to tune and no rates to guess — the
-//! design is pure backpressure:
+//! One task per armed playback stream keeps decoded segments in the shared
+//! [`SegmentCache`](crate::cache::SegmentCache) ahead of the player. The
+//! whole design is backpressure — no rate estimates, no control loops:
 //!
-//! - **Cursors.** Players read a file at more than one offset at a time
-//!   (Infuse issues interleaved range requests). Each reported position
+//! - **Cursors.** A player reads a file at more than one offset at a time
+//!   (Infuse opens the video handle plus a probe/second range, and their
+//!   positions interleave into this one task). Each reported position
 //!   attaches to the nearest *cursor* — an independent read sequence with
-//!   its own frontier — or founds a new one. Cursors never fight over a
-//!   shared frontier, so interleaved readers can't thrash the window, and
-//!   stale cursors simply expire.
-//! - **Backpressure, not rate math.** Each cursor fills until it is
-//!   `CURSOR_TARGET_BYTES` ahead of its consumer, then stops. Consumption
-//!   drains the window and fill resumes — pacing falls out of the buffer
-//!   level with no bitrate estimate anywhere.
-//! - **AIMD width.** Fetch parallelism starts small and doubles while any
-//!   cursor is running low (fill losing the race), decays by one when all
-//!   cursors are comfortably full. It converges on whatever the current
-//!   provider latency and pipe actually need — high-bitrate content on a
-//!   far provider widens; an easy stream idles at the floor.
+//!   its own frontier — or founds a new one, so interleaved readers never
+//!   thrash a shared frontier. Stale cursors expire.
+//! - **Fixed window.** Each cursor fills until it is `TARGET_BYTES` ahead of
+//!   its consumer, then stops. Consumption drains the window and fill
+//!   resumes; pacing falls out of the buffer level. The window is small
+//!   relative to the cache, so LRU never evicts an unread segment during
+//!   single-stream playback.
+//! - **Fixed fan-out.** At most `MAX_IN_FLIGHT` fetches run at once, bounded
+//!   further by the provider's connection count. The window cap is the real
+//!   throttle — once full, scheduling simply stops.
 //!
 //! Fetches ride the pool's `Stream` lane: they yield only to reads a player
 //! is actively blocked on and are never throttled behind bulk work. The VFS
-//! reports positions through [`ReadAheads::report`]; dropping the stream
-//! (unregister) tears the task down. In-flight fetches are never cancelled
-//! by cursor churn — a fetched segment always lands in the shared cache.
+//! reports positions through [`ReadAheads::report`]; unregister tears the
+//! task down.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -38,28 +35,30 @@ use tokio::sync::watch;
 
 use super::{NzbMetaFile, NzbMetaSource, UsenetStreamer};
 
-/// How far ahead of its consumer each cursor fills. Fixed and byte-based:
-/// backpressure paces low-bitrate content automatically (the window just
-/// covers more seconds), and the cap bounds per-stream memory.
-const CURSOR_TARGET_BYTES: u64 = 48 * 1024 * 1024;
-/// A cursor is "hungry" below this much buffer — fill is losing the race to
-/// the consumer and the fetch width should grow.
-const CURSOR_LOW_WATER: u64 = CURSOR_TARGET_BYTES / 3;
+/// How far ahead of its consumer each cursor fills. Byte-based, so
+/// low-bitrate content automatically buffers more seconds; small enough
+/// (relative to the ≥256 MB cache) that an unread segment is never evicted
+/// during normal playback.
+const TARGET_BYTES: u64 = 48 * 1024 * 1024;
+/// Max concurrent fetches for the whole stream, across all cursors. The
+/// window cap usually holds actual in-flight below this; it only bounds the
+/// initial cold-buffer fill. Further clamped to the provider's connections.
+const MAX_IN_FLIGHT: usize = 24;
 /// Max simultaneous read sequences tracked per stream. Real players use two
 /// (video + a probing/second range); a third absorbs transient jumps.
 const MAX_CURSORS: usize = 3;
 /// A report within this distance behind a cursor's frontier belongs to that
 /// cursor (its consumer advancing / re-reading); anything else outside the
 /// attach range founds a new cursor.
-const CURSOR_ATTACH_BEHIND: u64 = CURSOR_TARGET_BYTES * 2;
+const CURSOR_ATTACH_BEHIND: u64 = TARGET_BYTES * 2;
 /// A report at most this far past a cursor's frontier is still that cursor
 /// (kernel read-ahead overshoot), not a seek.
 const CURSOR_ATTACH_AHEAD: u64 = 16 * 1024 * 1024;
 /// Cursors with no reports for this long are dropped.
 const CURSOR_TTL: Duration = Duration::from_secs(30);
-/// AIMD width bounds: additive floor, doubling growth while hungry, -1 decay
-/// when every cursor is full.
-const MIN_WIDTH: usize = 4;
+/// A backward position report at least this far behind the cursor's consumer
+/// mark is a real backward seek (reset), not kernel re-read jitter (ignore).
+const BACKWARD_RESEEK_TOLERANCE: u64 = 4 * 1024 * 1024;
 /// Exit if the VFS stops reporting positions for this long (safety net for
 /// a session that never unregisters).
 const IDLE_EXIT: Duration = Duration::from_secs(300);
@@ -220,8 +219,6 @@ fn attach_report(cursors: &mut Vec<Cursor>, pos: u64) {
         // Prefer the nearest frontier when attach ranges overlap.
         c.frontier.abs_diff(pos)
     }) {
-        // Only forward progress moves the consumer mark: an overlapping
-        // re-read behind the window must not re-open already-filled budget.
         if pos > cursor.position {
             cursor.position = pos;
             // Overshoot past the frontier (seek within attach range or
@@ -230,7 +227,18 @@ fn attach_report(cursors: &mut Vec<Cursor>, pos: u64) {
             if pos > cursor.frontier {
                 cursor.frontier = pos;
             }
+        } else if pos.saturating_add(BACKWARD_RESEEK_TOLERANCE) < cursor.position {
+            // A real backward seek within this sequence's attach range. The
+            // consumer mark MUST regress with it — leaving it stale makes
+            // `buffered()` report a full window measured from the wrong
+            // place, which stops refilling and pins the wrong span. Reset
+            // the frontier too: still-cached segments re-schedule as free
+            // cache hits, evicted ones genuinely need refetching.
+            cursor.position = pos;
+            cursor.frontier = pos;
         }
+        // Small regressions (kernel read-ahead re-reading just behind) are
+        // ignored: they must not re-open already-filled budget.
         cursor.last_report = Instant::now();
         return;
     }
@@ -260,11 +268,10 @@ async fn run(
         return;
     };
     let client = streamer.pool.stream_client();
-    let width_cap = client.capacity().saturating_sub(2).max(MIN_WIDTH);
+    let max_in_flight = client.capacity().saturating_sub(2).clamp(1, MAX_IN_FLIGHT);
     let file_label: Arc<str> = Arc::from(file.filename.as_str());
 
     let mut cursors: Vec<Cursor> = vec![Cursor::new(*positions.borrow())];
-    let mut width = MIN_WIDTH;
     let mut last_log = Instant::now();
     let mut in_flight: FuturesUnordered<_> = FuturesUnordered::new();
 
@@ -274,30 +281,29 @@ async fn run(
             cursors.push(Cursor::new(*positions.borrow()));
         }
 
-        if last_log.elapsed() >= Duration::from_secs(15) {
+        if last_log.elapsed() >= Duration::from_secs(30) {
             last_log = Instant::now();
             let buffered: Vec<u64> = cursors.iter().map(|c| c.buffered() >> 20).collect();
             tracing::debug!(
                 file = %file_label,
                 cursors = cursors.len(),
                 buffered_mb = ?buffered,
-                width,
                 in_flight = in_flight.len(),
-                "usenet read-ahead adapting"
+                "usenet read-ahead"
             );
         }
 
         // Fill the hungriest cursor first until every cursor is at target or
-        // the pipeline is at width.
-        while in_flight.len() < width {
+        // the fetch pipeline is full.
+        while in_flight.len() < max_in_flight {
             let Some(cursor) = cursors
                 .iter_mut()
-                .filter(|c| c.frontier < file.total_size && c.buffered() < CURSOR_TARGET_BYTES)
+                .filter(|c| c.frontier < file.total_size && c.buffered() < TARGET_BYTES)
                 .min_by_key(|c| c.buffered())
             else {
                 break;
             };
-            let want = (width - in_flight.len()).min(8);
+            let want = (max_in_flight - in_flight.len()).min(8);
             let (mids, end) = window_from(file, cursor.frontier, want);
             if mids.is_empty() || end <= cursor.frontier {
                 cursor.frontier = file.total_size;
@@ -311,7 +317,7 @@ async fn run(
                 let c = client.clone();
                 let label = file_label.clone();
                 in_flight.push(async move {
-                    s.fetch_decoded_cached(&c, &mid, &label).await.is_ok()
+                    let _ = s.fetch_decoded_cached(&c, &mid, &label).await;
                 });
             }
             cursor.frontier = end;
@@ -320,31 +326,13 @@ async fn run(
         tokio::select! {
             changed = positions.changed() => {
                 if changed.is_err() {
-                    // Stream unregistered — exit. Dropping `in_flight`
-                    // cancels pending fetches safely: the single-flight
-                    // owner guard releases waiters and the pool skips jobs
-                    // whose requester is gone.
+                    // Stream unregistered — exit.
                     return;
                 }
                 let pos = *positions.borrow_and_update();
                 attach_report(&mut cursors, pos);
             }
-            Some(_ok) = in_flight.next(), if !in_flight.is_empty() => {
-                // AIMD: double while any active cursor is running low (fill
-                // is losing the race to its consumer), decay by one once
-                // every cursor is comfortably ahead.
-                let hungry = cursors.iter().any(|c| {
-                    c.frontier < file.total_size && c.buffered() < CURSOR_LOW_WATER
-                });
-                let all_full = cursors.iter().all(|c| {
-                    c.frontier >= file.total_size || c.buffered() >= CURSOR_TARGET_BYTES
-                });
-                if hungry {
-                    width = (width * 2).min(width_cap);
-                } else if all_full {
-                    width = width.saturating_sub(1).max(MIN_WIDTH);
-                }
-            }
+            Some(()) = in_flight.next(), if !in_flight.is_empty() => {}
             _ = tokio::time::sleep(IDLE_EXIT), if in_flight.is_empty() => {
                 streamer.state.readaheads.remove(&info_hash, file_index);
                 return;
