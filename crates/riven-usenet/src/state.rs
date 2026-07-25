@@ -37,6 +37,18 @@ const DEFAULT_META_CACHE_BYTES: u64 = 256 * 1024 * 1024;
 /// ~40 MB. Override with `RIVEN_USENET_DECODED_SIZES_ENTRIES`.
 const DEFAULT_DECODED_SIZES_ENTRIES: usize = 500_000;
 
+/// Articles fetched concurrently to satisfy one streaming range request.
+///
+/// This is the streaming connection cap, kept separate from the provider's
+/// `max_connections` so playback never consumes the whole pool — the same
+/// split altmount and streamnzb make (they cap playback prefetch at 60 and 24
+/// segments respectively, independent of account size). The VFS keeps up to
+/// `MAX_INFLIGHT_CHUNKS` ranges in flight, so total streaming concurrency is
+/// roughly `3 x` this: 8 gives ~24, matching streamnzb's playback depth, and
+/// leaves the rest of the account for ingest, verification and repair.
+/// Override with `RIVEN_USENET_STREAM_FANOUT`.
+const DEFAULT_STREAM_FANOUT: usize = 8;
+
 // Concurrency is no longer tuned here. The NNTP pool's priority lanes and
 // per-provider slot actors bound socket use (see `nntp::pool`), each stream's
 // read-ahead adapts its own depth and parallelism to measured bitrate and
@@ -48,6 +60,9 @@ const DEFAULT_DECODED_SIZES_ENTRIES: usize = 500_000;
 /// hot for subsequent read-path serves, and a single in-flight fetch
 /// deduplicates across all concerns.
 pub struct StreamerState {
+    /// Concurrent article fetches per streaming range. See
+    /// [`DEFAULT_STREAM_FANOUT`].
+    pub stream_fanout: usize,
     pub cache: SegmentCache,
     pub meta_cache: MetaCache,
     pub decoded_sizes: DecodedSizes,
@@ -69,7 +84,6 @@ pub struct StreamerState {
     /// files at a time.
     pub precache_sem: tokio::sync::Semaphore,
     /// Live adaptive read-ahead tasks, one per armed playback stream.
-    pub readaheads: crate::streamer::readahead::ReadAheads,
     /// Single-flight for `load_meta`. A season pack's episodes all resolve to
     /// one `usenet_meta` row, so a scanner opening 24 of them at once used to
     /// run 24 simultaneous loads + deserializes of the same (here 80 MB)
@@ -90,11 +104,11 @@ impl StreamerState {
         // head+tail warms is plenty for any library scan without a spike.
         const PRECACHE_CONCURRENCY: usize = 4;
         Self {
+            stream_fanout: env_positive("RIVEN_USENET_STREAM_FANOUT", DEFAULT_STREAM_FANOUT),
             cache: SegmentCache::new(cache_bytes),
             meta_cache: MetaCache::new(meta_cache_bytes),
             decoded_sizes: DecodedSizes::new(decoded_sizes_entries),
             precache_sem: tokio::sync::Semaphore::new(PRECACHE_CONCURRENCY),
-            readaheads: crate::streamer::readahead::ReadAheads::default(),
             meta_loads: InFlight::default(),
             fails: PermanentFails::default(),
             in_flight: InFlight::default(),

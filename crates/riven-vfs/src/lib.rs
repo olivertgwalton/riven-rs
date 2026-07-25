@@ -1,13 +1,10 @@
-pub mod cache;
-pub mod chunks;
-pub mod detect;
 pub mod filesystem;
-pub mod media_stream;
 pub mod path_info;
+pub mod prefetch;
 pub mod query;
+pub mod source;
 pub mod readdir;
 mod state;
-pub mod stream;
 
 use std::path::Path;
 

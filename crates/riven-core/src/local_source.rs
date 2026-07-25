@@ -24,11 +24,6 @@ pub trait LocalByteSource: Send + Sync {
         end_inclusive: u64,
     ) -> anyhow::Result<Bytes>;
 
-    /// Report the player's current byte position. The implementation owns
-    /// read-ahead entirely — depth, parallelism, provider scheduling,
-    /// deduplication, and cancellation of obsolete work all adapt to the
-    /// measured consumption rate; the caller only supplies the position.
-    async fn prefetch(&self, info_hash: &str, file_index: usize, position: u64);
 
     /// Active-stream registry hooks, driving the dashboard's "now playing"
     /// view. The VFS calls these as it serves a usenet handle. `key`

@@ -26,7 +26,6 @@ mod ingest;
 mod meta;
 mod read_direct;
 mod read_rar;
-pub mod readahead;
 mod store;
 #[cfg(test)]
 mod tests;
@@ -556,13 +555,6 @@ impl riven_core::local_source::LocalByteSource for UsenetStreamer {
         Ok(UsenetStreamer::read_range(self, info_hash, file_index, start, end_inclusive).await?)
     }
 
-    async fn prefetch(&self, info_hash: &str, file_index: usize, position: u64) {
-        // Position report only: the per-stream adaptive read-ahead task
-        // (spawned on first report) owns depth, parallelism, and pacing.
-        self.state
-            .readaheads
-            .report(self, info_hash, file_index, position);
-    }
 
     fn stream_register(&self, key: &str, info_hash: &str, filename: &str, file_size: u64) {
         let now = std::time::SystemTime::now()
@@ -591,7 +583,6 @@ impl riven_core::local_source::LocalByteSource for UsenetStreamer {
 
     fn stream_unregister(&self, key: &str) {
         active_streams().unregister(key);
-        self.state.readaheads.remove_key(key);
         self.pool.stream_ended();
     }
 }
