@@ -2,8 +2,8 @@ pub mod filesystem;
 pub mod path_info;
 pub mod prefetch;
 pub mod query;
-pub mod source;
 pub mod readdir;
+pub mod source;
 mod state;
 
 use std::path::Path;

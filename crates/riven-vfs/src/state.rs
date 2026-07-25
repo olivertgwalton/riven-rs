@@ -26,9 +26,7 @@ pub(crate) enum OpenedFile {
         prefetcher: Arc<Prefetcher>,
     },
     /// Subtitles are small and already resident; no streaming machinery.
-    Subtitle {
-        content: Arc<[u8]>,
-    },
+    Subtitle { content: Arc<[u8]> },
 }
 
 pub(crate) struct CachedEntry {

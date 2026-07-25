@@ -555,7 +555,6 @@ impl riven_core::local_source::LocalByteSource for UsenetStreamer {
         Ok(UsenetStreamer::read_range(self, info_hash, file_index, start, end_inclusive).await?)
     }
 
-
     fn stream_register(&self, key: &str, info_hash: &str, filename: &str, file_size: u64) {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

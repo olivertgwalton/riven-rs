@@ -18,8 +18,8 @@
 //!   the read path almost never pays a TLS handshake.
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
@@ -404,7 +404,6 @@ impl NntpClient {
     pub fn capacity(&self) -> usize {
         self.pool.total_capacity()
     }
-
 }
 
 impl NntpPool {
