@@ -274,11 +274,7 @@ async fn fetch_media_response(
     )
 }
 
-async fn load_media_entry(
-    state: &ApiState,
-    entry_id: i64,
-) -> Result<Option<riven_db::entities::FileSystemEntry>> {
-    let _ = state;
+async fn load_media_entry(entry_id: i64) -> Result<Option<riven_db::entities::FileSystemEntry>> {
     riven_db::repo::get_media_entry_by_id(entry_id).await
 }
 
@@ -498,7 +494,7 @@ pub(super) async fn media_bridge_handler(
         return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
     }
 
-    let entry = match load_media_entry(&state, entry_id).await {
+    let entry = match load_media_entry(entry_id).await {
         Ok(Some(entry)) => entry,
         Ok(None) => return StatusCode::NOT_FOUND.into_response(),
         Err(error) => {

@@ -291,9 +291,10 @@ impl ProviderRt {
         {
             let mut s = self.sched.lock();
             if s.shutdown {
-                let _ = job
-                    .reply
-                    .send(Err(NntpError::Protocol("nntp pool shut down")));
+                drop(
+                    job.reply
+                        .send(Err(NntpError::Protocol("nntp pool shut down"))),
+                );
                 return;
             }
             s.queue_mut(job.lane).push_back(job);
@@ -471,9 +472,9 @@ impl NntpPool {
     }
 
     pub fn stream_ended(&self) {
-        let _ = self
-            .active_streams
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_sub(1));
+        let _previous_stream_count =
+            self.active_streams
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_sub(1));
         // The bulk budget just grew; wake parked slots to drain any backlog.
         for rt in &self.providers {
             rt.wake_for_bulk();
@@ -612,9 +613,10 @@ impl Drop for NntpPool {
                 pending
             };
             for job in pending {
-                let _ = job
-                    .reply
-                    .send(Err(NntpError::Protocol("nntp pool shut down")));
+                drop(
+                    job.reply
+                        .send(Err(NntpError::Protocol("nntp pool shut down"))),
+                );
             }
             rt.warm_notify.notify_waiters();
             rt.cold_notify.notify_waiters();
@@ -728,7 +730,7 @@ async fn run_slot(rt: Arc<ProviderRt>, active_streams: Arc<AtomicUsize>, slot_id
                 }
                 Err(e) => {
                     let lane = job.lane;
-                    let _ = job.reply.send(Err(e));
+                    drop(job.reply.send(Err(e)));
                     finish_job(&rt, lane);
                     // Don't spin every cold slot against an unreachable
                     // provider: park; the next submission re-wakes us.
@@ -775,7 +777,7 @@ async fn run_slot(rt: Arc<ProviderRt>, active_streams: Arc<AtomicUsize>, slot_id
         }
 
         let lane = job.lane;
-        let _ = job.reply.send(result);
+        drop(job.reply.send(result));
         finish_job(&rt, lane);
     }
 }
@@ -841,7 +843,7 @@ async fn park(
         rt.sched.lock().cold_parked += 1;
         // The timeout is a shutdown/lost-wake safety net: a cold slot woken
         // by nothing simply re-checks the queues and re-parks.
-        let _ = tokio::time::timeout(Duration::from_secs(60), notified).await;
+        drop(tokio::time::timeout(Duration::from_secs(60), notified).await);
         rt.sched.lock().cold_parked -= 1;
     }
 }
@@ -878,7 +880,7 @@ mod tests {
                         } else if line.starts_with("BODY") {
                             b"430 no such article\r\n"
                         } else if line.starts_with("QUIT") {
-                            let _ = w.write_all(b"205 bye\r\n").await;
+                            drop(w.write_all(b"205 bye\r\n").await);
                             return;
                         } else {
                             b"500 what\r\n"
@@ -941,10 +943,11 @@ mod tests {
     #[test]
     fn bulk_admission_shrinks_while_streams_active() {
         let mut s = Sched::new();
+        let mut receivers = Vec::new();
         for _ in 0..4 {
             let (job, rx) = dummy_job(Lane::Bulk);
-            std::mem::forget(rx);
             s.bulk.push_back(job);
+            receivers.push(rx);
         }
         // capacity 4, one stream → reserve 2 → bulk cap 2.
         assert!(s.pop(4, 1).is_some());
@@ -961,8 +964,7 @@ mod tests {
     #[test]
     fn bulk_reserve_never_exceeds_capacity() {
         let mut s = Sched::new();
-        let (job, rx) = dummy_job(Lane::Bulk);
-        std::mem::forget(rx);
+        let (job, _rx) = dummy_job(Lane::Bulk);
         s.bulk.push_back(job);
         // capacity 1, many streams: cap clamps to 1, job still eligible.
         assert!(s.pop(1, 50).is_some());
