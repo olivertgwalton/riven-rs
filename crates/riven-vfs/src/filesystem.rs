@@ -4,28 +4,23 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use dashmap::DashMap;
 use fuser::{
     Errno, FileAttr, FileHandle as FuseFh, FileType, Filesystem, FopenFlags, Generation, INodeNo,
     KernelConfig, LockOwner, OpenFlags, PollEvents, PollFlags, PollNotifier, ReplyAttr, ReplyData,
     ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen, ReplyPoll, Request,
 };
-use parking_lot::Mutex;
-use tokio::sync::mpsc;
 use tokio::sync::{RwLock, Semaphore};
 
 use riven_core::config::vfs::*;
-use riven_core::stream_link::request_stream_url_blocking;
 use riven_core::types::FileSystemEntryType;
 use riven_core::vfs_layout::VfsLibraryLayout;
 use riven_db::repo;
+use riven_streaming::{LinkSpec, SourceFactory, StreamTarget, classify_stream_target};
 
 use crate::path_info::{CanonicalPath, PathTarget, parse_path};
 use crate::prefetch::Prefetcher;
 use crate::readdir::{DirEntry, populate_entries};
-use crate::source::{ByteSource, HttpSource, LinkRefresher, UsenetSource};
 use crate::state::{CachedEntry, MOVIES_INO, OpenedFile, ROOT_INO, SHOWS_INO, VfsState};
-use riven_core::local_source::parse_usenet_url;
 
 const TTL: Duration = Duration::from_secs(300);
 
@@ -69,14 +64,14 @@ fn file_attr(ino: u64, size: u64, mtime: SystemTime) -> FileAttr {
     make_attr(ino, FileType::RegularFile, size, mtime)
 }
 
-/// Inner state shared via `Arc` so FUSE handlers can hand the heavy I/O work
-/// off to tokio without borrowing from `&self`. The fuser session has one
-/// dispatcher thread that loops reading kernel requests; if a handler does a
-/// synchronous `runtime.block_on(...)` on that thread, the entire mount
-/// head-of-line blocks until the future completes. Cloning this `Arc` into a
-/// `spawn_blocking` closure lets the dispatcher return immediately while the
-/// real work runs on tokio's blocking-task pool, so a slow read on one file
-/// no longer wedges every other FUSE op.
+// Inner state is shared via `Arc` so FUSE handlers can hand the heavy I/O work
+// off to tokio without borrowing from `&self`. The fuser session has one
+// dispatcher thread that loops reading kernel requests; if a handler does a
+// synchronous `runtime.block_on(...)` on that thread, the entire mount
+// head-of-line blocks until the future completes. Cloning this `Arc` into a
+// `spawn_blocking` closure lets the dispatcher return immediately while the
+// real work runs on tokio's blocking-task pool, so a slow read on one file
+// no longer wedges every other FUSE op.
 
 /// Decrements the in-flight counter when the read task ends, on every path
 /// (reply, error, or early return).
@@ -159,8 +154,7 @@ impl FuseStats {
 struct RivenFsInner {
     vfs_layout: Arc<RwLock<VfsLibraryLayout>>,
     filesystem_settings_revision: Arc<AtomicU64>,
-    stream_client: reqwest::Client,
-    link_request_tx: mpsc::Sender<riven_core::stream_link::LinkRequest>,
+    source_factory: Arc<SourceFactory>,
     runtime: tokio::runtime::Handle,
 
     state: VfsState,
@@ -169,8 +163,6 @@ struct RivenFsInner {
     max_prefetch_window: u64,
     read_semaphore: Arc<Semaphore>,
     fuse_stats: Arc<FuseStats>,
-    link_refresh_locks: DashMap<i64, Arc<Mutex<()>>>,
-    local_source: Option<Arc<dyn riven_core::local_source::LocalByteSource>>,
 }
 
 pub struct RivenFs {
@@ -181,19 +173,15 @@ impl RivenFs {
     pub fn new(
         vfs_layout: Arc<RwLock<VfsLibraryLayout>>,
         filesystem_settings_revision: Arc<AtomicU64>,
-        stream_client: reqwest::Client,
-        link_request_tx: mpsc::Sender<riven_core::stream_link::LinkRequest>,
+        source_factory: Arc<SourceFactory>,
         cache_max_size_mb: u64,
-        local_source: Option<Arc<dyn riven_core::local_source::LocalByteSource>>,
     ) -> Self {
         Self {
             inner: Arc::new(RivenFsInner::new(
                 vfs_layout,
                 filesystem_settings_revision,
-                stream_client,
-                link_request_tx,
+                source_factory,
                 cache_max_size_mb,
-                local_source,
             )),
         }
     }
@@ -203,10 +191,8 @@ impl RivenFsInner {
     fn new(
         vfs_layout: Arc<RwLock<VfsLibraryLayout>>,
         filesystem_settings_revision: Arc<AtomicU64>,
-        stream_client: reqwest::Client,
-        link_request_tx: mpsc::Sender<riven_core::stream_link::LinkRequest>,
+        source_factory: Arc<SourceFactory>,
         cache_max_size_mb: u64,
-        local_source: Option<Arc<dyn riven_core::local_source::LocalByteSource>>,
     ) -> Self {
         let cache_capacity_bytes = if cache_max_size_mb == 0 {
             50 * 1024 * 1024
@@ -216,8 +202,7 @@ impl RivenFsInner {
         Self {
             vfs_layout,
             filesystem_settings_revision,
-            stream_client,
-            link_request_tx,
+            source_factory,
             runtime: tokio::runtime::Handle::current(),
             state: VfsState::new(),
             max_prefetch_window: cache_capacity_bytes as u64,
@@ -229,8 +214,6 @@ impl RivenFsInner {
             // read tasks.
             read_semaphore: Arc::new(Semaphore::new(32)),
             fuse_stats: Arc::new(FuseStats::default()),
-            link_refresh_locks: DashMap::new(),
-            local_source,
         }
     }
 
@@ -281,71 +264,11 @@ impl RivenFsInner {
             .map(Arc::new)
     }
 
-    /// Mint a fresh stream URL for an entry and persist it, coalescing
-    /// concurrent callers. `current_url` is the URL the caller already knows is
-    /// unusable (or `None` if the entry had no URL yet) — once the per-entry
-    /// lock is held, the DB is re-checked and any *different* URL a peer
-    /// persisted while we waited is returned instead of firing another request.
-    fn request_and_persist_stream_url(
-        &self,
-        entry_id: i64,
-        download_url: Option<&str>,
-        provider: Option<&str>,
-        current_url: Option<&str>,
-    ) -> Option<String> {
-        let lock = self
-            .link_refresh_locks
-            .entry(entry_id)
-            .or_insert_with(|| Arc::new(Mutex::new(())))
-            .clone();
-        let guard = lock.lock();
-
-        if let Ok(Some(entry)) = self
-            .runtime
-            .block_on(riven_db::repo::get_media_entry_by_id(entry_id))
-            && let Some(fresh) = entry.stream_url
-            && Some(fresh.as_str()) != current_url
-        {
-            drop(guard);
-            self.link_refresh_locks
-                .remove_if(&entry_id, |_, arc| Arc::strong_count(arc) <= 2);
-            return Some(fresh);
-        }
-
-        let url = request_stream_url_blocking(
-            download_url,
-            provider,
-            Some(entry_id),
-            current_url,
-            &self.link_request_tx,
-            &self.runtime,
-        );
-
-        if let Some(url) = url.as_deref()
-            && let Err(err) = self
-                .runtime
-                .block_on(riven_db::repo::update_stream_url(entry_id, url))
-        {
-            tracing::warn!(entry_id, %err, "failed to persist refreshed stream url");
-        }
-
-        drop(guard);
-        self.link_refresh_locks
-            .remove_if(&entry_id, |_, arc| Arc::strong_count(arc) <= 2);
-        url
-    }
-
-    fn resolve_stream_url(&self, entry: &CachedEntry) -> Option<String> {
-        if let Some(url) = entry.stream_url.as_deref() {
-            return Some(url.to_string());
-        }
-
-        self.request_and_persist_stream_url(
-            entry.id,
-            entry.download_url.as_deref(),
-            entry.provider.as_deref(),
-            None,
-        )
+    fn resolve_stream_url(&self, entry: &CachedEntry, link: &LinkSpec) -> Option<Arc<str>> {
+        entry.stream_url.as_deref().map(Arc::from).or_else(|| {
+            self.source_factory
+                .resolve_link_blocking(link, None, &self.runtime)
+        })
     }
 }
 
@@ -537,23 +460,27 @@ impl Filesystem for RivenFs {
 
         let file_size = entry.file_size;
 
-        let usenet_id = match (&entry.usenet_info_hash, entry.usenet_file_index) {
-            (Some(ih), Some(idx)) => Some((ih.to_string(), idx)),
-            _ => entry
-                .stream_url
-                .as_deref()
-                .or(entry.download_url.as_deref())
-                .and_then(parse_usenet_url),
-        };
-        if let (Some(source), Some((info_hash, file_index))) = (s.local_source.clone(), usenet_id) {
-            let filename: Arc<str> = Arc::from(path.rsplit('/').next().unwrap_or(&path));
-            let byte_source: Arc<dyn ByteSource> = Arc::new(UsenetSource::new(
-                source,
-                Arc::from(info_hash.as_str()),
-                file_index,
-                file_size,
-                &filename,
-            ));
+        let target = classify_stream_target(
+            entry.usenet_info_hash.as_deref(),
+            entry
+                .usenet_file_index
+                .and_then(|index| i64::try_from(index).ok()),
+            entry.stream_url.as_deref(),
+            entry.download_url.as_deref(),
+        );
+        if let StreamTarget::Usenet {
+            info_hash,
+            file_index,
+        } = target
+        {
+            let filename = path.rsplit('/').next().unwrap_or(&path);
+            let Some(byte_source) = s
+                .source_factory
+                .open_usenet(&info_hash, file_index, file_size, filename)
+            else {
+                reply.error(Errno::EIO);
+                return;
+            };
             let fd = s.state.open(OpenedFile::Streamed {
                 path,
                 prefetcher: Arc::new(Prefetcher::new(
@@ -566,7 +493,12 @@ impl Filesystem for RivenFs {
             return;
         }
 
-        let Some(stream_url) = s.resolve_stream_url(&entry) else {
+        let link = LinkSpec {
+            entry_id: entry.id,
+            download_url: entry.download_url.as_deref().map(str::to_owned),
+            provider: entry.provider.as_deref().map(str::to_owned),
+        };
+        let Some(stream_url) = s.resolve_stream_url(&entry, &link) else {
             reply.error(if entry.download_url.is_some() {
                 Errno::EIO
             } else {
@@ -575,31 +507,9 @@ impl Filesystem for RivenFs {
             return;
         };
 
-        // Lets a dying link be re-minted mid-playback instead of failing the
-        // read; reuses the same coalesced refresh path as `open`.
-        let refresher: LinkRefresher = {
-            let inner = Arc::clone(&self.inner);
-            let entry_id = entry.id;
-            let download_url = entry.download_url.clone();
-            let provider = entry.provider.clone();
-            let stale: Arc<str> = Arc::from(stream_url.as_str());
-            Arc::new(move || {
-                inner
-                    .request_and_persist_stream_url(
-                        entry_id,
-                        download_url.as_deref(),
-                        provider.as_deref(),
-                        Some(stale.as_ref()),
-                    )
-                    .map(|url| Arc::from(url.as_str()))
-            })
-        };
-        let byte_source: Arc<dyn ByteSource> = Arc::new(HttpSource::new(
-            s.stream_client.clone(),
-            Arc::from(stream_url),
-            file_size,
-            Some(refresher),
-        ));
+        let byte_source =
+            s.source_factory
+                .open_http(stream_url, file_size, link, s.runtime.clone());
         let fd = s.state.open(OpenedFile::Streamed {
             path,
             prefetcher: Arc::new(Prefetcher::new(

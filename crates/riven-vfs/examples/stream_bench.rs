@@ -62,6 +62,9 @@ struct Args {
     behind_pct: u32,
     /// Reads a single handle keeps outstanding. Infuse showed `inflight=2`.
     read_concurrency: usize,
+    /// Long reads beginning in this initial interval are cold-open latency,
+    /// not a pause after playback has started.
+    startup_grace_seconds: u64,
     label: String,
 }
 
@@ -89,6 +92,7 @@ fn parse_args() -> Args {
         flat_out: false,
         behind_pct: 9,
         read_concurrency: 2,
+        startup_grace_seconds: 5,
         label: String::new(),
     };
     let argv: Vec<String> = std::env::args().skip(1).collect();
@@ -107,6 +111,9 @@ fn parse_args() -> Args {
             "--bitrate-mbps" => args.bitrate_mbps = value.parse().unwrap_or(0.0),
             "--behind-pct" => args.behind_pct = value.parse().unwrap_or(9),
             "--read-concurrency" => args.read_concurrency = value.parse().unwrap_or(2),
+            "--startup-grace-seconds" => {
+                args.startup_grace_seconds = value.parse().unwrap_or(5);
+            }
             "--label" => args.label = value,
             "--flat-out" => {
                 args.flat_out = true;
@@ -211,7 +218,7 @@ async fn main() -> anyhow::Result<()> {
         args.seconds
     );
     println!(
-        "pattern      : {} | behind={}% | reads-in-flight/handle={}",
+        "pattern      : {} | behind={}% | reads-in-flight/handle={} | startup={}s",
         match args.read_interval() {
             Some(iv) => format!(
                 "paced to {:.0} Mbps (one {} KiB read every {:.0} ms)",
@@ -222,7 +229,8 @@ async fn main() -> anyhow::Result<()> {
             None => "FLAT OUT (does not model a player)".to_string(),
         },
         args.behind_pct,
-        args.read_concurrency
+        args.read_concurrency,
+        args.startup_grace_seconds,
     );
     println!("=====================================================================");
 
@@ -241,7 +249,11 @@ async fn main() -> anyhow::Result<()> {
             size,
             &filename,
         ));
-        let prefetcher = Arc::new(Prefetcher::new(source, args.max_window));
+        let prefetcher = Arc::new(Prefetcher::new(
+            source,
+            args.max_window,
+            &tokio::runtime::Handle::current(),
+        ));
         let bytes_total = Arc::clone(&bytes_total);
         // Stagger the readers slightly so they do not march in lockstep.
         let start_at = start + (handle_idx as u64 * 4 * READ_SIZE as u64);
@@ -254,6 +266,7 @@ async fn main() -> anyhow::Result<()> {
         let behind_pct = args.behind_pct;
         let interval = args.read_interval();
         let concurrency = args.read_concurrency.max(1);
+        let startup_grace = Duration::from_secs(args.startup_grace_seconds);
 
         tasks.push(tokio::spawn(async move {
             let began = Instant::now();
@@ -267,6 +280,8 @@ async fn main() -> anyhow::Result<()> {
                     let mut samples = Samples::default();
                     let mut bytes: u64 = 0;
                     let mut behind_reads: u64 = 0;
+                    let mut startup_slow: u64 = 0;
+                    let mut playback_slow: u64 = 0;
                     // Deterministic per-lane so a run is reproducible.
                     let mut rng: u64 = 0x9E37_79B9_7F4A_7C15 ^ (lane as u64).wrapping_mul(31);
                     loop {
@@ -305,8 +320,7 @@ async fn main() -> anyhow::Result<()> {
                         let position = if is_behind {
                             behind_reads += 1;
                             let back = (rng >> 8) % (16 * 1024 * 1024);
-                            head.saturating_sub(back).min(size - 1)
-                                & !(READ_SIZE as u64 - 1)
+                            head.saturating_sub(back).min(size - 1) & !(READ_SIZE as u64 - 1)
                         } else {
                             cursor.fetch_add(READ_SIZE as u64, Ordering::Relaxed)
                         };
@@ -318,35 +332,63 @@ async fn main() -> anyhow::Result<()> {
                         let data = match prefetcher.read(position, READ_SIZE).await {
                             Ok(data) => data,
                             Err(error) => {
-                                eprintln!("reader {handle_idx}: read failed at {position}: {error}");
+                                eprintln!(
+                                    "reader {handle_idx}: read failed at {position}: {error}"
+                                );
                                 break;
                             }
                         };
+                        let read_elapsed = read_began.elapsed();
+                        if read_elapsed > Duration::from_secs(1) {
+                            if read_began.duration_since(began) < startup_grace {
+                                startup_slow += 1;
+                            } else {
+                                playback_slow += 1;
+                            }
+                            eprintln!(
+                                "SLOW READ    handle={handle_idx} at={:.1}s latency={:.1}s kind={}",
+                                began.elapsed().as_secs_f64(),
+                                read_elapsed.as_secs_f64(),
+                                if is_behind { "behind" } else { "forward" },
+                            );
+                        }
                         if data.is_empty() {
                             break;
                         }
-                        samples.0.push(read_began.elapsed().as_micros() as u64);
+                        samples.0.push(read_elapsed.as_micros() as u64);
                         // Only forward progress counts as delivered video.
                         if !is_behind {
                             bytes += data.len() as u64;
                             bytes_total.fetch_add(data.len() as u64, Ordering::Relaxed);
                         }
                     }
-                    (samples, bytes, behind_reads)
+                    (samples, bytes, behind_reads, startup_slow, playback_slow)
                 }));
             }
 
             let mut samples = Samples::default();
             let mut bytes = 0;
             let mut behind_reads = 0;
+            let mut startup_slow = 0;
+            let mut playback_slow = 0;
             for t in inner_tasks {
-                if let Ok((s, b, be)) = t.await {
+                if let Ok((s, b, be, startup, playback)) = t.await {
                     samples.0.extend_from_slice(&s.0);
                     bytes += b;
                     behind_reads += be;
+                    startup_slow += startup;
+                    playback_slow += playback;
                 }
             }
-            (handle_idx, samples, bytes, began.elapsed(), behind_reads)
+            (
+                handle_idx,
+                samples,
+                bytes,
+                began.elapsed(),
+                behind_reads,
+                startup_slow,
+                playback_slow,
+            )
         }));
     }
 
@@ -357,23 +399,22 @@ async fn main() -> anyhow::Result<()> {
 
     println!();
     println!(
-        "{:<4} {:>10} {:>10} {:>9} {:>9} {:>9} {:>9} {:>10} {:>8}",
-        "rdr", "MB", "MB/s", "behind", "p50 ms", "p90 ms", "p99 ms", "max ms", ">1s"
+        "{:<4} {:>10} {:>10} {:>9} {:>9} {:>9} {:>9} {:>10} {:>7} {:>7}",
+        "rdr", "MB", "MB/s", "behind", "p50 ms", "p90 ms", "p99 ms", "max ms", "open>1", "play>1"
     );
-    println!("{}", "-".repeat(88));
+    println!("{}", "-".repeat(96));
 
     let mut all = Samples::default();
     let mut wall = Duration::ZERO;
-    let mut stalls_over_1s = 0usize;
-    for (idx, mut samples, bytes, elapsed, behind_reads) in rows {
+    let mut startup_over_1s = 0u64;
+    let mut playback_over_1s = 0u64;
+    for (idx, mut samples, bytes, elapsed, behind_reads, startup_slow, playback_slow) in rows {
         let secs = elapsed.as_secs_f64();
         wall = wall.max(elapsed);
-        // A read over a second is what a viewer sees as a stutter. This is
-        // the number the whole harness exists to produce.
-        let over_1s = samples.0.iter().filter(|us| **us > 1_000_000).count();
-        stalls_over_1s += over_1s;
+        startup_over_1s += startup_slow;
+        playback_over_1s += playback_slow;
         println!(
-            "{:<4} {:>10.1} {:>10.2} {:>9} {:>9.1} {:>9.1} {:>9.1} {:>10.1} {:>8}",
+            "{:<4} {:>10.1} {:>10.2} {:>9} {:>9.1} {:>9.1} {:>9.1} {:>10.1} {:>7} {:>7}",
             idx,
             bytes as f64 / 1e6,
             bytes as f64 / 1e6 / secs,
@@ -382,7 +423,8 @@ async fn main() -> anyhow::Result<()> {
             samples.pct(0.90),
             samples.pct(0.99),
             samples.pct(1.0),
-            over_1s,
+            startup_slow,
+            playback_slow,
         );
         all.0.extend_from_slice(&samples.0);
     }
@@ -391,7 +433,7 @@ async fn main() -> anyhow::Result<()> {
     let secs = wall.as_secs_f64();
     let mb_s = total as f64 / 1e6 / secs;
     let mbps = mb_s * 8.0;
-    println!("{}", "-".repeat(88));
+    println!("{}", "-".repeat(96));
     println!(
         "AGGREGATE    {:.1} MB in {:.1}s = {:.2} MB/s ({:.0} Mbps)   reads={}  p50={:.1}ms p99={:.1}ms",
         total as f64 / 1e6,
@@ -408,13 +450,17 @@ async fn main() -> anyhow::Result<()> {
         // Paced mode: the reader asked for exactly bitrate, so throughput is
         // not the result — whether it was *served on time* is.
         println!(
-            "REPRODUCED?  {} read(s) took over 1s (worst {:.1}s).  {}",
-            stalls_over_1s,
+            "STARTUP      {} read(s) over 1s during the first {}s.",
+            startup_over_1s, args.startup_grace_seconds,
+        );
+        println!(
+            "REPRODUCED?  {} post-start read(s) took over 1s (worst {:.1}s).  {}",
+            playback_over_1s,
             all.pct(1.0) / 1000.0,
-            if stalls_over_1s > 0 {
+            if playback_over_1s > 0 {
                 "YES — this is the stall Infuse sees."
             } else {
-                "NO — pattern did not reproduce the stall."
+                "NO — playback remained smooth after cold open."
             }
         );
     } else if args.bitrate_mbps > 0.0 {

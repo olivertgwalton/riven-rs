@@ -14,9 +14,9 @@ use axum::{
     },
     response::{IntoResponse, Response},
 };
-use riven_core::local_source::LocalByteSource;
-use riven_core::stream_link::request_stream_url;
-use riven_usenet::UsenetStreamer;
+use riven_streaming::{
+    LinkSpec, StreamTarget, classify_stream_target, validate_http_range_response,
+};
 
 use super::ApiState;
 use super::auth::check_api_key;
@@ -150,12 +150,22 @@ fn is_seek_request(range: Option<RequestedRange>) -> bool {
 fn validate_upstream_range_response(
     requested_range: Option<RequestedRange>,
     upstream_status: reqwest::StatusCode,
+    content_range: Option<&str>,
+    file_size: u64,
 ) -> Result<(), UpstreamRangeError> {
-    if requested_range.is_some()
-        && upstream_status != reqwest::StatusCode::PARTIAL_CONTENT
-        && upstream_status != reqwest::StatusCode::RANGE_NOT_SATISFIABLE
-    {
-        return Err(UpstreamRangeError::MissingPartialContent);
+    if let Some(requested_range) = requested_range {
+        let (start, end, _) = resolve_concrete_range(Some(requested_range), file_size);
+        if validate_http_range_response(
+            upstream_status.as_u16(),
+            content_range,
+            start,
+            end,
+            file_size,
+        )
+        .is_err()
+        {
+            return Err(UpstreamRangeError::MissingPartialContent);
+        }
     }
 
     Ok(())
@@ -186,22 +196,16 @@ async fn resolve_media_stream_url(
     state: &ApiState,
     entry: &riven_db::entities::FileSystemEntry,
 ) -> Option<String> {
-    let url = request_stream_url(
-        entry.download_url.as_deref(),
-        entry.provider.as_deref(),
-        Some(entry.id),
-        entry.stream_url.as_deref(),
-        &state.link_request_tx,
-    )
-    .await?;
-    if let Err(error) = riven_db::repo::update_stream_url(entry.id, &url).await {
-        tracing::warn!(
-            entry_id = entry.id,
-            error = %error,
-            "failed to persist refreshed stream url"
-        );
-    }
-    Some(url)
+    let spec = LinkSpec {
+        entry_id: entry.id,
+        download_url: entry.download_url.clone(),
+        provider: entry.provider.clone(),
+    };
+    state
+        .source_factory
+        .resolve_link(&spec, entry.stream_url.as_deref())
+        .await
+        .map(|url| url.to_string())
 }
 
 async fn prewarm_playback_target(
@@ -267,11 +271,14 @@ async fn fetch_media_response(
     stream_url: &str,
     request_headers: &HeaderMap,
 ) -> Result<reqwest::Response> {
-    Ok(
-        build_media_request(&state.stream_client, method, stream_url, request_headers)
-            .send()
-            .await?,
+    Ok(build_media_request(
+        state.source_factory.http_client(),
+        method,
+        stream_url,
+        request_headers,
     )
+    .send()
+    .await?)
 }
 
 async fn load_media_entry(
@@ -294,25 +301,18 @@ pub(super) struct MediaQuery {
 /// preferring the explicit columns and falling back to parsing a `usenet://`
 /// stream URL (mirrors the VFS open path).
 fn usenet_target(entry: &riven_db::entities::FileSystemEntry) -> Option<(String, usize)> {
-    if let (Some(info_hash), Some(idx)) =
-        (entry.usenet_info_hash.as_deref(), entry.usenet_file_index)
-    {
-        return Some((info_hash.to_string(), usize::try_from(idx).unwrap_or(0)));
+    match classify_stream_target(
+        entry.usenet_info_hash.as_deref(),
+        entry.usenet_file_index.map(i64::from),
+        entry.stream_url.as_deref(),
+        entry.download_url.as_deref(),
+    ) {
+        StreamTarget::Usenet {
+            info_hash,
+            file_index,
+        } => Some((info_hash, file_index)),
+        StreamTarget::Http => None,
     }
-    let candidate = entry
-        .stream_url
-        .as_deref()
-        .or(entry.download_url.as_deref())?;
-    parse_usenet_url(candidate)
-}
-
-fn parse_usenet_url(url: &str) -> Option<(String, usize)> {
-    let rest = url.strip_prefix("usenet://")?;
-    let (hash, idx) = rest.split_once('/')?;
-    if hash.is_empty() {
-        return None;
-    }
-    Some((hash.to_string(), idx.parse().ok()?))
 }
 
 /// Build a `Content-Disposition: attachment` header that names the saved file
@@ -362,8 +362,9 @@ fn resolve_concrete_range(range: Option<RequestedRange>, file_size: u64) -> (u64
 
 /// Stream a usenet-backed entry directly from the in-process streamer. Usenet
 /// entries have no HTTP origin, so the debrid proxy path cannot serve them;
-/// instead we read the requested byte range in chunks via `LocalByteSource`.
+/// instead the shared source factory supplies a lifecycle-tracked byte source.
 async fn serve_usenet_media(
+    state: &ApiState,
     entry: &riven_db::entities::FileSystemEntry,
     info_hash: String,
     file_index: usize,
@@ -381,14 +382,6 @@ async fn serve_usenet_media(
         Err(error) => return range_error_response(error, file_size),
     };
     let (start, end_inclusive, is_partial) = resolve_concrete_range(requested_range, file_size);
-
-    let Some(streamer) = UsenetStreamer::existing_shared() else {
-        tracing::warn!(
-            entry_id = entry.id,
-            "usenet streamer unavailable for media download"
-        );
-        return StatusCode::SERVICE_UNAVAILABLE.into_response();
-    };
 
     let content_length = end_inclusive - start + 1;
     let status = if is_partial {
@@ -432,36 +425,59 @@ async fn serve_usenet_media(
             .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
     }
 
+    let filename = entry
+        .original_filename
+        .as_deref()
+        .or_else(|| entry.path.rsplit('/').next())
+        .unwrap_or(&entry.path);
+    let Some(source) = state
+        .source_factory
+        .open_usenet(&info_hash, file_index, file_size, filename)
+    else {
+        tracing::warn!(
+            entry_id = entry.id,
+            "usenet source unavailable for media download"
+        );
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+
     const CHUNK: u64 = 8 * 1024 * 1024;
     let info_hash: Arc<str> = Arc::from(info_hash.as_str());
     // The entry path rides along with the stream state purely so a mid-stream
     // read failure names the title instead of only its info_hash.
     let entry_path: Arc<str> = Arc::from(entry.path.as_str());
     let body_stream = futures::stream::unfold(
-        (
-            streamer,
-            info_hash,
-            entry_path,
-            file_index,
-            start,
-            end_inclusive,
-        ),
-        move |(streamer, info_hash, entry_path, file_index, pos, end)| async move {
+        (source, info_hash, entry_path, start, end_inclusive),
+        move |(source, info_hash, entry_path, pos, end)| async move {
             if pos > end {
                 return None;
             }
             let chunk_end = end.min(pos + CHUNK - 1);
-            match LocalByteSource::read_range(&streamer, &info_hash, file_index, pos, chunk_end)
-                .await
-            {
+            source.report_position(pos);
+            match source.read_range(pos, chunk_end).await {
                 Ok(bytes) if !bytes.is_empty() => {
                     let next = pos + bytes.len() as u64;
                     Some((
                         Ok::<bytes::Bytes, std::io::Error>(bytes),
-                        (streamer, info_hash, entry_path, file_index, next, end),
+                        (source, info_hash, entry_path, next, end),
                     ))
                 }
-                Ok(_) => None,
+                Ok(_) => {
+                    tracing::warn!(
+                        info_hash = %info_hash,
+                        file = %entry_path,
+                        file_index,
+                        pos,
+                        "usenet download returned an empty mid-file read"
+                    );
+                    Some((
+                        Err(std::io::Error::new(
+                            std::io::ErrorKind::UnexpectedEof,
+                            "usenet read returned no data before the requested range ended",
+                        )),
+                        (source, info_hash, entry_path, end + 1, end),
+                    ))
+                }
                 Err(error) => {
                     tracing::warn!(
                         info_hash = %info_hash,
@@ -473,7 +489,7 @@ async fn serve_usenet_media(
                     );
                     Some((
                         Err(std::io::Error::other("usenet read failed")),
-                        (streamer, info_hash, entry_path, file_index, end + 1, end),
+                        (source, info_hash, entry_path, end + 1, end),
                     ))
                 }
             }
@@ -511,6 +527,7 @@ pub(super) async fn media_bridge_handler(
 
     if let Some((info_hash, file_index)) = usenet_target(&entry) {
         return serve_usenet_media(
+            &state,
             &entry,
             info_hash,
             file_index,
@@ -566,8 +583,17 @@ pub(super) async fn media_bridge_handler(
             }
         };
 
-    let mut upstream_range_error =
-        validate_upstream_range_response(requested_range, upstream.status()).err();
+    let file_size = u64::try_from(entry.file_size).unwrap_or(0);
+    let mut upstream_range_error = validate_upstream_range_response(
+        requested_range,
+        upstream.status(),
+        upstream
+            .headers()
+            .get(CONTENT_RANGE)
+            .and_then(|value| value.to_str().ok()),
+        file_size,
+    )
+    .err();
 
     if is_expired_stream_status(upstream.status()) || upstream_range_error.is_some() {
         let Some(refreshed) = resolve_media_stream_url(&state, &entry).await else {
@@ -578,8 +604,16 @@ pub(super) async fn media_bridge_handler(
         match fetch_media_response(&state, method.clone(), &refreshed, &headers).await {
             Ok(response) => {
                 upstream = response;
-                upstream_range_error =
-                    validate_upstream_range_response(requested_range, upstream.status()).err();
+                upstream_range_error = validate_upstream_range_response(
+                    requested_range,
+                    upstream.status(),
+                    upstream
+                        .headers()
+                        .get(CONTENT_RANGE)
+                        .and_then(|value| value.to_str().ok()),
+                    file_size,
+                )
+                .err();
             }
             Err(error) => {
                 tracing::error!(
@@ -716,17 +750,6 @@ mod tests {
     }
 
     #[test]
-    fn parses_usenet_stream_url() {
-        assert_eq!(
-            parse_usenet_url("usenet://abc123/4"),
-            Some(("abc123".to_string(), 4))
-        );
-        assert_eq!(parse_usenet_url("usenet://abc123/"), None);
-        assert_eq!(parse_usenet_url("usenet:///4"), None);
-        assert_eq!(parse_usenet_url("https://cdn.example/file.mkv"), None);
-    }
-
-    #[test]
     fn resolves_full_range_when_unspecified() {
         assert_eq!(resolve_concrete_range(None, 1000), (0, 999, false));
     }
@@ -773,7 +796,25 @@ mod tests {
                     start: Some(0),
                     end: Some(1023),
                 }),
-                reqwest::StatusCode::OK
+                reqwest::StatusCode::OK,
+                None,
+                2048,
+            ),
+            Err(UpstreamRangeError::MissingPartialContent)
+        );
+    }
+
+    #[test]
+    fn rejects_mismatched_upstream_content_range() {
+        assert_eq!(
+            validate_upstream_range_response(
+                Some(RequestedRange {
+                    start: Some(1024),
+                    end: Some(2047),
+                }),
+                reqwest::StatusCode::PARTIAL_CONTENT,
+                Some("bytes 0-1023/4096"),
+                4096,
             ),
             Err(UpstreamRangeError::MissingPartialContent)
         );

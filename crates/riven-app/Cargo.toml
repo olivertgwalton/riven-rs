@@ -14,6 +14,7 @@ riven-db = { path = "../riven-db" }
 riven-api = { path = "../riven-api" }
 riven-queue = { path = "../riven-queue" }
 riven-plugins = { path = "../riven-plugins" }
+riven-streaming = { path = "../riven-streaming" }
 riven-usenet = { path = "../riven-usenet" }
 # The binary reads NNTP settings out of the usenet plugin at startup to hand to
 # the streamer; the rest of the plugins are reached only through riven-plugins.

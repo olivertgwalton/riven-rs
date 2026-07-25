@@ -153,14 +153,17 @@ async fn main() -> Result<()> {
         usenet_streamer
             .clone()
             .map(|s| Arc::new(s) as Arc<dyn riven_core::local_source::LocalByteSource>);
+    let source_factory = Arc::new(riven_streaming::SourceFactory::new(
+        stream_http_client.clone(),
+        link_tx.clone(),
+        usenet_local_source,
+    ));
     let vfs_mount_manager = Arc::new(riven_api::vfs_mount::VfsMountManager::new(
         &vfs_mount_path,
         job_queue.vfs_layout.clone(),
         job_queue.filesystem_settings_revision.clone(),
-        stream_http_client.clone(),
-        link_tx.clone(),
+        source_factory.clone(),
         settings.vfs_cache_max_size_mb,
-        usenet_local_source,
     )?);
 
     usenet::spawn_background_tasks(
@@ -231,6 +234,7 @@ async fn main() -> Result<()> {
         let notif_tx = notification_tx.clone();
         let log_control = log_control.clone();
         let vfs_mount_manager = vfs_mount_manager.clone();
+        let source_factory = source_factory.clone();
         let cancel = cancel.clone();
         async move {
             if let Err(e) = riven_api::start_server(riven_api::StartServerConfig {
@@ -246,8 +250,7 @@ async fn main() -> Result<()> {
                 notification_tx: notif_tx,
                 downloader_config: jq.downloader_config.clone(),
                 log_control,
-                stream_client: stream_http_client.clone(),
-                link_request_tx: link_tx.clone(),
+                source_factory,
                 cors_allowed_origins,
                 vfs_mount_manager,
                 cancel,

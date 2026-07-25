@@ -10,9 +10,9 @@ use axum::{Router, routing::get};
 use riven_core::http::HttpClient;
 use riven_core::logging::LogControl;
 use riven_core::plugin::PluginRegistry;
-use riven_core::stream_link::LinkRequest;
 use riven_queue::JobQueue;
 use riven_queue::main_orchestrator::start_event_controller;
+use riven_streaming::SourceFactory;
 use tokio::sync::broadcast;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::services::{ServeDir, ServeFile};
@@ -38,8 +38,7 @@ pub struct StartServerConfig {
     pub notification_tx: broadcast::Sender<String>,
     pub downloader_config: Arc<tokio::sync::RwLock<riven_core::downloader::DownloaderConfig>>,
     pub log_control: Arc<LogControl>,
-    pub stream_client: reqwest::Client,
-    pub link_request_tx: tokio::sync::mpsc::Sender<LinkRequest>,
+    pub source_factory: Arc<SourceFactory>,
     pub cors_allowed_origins: Vec<String>,
     pub vfs_mount_manager: Arc<VfsMountManager>,
     pub cancel: tokio_util::sync::CancellationToken,
@@ -48,8 +47,8 @@ pub struct StartServerConfig {
 mod state {
     use std::sync::Arc;
 
-    use riven_core::stream_link::LinkRequest;
     use riven_queue::JobQueue;
+    use riven_streaming::SourceFactory;
     use tokio::sync::broadcast;
 
     use crate::schema::AppSchema;
@@ -62,8 +61,7 @@ mod state {
         pub frontend_auth_signing_secret: Option<String>,
         pub log_tx: broadcast::Sender<String>,
         pub notification_tx: broadcast::Sender<String>,
-        pub stream_client: reqwest::Client,
-        pub link_request_tx: tokio::sync::mpsc::Sender<LinkRequest>,
+        pub source_factory: Arc<SourceFactory>,
         pub runtime: tokio::runtime::Handle,
     }
 }
@@ -82,8 +80,7 @@ pub async fn start_server(config: StartServerConfig) -> Result<()> {
         notification_tx,
         downloader_config,
         log_control,
-        stream_client,
-        link_request_tx,
+        source_factory,
         cors_allowed_origins,
         vfs_mount_manager,
         cancel,
@@ -127,8 +124,7 @@ pub async fn start_server(config: StartServerConfig) -> Result<()> {
         frontend_auth_signing_secret,
         log_tx,
         notification_tx,
-        stream_client,
-        link_request_tx,
+        source_factory,
         runtime: tokio::runtime::Handle::current(),
     };
 

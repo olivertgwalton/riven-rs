@@ -7,9 +7,9 @@ rust-version.workspace = true
 [dependencies]
 riven-core = { path = "../riven-core" }
 riven-db = { path = "../riven-db" }
+riven-streaming = { path = "../riven-streaming" }
 fuser = { workspace = true }
 tokio = { workspace = true }
-reqwest = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 dashmap = { workspace = true }

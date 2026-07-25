@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "crates/riven-core",
+    "crates/riven-streaming",
     "crates/riven-vfs",
     "crates/riven-db",
     "crates/riven-api",

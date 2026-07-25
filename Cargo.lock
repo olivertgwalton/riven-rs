@@ -3904,6 +3904,7 @@ dependencies = [
  "riven-db",
  "riven-queue",
  "riven-rank",
+ "riven-streaming",
  "riven-usenet",
  "riven-vfs",
  "sea-orm",
@@ -3930,6 +3931,7 @@ dependencies = [
  "riven-db",
  "riven-plugins",
  "riven-queue",
+ "riven-streaming",
  "riven-usenet",
  "sea-orm",
  "serde_json",
@@ -4056,6 +4058,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "riven-streaming"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bytes",
+ "dashmap",
+ "parking_lot",
+ "reqwest",
+ "riven-core",
+ "riven-db",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "riven-usenet"
 version = "0.1.0"
 dependencies = [
@@ -4099,9 +4117,9 @@ dependencies = [
  "futures",
  "libc",
  "parking_lot",
- "reqwest",
  "riven-core",
  "riven-db",
+ "riven-streaming",
  "riven-usenet",
  "sea-orm",
  "serde_json",

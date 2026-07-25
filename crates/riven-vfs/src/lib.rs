@@ -2,8 +2,8 @@ pub mod filesystem;
 pub mod path_info;
 pub mod prefetch;
 pub mod query;
-pub mod source;
 pub mod readdir;
+pub mod source;
 mod state;
 
 use std::path::Path;
@@ -13,7 +13,6 @@ use riven_core::vfs_layout::VfsLibraryLayout;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use tokio::sync::RwLock;
-use tokio::sync::mpsc;
 
 use crate::filesystem::RivenFs;
 
@@ -36,10 +35,8 @@ pub fn mount(
     mount_path: &str,
     vfs_layout: Arc<RwLock<VfsLibraryLayout>>,
     filesystem_settings_revision: Arc<AtomicU64>,
-    stream_client: reqwest::Client,
-    link_request_tx: mpsc::Sender<riven_core::stream_link::LinkRequest>,
+    source_factory: Arc<riven_streaming::SourceFactory>,
     cache_max_size_mb: u64,
-    local_source: Option<Arc<dyn riven_core::local_source::LocalByteSource>>,
 ) -> Result<Option<FuseSession>> {
     let mount_path = Path::new(mount_path);
 
@@ -93,10 +90,8 @@ pub fn mount(
     let fs = RivenFs::new(
         vfs_layout,
         filesystem_settings_revision,
-        stream_client,
-        link_request_tx,
+        source_factory,
         cache_max_size_mb,
-        local_source,
     );
 
     let mut config = fuser::Config::default();

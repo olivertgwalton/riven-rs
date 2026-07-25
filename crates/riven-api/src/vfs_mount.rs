@@ -2,9 +2,9 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 
 use anyhow::Result;
-use riven_core::stream_link::LinkRequest;
 use riven_core::vfs_layout::VfsLibraryLayout;
-use tokio::sync::{Mutex, RwLock, mpsc};
+use riven_streaming::SourceFactory;
+use tokio::sync::{Mutex, RwLock};
 
 struct MountedVfs {
     path: String,
@@ -14,10 +14,8 @@ struct MountedVfs {
 struct VfsMountConfig {
     vfs_layout: Arc<RwLock<VfsLibraryLayout>>,
     filesystem_settings_revision: Arc<AtomicU64>,
-    stream_client: reqwest::Client,
-    link_request_tx: mpsc::Sender<LinkRequest>,
+    source_factory: Arc<SourceFactory>,
     cache_max_size_mb: u64,
-    local_source: Option<Arc<dyn riven_core::local_source::LocalByteSource>>,
 }
 
 /// Owns the active FUSE session and lets runtime settings changes remount it.
@@ -31,18 +29,14 @@ impl VfsMountManager {
         initial_path: &str,
         vfs_layout: Arc<RwLock<VfsLibraryLayout>>,
         filesystem_settings_revision: Arc<AtomicU64>,
-        stream_client: reqwest::Client,
-        link_request_tx: mpsc::Sender<LinkRequest>,
+        source_factory: Arc<SourceFactory>,
         cache_max_size_mb: u64,
-        local_source: Option<Arc<dyn riven_core::local_source::LocalByteSource>>,
     ) -> Result<Self> {
         let config = VfsMountConfig {
             vfs_layout,
             filesystem_settings_revision,
-            stream_client,
-            link_request_tx,
+            source_factory,
             cache_max_size_mb,
-            local_source,
         };
         let mounted = mount_with_config(initial_path, &config)?;
 
@@ -89,10 +83,8 @@ fn mount_with_config(mount_path: &str, config: &VfsMountConfig) -> Result<Option
         mount_path,
         config.vfs_layout.clone(),
         config.filesystem_settings_revision.clone(),
-        config.stream_client.clone(),
-        config.link_request_tx.clone(),
+        config.source_factory.clone(),
         config.cache_max_size_mb,
-        config.local_source.clone(),
     )?
     else {
         return Ok(None);
