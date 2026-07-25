@@ -24,6 +24,7 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::io;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use bytes::{Bytes, BytesMut};
 use tokio::sync::{Mutex, Notify};
@@ -47,6 +48,16 @@ const CHUNK: u64 = 8 * 1024 * 1024;
 /// Reads landing within this distance ahead of the buffer are still
 /// sequential rather than a seek. riven-ts's scan tolerance: 25 blocks.
 const SEQUENTIAL_TOLERANCE: u64 = 25 * BLOCK;
+/// How far *behind* the buffer a read may land and still not count as a seek.
+///
+/// Players keep more than one read position on a file — Infuse opens the
+/// video handle plus a probe range, and the kernel issues readahead in
+/// parallel, so requests arrive interleaved and slightly out of order. Those
+/// reads land behind the consumed frontier. Treating them as seeks resets the
+/// window, and with a second reader alternating it never survives long enough
+/// to grow: measured at a pinned 2 MiB with 84 resets in six minutes of
+/// plainly sequential playback. Serve them without disturbing the window.
+const BACKWARD_TOLERANCE: u64 = 32 * 1024 * 1024;
 /// Header players probe for container metadata (riven-ts: 256 KiB).
 const HEADER_SIZE: u64 = 256 * 1024;
 /// Footer bounds — MP4 keeps its `moov` atom at the end, so players read the
@@ -54,10 +65,25 @@ const HEADER_SIZE: u64 = 256 * 1024;
 const MIN_FOOTER: u64 = 16 * 1024;
 const MAX_FOOTER: u64 = 10 * 1024 * 1024;
 const FOOTER_PERCENT: f64 = 0.02;
-/// Chunks fetched concurrently. Without this the prefetcher alternates
-/// fetch/serve with no overlap, capping throughput at `CHUNK / latency` and
-/// passing every latency spike straight through to the player.
-const MAX_INFLIGHT_CHUNKS: usize = 3;
+/// Chunks fetched concurrently.
+///
+/// This is the prefetcher's throughput ceiling: fill rate is
+/// `MAX_INFLIGHT_CHUNKS x CHUNK / chunk_latency`. It has to exceed the
+/// player's bitrate by a wide margin, not a narrow one — the surplus is what
+/// *builds* the buffer, and only a deep buffer survives a slow chunk. At 3,
+/// an 8 MiB chunk and ~3 s latency gave ~7.9 MB/s against 5.3 MB/s demand:
+/// enough to keep up, far too little to ever fill a 50 MiB window.
+///
+/// Total concurrent article fetches is roughly this x
+/// `RIVEN_USENET_STREAM_FANOUT`, so keep the product near the provider's
+/// connection count. Override with `RIVEN_VFS_INFLIGHT_CHUNKS`.
+fn max_inflight_chunks() -> usize {
+    std::env::var("RIVEN_VFS_INFLIGHT_CHUNKS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(6)
+}
 
 struct Buffered {
     /// File offset of `data`'s first byte.
@@ -115,6 +141,32 @@ impl Buffered {
     }
 }
 
+#[derive(Default)]
+struct Stats {
+    /// Reads served straight from the buffer — the healthy path.
+    hits: u64,
+    /// Reads that had to wait for a fetch. These are the stalls a player
+    /// experiences as buffering.
+    misses: u64,
+    /// Total time reads spent blocked, and the worst single wait.
+    wait_ms: u64,
+    worst_wait_ms: u64,
+    /// Window resets caused by a non-sequential read.
+    seeks: u64,
+    /// Metadata probes served from the pinned header/footer.
+    probes: u64,
+    /// Reads from a second, interleaved reader landing behind the buffer.
+    /// Distinct from `probes`: these indicate how much the player is reading
+    /// out of order, which is what used to destroy the window.
+    behind: u64,
+    /// Chunk fetches and their cost.
+    chunks: u64,
+    chunk_ms: u64,
+    worst_chunk_ms: u64,
+    bytes: u64,
+    last_log: Option<Instant>,
+}
+
 struct Inner {
     buf: Buffered,
     /// Next byte to *dispatch*. Runs ahead of the buffer by whatever is in
@@ -128,6 +180,10 @@ struct Inner {
     /// Chunks that arrived out of order, keyed by start offset, waiting to be
     /// appended once the gap before them is filled.
     pending: BTreeMap<u64, Bytes>,
+    /// Rolling diagnostics — the buffer is invisible from the outside, so
+    /// without these a stall cannot be attributed to a shallow window, a
+    /// starved pipeline, or a slow origin.
+    stats: Stats,
     /// Container metadata, pinned for the life of the handle. Players probe
     /// these repeatedly and out of order; serving them from the sequential
     /// window would reset it on every probe and refetch them each time.
@@ -163,6 +219,7 @@ pub struct Prefetcher {
     progress: Notify,
     size: u64,
     max_window: u64,
+    max_inflight: usize,
 }
 
 impl Prefetcher {
@@ -183,10 +240,12 @@ impl Prefetcher {
                 pending: BTreeMap::new(),
                 header: None,
                 footer: None,
+                stats: Stats::default(),
             }),
             progress: Notify::new(),
             size,
             max_window: max_window.max(INITIAL_WINDOW),
+            max_inflight: max_inflight_chunks(),
         }
     }
 
@@ -266,13 +325,18 @@ impl Prefetcher {
         // Metadata probes bypass the window entirely.
         let end = start + want as u64 - 1;
         if end < HEADER_SIZE.min(self.size) {
+            self.inner.lock().await.stats.probes += 1;
             return self.read_pinned(start, want, true).await;
         }
         if start >= self.footer_start() {
+            self.inner.lock().await.stats.probes += 1;
             return self.read_pinned(start, want, false).await;
         }
 
         self.source.report_position(start).await;
+
+        let began = Instant::now();
+        let mut waited = false;
 
         loop {
             // Registered before the buffer is inspected, so a fill completing
@@ -292,7 +356,25 @@ impl Prefetcher {
                 let in_buf = start >= inner.buf.start && start < inner.buf.end();
                 let near = start >= inner.buf.end()
                     && start - inner.buf.end() <= SEQUENTIAL_TOLERANCE;
+                // A read just behind the buffer is an interleaved reader, not
+                // a seek. Its bytes are already consumed so it is served by a
+                // one-off fetch below, but the window must survive it.
+                let behind = start < inner.buf.start
+                    && inner.buf.start - start <= BACKWARD_TOLERANCE;
+                if behind {
+                    inner.stats.behind += 1;
+                    drop(inner);
+                    let end = start + want as u64 - 1;
+                    return self.read_exact_range(start, end).await;
+                }
                 if !in_buf && !near {
+                    tracing::debug!(
+                        target: "streaming",
+                        from = inner.buf.end(), to = start,
+                        window_mb = inner.window >> 20,
+                        "prefetch: seek — window reset"
+                    );
+                    inner.stats.seeks += 1;
                     inner.buf.clear(start);
                     inner.pending.clear();
                     inner.frontier = start;
@@ -308,8 +390,21 @@ impl Prefetcher {
                         // Sustained sequential reading earns a deeper window.
                         inner.window =
                             (inner.window * WINDOW_MULTIPLIER).min(self.max_window);
+
+                        let waited_ms = began.elapsed().as_millis() as u64;
+                        if waited {
+                            inner.stats.misses += 1;
+                            inner.stats.wait_ms += waited_ms;
+                            inner.stats.worst_wait_ms =
+                                inner.stats.worst_wait_ms.max(waited_ms);
+                        } else {
+                            inner.stats.hits += 1;
+                        }
+                        inner.stats.bytes += data.len() as u64;
+                        self.maybe_log(&mut inner, start);
+
                         drop(inner);
-                        self.dispatch_fills();
+                        self.dispatch_fills().await;
                         return Ok(data);
                     }
                 }
@@ -317,24 +412,67 @@ impl Prefetcher {
 
             // Keep the pipeline topped up, then wait for whichever chunk lands
             // next. Fills run as their own tasks, so fetching overlaps serving.
-            if !self.dispatch_fills() {
-                notified.await;
-            } else {
-                notified.await;
-            }
+            waited = true;
+            self.dispatch_fills().await;
+            notified.await;
         }
+    }
+
+    /// Emit a rolling summary every 10s.
+    ///
+    /// The single most diagnostic number here is the hit rate: a read served
+    /// from the buffer is invisible to the player, a miss is a stall. If
+    /// misses are high while `window_mb` is large, the origin is too slow for
+    /// the depth; if `window_mb` stays small, the window is being reset by
+    /// seeks and never gets a chance to grow.
+    fn maybe_log(&self, inner: &mut Inner, position: u64) {
+        const EVERY: Duration = Duration::from_secs(10);
+        let now = Instant::now();
+        match inner.stats.last_log {
+            Some(last) if now.duration_since(last) < EVERY => return,
+            _ => inner.stats.last_log = Some(now),
+        }
+        let s = &inner.stats;
+        let reads = s.hits + s.misses;
+        if reads == 0 {
+            return;
+        }
+        tracing::info!(
+            target: "streaming",
+            position_mb = position >> 20,
+            window_mb = inner.window >> 20,
+            buffered_mb = inner.buf.len >> 20,
+            inflight = inner.inflight,
+            pending = inner.pending.len(),
+            reads,
+            hit_pct = (s.hits * 100) / reads,
+            misses = s.misses,
+            avg_wait_ms = if s.misses > 0 { s.wait_ms / s.misses } else { 0 },
+            worst_wait_ms = s.worst_wait_ms,
+            chunks = s.chunks,
+            avg_chunk_ms = if s.chunks > 0 { s.chunk_ms / s.chunks } else { 0 },
+            worst_chunk_ms = s.worst_chunk_ms,
+            seeks = s.seeks,
+            probes = s.probes,
+            behind = s.behind,
+            served_mb = s.bytes >> 20,
+            "prefetch stats"
+        );
     }
 
     /// Start fills until the window is covered or the in-flight cap is hit.
     /// Returns whether anything was dispatched.
-    fn dispatch_fills(self: &Arc<Self>) -> bool {
+    async fn dispatch_fills(self: &Arc<Self>) -> bool {
         let mut started = false;
         loop {
-            let Ok(mut inner) = self.inner.try_lock() else {
-                return started;
-            };
+            // Must *wait* for the lock, not `try_lock`. Under load the buffer
+            // mutex is held constantly by concurrent readers, so a `try_lock`
+            // here silently abandoned the dispatch and pinned the pipeline at
+            // ~2 chunks regardless of the configured ceiling — the fill rate
+            // never rose above consumption and the window never filled.
+            let mut inner = self.inner.lock().await;
             if inner.error.is_some()
-                || inner.inflight >= MAX_INFLIGHT_CHUNKS
+                || inner.inflight >= self.max_inflight
                 || inner.frontier >= self.size
             {
                 return started;
@@ -364,11 +502,26 @@ impl Prefetcher {
 
     /// Fetch one chunk, slot it into place, and wake any waiters.
     async fn fill(&self, from: u64, to: u64) {
+        let began = Instant::now();
         let result = self.source.read_range(from, to).await;
+        let took_ms = began.elapsed().as_millis() as u64;
 
         {
             let mut inner = self.inner.lock().await;
             inner.inflight -= 1;
+            inner.stats.chunks += 1;
+            inner.stats.chunk_ms += took_ms;
+            inner.stats.worst_chunk_ms = inner.stats.worst_chunk_ms.max(took_ms);
+            if took_ms >= 2000 {
+                tracing::debug!(
+                    target: "streaming",
+                    from, len_mb = (to - from + 1) >> 20, took_ms,
+                    inflight = inner.inflight,
+                    buffered_mb = inner.buf.len >> 20,
+                    window_mb = inner.window >> 20,
+                    "prefetch: slow chunk"
+                );
+            }
             match result {
                 Ok(data) if !data.is_empty() => {
                     let got = data.len() as u64;
