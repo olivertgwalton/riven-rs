@@ -77,6 +77,85 @@ fn file_attr(ino: u64, size: u64, mtime: SystemTime) -> FileAttr {
 /// `spawn_blocking` closure lets the dispatcher return immediately while the
 /// real work runs on tokio's blocking-task pool, so a slow read on one file
 /// no longer wedges every other FUSE op.
+
+/// Decrements the in-flight counter when the read task ends, on every path
+/// (reply, error, or early return).
+struct InflightGuard(Arc<FuseStats>);
+
+impl Drop for InflightGuard {
+    fn drop(&mut self) {
+        self.0.inflight.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+/// FUSE-level counters. The prefetcher sees its own hit rate, but only this
+/// layer sees what the *player* experiences: total time from the kernel's
+/// read request to the reply, including semaphore admission. A stall the
+/// player notices always shows up here, whatever caused it.
+#[derive(Default)]
+struct FuseStats {
+    reads: AtomicU64,
+    /// Reads currently being served — if this pins at the semaphore limit,
+    /// admission is the bottleneck rather than the origin.
+    inflight: AtomicU64,
+    slow_reads: AtomicU64,
+    total_us: AtomicU64,
+    worst_us: AtomicU64,
+    /// Time spent waiting for a read permit, isolated from fetch time.
+    permit_wait_us: AtomicU64,
+    bytes: AtomicU64,
+    errors: AtomicU64,
+    last_log_secs: AtomicU64,
+}
+
+impl FuseStats {
+    /// Record one completed FUSE read and, every 10s, emit a summary.
+    ///
+    /// `permit_us` separates admission from service: if it dominates, the
+    /// 32-permit gate is the bottleneck, not the origin. `worst_us` is what
+    /// the player felt at its worst — a single multi-second read is a visible
+    /// stutter even when the average looks fine.
+    fn record_read(&self, permit_us: u64, total_us: u64, bytes: usize, ok: bool) {
+        self.reads.fetch_add(1, Ordering::Relaxed);
+        self.total_us.fetch_add(total_us, Ordering::Relaxed);
+        self.permit_wait_us.fetch_add(permit_us, Ordering::Relaxed);
+        self.bytes.fetch_add(bytes as u64, Ordering::Relaxed);
+        if !ok {
+            self.errors.fetch_add(1, Ordering::Relaxed);
+        }
+        self.worst_us.fetch_max(total_us, Ordering::Relaxed);
+        if total_us >= 500_000 {
+            self.slow_reads.fetch_add(1, Ordering::Relaxed);
+        }
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        let last = self.last_log_secs.load(Ordering::Relaxed);
+        if now < last + 10
+            || self
+                .last_log_secs
+                .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
+                .is_err()
+        {
+            return;
+        }
+        let reads = self.reads.load(Ordering::Relaxed).max(1);
+        tracing::info!(
+            target: "streaming",
+            reads,
+            inflight = self.inflight.load(Ordering::Relaxed),
+            avg_ms = self.total_us.load(Ordering::Relaxed) / reads / 1000,
+            worst_ms = self.worst_us.swap(0, Ordering::Relaxed) / 1000,
+            slow_reads = self.slow_reads.load(Ordering::Relaxed),
+            avg_permit_ms = self.permit_wait_us.load(Ordering::Relaxed) / reads / 1000,
+            errors = self.errors.load(Ordering::Relaxed),
+            served_mb = self.bytes.load(Ordering::Relaxed) >> 20,
+            "fuse read stats"
+        );
+    }
+}
+
 struct RivenFsInner {
     vfs_layout: Arc<RwLock<VfsLibraryLayout>>,
     filesystem_settings_revision: Arc<AtomicU64>,
@@ -89,6 +168,7 @@ struct RivenFsInner {
     /// Ceiling on one file's adaptive read-ahead window.
     max_prefetch_window: u64,
     read_semaphore: Arc<Semaphore>,
+    fuse_stats: Arc<FuseStats>,
     link_refresh_locks: DashMap<i64, Arc<Mutex<()>>>,
     local_source: Option<Arc<dyn riven_core::local_source::LocalByteSource>>,
 }
@@ -141,10 +221,14 @@ impl RivenFsInner {
             runtime: tokio::runtime::Handle::current(),
             state: VfsState::new(),
             max_prefetch_window: cache_capacity_bytes as u64,
-            // Bound upstream reads independently of tokio's much larger
-            // blocking-task pool. This prevents scans or concurrent players
-            // from creating hundreds of live HTTP buffers at once.
+            // Backstop only. Reads are async and normally served from the
+            // prefetch buffer, which bounds real fetches itself — measured
+            // permit wait is 0 and in-flight peaks in single digits during
+            // playback. This exists purely so a pathological fan-out (a media
+            // server analysing a whole library at once) cannot spawn unbounded
+            // read tasks.
             read_semaphore: Arc::new(Semaphore::new(32)),
+            fuse_stats: Arc::new(FuseStats::default()),
             link_refresh_locks: DashMap::new(),
             local_source,
         }
@@ -525,10 +609,15 @@ impl Filesystem for RivenFs {
         let inner = Arc::clone(&self.inner);
         let fh = fh.0;
         self.inner.runtime.spawn(async move {
+            let began = std::time::Instant::now();
             let Ok(_permit) = inner.read_semaphore.clone().acquire_owned().await else {
                 reply.error(Errno::EIO);
                 return;
             };
+            let permit_us = began.elapsed().as_micros() as u64;
+            let stats = Arc::clone(&inner.fuse_stats);
+            stats.inflight.fetch_add(1, Ordering::Relaxed);
+            let _guard = InflightGuard(Arc::clone(&stats));
 
             // Clone what is needed out of the handle map, then drop the guard.
             let opened = {
@@ -556,8 +645,31 @@ impl Filesystem for RivenFs {
                     reply.data(&content[offset as usize..end as usize]);
                 }
                 Err((prefetcher, path)) => match prefetcher.read(offset, size as usize).await {
-                    Ok(data) => reply.data(&data),
+                    Ok(data) => {
+                        let total_us = began.elapsed().as_micros() as u64;
+                        // Surfaced individually as well as in aggregate: one
+                        // multi-second read is a visible stutter, and the
+                        // offset tells us whether it was a seek or a stall
+                        // mid-sequence.
+                        if total_us >= 1_000_000 {
+                            tracing::warn!(
+                                target: "streaming",
+                                path = %path, offset, size,
+                                took_ms = total_us / 1000,
+                                permit_ms = permit_us / 1000,
+                                "slow playback read"
+                            );
+                        }
+                        stats.record_read(permit_us, total_us, data.len(), true);
+                        reply.data(&data);
+                    }
                     Err(error) => {
+                        stats.record_read(
+                            permit_us,
+                            began.elapsed().as_micros() as u64,
+                            0,
+                            false,
+                        );
                         tracing::warn!(
                             target: "streaming",
                             path = %path, offset, size, %error,
