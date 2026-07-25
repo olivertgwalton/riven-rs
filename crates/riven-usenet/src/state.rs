@@ -37,18 +37,6 @@ const DEFAULT_META_CACHE_BYTES: u64 = 256 * 1024 * 1024;
 /// ~40 MB. Override with `RIVEN_USENET_DECODED_SIZES_ENTRIES`.
 const DEFAULT_DECODED_SIZES_ENTRIES: usize = 500_000;
 
-/// Articles fetched concurrently to satisfy one streaming range request.
-///
-/// This is the streaming connection cap, kept separate from the provider's
-/// `max_connections` so playback never consumes the whole pool — the same
-/// split altmount and streamnzb make (they cap playback prefetch at 60 and 24
-/// segments respectively, independent of account size). The VFS keeps up to
-/// `MAX_INFLIGHT_CHUNKS` ranges in flight, so total streaming concurrency is
-/// roughly `3 x` this: 8 gives ~24, matching streamnzb's playback depth, and
-/// leaves the rest of the account for ingest, verification and repair.
-/// Override with `RIVEN_USENET_STREAM_FANOUT`.
-const DEFAULT_STREAM_FANOUT: usize = 8;
-
 // Concurrency is no longer tuned here. The NNTP pool's priority lanes and
 // per-provider slot actors bound socket use (see `nntp::pool`), each stream's
 // read-ahead adapts its own depth and parallelism to measured bitrate and
@@ -60,29 +48,15 @@ const DEFAULT_STREAM_FANOUT: usize = 8;
 /// hot for subsequent read-path serves, and a single in-flight fetch
 /// deduplicates across all concerns.
 pub struct StreamerState {
-    /// Concurrent article fetches per streaming range. See
-    /// [`DEFAULT_STREAM_FANOUT`].
-    pub stream_fanout: usize,
     pub cache: SegmentCache,
     pub meta_cache: MetaCache,
     pub decoded_sizes: DecodedSizes,
     pub fails: PermanentFails,
     pub in_flight: InFlight,
-    pub precached: PrecachedFiles,
     pub migrated: MigratedMetas,
     /// Cumulative NNTP fetch counters (cache misses that hit the wire),
     /// driving the API's usenet-streaming health view.
     pub fetch_metrics: FetchMetrics,
-    /// Caps concurrent head/tail precache operations. A Plex/Jellyfin
-    /// library scan HEADs hundreds of files in a burst, each of which
-    /// fires a fire-and-forget `precache_head_tail`. Without a limit
-    /// that's hundreds of simultaneous 8 MB fetch+decode pipelines —
-    /// a multi-GB allocation spike that musl never returns to the OS
-    /// (RSS observed climbing to ~3.5 GB and holding). Bounding peak
-    /// precache concurrency caps that high-water mark; the trade-off is
-    /// only that head/tail warming during a mass scan happens a few
-    /// files at a time.
-    pub precache_sem: tokio::sync::Semaphore,
     /// Live adaptive read-ahead tasks, one per armed playback stream.
     /// Single-flight for `load_meta`. A season pack's episodes all resolve to
     /// one `usenet_meta` row, so a scanner opening 24 of them at once used to
@@ -100,19 +74,13 @@ impl StreamerState {
             "RIVEN_USENET_DECODED_SIZES_ENTRIES",
             DEFAULT_DECODED_SIZES_ENTRIES,
         );
-        // Fixed: precache is optional cache warming, and 4 concurrent 8 MB
-        // head+tail warms is plenty for any library scan without a spike.
-        const PRECACHE_CONCURRENCY: usize = 4;
         Self {
-            stream_fanout: env_positive("RIVEN_USENET_STREAM_FANOUT", DEFAULT_STREAM_FANOUT),
             cache: SegmentCache::new(cache_bytes),
             meta_cache: MetaCache::new(meta_cache_bytes),
             decoded_sizes: DecodedSizes::new(decoded_sizes_entries),
-            precache_sem: tokio::sync::Semaphore::new(PRECACHE_CONCURRENCY),
             meta_loads: InFlight::default(),
             fails: PermanentFails::default(),
             in_flight: InFlight::default(),
-            precached: PrecachedFiles::default(),
             migrated: MigratedMetas::default(),
             fetch_metrics: FetchMetrics::default(),
         }
@@ -454,25 +422,6 @@ pub fn report_dead_segment(info_hash: &str, file_index: usize, filename: &str, d
 
 pub fn take_dead_segment_receiver() -> Option<mpsc::UnboundedReceiver<DeadSegmentEvent>> {
     dead_segment_channel().rx.lock().take()
-}
-
-/// Tracks files for which the head+tail precache has already been
-/// kicked off in this process. The first stream request for a file
-/// eagerly warms the first and last few MB so probes and seek-to-end
-/// hits are served from cache.
-#[derive(Default)]
-pub struct PrecachedFiles {
-    inner: Mutex<HashSet<String>>,
-}
-
-impl PrecachedFiles {
-    /// Returns `true` exactly once per `(info_hash, file_index)` pair —
-    /// the caller is responsible for actually performing the precache.
-    /// Subsequent callers see `false` and skip.
-    pub fn claim(&self, info_hash: &str, file_index: usize) -> bool {
-        let key = format!("{info_hash}:{file_index}");
-        self.inner.lock().insert(key)
-    }
 }
 
 /// Tracks NzbMeta instances for which the in-place backfill of
