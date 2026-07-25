@@ -34,6 +34,7 @@ use riven_vfs::source::{ByteSource, UsenetSource};
 const READ_SIZE: usize = 128 * 1024;
 /// Production default (`cache_max_size_mb == 0`) in `RivenFsInner::new`.
 const DEFAULT_MAX_WINDOW: u64 = 50 * 1024 * 1024;
+const FRACTION_SCALE: u64 = 1_000_000;
 
 struct Args {
     info_hash: String,
@@ -41,7 +42,7 @@ struct Args {
     /// Where to start, as a fraction of the file. Deliberately not 0: the
     /// head is pinned and precached, so starting there measures the one part
     /// of the file that is never the problem.
-    start_frac: f64,
+    start_millionths: u64,
     seconds: u64,
     /// Concurrent readers on the same file. Players really do open more than
     /// one handle, and each one used to get its own independent read-ahead
@@ -80,7 +81,7 @@ fn parse_args() -> Args {
     let mut args = Args {
         info_hash: String::new(),
         file_index: 0,
-        start_frac: 0.35,
+        start_millionths: 350_000,
         seconds: 60,
         handles: 1,
         max_connections: 100,
@@ -99,7 +100,9 @@ fn parse_args() -> Args {
         match flag.as_str() {
             "--info-hash" => args.info_hash = value,
             "--file-index" => args.file_index = value.parse().unwrap_or(0),
-            "--start-frac" => args.start_frac = value.parse().unwrap_or(0.35),
+            "--start-frac" => {
+                args.start_millionths = parse_fraction(&value).unwrap_or(350_000);
+            }
             "--seconds" => args.seconds = value.parse().unwrap_or(60),
             "--handles" => args.handles = value.parse().unwrap_or(1),
             "--max-connections" => args.max_connections = value.parse().unwrap_or(100),
@@ -120,18 +123,39 @@ fn parse_args() -> Args {
     args
 }
 
+fn parse_fraction(value: &str) -> Option<u64> {
+    let (whole, fractional) = value.split_once('.').unwrap_or((value, ""));
+    let whole = if whole.is_empty() {
+        0
+    } else {
+        whole.parse::<u64>().ok()?
+    };
+    let mut scaled = whole.checked_mul(FRACTION_SCALE)?;
+    let mut place = FRACTION_SCALE / 10;
+
+    for digit in fractional.bytes() {
+        if !digit.is_ascii_digit() {
+            return None;
+        }
+        if place > 0 {
+            scaled = scaled.checked_add(u64::from(digit - b'0') * place)?;
+            place /= 10;
+        }
+    }
+    Some(scaled)
+}
+
 /// Latency samples for one reader, in microseconds.
 #[derive(Default)]
 struct Samples(Vec<u64>);
 
 impl Samples {
-    fn pct(&mut self, p: f64) -> f64 {
+    fn pct(&mut self, percentile: usize) -> f64 {
         if self.0.is_empty() {
             return 0.0;
         }
         self.0.sort_unstable();
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let idx = ((self.0.len() as f64 - 1.0) * p) as usize;
+        let idx = (self.0.len() - 1).saturating_mul(percentile.min(100)) / 100;
         self.0[idx] as f64 / 1000.0
     }
 }
@@ -185,12 +209,10 @@ async fn main() -> anyhow::Result<()> {
     let size = file.total_size;
     let filename = file.filename.clone();
 
-    #[allow(
-        clippy::cast_precision_loss,
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss
-    )]
-    let start = ((size as f64) * args.start_frac) as u64 & !(READ_SIZE as u64 - 1);
+    let scaled_start =
+        u128::from(size) * u128::from(args.start_millionths) / u128::from(FRACTION_SCALE);
+    let start = u64::try_from(scaled_start).unwrap_or(u64::MAX) & !(READ_SIZE as u64 - 1);
+    let start_percent = args.start_millionths.saturating_add(5_000) / 10_000;
 
     println!("=====================================================================");
     if !args.label.is_empty() {
@@ -200,7 +222,7 @@ async fn main() -> anyhow::Result<()> {
     println!(
         "size         : {:.1} GB   start at {:.0}% ({:.1} GB)",
         size as f64 / 1e9,
-        args.start_frac * 100.0,
+        start_percent,
         start as f64 / 1e9
     );
     println!(
@@ -241,7 +263,11 @@ async fn main() -> anyhow::Result<()> {
             size,
             &filename,
         ));
-        let prefetcher = Arc::new(Prefetcher::new(source, args.max_window));
+        let prefetcher = Arc::new(Prefetcher::new(
+            source,
+            args.max_window,
+            &tokio::runtime::Handle::current(),
+        ));
         let bytes_total = Arc::clone(&bytes_total);
         // Stagger the readers slightly so they do not march in lockstep.
         let start_at = start + (handle_idx as u64 * 4 * READ_SIZE as u64);
@@ -379,10 +405,10 @@ async fn main() -> anyhow::Result<()> {
             bytes as f64 / 1e6,
             bytes as f64 / 1e6 / secs,
             behind_reads,
-            samples.pct(0.50),
-            samples.pct(0.90),
-            samples.pct(0.99),
-            samples.pct(1.0),
+            samples.pct(50),
+            samples.pct(90),
+            samples.pct(99),
+            samples.pct(100),
             over_1s,
         );
         all.0.extend_from_slice(&samples.0);
@@ -400,8 +426,8 @@ async fn main() -> anyhow::Result<()> {
         mb_s,
         mbps,
         all.0.len(),
-        all.pct(0.50),
-        all.pct(0.99),
+        all.pct(50),
+        all.pct(99),
     );
 
     println!();
@@ -411,7 +437,7 @@ async fn main() -> anyhow::Result<()> {
         println!(
             "REPRODUCED?  {} read(s) took over 1s (worst {:.1}s).  {}",
             stalls_over_1s,
-            all.pct(1.0) / 1000.0,
+            all.pct(100) / 1000.0,
             if stalls_over_1s > 0 {
                 "YES — this is the stall Infuse sees."
             } else {

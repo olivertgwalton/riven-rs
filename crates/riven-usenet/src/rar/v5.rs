@@ -47,14 +47,9 @@ pub(super) fn parse_volume_header_v5(bytes: &[u8]) -> Result<RarVolumeHeader, Ra
             None => break,
         };
 
-        let extra_size = if head_flags & RAR5_HEAD_FLAG_EXTRA != 0 {
-            match read_vint(bytes, &mut pos) {
-                Some(v) => v as usize,
-                None => break,
-            }
-        } else {
-            0
-        };
+        if head_flags & RAR5_HEAD_FLAG_EXTRA != 0 && read_vint(bytes, &mut pos).is_none() {
+            break;
+        }
         let data_size = if head_flags & RAR5_HEAD_FLAG_DATA != 0 {
             match read_vint(bytes, &mut pos) {
                 Some(v) => v,
@@ -142,7 +137,6 @@ pub(super) fn parse_volume_header_v5(bytes: &[u8]) -> Result<RarVolumeHeader, Ra
                     });
                 }
 
-                let _ = extra_size;
                 pos = match header_end.checked_add(data_size as usize) {
                     Some(p) => p,
                     None => break,
@@ -228,7 +222,6 @@ pub(super) fn block_layout_v5(bytes: &[u8]) -> Option<(u64, u64)> {
         return None;
     }
     let mut pos = 4;
-    let size_vint_start = pos;
     let header_size = read_vint(bytes, &mut pos)?;
     let header_total = pos as u64 + header_size;
 
@@ -242,7 +235,6 @@ pub(super) fn block_layout_v5(bytes: &[u8]) -> Option<(u64, u64)> {
     } else {
         0
     };
-    let _ = size_vint_start;
     Some((header_total, data_size))
 }
 

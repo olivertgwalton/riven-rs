@@ -13,12 +13,10 @@ use crate::entities::*;
 use crate::orm;
 
 /// Shared INSERT … ON CONFLICT … RETURNING * implementation for top-level items
-/// (movies and shows). `second_id_col` is either `"tmdb_id"` or `"tvdb_id"`;
-/// `item_type` is either `"movie"` or `"show"`.
+/// (movies and shows). `item_type` is either `"movie"` or `"show"`.
 async fn upsert_top_level_item(
     title: &str,
     imdb_id: Option<&str>,
-    second_id_col: &'static str,
     second_id_val: Option<&str>,
     item_type: &'static str,
     item_request_id: Option<i64>,
@@ -47,7 +45,6 @@ async fn upsert_top_level_item(
         }
         return Ok((existing, false));
     }
-    let _ = second_id_col;
     let inserted = media_items::ActiveModel {
         title: Set(title.to_owned()),
         imdb_id: Set(imdb_id.map(str::to_owned)),
@@ -270,16 +267,7 @@ pub async fn create_movie(
     tmdb_id: Option<&str>,
     item_request_id: Option<i64>,
 ) -> Result<(MediaItem, bool)> {
-    upsert_top_level_item(
-        title,
-        imdb_id,
-        "tmdb_id",
-        tmdb_id,
-        "movie",
-        item_request_id,
-        true,
-    )
-    .await
+    upsert_top_level_item(title, imdb_id, tmdb_id, "movie", item_request_id, true).await
 }
 
 /// Returns `(item, was_created)`. `was_created` is false when an existing item was found.
@@ -289,16 +277,7 @@ pub async fn create_show(
     tvdb_id: Option<&str>,
     item_request_id: Option<i64>,
 ) -> Result<(MediaItem, bool)> {
-    upsert_top_level_item(
-        title,
-        imdb_id,
-        "tvdb_id",
-        tvdb_id,
-        "show",
-        item_request_id,
-        true,
-    )
-    .await
+    upsert_top_level_item(title, imdb_id, tvdb_id, "show", item_request_id, true).await
 }
 
 pub async fn create_movie_unrequested(
@@ -306,7 +285,7 @@ pub async fn create_movie_unrequested(
     imdb_id: Option<&str>,
     tmdb_id: Option<&str>,
 ) -> Result<(MediaItem, bool)> {
-    upsert_top_level_item(title, imdb_id, "tmdb_id", tmdb_id, "movie", None, false).await
+    upsert_top_level_item(title, imdb_id, tmdb_id, "movie", None, false).await
 }
 
 pub async fn create_show_unrequested(
@@ -314,7 +293,7 @@ pub async fn create_show_unrequested(
     imdb_id: Option<&str>,
     tvdb_id: Option<&str>,
 ) -> Result<(MediaItem, bool)> {
-    upsert_top_level_item(title, imdb_id, "tvdb_id", tvdb_id, "show", None, false).await
+    upsert_top_level_item(title, imdb_id, tvdb_id, "show", None, false).await
 }
 
 pub(crate) fn to_json<T: serde::Serialize>(v: &T) -> serde_json::Value {

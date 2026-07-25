@@ -2,8 +2,10 @@
 //!
 //! Before this, usenet and HTTP origins each had their own reader, cache and
 //! prefetch machinery (`UsenetSession` vs `MediaStream` + `chunks` + `detect`
-//! + `RangeCache`). They differ in exactly one respect — how a byte range is
-//! fetched — so that is all this trait exposes. Everything above it
+//! + `RangeCache`).
+//!
+//! They differ in exactly one respect — how a byte range is fetched — so that
+//! is all this trait exposes. Everything above it
 //! (buffering, read-ahead, sequential detection) is shared, in [`crate::prefetch`].
 
 use async_trait::async_trait;

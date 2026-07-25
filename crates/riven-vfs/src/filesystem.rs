@@ -77,7 +77,6 @@ fn file_attr(ino: u64, size: u64, mtime: SystemTime) -> FileAttr {
 /// `spawn_blocking` closure lets the dispatcher return immediately while the
 /// real work runs on tokio's blocking-task pool, so a slow read on one file
 /// no longer wedges every other FUSE op.
-
 /// Decrements the in-flight counter when the read task ends, on every path
 /// (reply, error, or early return).
 struct InflightGuard(Arc<FuseStats>);
