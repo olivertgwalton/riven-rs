@@ -7,11 +7,11 @@ pub(crate) mod persist;
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
+use riven_core::downloader::BitrateLimits;
 use riven_core::events::{EventType, HookResponse, RivenEvent};
 use riven_core::types::*;
 use riven_db::entities::{MediaItem, Stream};
 use riven_db::repo;
-use riven_core::downloader::BitrateLimits;
 use riven_rank::RankSettings;
 use serde::Deserialize;
 

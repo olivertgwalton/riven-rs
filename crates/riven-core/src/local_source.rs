@@ -24,7 +24,6 @@ pub trait LocalByteSource: Send + Sync {
         end_inclusive: u64,
     ) -> anyhow::Result<Bytes>;
 
-
     /// Active-stream registry hooks, driving the dashboard's "now playing"
     /// view. The VFS calls these as it serves a usenet handle. `key`
     /// uniquely identifies an open handle (e.g. `"{info_hash}:{file_index}"`).

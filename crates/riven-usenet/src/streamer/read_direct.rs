@@ -166,8 +166,7 @@ impl UsenetStreamer {
                     // pops a different one, so there is nothing to back off
                     // from. Sleeping would only extend a stall the player is
                     // already feeling.
-                    let timed_out =
-                        matches!(e, NntpError::Timeout | NntpError::DeadlineExceeded);
+                    let timed_out = matches!(e, NntpError::Timeout | NntpError::DeadlineExceeded);
                     tracing::warn!(
                         attempt,
                         message_id,

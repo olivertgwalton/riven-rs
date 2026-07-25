@@ -305,8 +305,7 @@ async fn main() -> anyhow::Result<()> {
                         let position = if is_behind {
                             behind_reads += 1;
                             let back = (rng >> 8) % (16 * 1024 * 1024);
-                            head.saturating_sub(back).min(size - 1)
-                                & !(READ_SIZE as u64 - 1)
+                            head.saturating_sub(back).min(size - 1) & !(READ_SIZE as u64 - 1)
                         } else {
                             cursor.fetch_add(READ_SIZE as u64, Ordering::Relaxed)
                         };
@@ -318,7 +317,9 @@ async fn main() -> anyhow::Result<()> {
                         let data = match prefetcher.read(position, READ_SIZE).await {
                             Ok(data) => data,
                             Err(error) => {
-                                eprintln!("reader {handle_idx}: read failed at {position}: {error}");
+                                eprintln!(
+                                    "reader {handle_idx}: read failed at {position}: {error}"
+                                );
                                 break;
                             }
                         };
