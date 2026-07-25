@@ -1,0 +1,20 @@
+[package]
+name = "riven-streaming"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+riven-core = { path = "../riven-core" }
+riven-db = { path = "../riven-db" }
+anyhow = { workspace = true }
+tokio = { workspace = true }
+reqwest = { workspace = true }
+tracing = { workspace = true }
+dashmap = { workspace = true }
+parking_lot = { workspace = true }
+bytes = { workspace = true }
+async-trait = { workspace = true }
+
+[lints]
+workspace = true
