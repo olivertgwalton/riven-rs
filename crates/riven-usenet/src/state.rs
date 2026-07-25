@@ -142,7 +142,15 @@ impl FetchMetrics {
                 } else {
                     let capped =
                         sample_ms.min(current.saturating_mul(Self::EWMA_SAMPLE_CAP_MULTIPLE));
-                    current + ((capped as i64 - current as i64) >> Self::EWMA_SHIFT) as u64
+                    // Signed throughout: roughly half of all samples are
+                    // *faster* than the mean, so the step is negative as often
+                    // as not. Doing this in `u64` wraps on those, which
+                    // happens to land on the right value in release and
+                    // panics on overflow in debug.
+                    let current_ms = i64::try_from(current).unwrap_or(i64::MAX);
+                    let capped_ms = i64::try_from(capped).unwrap_or(i64::MAX);
+                    let step = (capped_ms - current_ms) >> Self::EWMA_SHIFT;
+                    u64::try_from((current_ms + step).max(1)).unwrap_or(1)
                 })
             });
     }
@@ -632,6 +640,19 @@ mod tests {
         assert!(
             (1150..=1250).contains(&shifted),
             "estimate should follow a real shift, got {shifted}"
+        );
+
+        // Samples *below* the mean are at least half of all traffic, and the
+        // step they produce is negative. Computing that in unsigned arithmetic
+        // wraps — which lands on the right answer in release and panics on
+        // overflow in debug, so this case has to be exercised explicitly.
+        for _ in 0..200 {
+            metrics.record_latency(120);
+        }
+        let recovered = metrics.latency_ewma_ms().expect("has samples");
+        assert!(
+            (110..=130).contains(&recovered),
+            "estimate must fall again when fetches get faster, got {recovered}"
         );
     }
 }
