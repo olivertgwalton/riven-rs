@@ -8,7 +8,7 @@ use riven_core::settings::LibraryProfileMembership;
 use riven_core::types::FileSystemEntryType;
 use riven_db::entities::FileSystemEntry;
 
-use crate::media_stream::{MediaStream, UsenetSession};
+use crate::prefetch::Prefetcher;
 use crate::readdir::DirEntry;
 
 pub(crate) const ROOT_INO: u64 = 1;
@@ -18,18 +18,14 @@ const FIRST_DYNAMIC_INO: u64 = 100;
 const READDIR_CACHE_TTL: Duration = Duration::from_secs(30);
 
 pub(crate) enum OpenedFile {
-    Media {
-        entry_id: i64,
+    /// Any network-backed file. The origin (usenet or HTTP) is behind
+    /// `ByteSource`, and read-ahead is the same for both — so there is one
+    /// variant here rather than one per backend.
+    Streamed {
         path: Arc<str>,
-        stream_url: Arc<str>,
-        download_url: Option<Arc<str>>,
-        provider: Option<Arc<str>>,
-        stream_session: MediaStream,
+        prefetcher: Arc<Prefetcher>,
     },
-    Usenet {
-        path: Arc<str>,
-        session: UsenetSession,
-    },
+    /// Subtitles are small and already resident; no streaming machinery.
     Subtitle {
         content: Arc<[u8]>,
     },

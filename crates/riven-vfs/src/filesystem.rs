@@ -20,8 +20,8 @@ use riven_core::types::FileSystemEntryType;
 use riven_core::vfs_layout::VfsLibraryLayout;
 use riven_db::repo;
 
-use crate::cache::RangeCache;
-use crate::media_stream::{MediaStream, ReadOutcome, UsenetSession};
+use crate::prefetch::Prefetcher;
+use crate::source::{ByteSource, HttpSource, LinkRefresher, UsenetSource};
 use crate::path_info::{CanonicalPath, PathTarget, parse_path};
 use crate::readdir::{DirEntry, populate_entries};
 use crate::state::{CachedEntry, MOVIES_INO, OpenedFile, ROOT_INO, SHOWS_INO, VfsState};
@@ -86,7 +86,8 @@ struct RivenFsInner {
 
     state: VfsState,
 
-    range_cache: Arc<RangeCache>,
+    /// Ceiling on one file's adaptive read-ahead window.
+    max_prefetch_window: u64,
     read_semaphore: Arc<Semaphore>,
     link_refresh_locks: DashMap<i64, Arc<Mutex<()>>>,
     local_source: Option<Arc<dyn riven_core::local_source::LocalByteSource>>,
@@ -139,7 +140,7 @@ impl RivenFsInner {
             link_request_tx,
             runtime: tokio::runtime::Handle::current(),
             state: VfsState::new(),
-            range_cache: Arc::new(RangeCache::new(cache_capacity_bytes)),
+            max_prefetch_window: cache_capacity_bytes as u64,
             // Bound upstream reads independently of tokio's much larger
             // blocking-task pool. This prevents scans or concurrent players
             // from creating hundreds of live HTTP buffers at once.
@@ -263,64 +264,6 @@ impl RivenFsInner {
         )
     }
 
-    /// A stream-URL refresh failed. If the handle's entry was deleted out from
-    /// under it — typically because a dead-link re-download replaced it with a
-    /// fresh entry at the same path — the open handle is stale. Rebind it to
-    /// the new entry so the in-flight read can be retried instead of failing.
-    /// Returns the new stream URL, or `None` if there is no fresh entry to
-    /// rebind to (a genuine dead end).
-    fn rebind_stale_handle(
-        &self,
-        handle: &mut OpenedFile,
-        path: &str,
-        stale_entry_id: i64,
-    ) -> Option<Arc<str>> {
-        let fresh = self.get_entry(path)?;
-        if fresh.id == stale_entry_id || fresh.entry_type != FileSystemEntryType::Media {
-            return None;
-        }
-        let url: Arc<str> = Arc::from(self.resolve_stream_url(&fresh)?);
-        if let OpenedFile::Media {
-            entry_id,
-            stream_url,
-            download_url,
-            provider,
-            ..
-        } = handle
-        {
-            tracing::warn!(
-                path,
-                stale_entry_id,
-                new_entry_id = fresh.id,
-                "open handle outlived its entry — rebinding to the replacement"
-            );
-            *entry_id = fresh.id;
-            *download_url = fresh.download_url.clone();
-            *provider = fresh.provider.clone();
-            *stream_url = Arc::clone(&url);
-        }
-        Some(url)
-    }
-
-    fn read_handle(
-        &self,
-        handle: &mut OpenedFile,
-        start: u64,
-        end: u64,
-        stream_url: &str,
-    ) -> ReadOutcome {
-        let OpenedFile::Media { stream_session, .. } = handle else {
-            return ReadOutcome::Error(libc::EIO);
-        };
-        stream_session.read(
-            start,
-            end,
-            stream_url,
-            &self.range_cache,
-            &self.stream_client,
-            &self.runtime,
-        )
-    }
 }
 
 impl Filesystem for RivenFs {
@@ -506,15 +449,16 @@ impl Filesystem for RivenFs {
         };
         if let (Some(source), Some((info_hash, file_index))) = (s.local_source.clone(), usenet_id) {
             let filename: Arc<str> = Arc::from(path.rsplit('/').next().unwrap_or(&path));
-            let fd = s.state.open(OpenedFile::Usenet {
+            let byte_source: Arc<dyn ByteSource> = Arc::new(UsenetSource::new(
+                source,
+                Arc::from(info_hash.as_str()),
+                file_index,
+                file_size,
+                &filename,
+            ));
+            let fd = s.state.open(OpenedFile::Streamed {
                 path,
-                session: UsenetSession::new(
-                    source,
-                    Arc::from(info_hash.as_str()),
-                    file_index,
-                    file_size,
-                    filename,
-                ),
+                prefetcher: Arc::new(Prefetcher::new(byte_source, s.max_prefetch_window)),
             });
             reply.opened(FuseFh(fd), FopenFlags::FOPEN_KEEP_CACHE);
             return;
@@ -529,13 +473,34 @@ impl Filesystem for RivenFs {
             return;
         };
 
-        let fd = s.state.open(OpenedFile::Media {
-            entry_id: entry.id,
+        // Lets a dying link be re-minted mid-playback instead of failing the
+        // read; reuses the same coalesced refresh path as `open`.
+        let refresher: LinkRefresher = {
+            let inner = Arc::clone(&self.inner);
+            let entry_id = entry.id;
+            let download_url = entry.download_url.clone();
+            let provider = entry.provider.clone();
+            let stale: Arc<str> = Arc::from(stream_url.as_str());
+            Arc::new(move || {
+                inner
+                    .request_and_persist_stream_url(
+                        entry_id,
+                        download_url.as_deref(),
+                        provider.as_deref(),
+                        Some(stale.as_ref()),
+                    )
+                    .map(|url| Arc::from(url.as_str()))
+            })
+        };
+        let byte_source: Arc<dyn ByteSource> = Arc::new(HttpSource::new(
+            s.stream_client.clone(),
+            Arc::from(stream_url),
+            file_size,
+            Some(refresher),
+        ));
+        let fd = s.state.open(OpenedFile::Streamed {
             path,
-            stream_url: Arc::from(stream_url),
-            download_url: entry.download_url.clone(),
-            provider: entry.provider.clone(),
-            stream_session: MediaStream::new(ino, file_size),
+            prefetcher: Arc::new(Prefetcher::new(byte_source, s.max_prefetch_window)),
         });
         reply.opened(FuseFh(fd), FopenFlags::FOPEN_KEEP_CACHE);
     }
@@ -551,143 +516,60 @@ impl Filesystem for RivenFs {
         _lock_owner: Option<LockOwner>,
         reply: ReplyData,
     ) {
-        // Hand the read off to a tokio blocking task so the FUSE dispatcher
-        // thread returns immediately and is free to service the next kernel
-        // request. The body below does `runtime.block_on(fetch_range(...))`
-        // synchronously and can take seconds (NNTP fetch, dead-link refresh,
-        // retry); running it on the FUSE thread head-of-line blocks every
-        // other op on the mount, which is what wedged playback whenever
-        // Plex's analyzer fan-out hammered a file. Admission to tokio's
-        // blocking-task pool is bounded so a burst of kernel reads cannot
-        // create hundreds of blocked network workers. Per-handle
-        // serialisation is still preserved by the `Mutex<OpenedFile>` inside
-        // `file_handles`.
+        // Fully async: the FUSE dispatcher returns immediately and the read is
+        // driven on the tokio runtime. Nothing blocks a runtime worker, and
+        // nothing holds a lock across the network fetch, so concurrent reads
+        // on one open file overlap instead of serialising behind each other.
+        // The semaphore bounds how many reads may be in flight, so a player's
+        // analyser fan-out cannot queue unbounded work.
         let inner = Arc::clone(&self.inner);
         let fh = fh.0;
-        let runtime = inner.runtime.clone();
-        let read_semaphore = Arc::clone(&inner.read_semaphore);
-        runtime.clone().spawn(async move {
-            let Ok(permit) = read_semaphore.acquire_owned().await else {
+        self.inner.runtime.spawn(async move {
+            let Ok(_permit) = inner.read_semaphore.clone().acquire_owned().await else {
                 reply.error(Errno::EIO);
                 return;
             };
-            if let Err(error) = runtime.spawn_blocking(move || {
-                let _permit = permit;
-                let s = inner.as_ref();
-                let Some(entry) = s.state.file_handles.get(&fh) else {
+
+            // Clone what is needed out of the handle map, then drop the guard.
+            let opened = {
+                let Some(entry) = inner.state.file_handles.get(&fh) else {
                     reply.error(Errno::EBADF);
                     return;
                 };
-                let mut handle = entry.lock();
-
-            if let OpenedFile::Subtitle { content } = &*handle {
-                let len = content.len() as u64;
-                let start = offset;
-                if start >= len {
-                    reply.data(&[]);
-                    return;
-                }
-                let end = (start + size as u64 - 1).min(len - 1);
-                reply.data(&content[start as usize..=end as usize]);
-                return;
-            }
-
-            if let OpenedFile::Usenet { path, session } = &mut *handle {
-                let start = offset;
-                if start >= session.file_size() {
-                    reply.data(&[]);
-                    return;
-                }
-                let end = (start + size as u64 - 1).min(session.file_size() - 1);
-                tracing::debug!(target: "streaming", path = %path, offset = start, size, "usenet read");
-                match session.read(start, end, &s.runtime) {
-                    ReadOutcome::Data(buf) => reply.data(&buf),
-                    ReadOutcome::Error(code) => reply.error(Errno::from_i32(code)),
-                }
-                return;
-            }
-
-            let OpenedFile::Media {
-                stream_session,
-                path,
-                stream_url,
-                download_url,
-                provider,
-                entry_id,
-            } = &*handle
-            else {
-                tracing::error!(fh, "non-media handle reached the media read path");
-                return reply.error(Errno::EIO);
-            };
-            let (file_size, path, stream_url, download_url, provider, entry_id) = (
-                stream_session.file_size(),
-                Arc::clone(path),
-                Arc::clone(stream_url),
-                download_url.as_ref().map(Arc::clone),
-                provider.as_ref().map(Arc::clone),
-                *entry_id,
-            );
-
-            let start = offset;
-            if start >= file_size {
-                reply.data(&[]);
-                return;
-            }
-            let end = (start + size as u64 - 1).min(file_size - 1);
-
-            tracing::debug!(target: "streaming", path = %path, offset = start, size, "read");
-
-            let outcome = match s.read_handle(&mut handle, start, end, &stream_url) {
-                ReadOutcome::Data(buf) => ReadOutcome::Data(buf),
-                ReadOutcome::Error(code) => {
-                    let Some(download_url) = download_url else {
-                        return reply.error(Errno::from_i32(code));
-                    };
-
-                    tracing::warn!(
-                        path = %path,
-                        offset = start,
-                        size,
-                        code,
-                        "read failed, refreshing stream url and retrying once"
-                    );
-
-                    match s.request_and_persist_stream_url(
-                        entry_id,
-                        Some(download_url.as_ref()),
-                        provider.as_deref(),
-                        Some(stream_url.as_ref()),
-                    ) {
-                        Some(url) => {
-                            let OpenedFile::Media { stream_url, .. } = &mut *handle else {
-                                tracing::error!(fh, "non-media handle reached stream-url refresh");
-                                return reply.error(Errno::EIO);
-                            };
-                            *stream_url = Arc::from(url);
-                            let refreshed = Arc::clone(stream_url);
-                            s.read_handle(&mut handle, start, end, &refreshed)
-                        }
-                        None => match s.rebind_stale_handle(&mut handle, &path, entry_id) {
-                            Some(rebound) => s.read_handle(&mut handle, start, end, &rebound),
-                            None => ReadOutcome::Error(code),
-                        },
+                let guard = entry.lock();
+                match &*guard {
+                    OpenedFile::Subtitle { content } => Ok(Arc::clone(content)),
+                    OpenedFile::Streamed { prefetcher, path } => {
+                        Err((Arc::clone(prefetcher), Arc::clone(path)))
                     }
                 }
             };
 
-                match outcome {
-                    ReadOutcome::Data(buf) => reply.data(&buf),
-                    ReadOutcome::Error(code) => reply.error(Errno::from_i32(code)),
+            match opened {
+                Ok(content) => {
+                    let len = content.len() as u64;
+                    if offset >= len {
+                        reply.data(&[]);
+                        return;
+                    }
+                    let end = (offset + u64::from(size)).min(len);
+                    reply.data(&content[offset as usize..end as usize]);
                 }
-            }).await {
-                tracing::error!(%error, fh, "FUSE read worker failed");
+                Err((prefetcher, path)) => match prefetcher.read(offset, size as usize).await {
+                    Ok(data) => reply.data(&data),
+                    Err(error) => {
+                        tracing::warn!(
+                            target: "streaming",
+                            path = %path, offset, size, %error,
+                            "read failed"
+                        );
+                        reply.error(Errno::EIO);
+                    }
+                },
             }
         });
     }
 
-    // The VFS is read-only, so there is nothing to flush — but the kernel
-    // issues `flush` on every `close()`, and the fuser default handler
-    // answers `ENOSYS` and logs a "[Not Implemented]" warning each time.
     fn flush(
         &self,
         _req: &Request,

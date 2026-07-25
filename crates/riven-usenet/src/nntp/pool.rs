@@ -194,6 +194,10 @@ struct Job {
     kind: JobKind,
     lane: Lane,
     reply: oneshot::Sender<Result<JobOutput, NntpError>>,
+    /// When the job entered the queue. Lets a slot report how long the job
+    /// waited for a connection, separately from how long the wire took —
+    /// the caller's own timing conflates the two.
+    queued_at: Instant,
 }
 
 /// One provider's scheduler state. A single mutex covers queues, budget
@@ -554,6 +558,7 @@ impl NntpPool {
                 kind: make_kind(),
                 lane,
                 reply: tx,
+                queued_at: Instant::now(),
             });
             match rx.await {
                 Ok(Ok(out)) => {
@@ -668,6 +673,7 @@ async fn execute(conn: &mut NntpConnection, kind: &JobKind) -> Result<JobOutput,
 async fn run_slot(rt: Arc<ProviderRt>, active_streams: Arc<AtomicUsize>, slot_idx: usize) {
     let mut conn: Option<NntpConnection> = None;
     let mut last_used = Instant::now();
+    let mut dialed_ms: Option<u128> = None;
 
     loop {
         // Claim the highest-priority eligible job, or decide to park.
@@ -714,9 +720,11 @@ async fn run_slot(rt: Arc<ProviderRt>, active_streams: Arc<AtomicUsize>, slot_id
 
         // Ensure a live connection.
         if conn.is_none() {
+            let dial_started = Instant::now();
             match dial(&rt).await {
                 Ok(c) => {
                     conn = Some(c);
+                    dialed_ms = Some(dial_started.elapsed().as_millis());
                     rt.sched.lock().open += 1;
                 }
                 Err(e) => {
@@ -730,6 +738,9 @@ async fn run_slot(rt: Arc<ProviderRt>, active_streams: Arc<AtomicUsize>, slot_id
             }
         }
 
+        let queue_ms = job.queued_at.elapsed().as_millis();
+        let dial_ms = dialed_ms.take().unwrap_or(0);
+        let wire_started = Instant::now();
         let c = conn.as_mut().expect("connection ensured above");
         // Player-facing lanes bound the whole attempt, not just inactivity;
         // on expiry `drop_conn` below discards the connection (a timed-out
@@ -742,6 +753,19 @@ async fn run_slot(rt: Arc<ProviderRt>, active_streams: Arc<AtomicUsize>, slot_id
             None => execute(c, &job.kind).await,
         };
         last_used = Instant::now();
+
+        // Attribute a slow job to the stage that actually caused it: waiting
+        // for a free slot, dialing, or the wire itself.
+        let wire_ms = wire_started.elapsed().as_millis();
+        if queue_ms + dial_ms + wire_ms >= 500 {
+            tracing::debug!(
+                queue_ms,
+                dial_ms,
+                wire_ms,
+                lane = ?job.lane,
+                "NNTP job breakdown"
+            );
+        }
 
         // A transport-level failure poisons the connection: drop it so the
         // next job dials fresh. `ArticleNotFound` leaves the wire clean.
@@ -891,6 +915,7 @@ mod tests {
         (
             Job {
                 kind: JobKind::Stat("x@test".into()),
+                queued_at: Instant::now(),
                 lane,
                 reply: tx,
             },
