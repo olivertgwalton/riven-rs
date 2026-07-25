@@ -6,8 +6,8 @@
 //!   each hold at most one live NNTP connection. Work arrives as jobs on
 //!   three priority lanes; an idle slot pops the highest-priority job under
 //!   a single mutex, so there is no waiter/hand-off machinery and no reaper.
-//! - Lanes: `Hot` (a read the player is blocked on) > `Stream` (read-ahead
-//!   fill, head/tail precache) > `Bulk` (ingest, health, repair, backfill).
+//! - Lanes: `Hot` (a read the player is blocked on) > `Stream` (speculative
+//!   read-ahead fill) > `Bulk` (ingest, health, repair, backfill).
 //!   Priority is absolute at pop time; additionally Bulk admission shrinks
 //!   while streams are active (altmount's import budget), so bulk work can
 //!   never occupy the sockets a live stream is about to need.
@@ -18,8 +18,8 @@
 //!   the read path almost never pays a TLS handshake.
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
@@ -33,7 +33,7 @@ use super::{NntpConnection, NntpError, NntpProvider};
 pub(crate) enum Lane {
     /// A fetch a player is actively blocked on.
     Hot,
-    /// Read-ahead / precache for a live stream: latency-tolerant but
+    /// Speculative read-ahead for a live stream: latency-tolerant but
     /// throughput-critical. Never throttled — a stream fills its window
     /// across the whole pool.
     Stream,
@@ -62,14 +62,28 @@ impl Lane {
 }
 
 /// Total deadline for one `Hot` attempt — a read the player is blocked on.
-/// A ~700 KB body completes in well under a second on a healthy link, so
-/// past this the connection is wedged or trickling and a fresh one will beat
-/// continuing to wait.
-const HOT_ATTEMPT_DEADLINE: Duration = Duration::from_secs(15);
+///
+/// This is a backstop for a pathologically hung fetch, **not** a latency
+/// target. Killing a fetch that is still making progress is strictly worse
+/// than waiting for it: the partial body is discarded, the connection is
+/// dropped as dirty, and the retry re-dials and re-fetches the whole article
+/// from scratch. Under load that is self-amplifying — the wasted work pushes
+/// more fetches past the deadline, which is exactly what was observed at 15 s
+/// (bursts of `lane deadline exceeded` at 15001 ms that never recovered,
+/// while a plain client against the same provider completed in 90 ms).
+///
+/// The connection's own inactivity timeout already catches dead sockets, so
+/// this only needs to be longer than any fetch that is genuinely progressing.
+const HOT_ATTEMPT_DEADLINE: Duration = Duration::from_secs(45);
 /// Total deadline for one `Stream` (read-ahead) attempt. Longer than `Hot`:
-/// no read is blocked on it directly, so tolerate more before spending
-/// another connection on a retry.
-const STREAM_ATTEMPT_DEADLINE: Duration = Duration::from_secs(20);
+/// nothing is blocked on it directly, so there is even less reason to
+/// abandon work that is still arriving.
+const STREAM_ATTEMPT_DEADLINE: Duration = Duration::from_secs(60);
+/// How long to spend reclaiming a connection whose fetch was abandoned by a
+/// lane deadline. Short: if the rest of the body does not arrive promptly the
+/// socket is genuinely wedged, and a half-drained connection is worse than
+/// none — the caller drops it and dials fresh.
+const DRAIN_BUDGET: Duration = Duration::from_secs(5);
 /// Send a `DATE` keepalive on a warm parked connection this often. Must stay
 /// below the ~30s silent idle-drop several commercial providers apply.
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(25);
@@ -405,6 +419,19 @@ impl NntpClient {
         self.pool.total_capacity()
     }
 
+    /// Whether this workload is latency-sensitive enough to justify racing a
+    /// duplicate request when one is slow.
+    ///
+    /// Playback is: a reader is blocked, and a second copy of the article is
+    /// far cheaper than the stall. Bulk work — ingest, verification, repair,
+    /// backfill — is not: nothing waits on any single article, so a hedge buys
+    /// no latency anyone can perceive and merely spends a connection that
+    /// playback might want. It also has to stay off the feedback loop: bulk
+    /// runs thousands of articles deep, so hedging there would add load in
+    /// exactly the conditions that made articles slow to begin with.
+    pub(crate) fn is_latency_sensitive(&self) -> bool {
+        matches!(self.lane, Lane::Hot | Lane::Stream)
+    }
 }
 
 impl NntpPool {
@@ -769,7 +796,24 @@ async fn run_slot(rt: Arc<ProviderRt>, active_streams: Arc<AtomicUsize>, slot_id
 
         // A transport-level failure poisons the connection: drop it so the
         // next job dials fresh. `ArticleNotFound` leaves the wire clean.
-        let drop_conn = !matches!(result, Ok(_) | Err(NntpError::ArticleNotFound(_)));
+        //
+        // A lane-deadline expiry is different: the server is still delivering a
+        // perfectly good body, we simply stopped waiting. Draining it returns
+        // the socket to the pool the way altmount's round-robin does, instead
+        // of paying a TLS re-dial and losing a slot for every slow article —
+        // the cost that turned timeouts into a self-amplifying retry storm.
+        let drop_conn = match &result {
+            Ok(_) | Err(NntpError::ArticleNotFound(_)) => false,
+            Err(NntpError::DeadlineExceeded) => match conn.as_mut() {
+                Some(c) => {
+                    let reclaimed = c.drain_abandoned_body(DRAIN_BUDGET).await;
+                    tracing::debug!(reclaimed, "lane deadline: draining abandoned body");
+                    !reclaimed
+                }
+                None => true,
+            },
+            Err(_) => true,
+        };
         if drop_conn && let Some(mut dead) = conn.take() {
             dead.quit().await;
             rt.sched.lock().open -= 1;

@@ -11,7 +11,7 @@ use std::io;
 use std::sync::Arc;
 
 use bytes::Bytes;
-use riven_core::local_source::LocalByteSource;
+use riven_core::local_source::{LocalByteSource, ReadIntent};
 
 /// Fetches byte ranges of one open file.
 ///
@@ -20,9 +20,13 @@ use riven_core::local_source::LocalByteSource;
 pub trait ByteSource: Send + Sync {
     /// Fetch the inclusive range `[start, end]`.
     ///
+    /// `intent` says whether a reader is blocked on this range or it is
+    /// speculative fill; origins that can prioritise (usenet) use it, and
+    /// origins that cannot (HTTP) ignore it.
+    ///
     /// A short read is allowed — origins cap their own windows — but callers
     /// must never forward one mid-file to the kernel (see [`crate::prefetch`]).
-    async fn read_range(&self, start: u64, end: u64) -> io::Result<Bytes>;
+    async fn read_range(&self, start: u64, end: u64, intent: ReadIntent) -> io::Result<Bytes>;
 
     /// Total file size in bytes.
     fn size(&self) -> u64;
@@ -73,9 +77,9 @@ impl Drop for UsenetSource {
 
 #[async_trait]
 impl ByteSource for UsenetSource {
-    async fn read_range(&self, start: u64, end: u64) -> io::Result<Bytes> {
+    async fn read_range(&self, start: u64, end: u64, intent: ReadIntent) -> io::Result<Bytes> {
         self.inner
-            .read_range(&self.info_hash, self.file_index, start, end)
+            .read_range(&self.info_hash, self.file_index, start, end, intent)
             .await
             .map_err(io::Error::other)
     }
@@ -139,16 +143,13 @@ impl HttpSource {
         if !status.is_success() {
             return Err(format!("origin returned {status}"));
         }
-        response
-            .bytes()
-            .await
-            .map_err(|error| error.to_string())
+        response.bytes().await.map_err(|error| error.to_string())
     }
 }
 
 #[async_trait]
 impl ByteSource for HttpSource {
-    async fn read_range(&self, start: u64, end: u64) -> io::Result<Bytes> {
+    async fn read_range(&self, start: u64, end: u64, _intent: ReadIntent) -> io::Result<Bytes> {
         let url = self.url();
         let first = match self.get(&url, start, end).await {
             Ok(data) => return Ok(data),

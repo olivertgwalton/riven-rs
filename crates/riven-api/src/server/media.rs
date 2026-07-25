@@ -451,8 +451,17 @@ async fn serve_usenet_media(
                 return None;
             }
             let chunk_end = end.min(pos + CHUNK - 1);
-            match LocalByteSource::read_range(&streamer, &info_hash, file_index, pos, chunk_end)
-                .await
+            // An HTTP client is waiting on this chunk of the response body,
+            // so it competes for connections as a blocked read, not as fill.
+            match LocalByteSource::read_range(
+                &streamer,
+                &info_hash,
+                file_index,
+                pos,
+                chunk_end,
+                riven_core::local_source::ReadIntent::Demand,
+            )
+            .await
             {
                 Ok(bytes) if !bytes.is_empty() => {
                     let next = pos + bytes.len() as u64;
