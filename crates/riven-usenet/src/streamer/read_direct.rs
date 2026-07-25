@@ -9,88 +9,18 @@ use crate::nzb::NzbSegment;
 use crate::state::{FetchEntry, PromiseSlot, StreamerState};
 use crate::yenc;
 
-use riven_core::local_source::ReadIntent;
+use super::{NzbMetaSource, StreamerError, UsenetStreamer, concat_slices, segments_overlapping};
 
-use super::{NzbMetaSource, StreamerError, UsenetStreamer, concat_slices};
-
-/// Max attempts when fetching an NNTP segment body. `ArticleNotFound` is
+/// Max attempts when fetching an NNTP segment body. ArticleNotFound is
 /// permanent and never retried.
-const NNTP_FETCH_ATTEMPTS: usize = 2;
-/// Base backoff between error retries (linear, not exponential — NNTP errors
+const NNTP_FETCH_ATTEMPTS: usize = 3;
+/// Base backoff between retries (linear, not exponential — NNTP errors
 /// are usually transient connectivity issues that clear within a second).
 /// Skipped entirely after a timeout, which has already waited out its own
-/// deadline.
+/// deadline on a connection the pool then discarded.
 const NNTP_RETRY_DELAY_MS: u64 = 300;
 
-/// Wait this long for an article before racing a second copy of the same
-/// request down another connection and taking whichever answers first.
-///
-/// This is the fix for the stall that made high-bitrate playback buffer, and
-/// it is worth being precise about why, because the obvious diagnoses are all
-/// wrong. Measured against Newshosting with 100 connections: article latency
-/// is p50 224 ms, p99 700 ms — but the slowest of ~2400 took **4.5 s**, with
-/// `queue_ms=0`, so it was neither pool contention nor a slow provider. A
-/// single connection simply got starved of its share of bandwidth.
-///
-/// That rare outlier is catastrophic here because a read is only served once
-/// the *whole* contiguous range is assembled: one 4.5 s article freezes the
-/// reader, which stops the buffer draining, which stops read-ahead
-/// dispatching. Traces show the entire pipeline going silent for 3.3 s behind
-/// one article, then a burst of ~16 fetches the instant it lands.
-///
-/// Retrying serially cannot help — you would have to abandon the original,
-/// having already paid for it. Racing a duplicate does: the tail is a
-/// *property of one connection*, not of the article, so a second connection
-/// usually answers in the normal time. The loser is cancelled the moment the
-/// winner lands. (Dean & Barroso's "The Tail at Scale", applied to NNTP.)
-///
-/// The threshold is a multiple of the *measured* mean rather than a constant,
-/// because "abnormally slow" is not portable. The same code sees a ~250 ms
-/// mean on a fast host with a quiet account and ~1100 ms in a container
-/// sharing a saturated one. A constant tuned to the first (900 ms — under 1%
-/// hedged) fires on roughly a quarter of all fetches in the second, adding
-/// load in precisely the conditions that made fetches slow. Scaling keeps the
-/// hedge rare in both.
-const HEDGE_LATENCY_MULTIPLE: u32 = 5;
-/// Never hedge sooner than this, however fast things look. Below it the
-/// duplicate costs more than the stall it avoids.
-const HEDGE_FLOOR: std::time::Duration = std::time::Duration::from_millis(1500);
-/// Never wait longer than this to give up on one connection, however slow
-/// things look. Past here the read is already a visible stutter.
-const HEDGE_CEILING: std::time::Duration = std::time::Duration::from_millis(8000);
-
 impl UsenetStreamer {
-    /// The pool client matching a read's urgency.
-    ///
-    /// The pool has always had a `Hot > Stream > Bulk` priority order, but
-    /// the read path asked for `Hot` unconditionally — including for
-    /// speculative read-ahead, which is most of the traffic. That put a
-    /// blocked player read into one FIFO behind every read-ahead article
-    /// already queued, so the priority order it was supposed to benefit from
-    /// never applied to it. Routing read-ahead to `Stream` restores the
-    /// distinction: read-ahead still outranks ingest and repair, but yields
-    /// to the read a player is actually waiting on.
-    fn lane_client(&self, intent: ReadIntent) -> NntpClient {
-        match intent {
-            ReadIntent::Demand => self.pool.playback_client(),
-            ReadIntent::ReadAhead => self.pool.stream_client(),
-        }
-    }
-
-    /// How long to wait on one connection before racing a duplicate, scaled
-    /// to what fetches currently cost here. See [`HEDGE_LATENCY_MULTIPLE`].
-    fn hedge_after(&self) -> std::time::Duration {
-        self.state
-            .fetch_metrics
-            .latency_ewma_ms()
-            .map_or(HEDGE_FLOOR, |mean| {
-                std::time::Duration::from_millis(
-                    mean.saturating_mul(u64::from(HEDGE_LATENCY_MULTIPLE)),
-                )
-                .clamp(HEDGE_FLOOR, HEDGE_CEILING)
-            })
-    }
-
     /// Fetch and yEnc-decode a segment's body. Routes through the LRU
     /// cache, retries transient errors with backoff, short-circuits on
     /// previously-observed permanent failures (`ArticleNotFound`), and
@@ -176,47 +106,6 @@ impl UsenetStreamer {
         }
     }
 
-    /// One article fetch, with a hedge against a single starved connection.
-    ///
-    /// Issues the `BODY`, and if it has not answered within [`HEDGE_AFTER`],
-    /// issues a second one and returns whichever wins. Dropping the loser
-    /// cancels its job; the pool either skips it (not yet dispatched, the
-    /// reply channel is closed) or lets the slot finish reading the body and
-    /// discard it, so the connection is handed back clean either way.
-    async fn fetch_body_hedged(
-        &self,
-        client: &NntpClient,
-        message_id: &str,
-        file: &str,
-    ) -> Result<crate::bufpool::PooledBuf, NntpError> {
-        if !client.is_latency_sensitive() {
-            return client.fetch_body(message_id).await;
-        }
-        let hedge_after = self.hedge_after();
-        let primary = client.fetch_body(message_id);
-        tokio::pin!(primary);
-        match tokio::time::timeout(hedge_after, &mut primary).await {
-            Ok(result) => result,
-            Err(_) => {
-                tracing::debug!(
-                    message_id,
-                    file,
-                    hedge_after_ms = hedge_after.as_millis(),
-                    "nntp fetch is in the latency tail; racing a hedge"
-                );
-                let hedge = client.fetch_body(message_id);
-                tokio::pin!(hedge);
-                // Whichever answers first wins, *including* a failure: an
-                // error from one connection is a real answer about the
-                // article, and the outer retry loop owns what to do with it.
-                tokio::select! {
-                    result = &mut primary => result,
-                    result = &mut hedge => result,
-                }
-            }
-        }
-    }
-
     /// Inner retry loop. Side effects (cache.put, fails.mark_dead) are
     /// the caller's responsibility — keeps this fn purely about fetching.
     async fn do_fetch_with_retry(
@@ -229,7 +118,7 @@ impl UsenetStreamer {
         for attempt in 0..NNTP_FETCH_ATTEMPTS {
             tracing::debug!(attempt, message_id, file, "nntp fetch starting");
             let started = std::time::Instant::now();
-            match self.fetch_body_hedged(client, message_id, file).await {
+            match client.fetch_body(message_id).await {
                 Ok(body) => {
                     let wire_ms = started.elapsed().as_millis();
                     let encoded_len = body.len();
@@ -252,7 +141,6 @@ impl UsenetStreamer {
                         };
                     let decode_ms = decode_started.elapsed().as_millis();
                     self.state.fetch_metrics.record_ok(decoded.len() as u64);
-                    self.state.fetch_metrics.record_latency(wire_ms as u64);
                     tracing::debug!(
                         attempt,
                         message_id,
@@ -278,7 +166,8 @@ impl UsenetStreamer {
                     // pops a different one, so there is nothing to back off
                     // from. Sleeping would only extend a stall the player is
                     // already feeling.
-                    let timed_out = matches!(e, NntpError::Timeout | NntpError::DeadlineExceeded);
+                    let timed_out =
+                        matches!(e, NntpError::Timeout | NntpError::DeadlineExceeded);
                     tracing::warn!(
                         attempt,
                         message_id,
@@ -302,6 +191,133 @@ impl UsenetStreamer {
         )))
     }
 
+    /// Warm the segment cache for the segments that overlap
+    /// `[start, end_inclusive]` of `file_index`. Rides the pool's `Stream`
+    /// lane (used by head/tail precache ahead of playback), with a small
+    /// fixed fan-out — the pool's slot actors bound real socket use.
+    pub async fn prefetch_range(
+        &self,
+        info_hash: &str,
+        file_index: usize,
+        start: u64,
+        end_inclusive: u64,
+    ) {
+        let Ok(meta) = self.load_meta(info_hash).await else {
+            return;
+        };
+        let Some(file) = meta.files.get(file_index) else {
+            return;
+        };
+        if start > end_inclusive || end_inclusive >= file.total_size {
+            return;
+        }
+
+        let mids: Vec<String> = match &file.source {
+            NzbMetaSource::Direct { offsets, segments } => {
+                segments_overlapping(offsets, segments, start, end_inclusive)
+            }
+            NzbMetaSource::Rar { parts, slices } => {
+                let mut out = Vec::new();
+                let mut vpos: u64 = 0;
+                for slice in slices {
+                    let s0 = vpos;
+                    let s1 = vpos + slice.length;
+                    vpos = s1;
+                    if s1 <= start {
+                        continue;
+                    }
+                    if s0 > end_inclusive {
+                        break;
+                    }
+                    let req_lo = start.max(s0) - s0;
+                    let req_hi = end_inclusive.min(s1 - 1) - s0;
+                    let part_lo = slice.start_in_part + req_lo;
+                    let part_hi = slice.start_in_part + req_hi;
+                    if let Some(part) = parts.get(slice.part_index) {
+                        out.extend(segments_overlapping(
+                            &part.offsets,
+                            &part.segments,
+                            part_lo,
+                            part_hi,
+                        ));
+                    }
+                }
+                out
+            }
+        };
+
+        let client = self.pool.stream_client();
+        self.warm_mids(client, mids, &file.filename).await;
+    }
+
+    /// Warm a list of segments through the cache with a small fixed fan-out.
+    /// `file` names the file purely so a warm-fetch failure logs like a
+    /// playback one; shared as an `Arc<str>` into each segment future.
+    async fn warm_mids(&self, client: NntpClient, mids: Vec<String>, file: &str) {
+        const WARM_FANOUT: usize = 4;
+        let streamer = self.clone();
+        let file: Arc<str> = Arc::from(file);
+        let cold: Vec<String> = mids
+            .into_iter()
+            .filter(|mid| !streamer.state.cache.contains(mid))
+            .collect();
+        let mut stream = stream::iter(cold)
+            .map(move |mid| {
+                let s = streamer.clone();
+                let client = client.clone();
+                let file = file.clone();
+                async move { s.fetch_decoded_cached(&client, &mid, &file).await }
+            })
+            .buffer_unordered(WARM_FANOUT);
+        while stream.next().await.is_some() {}
+    }
+
+    /// Warm the segment cache for the head and tail of `file_index`.
+    /// Players probe the start (container header, codec init) and end
+    /// (MKV cues, fragmented MP4 moov) before sequential playback.
+    /// Idempotent per `(info_hash, file_index)` per process.
+    pub async fn precache_head_tail(&self, info_hash: &str, file_index: usize) {
+        const PRECACHE_HEAD_BYTES: u64 = 4 * 1024 * 1024;
+        const PRECACHE_TAIL_BYTES: u64 = 4 * 1024 * 1024;
+
+        if !self.state.precached.claim(info_hash, file_index) {
+            return;
+        }
+        let Ok(_permit) = self.state.precache_sem.acquire().await else {
+            return;
+        };
+        let Ok(meta) = self.load_meta(info_hash).await else {
+            return;
+        };
+        let Some(file) = meta.files.get(file_index) else {
+            return;
+        };
+        let total = file.total_size;
+        if total == 0 {
+            return;
+        }
+
+        let head_end = PRECACHE_HEAD_BYTES.saturating_sub(1).min(total - 1);
+        let tail_start = total.saturating_sub(PRECACHE_TAIL_BYTES);
+        let tail_end = total - 1;
+
+        let started = std::time::Instant::now();
+        let head = self.prefetch_range(info_hash, file_index, 0, head_end);
+        if tail_start > head_end {
+            let tail = self.prefetch_range(info_hash, file_index, tail_start, tail_end);
+            tokio::join!(head, tail);
+        } else {
+            head.await;
+        }
+        tracing::info!(
+            info_hash,
+            file = %file.filename,
+            file_index,
+            elapsed_ms = started.elapsed().as_millis(),
+            "usenet precache done"
+        );
+    }
+
     /// Read `[start, end_inclusive]` from `file_index`. Walks the meta's
     /// `source` to find the segments that overlap the request, decodes them,
     /// and returns a contiguous byte slice. Buffered (≤1 MB) HTTP responses
@@ -314,10 +330,9 @@ impl UsenetStreamer {
         file_index: usize,
         start: u64,
         end_inclusive: u64,
-        intent: ReadIntent,
     ) -> Result<Bytes, StreamerError> {
         let slices = self
-            .read_range_slices(info_hash, file_index, start, end_inclusive, intent)
+            .read_range_slices(info_hash, file_index, start, end_inclusive)
             .await?;
         let mut buf = concat_slices(slices, start, end_inclusive);
         let want = (end_inclusive - start + 1) as usize;
@@ -340,14 +355,13 @@ impl UsenetStreamer {
         file_index: usize,
         start: u64,
         end_inclusive: u64,
-        intent: ReadIntent,
     ) -> Result<Vec<Bytes>, StreamerError> {
         // Any player-facing read that stalls is a visible stutter; make it
         // observable with where and how long, so a stall is diagnosable from
         // logs instead of averages.
         let started = std::time::Instant::now();
         let result = self
-            .read_range_slices_inner(info_hash, file_index, start, end_inclusive, intent)
+            .read_range_slices_inner(info_hash, file_index, start, end_inclusive)
             .await;
         let elapsed_ms = started.elapsed().as_millis();
         if elapsed_ms > 300 {
@@ -370,7 +384,6 @@ impl UsenetStreamer {
         file_index: usize,
         start: u64,
         end_inclusive: u64,
-        intent: ReadIntent,
     ) -> Result<Vec<Bytes>, StreamerError> {
         let meta = self.load_meta(info_hash).await?;
         let file = meta
@@ -383,18 +396,11 @@ impl UsenetStreamer {
 
         let result = match &file.source {
             NzbMetaSource::Direct { offsets, segments } => {
-                self.read_direct(
-                    offsets,
-                    segments,
-                    start,
-                    end_inclusive,
-                    &file.filename,
-                    intent,
-                )
-                .await
+                self.read_direct(offsets, segments, start, end_inclusive, &file.filename)
+                    .await
             }
             NzbMetaSource::Rar { parts, slices } => {
-                let client = self.lane_client(intent);
+                let client = self.pool.playback_client();
                 self.read_rar(
                     parts,
                     slices,
@@ -448,30 +454,20 @@ impl UsenetStreamer {
         start: u64,
         end_inclusive: u64,
         file: &str,
-        intent: ReadIntent,
     ) -> Result<Vec<Bytes>, StreamerError> {
         let want = (end_inclusive - start + 1) as usize;
         if want == 0 || segments.is_empty() {
             return Ok(Vec::new());
         }
 
-        // Fan out across the *whole* span at once.
-        //
-        // A read is only served when every article covering it has arrived,
-        // so its latency is the slowest article's no matter how they are
-        // scheduled. Fetching them a few at a time therefore cannot lower the
-        // floor — it only adds rounds on top of it. Measured: an 8 MiB read
-        // spans ~11 articles, whose slowest is ~415 ms at p50; four at a time
-        // turned that into 801 ms. Real socket use stays bounded by the
-        // pool's slot actors and, above them, the read-ahead admission that
-        // decides how many reads are in flight at once.
-        //
-        // The cap keeps a pathological range (a repair job reading a whole
-        // file) from queueing thousands of futures in one go.
-        const MAX_READ_FANOUT: usize = 24;
+        // Per-read fan-out: a FUSE chunk covers a handful of segments; the
+        // adaptive read-ahead task owns deep pipelining, so on-demand reads
+        // only need enough parallelism to cover their own span.
+        const READ_FANOUT: usize = 4;
         let (first, last) = direct_segment_span(offsets, segments.len(), start, end_inclusive);
         let mut skip = start.saturating_sub(offsets[first]) as usize;
-        let client = self.lane_client(intent);
+        let client = self.pool.playback_client();
+        let read_concurrency = READ_FANOUT;
 
         let mut slices: Vec<Bytes> = Vec::new();
         let mut produced: usize = 0;
@@ -490,7 +486,6 @@ impl UsenetStreamer {
         loop {
             let streamer = self.clone();
             let batch_client = client.clone();
-            let fanout = (batch_last - batch_start + 1).min(MAX_READ_FANOUT);
             let mut stream = stream::iter(batch_start..=batch_last)
                 .map(move |i| {
                     let s = streamer.clone();
@@ -500,7 +495,7 @@ impl UsenetStreamer {
                         s.fetch_decoded_cached(&client, mid, file).await
                     }
                 })
-                .buffered(fanout);
+                .buffered(read_concurrency);
 
             while let Some(result) = stream.next().await {
                 let decoded = result?;
@@ -521,7 +516,7 @@ impl UsenetStreamer {
                 break;
             }
             batch_start = batch_last + 1;
-            batch_last = (batch_last + MAX_READ_FANOUT).min(segments.len() - 1);
+            batch_last = (batch_last + read_concurrency).min(segments.len() - 1);
         }
 
         Ok(slices)
