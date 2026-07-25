@@ -9,6 +9,7 @@
 use async_trait::async_trait;
 use std::io;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use bytes::Bytes;
 use riven_core::local_source::LocalByteSource;
@@ -29,11 +30,11 @@ pub trait ByteSource: Send + Sync {
 
     /// Tell the origin where the player is, for origins that own their own
     /// read-ahead. No-op by default.
-    async fn report_position(&self, _position: u64) {}
+    fn report_position(&self, _position: u64) {}
 }
 
-/// Usenet-backed file. Read-ahead lives in `riven-usenet`, which adapts depth
-/// and parallelism from the reported position, so this only forwards.
+/// Usenet-backed range source. The VFS owns read-ahead; `riven-usenet`
+/// parallelizes the NNTP articles needed to satisfy each range.
 pub struct UsenetSource {
     inner: Arc<dyn LocalByteSource>,
     info_hash: Arc<str>,
@@ -53,7 +54,9 @@ impl UsenetSource {
         size: u64,
         filename: &str,
     ) -> Self {
-        let stream_key = format!("{info_hash}:{file_index}");
+        static NEXT_STREAM_ID: AtomicU64 = AtomicU64::new(1);
+        let stream_id = NEXT_STREAM_ID.fetch_add(1, Ordering::Relaxed);
+        let stream_key = format!("{info_hash}:{file_index}:{stream_id}");
         inner.stream_register(&stream_key, &info_hash, filename, size);
         Self {
             inner,
@@ -84,7 +87,7 @@ impl ByteSource for UsenetSource {
         self.size
     }
 
-    async fn report_position(&self, _position: u64) {
+    fn report_position(&self, _position: u64) {
         // Read-ahead lives in `crate::prefetch` now, so the origin is only
         // told the stream is alive — it no longer runs a second, competing
         // read-ahead of its own.
@@ -139,10 +142,7 @@ impl HttpSource {
         if !status.is_success() {
             return Err(format!("origin returned {status}"));
         }
-        response
-            .bytes()
-            .await
-            .map_err(|error| error.to_string())
+        response.bytes().await.map_err(|error| error.to_string())
     }
 }
 
