@@ -42,15 +42,22 @@ const BLOCK: u64 = 128 * 1024;
 /// One fetch.
 ///
 /// The origin is usenet: ~700 KiB articles, fetched in parallel *within* a
-/// range, and a range is only served once its slowest article lands. Chunk
-/// size therefore sets how many articles a single read has to win a race
-/// against — 4 MiB is ~6 of them, 8 MiB is ~11 — and the slowest of 11 draws
-/// is meaningfully worse than the slowest of 6. Smaller chunks also make the
-/// buffer advance in finer steps, so a stalled fetch blocks less of it.
+/// range, so a chunk is ~11 articles and lands when its slowest one does.
 ///
-/// Below ~4 MiB the trend reverses: a chunk stops being big enough to keep a
-/// useful number of connections busy, and per-chunk overhead starts to show.
-const CHUNK: u64 = 4 * 1024 * 1024;
+/// It is tempting to shrink this — fewer articles per chunk means a shorter
+/// race and a lower tail — and that is right when chunk latency is set by
+/// article *count*. It is wrong when it is set by how slow the wire is, and
+/// the second case is what a struggling deployment is actually in. Halving
+/// the chunk there simply halves the fill rate, because
+/// `permits x CHUNK / chunk_latency` drops with `CHUNK` while
+/// `chunk_latency` barely moves. Measured: 4 MiB put fill rate at ~3.3 MB/s
+/// against a title needing ~5.4 MB/s, i.e. below the bitrate, and playback
+/// could not keep up no matter how deep the window was allowed to grow.
+///
+/// So: size this for fill-rate headroom, and deal with the tail by fetching a
+/// chunk's articles concurrently (which the read paths do) rather than by
+/// asking for fewer of them.
+const CHUNK: u64 = 8 * 1024 * 1024;
 /// Reads landing within this distance ahead of the buffer are still
 /// sequential rather than a seek. riven-ts's scan tolerance: 25 blocks.
 const SEQUENTIAL_TOLERANCE: u64 = 25 * BLOCK;
