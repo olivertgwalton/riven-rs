@@ -4102,10 +4102,13 @@ dependencies = [
  "reqwest",
  "riven-core",
  "riven-db",
+ "riven-usenet",
+ "sea-orm",
  "serde_json",
  "tokio",
  "tokio-util",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

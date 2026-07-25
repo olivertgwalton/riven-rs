@@ -49,9 +49,31 @@ struct Args {
     handles: usize,
     max_connections: u32,
     max_window: u64,
-    /// Title bitrate to judge against, in Mbps. Reported as a verdict.
+    /// Title bitrate, in Mbps. Also *paces* the reader unless --flat-out:
+    /// a player consumes at its bitrate, not as fast as the disk will go.
     bitrate_mbps: f64,
+    /// Read as fast as possible instead of pacing to the bitrate. This is
+    /// what the original harness did, and it is why the original harness
+    /// never reproduced the stall.
+    flat_out: bool,
+    /// Percentage of reads that deliberately land behind the read frontier,
+    /// modelling a player's interleaved/out-of-order reads. Measured ~9%
+    /// against Infuse.
+    behind_pct: u32,
+    /// Reads a single handle keeps outstanding. Infuse showed `inflight=2`.
+    read_concurrency: usize,
     label: String,
+}
+
+impl Args {
+    /// Interval between reads needed to consume at `bitrate_mbps`.
+    fn read_interval(&self) -> Option<Duration> {
+        if self.flat_out || self.bitrate_mbps <= 0.0 {
+            return None;
+        }
+        let bytes_per_sec = self.bitrate_mbps * 1_000_000.0 / 8.0;
+        Some(Duration::from_secs_f64(READ_SIZE as f64 / bytes_per_sec))
+    }
 }
 
 fn parse_args() -> Args {
@@ -64,6 +86,9 @@ fn parse_args() -> Args {
         max_connections: 100,
         max_window: DEFAULT_MAX_WINDOW,
         bitrate_mbps: 0.0,
+        flat_out: false,
+        behind_pct: 9,
+        read_concurrency: 2,
         label: String::new(),
     };
     let argv: Vec<String> = std::env::args().skip(1).collect();
@@ -80,7 +105,13 @@ fn parse_args() -> Args {
             "--max-connections" => args.max_connections = value.parse().unwrap_or(100),
             "--max-window-mb" => args.max_window = value.parse().unwrap_or(50) * 1024 * 1024,
             "--bitrate-mbps" => args.bitrate_mbps = value.parse().unwrap_or(0.0),
+            "--behind-pct" => args.behind_pct = value.parse().unwrap_or(9),
+            "--read-concurrency" => args.read_concurrency = value.parse().unwrap_or(2),
             "--label" => args.label = value,
+            "--flat-out" => {
+                args.flat_out = true;
+                i -= 1;
+            }
             other => panic!("unknown argument: {other}"),
         }
         i += 2;
@@ -179,6 +210,20 @@ async fn main() -> anyhow::Result<()> {
         args.max_window >> 20,
         args.seconds
     );
+    println!(
+        "pattern      : {} | behind={}% | reads-in-flight/handle={}",
+        match args.read_interval() {
+            Some(iv) => format!(
+                "paced to {:.0} Mbps (one {} KiB read every {:.0} ms)",
+                args.bitrate_mbps,
+                READ_SIZE / 1024,
+                iv.as_secs_f64() * 1000.0
+            ),
+            None => "FLAT OUT (does not model a player)".to_string(),
+        },
+        args.behind_pct,
+        args.read_concurrency
+    );
     println!("=====================================================================");
 
     let streamer: Arc<dyn riven_core::local_source::LocalByteSource> = Arc::new(streamer);
@@ -199,35 +244,109 @@ async fn main() -> anyhow::Result<()> {
         let prefetcher = Arc::new(Prefetcher::new(source, args.max_window));
         let bytes_total = Arc::clone(&bytes_total);
         // Stagger the readers slightly so they do not march in lockstep.
-        let mut position = start + (handle_idx as u64 * 4 * READ_SIZE as u64);
+        let start_at = start + (handle_idx as u64 * 4 * READ_SIZE as u64);
+        // Shared between this handle's concurrent readers, so they advance one
+        // sequential stream between them rather than N independent ones —
+        // which is what a player's parallel in-flight reads on one open file
+        // actually look like.
+        let cursor = Arc::new(AtomicU64::new(start_at));
+        let issued = Arc::new(AtomicU64::new(0));
+        let behind_pct = args.behind_pct;
+        let interval = args.read_interval();
+        let concurrency = args.read_concurrency.max(1);
 
         tasks.push(tokio::spawn(async move {
-            let mut samples = Samples::default();
-            let mut bytes: u64 = 0;
-            let mut first_byte_ms = 0.0;
             let began = Instant::now();
-            while Instant::now() < deadline && position < size {
-                let read_began = Instant::now();
-                let data = match prefetcher.read(position, READ_SIZE).await {
-                    Ok(data) => data,
-                    Err(error) => {
-                        eprintln!("reader {handle_idx}: read failed at {position}: {error}");
-                        break;
+            let mut inner_tasks = Vec::new();
+            for lane in 0..concurrency {
+                let prefetcher = Arc::clone(&prefetcher);
+                let cursor = Arc::clone(&cursor);
+                let issued = Arc::clone(&issued);
+                let bytes_total = Arc::clone(&bytes_total);
+                inner_tasks.push(tokio::spawn(async move {
+                    let mut samples = Samples::default();
+                    let mut bytes: u64 = 0;
+                    let mut behind_reads: u64 = 0;
+                    // Deterministic per-lane so a run is reproducible.
+                    let mut rng: u64 = 0x9E37_79B9_7F4A_7C15 ^ (lane as u64).wrapping_mul(31);
+                    loop {
+                        if Instant::now() >= deadline {
+                            break;
+                        }
+                        // Pace the *aggregate* to the title's bitrate. This is
+                        // the ingredient a flat-out reader misses entirely: a
+                        // player consumes slowly, so the read-ahead window is
+                        // allowed to run far ahead — and it is the behaviour of
+                        // that deep window, not of a saturated one, that decides
+                        // whether playback stalls.
+                        let n = issued.fetch_add(1, Ordering::Relaxed);
+                        if let Some(interval) = interval {
+                            let due = began + interval.mul_f64(n as f64);
+                            let now = Instant::now();
+                            if due > now {
+                                tokio::time::sleep(due - now).await;
+                            }
+                        }
+
+                        rng ^= rng << 13;
+                        rng ^= rng >> 7;
+                        rng ^= rng << 17;
+                        let head = cursor.load(Ordering::Relaxed);
+                        if head >= size {
+                            break;
+                        }
+
+                        // A fraction of reads land *behind* the frontier. Real
+                        // players do this constantly (measured ~9% of reads,
+                        // ~1.3/s), and those reads bypass the prefetch buffer
+                        // entirely, so they are the part of the workload most
+                        // likely to be mispriced.
+                        let is_behind = behind_pct > 0 && (rng % 100) < u64::from(behind_pct);
+                        let position = if is_behind {
+                            behind_reads += 1;
+                            let back = (rng >> 8) % (16 * 1024 * 1024);
+                            head.saturating_sub(back).min(size - 1)
+                                & !(READ_SIZE as u64 - 1)
+                        } else {
+                            cursor.fetch_add(READ_SIZE as u64, Ordering::Relaxed)
+                        };
+                        if position >= size {
+                            break;
+                        }
+
+                        let read_began = Instant::now();
+                        let data = match prefetcher.read(position, READ_SIZE).await {
+                            Ok(data) => data,
+                            Err(error) => {
+                                eprintln!("reader {handle_idx}: read failed at {position}: {error}");
+                                break;
+                            }
+                        };
+                        if data.is_empty() {
+                            break;
+                        }
+                        samples.0.push(read_began.elapsed().as_micros() as u64);
+                        // Only forward progress counts as delivered video.
+                        if !is_behind {
+                            bytes += data.len() as u64;
+                            bytes_total.fetch_add(data.len() as u64, Ordering::Relaxed);
+                        }
                     }
-                };
-                let elapsed = read_began.elapsed();
-                if bytes == 0 {
-                    first_byte_ms = began.elapsed().as_secs_f64() * 1000.0;
-                }
-                if data.is_empty() {
-                    break;
-                }
-                samples.0.push(elapsed.as_micros() as u64);
-                position += data.len() as u64;
-                bytes += data.len() as u64;
-                bytes_total.fetch_add(data.len() as u64, Ordering::Relaxed);
+                    (samples, bytes, behind_reads)
+                }));
             }
-            (handle_idx, samples, bytes, began.elapsed(), first_byte_ms)
+
+            let mut samples = Samples::default();
+            let mut bytes = 0;
+            let mut behind_reads = 0;
+            for t in inner_tasks {
+                if let Ok((s, b, be)) = t.await {
+                    samples.0.extend_from_slice(&s.0);
+                    bytes += b;
+                    behind_reads += be;
+                }
+            }
+            (handle_idx, samples, bytes, began.elapsed(), behind_reads)
         }));
     }
 
@@ -239,31 +358,31 @@ async fn main() -> anyhow::Result<()> {
     println!();
     println!(
         "{:<4} {:>10} {:>10} {:>9} {:>9} {:>9} {:>9} {:>10} {:>8}",
-        "rdr", "MB", "MB/s", "ttfb ms", "p50 ms", "p90 ms", "p99 ms", "max ms", "stall%"
+        "rdr", "MB", "MB/s", "behind", "p50 ms", "p90 ms", "p99 ms", "max ms", ">1s"
     );
     println!("{}", "-".repeat(88));
 
     let mut all = Samples::default();
     let mut wall = Duration::ZERO;
-    for (idx, mut samples, bytes, elapsed, ttfb) in rows {
+    let mut stalls_over_1s = 0usize;
+    for (idx, mut samples, bytes, elapsed, behind_reads) in rows {
         let secs = elapsed.as_secs_f64();
         wall = wall.max(elapsed);
-        // Anything over one 128 KiB read-time at the target rate is the
-        // reader waiting on the origin rather than being served from buffer.
-        let stall_us: u64 = samples.0.iter().filter(|us| **us > 50_000).sum();
-        #[allow(clippy::cast_precision_loss)]
-        let stall_pct = (stall_us as f64 / 1e6) / secs * 100.0;
+        // A read over a second is what a viewer sees as a stutter. This is
+        // the number the whole harness exists to produce.
+        let over_1s = samples.0.iter().filter(|us| **us > 1_000_000).count();
+        stalls_over_1s += over_1s;
         println!(
-            "{:<4} {:>10.1} {:>10.2} {:>9.0} {:>9.1} {:>9.1} {:>9.1} {:>10.1} {:>8.1}",
+            "{:<4} {:>10.1} {:>10.2} {:>9} {:>9.1} {:>9.1} {:>9.1} {:>10.1} {:>8}",
             idx,
             bytes as f64 / 1e6,
             bytes as f64 / 1e6 / secs,
-            ttfb,
+            behind_reads,
             samples.pct(0.50),
             samples.pct(0.90),
             samples.pct(0.99),
             samples.pct(1.0),
-            stall_pct,
+            over_1s,
         );
         all.0.extend_from_slice(&samples.0);
     }
@@ -284,20 +403,25 @@ async fn main() -> anyhow::Result<()> {
         all.pct(0.99),
     );
 
-    if args.bitrate_mbps > 0.0 {
-        let headroom = mbps / args.bitrate_mbps;
-        println!();
+    println!();
+    if args.read_interval().is_some() {
+        // Paced mode: the reader asked for exactly bitrate, so throughput is
+        // not the result — whether it was *served on time* is.
         println!(
-            "VERDICT      title needs {:.0} Mbps; delivered {:.0} Mbps = {headroom:.1}x headroom -> {}",
-            args.bitrate_mbps,
-            mbps,
-            if headroom >= 2.0 {
-                "streams cleanly"
-            } else if headroom >= 1.0 {
-                "marginal, will buffer on bitrate peaks"
+            "REPRODUCED?  {} read(s) took over 1s (worst {:.1}s).  {}",
+            stalls_over_1s,
+            all.pct(1.0) / 1000.0,
+            if stalls_over_1s > 0 {
+                "YES — this is the stall Infuse sees."
             } else {
-                "BUFFERS"
+                "NO — pattern did not reproduce the stall."
             }
+        );
+    } else if args.bitrate_mbps > 0.0 {
+        let headroom = mbps / args.bitrate_mbps;
+        println!(
+            "VERDICT      title needs {:.0} Mbps; delivered {:.0} Mbps = {headroom:.1}x headroom",
+            args.bitrate_mbps, mbps,
         );
     }
     println!();

@@ -167,11 +167,75 @@ struct Stats {
     last_log: Option<Instant>,
 }
 
+/// Consecutive sequential reads required before a handle starts reading ahead.
+///
+/// This is the core of the design, and the thing its predecessor got wrong.
+/// Read-ahead used to begin on a handle's very first read, which is fine for
+/// the one handle that is playing a film and wrong for every other handle.
+///
+/// Measured against a real session: a single playback produced 16 file
+/// handles. Most were short-lived — a metadata probe reading the first
+/// 70-170 MB, a bulk reader pulling 0.8 GB at 40 MB/s — and each one spun up
+/// its own full read-ahead pipeline over a shared connection pool, starving
+/// the 4 MB/s handle that was actually feeding the player. Handles are also
+/// mostly *successive* rather than concurrent, and sit gigabytes apart, so
+/// sharing one buffer between them is not the answer either.
+///
+/// Staying in passthrough until a handle proves it is streaming costs one
+/// extra round trip on a genuine stream and nothing at all on a probe.
+/// (Pattern from javi11/altmount's `AsyncReadBuffer`, whose own history
+/// records an earlier reset-and-refill design being reverted for exactly the
+/// thrashing seen here.)
+const ARM_THRESHOLD: u32 = 3;
+/// Forward gap still counted as sequential while probing. The kernel issues
+/// 128 KiB readahead in parallel and they can arrive slightly out of order,
+/// so a strict `==` test would never arm on a genuinely sequential stream.
+const PROBING_SEQ_TOLERANCE: u64 = 256 * 1024;
+
+/// Process-wide ceiling on buffered read-ahead, in bytes.
+///
+/// Reserved on promotion and released on demotion or close, so memory — and
+/// with it the share of the connection pool a handle can command — is only
+/// held by handles that are actually streaming. A handle that cannot get a
+/// reservation simply stays in passthrough and serves reads directly, which
+/// is correct behaviour rather than a failure: it still makes progress, it
+/// just does not compete for read-ahead.
+fn readahead_budget() -> &'static tokio::sync::Semaphore {
+    // Permits are megabytes, so the whole budget fits comfortably in the
+    // semaphore's permit space.
+    static BUDGET: std::sync::OnceLock<tokio::sync::Semaphore> = std::sync::OnceLock::new();
+    BUDGET.get_or_init(|| {
+        let mb = std::env::var("RIVEN_VFS_READAHEAD_BUDGET_MB")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .filter(|v| *v > 0)
+            .unwrap_or(256);
+        tokio::sync::Semaphore::new(mb)
+    })
+}
+
+/// Woken when a handle releases its read-ahead reservation, so a handle that
+/// is streaming but could not get one re-tries promptly instead of serving
+/// every read as a passthrough until it happens to be asked again.
+fn budget_freed() -> &'static Notify {
+    static FREED: std::sync::OnceLock<Notify> = std::sync::OnceLock::new();
+    FREED.get_or_init(Notify::new)
+}
+
 struct Inner {
     buf: Buffered,
     /// Next byte to *dispatch*. Runs ahead of the buffer by whatever is in
     /// flight, so concurrent fetches never request the same range twice.
     frontier: u64,
+    /// `false` = probing: no read-ahead, every read served straight from the
+    /// origin. `true` = streaming: buffered and filling ahead.
+    streaming: bool,
+    /// Consecutive sequential reads seen while probing.
+    seq_run: u32,
+    /// Offset the next sequential read is expected at.
+    expected_next: u64,
+    /// Held for as long as this handle is streaming; dropped on demotion.
+    reservation: Option<tokio::sync::SemaphorePermit<'static>>,
     /// Current read-ahead depth, doubling while reads stay sequential.
     window: u64,
     /// Set when the origin fails, so waiters stop rather than hang.
@@ -210,6 +274,47 @@ impl Inner {
         self.pending.retain(|start, _| *start < valid_end);
         self.frontier = valid_end;
     }
+
+    /// Start reading ahead from `frontier`, if the shared budget allows.
+    ///
+    /// Failing to get a reservation is not an error: the handle stays in
+    /// passthrough and `seq_run` stays high, so the next sequential read
+    /// retries the (cheap) reservation.
+    fn promote(&mut self, frontier: u64, window: u64) {
+        if self.streaming {
+            return;
+        }
+        let want = window.div_ceil(1024 * 1024).max(1) as u32;
+        let Ok(permit) = readahead_budget().try_acquire_many(want) else {
+            return;
+        };
+        self.reservation = Some(permit);
+        self.streaming = true;
+        self.buf.clear(frontier);
+        self.pending.clear();
+        self.frontier = frontier;
+        self.window = INITIAL_WINDOW;
+    }
+
+    /// Drop back to passthrough, releasing the buffer and the budget so a
+    /// handle that has stopped streaming stops holding resources.
+    ///
+    /// This replaces the old reset-and-refill: on a seek the previous design
+    /// kept the pipeline armed and immediately refetched around the new
+    /// offset, so a scrubbing player kept a full read-ahead engine running
+    /// while never reading sequentially enough to benefit from it.
+    fn demote(&mut self) {
+        if !self.streaming {
+            return;
+        }
+        self.streaming = false;
+        self.seq_run = 0;
+        self.buf.clear(0);
+        self.pending.clear();
+        self.window = INITIAL_WINDOW;
+        drop(self.reservation.take());
+        budget_freed().notify_waiters();
+    }
 }
 
 /// Per-open-file adaptive read-ahead over a [`ByteSource`].
@@ -234,6 +339,12 @@ impl Prefetcher {
                     len: 0,
                 },
                 frontier: 0,
+                // Every handle starts in passthrough. It only earns read-ahead
+                // by proving it reads sequentially — see [`ARM_THRESHOLD`].
+                streaming: false,
+                seq_run: 0,
+                expected_next: 0,
+                reservation: None,
                 window: INITIAL_WINDOW,
                 error: None,
                 inflight: 0,
@@ -295,7 +406,11 @@ impl Prefetcher {
 
         {
             let inner = self.inner.lock().await;
-            let cached = if is_header { &inner.header } else { &inner.footer };
+            let cached = if is_header {
+                &inner.header
+            } else {
+                &inner.footer
+            };
             if let Some(data) = cached {
                 return Ok(slice_at(data, region_start, start, want));
             }
@@ -339,9 +454,11 @@ impl Prefetcher {
         let mut waited = false;
 
         loop {
-            // Registered before the buffer is inspected, so a fill completing
-            // between the check and the await cannot be missed.
+            // Both registered before the buffer is inspected, so neither a
+            // fill landing nor a reservation being freed can be missed in the
+            // gap between checking and awaiting.
             let notified = self.progress.notified();
+            let budget = budget_freed().notified();
 
             {
                 let mut inner = self.inner.lock().await;
@@ -350,71 +467,111 @@ impl Prefetcher {
                     return Err(io::Error::other(error));
                 }
 
-                // Seek: outside the buffer and past the tolerance window means
-                // restart read-ahead, back at the shallow initial depth so
-                // scrubbing does not pay for a deep window it will discard.
-                let in_buf = start >= inner.buf.start && start < inner.buf.end();
-                let near = start >= inner.buf.end()
-                    && start - inner.buf.end() <= SEQUENTIAL_TOLERANCE;
-                // A read just behind the buffer is an interleaved reader, not
-                // a seek. Its bytes are already consumed so it is served by a
-                // one-off fetch below, but the window must survive it.
-                let behind = start < inner.buf.start
-                    && inner.buf.start - start <= BACKWARD_TOLERANCE;
-                if behind {
-                    inner.stats.behind += 1;
-                    drop(inner);
-                    let end = start + want as u64 - 1;
-                    return self.read_exact_range(start, end).await;
-                }
-                if !in_buf && !near {
-                    tracing::debug!(
-                        target: "streaming",
-                        from = inner.buf.end(), to = start,
-                        window_mb = inner.window >> 20,
-                        "prefetch: seek — window reset"
-                    );
-                    inner.stats.seeks += 1;
-                    inner.buf.clear(start);
-                    inner.pending.clear();
-                    inner.frontier = start;
-                    inner.window = INITIAL_WINDOW;
-                }
+                if inner.streaming {
+                    let in_buf = start >= inner.buf.start && start < inner.buf.end();
+                    if in_buf {
+                        let available = inner.buf.end() - start;
+                        // Serve when the full request is buffered, or at EOF
+                        // where a short read is legitimate.
+                        if available >= want as u64 || inner.buf.end() >= self.size {
+                            let data = inner.buf.read_at(start, want);
+                            inner.expected_next = start + data.len() as u64;
+                            // Sustained sequential reading earns a deeper window.
+                            inner.window = (inner.window * WINDOW_MULTIPLIER).min(self.max_window);
 
-                if in_buf {
-                    let available = inner.buf.end() - start;
-                    // Serve when the full request is buffered, or at EOF where
-                    // a short read is legitimate.
-                    if available >= want as u64 || inner.buf.end() >= self.size {
-                        let data = inner.buf.read_at(start, want);
-                        // Sustained sequential reading earns a deeper window.
-                        inner.window =
-                            (inner.window * WINDOW_MULTIPLIER).min(self.max_window);
+                            let waited_ms = began.elapsed().as_millis() as u64;
+                            if waited {
+                                inner.stats.misses += 1;
+                                inner.stats.wait_ms += waited_ms;
+                                inner.stats.worst_wait_ms =
+                                    inner.stats.worst_wait_ms.max(waited_ms);
+                            } else {
+                                inner.stats.hits += 1;
+                            }
+                            inner.stats.bytes += data.len() as u64;
+                            self.maybe_log(&mut inner, start);
 
-                        let waited_ms = began.elapsed().as_millis() as u64;
-                        if waited {
-                            inner.stats.misses += 1;
-                            inner.stats.wait_ms += waited_ms;
-                            inner.stats.worst_wait_ms =
-                                inner.stats.worst_wait_ms.max(waited_ms);
-                        } else {
-                            inner.stats.hits += 1;
+                            drop(inner);
+                            self.dispatch_fills().await;
+                            return Ok(data);
                         }
-                        inner.stats.bytes += data.len() as u64;
-                        self.maybe_log(&mut inner, start);
-
-                        drop(inner);
-                        self.dispatch_fills().await;
-                        return Ok(data);
                     }
+
+                    // Just ahead of what is buffered: this is the reader
+                    // catching up with the fill, or the kernel's parallel
+                    // readahead arriving early — not a seek. Wait for the fill
+                    // rather than tearing the pipeline down.
+                    let near =
+                        start >= inner.buf.end() && start - inner.buf.end() <= SEQUENTIAL_TOLERANCE;
+                    // A read just behind the buffer is an interleaved reader.
+                    // Its bytes are already consumed, so serve it directly
+                    // without disturbing the stream.
+                    let behind =
+                        start < inner.buf.start && inner.buf.start - start <= BACKWARD_TOLERANCE;
+                    if behind {
+                        inner.stats.behind += 1;
+                        drop(inner);
+                        let end = start + want as u64 - 1;
+                        return self.read_exact_range(start, end).await;
+                    }
+                    if !in_buf && !near {
+                        // A real seek. Give up the buffer *and* the budget
+                        // rather than refilling around the new offset: a
+                        // scrubbing player would otherwise keep a full
+                        // read-ahead engine armed while never reading
+                        // sequentially enough to benefit from it.
+                        tracing::debug!(
+                            target: "streaming",
+                            from = inner.buf.end(), to = start,
+                            window_mb = inner.window >> 20,
+                            "prefetch: seek — demoting to passthrough"
+                        );
+                        inner.stats.seeks += 1;
+                        inner.demote();
+                    }
+                }
+
+                if !inner.streaming {
+                    // Probing. Count the sequential run, and arm read-ahead
+                    // only once this handle has proved it is streaming.
+                    if start >= inner.expected_next
+                        && start - inner.expected_next <= PROBING_SEQ_TOLERANCE
+                    {
+                        inner.seq_run += 1;
+                    } else {
+                        inner.seq_run = 1;
+                    }
+                    let arm = inner.seq_run >= ARM_THRESHOLD && self.size > self.max_window;
+                    inner.expected_next = start + want as u64;
+                    let window = self.max_window;
+                    drop(inner);
+
+                    let end = start + want as u64 - 1;
+                    let data = self.read_exact_range(start, end).await?;
+
+                    let mut inner = self.inner.lock().await;
+                    inner.expected_next = start + data.len() as u64;
+                    if arm && !data.is_empty() {
+                        inner.promote(start + data.len() as u64, window);
+                    }
+                    let streaming = inner.streaming;
+                    drop(inner);
+                    if streaming {
+                        self.dispatch_fills().await;
+                    }
+                    return Ok(data);
                 }
             }
 
-            // Keep the pipeline topped up, then wait for whichever chunk lands
-            // next. Fills run as their own tasks, so fetching overlaps serving.
+            // Streaming but not yet served: top the pipeline up, then wait for
+            // whichever comes first — a chunk of ours landing, or budget
+            // freeing up so a handle that could not reserve can arm.
             waited = true;
             self.dispatch_fills().await;
-            notified.await;
+            tokio::select! {
+                () = notified => {}
+                () = budget => {}
+            }
         }
     }
 
@@ -471,7 +628,11 @@ impl Prefetcher {
             // ~2 chunks regardless of the configured ceiling — the fill rate
             // never rose above consumption and the window never filled.
             let mut inner = self.inner.lock().await;
-            if inner.error.is_some()
+            // Only a promoted handle reads ahead. A probing one serves reads
+            // straight from the origin and costs the pool nothing beyond what
+            // it is actually asked for.
+            if !inner.streaming
+                || inner.error.is_some()
                 || inner.inflight >= self.max_inflight
                 || inner.frontier >= self.size
             {
@@ -541,6 +702,19 @@ impl Prefetcher {
             }
         }
         self.progress.notify_waiters();
+    }
+}
+
+impl Drop for Prefetcher {
+    fn drop(&mut self) {
+        // Hand the reservation back so a closing handle stops holding
+        // read-ahead budget the moment it goes away, rather than whenever the
+        // allocator gets round to it.
+        if let Some(inner) = self.inner.try_lock().ok().as_deref_mut()
+            && inner.reservation.take().is_some()
+        {
+            budget_freed().notify_waiters();
+        }
     }
 }
 
@@ -626,19 +800,59 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn window_grows_while_sequential_and_resets_on_seek() {
+    async fn read_ahead_only_arms_once_reads_prove_sequential() {
+        // The whole point of the probing state: a handle that is not streaming
+        // must not build a read-ahead pipeline. One playback was observed
+        // producing 16 handles — probes and bulk readers — and each one arming
+        // immediately is what starved the handle actually feeding the player.
+        let p = prefetcher(512 * 1024 * 1024, 1024 * 1024);
+
+        // Scattered reads never establish a sequential run, so they never arm.
+        let mut offset = 0u64;
+        for _ in 0..6 {
+            p.read(offset, 128 * 1024).await.unwrap();
+            offset += 64 * 1024 * 1024;
+        }
+        assert!(
+            !p.inner.lock().await.streaming,
+            "a seeking/probing handle must stay in passthrough"
+        );
+
+        // A sustained sequential run earns read-ahead.
+        let mut offset = 200 * 1024 * 1024;
+        for _ in 0..ARM_THRESHOLD + 1 {
+            p.read(offset, 128 * 1024).await.unwrap();
+            offset += 128 * 1024;
+        }
+        assert!(
+            p.inner.lock().await.streaming,
+            "a sustained sequential run must arm read-ahead"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_seek_demotes_instead_of_refilling() {
+        // The predecessor reset the window and immediately refetched around
+        // the new offset, so a scrubbing player kept a full read-ahead engine
+        // armed while never reading sequentially enough to benefit from it.
+        // A seek must hand back the buffer and the shared budget.
         let p = prefetcher(512 * 1024 * 1024, 1024 * 1024);
         let mut offset = 0u64;
         for _ in 0..6 {
             p.read(offset, 128 * 1024).await.unwrap();
             offset += 128 * 1024;
         }
-        let grown = p.inner.lock().await.window;
-        assert!(grown > INITIAL_WINDOW, "sequential reads deepen the window");
+        assert!(p.inner.lock().await.streaming, "sequential run should arm");
 
-        // A distant seek must drop back to the shallow window so scrubbing
-        // does not pay for read-ahead it will discard.
         p.read(400 * 1024 * 1024, 128 * 1024).await.unwrap();
-        assert_eq!(p.inner.lock().await.window, INITIAL_WINDOW * WINDOW_MULTIPLIER);
+        let inner = p.inner.lock().await;
+        assert!(
+            !inner.streaming,
+            "a distant seek must demote to passthrough"
+        );
+        assert!(
+            inner.reservation.is_none(),
+            "demotion must release the shared read-ahead budget"
+        );
     }
 }
