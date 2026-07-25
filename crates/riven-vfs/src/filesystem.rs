@@ -7,7 +7,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use dashmap::DashMap;
 use fuser::{
     Errno, FileAttr, FileHandle as FuseFh, FileType, Filesystem, FopenFlags, Generation, INodeNo,
-    LockOwner, OpenFlags, PollEvents, PollFlags, PollNotifier, ReplyAttr, ReplyData,
+    KernelConfig, LockOwner, OpenFlags, PollEvents, PollFlags, PollNotifier, ReplyAttr, ReplyData,
     ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen, ReplyPoll, Request,
 };
 use parking_lot::Mutex;
@@ -20,10 +20,10 @@ use riven_core::types::FileSystemEntryType;
 use riven_core::vfs_layout::VfsLibraryLayout;
 use riven_db::repo;
 
-use crate::prefetch::Prefetcher;
-use crate::source::{ByteSource, HttpSource, LinkRefresher, UsenetSource};
 use crate::path_info::{CanonicalPath, PathTarget, parse_path};
+use crate::prefetch::Prefetcher;
 use crate::readdir::{DirEntry, populate_entries};
+use crate::source::{ByteSource, HttpSource, LinkRefresher, UsenetSource};
 use crate::state::{CachedEntry, MOVIES_INO, OpenedFile, ROOT_INO, SHOWS_INO, VfsState};
 use riven_core::local_source::parse_usenet_url;
 
@@ -347,10 +347,24 @@ impl RivenFsInner {
             None,
         )
     }
-
 }
 
 impl Filesystem for RivenFs {
+    fn init(&mut self, _req: &Request, config: &mut KernelConfig) -> std::io::Result<()> {
+        // Network reads legitimately remain outstanding while the origin
+        // responds. Fuser defaults to 16 background requests, which makes the
+        // kernel declare congestion at 12 and suppress its own asynchronous
+        // readahead. Mountpoint S3 uses 64 for the same network-filesystem
+        // workload; keep the threshold explicit so this stays intentional.
+        config.set_max_background(64).map_err(|minimum| {
+            std::io::Error::other(format!("max_background must be >= {minimum}"))
+        })?;
+        config.set_congestion_threshold(48).map_err(|minimum| {
+            std::io::Error::other(format!("congestion_threshold must be >= {minimum}"))
+        })?;
+        Ok(())
+    }
+
     fn lookup(&self, _req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEntry) {
         let s = &self.inner;
         let parent = parent.0;
@@ -542,7 +556,11 @@ impl Filesystem for RivenFs {
             ));
             let fd = s.state.open(OpenedFile::Streamed {
                 path,
-                prefetcher: Arc::new(Prefetcher::new(byte_source, s.max_prefetch_window)),
+                prefetcher: Arc::new(Prefetcher::new(
+                    byte_source,
+                    s.max_prefetch_window,
+                    &s.runtime,
+                )),
             });
             reply.opened(FuseFh(fd), FopenFlags::FOPEN_KEEP_CACHE);
             return;
@@ -584,7 +602,11 @@ impl Filesystem for RivenFs {
         ));
         let fd = s.state.open(OpenedFile::Streamed {
             path,
-            prefetcher: Arc::new(Prefetcher::new(byte_source, s.max_prefetch_window)),
+            prefetcher: Arc::new(Prefetcher::new(
+                byte_source,
+                s.max_prefetch_window,
+                &s.runtime,
+            )),
         });
         reply.opened(FuseFh(fd), FopenFlags::FOPEN_KEEP_CACHE);
     }
@@ -664,12 +686,7 @@ impl Filesystem for RivenFs {
                         reply.data(&data);
                     }
                     Err(error) => {
-                        stats.record_read(
-                            permit_us,
-                            began.elapsed().as_micros() as u64,
-                            0,
-                            false,
-                        );
+                        stats.record_read(permit_us, began.elapsed().as_micros() as u64, 0, false);
                         tracing::warn!(
                             target: "streaming",
                             path = %path, offset, size, %error,
