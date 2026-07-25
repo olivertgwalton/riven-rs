@@ -8,23 +8,6 @@
 
 use bytes::Bytes;
 
-/// Why a range is being read, so the origin can prioritise accordingly.
-///
-/// These are not equally urgent and treating them as if they were is what
-/// makes a stream stutter: read-ahead runs many ranges deep, so a demand read
-/// arriving behind that backlog waits for all of it before its own articles
-/// are even dispatched. The usenet origin has priority lanes for exactly this
-/// and needs to be told which one applies.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ReadIntent {
-    /// A reader is blocked on these bytes right now. Every millisecond is a
-    /// millisecond the player is not receiving video.
-    Demand,
-    /// Speculative fill running ahead of the reader. Throughput matters,
-    /// latency does not — nothing is waiting on any individual range.
-    ReadAhead,
-}
-
 /// A read-by-range byte source addressed by `(info_hash, file_index)`,
 /// implemented in-process by the usenet streamer.
 #[async_trait::async_trait]
@@ -39,8 +22,8 @@ pub trait LocalByteSource: Send + Sync {
         file_index: usize,
         start: u64,
         end_inclusive: u64,
-        intent: ReadIntent,
     ) -> anyhow::Result<Bytes>;
+
 
     /// Active-stream registry hooks, driving the dashboard's "now playing"
     /// view. The VFS calls these as it serves a usenet handle. `key`

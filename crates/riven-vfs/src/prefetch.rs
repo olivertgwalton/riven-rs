@@ -29,8 +29,6 @@ use std::time::{Duration, Instant};
 use bytes::{Bytes, BytesMut};
 use tokio::sync::{Mutex, Notify};
 
-use riven_core::local_source::ReadIntent;
-
 use crate::source::ByteSource;
 
 /// First window: 1 MiB plus Linux's 128 KiB readahead overshoot.
@@ -41,22 +39,11 @@ const WINDOW_MULTIPLIER: u64 = 2;
 const BLOCK: u64 = 128 * 1024;
 /// One fetch.
 ///
-/// The origin is usenet: ~700 KiB articles, fetched in parallel *within* a
-/// range, so a chunk is ~11 articles and lands when its slowest one does.
-///
-/// It is tempting to shrink this — fewer articles per chunk means a shorter
-/// race and a lower tail — and that is right when chunk latency is set by
-/// article *count*. It is wrong when it is set by how slow the wire is, and
-/// the second case is what a struggling deployment is actually in. Halving
-/// the chunk there simply halves the fill rate, because
-/// `permits x CHUNK / chunk_latency` drops with `CHUNK` while
-/// `chunk_latency` barely moves. Measured: 4 MiB put fill rate at ~3.3 MB/s
-/// against a title needing ~5.4 MB/s, i.e. below the bitrate, and playback
-/// could not keep up no matter how deep the window was allowed to grow.
-///
-/// So: size this for fill-rate headroom, and deal with the tail by fetching a
-/// chunk's articles concurrently (which the read paths do) rather than by
-/// asking for fewer of them.
+/// riven-ts uses 1 MiB here, but it streams from a low-latency CDN where a
+/// small chunk still saturates the link. This origin is usenet: ~700 KiB
+/// articles behind multi-second latency, fetched in parallel *within* a
+/// range. A 1 MiB chunk is barely one article, so it would leave most of the
+/// connection pool idle; 8 MiB is ~11 articles, which keeps it busy.
 const CHUNK: u64 = 8 * 1024 * 1024;
 /// Reads landing within this distance ahead of the buffer are still
 /// sequential rather than a seek. riven-ts's scan tolerance: 25 blocks.
@@ -78,56 +65,24 @@ const HEADER_SIZE: u64 = 256 * 1024;
 const MIN_FOOTER: u64 = 16 * 1024;
 const MAX_FOOTER: u64 = 10 * 1024 * 1024;
 const FOOTER_PERCENT: f64 = 0.02;
-/// Chunk fetches in flight at once, **across the whole process**.
+/// Chunks fetched concurrently.
 ///
-/// This is deliberately global rather than per-handle, and that is the point.
-/// A player does not open one handle per file — Infuse opens the video plus a
-/// probe, a media server may analyse several titles at once — and every open
-/// handle used to get its own independent budget. Three handles therefore ran
-/// three times the intended fetches, and since each chunk fans out across all
-/// its articles, that reached ~130 concurrent article fetches against a
-/// provider that stops rewarding concurrency long before then.
+/// This is the prefetcher's throughput ceiling: fill rate is
+/// `MAX_INFLIGHT_CHUNKS x CHUNK / chunk_latency`. It has to exceed the
+/// player's bitrate by a wide margin, not a narrow one — the surplus is what
+/// *builds* the buffer, and only a deep buffer survives a slow chunk. At 3,
+/// an 8 MiB chunk and ~3 s latency gave ~7.9 MB/s against 5.3 MB/s demand:
+/// enough to keep up, far too little to ever fill a 50 MiB window.
 ///
-/// Past that point extra concurrency is not merely wasted, it is harmful: the
-/// provider spreads a fixed budget over more connections, so every individual
-/// article gets slower and the *tail* — the thing that actually stalls
-/// playback — gets much worse. Measured standalone against Newshosting,
-/// aggregate throughput was already flat from 16 connections while
-/// per-connection rate fell from 63 to 36 Mbps.
-///
-/// So the ceiling belongs to the process, which is the thing that shares the
-/// connection pool. `CHUNK_PERMITS x articles-per-chunk` is the real number
-/// of concurrent article fetches: 5 x ~6 is ~30, which sits at the plateau
-/// and leaves the rest of the account for ingest and repair. Fill rate is
-/// still `permits x CHUNK / chunk_latency` ~ 50 MB/s, an order of magnitude
-/// above any single title's bitrate.
-///
-/// Override with `RIVEN_VFS_INFLIGHT_CHUNKS`.
-const DEFAULT_CHUNK_PERMITS: usize = 5;
-
-fn chunk_permits() -> &'static tokio::sync::Semaphore {
-    static PERMITS: std::sync::OnceLock<tokio::sync::Semaphore> = std::sync::OnceLock::new();
-    PERMITS.get_or_init(|| {
-        let n = std::env::var("RIVEN_VFS_INFLIGHT_CHUNKS")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .filter(|v| *v > 0)
-            .unwrap_or(DEFAULT_CHUNK_PERMITS);
-        tokio::sync::Semaphore::new(n)
-    })
-}
-
-/// Woken whenever a chunk permit is returned.
-///
-/// A budget shared between handles needs this: a handle that finds the budget
-/// exhausted dispatches nothing, so it has no fetch of its own whose
-/// completion could wake it, and its own `progress` signal would never fire.
-/// Without a cross-handle wake, such a reader blocks until some *other* part
-/// of its own pipeline happens to make progress — which, when it is starved
-/// precisely because it owns no in-flight work, is never.
-fn permit_freed() -> &'static Notify {
-    static FREED: std::sync::OnceLock<Notify> = std::sync::OnceLock::new();
-    FREED.get_or_init(Notify::new)
+/// Total concurrent article fetches is roughly this x
+/// `RIVEN_USENET_STREAM_FANOUT`, so keep the product near the provider's
+/// connection count. Override with `RIVEN_VFS_INFLIGHT_CHUNKS`.
+fn max_inflight_chunks() -> usize {
+    std::env::var("RIVEN_VFS_INFLIGHT_CHUNKS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(6)
 }
 
 struct Buffered {
@@ -264,6 +219,7 @@ pub struct Prefetcher {
     progress: Notify,
     size: u64,
     max_window: u64,
+    max_inflight: usize,
 }
 
 impl Prefetcher {
@@ -289,6 +245,7 @@ impl Prefetcher {
             progress: Notify::new(),
             size,
             max_window: max_window.max(INITIAL_WINDOW),
+            max_inflight: max_inflight_chunks(),
         }
     }
 
@@ -314,10 +271,7 @@ impl Prefetcher {
         let mut out = BytesMut::with_capacity(want);
         let mut pos = start;
         while pos <= end {
-            // Always demand: every caller of this — a pinned header/footer
-            // probe, an interleaved read landing behind the buffer — has a
-            // reader blocked on the result.
-            let data = self.source.read_range(pos, end, ReadIntent::Demand).await?;
+            let data = self.source.read_range(pos, end).await?;
             if data.is_empty() {
                 break;
             }
@@ -341,11 +295,7 @@ impl Prefetcher {
 
         {
             let inner = self.inner.lock().await;
-            let cached = if is_header {
-                &inner.header
-            } else {
-                &inner.footer
-            };
+            let cached = if is_header { &inner.header } else { &inner.footer };
             if let Some(data) = cached {
                 return Ok(slice_at(data, region_start, start, want));
             }
@@ -389,13 +339,9 @@ impl Prefetcher {
         let mut waited = false;
 
         loop {
-            // Both registered before the buffer is inspected, so a fill
-            // completing between the check and the await cannot be missed.
-            // `budget` covers the other way this reader can be unblocked:
-            // it dispatched nothing because the shared budget was spent, and
-            // only a permit coming back lets it make progress.
+            // Registered before the buffer is inspected, so a fill completing
+            // between the check and the await cannot be missed.
             let notified = self.progress.notified();
-            let budget = permit_freed().notified();
 
             {
                 let mut inner = self.inner.lock().await;
@@ -408,13 +354,13 @@ impl Prefetcher {
                 // restart read-ahead, back at the shallow initial depth so
                 // scrubbing does not pay for a deep window it will discard.
                 let in_buf = start >= inner.buf.start && start < inner.buf.end();
-                let near =
-                    start >= inner.buf.end() && start - inner.buf.end() <= SEQUENTIAL_TOLERANCE;
+                let near = start >= inner.buf.end()
+                    && start - inner.buf.end() <= SEQUENTIAL_TOLERANCE;
                 // A read just behind the buffer is an interleaved reader, not
                 // a seek. Its bytes are already consumed so it is served by a
                 // one-off fetch below, but the window must survive it.
-                let behind =
-                    start < inner.buf.start && inner.buf.start - start <= BACKWARD_TOLERANCE;
+                let behind = start < inner.buf.start
+                    && inner.buf.start - start <= BACKWARD_TOLERANCE;
                 if behind {
                     inner.stats.behind += 1;
                     drop(inner);
@@ -442,13 +388,15 @@ impl Prefetcher {
                     if available >= want as u64 || inner.buf.end() >= self.size {
                         let data = inner.buf.read_at(start, want);
                         // Sustained sequential reading earns a deeper window.
-                        inner.window = (inner.window * WINDOW_MULTIPLIER).min(self.max_window);
+                        inner.window =
+                            (inner.window * WINDOW_MULTIPLIER).min(self.max_window);
 
                         let waited_ms = began.elapsed().as_millis() as u64;
                         if waited {
                             inner.stats.misses += 1;
                             inner.stats.wait_ms += waited_ms;
-                            inner.stats.worst_wait_ms = inner.stats.worst_wait_ms.max(waited_ms);
+                            inner.stats.worst_wait_ms =
+                                inner.stats.worst_wait_ms.max(waited_ms);
                         } else {
                             inner.stats.hits += 1;
                         }
@@ -462,16 +410,11 @@ impl Prefetcher {
                 }
             }
 
-            // Keep the pipeline topped up, then wait for whichever comes
-            // first: a chunk of our own landing, or the shared budget freeing
-            // up so we can dispatch one. Fills run as their own tasks, so
-            // fetching overlaps serving.
+            // Keep the pipeline topped up, then wait for whichever chunk lands
+            // next. Fills run as their own tasks, so fetching overlaps serving.
             waited = true;
             self.dispatch_fills().await;
-            tokio::select! {
-                () = notified => {}
-                () = budget => {}
-            }
+            notified.await;
         }
     }
 
@@ -522,22 +465,16 @@ impl Prefetcher {
     async fn dispatch_fills(self: &Arc<Self>) -> bool {
         let mut started = false;
         loop {
-            // Claimed before the lock so a handle that is over its share
-            // simply stops dispatching rather than blocking here holding it.
-            // Nothing is lost by giving up: `read` calls this again after
-            // every served read and every wake, so a freed permit is picked
-            // up promptly.
-            let Ok(permit) = chunk_permits().try_acquire() else {
-                return started;
-            };
-
             // Must *wait* for the lock, not `try_lock`. Under load the buffer
             // mutex is held constantly by concurrent readers, so a `try_lock`
             // here silently abandoned the dispatch and pinned the pipeline at
             // ~2 chunks regardless of the configured ceiling — the fill rate
             // never rose above consumption and the window never filled.
             let mut inner = self.inner.lock().await;
-            if inner.error.is_some() || inner.frontier >= self.size {
+            if inner.error.is_some()
+                || inner.inflight >= self.max_inflight
+                || inner.frontier >= self.size
+            {
                 return started;
             }
             // Depth is measured from the buffer, so in-flight chunks count
@@ -548,46 +485,25 @@ impl Prefetcher {
             }
 
             let from = inner.frontier;
-            // The chunk starting exactly where the buffer ends is the one the
-            // reader hits next, so if it is slow the reader blocks on it —
-            // that is a demand read however speculatively it was dispatched.
-            // Chunks further ahead are pure read-ahead. At steady state the
-            // frontier runs well past the buffer and everything is read-ahead;
-            // this only promotes fills issued while the buffer is dry, which
-            // is exactly when the player is about to stall.
-            let intent = if from == inner.buf.end() {
-                ReadIntent::Demand
-            } else {
-                ReadIntent::ReadAhead
-            };
             // Align the end to a CHUNK boundary so every pass over a file
             // splits segments at the same offsets, letting the origin's cache
-            // serve the half it already has instead of refetching it. The
-            // boundary must be strictly *past* `from`: `next_multiple_of`
-            // returns `from` itself when it is already aligned, which used to
-            // dispatch a one-byte chunk — a full article fetch, and a wasted
-            // slot, at every chunk boundary.
-            let to = ((from / CHUNK + 1) * CHUNK - 1).min(self.size - 1);
+            // serve the half it already has instead of refetching it.
+            let aligned_end = from.next_multiple_of(CHUNK).max(from + 1);
+            let to = (aligned_end - 1).min(self.size - 1);
             inner.frontier = to + 1;
             inner.inflight += 1;
             drop(inner);
 
-            // The permit rides into the task and is released when the fetch
-            // finishes, whatever the outcome.
             let this = Arc::clone(self);
-            tokio::spawn(async move {
-                this.fill(from, to, intent).await;
-                drop(permit);
-                permit_freed().notify_waiters();
-            });
+            tokio::spawn(async move { this.fill(from, to).await });
             started = true;
         }
     }
 
     /// Fetch one chunk, slot it into place, and wake any waiters.
-    async fn fill(&self, from: u64, to: u64, intent: ReadIntent) {
+    async fn fill(&self, from: u64, to: u64) {
         let began = Instant::now();
-        let result = self.source.read_range(from, to, intent).await;
+        let result = self.source.read_range(from, to).await;
         let took_ms = began.elapsed().as_millis() as u64;
 
         {
@@ -651,7 +567,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl ByteSource for ShortSource {
-        async fn read_range(&self, start: u64, end: u64, _intent: ReadIntent) -> io::Result<Bytes> {
+        async fn read_range(&self, start: u64, end: u64) -> io::Result<Bytes> {
             let want = (end - start + 1) as usize;
             Ok(Bytes::from(vec![b'x'; want.min(self.cap)]))
         }
@@ -710,36 +626,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn many_handles_sharing_the_chunk_budget_all_finish() {
-        // The read-ahead budget is process-wide, so more open handles than
-        // permits is the normal case, not an edge one. A handle that loses
-        // the race for a permit dispatches nothing — and therefore has no
-        // fetch of its own whose completion could wake it. It has to be woken
-        // when some *other* handle returns a permit, or it blocks forever.
-        // Without that cross-handle wake this test hangs rather than fails.
-        let readers = (0..8).map(|_| {
-            let p = prefetcher(64 * 1024 * 1024, 1024 * 1024);
-            tokio::spawn(async move {
-                let mut offset = 0u64;
-                for _ in 0..12 {
-                    let data = p.read(offset, 128 * 1024).await.unwrap();
-                    assert_eq!(data.len(), 128 * 1024);
-                    offset += 128 * 1024;
-                }
-            })
-        });
-        let all = futures::future::join_all(readers);
-        for result in tokio::time::timeout(Duration::from_secs(20), all)
-            .await
-            .expect(
-                "every handle must make progress; a starved one means no wake on permit release",
-            )
-        {
-            result.unwrap();
-        }
-    }
-
-    #[tokio::test]
     async fn window_grows_while_sequential_and_resets_on_seek() {
         let p = prefetcher(512 * 1024 * 1024, 1024 * 1024);
         let mut offset = 0u64;
@@ -753,9 +639,6 @@ mod tests {
         // A distant seek must drop back to the shallow window so scrubbing
         // does not pay for read-ahead it will discard.
         p.read(400 * 1024 * 1024, 128 * 1024).await.unwrap();
-        assert_eq!(
-            p.inner.lock().await.window,
-            INITIAL_WINDOW * WINDOW_MULTIPLIER
-        );
+        assert_eq!(p.inner.lock().await.window, INITIAL_WINDOW * WINDOW_MULTIPLIER);
     }
 }

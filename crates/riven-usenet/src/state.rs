@@ -37,6 +37,18 @@ const DEFAULT_META_CACHE_BYTES: u64 = 256 * 1024 * 1024;
 /// ~40 MB. Override with `RIVEN_USENET_DECODED_SIZES_ENTRIES`.
 const DEFAULT_DECODED_SIZES_ENTRIES: usize = 500_000;
 
+/// Articles fetched concurrently to satisfy one streaming range request.
+///
+/// This is the streaming connection cap, kept separate from the provider's
+/// `max_connections` so playback never consumes the whole pool — the same
+/// split altmount and streamnzb make (they cap playback prefetch at 60 and 24
+/// segments respectively, independent of account size). The VFS keeps up to
+/// `MAX_INFLIGHT_CHUNKS` ranges in flight, so total streaming concurrency is
+/// roughly `3 x` this: 8 gives ~24, matching streamnzb's playback depth, and
+/// leaves the rest of the account for ingest, verification and repair.
+/// Override with `RIVEN_USENET_STREAM_FANOUT`.
+const DEFAULT_STREAM_FANOUT: usize = 8;
+
 // Concurrency is no longer tuned here. The NNTP pool's priority lanes and
 // per-provider slot actors bound socket use (see `nntp::pool`), each stream's
 // read-ahead adapts its own depth and parallelism to measured bitrate and
@@ -48,15 +60,29 @@ const DEFAULT_DECODED_SIZES_ENTRIES: usize = 500_000;
 /// hot for subsequent read-path serves, and a single in-flight fetch
 /// deduplicates across all concerns.
 pub struct StreamerState {
+    /// Concurrent article fetches per streaming range. See
+    /// [`DEFAULT_STREAM_FANOUT`].
+    pub stream_fanout: usize,
     pub cache: SegmentCache,
     pub meta_cache: MetaCache,
     pub decoded_sizes: DecodedSizes,
     pub fails: PermanentFails,
     pub in_flight: InFlight,
+    pub precached: PrecachedFiles,
     pub migrated: MigratedMetas,
     /// Cumulative NNTP fetch counters (cache misses that hit the wire),
     /// driving the API's usenet-streaming health view.
     pub fetch_metrics: FetchMetrics,
+    /// Caps concurrent head/tail precache operations. A Plex/Jellyfin
+    /// library scan HEADs hundreds of files in a burst, each of which
+    /// fires a fire-and-forget `precache_head_tail`. Without a limit
+    /// that's hundreds of simultaneous 8 MB fetch+decode pipelines —
+    /// a multi-GB allocation spike that musl never returns to the OS
+    /// (RSS observed climbing to ~3.5 GB and holding). Bounding peak
+    /// precache concurrency caps that high-water mark; the trade-off is
+    /// only that head/tail warming during a mass scan happens a few
+    /// files at a time.
+    pub precache_sem: tokio::sync::Semaphore,
     /// Live adaptive read-ahead tasks, one per armed playback stream.
     /// Single-flight for `load_meta`. A season pack's episodes all resolve to
     /// one `usenet_meta` row, so a scanner opening 24 of them at once used to
@@ -74,13 +100,19 @@ impl StreamerState {
             "RIVEN_USENET_DECODED_SIZES_ENTRIES",
             DEFAULT_DECODED_SIZES_ENTRIES,
         );
+        // Fixed: precache is optional cache warming, and 4 concurrent 8 MB
+        // head+tail warms is plenty for any library scan without a spike.
+        const PRECACHE_CONCURRENCY: usize = 4;
         Self {
+            stream_fanout: env_positive("RIVEN_USENET_STREAM_FANOUT", DEFAULT_STREAM_FANOUT),
             cache: SegmentCache::new(cache_bytes),
             meta_cache: MetaCache::new(meta_cache_bytes),
             decoded_sizes: DecodedSizes::new(decoded_sizes_entries),
+            precache_sem: tokio::sync::Semaphore::new(PRECACHE_CONCURRENCY),
             meta_loads: InFlight::default(),
             fails: PermanentFails::default(),
             in_flight: InFlight::default(),
+            precached: PrecachedFiles::default(),
             migrated: MigratedMetas::default(),
             fetch_metrics: FetchMetrics::default(),
         }
@@ -100,72 +132,9 @@ pub struct FetchMetrics {
     ok: std::sync::atomic::AtomicU64,
     failed: std::sync::atomic::AtomicU64,
     bytes_decoded: std::sync::atomic::AtomicU64,
-    /// Exponentially-weighted mean article fetch time, in milliseconds.
-    ///
-    /// Exists so "this fetch is abnormally slow" can be judged against what
-    /// this deployment is actually seeing rather than against a number baked
-    /// in on someone else's hardware. The same code sees a ~250 ms mean on a
-    /// fast host with a lightly-loaded account and ~1100 ms in a container
-    /// sharing a saturated one; a fixed threshold that is a rare outlier in
-    /// the first case fires on a quarter of all fetches in the second, which
-    /// is exactly when adding load is most harmful.
-    ///
-    /// 0 means "no samples yet".
-    latency_ewma_ms: std::sync::atomic::AtomicU64,
 }
 
 impl FetchMetrics {
-    /// Weight of each new sample. 1/16 is slow enough to ignore a single
-    /// outlier — which is the very thing the estimate is used to detect — and
-    /// fast enough to follow a real shift in conditions within a few seconds
-    /// of streaming.
-    const EWMA_SHIFT: u64 = 4;
-
-    /// Ceiling on how far above the running mean a single sample may count,
-    /// as a multiple of it.
-    ///
-    /// Without this the estimate is not robust against the very thing it
-    /// exists to detect: one 30 s article folded in at full weight moved a
-    /// settled 250 ms mean to 2.1 s, which would then have been treated as
-    /// normal and suppressed hedging exactly when it was needed. Clamping
-    /// each sample keeps the estimate a measure of *typical* cost while still
-    /// letting a sustained shift ratchet it up within a few dozen samples.
-    const EWMA_SAMPLE_CAP_MULTIPLE: u64 = 4;
-
-    pub fn record_latency(&self, sample_ms: u64) {
-        use std::sync::atomic::Ordering::Relaxed;
-        let _ = self
-            .latency_ewma_ms
-            .fetch_update(Relaxed, Relaxed, |current| {
-                Some(if current == 0 {
-                    sample_ms
-                } else {
-                    let capped =
-                        sample_ms.min(current.saturating_mul(Self::EWMA_SAMPLE_CAP_MULTIPLE));
-                    // Signed throughout: roughly half of all samples are
-                    // *faster* than the mean, so the step is negative as often
-                    // as not. Doing this in `u64` wraps on those, which
-                    // happens to land on the right value in release and
-                    // panics on overflow in debug.
-                    let current_ms = i64::try_from(current).unwrap_or(i64::MAX);
-                    let capped_ms = i64::try_from(capped).unwrap_or(i64::MAX);
-                    let step = (capped_ms - current_ms) >> Self::EWMA_SHIFT;
-                    u64::try_from((current_ms + step).max(1)).unwrap_or(1)
-                })
-            });
-    }
-
-    /// Current estimate, or `None` until enough has been seen to trust one.
-    pub fn latency_ewma_ms(&self) -> Option<u64> {
-        match self
-            .latency_ewma_ms
-            .load(std::sync::atomic::Ordering::Relaxed)
-        {
-            0 => None,
-            ms => Some(ms),
-        }
-    }
-
     pub fn record_ok(&self, decoded_bytes: u64) {
         use std::sync::atomic::Ordering::Relaxed;
         self.ok.fetch_add(1, Relaxed);
@@ -487,6 +456,25 @@ pub fn take_dead_segment_receiver() -> Option<mpsc::UnboundedReceiver<DeadSegmen
     dead_segment_channel().rx.lock().take()
 }
 
+/// Tracks files for which the head+tail precache has already been
+/// kicked off in this process. The first stream request for a file
+/// eagerly warms the first and last few MB so probes and seek-to-end
+/// hits are served from cache.
+#[derive(Default)]
+pub struct PrecachedFiles {
+    inner: Mutex<HashSet<String>>,
+}
+
+impl PrecachedFiles {
+    /// Returns `true` exactly once per `(info_hash, file_index)` pair —
+    /// the caller is responsible for actually performing the precache.
+    /// Subsequent callers see `false` and skip.
+    pub fn claim(&self, info_hash: &str, file_index: usize) -> bool {
+        let key = format!("{info_hash}:{file_index}");
+        self.inner.lock().insert(key)
+    }
+}
+
 /// Tracks NzbMeta instances for which the in-place backfill of
 /// `decoded_seg_size` (for old metas ingested before that field existed)
 /// has been started. Single-shot per `info_hash` per process.
@@ -604,55 +592,5 @@ mod tests {
         assert_eq!(sizes.get("a"), Some(1));
         assert_eq!(sizes.get("b"), None);
         assert_eq!(sizes.get("c"), Some(3));
-    }
-
-    #[test]
-    fn latency_estimate_tracks_conditions_without_chasing_outliers() {
-        let metrics = FetchMetrics::default();
-        assert_eq!(metrics.latency_ewma_ms(), None, "no samples yet");
-
-        // A steady stream of normal fetches settles near their true cost.
-        for _ in 0..100 {
-            metrics.record_latency(250);
-        }
-        let settled = metrics.latency_ewma_ms().expect("has samples");
-        assert!(
-            (240..=260).contains(&settled),
-            "estimate should converge on the observed cost, got {settled}"
-        );
-
-        // One pathological fetch must barely move it — the estimate is what
-        // *defines* an outlier, so an outlier dragging it up would raise the
-        // bar for detecting the next one.
-        metrics.record_latency(30_000);
-        let after = metrics.latency_ewma_ms().expect("has samples");
-        assert!(
-            after < settled * 2,
-            "a single 30s outlier must not blow up the estimate, got {after}"
-        );
-
-        // A sustained shift in conditions is followed, so a slower deployment
-        // does not end up hedging on a quarter of its fetches.
-        for _ in 0..200 {
-            metrics.record_latency(1200);
-        }
-        let shifted = metrics.latency_ewma_ms().expect("has samples");
-        assert!(
-            (1150..=1250).contains(&shifted),
-            "estimate should follow a real shift, got {shifted}"
-        );
-
-        // Samples *below* the mean are at least half of all traffic, and the
-        // step they produce is negative. Computing that in unsigned arithmetic
-        // wraps — which lands on the right answer in release and panics on
-        // overflow in debug, so this case has to be exercised explicitly.
-        for _ in 0..200 {
-            metrics.record_latency(120);
-        }
-        let recovered = metrics.latency_ewma_ms().expect("has samples");
-        assert!(
-            (110..=130).contains(&recovered),
-            "estimate must fall again when fetches get faster, got {recovered}"
-        );
     }
 }

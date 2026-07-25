@@ -168,28 +168,6 @@ impl NntpConnection {
     /// (typically `do_fetch_with_retry` consuming the `PooledBuf` inside its
     /// `spawn_blocking` decode closure) returns the allocation to the pool
     /// when the `PooledBuf` drops.
-
-    /// Read and discard a response body that a cancelled fetch left on the
-    /// wire, so the connection can be handed back instead of thrown away.
-    ///
-    /// When an attempt is abandoned mid-`BODY`, the server keeps sending; the
-    /// bytes are still queued on the socket and would be read as the *next*
-    /// request's response, corrupting it. Discarding the connection avoids
-    /// that but costs a TLS re-dial and loses a pool slot — under load that
-    /// compounds into a retry storm. Draining reclaims the socket whenever
-    /// the remainder arrives promptly.
-    ///
-    /// Returns `true` if the wire is clean and the connection is safe to
-    /// reuse. On timeout or error the caller must still drop it: a partially
-    /// drained socket is worse than no socket.
-    pub(crate) async fn drain_abandoned_body(&mut self, budget: Duration) -> bool {
-        let mut scratch = Vec::new();
-        matches!(
-            tokio::time::timeout(budget, self.stream.read_until_dot(&mut scratch, budget)).await,
-            Ok(Ok(()))
-        )
-    }
-
     pub(crate) async fn fetch_body(&mut self, message_id: &str) -> Result<PooledBuf, NntpError> {
         let id_wrapped = if message_id.starts_with('<') {
             message_id.to_string()

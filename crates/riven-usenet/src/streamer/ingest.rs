@@ -138,7 +138,8 @@ impl UsenetStreamer {
         if n == 0 {
             return Ok(());
         }
-        let probe_concurrency = super::OP_FANOUT.min(n);
+        let probe_concurrency = super::OP_FANOUT
+            .min(n);
         // stop_on_first_miss: zero tolerance for confirmed-missing segments
         // means the rest of the sample is wasted work the instant one hits —
         // there's no par2 data repair on the read path, so even one dead
@@ -453,7 +454,8 @@ impl UsenetStreamer {
             parts.push(build_rar_part(f));
         }
 
-        let header_fetch_concurrency = super::OP_FANOUT;
+        let header_fetch_concurrency =
+            super::OP_FANOUT;
         let streamer = self.clone();
         // Fetch every volume's header at bounded concurrency, but cancel the
         // rest of the group the instant one volume fails: a missing or

@@ -125,6 +125,28 @@ pub struct NzbRarSlice {
     pub ciphertext_length: u64,
 }
 
+/// Indices of segments whose encoded-byte range overlaps `[lo, hi]`.
+pub(crate) fn segments_overlapping(
+    offsets: &[u64],
+    segments: &[NzbSegment],
+    lo: u64,
+    hi: u64,
+) -> Vec<String> {
+    if segments.is_empty() {
+        return Vec::new();
+    }
+    let n = segments.len();
+    let first = if offsets.last().is_some_and(|&end| end > lo) {
+        offsets.partition_point(|&o| o <= lo).saturating_sub(1)
+    } else {
+        0
+    };
+    let last = offsets[..n].partition_point(|&o| o <= hi).saturating_sub(1);
+    (first..=last)
+        .map(|i| segments[i].message_id.clone())
+        .collect()
+}
+
 /// Pick which segment indices to STAT-probe for availability. A
 /// `sample_percent` of 100 or more returns every index — full verification,
 /// the only mode that reliably catches a *single* dead article in a large
@@ -200,6 +222,14 @@ pub(crate) fn concat_slices(mut slices: Vec<Bytes>, start: u64, end_inclusive: u
 mod tests {
     use super::*;
 
+    fn seg(id: &str) -> NzbSegment {
+        NzbSegment {
+            bytes: 0,
+            number: 0,
+            message_id: id.to_string(),
+        }
+    }
+
     #[test]
     fn validation_full_coverage_at_100_percent() {
         let got = select_validation_indices(36_526, 100);
@@ -229,5 +259,25 @@ mod tests {
     fn validation_small_file_probes_everything() {
         assert_eq!(select_validation_indices(4, 5), vec![0, 1, 2, 3]);
         assert_eq!(select_validation_indices(0, 5), Vec::<usize>::new());
+    }
+
+    #[test]
+    fn segments_overlapping_picks_touched_segments() {
+        let offsets = [0u64, 100, 250, 400];
+        let segments = [seg("a"), seg("b"), seg("c")];
+
+        let ids = |lo, hi| segments_overlapping(&offsets, &segments, lo, hi);
+
+        assert_eq!(ids(0, 0), vec!["a"]);
+        assert_eq!(ids(50, 99), vec!["a"]);
+        assert_eq!(ids(50, 150), vec!["a", "b"]);
+        assert_eq!(ids(120, 300), vec!["b", "c"]);
+        assert_eq!(ids(100, 100), vec!["b"]);
+        assert_eq!(ids(0, 399), vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn segments_overlapping_empty_is_empty() {
+        assert!(segments_overlapping(&[0], &[], 0, 10).is_empty());
     }
 }

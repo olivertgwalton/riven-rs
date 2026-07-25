@@ -296,17 +296,7 @@ impl UsenetStreamer {
             return Ok(Bytes::new());
         }
 
-        // Fan out across the whole batch, for the same reason `read_direct`
-        // does: the caller cannot be served until the slowest segment in the
-        // range lands, so fetching them a few at a time adds rounds of latency
-        // on top of a floor it cannot lower. `OP_FANOUT` (4) was measured
-        // costing a RAR-backed title ~5.6 s per 4 MiB range where the articles
-        // themselves were ~1 s — two thirds of that was waiting for a turn.
-        //
-        // This path is easy to forget: RAR and Direct releases are the same
-        // file to a player but take different assembly code, so a fix applied
-        // only to `read_direct` silently leaves every RAR release slow.
-        const MAX_READ_FANOUT: usize = 24;
+        let read_concurrency = super::OP_FANOUT;
         let segments = part.segments.as_slice();
         let mut slices: Vec<Bytes> = Vec::new();
         let mut produced: usize = 0;
@@ -316,7 +306,6 @@ impl UsenetStreamer {
         loop {
             let streamer = self.clone();
             let client = client.clone();
-            let read_concurrency = (batch_last - batch_start + 1).min(MAX_READ_FANOUT);
             let mut stream = stream::iter(batch_start..=batch_last)
                 .map(move |i| {
                     let s = streamer.clone();

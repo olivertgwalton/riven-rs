@@ -35,7 +35,7 @@ pub use ingest::DEFAULT_AVAILABILITY_SAMPLE_PERCENT;
 pub use meta::{NzbMeta, NzbMetaFile, NzbMetaSource, NzbRarPart, NzbRarSlice, UNKNOWN_FILE_LABEL};
 
 pub(crate) use availability::{SweepCounts, stat_sweep};
-pub(crate) use meta::{concat_slices, select_validation_indices};
+pub(crate) use meta::{concat_slices, segments_overlapping, select_validation_indices};
 
 /// Task fan-out for availability STAT sweeps. STATs are tiny; real socket
 /// use is bounded by the pool's Bulk lane admission, this only caps how many
@@ -551,13 +551,10 @@ impl riven_core::local_source::LocalByteSource for UsenetStreamer {
         file_index: usize,
         start: u64,
         end_inclusive: u64,
-        intent: riven_core::local_source::ReadIntent,
     ) -> anyhow::Result<bytes::Bytes> {
-        Ok(
-            UsenetStreamer::read_range(self, info_hash, file_index, start, end_inclusive, intent)
-                .await?,
-        )
+        Ok(UsenetStreamer::read_range(self, info_hash, file_index, start, end_inclusive).await?)
     }
+
 
     fn stream_register(&self, key: &str, info_hash: &str, filename: &str, file_size: u64) {
         let now = std::time::SystemTime::now()
