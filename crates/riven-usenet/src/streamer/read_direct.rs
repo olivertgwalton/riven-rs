@@ -41,11 +41,23 @@ const NNTP_RETRY_DELAY_MS: u64 = 300;
 /// Retrying serially cannot help — you would have to abandon the original,
 /// having already paid for it. Racing a duplicate does: the tail is a
 /// *property of one connection*, not of the article, so a second connection
-/// almost always answers in the usual ~224 ms. Cost is bounded and tiny,
-/// because the threshold sits far out in the tail: under 1% of articles are
-/// ever hedged, and the loser is cancelled the moment the winner lands.
-/// (Dean & Barroso's "The Tail at Scale" hedged request, applied to NNTP.)
-const HEDGE_AFTER: std::time::Duration = std::time::Duration::from_millis(900);
+/// usually answers in the normal time. The loser is cancelled the moment the
+/// winner lands. (Dean & Barroso's "The Tail at Scale", applied to NNTP.)
+///
+/// The threshold is a multiple of the *measured* mean rather than a constant,
+/// because "abnormally slow" is not portable. The same code sees a ~250 ms
+/// mean on a fast host with a quiet account and ~1100 ms in a container
+/// sharing a saturated one. A constant tuned to the first (900 ms — under 1%
+/// hedged) fires on roughly a quarter of all fetches in the second, adding
+/// load in precisely the conditions that made fetches slow. Scaling keeps the
+/// hedge rare in both.
+const HEDGE_LATENCY_MULTIPLE: u32 = 5;
+/// Never hedge sooner than this, however fast things look. Below it the
+/// duplicate costs more than the stall it avoids.
+const HEDGE_FLOOR: std::time::Duration = std::time::Duration::from_millis(1500);
+/// Never wait longer than this to give up on one connection, however slow
+/// things look. Past here the read is already a visible stutter.
+const HEDGE_CEILING: std::time::Duration = std::time::Duration::from_millis(8000);
 
 impl UsenetStreamer {
     /// The pool client matching a read's urgency.
@@ -63,6 +75,20 @@ impl UsenetStreamer {
             ReadIntent::Demand => self.pool.playback_client(),
             ReadIntent::ReadAhead => self.pool.stream_client(),
         }
+    }
+
+    /// How long to wait on one connection before racing a duplicate, scaled
+    /// to what fetches currently cost here. See [`HEDGE_LATENCY_MULTIPLE`].
+    fn hedge_after(&self) -> std::time::Duration {
+        self.state
+            .fetch_metrics
+            .latency_ewma_ms()
+            .map_or(HEDGE_FLOOR, |mean| {
+                std::time::Duration::from_millis(
+                    mean.saturating_mul(u64::from(HEDGE_LATENCY_MULTIPLE)),
+                )
+                .clamp(HEDGE_FLOOR, HEDGE_CEILING)
+            })
     }
 
     /// Fetch and yEnc-decode a segment's body. Routes through the LRU
@@ -158,6 +184,7 @@ impl UsenetStreamer {
     /// reply channel is closed) or lets the slot finish reading the body and
     /// discard it, so the connection is handed back clean either way.
     async fn fetch_body_hedged(
+        &self,
         client: &NntpClient,
         message_id: &str,
         file: &str,
@@ -165,15 +192,16 @@ impl UsenetStreamer {
         if !client.is_latency_sensitive() {
             return client.fetch_body(message_id).await;
         }
+        let hedge_after = self.hedge_after();
         let primary = client.fetch_body(message_id);
         tokio::pin!(primary);
-        match tokio::time::timeout(HEDGE_AFTER, &mut primary).await {
+        match tokio::time::timeout(hedge_after, &mut primary).await {
             Ok(result) => result,
             Err(_) => {
                 tracing::debug!(
                     message_id,
                     file,
-                    hedge_after_ms = HEDGE_AFTER.as_millis(),
+                    hedge_after_ms = hedge_after.as_millis(),
                     "nntp fetch is in the latency tail; racing a hedge"
                 );
                 let hedge = client.fetch_body(message_id);
@@ -201,7 +229,7 @@ impl UsenetStreamer {
         for attempt in 0..NNTP_FETCH_ATTEMPTS {
             tracing::debug!(attempt, message_id, file, "nntp fetch starting");
             let started = std::time::Instant::now();
-            match Self::fetch_body_hedged(client, message_id, file).await {
+            match self.fetch_body_hedged(client, message_id, file).await {
                 Ok(body) => {
                     let wire_ms = started.elapsed().as_millis();
                     let encoded_len = body.len();
@@ -224,6 +252,7 @@ impl UsenetStreamer {
                         };
                     let decode_ms = decode_started.elapsed().as_millis();
                     self.state.fetch_metrics.record_ok(decoded.len() as u64);
+                    self.state.fetch_metrics.record_latency(wire_ms as u64);
                     tracing::debug!(
                         attempt,
                         message_id,

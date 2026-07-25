@@ -100,9 +100,64 @@ pub struct FetchMetrics {
     ok: std::sync::atomic::AtomicU64,
     failed: std::sync::atomic::AtomicU64,
     bytes_decoded: std::sync::atomic::AtomicU64,
+    /// Exponentially-weighted mean article fetch time, in milliseconds.
+    ///
+    /// Exists so "this fetch is abnormally slow" can be judged against what
+    /// this deployment is actually seeing rather than against a number baked
+    /// in on someone else's hardware. The same code sees a ~250 ms mean on a
+    /// fast host with a lightly-loaded account and ~1100 ms in a container
+    /// sharing a saturated one; a fixed threshold that is a rare outlier in
+    /// the first case fires on a quarter of all fetches in the second, which
+    /// is exactly when adding load is most harmful.
+    ///
+    /// 0 means "no samples yet".
+    latency_ewma_ms: std::sync::atomic::AtomicU64,
 }
 
 impl FetchMetrics {
+    /// Weight of each new sample. 1/16 is slow enough to ignore a single
+    /// outlier — which is the very thing the estimate is used to detect — and
+    /// fast enough to follow a real shift in conditions within a few seconds
+    /// of streaming.
+    const EWMA_SHIFT: u64 = 4;
+
+    /// Ceiling on how far above the running mean a single sample may count,
+    /// as a multiple of it.
+    ///
+    /// Without this the estimate is not robust against the very thing it
+    /// exists to detect: one 30 s article folded in at full weight moved a
+    /// settled 250 ms mean to 2.1 s, which would then have been treated as
+    /// normal and suppressed hedging exactly when it was needed. Clamping
+    /// each sample keeps the estimate a measure of *typical* cost while still
+    /// letting a sustained shift ratchet it up within a few dozen samples.
+    const EWMA_SAMPLE_CAP_MULTIPLE: u64 = 4;
+
+    pub fn record_latency(&self, sample_ms: u64) {
+        use std::sync::atomic::Ordering::Relaxed;
+        let _ = self
+            .latency_ewma_ms
+            .fetch_update(Relaxed, Relaxed, |current| {
+                Some(if current == 0 {
+                    sample_ms
+                } else {
+                    let capped =
+                        sample_ms.min(current.saturating_mul(Self::EWMA_SAMPLE_CAP_MULTIPLE));
+                    current + ((capped as i64 - current as i64) >> Self::EWMA_SHIFT) as u64
+                })
+            });
+    }
+
+    /// Current estimate, or `None` until enough has been seen to trust one.
+    pub fn latency_ewma_ms(&self) -> Option<u64> {
+        match self
+            .latency_ewma_ms
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            0 => None,
+            ms => Some(ms),
+        }
+    }
+
     pub fn record_ok(&self, decoded_bytes: u64) {
         use std::sync::atomic::Ordering::Relaxed;
         self.ok.fetch_add(1, Relaxed);
@@ -541,5 +596,42 @@ mod tests {
         assert_eq!(sizes.get("a"), Some(1));
         assert_eq!(sizes.get("b"), None);
         assert_eq!(sizes.get("c"), Some(3));
+    }
+
+    #[test]
+    fn latency_estimate_tracks_conditions_without_chasing_outliers() {
+        let metrics = FetchMetrics::default();
+        assert_eq!(metrics.latency_ewma_ms(), None, "no samples yet");
+
+        // A steady stream of normal fetches settles near their true cost.
+        for _ in 0..100 {
+            metrics.record_latency(250);
+        }
+        let settled = metrics.latency_ewma_ms().expect("has samples");
+        assert!(
+            (240..=260).contains(&settled),
+            "estimate should converge on the observed cost, got {settled}"
+        );
+
+        // One pathological fetch must barely move it — the estimate is what
+        // *defines* an outlier, so an outlier dragging it up would raise the
+        // bar for detecting the next one.
+        metrics.record_latency(30_000);
+        let after = metrics.latency_ewma_ms().expect("has samples");
+        assert!(
+            after < settled * 2,
+            "a single 30s outlier must not blow up the estimate, got {after}"
+        );
+
+        // A sustained shift in conditions is followed, so a slower deployment
+        // does not end up hedging on a quarter of its fetches.
+        for _ in 0..200 {
+            metrics.record_latency(1200);
+        }
+        let shifted = metrics.latency_ewma_ms().expect("has samples");
+        assert!(
+            (1150..=1250).contains(&shifted),
+            "estimate should follow a real shift, got {shifted}"
+        );
     }
 }
