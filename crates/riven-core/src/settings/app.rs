@@ -59,7 +59,8 @@ pub struct RivenSettings {
     /// Shared secret used to verify frontend-signed auth claims.
     pub frontend_auth_signing_secret: String,
 
-    /// VFS in-memory chunk cache capacity in MB. 0 = use default (1 024 MB).
+    /// Ceiling on VFS read-ahead memory across every open handle, in MB.
+    /// 0 = use default (256 MB).
     pub vfs_cache_max_size_mb: u64,
 
     /// Comma-separated list of allowed CORS origins for the API.

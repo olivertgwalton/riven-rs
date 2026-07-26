@@ -164,8 +164,6 @@ struct RivenFsInner {
 
     state: VfsState,
 
-    /// Ceiling on one file's adaptive read-ahead window.
-    max_prefetch_window: u64,
     read_semaphore: Arc<Semaphore>,
     fuse_stats: Arc<FuseStats>,
     link_refresh_locks: DashMap<i64, Arc<Mutex<()>>>,
@@ -207,11 +205,7 @@ impl RivenFsInner {
         cache_max_size_mb: u64,
         local_source: Option<Arc<dyn riven_core::local_source::LocalByteSource>>,
     ) -> Self {
-        let cache_capacity_bytes = if cache_max_size_mb == 0 {
-            50 * 1024 * 1024
-        } else {
-            (cache_max_size_mb * 1024 * 1024) as usize
-        };
+        crate::prefetch::init_budget_mb(cache_max_size_mb as usize);
         Self {
             vfs_layout,
             filesystem_settings_revision,
@@ -219,7 +213,6 @@ impl RivenFsInner {
             link_request_tx,
             runtime: tokio::runtime::Handle::current(),
             state: VfsState::new(),
-            max_prefetch_window: cache_capacity_bytes as u64,
             // Backstop only. Reads are async and normally served from the
             // prefetch buffer, which bounds real fetches itself — measured
             // permit wait is 0 and in-flight peaks in single digits during
@@ -555,11 +548,7 @@ impl Filesystem for RivenFs {
             ));
             let fd = s.state.open(OpenedFile::Streamed {
                 path,
-                prefetcher: Arc::new(Prefetcher::new(
-                    byte_source,
-                    s.max_prefetch_window,
-                    &s.runtime,
-                )),
+                prefetcher: Arc::new(Prefetcher::new(byte_source, &s.runtime)),
             });
             reply.opened(FuseFh(fd), FopenFlags::FOPEN_KEEP_CACHE);
             return;
@@ -601,11 +590,7 @@ impl Filesystem for RivenFs {
         ));
         let fd = s.state.open(OpenedFile::Streamed {
             path,
-            prefetcher: Arc::new(Prefetcher::new(
-                byte_source,
-                s.max_prefetch_window,
-                &s.runtime,
-            )),
+            prefetcher: Arc::new(Prefetcher::new(byte_source, &s.runtime)),
         });
         reply.opened(FuseFh(fd), FopenFlags::FOPEN_KEEP_CACHE);
     }

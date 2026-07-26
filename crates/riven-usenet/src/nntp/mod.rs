@@ -14,11 +14,11 @@ use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
 use tokio_rustls::rustls::ClientConfig;
 
-mod connection;
+mod client;
 mod pool;
 
-pub use connection::NntpConnection;
-pub use pool::{NntpClient, NntpPool, ProviderHealth, ProviderTraffic};
+pub use client::{NntpClient, Traffic};
+pub use pool::{ClientPool, Lease, ProviderHealth, ProviderTraffic};
 
 #[derive(Clone)]
 pub struct NntpServerConfig {
@@ -57,18 +57,16 @@ pub enum NntpError {
     ServerError(String),
     #[error("article not found: {0}")]
     ArticleNotFound(String),
+    /// `480` — the provider wants us to authenticate again, which a
+    /// reconnect satisfies.
+    #[error("authentication required: {0}")]
+    AuthRequired(String),
     #[error("provider connection limit reached: {0}")]
     TooManyConnections(String),
     #[error("protocol error: {0}")]
     Protocol(&'static str),
     #[error("timed out")]
     Timeout,
-    /// A *client-side* lane deadline elapsed while the provider was still
-    /// responding. Distinct from [`NntpError::Timeout`] (a dead socket)
-    /// because it says nothing about provider health: it is our own
-    /// impatience, so it must never count toward the circuit breaker.
-    #[error("lane deadline exceeded")]
-    DeadlineExceeded,
 }
 
 pub(crate) enum NntpStream {
@@ -306,9 +304,65 @@ static ENCODED_BUF_POOL: crate::bufpool::BufPool =
     crate::bufpool::BufPool::new(64, 2 * 1024 * 1024);
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::io::Cursor;
+
+    /// Decoded payload every article served by [`spawn_fake_nntp_server`]
+    /// carries.
+    pub(crate) const FAKE_SEGMENT_PAYLOAD: &[u8] = b"riven fake usenet segment payload";
+
+    /// Loopback listener speaking enough NNTP for pool tests: `200` greeting,
+    /// `111` to DATE, `223` to STAT, and a yEnc article to BODY.
+    pub(crate) async fn spawn_fake_nntp_server()
+    -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader as TokioBufReader};
+        use tokio::net::TcpListener;
+
+        let article = crate::yenc::tests::encode_single(FAKE_SEGMENT_PAYLOAD, "fake.bin");
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move {
+            loop {
+                let Ok((socket, _)) = listener.accept().await else {
+                    return;
+                };
+                let article = article.clone();
+                tokio::spawn(async move {
+                    let (read_half, mut write_half) = socket.into_split();
+                    if write_half
+                        .write_all(b"200 fake nntp ready\r\n")
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                    let mut lines = TokioBufReader::new(read_half).lines();
+                    while let Ok(Some(line)) = lines.next_line().await {
+                        let reply: Vec<u8> = if line.starts_with("DATE") {
+                            b"111 20260101000000\r\n".to_vec()
+                        } else if line.starts_with("STAT") {
+                            b"223 0 <exists>\r\n".to_vec()
+                        } else if line.starts_with("BODY") {
+                            let mut out = b"222 0 <exists>\r\n".to_vec();
+                            out.extend_from_slice(&article);
+                            out.extend_from_slice(b"\r\n.\r\n");
+                            out
+                        } else if line.starts_with("QUIT") {
+                            drop(write_half.write_all(b"205 bye\r\n").await);
+                            return;
+                        } else {
+                            b"500 what\r\n".to_vec()
+                        };
+                        if write_half.write_all(&reply).await.is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        (addr, handle)
+    }
 
     #[test]
     fn undot_stuff_noop_when_no_stuffing() {

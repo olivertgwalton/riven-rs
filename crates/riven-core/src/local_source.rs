@@ -8,10 +8,26 @@
 
 use bytes::Bytes;
 
+/// How an origin is physically chunked, so read-ahead can be sized in the
+/// origin's own units instead of an arbitrary byte figure.
+#[derive(Debug, Clone)]
+pub struct SourceLayout {
+    /// Natural fetch unit — one usenet article's decoded size.
+    pub chunk_size: u64,
+    /// Virtual offsets at which a new container volume begins. Crossing one
+    /// is where a stall shows up, so read-ahead widens as it approaches.
+    pub boundaries: Vec<u64>,
+}
+
 /// A read-by-range byte source addressed by `(info_hash, file_index)`,
 /// implemented in-process by the usenet streamer.
 #[async_trait::async_trait]
 pub trait LocalByteSource: Send + Sync {
+    /// Chunking of one file, when the origin has a natural one.
+    async fn layout(&self, _info_hash: &str, _file_index: usize) -> Option<SourceLayout> {
+        None
+    }
+
     /// Read the inclusive byte range `[start, end]` of the file. Returns the
     /// decoded bytes (which may be slightly shorter than requested at the
     /// tail of a segment — callers must tolerate a short read, as they

@@ -1,5 +1,5 @@
-//! Usenet streaming diagnostics: NNTP provider health (connections + circuit
-//! breaker) and the in-process streaming engine's cache/fetch metrics.
+//! Usenet streaming diagnostics: NNTP provider health (connections + 430
+//! demotion) and the in-process streaming engine's cache/fetch metrics.
 //!
 //! Both read live, in-process state — the shared `UsenetStreamer`'s connection
 //! pool and the process-global `StreamerState`. Neither touches the network:
@@ -27,12 +27,11 @@ pub struct NntpProviderHealth {
     pub idle_connections: i32,
     /// Open sockets currently servicing a fetch.
     pub active_connections: i32,
-    /// Circuit breaker is muting this provider after repeated failures.
-    pub breaker_tripped: bool,
-    /// Seconds until the breaker re-allows the provider (0 if healthy).
-    pub cooldown_seconds_remaining: i64,
-    /// Consecutive transient failures since the last success.
-    pub consecutive_failures: i64,
+    /// Provider is being tried after healthier ones because it keeps
+    /// answering 430 for articles others can serve.
+    pub demoted: bool,
+    /// Consecutive "no such article" answers since the last success.
+    pub consecutive_not_found: i64,
 }
 
 /// In-process streaming engine health (segment cache + NNTP fetch counters).
@@ -201,8 +200,8 @@ pub struct UsenetHealthQuery;
 
 #[Object]
 impl UsenetHealthQuery {
-    /// Per-provider NNTP health (connections + circuit-breaker state). Empty
-    /// when usenet isn't configured.
+    /// Per-provider NNTP health (connections + demotion state). Empty when
+    /// usenet isn't configured.
     async fn nntp_providers(&self, _ctx: &Context<'_>) -> Result<Vec<NntpProviderHealth>> {
         let providers = match UsenetStreamer::existing_shared() {
             Some(streamer) => streamer.pool().health(),
@@ -219,9 +218,8 @@ impl UsenetHealthQuery {
                 open_connections: p.open_connections as i32,
                 idle_connections: p.idle_connections as i32,
                 active_connections: p.active_connections as i32,
-                breaker_tripped: p.breaker_tripped,
-                cooldown_seconds_remaining: p.cooldown_seconds_remaining as i64,
-                consecutive_failures: p.consecutive_failures as i64,
+                demoted: p.demoted,
+                consecutive_not_found: p.consecutive_not_found as i64,
             })
             .collect())
     }

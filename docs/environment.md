@@ -41,7 +41,7 @@ anything outside the markers survives regeneration. -->
 | --- | --- | --- |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | variable | `crates/riven-core/src/logging.rs:200` |
 | `OTEL_SERVICE_NAME` | variable | `crates/riven-core/src/logging.rs:204` |
-| `RIVEN_SETTING__` | prefix | `crates/riven-core/src/settings/app.rs:141` |
+| `RIVEN_SETTING__` | prefix | `crates/riven-core/src/settings/app.rs:130` |
 | `SENTRY_DSN` | variable | `crates/riven-core/src/logging.rs:183` |
 | `SENTRY_ENVIRONMENT` | variable | `crates/riven-core/src/logging.rs:186` |
 
@@ -49,19 +49,20 @@ anything outside the markers survives regeneration. -->
 
 | Variable | Kind | Read at |
 | --- | --- | --- |
-| `RIVEN_USENET_CACHE_BYTES` | variable | `crates/riven-usenet/src/state.rs:119` |
-| `RIVEN_USENET_DECODED_SIZES_ENTRIES` | variable | `crates/riven-usenet/src/state.rs:123` |
-| `RIVEN_USENET_MAX_BACKGROUND_SEGMENTS` | variable | `crates/riven-usenet/src/state.rs:141` |
-| `RIVEN_USENET_MAX_IN_FLIGHT_SEGMENTS` | variable | `crates/riven-usenet/src/state.rs:132` |
-| `RIVEN_USENET_MAX_PREFETCH` | variable | `crates/riven-usenet/src/state.rs:130` |
-| `RIVEN_USENET_MAX_PREFETCH_WINDOWS` | variable | `crates/riven-usenet/src/state.rs:136` |
-| `RIVEN_USENET_META_CACHE_BYTES` | variable | `crates/riven-usenet/src/state.rs:121` |
-| `RIVEN_USENET_PRECACHE_CONCURRENCY` | variable | `crates/riven-usenet/src/state.rs:127` |
+| `RIVEN_MEMORY_LIMIT_MB` | variable | `crates/riven-usenet/src/pool/segment_cache.rs:34` |
+| `RIVEN_USENET_CACHE_BYTES` | variable | `crates/riven-usenet/src/pool/segment_cache.rs:31` |
+| `RIVEN_USENET_META_CACHE_BYTES` | variable | `crates/riven-usenet/src/state.rs:37` |
 
 ### `riven-vfs`
 
 | Variable | Kind | Read at |
 | --- | --- | --- |
-| `RIVEN_USENET_PLAYBACK_SEGMENT_WINDOW` | variable | `crates/riven-vfs/src/media_stream.rs:643` |
+| `RIVEN_BENCH_DB` | variable | `crates/riven-vfs/examples/stream_bench.rs:176` |
+| `RIVEN_BENCH_NNTP_HOST` | variable | `crates/riven-vfs/examples/stream_bench.rs:181` |
+| `RIVEN_BENCH_NNTP_PASS` | variable | `crates/riven-vfs/examples/stream_bench.rs:179` |
+| `RIVEN_BENCH_NNTP_PORT` | variable | `crates/riven-vfs/examples/stream_bench.rs:182` |
+| `RIVEN_BENCH_NNTP_USER` | variable | `crates/riven-vfs/examples/stream_bench.rs:178` |
+| `RIVEN_VFS_READAHEAD_BUDGET_MB` | variable | `crates/riven-vfs/src/prefetch.rs:64`<br>`crates/riven-vfs/src/prefetch.rs:78` |
+| `RIVEN_VFS_READAHEAD_CHUNKS` | variable | `crates/riven-vfs/src/prefetch.rs:99` |
 <!-- END GENERATED -->
 

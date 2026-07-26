@@ -11,14 +11,23 @@ use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use bytes::{Bytes, BytesMut};
+use riven_core::local_source::SourceLayout;
 use tokio::runtime::Handle;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot};
 
 use crate::source::ByteSource;
 
 const MIB: u64 = 1024 * 1024;
-const CHUNK_SIZE: u64 = 8 * MIB;
-const MAX_INFLIGHT: usize = 6;
+/// Chunk size for origins with no natural one of their own (HTTP/debrid).
+/// Usenet supplies its article size instead, via [`ByteSource::layout`].
+const DEFAULT_CHUNK: u64 = 8 * MIB;
+/// Chunks kept in flight ahead of the read position. Each one is its own task
+/// and may take its own origin connection; the hard ceiling on connections is
+/// the origin's, not this.
+const WINDOW_CHUNKS: usize = 8;
+/// Widened window used when playback is about to cross into another container
+/// volume, where a boundary stall would otherwise be audible.
+const BOUNDARY_WINDOW_CHUNKS: usize = 24;
 const ARM_AFTER: u32 = 3;
 const PROBING_TOLERANCE: u64 = 256 * 1024;
 const FORWARD_TOLERANCE: u64 = 4 * MIB;
@@ -42,36 +51,103 @@ fn env_positive(name: &str, default: usize) -> usize {
         .unwrap_or(default)
 }
 
+/// Default ceiling on read-ahead memory across every open handle.
+const DEFAULT_BUDGET_MB: usize = 256;
+
+static BUDGET: OnceLock<Arc<Semaphore>> = OnceLock::new();
+
+/// Set the process-wide read-ahead memory ceiling. Called once at VFS
+/// construction; the env var still wins so a deployment can override without
+/// touching settings. Later calls are ignored.
+pub fn init_budget_mb(budget_mb: usize) {
+    let budget = env_positive(
+        "RIVEN_VFS_READAHEAD_BUDGET_MB",
+        if budget_mb > 0 {
+            budget_mb
+        } else {
+            DEFAULT_BUDGET_MB
+        },
+    );
+    drop(BUDGET.set(Arc::new(Semaphore::new(budget))));
+}
+
 fn global_budget() -> Arc<Semaphore> {
-    static BUDGET: OnceLock<Arc<Semaphore>> = OnceLock::new();
     BUDGET
         .get_or_init(|| {
             Arc::new(Semaphore::new(env_positive(
                 "RIVEN_VFS_READAHEAD_BUDGET_MB",
-                256,
+                DEFAULT_BUDGET_MB,
             )))
         })
         .clone()
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct Config {
-    window: u64,
     chunk: u64,
-    max_inflight: usize,
+    window_chunks: usize,
+    boundary_window_chunks: usize,
+    /// Virtual offsets at which the origin starts a new container volume,
+    /// ascending. Empty for origins that are one flat stream.
+    boundaries: Arc<[u64]>,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            chunk: DEFAULT_CHUNK,
+            window_chunks: env_positive("RIVEN_VFS_READAHEAD_CHUNKS", WINDOW_CHUNKS),
+            boundary_window_chunks: BOUNDARY_WINDOW_CHUNKS,
+            boundaries: Arc::from([]),
+        }
+    }
 }
 
 impl Config {
-    fn new(window: u64) -> Self {
+    fn from_layout(layout: Option<SourceLayout>) -> Self {
+        let defaults = Self::default();
+        let Some(layout) = layout else {
+            return defaults;
+        };
         Self {
-            window: window.max(CHUNK_SIZE),
-            chunk: CHUNK_SIZE,
-            max_inflight: env_positive("RIVEN_VFS_INFLIGHT_CHUNKS", MAX_INFLIGHT),
+            chunk: layout.chunk_size.max(1),
+            boundaries: Arc::from(layout.boundaries),
+            ..defaults
         }
     }
 
-    fn budget_mib(self) -> u32 {
-        self.window
+    /// Chunks to keep in flight from `cursor`. Widens as the next volume
+    /// boundary comes within the ordinary window.
+    fn chunks_at(&self, cursor: u64) -> usize {
+        let ordinary = self.chunk * self.window_chunks as u64;
+        let approaching = self
+            .boundaries
+            .iter()
+            .any(|&boundary| boundary >= cursor && boundary - cursor <= ordinary);
+        if approaching {
+            self.boundary_window_chunks.max(self.window_chunks)
+        } else {
+            self.window_chunks
+        }
+    }
+
+    fn window_at(&self, cursor: u64) -> u64 {
+        self.chunk * self.chunks_at(cursor) as u64
+    }
+
+    /// The largest window this handle can ever ask for — what its memory
+    /// reservation has to cover, since the window widens without re-reserving.
+    fn max_window(&self) -> u64 {
+        let chunks = if self.boundaries.is_empty() {
+            self.window_chunks
+        } else {
+            self.boundary_window_chunks.max(self.window_chunks)
+        };
+        self.chunk * chunks as u64
+    }
+
+    fn budget_mib(&self) -> u32 {
+        self.max_window()
             .saturating_add(BACKWARD_RETENTION)
             .div_ceil(MIB)
             .min(u64::from(u32::MAX)) as u32
@@ -221,14 +297,14 @@ pub struct Prefetcher {
 }
 
 impl Prefetcher {
-    pub fn new(source: Arc<dyn ByteSource>, max_window: u64, runtime: &Handle) -> Self {
+    pub fn new(source: Arc<dyn ByteSource>, runtime: &Handle) -> Self {
         let size = source.size();
         let (command_tx, command_rx) = mpsc::unbounded_channel();
         let (fill_tx, fill_rx) = mpsc::unbounded_channel();
         let (direct_tx, direct_rx) = mpsc::unbounded_channel();
         let actor = Actor {
             source,
-            config: Config::new(max_window),
+            config: Config::default(),
             size,
             commands: command_rx,
             fill_tx,
@@ -311,6 +387,9 @@ struct Actor {
 
 impl Actor {
     async fn run(mut self) {
+        // Resolved here rather than at construction: the FUSE open path is
+        // synchronous, and discovering an origin's chunking may need I/O.
+        self.config = Config::from_layout(self.source.layout().await);
         loop {
             tokio::select! {
                 command = self.commands.recv() => {
@@ -368,7 +447,10 @@ impl Actor {
         let request_end = request.end();
         let waits_for_current_window = request.start >= self.buffer.start
             && request.start <= self.frontier.saturating_add(FORWARD_TOLERANCE)
-            && request_end <= self.cursor.saturating_add(self.config.window);
+            && request_end
+                <= self
+                    .cursor
+                    .saturating_add(self.config.window_at(self.cursor));
         if waits_for_current_window {
             request.waited = true;
             self.pending.push(request);
@@ -398,7 +480,7 @@ impl Actor {
         }
         self.expected_next = request.end();
 
-        self.seq_run >= ARM_AFTER && self.size > self.config.window
+        self.seq_run >= ARM_AFTER && self.size > self.config.window_at(0)
     }
 
     fn promote(&mut self, start: u64) {
@@ -434,9 +516,9 @@ impl Actor {
 
     fn dispatch(&mut self) {
         while self.mode != Mode::Probing
-            && self.inflight < self.config.max_inflight
+            && self.inflight < self.config.chunks_at(self.cursor)
             && self.frontier < self.size
-            && self.frontier.saturating_sub(self.cursor) < self.config.window
+            && self.frontier.saturating_sub(self.cursor) < self.config.window_at(self.cursor)
         {
             let start = self.frontier;
             let boundary = start
@@ -444,7 +526,10 @@ impl Actor {
                 .unwrap_or(self.size)
                 .max(start + 1);
             let end = boundary
-                .min(self.cursor.saturating_add(self.config.window))
+                .min(
+                    self.cursor
+                        .saturating_add(self.config.window_at(self.cursor)),
+                )
                 .min(self.size);
             if end <= start {
                 break;
@@ -583,7 +668,11 @@ impl Actor {
 
     fn startup_ready(&self) -> bool {
         let remaining = self.size.saturating_sub(self.cursor);
-        let target = self.config.window.min(STARTUP_BUFFER).min(remaining);
+        let target = self
+            .config
+            .window_at(self.cursor)
+            .min(STARTUP_BUFFER)
+            .min(remaining);
         self.buffer.len >= target || self.buffer.end() >= self.size
     }
 
@@ -608,7 +697,7 @@ impl Actor {
             target: "streaming",
             phase = ?self.mode,
             position_mb = self.cursor >> 20,
-            window_mb = self.config.window >> 20,
+            window_mb = self.config.window_at(self.cursor) >> 20,
             buffered_mb = self.buffer.len >> 20,
             inflight = self.inflight,
             pending = self.pending.len(),
@@ -704,8 +793,16 @@ mod tests {
         }
     }
 
+    /// Every prefetcher reserves its window from one process-wide budget that
+    /// the whole test binary shares, so tests running in parallel would
+    /// otherwise starve each other out of read-ahead entirely.
+    fn unbounded_budget() {
+        init_budget_mb(1024 * 1024);
+    }
+
     fn prefetcher(size: u64, cap: usize) -> Prefetcher {
-        Prefetcher::new(Arc::new(Source { size, cap }), 16 * MIB, &Handle::current())
+        unbounded_budget();
+        Prefetcher::new(Arc::new(Source { size, cap }), &Handle::current())
     }
 
     #[tokio::test]
@@ -790,11 +887,8 @@ mod tests {
             third_gate: Semaphore::new(0),
             fill_calls: AtomicUsize::new(0),
         });
-        let reader = Arc::new(Prefetcher::new(
-            source.clone(),
-            CHUNK_SIZE,
-            &Handle::current(),
-        ));
+        unbounded_budget();
+        let reader = Arc::new(Prefetcher::new(source.clone(), &Handle::current()));
         reader.read(MIB, 128 * 1024).await.unwrap();
         reader.read(MIB + 128 * 1024, 128 * 1024).await.unwrap();
 
@@ -848,11 +942,8 @@ mod tests {
             first_gate: Semaphore::new(0),
             later_gate: Semaphore::new(0),
         });
-        let reader = Arc::new(Prefetcher::new(
-            source.clone(),
-            CHUNK_SIZE,
-            &Handle::current(),
-        ));
+        unbounded_budget();
+        let reader = Arc::new(Prefetcher::new(source.clone(), &Handle::current()));
         let mut offset = MIB;
         for _ in 0..ARM_AFTER {
             reader.read(offset, 128 * 1024).await.unwrap();
@@ -875,7 +966,7 @@ mod tests {
             "the first chunk must not start playback before the reservoir is full"
         );
 
-        source.later_gate.add_permits(MAX_INFLIGHT);
+        source.later_gate.add_permits(WINDOW_CHUNKS);
         waiting.await.unwrap().unwrap();
         assert!(!reader.snapshot().await.warming);
     }
@@ -948,7 +1039,8 @@ mod tests {
             fill_started: Notify::new(),
             fill_gate: Semaphore::new(0),
         });
-        let reader = Prefetcher::new(source.clone(), CHUNK_SIZE, &Handle::current());
+        unbounded_budget();
+        let reader = Prefetcher::new(source.clone(), &Handle::current());
 
         let mut offset = MIB;
         for _ in 0..ARM_AFTER {
@@ -966,7 +1058,7 @@ mod tests {
         let second_generation = reader.snapshot().await.generation;
         assert!(second_generation > first_generation);
 
-        source.fill_gate.add_permits(MAX_INFLIGHT);
+        source.fill_gate.add_permits(WINDOW_CHUNKS);
         for _ in 0..20 {
             tokio::task::yield_now().await;
         }

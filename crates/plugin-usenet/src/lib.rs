@@ -394,7 +394,7 @@ impl Plugin for UsenetPlugin {
         // release under heavy pool contention should be allowed to take as
         // long as it takes rather than being falsely treated as dead. The
         // pool itself already bounds provider-capacity retries (see
-        // `NntpPool::acquire`'s handling of "too many connections"), so a
+        // `ClientPool::acquire`'s handling of "too many connections"), so a
         // hang here means either a genuinely dead release (surfaces as a
         // verification error below) or every provider's own read/connect
         // timeout, neither of which needs a second timer wrapped around them.

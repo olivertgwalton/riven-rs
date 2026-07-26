@@ -289,7 +289,7 @@ pub(crate) fn spawn_background_tasks(
                 std::collections::HashMap::new();
             loop {
                 tick.tick().await;
-                for t in streamer.pool().traffic_snapshot() {
+                for t in streamer.pool().traffic() {
                     let (last_bytes, last_articles) = last.get(&t.host).copied().unwrap_or((0, 0));
                     let bytes_delta = t.bytes_downloaded.saturating_sub(last_bytes);
                     let articles_delta = t.articles_downloaded.saturating_sub(last_articles);

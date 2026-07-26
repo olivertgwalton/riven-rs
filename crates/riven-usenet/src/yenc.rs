@@ -219,11 +219,11 @@ fn parse_kv(line: &[u8], cb: &mut dyn FnMut(&str, &str)) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// Encode `data` as yEnc (single part) for round-trip testing.
-    fn encode_single(data: &[u8], name: &str) -> Vec<u8> {
+    pub(crate) fn encode_single(data: &[u8], name: &str) -> Vec<u8> {
         let mut out = Vec::new();
         out.extend_from_slice(
             format!("=ybegin line=128 size={} name={}\r\n", data.len(), name).as_bytes(),
