@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use bytes::Bytes;
-use riven_core::local_source::LocalByteSource;
+use riven_core::local_source::{LocalByteSource, SourceLayout};
 
 /// Fetches byte ranges of one open file.
 ///
@@ -26,6 +26,12 @@ pub trait ByteSource: Send + Sync {
     /// A short read is allowed — origins cap their own windows — but callers
     /// must never forward one mid-file to the kernel (see [`crate::prefetch`]).
     async fn read_range(&self, start: u64, end: u64) -> io::Result<Bytes>;
+
+    /// The origin's natural chunking, when it has one. `None` means the
+    /// read-ahead picks its own chunk size.
+    async fn layout(&self) -> Option<SourceLayout> {
+        None
+    }
 
     /// Total file size in bytes.
     fn size(&self) -> u64;
@@ -83,6 +89,10 @@ impl ByteSource for UsenetSource {
             .read_range(&self.info_hash, self.file_index, start, end)
             .await
             .map_err(io::Error::other)
+    }
+
+    async fn layout(&self) -> Option<SourceLayout> {
+        self.inner.layout(&self.info_hash, self.file_index).await
     }
 
     fn size(&self) -> u64 {

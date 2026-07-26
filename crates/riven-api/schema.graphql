@@ -640,9 +640,8 @@ type NntpProviderHealth {
 	openConnections: Int!
 	idleConnections: Int!
 	activeConnections: Int!
-	breakerTripped: Boolean!
-	cooldownSecondsRemaining: Int!
-	consecutiveFailures: Int!
+	demoted: Boolean!
+	consecutiveNotFound: Int!
 }
 
 enum PlaybackMethod {

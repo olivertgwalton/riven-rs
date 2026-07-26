@@ -16,8 +16,8 @@ use crate::rar::{self, RarEncryption, RarVolumeFileEntry};
 use super::meta::{UNKNOWN_FILE_LABEL, is_media_filename};
 use super::store;
 use super::{
-    NzbMeta, NzbMetaFile, NzbMetaSource, NzbRarPart, NzbRarSlice, StreamerError, SweepCounts,
-    UsenetStreamer, select_validation_indices, stat_sweep,
+    NzbMeta, NzbMetaFile, NzbMetaSource, NzbRarPart, NzbRarSlice, StreamerError, UsenetStreamer,
+    select_validation_indices,
 };
 
 /// In-progress per-inner-file accumulator during multi-file RAR reconstruction.
@@ -138,25 +138,18 @@ impl UsenetStreamer {
         if n == 0 {
             return Ok(());
         }
-        let probe_concurrency = super::OP_FANOUT.min(n);
+        let probe_concurrency = super::DISCOVERY_FANOUT.min(n);
         // stop_on_first_miss: zero tolerance for confirmed-missing segments
         // means the rest of the sample is wasted work the instant one hits —
         // there's no par2 data repair on the read path, so even one dead
         // segment in the file stalls playback when it's reached. Cancel and
         // let the caller try the next ranked candidate (mirrors altmount's
         // FastFailReleaseProbe cancelling on first miss).
-        let SweepCounts {
+        let super::validation::SweepCounts {
             missing,
             errors,
             checked,
-        } = stat_sweep(
-            &self.pool.bulk_client(),
-            mids,
-            probe_concurrency,
-            true,
-            file,
-        )
-        .await;
+        } = super::validation::sweep_all(&self.pool, mids, probe_concurrency, true, file).await;
 
         if missing > 0 {
             return Err(StreamerError::IncompleteRelease { missing, checked });
@@ -332,7 +325,7 @@ impl UsenetStreamer {
             file.filename = new_name;
         }
 
-        let rescale_concurrency = super::OP_FANOUT;
+        let rescale_concurrency = super::DISCOVERY_FANOUT;
         stream::iter(
             meta_files
                 .iter_mut()
@@ -453,7 +446,7 @@ impl UsenetStreamer {
             parts.push(build_rar_part(f));
         }
 
-        let header_fetch_concurrency = super::OP_FANOUT;
+        let header_fetch_concurrency = super::VOLUME_DISCOVERY_FANOUT;
         let streamer = self.clone();
         // Fetch every volume's header at bounded concurrency, but cancel the
         // rest of the group the instant one volume fails: a missing or
@@ -505,7 +498,7 @@ impl UsenetStreamer {
 
         for (vol_idx, (part, header)) in parts.iter_mut().zip(header_bytes).enumerate() {
             if let Some(first_seg) = part.segments.first()
-                && let Some(size) = self.state.decoded_sizes.get(&first_seg.message_id)
+                && let Some(size) = self.pool.decoded_size(&first_seg.message_id)
             {
                 part.decoded_seg_size = Some(size);
             }
@@ -659,9 +652,8 @@ impl UsenetStreamer {
                 continue;
             };
             let probe_end = prev_data_end.saturating_add(1023);
-            let client = self.pool.bulk_client();
             let probe = match self
-                .read_decoded_range_within_part(part, prev_data_end, probe_end, &client, &g.name)
+                .read_decoded_range_within_part(part, prev_vol == 0, prev_data_end, probe_end)
                 .await
             {
                 Ok(p) => p,
@@ -783,11 +775,8 @@ impl UsenetStreamer {
         wanted: u64,
     ) -> Result<Vec<u8>, StreamerError> {
         let mut buf: Vec<u8> = Vec::with_capacity(wanted as usize + 4096);
-        let client = self.pool.bulk_client();
         for seg in &part.segments {
-            let decoded = self
-                .fetch_decoded_cached(&client, &seg.message_id, &part.filename)
-                .await?;
+            let decoded = self.fetch_article(&seg.message_id, false).await?;
             buf.extend_from_slice(&decoded);
             if (buf.len() as u64) >= wanted {
                 break;
@@ -818,12 +807,8 @@ impl UsenetStreamer {
         let par2_name = filename_from_subject(&smallest.subject);
         let total_bytes: u64 = smallest.segments.iter().map(|s| s.bytes).sum();
         let mut buf: Vec<u8> = Vec::with_capacity(total_bytes as usize);
-        let client = self.pool.bulk_client();
         for seg in &smallest.segments {
-            match self
-                .fetch_decoded_cached(&client, &seg.message_id, &par2_name)
-                .await
-            {
+            match self.fetch_article(&seg.message_id, false).await {
                 Ok(decoded) => buf.extend_from_slice(&decoded),
                 Err(error) => {
                     tracing::debug!(
@@ -874,13 +859,12 @@ impl UsenetStreamer {
         blocks: &[Par2Block],
         slice_size: u64,
     ) -> Result<bool, StreamerError> {
-        let client = self.pool.bulk_client();
         for idx in par2_sample_block_indices(blocks.len()) {
             let block = &blocks[idx];
             let start = idx as u64 * slice_size;
             let end_inclusive = start + slice_size - 1;
             let fetched = self
-                .read_decoded_range_within_part(part, start, end_inclusive, &client, &part.filename)
+                .read_decoded_range_within_part(part, false, start, end_inclusive)
                 .await?;
             // PAR2 checksums the slice zero-padded to `slice_size`; a file's
             // final block is normally shorter than that on disk.
@@ -909,7 +893,6 @@ impl UsenetStreamer {
         // Cloned up front: the `source` match below borrows `file` mutably for
         // the rest of the function, and the fetches underneath need the name
         // for their own logs.
-        let filename = file.filename.clone();
         let NzbMetaSource::Direct { offsets, segments } = &mut file.source else {
             return Ok(());
         };
@@ -919,11 +902,7 @@ impl UsenetStreamer {
         if first.bytes == 0 {
             return Ok(());
         }
-        let client = self.pool.bulk_client();
-        let dec_first = self
-            .fetch_decoded_cached(&client, &first.message_id, &filename)
-            .await?
-            .len() as u64;
+        let dec_first = self.fetch_article(&first.message_id, false).await?.len() as u64;
         if dec_first == 0 {
             return Ok(());
         }
@@ -935,9 +914,7 @@ impl UsenetStreamer {
             let measured = if last.bytes == 0 {
                 dec_first
             } else {
-                self.fetch_decoded_cached(&client, &last.message_id, &filename)
-                    .await?
-                    .len() as u64
+                self.fetch_article(&last.message_id, false).await?.len() as u64
             };
             if measured == 0 { dec_first } else { measured }
         };

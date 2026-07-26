@@ -62,19 +62,14 @@ impl UsenetStreamer {
         let total = to_probe.len();
 
         let streamer = self.clone();
-        let client = self.pool.bulk_client();
         let mut probes = stream::iter(to_probe)
-            .map(move |(fi, pi, mid, volume)| {
+            .map(move |(fi, pi, mid, _volume)| {
                 let s = streamer.clone();
-                let client = client.clone();
                 async move {
-                    // Background migration rides the Bulk lane: the pool's
-                    // admission shrinks it automatically while streams play,
-                    // so a multi-hundred-part release can't starve playback.
                     let r = s
-                        .fetch_decoded_cached(&client, &mid, &volume)
+                        .fetch_article(&mid, false)
                         .await
-                        .map(|b| b.len() as u64);
+                        .map(|bytes| bytes.len() as u64);
                     (fi, pi, r)
                 }
             })

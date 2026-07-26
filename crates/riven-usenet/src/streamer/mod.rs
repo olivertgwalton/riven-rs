@@ -16,10 +16,10 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use sea_orm::DatabaseConnection;
 
-use crate::nntp::{NntpConfig, NntpPool};
+use crate::nntp::NntpConfig;
+use crate::pool::SegmentPool;
 use crate::state::StreamerState;
 
-mod availability;
 mod backfill;
 mod error;
 mod ingest;
@@ -29,27 +29,29 @@ mod read_rar;
 mod store;
 #[cfg(test)]
 mod tests;
+pub mod validation;
 
 pub use error::StreamerError;
 pub use ingest::DEFAULT_AVAILABILITY_SAMPLE_PERCENT;
 pub use meta::{NzbMeta, NzbMetaFile, NzbMetaSource, NzbRarPart, NzbRarSlice, UNKNOWN_FILE_LABEL};
 
-pub(crate) use availability::{SweepCounts, stat_sweep};
-pub(crate) use meta::{concat_slices, segments_overlapping, select_validation_indices};
+pub(crate) use meta::{concat_slices, select_validation_indices};
 
-/// Task fan-out for availability STAT sweeps. STATs are tiny; real socket
-/// use is bounded by the pool's Bulk lane admission, this only caps how many
-/// sweep futures are queued at once.
-const STAT_SWEEP_FANOUT: usize = 16;
+/// Articles fetched in parallel to satisfy one multi-segment read. Matches the
+/// VFS read-ahead window so a read and a read-ahead chunk cost the same depth.
+/// The hard ceiling is each provider's own `max_connections` — this is a
+/// window, not a connection allowance.
+pub(crate) const SEGMENT_FANOUT: usize = 8;
 
-/// Fixed per-operation fetch fan-out for on-demand reads and bulk probes.
-/// Deliberately small: deep pipelining belongs to the adaptive per-stream
-/// read-ahead, and real socket use is bounded by the pool's slot actors.
-pub(crate) const OP_FANOUT: usize = 4;
+/// Parallel BODY probes during segment-size discovery at ingest.
+pub(crate) const DISCOVERY_FANOUT: usize = 16;
+/// RAR volumes whose continuation map is discovered at once. Each volume
+/// fans out into its own segment probes, so this stays small.
+pub(crate) const VOLUME_DISCOVERY_FANOUT: usize = 3;
 
 #[derive(Clone)]
 pub struct UsenetStreamer {
-    pub(crate) pool: Arc<NntpPool>,
+    pub(crate) pool: Arc<SegmentPool>,
     pub(crate) state: Arc<StreamerState>,
     pub(crate) db: DatabaseConnection,
 }
@@ -57,16 +59,15 @@ pub struct UsenetStreamer {
 impl UsenetStreamer {
     pub fn new(cfg: NntpConfig, db: DatabaseConnection) -> Self {
         crate::nntp::init_crypto();
-        let pool = NntpPool::new_multi(cfg.providers);
         Self {
-            pool,
+            pool: SegmentPool::new(cfg.providers),
             state: StreamerState::global(),
             db,
         }
     }
 
     /// Process-wide shared streamer keyed by NNTP config. Both ingest and
-    /// playback construct through this so they share one `NntpPool` and the
+    /// playback construct through this so they share one `SegmentPool` and the
     /// user's `max_connections` is the true ceiling against the provider.
     /// Settings change → fingerprint flips → cached entry rebuilt
     /// automatically, no restart needed.
@@ -96,7 +97,7 @@ impl UsenetStreamer {
             .and_then(|guard| guard.as_ref().map(|(_, streamer)| streamer.clone()))
     }
 
-    pub fn pool(&self) -> Arc<NntpPool> {
+    pub fn pool(&self) -> Arc<SegmentPool> {
         self.pool.clone()
     }
 
@@ -307,9 +308,9 @@ impl UsenetStreamer {
             return Ok(AvailabilityScan::default());
         }
 
-        let concurrency = STAT_SWEEP_FANOUT.min(n);
-        let client = self.pool.bulk_client();
-        let counts = stat_sweep(&client, sample, concurrency, false, &file.filename).await;
+        let concurrency = self.pool.total_connections().min(n);
+        let counts =
+            validation::sweep_all(&self.pool, sample, concurrency, false, &file.filename).await;
 
         Ok(AvailabilityScan {
             total_segments: total,
@@ -356,19 +357,12 @@ impl UsenetStreamer {
             return Ok(());
         }
 
-        let concurrency = STAT_SWEEP_FANOUT.min(total);
-        let SweepCounts {
+        let concurrency = self.pool.total_connections().min(total);
+        let validation::SweepCounts {
             missing,
             errors,
             checked,
-        } = stat_sweep(
-            &self.pool.bulk_client(),
-            message_ids,
-            concurrency,
-            false,
-            meta.label(),
-        )
-        .await;
+        } = validation::sweep_all(&self.pool, message_ids, concurrency, false, meta.label()).await;
 
         let checked_f = checked.max(1) as f64;
         if (missing as f64 / checked_f) * 100.0 > acceptable_missing_pct {
@@ -489,7 +483,7 @@ fn shared_cell() -> &'static Mutex<Option<(u64, UsenetStreamer)>> {
 /// Point-in-time health of the in-process usenet streaming engine (segment
 /// cache, NNTP fetch counters, in-flight work). Counters are cumulative since
 /// process start; the API derives rates by sampling deltas.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct StreamingHealth {
     pub cache_bytes_used: u64,
     pub cache_bytes_max: u64,
@@ -504,20 +498,28 @@ pub struct StreamingHealth {
     pub active_streams: u64,
 }
 
-/// Snapshot the process-global streaming state for the API's health view.
+/// Snapshot the streaming engine for the API's health view. Reports zeros
+/// when no streamer has been constructed — a health query must never spin up
+/// NNTP connections as a side effect.
 pub fn streaming_health() -> StreamingHealth {
-    let state = crate::state::StreamerState::global();
+    let Some(streamer) = UsenetStreamer::existing_shared() else {
+        return StreamingHealth {
+            active_streams: active_streams().count() as u64,
+            ..StreamingHealth::default()
+        };
+    };
+    let pool = &streamer.pool;
     StreamingHealth {
-        cache_bytes_used: state.cache.current_bytes(),
-        cache_bytes_max: state.cache.max_bytes(),
-        cache_entries: state.cache.entry_count() as u64,
-        cache_hits: state.cache.hits(),
-        cache_misses: state.cache.misses(),
-        fetches_ok: state.fetch_metrics.ok(),
-        fetches_failed: state.fetch_metrics.failed(),
-        bytes_decoded: state.fetch_metrics.bytes_decoded(),
-        in_flight: state.in_flight.len() as u64,
-        dead_segments: state.fails.len() as u64,
+        cache_bytes_used: pool.cache().current_bytes(),
+        cache_bytes_max: pool.cache().max_bytes(),
+        cache_entries: pool.cache().entry_count() as u64,
+        cache_hits: pool.cache().hits(),
+        cache_misses: pool.cache().misses(),
+        fetches_ok: pool.metrics().ok(),
+        fetches_failed: pool.metrics().failed(),
+        bytes_decoded: pool.metrics().bytes_decoded(),
+        in_flight: pool.in_flight() as u64,
+        dead_segments: pool.missing().len() as u64,
         active_streams: active_streams().count() as u64,
     }
 }
@@ -545,6 +547,41 @@ fn nntp_config_fingerprint(cfg: &NntpConfig) -> u64 {
 
 #[async_trait::async_trait]
 impl riven_core::local_source::LocalByteSource for UsenetStreamer {
+    async fn layout(
+        &self,
+        info_hash: &str,
+        file_index: usize,
+    ) -> Option<riven_core::local_source::SourceLayout> {
+        let meta = self.load_meta(info_hash).await.ok()?;
+        let file = meta.files.get(file_index)?;
+        match &file.source {
+            NzbMetaSource::Direct { offsets, .. } => {
+                let chunk_size = offsets.windows(2).next().map(|w| w[1] - w[0])?;
+                (chunk_size > 0).then(|| riven_core::local_source::SourceLayout {
+                    chunk_size,
+                    boundaries: Vec::new(),
+                })
+            }
+            NzbMetaSource::Rar { parts, slices } => {
+                let chunk_size = parts
+                    .iter()
+                    .find_map(|part| part.decoded_seg_size.filter(|size| *size > 0))?;
+                // Virtual offset at which each slice — and so each volume —
+                // starts, which is where a boundary stall would land.
+                let mut boundaries = Vec::with_capacity(slices.len());
+                let mut position = 0u64;
+                for slice in slices {
+                    boundaries.push(position);
+                    position += slice.length;
+                }
+                Some(riven_core::local_source::SourceLayout {
+                    chunk_size,
+                    boundaries,
+                })
+            }
+        }
+    }
+
     async fn read_range(
         &self,
         info_hash: &str,
@@ -570,7 +607,6 @@ impl riven_core::local_source::LocalByteSource for UsenetStreamer {
                 client: "vfs".to_string(),
             },
         );
-        self.pool.stream_started();
     }
 
     fn stream_touch(&self, key: &str) {
@@ -582,6 +618,5 @@ impl riven_core::local_source::LocalByteSource for UsenetStreamer {
 
     fn stream_unregister(&self, key: &str) {
         active_streams().unregister(key);
-        self.pool.stream_ended();
     }
 }
