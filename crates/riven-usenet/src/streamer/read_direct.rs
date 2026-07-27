@@ -33,6 +33,14 @@ impl UsenetStreamer {
     /// Same as [`read_range`] but returns the per-segment decoded slices
     /// instead of concatenating them, so a single-segment read is served by
     /// slicing the cached `Bytes` with no copy.
+    ///
+    /// Slow fetches are logged at `debug`. This is the origin fetch behind both
+    /// demand reads and speculative read-ahead fills, so a duration measured
+    /// here cannot tell a stalled player from a background chunk nobody is
+    /// waiting on — the VFS times those two separately, where it knows which is
+    /// which, and stays the signal to reach for first. What this one is good at
+    /// is the shape of the requests the VFS actually issues, which is how the
+    /// one-byte read-ahead fill was found.
     pub async fn read_range_slices(
         &self,
         info_hash: &str,
@@ -40,22 +48,20 @@ impl UsenetStreamer {
         start: u64,
         end_inclusive: u64,
     ) -> Result<Vec<Bytes>, StreamerError> {
-        // A player-facing read that stalls is a visible stutter; log where and
-        // for how long so it is diagnosable from logs rather than averages.
         let started = std::time::Instant::now();
         let result = self
             .read_range_slices_inner(info_hash, file_index, start, end_inclusive)
             .await;
         let elapsed_ms = started.elapsed().as_millis();
         if elapsed_ms > 300 {
-            tracing::warn!(
+            tracing::debug!(
                 info_hash,
                 file = %self.cached_file_label(info_hash, file_index),
                 start,
                 len = end_inclusive.saturating_sub(start) + 1,
                 elapsed_ms,
                 ok = result.is_ok(),
-                "slow playback read"
+                "slow origin read"
             );
         }
         result
