@@ -62,7 +62,7 @@ anything outside the markers survives regeneration. -->
 | `RIVEN_BENCH_NNTP_PASS` | variable | `crates/riven-vfs/examples/stream_bench.rs:179` |
 | `RIVEN_BENCH_NNTP_PORT` | variable | `crates/riven-vfs/examples/stream_bench.rs:182` |
 | `RIVEN_BENCH_NNTP_USER` | variable | `crates/riven-vfs/examples/stream_bench.rs:178` |
-| `RIVEN_VFS_READAHEAD_BUDGET_MB` | variable | `crates/riven-vfs/src/prefetch.rs:64`<br>`crates/riven-vfs/src/prefetch.rs:78` |
-| `RIVEN_VFS_READAHEAD_CHUNKS` | variable | `crates/riven-vfs/src/prefetch.rs:99` |
+| `RIVEN_VFS_READAHEAD_BUDGET_MB` | variable | `crates/riven-vfs/src/prefetch.rs:72`<br>`crates/riven-vfs/src/prefetch.rs:86` |
+| `RIVEN_VFS_READAHEAD_CHUNKS` | variable | `crates/riven-vfs/src/prefetch.rs:107` |
 <!-- END GENERATED -->
 
