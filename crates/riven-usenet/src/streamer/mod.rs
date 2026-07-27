@@ -104,9 +104,8 @@ impl UsenetStreamer {
     /// Filename for a log field, from the in-memory meta cache only. Never
     /// touches Postgres and never waits on an in-flight load: naming a file in
     /// a log line must not add a database round-trip (or a single-flight wait)
-    /// to a path that is otherwise cache-only — notably the read-ahead shed
-    /// path, which runs *before* the meta load precisely to stay cheap.
-    /// Returns the placeholder when the release isn't resident.
+    /// to a path that is otherwise cache-only. Returns the placeholder when the
+    /// release isn't resident.
     pub fn cached_file_label(&self, info_hash: &str, file_index: usize) -> String {
         self.state.meta_cache.get(info_hash).map_or_else(
             || meta::UNKNOWN_FILE_LABEL.to_string(),
