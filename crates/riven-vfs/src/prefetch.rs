@@ -42,6 +42,14 @@ const STARTUP_BUFFER: u64 = 16 * MIB;
 const HEADER_SIZE: u64 = 256 * 1024;
 const MIN_FOOTER: u64 = 16 * 1024;
 const MAX_FOOTER: u64 = 10 * MIB;
+/// A read the player is blocked on is only interesting once it is long enough
+/// to be seen. Both thresholds sit well above the cost of a single cold origin
+/// chunk (a usenet article is a few hundred milliseconds by itself), so a
+/// healthy cold fetch is not reported as a stall.
+const SLOW_DEMAND_MS: u64 = 800;
+/// Fills are speculative and overlap each other, so a slow one is only a
+/// problem if it is slow enough to arrive after the cursor reaches it.
+const SLOW_FILL_MS: u64 = 1_000;
 
 fn env_positive(name: &str, default: usize) -> usize {
     std::env::var(name)
@@ -521,10 +529,15 @@ impl Actor {
             && self.frontier.saturating_sub(self.cursor) < self.config.window_at(self.cursor)
         {
             let start = self.frontier;
+            // The boundary has to be strictly ahead of `start`. `next_multiple_of`
+            // returns `start` unchanged when it is already on one — and every fill
+            // after the first ends on a boundary, so that was the common case. The
+            // old `.max(start + 1)` then turned it into a one-byte fill, which
+            // still costs a whole article fetch and an in-flight slot: each chunk
+            // burned two slots and read-ahead ran at half its configured depth.
             let boundary = start
-                .checked_next_multiple_of(self.config.chunk)
-                .unwrap_or(self.size)
-                .max(start + 1);
+                .checked_add(self.config.chunk - start % self.config.chunk)
+                .unwrap_or(self.size);
             let end = boundary
                 .min(
                     self.cursor
@@ -565,6 +578,18 @@ impl Actor {
         self.stats.fills += 1;
         self.stats.fill_ms += elapsed_ms;
         self.stats.worst_fill_ms = self.stats.worst_fill_ms.max(elapsed_ms);
+        if elapsed_ms >= SLOW_FILL_MS {
+            // Not a stutter on its own — read-ahead runs ahead of the player.
+            // `ahead_mb` is what says whether it had room to be late.
+            tracing::warn!(
+                target: "streaming",
+                start = fill.start,
+                ahead_mb = fill.start.saturating_sub(self.cursor) >> 20,
+                inflight = self.inflight,
+                elapsed_ms,
+                "slow read-ahead fill"
+            );
+        }
 
         match fill.result {
             Ok(data) => {
@@ -614,6 +639,7 @@ impl Actor {
             self.stats.misses += 1;
             self.stats.waited_ms += waited_ms;
             self.stats.worst_wait_ms = self.stats.worst_wait_ms.max(waited_ms);
+            self.log_slow_demand(&request, "buffer");
         } else {
             self.stats.hits += 1;
         }
@@ -652,6 +678,7 @@ impl Actor {
     fn on_direct(&mut self, direct: Direct) {
         let succeeded = direct.result.as_ref().is_ok_and(|data| !data.is_empty());
         let promote_from = self.expected_next.max(direct.request.end());
+        self.log_slow_demand(&direct.request, "passthrough");
         direct.request.respond(direct.result);
 
         // Starting six speculative fills while the read that proved the
@@ -680,6 +707,26 @@ impl Actor {
         let footer_size = (self.size / 50).clamp(MIN_FOOTER, MAX_FOOTER);
         request.end() <= HEADER_SIZE.min(self.size)
             || request.start >= self.size.saturating_sub(footer_size)
+    }
+
+    /// Warn about a read a player was actually blocked on. `served_from`
+    /// separates the two causes that need different fixes: `passthrough` is the
+    /// origin itself being slow, `buffer` is read-ahead that fell behind the
+    /// cursor.
+    fn log_slow_demand(&self, request: &ReadRequest, served_from: &'static str) {
+        let waited_ms = request.queued_at.elapsed().as_millis() as u64;
+        if waited_ms < SLOW_DEMAND_MS {
+            return;
+        }
+        tracing::warn!(
+            target: "streaming",
+            offset = request.start,
+            len = request.len,
+            served_from,
+            phase = ?self.mode,
+            waited_ms,
+            "slow playback read"
+        );
     }
 
     fn maybe_log(&mut self) {
@@ -773,6 +820,7 @@ struct Snapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::sync::{Notify, Semaphore};
 
@@ -850,6 +898,80 @@ mod tests {
         let snapshot = reader.snapshot().await;
         assert!(snapshot.streaming);
         assert!(snapshot.inflight > 0 || snapshot.buffer_end > snapshot.buffer_start);
+    }
+
+    /// Records every range the origin is asked for, so a test can assert on the
+    /// shape of read-ahead rather than only on its results.
+    struct RecordingSource {
+        size: u64,
+        chunk: u64,
+        lengths: Mutex<Vec<u64>>,
+    }
+
+    #[async_trait::async_trait]
+    impl ByteSource for RecordingSource {
+        async fn read_range(&self, start: u64, end: u64) -> io::Result<Bytes> {
+            let len = end - start + 1;
+            self.lengths.lock().unwrap().push(len);
+            Ok(Bytes::from(vec![b'x'; len as usize]))
+        }
+
+        fn size(&self) -> u64 {
+            self.size
+        }
+
+        async fn layout(&self) -> Option<SourceLayout> {
+            Some(SourceLayout {
+                chunk_size: self.chunk,
+                boundaries: Vec::new(),
+            })
+        }
+    }
+
+    /// A frontier sitting exactly on a chunk boundary must advance by a whole
+    /// chunk. It used to advance by one byte, so every chunk cost two fills —
+    /// one of them a full origin fetch for a single byte — and read-ahead ran
+    /// at half the depth it was configured for.
+    #[tokio::test]
+    async fn boundary_aligned_fills_span_whole_chunks() {
+        let chunk = 700 * 1024;
+        let source = Arc::new(RecordingSource {
+            size: 512 * MIB,
+            chunk,
+            lengths: Mutex::new(Vec::new()),
+        });
+        unbounded_budget();
+        let reader = Prefetcher::new(source.clone(), &Handle::current());
+
+        let mut offset = MIB;
+        for _ in 0..ARM_AFTER {
+            reader.read(offset, 128 * 1024).await.unwrap();
+            offset += 128 * 1024;
+        }
+        // Let the armed window issue its fills.
+        for _ in 0..64 {
+            tokio::task::yield_now().await;
+        }
+
+        let lengths = source.lengths.lock().unwrap().clone();
+        let fills: Vec<u64> = lengths
+            .iter()
+            .copied()
+            .filter(|len| *len > 128 * 1024)
+            .collect();
+        assert!(!fills.is_empty(), "read-ahead never dispatched a fill");
+        assert!(
+            lengths.iter().all(|len| *len != 1),
+            "one-byte fill dispatched: {lengths:?}"
+        );
+        // Only the very first fill may be partial, squaring the armed cursor up
+        // with a chunk boundary. Fills complete out of order, so this counts
+        // rather than indexes.
+        let partial = fills.iter().filter(|len| **len != chunk).count();
+        assert!(
+            partial <= 1,
+            "only the initial alignment fill may be partial: {fills:?}"
+        );
     }
 
     struct GatedProbeSource {
