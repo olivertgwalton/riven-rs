@@ -105,7 +105,25 @@ struct FuseStats {
     bytes: AtomicU64,
     errors: AtomicU64,
     last_log_secs: AtomicU64,
+
+    /// Previous read offset, for the access-pattern buckets below. Reads from
+    /// several handles interleave through here, so the buckets describe the
+    /// shape of the player's access rather than one handle's exact sequence.
+    last_offset: AtomicU64,
+    /// Forward and contiguous: the case read-ahead is built for.
+    seq_reads: AtomicU64,
+    /// Off-sequence but still inside a read-ahead window, so already buffered.
+    near_reads: AtomicU64,
+    /// Outside any plausible window. Each of these makes the prefetcher start
+    /// over, and the read that triggers it waits a full origin fetch.
+    far_reads: AtomicU64,
 }
+
+/// Forward distance still counted as sequential.
+const SEQ_DISTANCE: i64 = 1 << 20;
+/// Distance beyond which a read cannot be in the read-ahead window — a little
+/// under the 24-unit archive window, which is the widest one configured.
+const NEAR_DISTANCE: i64 = 16 << 20;
 
 impl FuseStats {
     /// Record one completed FUSE read and, every 10s, emit a summary.
@@ -114,7 +132,17 @@ impl FuseStats {
     /// 32-permit gate is the bottleneck, not the origin. `worst_us` is what
     /// the player felt at its worst — a single multi-second read is a visible
     /// stutter even when the average looks fine.
-    fn record_read(&self, permit_us: u64, total_us: u64, bytes: usize, ok: bool) {
+    fn record_read(&self, offset: u64, permit_us: u64, total_us: u64, bytes: usize, ok: bool) {
+        let previous = self.last_offset.swap(offset, Ordering::Relaxed);
+        let delta = offset as i64 - previous as i64;
+        if (0..=SEQ_DISTANCE).contains(&delta) {
+            self.seq_reads.fetch_add(1, Ordering::Relaxed);
+        } else if delta.abs() <= NEAR_DISTANCE {
+            self.near_reads.fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.far_reads.fetch_add(1, Ordering::Relaxed);
+        }
+
         self.reads.fetch_add(1, Ordering::Relaxed);
         self.total_us.fetch_add(total_us, Ordering::Relaxed);
         self.permit_wait_us.fetch_add(permit_us, Ordering::Relaxed);
@@ -150,6 +178,9 @@ impl FuseStats {
             avg_permit_ms = self.permit_wait_us.load(Ordering::Relaxed) / reads / 1000,
             errors = self.errors.load(Ordering::Relaxed),
             served_mb = self.bytes.load(Ordering::Relaxed) >> 20,
+            seq = self.seq_reads.load(Ordering::Relaxed),
+            near = self.near_reads.load(Ordering::Relaxed),
+            far = self.far_reads.load(Ordering::Relaxed),
             "fuse read stats"
         );
     }
@@ -180,7 +211,6 @@ impl RivenFs {
         filesystem_settings_revision: Arc<AtomicU64>,
         stream_client: reqwest::Client,
         link_request_tx: mpsc::Sender<riven_core::stream_link::LinkRequest>,
-        cache_max_size_mb: u64,
         local_source: Option<Arc<dyn riven_core::local_source::LocalByteSource>>,
     ) -> Self {
         Self {
@@ -189,7 +219,6 @@ impl RivenFs {
                 filesystem_settings_revision,
                 stream_client,
                 link_request_tx,
-                cache_max_size_mb,
                 local_source,
             )),
         }
@@ -202,10 +231,8 @@ impl RivenFsInner {
         filesystem_settings_revision: Arc<AtomicU64>,
         stream_client: reqwest::Client,
         link_request_tx: mpsc::Sender<riven_core::stream_link::LinkRequest>,
-        cache_max_size_mb: u64,
         local_source: Option<Arc<dyn riven_core::local_source::LocalByteSource>>,
     ) -> Self {
-        crate::prefetch::init_budget_mb(cache_max_size_mb as usize);
         Self {
             vfs_layout,
             filesystem_settings_revision,
@@ -213,12 +240,9 @@ impl RivenFsInner {
             link_request_tx,
             runtime: tokio::runtime::Handle::current(),
             state: VfsState::new(),
-            // Backstop only. Reads are async and normally served from the
-            // prefetch buffer, which bounds real fetches itself — measured
-            // permit wait is 0 and in-flight peaks in single digits during
-            // playback. This exists purely so a pathological fan-out (a media
-            // server analysing a whole library at once) cannot spawn unbounded
-            // read tasks.
+            // Backstop only. Reads are async; HTTP handles have a bounded byte
+            // buffer and Usenet handles have a bounded segment window. This
+            // prevents pathological analyser fan-out across many open files.
             read_semaphore: Arc::new(Semaphore::new(32)),
             fuse_stats: Arc::new(FuseStats::default()),
             link_refresh_locks: DashMap::new(),
@@ -546,10 +570,12 @@ impl Filesystem for RivenFs {
                 file_size,
                 &filename,
             ));
-            let fd = s.state.open(OpenedFile::Streamed {
-                path,
-                prefetcher: Arc::new(Prefetcher::new(byte_source, &s.runtime)),
-            });
+            let prefetcher = Arc::new(Prefetcher::new(
+                byte_source,
+                s.state.unit_cache(ino),
+                &s.runtime,
+            ));
+            let fd = s.state.open(OpenedFile::Streamed { path, prefetcher });
             reply.opened(FuseFh(fd), FopenFlags::FOPEN_KEEP_CACHE);
             return;
         }
@@ -588,10 +614,12 @@ impl Filesystem for RivenFs {
             file_size,
             Some(refresher),
         ));
-        let fd = s.state.open(OpenedFile::Streamed {
-            path,
-            prefetcher: Arc::new(Prefetcher::new(byte_source, &s.runtime)),
-        });
+        let prefetcher = Arc::new(Prefetcher::new(
+            byte_source,
+            s.state.unit_cache(ino),
+            &s.runtime,
+        ));
+        let fd = s.state.open(OpenedFile::Streamed { path, prefetcher });
         reply.opened(FuseFh(fd), FopenFlags::FOPEN_KEEP_CACHE);
     }
 
@@ -666,11 +694,17 @@ impl Filesystem for RivenFs {
                                 "slow playback read"
                             );
                         }
-                        stats.record_read(permit_us, total_us, data.len(), true);
+                        stats.record_read(offset, permit_us, total_us, data.len(), true);
                         reply.data(&data);
                     }
                     Err(error) => {
-                        stats.record_read(permit_us, began.elapsed().as_micros() as u64, 0, false);
+                        stats.record_read(
+                            offset,
+                            permit_us,
+                            began.elapsed().as_micros() as u64,
+                            0,
+                            false,
+                        );
                         tracing::warn!(
                             target: "streaming",
                             path = %path, offset, size, %error,

@@ -10,13 +10,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use bytes::Bytes;
-use futures::StreamExt;
-use futures::stream::FuturesUnordered;
 use lru::LruCache;
 use parking_lot::Mutex;
+use tokio::sync::oneshot;
 
 use crate::nntp::{ClientPool, NntpError, NntpProvider, ProviderHealth, ProviderTraffic};
-use crate::state::{FetchEntry, InFlight, PromiseSlot};
+use crate::state::{FetchEntry, InFlight};
 use crate::yenc;
 
 mod missing;
@@ -119,7 +118,7 @@ impl SegmentPool {
 
     /// Fetch and decode a segment. Coalesces concurrent callers for the same
     /// message-id onto one wire fetch.
-    pub async fn fetch_segment(&self, message_id: &str) -> Result<Bytes, NntpError> {
+    pub async fn fetch_segment(self: &Arc<Self>, message_id: &str) -> Result<Bytes, NntpError> {
         loop {
             if let Some(hit) = self.cache.get(message_id) {
                 return Ok(hit);
@@ -134,14 +133,16 @@ impl SegmentPool {
                     slot.wait().await;
                 }
                 FetchEntry::Owner(slot, key) => {
-                    let guard = OwnerGuard {
-                        inflight: &self.inflight,
-                        slot,
-                        key: key.clone(),
-                    };
-                    let result = self.fetch_sequential(&key).await;
-                    drop(guard);
-                    return result;
+                    let pool = self.clone();
+                    let (result_tx, result_rx) = oneshot::channel();
+                    tokio::spawn(async move {
+                        let result = pool.fetch_sequential(&key).await;
+                        pool.inflight.finish(&key, &slot);
+                        drop(result_tx.send(result));
+                    });
+                    return result_rx
+                        .await
+                        .unwrap_or(Err(NntpError::Protocol("segment fetch task stopped")));
                 }
             }
         }
@@ -187,58 +188,24 @@ impl SegmentPool {
         Err(last_err.unwrap_or(NntpError::Protocol("no providers configured")))
     }
 
-    /// Ask every eligible provider at once and take the first success.
-    ///
-    /// Only for the first segment of a release, where the extra connections
-    /// buy startup latency when a provider is missing the article. A miss here
-    /// is never recorded as permanent: losers are cancelled mid-flight, so
-    /// "not found" was not established for all of them.
-    pub async fn fetch_segment_first(&self, message_id: &str) -> Result<Bytes, NntpError> {
-        if let Some(hit) = self.cache.get(message_id) {
-            return Ok(hit);
-        }
-        if self.missing.contains(message_id) {
-            return Err(NntpError::ArticleNotFound(
-                "previously confirmed missing on every provider".into(),
-            ));
-        }
-        let key: Arc<str> = Arc::from(message_id);
-        let mut attempts: FuturesUnordered<_> = self
-            .providers
-            .iter()
-            .map(|provider| {
-                let key = key.clone();
-                async move { (provider, self.fetch_from(provider, &key).await) }
-            })
-            .collect();
-
-        let mut last_err: Option<NntpError> = None;
-        while let Some((provider, result)) = attempts.next().await {
-            match result {
-                Ok(bytes) => {
-                    provider.record_success();
-                    return Ok(bytes);
-                }
-                Err(NntpError::ArticleNotFound(status)) => {
-                    provider.record_not_found();
-                    last_err = Some(NntpError::ArticleNotFound(status));
-                }
-                Err(error) => last_err = Some(error),
-            }
-        }
-        self.metrics.record_failed();
-        Err(last_err.unwrap_or(NntpError::Protocol("no providers configured")))
-    }
-
     async fn fetch_from(
         &self,
         provider: &Arc<ClientPool>,
         message_id: &Arc<str>,
     ) -> Result<Bytes, NntpError> {
+        // Split so a slow article can be attributed. Raw NNTP against this
+        // provider fetches a 722 KiB article in ~87 ms p50, so anything near a
+        // second is riven's own cost and this says which part of it.
+        let started = std::time::Instant::now();
         let mut lease = provider.acquire().await?;
+        let acquire_us = started.elapsed().as_micros() as u64;
+
+        let wire = std::time::Instant::now();
         let body = lease.body(message_id).await?;
         drop(lease);
+        let body_us = wire.elapsed().as_micros() as u64;
 
+        let blocking = std::time::Instant::now();
         let decoded = match tokio::task::spawn_blocking(move || yenc::decode(&body)).await {
             Ok(Ok((decoded, _info))) => decoded,
             Ok(Err(error)) => {
@@ -250,6 +217,22 @@ impl SegmentPool {
                 return Err(NntpError::Protocol("yenc decode task panicked"));
             }
         };
+
+        let decode_us = blocking.elapsed().as_micros() as u64;
+        let total_us = started.elapsed().as_micros() as u64;
+        if total_us >= 300_000 {
+            tracing::debug!(
+                host = %provider.host(),
+                bytes = decoded.len(),
+                acquire_ms = acquire_us / 1000,
+                body_ms = body_us / 1000,
+                // Includes waiting for a blocking-pool thread, not just the
+                // decode: saturation there would show up here and nowhere else.
+                decode_ms = decode_us / 1000,
+                total_ms = total_us / 1000,
+                "slow article fetch"
+            );
+        }
 
         self.metrics.record_ok(decoded.len() as u64);
         self.decoded_sizes
@@ -310,21 +293,6 @@ impl SegmentPool {
             return Ok(false);
         }
         Err(last_err.unwrap_or(NntpError::Protocol("no providers configured")))
-    }
-}
-
-/// Releases the single-flight slot even if the owning future is cancelled
-/// mid-fetch, so waiters are never left hanging on a promise nobody will
-/// complete.
-struct OwnerGuard<'a> {
-    inflight: &'a InFlight,
-    slot: Arc<PromiseSlot>,
-    key: Arc<str>,
-}
-
-impl Drop for OwnerGuard<'_> {
-    fn drop(&mut self) {
-        self.inflight.finish(&self.key, &self.slot);
     }
 }
 
@@ -448,6 +416,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cancelled_reader_leaves_fetch_for_later_reader() {
+        let (addr, _server) = spawn_fake_nntp_server().await;
+        let pool = SegmentPool::new(vec![provider(addr, 1, 0)]);
+        let held_connection = pool.providers()[0].acquire().await.unwrap();
+
+        let first_pool = pool.clone();
+        let first = tokio::spawn(async move { first_pool.fetch_segment("same@test").await });
+        while pool.in_flight() == 0 {
+            tokio::task::yield_now().await;
+        }
+        first.abort();
+        assert!(first.await.unwrap_err().is_cancelled());
+
+        drop(held_connection);
+        let bytes = pool.fetch_segment("same@test").await.unwrap();
+        assert_eq!(bytes.as_ref(), FAKE_SEGMENT_PAYLOAD);
+        assert_eq!(
+            pool.metrics().ok(),
+            1,
+            "wire fetch must survive cancellation"
+        );
+    }
+
+    #[tokio::test]
     async fn missing_on_every_provider_is_cached_permanently() {
         let (addr, _server) = spawn_missing_server().await;
         let pool = SegmentPool::new(vec![provider(addr, 2, 0)]);
@@ -466,14 +458,6 @@ mod tests {
             1,
             "the second call must short-circuit before touching the provider"
         );
-    }
-
-    #[tokio::test]
-    async fn parallel_first_segment_does_not_record_permanent_missing() {
-        let (missing_addr, _a) = spawn_missing_server().await;
-        let pool = SegmentPool::new(vec![provider(missing_addr, 2, 0)]);
-        assert!(pool.fetch_segment_first("x@test").await.is_err());
-        assert!(!pool.missing().contains("x@test"));
     }
 
     #[tokio::test]

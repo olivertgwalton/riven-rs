@@ -66,10 +66,7 @@ impl UsenetStreamer {
             .map(move |(fi, pi, mid, _volume)| {
                 let s = streamer.clone();
                 async move {
-                    let r = s
-                        .fetch_article(&mid, false)
-                        .await
-                        .map(|bytes| bytes.len() as u64);
+                    let r = s.fetch_article(&mid).await.map(|bytes| bytes.len() as u64);
                     (fi, pi, r)
                 }
             })

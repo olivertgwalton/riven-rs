@@ -159,7 +159,6 @@ async fn main() -> Result<()> {
         job_queue.filesystem_settings_revision.clone(),
         stream_http_client.clone(),
         link_tx.clone(),
-        settings.vfs_cache_max_size_mb,
         usenet_local_source,
     )?);
 

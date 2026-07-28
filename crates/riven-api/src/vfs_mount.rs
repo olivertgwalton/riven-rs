@@ -16,7 +16,6 @@ struct VfsMountConfig {
     filesystem_settings_revision: Arc<AtomicU64>,
     stream_client: reqwest::Client,
     link_request_tx: mpsc::Sender<LinkRequest>,
-    cache_max_size_mb: u64,
     local_source: Option<Arc<dyn riven_core::local_source::LocalByteSource>>,
 }
 
@@ -33,7 +32,6 @@ impl VfsMountManager {
         filesystem_settings_revision: Arc<AtomicU64>,
         stream_client: reqwest::Client,
         link_request_tx: mpsc::Sender<LinkRequest>,
-        cache_max_size_mb: u64,
         local_source: Option<Arc<dyn riven_core::local_source::LocalByteSource>>,
     ) -> Result<Self> {
         let config = VfsMountConfig {
@@ -41,7 +39,6 @@ impl VfsMountManager {
             filesystem_settings_revision,
             stream_client,
             link_request_tx,
-            cache_max_size_mb,
             local_source,
         };
         let mounted = mount_with_config(initial_path, &config)?;
@@ -91,7 +88,6 @@ fn mount_with_config(mount_path: &str, config: &VfsMountConfig) -> Result<Option
         config.filesystem_settings_revision.clone(),
         config.stream_client.clone(),
         config.link_request_tx.clone(),
-        config.cache_max_size_mb,
         config.local_source.clone(),
     )?
     else {

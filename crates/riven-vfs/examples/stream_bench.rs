@@ -32,8 +32,6 @@ use riven_vfs::source::{ByteSource, UsenetSource};
 
 /// The unit a player's FUSE reads arrive in.
 const READ_SIZE: usize = 128 * 1024;
-/// Production default (`vfs_cache_max_size_mb == 0`) in `RivenFsInner::new`.
-const DEFAULT_BUDGET_MB: usize = 256;
 const FRACTION_SCALE: u64 = 1_000_000;
 
 struct Args {
@@ -49,7 +47,6 @@ struct Args {
     /// budget, so this is the knob that reproduces the overload.
     handles: usize,
     max_connections: u32,
-    readahead_budget_mb: usize,
     /// Title bitrate, in Mbps. Also *paces* the reader unless --flat-out:
     /// a player consumes at its bitrate, not as fast as the disk will go.
     bitrate_mbps: f64,
@@ -85,7 +82,6 @@ fn parse_args() -> Args {
         seconds: 60,
         handles: 1,
         max_connections: 100,
-        readahead_budget_mb: DEFAULT_BUDGET_MB,
         bitrate_mbps: 0.0,
         flat_out: false,
         behind_pct: 9,
@@ -106,9 +102,6 @@ fn parse_args() -> Args {
             "--seconds" => args.seconds = value.parse().unwrap_or(60),
             "--handles" => args.handles = value.parse().unwrap_or(1),
             "--max-connections" => args.max_connections = value.parse().unwrap_or(100),
-            "--readahead-budget-mb" => {
-                args.readahead_budget_mb = value.parse().unwrap_or(DEFAULT_BUDGET_MB);
-            }
             "--bitrate-mbps" => args.bitrate_mbps = value.parse().unwrap_or(0.0),
             "--behind-pct" => args.behind_pct = value.parse().unwrap_or(9),
             "--read-concurrency" => args.read_concurrency = value.parse().unwrap_or(2),
@@ -227,10 +220,9 @@ async fn main() -> anyhow::Result<()> {
         start_percent,
         start as f64 / 1e9
     );
-    riven_vfs::prefetch::init_budget_mb(args.readahead_budget_mb);
     println!(
-        "config       : handles={} max_connections={} readahead-budget={} MiB duration={}s",
-        args.handles, args.max_connections, args.readahead_budget_mb, args.seconds
+        "config       : handles={} max_connections={} duration={}s",
+        args.handles, args.max_connections, args.seconds
     );
     println!(
         "pattern      : {} | behind={}% | reads-in-flight/handle={}",
@@ -263,7 +255,13 @@ async fn main() -> anyhow::Result<()> {
             size,
             &filename,
         ));
-        let prefetcher = Arc::new(Prefetcher::new(source, &tokio::runtime::Handle::current()));
+        let prefetcher = Arc::new(Prefetcher::new(
+            source,
+            // One cache per handle here, not per file: the harness's handles
+            // are independent readers, unlike a player's overlapping requests.
+            riven_vfs::prefetch::UnitCache::new(riven_vfs::prefetch::UNIT_CACHE_BYTES),
+            &tokio::runtime::Handle::current(),
+        ));
         let bytes_total = Arc::clone(&bytes_total);
         // Stagger the readers slightly so they do not march in lockstep.
         let start_at = start + (handle_idx as u64 * 4 * READ_SIZE as u64);

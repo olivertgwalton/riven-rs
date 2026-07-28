@@ -1,12 +1,8 @@
 use bytes::Bytes;
-use futures::StreamExt;
-use futures::stream;
 
 use crate::rar;
 
-use super::{
-    NzbRarPart, NzbRarSlice, SEGMENT_FANOUT, StreamerError, UsenetStreamer, concat_slices,
-};
+use super::{NzbRarPart, NzbRarSlice, StreamerError, UsenetStreamer, concat_slices};
 
 impl UsenetStreamer {
     /// Read a byte range from a `Rar` source. RAR slice offsets are exact
@@ -46,7 +42,6 @@ impl UsenetStreamer {
                 None => {
                     self.read_decoded_range_within_part(
                         part,
-                        slice.part_index == 0,
                         slice.start_in_part + requested_lo,
                         slice.start_in_part + requested_hi,
                     )
@@ -100,7 +95,7 @@ impl UsenetStreamer {
         }
 
         let fetched = self
-            .read_decoded_range_within_part(part, slice.part_index == 0, cipher_lo, cipher_hi)
+            .read_decoded_range_within_part(part, cipher_lo, cipher_hi)
             .await?;
         if fetched.len() < AES_BLOCK {
             return Err(StreamerError::BadRange);
@@ -133,7 +128,6 @@ impl UsenetStreamer {
     pub(super) async fn read_decoded_range_within_part(
         &self,
         part: &NzbRarPart,
-        is_first_volume: bool,
         dec_start: u64,
         dec_end_inclusive: u64,
     ) -> Result<Bytes, StreamerError> {
@@ -187,16 +181,8 @@ impl UsenetStreamer {
             _ => anchor,
         };
 
-        self.assemble_decoded_forward(
-            part,
-            is_first_volume,
-            dec_start,
-            dec_end_inclusive,
-            anchor,
-            horizon,
-            skip,
-        )
-        .await
+        self.assemble_decoded_forward(part, dec_start, dec_end_inclusive, anchor, horizon, skip)
+            .await
     }
 
     /// Assemble `[dec_start, dec_end_inclusive]` by walking a volume's
@@ -207,7 +193,6 @@ impl UsenetStreamer {
     async fn assemble_decoded_forward(
         &self,
         part: &NzbRarPart,
-        is_first_volume: bool,
         dec_start: u64,
         dec_end_inclusive: u64,
         anchor: usize,
@@ -225,15 +210,24 @@ impl UsenetStreamer {
         let mut index = anchor;
         let mut horizon = first_horizon.max(anchor).min(total - 1);
 
-        loop {
-            let mut batch = stream::iter(index..=horizon)
-                .map(|i| {
-                    self.fetch_article(&part.segments[i].message_id, is_first_volume && i == 0)
-                })
-                .buffered(SEGMENT_FANOUT);
+        // A read-ahead unit is aligned on the *virtual file*; a segment is
+        // aligned on its *volume*. The two grids never coincide, so essentially
+        // every archive unit spans two articles — and walking them serially
+        // paid both round trips end to end, which measured as exactly double a
+        // single-article read in production. Start them together first, the way
+        // streamnzb's read-ahead does, so the walk below collects what is
+        // already in flight.
+        self.warm_articles(
+            part.segments[anchor..=horizon]
+                .iter()
+                .map(|segment| segment.message_id.as_str()),
+        );
 
-            while let Some(decoded) = batch.next().await {
-                let decoded = decoded?;
+        loop {
+            // Bytes are still assembled in order: the walk consumes the fetches
+            // started above rather than opening a new one per segment.
+            for segment in part.segments.iter().take(horizon + 1).skip(index) {
+                let decoded = self.fetch_article(&segment.message_id).await?;
                 if skip >= decoded.len() {
                     skip -= decoded.len();
                     continue;
@@ -251,7 +245,7 @@ impl UsenetStreamer {
                 return Ok(concat_slices(slices, dec_start, dec_end_inclusive));
             }
             index = horizon + 1;
-            horizon = (horizon + SEGMENT_FANOUT).min(total - 1);
+            horizon = (horizon + 1).min(total - 1);
         }
     }
 }

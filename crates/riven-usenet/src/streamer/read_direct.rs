@@ -1,11 +1,9 @@
 use bytes::Bytes;
-use futures::StreamExt;
-use futures::stream;
 
 use crate::nntp::NntpError;
 use crate::nzb::NzbSegment;
 
-use super::{NzbMetaSource, SEGMENT_FANOUT, StreamerError, UsenetStreamer, concat_slices};
+use super::{NzbMetaSource, StreamerError, UsenetStreamer, concat_slices};
 
 impl UsenetStreamer {
     /// Read `[start, end_inclusive]` from `file_index` as a single contiguous
@@ -34,13 +32,9 @@ impl UsenetStreamer {
     /// instead of concatenating them, so a single-segment read is served by
     /// slicing the cached `Bytes` with no copy.
     ///
-    /// Slow fetches are logged at `debug`. This is the origin fetch behind both
-    /// demand reads and speculative read-ahead fills, so a duration measured
-    /// here cannot tell a stalled player from a background chunk nobody is
-    /// waiting on — the VFS times those two separately, where it knows which is
-    /// which, and stays the signal to reach for first. What this one is good at
-    /// is the shape of the requests the VFS actually issues, which is how the
-    /// one-byte read-ahead fill was found.
+    /// Slow origin fetches are logged at `debug`. Both demand and speculative
+    /// calls come from the one unified VFS window; there is no nested Usenet
+    /// scheduler.
     pub async fn read_range_slices(
         &self,
         info_hash: &str,
@@ -137,82 +131,63 @@ impl UsenetStreamer {
             return Ok(Vec::new());
         }
 
-        let (first, last) = direct_segment_span(offsets, segments.len(), start, end_inclusive);
-        let mut skip = start.saturating_sub(offsets[first]) as usize;
+        let anchor = direct_anchor_segment(offsets, segments.len(), start);
+        let mut skip = start.saturating_sub(offsets[anchor]) as usize;
 
         let mut slices: Vec<Bytes> = Vec::new();
         let mut produced: usize = 0;
-        let mut index = first;
-        // Exactly the span the offset table says the request touches. Fetching
-        // a speculative margin past it would start articles this read almost
-        // never needs, and `buffered` starts them eagerly — the extras then get
-        // cancelled mid-BODY, costing their connection.
-        let mut horizon = last;
 
-        loop {
-            let mut batch = stream::iter(index..=horizon)
-                .map(|i| self.fetch_article(&segments[i].message_id, i == 0))
-                .buffered(SEGMENT_FANOUT);
-
-            while let Some(decoded) = batch.next().await {
-                let decoded = decoded?;
-                if skip >= decoded.len() {
-                    skip -= decoded.len();
-                    continue;
-                }
-                let take = (want - produced).min(decoded.len() - skip);
-                slices.push(decoded.slice(skip..skip + take));
-                produced += take;
-                skip = 0;
-                if produced >= want {
-                    return Ok(slices);
-                }
+        // Walk forward from the anchor until the requested byte count is
+        // satisfied or the file ends — the offset table says where to start,
+        // never where to stop. Segments are walked in order: parallelism is
+        // owned by the unified VFS window, and fanning out here would nest a
+        // second scheduler underneath it.
+        for segment in segments.iter().skip(anchor) {
+            let decoded = self.fetch_article(&segment.message_id).await?;
+            if skip >= decoded.len() {
+                skip -= decoded.len();
+                continue;
             }
-
-            if horizon + 1 >= segments.len() {
-                return Ok(slices);
+            let take = (want - produced).min(decoded.len() - skip);
+            slices.push(decoded.slice(skip..skip + take));
+            produced += take;
+            skip = 0;
+            if produced >= want {
+                break;
             }
-            index = horizon + 1;
-            horizon = (horizon + SEGMENT_FANOUT).min(segments.len() - 1);
         }
+        Ok(slices)
     }
 
-    /// Fetch one article. The very first article of a release is asked of
-    /// every provider at once: it gates playback start, and one provider
-    /// missing it is the usual cause of a slow first frame.
-    pub(super) async fn fetch_article(
-        &self,
-        message_id: &str,
-        first_of_release: bool,
-    ) -> Result<Bytes, StreamerError> {
-        let result = if first_of_release {
-            self.pool.fetch_segment_first(message_id).await
-        } else {
-            self.pool.fetch_segment(message_id).await
-        };
-        Ok(result?)
+    /// Fetch one article through the shared segment path.
+    pub(super) async fn fetch_article(&self, message_id: &str) -> Result<Bytes, StreamerError> {
+        Ok(self.pool.fetch_segment(message_id).await?)
+    }
+
+    /// Start every article a range spans, without waiting for any of them.
+    ///
+    /// This is streamnzb's `ReadAheadSegment`: warm the shared segment cache so
+    /// the walk that follows either hits it or joins a fetch already on the
+    /// wire, instead of paying each article's round trip end to end. The pool's
+    /// single-flight keys on message-id, so overlapping ranges coalesce and a
+    /// warm start is never a duplicate fetch.
+    pub(super) fn warm_articles<'a>(&self, message_ids: impl Iterator<Item = &'a str>) {
+        for message_id in message_ids {
+            let pool = self.pool.clone();
+            let message_id = message_id.to_string();
+            tokio::spawn(async move { drop(pool.fetch_segment(&message_id).await) });
+        }
     }
 }
 
-/// Inclusive `[first, last]` segment indices whose cumulative byte ranges
-/// overlap `[start, end]`. `offsets` is sorted with length `n_segments + 1`;
-/// `offsets[i]..offsets[i+1]` is segment `i`'s span.
-pub(super) fn direct_segment_span(
-    offsets: &[u64],
-    n_segments: usize,
-    start: u64,
-    end: u64,
-) -> (usize, usize) {
-    let last_idx = n_segments.saturating_sub(1);
-    let first = offsets
+/// Index of the segment whose cumulative byte range contains `start`.
+/// `offsets` is sorted with length `n_segments + 1`; `offsets[i]..offsets[i+1]`
+/// is segment `i`'s span.
+pub(super) fn direct_anchor_segment(offsets: &[u64], n_segments: usize, start: u64) -> usize {
+    offsets
         .partition_point(|&o| o <= start)
         .saturating_sub(1)
-        .min(last_idx);
-    let last = offsets
-        .partition_point(|&o| o <= end)
-        .saturating_sub(1)
-        .min(last_idx);
-    (first, last)
+        .min(n_segments.saturating_sub(1))
 }
 
 #[cfg(test)]
@@ -220,13 +195,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn direct_segment_span_covers_request() {
+    fn direct_anchor_segment_locates_the_start() {
         let offsets = [0u64, 100, 250, 400];
-        assert_eq!(direct_segment_span(&offsets, 3, 0, 0), (0, 0));
-        assert_eq!(direct_segment_span(&offsets, 3, 50, 99), (0, 0));
-        assert_eq!(direct_segment_span(&offsets, 3, 50, 150), (0, 1));
-        assert_eq!(direct_segment_span(&offsets, 3, 120, 300), (1, 2));
-        assert_eq!(direct_segment_span(&offsets, 3, 100, 100), (1, 1));
-        assert_eq!(direct_segment_span(&offsets, 3, 0, 399), (0, 2));
+        assert_eq!(direct_anchor_segment(&offsets, 3, 0), 0);
+        assert_eq!(direct_anchor_segment(&offsets, 3, 50), 0);
+        assert_eq!(direct_anchor_segment(&offsets, 3, 100), 1);
+        assert_eq!(direct_anchor_segment(&offsets, 3, 120), 1);
+        assert_eq!(direct_anchor_segment(&offsets, 3, 399), 2);
+        assert_eq!(direct_anchor_segment(&offsets, 3, 10_000), 2);
     }
 }

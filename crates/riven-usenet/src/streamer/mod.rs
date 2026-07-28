@@ -37,12 +37,6 @@ pub use meta::{NzbMeta, NzbMetaFile, NzbMetaSource, NzbRarPart, NzbRarSlice, UNK
 
 pub(crate) use meta::{concat_slices, select_validation_indices};
 
-/// Articles fetched in parallel to satisfy one multi-segment read. Matches the
-/// VFS read-ahead window so a read and a read-ahead chunk cost the same depth.
-/// The hard ceiling is each provider's own `max_connections` — this is a
-/// window, not a connection allowance.
-pub(crate) const SEGMENT_FANOUT: usize = 8;
-
 /// Parallel BODY probes during segment-size discovery at ingest.
 pub(crate) const DISCOVERY_FANOUT: usize = 16;
 /// RAR volumes whose continuation map is discovered at once. Each volume
