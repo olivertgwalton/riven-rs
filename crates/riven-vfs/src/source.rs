@@ -1,12 +1,8 @@
 //! One byte source per backend, behind a single trait.
 //!
-//! Before this, usenet and HTTP origins each had their own reader, cache and
-//! prefetch machinery (`UsenetSession` vs `MediaStream` + `chunks` + `detect`
-//! + `RangeCache`).
-//!
-//! They differ in exactly one respect — how a byte range is fetched — so that
-//! is all this trait exposes. Everything above it
-//! (buffering, read-ahead, sequential detection) is shared, in [`crate::prefetch`].
+//! HTTP/debrid and Usenet differ only in how a byte range is fetched.
+//! [`crate::prefetch`] owns one shared buffering and read-ahead policy above
+//! both origins.
 
 use async_trait::async_trait;
 use std::io;
@@ -36,13 +32,11 @@ pub trait ByteSource: Send + Sync {
     /// Total file size in bytes.
     fn size(&self) -> u64;
 
-    /// Tell the origin where the player is, for origins that own their own
-    /// read-ahead. No-op by default.
+    /// Tell the origin where the player is. No-op by default.
     fn report_position(&self, _position: u64) {}
 }
 
-/// Usenet-backed range source. The VFS owns read-ahead; `riven-usenet`
-/// parallelizes the NNTP articles needed to satisfy each range.
+/// Usenet-backed range source.
 pub struct UsenetSource {
     inner: Arc<dyn LocalByteSource>,
     info_hash: Arc<str>,
@@ -100,9 +94,6 @@ impl ByteSource for UsenetSource {
     }
 
     fn report_position(&self, _position: u64) {
-        // Read-ahead lives in `crate::prefetch` now, so the origin is only
-        // told the stream is alive — it no longer runs a second, competing
-        // read-ahead of its own.
         self.inner.stream_touch(&self.stream_key);
     }
 }

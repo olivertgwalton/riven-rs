@@ -184,15 +184,19 @@ impl NntpClient {
     }
 
     async fn body_once(&mut self, message_id: &str) -> Result<PooledBuf, NntpError> {
+        // A future can be cancelled at any await below. Poison before writing
+        // so a socket with an unread status or body is never pooled.
+        self.poisoned = true;
         self.send(&format!("BODY {}\r\n", wrap_id(message_id)))
             .await?;
         let status = self.read_status(COMMAND_TIMEOUT).await?;
-        classify_article_status(&status, "222")?;
+        if let Err(error) = classify_article_status(&status, "222") {
+            // Non-body responses end at the status line, so the wire is clean.
+            self.poisoned = false;
+            return Err(error);
+        }
 
         let mut buf = PooledBuf::take(&ENCODED_BUF_POOL, 1 << 20);
-        // From here until the terminating dot the socket owes us a body; any
-        // failure leaves it unreadable for the next caller.
-        self.poisoned = true;
         self.stream
             .read_until_dot(buf.as_mut_vec(), BODY_READ_TIMEOUT)
             .await?;
@@ -226,9 +230,11 @@ impl NntpClient {
     }
 
     async fn stat_once(&mut self, message_id: &str) -> Result<bool, NntpError> {
+        self.poisoned = true;
         self.send(&format!("STAT {}\r\n", wrap_id(message_id)))
             .await?;
         let status = self.read_status(STAT_TIMEOUT).await?;
+        self.poisoned = false;
         self.last_used = Instant::now();
         match classify_article_status(&status, "223") {
             Ok(()) => Ok(true),
@@ -256,9 +262,8 @@ impl NntpClient {
             pipeline.push_str(&wrap_id(id));
             pipeline.push_str("\r\n");
         }
-        self.send(&pipeline).await?;
-
         self.poisoned = true;
+        self.send(&pipeline).await?;
         let mut out = Vec::with_capacity(message_ids.len());
         for _ in message_ids {
             let status = self.read_status(COMMAND_TIMEOUT).await?;

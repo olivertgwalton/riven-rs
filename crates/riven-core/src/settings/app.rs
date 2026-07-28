@@ -59,10 +59,6 @@ pub struct RivenSettings {
     /// Shared secret used to verify frontend-signed auth claims.
     pub frontend_auth_signing_secret: String,
 
-    /// Ceiling on VFS read-ahead memory across every open handle, in MB.
-    /// 0 = use default (256 MB).
-    pub vfs_cache_max_size_mb: u64,
-
     /// Comma-separated list of allowed CORS origins for the API.
     /// Empty = fall back to permissive CORS (logs a warning on startup).
     pub cors_allowed_origins: String,
@@ -99,7 +95,6 @@ impl Default for RivenSettings {
             unknown_air_date_offset_days: 7,
             api_key: String::new(),
             frontend_auth_signing_secret: String::new(),
-            vfs_cache_max_size_mb: 0,
             cors_allowed_origins: String::new(),
             enabled_plugins: None,
         }

@@ -1,247 +1,138 @@
-//! Per-handle read-ahead for immutable network files.
+//! One bounded read-ahead engine for every immutable network source.
 //!
-//! The implementation is deliberately an actor. One task owns the buffer,
-//! cursor, pending reads, and fill generations; FUSE threads only exchange
-//! commands with it. This makes seek/reset races impossible without spreading
-//! synchronization across every state transition.
+//! HTTP/debrid uses an 8 MiB fetch unit. Usenet reports its decoded article
+//! size, so the same eight-unit window becomes eight NNTP segments, matching
+//! streamnzb's `DefaultReadAhead`. Archive boundaries widen it to 24, matching
+//! its `PlaybackReadAheadSegments`. Demand units are always dispatched before
+//! speculative units.
+//!
+//! Memory is bounded once, by the shared decoded-segment cache below this
+//! layer — the same place streamnzb bounds it. There is no second per-file
+//! reservation here.
+//!
+//! Decoded units live in a [`UnitCache`] owned by the *file*, not by the
+//! handle; the window and cursor stay per-handle. streamnzb splits it the same
+//! way — cache and in-flight map on its `File`, cursor on each
+//! `SegmentReader` — and the split matters because players open the same file
+//! repeatedly and at several positions at once. Sharing the bytes makes a
+//! re-open warm; sharing a cursor would make those positions fight.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::BTreeMap;
 use std::io;
-use std::sync::{Arc, OnceLock};
-use std::time::{Duration, Instant};
+use std::sync::Arc;
 
 use bytes::{Bytes, BytesMut};
+use lru::LruCache;
+use parking_lot::Mutex;
 use riven_core::local_source::SourceLayout;
 use tokio::runtime::Handle;
-use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot};
+use tokio::task::JoinHandle;
 
 use crate::source::ByteSource;
 
 const MIB: u64 = 1024 * 1024;
-/// Chunk size for origins with no natural one of their own (HTTP/debrid).
-/// Usenet supplies its article size instead, via [`ByteSource::layout`].
-const DEFAULT_CHUNK: u64 = 8 * MIB;
-/// Chunks kept in flight ahead of the read position. Each one is its own task
-/// and may take its own origin connection; the hard ceiling on connections is
-/// the origin's, not this.
-const WINDOW_CHUNKS: usize = 8;
-/// Widened window used when playback is about to cross into another container
-/// volume, where a boundary stall would otherwise be audible.
-const BOUNDARY_WINDOW_CHUNKS: usize = 24;
-const ARM_AFTER: u32 = 3;
-const PROBING_TOLERANCE: u64 = 256 * 1024;
-const FORWARD_TOLERANCE: u64 = 4 * MIB;
-const BACKWARD_RETENTION: u64 = 16 * MIB;
-const BACKWARD_PASSTHROUGH: u64 = 32 * MIB;
-/// Reservoir built before buffered reads are released to a player.
+const HTTP_CHUNK: u64 = 8 * MIB;
+const READ_AHEAD_UNITS: usize = 8;
+const ARCHIVE_READ_AHEAD_UNITS: usize = 24;
+const RETAIN_BEHIND_UNITS: u64 = 2;
+const MIN_TAIL_PROBE: u64 = 16 * 1024;
+const MAX_TAIL_PROBE: u64 = 10 * MIB;
+/// Decoded bytes retained per open file. Wide enough to cover several handles'
+/// windows at once, since a player streams one file from several positions.
+pub const UNIT_CACHE_BYTES: u64 = 192 * MIB;
+
+/// Decoded read-ahead units for one file, shared by every handle open on it.
 ///
-/// Players initially pull much faster than the title bitrate to fill their
-/// own cache. Releasing the first completed chunk lets playback begin quickly
-/// but makes it catch the still-cold origin pipeline a few seconds later.
-const STARTUP_BUFFER: u64 = 16 * MIB;
-const HEADER_SIZE: u64 = 256 * 1024;
-const MIN_FOOTER: u64 = 16 * 1024;
-const MAX_FOOTER: u64 = 10 * MIB;
-/// A read the player is blocked on is only interesting once it is long enough
-/// to be seen. Both thresholds sit well above the cost of a single cold origin
-/// chunk (a usenet article is a few hundred milliseconds by itself), so a
-/// healthy cold fetch is not reported as a stall.
-const SLOW_DEMAND_MS: u64 = 800;
-/// Fills are speculative and overlap each other, so a slow one is only a
-/// problem if it is slow enough to arrive after the cursor reaches it.
-const SLOW_FILL_MS: u64 = 1_000;
-
-fn env_positive(name: &str, default: usize) -> usize {
-    std::env::var(name)
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .filter(|value| *value > 0)
-        .unwrap_or(default)
+/// Bounded by bytes rather than entries because a unit is an 8 MiB HTTP chunk
+/// on one backend and a ~700 KiB article on the other.
+pub struct UnitCache {
+    state: Mutex<UnitCacheState>,
+    max_bytes: u64,
 }
 
-/// Default ceiling on read-ahead memory across every open handle.
-const DEFAULT_BUDGET_MB: usize = 256;
-
-static BUDGET: OnceLock<Arc<Semaphore>> = OnceLock::new();
-
-/// Set the process-wide read-ahead memory ceiling. Called once at VFS
-/// construction; the env var still wins so a deployment can override without
-/// touching settings. Later calls are ignored.
-pub fn init_budget_mb(budget_mb: usize) {
-    let budget = env_positive(
-        "RIVEN_VFS_READAHEAD_BUDGET_MB",
-        if budget_mb > 0 {
-            budget_mb
-        } else {
-            DEFAULT_BUDGET_MB
-        },
-    );
-    drop(BUDGET.set(Arc::new(Semaphore::new(budget))));
+struct UnitCacheState {
+    units: LruCache<u64, Bytes>,
+    bytes: u64,
 }
 
-fn global_budget() -> Arc<Semaphore> {
-    BUDGET
-        .get_or_init(|| {
-            Arc::new(Semaphore::new(env_positive(
-                "RIVEN_VFS_READAHEAD_BUDGET_MB",
-                DEFAULT_BUDGET_MB,
-            )))
+impl UnitCache {
+    pub fn new(max_bytes: u64) -> Arc<Self> {
+        Arc::new(Self {
+            state: Mutex::new(UnitCacheState {
+                units: LruCache::unbounded(),
+                bytes: 0,
+            }),
+            max_bytes,
         })
-        .clone()
+    }
+
+    fn get(&self, start: u64) -> Option<Bytes> {
+        self.state.lock().units.get(&start).cloned()
+    }
+
+    /// Whether a unit is held, without counting as a use: scheduling decisions
+    /// must not keep a unit alive that no reader has actually wanted.
+    fn contains(&self, start: u64) -> bool {
+        self.state.lock().units.peek(&start).is_some()
+    }
+
+    fn put(&self, start: u64, data: Bytes) {
+        let mut state = self.state.lock();
+        let added = data.len() as u64;
+        if let Some(previous) = state.units.put(start, data) {
+            state.bytes = state.bytes.saturating_sub(previous.len() as u64);
+        }
+        state.bytes = state.bytes.saturating_add(added);
+        while state.bytes > self.max_bytes && state.units.len() > 1 {
+            let Some((_, evicted)) = state.units.pop_lru() else {
+                break;
+            };
+            state.bytes = state.bytes.saturating_sub(evicted.len() as u64);
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.state.lock().units.len()
+    }
 }
 
 #[derive(Clone)]
 struct Config {
-    chunk: u64,
-    window_chunks: usize,
-    boundary_window_chunks: usize,
-    /// Virtual offsets at which the origin starts a new container volume,
-    /// ascending. Empty for origins that are one flat stream.
+    unit: u64,
     boundaries: Arc<[u64]>,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            chunk: DEFAULT_CHUNK,
-            window_chunks: env_positive("RIVEN_VFS_READAHEAD_CHUNKS", WINDOW_CHUNKS),
-            boundary_window_chunks: BOUNDARY_WINDOW_CHUNKS,
-            boundaries: Arc::from([]),
-        }
-    }
 }
 
 impl Config {
     fn from_layout(layout: Option<SourceLayout>) -> Self {
-        let defaults = Self::default();
-        let Some(layout) = layout else {
-            return defaults;
-        };
-        Self {
-            chunk: layout.chunk_size.max(1),
-            boundaries: Arc::from(layout.boundaries),
-            ..defaults
+        match layout {
+            Some(layout) => Self {
+                unit: layout.chunk_size.max(1),
+                boundaries: layout.boundaries.into(),
+            },
+            None => Self {
+                unit: HTTP_CHUNK,
+                boundaries: Arc::from([]),
+            },
         }
     }
 
-    /// Chunks to keep in flight from `cursor`. Widens as the next volume
-    /// boundary comes within the ordinary window.
-    fn chunks_at(&self, cursor: u64) -> usize {
-        let ordinary = self.chunk * self.window_chunks as u64;
-        let approaching = self
-            .boundaries
-            .iter()
-            .any(|&boundary| boundary >= cursor && boundary - cursor <= ordinary);
-        if approaching {
-            self.boundary_window_chunks.max(self.window_chunks)
+    fn window_units(&self) -> usize {
+        if self.boundaries.is_empty() {
+            READ_AHEAD_UNITS
         } else {
-            self.window_chunks
+            ARCHIVE_READ_AHEAD_UNITS
         }
     }
 
-    fn window_at(&self, cursor: u64) -> u64 {
-        self.chunk * self.chunks_at(cursor) as u64
-    }
-
-    /// The largest window this handle can ever ask for — what its memory
-    /// reservation has to cover, since the window widens without re-reserving.
-    fn max_window(&self) -> u64 {
-        let chunks = if self.boundaries.is_empty() {
-            self.window_chunks
-        } else {
-            self.boundary_window_chunks.max(self.window_chunks)
-        };
-        self.chunk * chunks as u64
-    }
-
-    fn budget_mib(&self) -> u32 {
-        self.max_window()
-            .saturating_add(BACKWARD_RETENTION)
-            .div_ceil(MIB)
-            .min(u64::from(u32::MAX)) as u32
-    }
-}
-
-struct Buffer {
-    start: u64,
-    len: u64,
-    chunks: VecDeque<Bytes>,
-}
-
-impl Buffer {
-    fn empty(start: u64) -> Self {
-        Self {
-            start,
-            len: 0,
-            chunks: VecDeque::new(),
-        }
-    }
-
-    fn end(&self) -> u64 {
-        self.start + self.len
-    }
-
-    fn reset(&mut self, start: u64) {
-        self.start = start;
-        self.len = 0;
-        self.chunks.clear();
-    }
-
-    fn push(&mut self, bytes: Bytes) {
-        self.len += bytes.len() as u64;
-        self.chunks.push_back(bytes);
-    }
-
-    fn discard_before(&mut self, offset: u64) {
-        let offset = offset.min(self.end());
-        while self.start < offset {
-            let Some(front) = self.chunks.front_mut() else {
-                self.start = offset;
-                self.len = 0;
-                return;
-            };
-            let skip = (offset - self.start).min(front.len() as u64) as usize;
-            if skip == front.len() {
-                self.chunks.pop_front();
-            } else {
-                *front = front.slice(skip..);
-            }
-            self.start += skip as u64;
-            self.len -= skip as u64;
-        }
-    }
-
-    fn read(&self, start: u64, len: usize) -> Option<Bytes> {
-        let end = start.checked_add(len as u64)?;
-        if start < self.start || end > self.end() {
-            return None;
-        }
-
-        let mut skip = (start - self.start) as usize;
-        let mut remaining = len;
-        let mut output = BytesMut::with_capacity(len);
-        for chunk in &self.chunks {
-            if skip >= chunk.len() {
-                skip -= chunk.len();
-                continue;
-            }
-            let take = remaining.min(chunk.len() - skip);
-            output.extend_from_slice(&chunk[skip..skip + take]);
-            remaining -= take;
-            skip = 0;
-            if remaining == 0 {
-                return Some(output.freeze());
-            }
-        }
-        None
+    fn unit_start(&self, position: u64) -> u64 {
+        position - position % self.unit
     }
 }
 
 struct ReadRequest {
     start: u64,
     len: usize,
-    queued_at: Instant,
-    waited: bool,
     reply: oneshot::Sender<io::Result<Bytes>>,
 }
 
@@ -262,77 +153,49 @@ enum Command {
 }
 
 struct Fill {
-    generation: u64,
     start: u64,
-    elapsed: Duration,
     result: io::Result<Bytes>,
 }
 
 struct Direct {
-    generation: u64,
-    arm_after: bool,
+    id: u64,
     request: ReadRequest,
     result: io::Result<Bytes>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum Mode {
-    Probing,
-    Warming,
-    Streaming,
-}
-
-#[derive(Default)]
-struct Stats {
-    hits: u64,
-    misses: u64,
-    waited_ms: u64,
-    worst_wait_ms: u64,
-    fills: u64,
-    fill_ms: u64,
-    worst_fill_ms: u64,
-    seeks: u64,
-    probes: u64,
-    behind: u64,
-    bytes: u64,
-    last_log: Option<Instant>,
-}
-
-/// One open file handle. All mutable read-ahead state lives in its actor task.
+/// One open network file. Dropping it closes the command channel; the actor
+/// then aborts every outstanding range request.
 pub struct Prefetcher {
     commands: mpsc::UnboundedSender<Command>,
     size: u64,
 }
 
 impl Prefetcher {
-    pub fn new(source: Arc<dyn ByteSource>, runtime: &Handle) -> Self {
+    pub fn new(source: Arc<dyn ByteSource>, cache: Arc<UnitCache>, runtime: &Handle) -> Self {
         let size = source.size();
         let (command_tx, command_rx) = mpsc::unbounded_channel();
         let (fill_tx, fill_rx) = mpsc::unbounded_channel();
         let (direct_tx, direct_rx) = mpsc::unbounded_channel();
-        let actor = Actor {
-            source,
-            config: Config::default(),
-            size,
-            commands: command_rx,
-            fill_tx,
-            fills: fill_rx,
-            direct_tx,
-            directs: direct_rx,
-            buffer: Buffer::empty(0),
-            completed: BTreeMap::new(),
-            pending: Vec::new(),
-            mode: Mode::Probing,
-            expected_next: 0,
-            seq_run: 0,
-            cursor: 0,
-            frontier: 0,
-            generation: 0,
-            inflight: 0,
-            reservation: None,
-            stats: Stats::default(),
-        };
-        runtime.spawn(actor.run());
+        runtime.spawn(
+            Actor {
+                source,
+                size,
+                config: Config::from_layout(None),
+                commands: command_rx,
+                fills: fill_rx,
+                fill_tx,
+                directs: direct_rx,
+                direct_tx,
+                cursor: 0,
+                resets: 0,
+                cache,
+                active: BTreeMap::new(),
+                direct_active: BTreeMap::new(),
+                next_direct_id: 1,
+                pending: Vec::new(),
+            }
+            .run(),
+        );
         Self {
             commands: command_tx,
             size,
@@ -346,18 +209,10 @@ impl Prefetcher {
     pub async fn read(&self, start: u64, len: usize) -> io::Result<Bytes> {
         let (reply, response) = oneshot::channel();
         self.commands
-            .send(Command::Read(ReadRequest {
-                start,
-                len,
-                queued_at: Instant::now(),
-                waited: false,
-                reply,
-            }))
-            .map_err(|_send_error| {
-                io::Error::new(io::ErrorKind::BrokenPipe, "read handle is closed")
-            })?;
+            .send(Command::Read(ReadRequest { start, len, reply }))
+            .map_err(|_send_error| io::Error::new(io::ErrorKind::BrokenPipe, "stream is closed"))?;
         response.await.map_err(|_receive_error| {
-            io::Error::new(io::ErrorKind::BrokenPipe, "read handle is closed")
+            io::Error::new(io::ErrorKind::BrokenPipe, "stream is closed")
         })?
     }
 
@@ -371,48 +226,49 @@ impl Prefetcher {
 
 struct Actor {
     source: Arc<dyn ByteSource>,
-    config: Config,
     size: u64,
+    config: Config,
     commands: mpsc::UnboundedReceiver<Command>,
-    fill_tx: mpsc::UnboundedSender<Fill>,
     fills: mpsc::UnboundedReceiver<Fill>,
-    direct_tx: mpsc::UnboundedSender<Direct>,
+    fill_tx: mpsc::UnboundedSender<Fill>,
     directs: mpsc::UnboundedReceiver<Direct>,
-
-    buffer: Buffer,
-    completed: BTreeMap<u64, Bytes>,
-    pending: Vec<ReadRequest>,
-    mode: Mode,
-    expected_next: u64,
-    seq_run: u32,
+    direct_tx: mpsc::UnboundedSender<Direct>,
     cursor: u64,
-    frontier: u64,
-    generation: u64,
-    inflight: usize,
-    reservation: Option<OwnedSemaphorePermit>,
-    stats: Stats,
+    resets: u64,
+    /// Shared with every other handle on this file; see [`UnitCache`].
+    cache: Arc<UnitCache>,
+    active: BTreeMap<u64, JoinHandle<()>>,
+    direct_active: BTreeMap<u64, JoinHandle<()>>,
+    next_direct_id: u64,
+    pending: Vec<ReadRequest>,
 }
 
 impl Actor {
     async fn run(mut self) {
-        // Resolved here rather than at construction: the FUSE open path is
-        // synchronous, and discovering an origin's chunking may need I/O.
         self.config = Config::from_layout(self.source.layout().await);
+
         loop {
             tokio::select! {
-                command = self.commands.recv() => {
-                    match command {
-                        Some(Command::Read(request)) => self.on_read(request),
-                        #[cfg(test)]
-                        Some(Command::Inspect(reply)) => {
-                            drop(reply.send(self.snapshot()));
-                        }
-                        None => break,
+                command = self.commands.recv() => match command {
+                    Some(Command::Read(request)) => self.on_read(request),
+                    #[cfg(test)]
+                    Some(Command::Inspect(reply)) => {
+                        drop(reply.send(self.snapshot()));
                     }
-                }
-                Some(fill) = self.fills.recv(), if self.inflight > 0 => self.on_fill(fill),
+                    None => break,
+                },
+                Some(fill) = self.fills.recv() => self.on_fill(fill),
                 Some(direct) = self.directs.recv() => self.on_direct(direct),
             }
+        }
+
+        self.abort_active();
+        self.abort_direct();
+        for request in self.pending.drain(..) {
+            request.respond(Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "stream is closed",
+            )));
         }
     }
 
@@ -424,355 +280,225 @@ impl Actor {
         request.len = request.len.min((self.size - request.start) as usize);
         self.source.report_position(request.start);
 
-        if self.is_metadata_probe(&request) {
-            self.stats.probes += 1;
-            self.spawn_direct(request, false);
+        if self.is_tail_probe(&request) {
+            self.spawn_direct(request);
             return;
         }
 
-        if self.mode == Mode::Probing {
-            let arm_after = self.observe_probing_read(&request);
-            self.spawn_direct(request, arm_after);
-            return;
-        }
-
-        if self.mode == Mode::Streaming
-            && let Some(data) = self.buffer.read(request.start, request.len)
-        {
-            self.finish_buffered(request, data);
+        if let Some(data) = self.read_cached(request.start, request.len) {
+            self.finish(request, data);
             self.dispatch();
             return;
         }
 
-        if request.start < self.buffer.start
-            && self.buffer.start - request.start <= BACKWARD_PASSTHROUGH
-        {
-            self.stats.behind += 1;
-            self.spawn_direct(request, false);
+        if !self.in_current_window(&request) {
+            self.reset(request.start);
+        }
+
+        let demand_units = self.unit_count(request.start, request.end());
+        if demand_units > self.config.window_units() {
+            self.spawn_direct(request);
             return;
         }
 
-        let request_end = request.end();
-        let waits_for_current_window = request.start >= self.buffer.start
-            && request.start <= self.frontier.saturating_add(FORWARD_TOLERANCE)
-            && request_end
-                <= self
-                    .cursor
-                    .saturating_add(self.config.window_at(self.cursor));
-        if waits_for_current_window {
-            request.waited = true;
-            self.pending.push(request);
-            self.dispatch();
-            return;
-        }
-
-        tracing::debug!(
-            target: "streaming",
-            from = self.cursor,
-            to = request.start,
-            "read-ahead seek; returning handle to passthrough"
-        );
-        self.stats.seeks += 1;
-        self.demote();
-        let arm_after = self.observe_probing_read(&request);
-        self.spawn_direct(request, arm_after);
-    }
-
-    fn observe_probing_read(&mut self, request: &ReadRequest) -> bool {
-        if request.start >= self.expected_next
-            && request.start - self.expected_next <= PROBING_TOLERANCE
-        {
-            self.seq_run += 1;
-        } else {
-            self.seq_run = 1;
-        }
-        self.expected_next = request.end();
-
-        self.seq_run >= ARM_AFTER && self.size > self.config.window_at(0)
-    }
-
-    fn promote(&mut self, start: u64) {
-        if self.mode != Mode::Probing {
-            return;
-        }
-        let Ok(permit) = global_budget().try_acquire_many_owned(self.config.budget_mib()) else {
-            return;
-        };
-
-        self.mode = Mode::Warming;
-        self.generation = self.generation.wrapping_add(1);
-        self.cursor = start;
-        self.frontier = self.cursor;
-        self.buffer.reset(self.cursor);
-        self.completed.clear();
-        self.reservation = Some(permit);
-        self.dispatch();
-    }
-
-    fn demote(&mut self) {
-        self.mode = Mode::Probing;
-        self.generation = self.generation.wrapping_add(1);
-        self.seq_run = 0;
-        self.buffer.reset(0);
-        self.completed.clear();
-        self.reservation = None;
-
-        for request in std::mem::take(&mut self.pending) {
-            self.spawn_direct(request, false);
-        }
-    }
-
-    fn dispatch(&mut self) {
-        while self.mode != Mode::Probing
-            && self.inflight < self.config.chunks_at(self.cursor)
-            && self.frontier < self.size
-            && self.frontier.saturating_sub(self.cursor) < self.config.window_at(self.cursor)
-        {
-            let start = self.frontier;
-            // The boundary has to be strictly ahead of `start`. `next_multiple_of`
-            // returns `start` unchanged when it is already on one — and every fill
-            // after the first ends on a boundary, so that was the common case. The
-            // old `.max(start + 1)` then turned it into a one-byte fill, which
-            // still costs a whole article fetch and an in-flight slot: each chunk
-            // burned two slots and read-ahead ran at half its configured depth.
-            let boundary = start
-                .checked_add(self.config.chunk - start % self.config.chunk)
-                .unwrap_or(self.size);
-            let end = boundary
-                .min(
-                    self.cursor
-                        .saturating_add(self.config.window_at(self.cursor)),
-                )
-                .min(self.size);
-            if end <= start {
-                break;
-            }
-            self.frontier = end;
-            self.inflight += 1;
-
-            let source = Arc::clone(&self.source);
-            let sender = self.fill_tx.clone();
-            let generation = self.generation;
-            let size = self.size;
-            tokio::spawn(async move {
-                let started = Instant::now();
-                let result = read_exact(source, size, start, (end - start) as usize).await;
-                drop(sender.send(Fill {
-                    generation,
-                    start,
-                    elapsed: started.elapsed(),
-                    result,
-                }));
-            });
-        }
+        self.schedule_range(request.start, request.end());
+        self.pending.push(request);
+        // Match streamnzb's SegmentReader: requested bytes complete before
+        // speculative work starts. This protects startup and keeps metadata
+        // probes from filling every NNTP connection ahead of their demand.
     }
 
     fn on_fill(&mut self, fill: Fill) {
-        self.inflight = self.inflight.saturating_sub(1);
-        if fill.generation != self.generation || self.mode == Mode::Probing {
-            self.dispatch();
-            return;
-        }
-
-        let elapsed_ms = fill.elapsed.as_millis() as u64;
-        self.stats.fills += 1;
-        self.stats.fill_ms += elapsed_ms;
-        self.stats.worst_fill_ms = self.stats.worst_fill_ms.max(elapsed_ms);
-        if elapsed_ms >= SLOW_FILL_MS {
-            // Not a stutter on its own — read-ahead runs ahead of the player.
-            // `ahead_mb` is what says whether it had room to be late.
-            tracing::warn!(
-                target: "streaming",
-                start = fill.start,
-                ahead_mb = fill.start.saturating_sub(self.cursor) >> 20,
-                inflight = self.inflight,
-                elapsed_ms,
-                "slow read-ahead fill"
-            );
-        }
-
+        self.active.remove(&fill.start);
         match fill.result {
             Ok(data) => {
-                self.completed.insert(fill.start, data);
-                while let Some(data) = self.completed.remove(&self.buffer.end()) {
-                    self.buffer.push(data);
-                }
-                if self.mode == Mode::Warming && self.startup_ready() {
-                    self.mode = Mode::Streaming;
-                }
+                self.cache.put(fill.start, data);
                 self.serve_pending();
                 self.dispatch();
             }
+            // One unreadable unit fails the reads waiting on it and nothing
+            // else. Sibling fills stay in flight and keep their bytes, the way
+            // streamnzb leaves a shared segment download alone when one reader
+            // gives up on it.
             Err(error) => {
-                tracing::warn!(
-                    target: "streaming",
-                    start = fill.start,
-                    %error,
-                    "read-ahead fill failed; retrying demand reads directly"
-                );
-                self.demote();
+                let message = error.to_string();
+                for request in self.pending.drain(..) {
+                    request.respond(Err(io::Error::new(error.kind(), message.clone())));
+                }
             }
         }
     }
 
-    fn serve_pending(&mut self) {
-        if self.mode != Mode::Streaming {
+    fn on_direct(&mut self, direct: Direct) {
+        self.direct_active.remove(&direct.id);
+        direct.request.respond(direct.result);
+    }
+
+    /// Repoint this handle's window after a seek or a probe. Fills already on
+    /// the wire keep running and their bytes stay in the shared [`UnitCache`],
+    /// so a backward read or a probe never throws away work another handle —
+    /// or this one, a moment later — still needs. The cache's own LRU bound
+    /// reclaims what nothing reads again.
+    ///
+    /// Logged because a reset means this window starts over. It is no longer
+    /// the stall it once was, now that the bytes survive it, but a burst of
+    /// them still says the player is reading further apart than one window
+    /// spans.
+    fn reset(&mut self, position: u64) {
+        self.resets += 1;
+        tracing::debug!(
+            target: "streaming",
+            resets = self.resets,
+            from = self.cursor,
+            to = position,
+            jump = position as i64 - self.cursor as i64,
+            window_bytes = self.config.unit * self.config.window_units() as u64,
+            cached_units = self.cache.len(),
+            inflight_units = self.active.len(),
+            "read-ahead window reset"
+        );
+        for request in self.pending.drain(..).collect::<Vec<_>>() {
+            self.spawn_direct(request);
+        }
+        self.cursor = position;
+    }
+
+    fn abort_active(&mut self) {
+        for (_, task) in std::mem::take(&mut self.active) {
+            task.abort();
+        }
+    }
+
+    fn abort_direct(&mut self) {
+        for (_, task) in std::mem::take(&mut self.direct_active) {
+            task.abort();
+        }
+    }
+
+    fn in_current_window(&self, request: &ReadRequest) -> bool {
+        let behind = self
+            .cursor
+            .saturating_sub(self.config.unit.saturating_mul(RETAIN_BEHIND_UNITS));
+        let ahead = self.cursor.saturating_add(
+            self.config
+                .unit
+                .saturating_mul(self.config.window_units() as u64),
+        );
+        request.start >= behind && request.end() <= ahead
+    }
+
+    fn dispatch(&mut self) {
+        let units = self.config.window_units();
+        let mut start = self.config.unit_start(self.cursor);
+        for _ in 0..units {
+            if start >= self.size || self.active.len() >= units {
+                break;
+            }
+            self.schedule_unit(start);
+            start = start.saturating_add(self.config.unit);
+        }
+    }
+
+    fn schedule_range(&mut self, start: u64, end: u64) {
+        let mut unit = self.config.unit_start(start);
+        while unit < end && unit < self.size {
+            self.schedule_unit(unit);
+            unit = unit.saturating_add(self.config.unit);
+        }
+    }
+
+    fn schedule_unit(&mut self, start: u64) {
+        if self.cache.contains(start) || self.active.contains_key(&start) || start >= self.size {
             return;
         }
-        let mut waiting = Vec::with_capacity(self.pending.len());
+        let end = start.saturating_add(self.config.unit).min(self.size);
+        let source = self.source.clone();
+        let sender = self.fill_tx.clone();
+        let size = self.size;
+        let task = tokio::spawn(async move {
+            let result = read_exact(source, size, start, (end - start) as usize).await;
+            drop(sender.send(Fill { start, result }));
+        });
+        self.active.insert(start, task);
+    }
+
+    fn spawn_direct(&mut self, request: ReadRequest) {
+        let source = self.source.clone();
+        let sender = self.direct_tx.clone();
+        let size = self.size;
+        let id = self.next_direct_id;
+        self.next_direct_id = self.next_direct_id.wrapping_add(1);
+        let task = tokio::spawn(async move {
+            let result = read_exact(source, size, request.start, request.len).await;
+            drop(sender.send(Direct {
+                id,
+                request,
+                result,
+            }));
+        });
+        self.direct_active.insert(id, task);
+    }
+
+    fn serve_pending(&mut self) {
+        let mut waiting = Vec::new();
         for request in std::mem::take(&mut self.pending) {
-            if let Some(data) = self.buffer.read(request.start, request.len) {
-                self.finish_buffered(request, data);
-            } else if request.start < self.buffer.start {
-                self.spawn_direct(request, false);
+            if let Some(data) = self.read_cached(request.start, request.len) {
+                self.finish(request, data);
             } else {
                 waiting.push(request);
             }
         }
         self.pending = waiting;
-        self.evict_consumed();
     }
 
-    fn finish_buffered(&mut self, request: ReadRequest, data: Bytes) {
-        let waited_ms = request.queued_at.elapsed().as_millis() as u64;
-        if request.waited {
-            self.stats.misses += 1;
-            self.stats.waited_ms += waited_ms;
-            self.stats.worst_wait_ms = self.stats.worst_wait_ms.max(waited_ms);
-            self.log_slow_demand(&request, "buffer");
-        } else {
-            self.stats.hits += 1;
-        }
-        self.stats.bytes += data.len() as u64;
+    fn finish(&mut self, request: ReadRequest, data: Bytes) {
         self.cursor = self.cursor.max(request.start + data.len() as u64);
-        self.expected_next = self.cursor;
         request.respond(Ok(data));
-        self.evict_consumed();
-        self.maybe_log();
     }
 
-    fn evict_consumed(&mut self) {
-        let mut keep_from = self.cursor.saturating_sub(BACKWARD_RETENTION);
-        if let Some(oldest_waiter) = self.pending.iter().map(|request| request.start).min() {
-            keep_from = keep_from.min(oldest_waiter);
+    fn read_cached(&self, start: u64, len: usize) -> Option<Bytes> {
+        let end = start.checked_add(len as u64)?;
+        let first_start = self.config.unit_start(start);
+        if end <= first_start.saturating_add(self.config.unit) {
+            let data = self.cache.get(first_start)?;
+            let offset = (start - first_start) as usize;
+            let wanted_end = offset.checked_add(len)?;
+            return (wanted_end <= data.len()).then(|| data.slice(offset..wanted_end));
         }
-        self.buffer.discard_before(keep_from);
-    }
 
-    fn spawn_direct(&self, request: ReadRequest, arm_after: bool) {
-        let source = Arc::clone(&self.source);
-        let sender = self.direct_tx.clone();
-        let size = self.size;
-        let generation = self.generation;
-        tokio::spawn(async move {
-            let result = read_exact(source, size, request.start, request.len).await;
-            drop(sender.send(Direct {
-                generation,
-                arm_after,
-                request,
-                result,
-            }));
-        });
-    }
-
-    fn on_direct(&mut self, direct: Direct) {
-        let succeeded = direct.result.as_ref().is_ok_and(|data| !data.is_empty());
-        let promote_from = self.expected_next.max(direct.request.end());
-        self.log_slow_demand(&direct.request, "passthrough");
-        direct.request.respond(direct.result);
-
-        // Starting six speculative fills while the read that proved the
-        // stream is still waiting lets read-ahead starve demand during cold
-        // start. Promote only after that demand read has completed.
-        if direct.arm_after
-            && succeeded
-            && direct.generation == self.generation
-            && self.mode == Mode::Probing
-        {
-            self.promote(promote_from);
+        let mut output = BytesMut::with_capacity(len);
+        let mut position = start;
+        while position < end {
+            let unit_start = self.config.unit_start(position);
+            let data = self.cache.get(unit_start)?;
+            let offset = (position - unit_start) as usize;
+            if offset >= data.len() {
+                return None;
+            }
+            let take = (end - position).min((data.len() - offset) as u64) as usize;
+            output.extend_from_slice(&data[offset..offset + take]);
+            position += take as u64;
         }
+        Some(output.freeze())
     }
 
-    fn startup_ready(&self) -> bool {
-        let remaining = self.size.saturating_sub(self.cursor);
-        let target = self
-            .config
-            .window_at(self.cursor)
-            .min(STARTUP_BUFFER)
-            .min(remaining);
-        self.buffer.len >= target || self.buffer.end() >= self.size
+    fn unit_count(&self, start: u64, end: u64) -> usize {
+        let first = self.config.unit_start(start);
+        end.saturating_sub(first).div_ceil(self.config.unit) as usize
     }
 
-    fn is_metadata_probe(&self, request: &ReadRequest) -> bool {
-        let footer_size = (self.size / 50).clamp(MIN_FOOTER, MAX_FOOTER);
-        request.end() <= HEADER_SIZE.min(self.size)
-            || request.start >= self.size.saturating_sub(footer_size)
-    }
-
-    /// Warn about a read a player was actually blocked on. `served_from`
-    /// separates the two causes that need different fixes: `passthrough` is the
-    /// origin itself being slow, `buffer` is read-ahead that fell behind the
-    /// cursor.
-    fn log_slow_demand(&self, request: &ReadRequest, served_from: &'static str) {
-        let waited_ms = request.queued_at.elapsed().as_millis() as u64;
-        if waited_ms < SLOW_DEMAND_MS {
-            return;
-        }
-        tracing::warn!(
-            target: "streaming",
-            offset = request.start,
-            len = request.len,
-            served_from,
-            phase = ?self.mode,
-            waited_ms,
-            "slow playback read"
-        );
-    }
-
-    fn maybe_log(&mut self) {
-        let now = Instant::now();
-        if self
-            .stats
-            .last_log
-            .is_some_and(|last| now.duration_since(last) < Duration::from_secs(10))
-        {
-            return;
-        }
-        self.stats.last_log = Some(now);
-        let reads = self.stats.hits + self.stats.misses;
-        tracing::info!(
-            target: "streaming",
-            phase = ?self.mode,
-            position_mb = self.cursor >> 20,
-            window_mb = self.config.window_at(self.cursor) >> 20,
-            buffered_mb = self.buffer.len >> 20,
-            inflight = self.inflight,
-            pending = self.pending.len(),
-            reads,
-            hit_pct = self.stats.hits * 100 / reads.max(1),
-            misses = self.stats.misses,
-            avg_wait_ms = self.stats.waited_ms / self.stats.misses.max(1),
-            worst_wait_ms = self.stats.worst_wait_ms,
-            fills = self.stats.fills,
-            avg_fill_ms = self.stats.fill_ms / self.stats.fills.max(1),
-            worst_fill_ms = self.stats.worst_fill_ms,
-            seeks = self.stats.seeks,
-            probes = self.stats.probes,
-            behind = self.stats.behind,
-            served_mb = self.stats.bytes >> 20,
-            "read-ahead stats"
-        );
+    fn is_tail_probe(&self, request: &ReadRequest) -> bool {
+        let tail = (self.size / 50).clamp(MIN_TAIL_PROBE, MAX_TAIL_PROBE);
+        self.size > tail && request.start >= self.size - tail
     }
 
     #[cfg(test)]
     fn snapshot(&self) -> Snapshot {
         Snapshot {
-            streaming: self.mode != Mode::Probing,
-            warming: self.mode == Mode::Warming,
-            generation: self.generation,
-            buffer_start: self.buffer.start,
-            buffer_end: self.buffer.end(),
-            inflight: self.inflight,
+            unit: self.config.unit,
+            window: self.config.window_units(),
+            cursor: self.cursor,
+            active: self.active.len(),
         }
     }
 }
@@ -786,17 +512,17 @@ async fn read_exact(
     if start >= file_size || len == 0 {
         return Ok(Bytes::new());
     }
-    let len = len.min((file_size - start) as usize);
-    let end = start + len as u64;
+    let wanted = len.min((file_size - start) as usize);
+    let end = start + wanted as u64;
     let mut position = start;
-    let mut output = BytesMut::with_capacity(len);
+    let mut output = BytesMut::with_capacity(wanted);
 
     while position < end {
         let data = source.read_range(position, end - 1).await?;
         if data.is_empty() {
             return Err(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
-                format!("origin returned no data at offset {position} before file end"),
+                format!("origin returned no data at {position}"),
             ));
         }
         let take = data.len().min((end - position) as usize);
@@ -809,424 +535,215 @@ async fn read_exact(
 #[cfg(test)]
 #[derive(Debug)]
 struct Snapshot {
-    streaming: bool,
-    warming: bool,
-    generation: u64,
-    buffer_start: u64,
-    buffer_end: u64,
-    inflight: usize,
+    unit: u64,
+    window: usize,
+    cursor: u64,
+    active: usize,
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use tokio::sync::{Notify, Semaphore};
+    use std::time::Duration;
+
+    use super::*;
 
     struct Source {
         size: u64,
-        cap: usize,
+        unit: u64,
+        boundaries: Vec<u64>,
+        max_return: usize,
+        calls: Mutex<Vec<(u64, u64)>>,
+        active: AtomicUsize,
+        peak: AtomicUsize,
+    }
+
+    impl Source {
+        fn new(size: u64, unit: u64) -> Arc<Self> {
+            Arc::new(Self {
+                size,
+                unit,
+                boundaries: Vec::new(),
+                max_return: usize::MAX,
+                calls: Mutex::new(Vec::new()),
+                active: AtomicUsize::new(0),
+                peak: AtomicUsize::new(0),
+            })
+        }
+
+        fn with_boundaries(size: u64, unit: u64, boundaries: Vec<u64>) -> Arc<Self> {
+            Arc::new(Self {
+                size,
+                unit,
+                boundaries,
+                max_return: usize::MAX,
+                calls: Mutex::new(Vec::new()),
+                active: AtomicUsize::new(0),
+                peak: AtomicUsize::new(0),
+            })
+        }
+
+        fn call_count(&self) -> usize {
+            self.calls.lock().unwrap().len()
+        }
     }
 
     #[async_trait::async_trait]
     impl ByteSource for Source {
         async fn read_range(&self, start: u64, end: u64) -> io::Result<Bytes> {
-            let want = (end - start + 1) as usize;
-            Ok(Bytes::from(vec![b'x'; want.min(self.cap)]))
-        }
-
-        fn size(&self) -> u64 {
-            self.size
-        }
-    }
-
-    /// Every prefetcher reserves its window from one process-wide budget that
-    /// the whole test binary shares, so tests running in parallel would
-    /// otherwise starve each other out of read-ahead entirely.
-    fn unbounded_budget() {
-        init_budget_mb(1024 * 1024);
-    }
-
-    fn prefetcher(size: u64, cap: usize) -> Prefetcher {
-        unbounded_budget();
-        Prefetcher::new(Arc::new(Source { size, cap }), &Handle::current())
-    }
-
-    #[tokio::test]
-    async fn fills_mid_file_short_reads() {
-        let reader = prefetcher(128 * MIB, 4096);
-        let data = reader.read(MIB, 128 * 1024).await.unwrap();
-        assert_eq!(data.len(), 128 * 1024);
-    }
-
-    #[tokio::test]
-    async fn only_eof_may_be_short() {
-        let size = 100 * 1024;
-        let reader = prefetcher(size, 4096);
-        assert_eq!(
-            reader.read(size - 1000, 128 * 1024).await.unwrap().len(),
-            1000
-        );
-        assert!(reader.read(size, 4096).await.unwrap().is_empty());
-    }
-
-    #[tokio::test]
-    async fn empty_mid_file_response_is_an_error() {
-        let reader = prefetcher(128 * MIB, 0);
-        let error = reader.read(MIB, 4096).await.unwrap_err();
-        assert_eq!(error.kind(), io::ErrorKind::UnexpectedEof);
-    }
-
-    #[tokio::test]
-    async fn scattered_reads_do_not_arm_read_ahead() {
-        let reader = prefetcher(512 * MIB, MIB as usize);
-        for offset in [MIB, 100 * MIB, 200 * MIB] {
-            reader.read(offset, 128 * 1024).await.unwrap();
-        }
-        assert!(!reader.snapshot().await.streaming);
-    }
-
-    #[tokio::test]
-    async fn sequential_reads_arm_one_fixed_window() {
-        let reader = prefetcher(512 * MIB, MIB as usize);
-        let mut offset = MIB;
-        for _ in 0..ARM_AFTER {
-            reader.read(offset, 128 * 1024).await.unwrap();
-            offset += 128 * 1024;
-        }
-        let snapshot = reader.snapshot().await;
-        assert!(snapshot.streaming);
-        assert!(snapshot.inflight > 0 || snapshot.buffer_end > snapshot.buffer_start);
-    }
-
-    /// Records every range the origin is asked for, so a test can assert on the
-    /// shape of read-ahead rather than only on its results.
-    struct RecordingSource {
-        size: u64,
-        chunk: u64,
-        lengths: Mutex<Vec<u64>>,
-    }
-
-    #[async_trait::async_trait]
-    impl ByteSource for RecordingSource {
-        async fn read_range(&self, start: u64, end: u64) -> io::Result<Bytes> {
-            let len = end - start + 1;
-            self.lengths.lock().unwrap().push(len);
-            Ok(Bytes::from(vec![b'x'; len as usize]))
-        }
-
-        fn size(&self) -> u64 {
-            self.size
+            self.calls.lock().unwrap().push((start, end));
+            let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+            self.peak.fetch_max(active, Ordering::SeqCst);
+            tokio::task::yield_now().await;
+            self.active.fetch_sub(1, Ordering::SeqCst);
+            let len = (end - start + 1) as usize;
+            Ok(Bytes::from(vec![b'x'; len.min(self.max_return)]))
         }
 
         async fn layout(&self) -> Option<SourceLayout> {
             Some(SourceLayout {
-                chunk_size: self.chunk,
-                boundaries: Vec::new(),
+                chunk_size: self.unit,
+                boundaries: self.boundaries.clone(),
             })
         }
-    }
-
-    /// A frontier sitting exactly on a chunk boundary must advance by a whole
-    /// chunk. It used to advance by one byte, so every chunk cost two fills —
-    /// one of them a full origin fetch for a single byte — and read-ahead ran
-    /// at half the depth it was configured for.
-    #[tokio::test]
-    async fn boundary_aligned_fills_span_whole_chunks() {
-        let chunk = 700 * 1024;
-        let source = Arc::new(RecordingSource {
-            size: 512 * MIB,
-            chunk,
-            lengths: Mutex::new(Vec::new()),
-        });
-        unbounded_budget();
-        let reader = Prefetcher::new(source.clone(), &Handle::current());
-
-        let mut offset = MIB;
-        for _ in 0..ARM_AFTER {
-            reader.read(offset, 128 * 1024).await.unwrap();
-            offset += 128 * 1024;
-        }
-        // Let the armed window issue its fills.
-        for _ in 0..64 {
-            tokio::task::yield_now().await;
-        }
-
-        let lengths = source.lengths.lock().unwrap().clone();
-        let fills: Vec<u64> = lengths
-            .iter()
-            .copied()
-            .filter(|len| *len > 128 * 1024)
-            .collect();
-        assert!(!fills.is_empty(), "read-ahead never dispatched a fill");
-        assert!(
-            lengths.iter().all(|len| *len != 1),
-            "one-byte fill dispatched: {lengths:?}"
-        );
-        // Only the very first fill may be partial, squaring the armed cursor up
-        // with a chunk boundary. Fills complete out of order, so this counts
-        // rather than indexes.
-        let partial = fills.iter().filter(|len| **len != chunk).count();
-        assert!(
-            partial <= 1,
-            "only the initial alignment fill may be partial: {fills:?}"
-        );
-    }
-
-    struct GatedProbeSource {
-        size: u64,
-        calls: AtomicUsize,
-        third_started: Notify,
-        third_gate: Semaphore,
-        fill_calls: AtomicUsize,
-    }
-
-    #[async_trait::async_trait]
-    impl ByteSource for GatedProbeSource {
-        async fn read_range(&self, start: u64, end: u64) -> io::Result<Bytes> {
-            let len = (end - start + 1) as usize;
-            if len > 128 * 1024 {
-                self.fill_calls.fetch_add(1, Ordering::SeqCst);
-            } else if self.calls.fetch_add(1, Ordering::SeqCst) == 2 {
-                self.third_started.notify_one();
-                self.third_gate.acquire().await.unwrap().forget();
-            }
-            Ok(Bytes::from(vec![b'x'; len]))
-        }
 
         fn size(&self) -> u64 {
             self.size
         }
     }
 
-    #[tokio::test]
-    async fn proving_read_finishes_before_read_ahead_starts() {
-        let source = Arc::new(GatedProbeSource {
-            size: 512 * MIB,
-            calls: AtomicUsize::new(0),
-            third_started: Notify::new(),
-            third_gate: Semaphore::new(0),
-            fill_calls: AtomicUsize::new(0),
-        });
-        unbounded_budget();
-        let reader = Arc::new(Prefetcher::new(source.clone(), &Handle::current()));
-        reader.read(MIB, 128 * 1024).await.unwrap();
-        reader.read(MIB + 128 * 1024, 128 * 1024).await.unwrap();
-
-        let third = {
-            let reader = reader.clone();
-            tokio::spawn(async move { reader.read(MIB + 256 * 1024, 128 * 1024).await })
-        };
-        source.third_started.notified().await;
-        assert!(!reader.snapshot().await.streaming);
-        assert_eq!(source.fill_calls.load(Ordering::SeqCst), 0);
-
-        source.third_gate.add_permits(1);
-        third.await.unwrap().unwrap();
-        let snapshot = reader.snapshot().await;
-        assert!(snapshot.streaming);
-        assert!(snapshot.inflight > 0 || snapshot.buffer_end > snapshot.buffer_start);
+    fn reader(source: Arc<Source>) -> Prefetcher {
+        Prefetcher::new(source, UnitCache::new(UNIT_CACHE_BYTES), &Handle::current())
     }
 
-    struct StartupSource {
-        size: u64,
-        first_started: Notify,
-        first_gate: Semaphore,
-        later_gate: Semaphore,
-    }
-
-    #[async_trait::async_trait]
-    impl ByteSource for StartupSource {
-        async fn read_range(&self, start: u64, end: u64) -> io::Result<Bytes> {
-            let len = (end - start + 1) as usize;
-            if len > 128 * 1024 {
-                if start < 8 * MIB {
-                    self.first_started.notify_one();
-                    self.first_gate.acquire().await.unwrap().forget();
-                } else {
-                    self.later_gate.acquire().await.unwrap().forget();
-                }
+    async fn wait_for_calls(source: &Source, count: usize) {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while source.call_count() < count {
+                tokio::task::yield_now().await;
             }
-            Ok(Bytes::from(vec![b'x'; len]))
-        }
-
-        fn size(&self) -> u64 {
-            self.size
-        }
+        })
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
-    async fn warming_holds_reads_until_startup_reservoir_is_ready() {
-        let source = Arc::new(StartupSource {
-            size: 512 * MIB,
-            first_started: Notify::new(),
-            first_gate: Semaphore::new(0),
-            later_gate: Semaphore::new(0),
+    async fn one_engine_keeps_exactly_eight_units_in_flight() {
+        let source = Source::new(10_000, 100);
+        let prefetcher = reader(source.clone());
+
+        let data = prefetcher.read(0, 50).await.unwrap();
+        assert_eq!(data.len(), 50);
+        wait_for_calls(&source, READ_AHEAD_UNITS).await;
+        tokio::task::yield_now().await;
+
+        assert_eq!(source.call_count(), READ_AHEAD_UNITS);
+        assert!(source.peak.load(Ordering::SeqCst) <= READ_AHEAD_UNITS);
+        let snapshot = prefetcher.snapshot().await;
+        assert_eq!(snapshot.unit, 100);
+        assert_eq!(snapshot.window, READ_AHEAD_UNITS);
+    }
+
+    #[tokio::test]
+    async fn archive_boundary_widens_the_same_engine_to_twenty_four() {
+        let source = Source::with_boundaries(10_000, 100, vec![800]);
+        let prefetcher = reader(source.clone());
+
+        prefetcher.read(0, 50).await.unwrap();
+        wait_for_calls(&source, ARCHIVE_READ_AHEAD_UNITS).await;
+        let snapshot = prefetcher.snapshot().await;
+
+        assert_eq!(snapshot.window, ARCHIVE_READ_AHEAD_UNITS);
+        assert!(source.peak.load(Ordering::SeqCst) <= ARCHIVE_READ_AHEAD_UNITS);
+    }
+
+    #[tokio::test]
+    async fn cached_reads_do_not_touch_the_origin_again() {
+        let source = Source::new(10_000, 100);
+        let prefetcher = reader(source.clone());
+
+        prefetcher.read(0, 50).await.unwrap();
+        wait_for_calls(&source, READ_AHEAD_UNITS).await;
+        let before = source.call_count();
+        assert_eq!(prefetcher.read(10, 20).await.unwrap().len(), 20);
+        tokio::task::yield_now().await;
+        assert_eq!(source.call_count(), before);
+    }
+
+    #[tokio::test]
+    async fn a_reopened_handle_reads_the_previous_one_s_bytes_off_the_wire() {
+        let source = Source::new(100_000, 100);
+        let cache = UnitCache::new(UNIT_CACHE_BYTES);
+
+        // One handle warms the window, then goes away — as a player's range
+        // request does every couple of seconds.
+        let first = Prefetcher::new(source.clone(), Arc::clone(&cache), &Handle::current());
+        first.read(5_000, 50).await.unwrap();
+        wait_for_calls(&source, READ_AHEAD_UNITS).await;
+        tokio::task::yield_now().await;
+        let warm = source.call_count();
+        drop(first);
+
+        // Its replacement starts with a cold cursor but a warm cache: the read
+        // it opens with must be served without touching the origin again.
+        let second = Prefetcher::new(source.clone(), cache, &Handle::current());
+        assert_eq!(second.read(5_000, 50).await.unwrap().len(), 50);
+        assert_eq!(source.call_count(), warm);
+    }
+
+    #[tokio::test]
+    async fn seek_repoints_the_window_without_widening_it() {
+        let source = Source::new(100_000, 100);
+        let prefetcher = reader(source);
+
+        prefetcher.read(0, 50).await.unwrap();
+        prefetcher.read(50_000, 50).await.unwrap();
+        let after = prefetcher.snapshot().await;
+
+        assert!(after.cursor >= 50_050);
+        assert!(after.active <= READ_AHEAD_UNITS);
+    }
+
+    #[tokio::test]
+    async fn a_backward_probe_keeps_the_bytes_the_window_already_holds() {
+        let source = Source::new(100_000, 100);
+        let prefetcher = reader(source.clone());
+
+        prefetcher.read(5_000, 50).await.unwrap();
+        wait_for_calls(&source, READ_AHEAD_UNITS).await;
+
+        // Far enough back to leave the window, the way a player probes.
+        prefetcher.read(0, 50).await.unwrap();
+        wait_for_calls(&source, READ_AHEAD_UNITS * 2).await;
+        tokio::task::yield_now().await;
+        let settled = source.call_count();
+
+        // Back to where playback was: those bytes were never discarded.
+        prefetcher.read(5_000, 50).await.unwrap();
+        tokio::task::yield_now().await;
+        assert_eq!(source.call_count(), settled);
+    }
+
+    #[tokio::test]
+    async fn fills_short_origin_responses_before_replying() {
+        let source = Arc::new(Source {
+            size: 10_000,
+            unit: 100,
+            boundaries: Vec::new(),
+            max_return: 7,
+            calls: Mutex::new(Vec::new()),
+            active: AtomicUsize::new(0),
+            peak: AtomicUsize::new(0),
         });
-        unbounded_budget();
-        let reader = Arc::new(Prefetcher::new(source.clone(), &Handle::current()));
-        let mut offset = MIB;
-        for _ in 0..ARM_AFTER {
-            reader.read(offset, 128 * 1024).await.unwrap();
-            offset += 128 * 1024;
-        }
-
-        source.first_started.notified().await;
-        let waiting = {
-            let reader = reader.clone();
-            tokio::spawn(async move { reader.read(offset, 128 * 1024).await })
-        };
-        source.first_gate.add_permits(1);
-        for _ in 0..20 {
-            tokio::task::yield_now().await;
-        }
-
-        assert!(reader.snapshot().await.warming);
-        assert!(
-            !waiting.is_finished(),
-            "the first chunk must not start playback before the reservoir is full"
-        );
-
-        source.later_gate.add_permits(WINDOW_CHUNKS);
-        waiting.await.unwrap().unwrap();
-        assert!(!reader.snapshot().await.warming);
+        let prefetcher = reader(source);
+        assert_eq!(prefetcher.read(0, 80).await.unwrap().len(), 80);
     }
 
     #[tokio::test]
-    async fn seek_starts_a_new_generation() {
-        let reader = prefetcher(512 * MIB, MIB as usize);
-        let mut offset = MIB;
-        for _ in 0..ARM_AFTER {
-            reader.read(offset, 128 * 1024).await.unwrap();
-            offset += 128 * 1024;
-        }
-        let armed = reader.snapshot().await;
-
-        reader.read(400 * MIB, 128 * 1024).await.unwrap();
-        let sought = reader.snapshot().await;
-        assert!(!sought.streaming);
-        assert!(sought.generation > armed.generation);
-        assert_eq!(sought.buffer_start, 0);
-        assert_eq!(sought.buffer_end, 0);
-    }
-
-    #[tokio::test]
-    async fn interleaved_read_behind_retention_does_not_demote() {
-        let reader = prefetcher(512 * MIB, MIB as usize);
-        let mut offset = MIB;
-        for _ in 0..100 {
-            reader.read(offset, 128 * 1024).await.unwrap();
-            offset += 128 * 1024;
-        }
-        let before = reader.snapshot().await;
-        assert!(before.streaming);
-        assert!(before.buffer_start > MIB);
-
-        reader
-            .read(before.buffer_start - MIB, 128 * 1024)
-            .await
-            .unwrap();
-        let after = reader.snapshot().await;
-        assert!(after.streaming);
-        assert_eq!(after.generation, before.generation);
-    }
-
-    struct GatedSource {
-        size: u64,
-        fill_started: Notify,
-        fill_gate: Semaphore,
-    }
-
-    #[async_trait::async_trait]
-    impl ByteSource for GatedSource {
-        async fn read_range(&self, start: u64, end: u64) -> io::Result<Bytes> {
-            let len = (end - start + 1) as usize;
-            if len > 128 * 1024 && start < 100 * MIB {
-                self.fill_started.notify_one();
-                self.fill_gate.acquire().await.unwrap().forget();
-            }
-            Ok(Bytes::from(vec![b'x'; len]))
-        }
-
-        fn size(&self) -> u64 {
-            self.size
-        }
-    }
-
-    #[tokio::test]
-    async fn stale_fill_cannot_enter_a_new_seek_generation() {
-        let source = Arc::new(GatedSource {
-            size: 512 * MIB,
-            fill_started: Notify::new(),
-            fill_gate: Semaphore::new(0),
-        });
-        unbounded_budget();
-        let reader = Prefetcher::new(source.clone(), &Handle::current());
-
-        let mut offset = MIB;
-        for _ in 0..ARM_AFTER {
-            reader.read(offset, 128 * 1024).await.unwrap();
-            offset += 128 * 1024;
-        }
-        source.fill_started.notified().await;
-        let first_generation = reader.snapshot().await.generation;
-
-        let mut seek = 400 * MIB;
-        for _ in 0..ARM_AFTER {
-            reader.read(seek, 128 * 1024).await.unwrap();
-            seek += 128 * 1024;
-        }
-        let second_generation = reader.snapshot().await.generation;
-        assert!(second_generation > first_generation);
-
-        source.fill_gate.add_permits(WINDOW_CHUNKS);
-        for _ in 0..20 {
-            tokio::task::yield_now().await;
-        }
-        let snapshot = reader.snapshot().await;
-        assert!(snapshot.streaming);
-        assert!(
-            snapshot.buffer_start >= 400 * MIB,
-            "old-generation bytes entered the new buffer: {snapshot:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn concurrent_kernel_reads_complete_out_of_order() {
-        let reader = Arc::new(prefetcher(512 * MIB, MIB as usize));
-        let mut offset = MIB;
-        for _ in 0..ARM_AFTER {
-            reader.read(offset, 128 * 1024).await.unwrap();
-            offset += 128 * 1024;
-        }
-
-        let reads = (0..32).map(|index| {
-            let reader = reader.clone();
-            async move {
-                reader
-                    .read(offset + index * 128 * 1024, 128 * 1024)
-                    .await
-                    .map(|data| data.len())
-            }
-        });
-        let lengths =
-            tokio::time::timeout(Duration::from_secs(1), futures::future::join_all(reads))
-                .await
-                .expect("concurrent reads must not deadlock");
-        assert!(
-            lengths
-                .into_iter()
-                .all(|result| matches!(result, Ok(131_072)))
-        );
-    }
-
-    #[test]
-    fn buffer_retains_out_of_order_reads_without_advancing() {
-        let mut buffer = Buffer::empty(100);
-        buffer.push(Bytes::from_static(b"abcdefghijkl"));
-        assert_eq!(&buffer.read(104, 4).unwrap()[..], b"efgh");
-        assert_eq!(&buffer.read(100, 4).unwrap()[..], b"abcd");
-        assert_eq!(buffer.start, 100);
+    async fn only_true_eof_returns_short() {
+        let source = Source::new(1_000, 100);
+        let prefetcher = reader(source);
+        assert_eq!(prefetcher.read(950, 100).await.unwrap().len(), 50);
+        assert!(prefetcher.read(1_000, 100).await.unwrap().is_empty());
     }
 }

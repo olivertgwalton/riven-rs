@@ -38,7 +38,6 @@ pub fn mount(
     filesystem_settings_revision: Arc<AtomicU64>,
     stream_client: reqwest::Client,
     link_request_tx: mpsc::Sender<riven_core::stream_link::LinkRequest>,
-    cache_max_size_mb: u64,
     local_source: Option<Arc<dyn riven_core::local_source::LocalByteSource>>,
 ) -> Result<Option<FuseSession>> {
     let mount_path = Path::new(mount_path);
@@ -95,7 +94,6 @@ pub fn mount(
         filesystem_settings_revision,
         stream_client,
         link_request_tx,
-        cache_max_size_mb,
         local_source,
     );
 

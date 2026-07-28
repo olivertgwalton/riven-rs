@@ -277,6 +277,8 @@ pub struct ProviderTraffic {
 mod tests {
     use super::*;
     use crate::nntp::tests::spawn_fake_nntp_server;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::TcpListener;
 
     fn test_provider(addr: std::net::SocketAddr, max_connections: u32) -> NntpProvider {
         NntpProvider {
@@ -338,6 +340,40 @@ mod tests {
             "opened {} connections for a 3-connection provider",
             pool.health().open_connections
         );
+    }
+
+    #[tokio::test]
+    async fn cancelled_command_discards_connection_with_unread_reply() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (command_seen_tx, command_seen_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut stream = BufReader::new(stream);
+            stream.get_mut().write_all(b"200 ready\r\n").await.unwrap();
+            stream.get_mut().flush().await.unwrap();
+            let mut command = String::new();
+            stream.read_line(&mut command).await.unwrap();
+            assert!(command.starts_with("BODY "));
+            assert!(command_seen_tx.send(()).is_ok());
+            std::future::pending::<()>().await;
+        });
+
+        let pool = ClientPool::new(test_provider(addr, 1));
+        let task_pool = pool.clone();
+        let command = tokio::spawn(async move {
+            let mut lease = task_pool.acquire().await.unwrap();
+            lease.body("cancel@test").await
+        });
+        command_seen_rx.await.unwrap();
+        command.abort();
+        drop(command.await);
+        tokio::task::yield_now().await;
+
+        let health = pool.health();
+        assert_eq!(health.idle_connections, 0);
+        assert_eq!(health.open_connections, 0);
+        server.abort();
     }
 
     #[tokio::test]

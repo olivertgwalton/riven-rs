@@ -28,7 +28,7 @@ anything outside the markers survives regeneration. -->
 
 | Variable | Kind | Read at |
 | --- | --- | --- |
-| `ORIGIN` | variable | `crates/riven-app/src/main.rs:224` |
+| `ORIGIN` | variable | `crates/riven-app/src/main.rs:223` |
 | `RIVEN_USENET_AUTO_REPAIR` | variable | `crates/riven-app/src/usenet.rs:49` |
 | `RIVEN_USENET_HEALTH_SCAN_BATCH` | variable | `crates/riven-app/src/usenet.rs:46` |
 | `RIVEN_USENET_HEALTH_SCAN_INTERVAL_SECS` | variable | `crates/riven-app/src/usenet.rs:43` |
@@ -41,7 +41,7 @@ anything outside the markers survives regeneration. -->
 | --- | --- | --- |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | variable | `crates/riven-core/src/logging.rs:200` |
 | `OTEL_SERVICE_NAME` | variable | `crates/riven-core/src/logging.rs:204` |
-| `RIVEN_SETTING__` | prefix | `crates/riven-core/src/settings/app.rs:130` |
+| `RIVEN_SETTING__` | prefix | `crates/riven-core/src/settings/app.rs:125` |
 | `SENTRY_DSN` | variable | `crates/riven-core/src/logging.rs:183` |
 | `SENTRY_ENVIRONMENT` | variable | `crates/riven-core/src/logging.rs:186` |
 
@@ -57,12 +57,10 @@ anything outside the markers survives regeneration. -->
 
 | Variable | Kind | Read at |
 | --- | --- | --- |
-| `RIVEN_BENCH_DB` | variable | `crates/riven-vfs/examples/stream_bench.rs:176` |
-| `RIVEN_BENCH_NNTP_HOST` | variable | `crates/riven-vfs/examples/stream_bench.rs:181` |
-| `RIVEN_BENCH_NNTP_PASS` | variable | `crates/riven-vfs/examples/stream_bench.rs:179` |
-| `RIVEN_BENCH_NNTP_PORT` | variable | `crates/riven-vfs/examples/stream_bench.rs:182` |
-| `RIVEN_BENCH_NNTP_USER` | variable | `crates/riven-vfs/examples/stream_bench.rs:178` |
-| `RIVEN_VFS_READAHEAD_BUDGET_MB` | variable | `crates/riven-vfs/src/prefetch.rs:72`<br>`crates/riven-vfs/src/prefetch.rs:86` |
-| `RIVEN_VFS_READAHEAD_CHUNKS` | variable | `crates/riven-vfs/src/prefetch.rs:107` |
+| `RIVEN_BENCH_DB` | variable | `crates/riven-vfs/examples/stream_bench.rs:169` |
+| `RIVEN_BENCH_NNTP_HOST` | variable | `crates/riven-vfs/examples/stream_bench.rs:174` |
+| `RIVEN_BENCH_NNTP_PASS` | variable | `crates/riven-vfs/examples/stream_bench.rs:172` |
+| `RIVEN_BENCH_NNTP_PORT` | variable | `crates/riven-vfs/examples/stream_bench.rs:175` |
+| `RIVEN_BENCH_NNTP_USER` | variable | `crates/riven-vfs/examples/stream_bench.rs:171` |
 <!-- END GENERATED -->
 

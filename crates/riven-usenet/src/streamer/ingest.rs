@@ -653,7 +653,7 @@ impl UsenetStreamer {
             };
             let probe_end = prev_data_end.saturating_add(1023);
             let probe = match self
-                .read_decoded_range_within_part(part, prev_vol == 0, prev_data_end, probe_end)
+                .read_decoded_range_within_part(part, prev_data_end, probe_end)
                 .await
             {
                 Ok(p) => p,
@@ -776,7 +776,7 @@ impl UsenetStreamer {
     ) -> Result<Vec<u8>, StreamerError> {
         let mut buf: Vec<u8> = Vec::with_capacity(wanted as usize + 4096);
         for seg in &part.segments {
-            let decoded = self.fetch_article(&seg.message_id, false).await?;
+            let decoded = self.fetch_article(&seg.message_id).await?;
             buf.extend_from_slice(&decoded);
             if (buf.len() as u64) >= wanted {
                 break;
@@ -808,7 +808,7 @@ impl UsenetStreamer {
         let total_bytes: u64 = smallest.segments.iter().map(|s| s.bytes).sum();
         let mut buf: Vec<u8> = Vec::with_capacity(total_bytes as usize);
         for seg in &smallest.segments {
-            match self.fetch_article(&seg.message_id, false).await {
+            match self.fetch_article(&seg.message_id).await {
                 Ok(decoded) => buf.extend_from_slice(&decoded),
                 Err(error) => {
                     tracing::debug!(
@@ -864,7 +864,7 @@ impl UsenetStreamer {
             let start = idx as u64 * slice_size;
             let end_inclusive = start + slice_size - 1;
             let fetched = self
-                .read_decoded_range_within_part(part, false, start, end_inclusive)
+                .read_decoded_range_within_part(part, start, end_inclusive)
                 .await?;
             // PAR2 checksums the slice zero-padded to `slice_size`; a file's
             // final block is normally shorter than that on disk.
@@ -902,7 +902,7 @@ impl UsenetStreamer {
         if first.bytes == 0 {
             return Ok(());
         }
-        let dec_first = self.fetch_article(&first.message_id, false).await?.len() as u64;
+        let dec_first = self.fetch_article(&first.message_id).await?.len() as u64;
         if dec_first == 0 {
             return Ok(());
         }
@@ -914,7 +914,7 @@ impl UsenetStreamer {
             let measured = if last.bytes == 0 {
                 dec_first
             } else {
-                self.fetch_article(&last.message_id, false).await?.len() as u64
+                self.fetch_article(&last.message_id).await?.len() as u64
             };
             if measured == 0 { dec_first } else { measured }
         };
