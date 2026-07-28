@@ -34,7 +34,19 @@ use crate::source::ByteSource;
 const MIB: u64 = 1024 * 1024;
 const HTTP_CHUNK: u64 = 8 * MIB;
 const READ_AHEAD_UNITS: usize = 8;
-const ARCHIVE_READ_AHEAD_UNITS: usize = 24;
+/// Units of cushion held ahead of the cursor on an archive source.
+///
+/// An article's arrival time has a long tail — p90 around 2.3s and outliers
+/// past 6s against this provider — so the cushion has to be measured in
+/// seconds of playback, not units. 64 articles is ~46 MB, which is 5.3s at
+/// 68.7 Mbps: enough to sit through the tail instead of draining into it.
+const ARCHIVE_READ_AHEAD_UNITS: usize = 64;
+/// Unit fetches allowed on the wire at once, independent of the cushion above.
+///
+/// A unit usually spans two articles, so this is roughly 32 concurrent article
+/// fetches — the top of the measured plateau, and short of the connection count
+/// where the provider's aggregate collapses.
+const ARCHIVE_MAX_IN_FLIGHT_UNITS: usize = 16;
 const RETAIN_BEHIND_UNITS: u64 = 2;
 const MIN_TAIL_PROBE: u64 = 16 * 1024;
 const MAX_TAIL_PROBE: u64 = 10 * MIB;
@@ -117,11 +129,30 @@ impl Config {
         }
     }
 
+    /// How far ahead of the cursor to keep units buffered. This is the depth of
+    /// the cushion, not a concurrency limit — see [`Config::max_in_flight`].
     fn window_units(&self) -> usize {
         if self.boundaries.is_empty() {
             READ_AHEAD_UNITS
         } else {
             ARCHIVE_READ_AHEAD_UNITS
+        }
+    }
+
+    /// How many unit fetches may be on the wire at once.
+    ///
+    /// Separate from [`Config::window_units`] because the two want opposite
+    /// things. Depth wants to be large, to ride out a slow origin. Concurrency
+    /// wants to be small: a provider divides an account's bandwidth by
+    /// connection count, and past its limit the aggregate collapses rather than
+    /// plateaus — measured here as 438 Mbps over 16 connections against
+    /// ~108 Mbps over 63. While they shared one number, buffering deeper meant
+    /// connecting wider, and the second effect cancelled the first.
+    fn max_in_flight(&self) -> usize {
+        if self.boundaries.is_empty() {
+            READ_AHEAD_UNITS
+        } else {
+            ARCHIVE_MAX_IN_FLIGHT_UNITS
         }
     }
 
@@ -387,11 +418,18 @@ impl Actor {
         request.start >= behind && request.end() <= ahead
     }
 
+    /// Top the cushion back up, oldest gap first.
+    ///
+    /// Walks the whole window so a deep cushion is filled in cursor order, but
+    /// stops as soon as the wire is busy. The units past that point are picked
+    /// up by the next call, once a fetch lands — so depth costs memory and
+    /// patience rather than connections.
     fn dispatch(&mut self) {
-        let units = self.config.window_units();
+        let horizon = self.config.window_units();
+        let in_flight = self.config.max_in_flight();
         let mut start = self.config.unit_start(self.cursor);
-        for _ in 0..units {
-            if start >= self.size || self.active.len() >= units {
+        for _ in 0..horizon {
+            if start >= self.size || self.active.len() >= in_flight {
                 break;
             }
             self.schedule_unit(start);
@@ -645,16 +683,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn archive_boundary_widens_the_same_engine_to_twenty_four() {
-        let source = Source::with_boundaries(10_000, 100, vec![800]);
+    async fn an_archive_buffers_deeper_than_it_connects() {
+        let source = Source::with_boundaries(1_000_000, 100, vec![800]);
         let prefetcher = reader(source.clone());
 
         prefetcher.read(0, 50).await.unwrap();
+        // The cushion is deeper than the wire is wide, so the whole window is
+        // eventually fetched...
         wait_for_calls(&source, ARCHIVE_READ_AHEAD_UNITS).await;
         let snapshot = prefetcher.snapshot().await;
-
         assert_eq!(snapshot.window, ARCHIVE_READ_AHEAD_UNITS);
-        assert!(source.peak.load(Ordering::SeqCst) <= ARCHIVE_READ_AHEAD_UNITS);
+
+        // ...without ever opening more than the in-flight cap at once. This is
+        // the whole point of the split: depth must not cost connections.
+        assert!(
+            source.peak.load(Ordering::SeqCst) <= ARCHIVE_MAX_IN_FLIGHT_UNITS,
+            "peak {} exceeded in-flight cap {ARCHIVE_MAX_IN_FLIGHT_UNITS}",
+            source.peak.load(Ordering::SeqCst)
+        );
+        const { assert!(ARCHIVE_MAX_IN_FLIGHT_UNITS < ARCHIVE_READ_AHEAD_UNITS) };
     }
 
     #[tokio::test]
