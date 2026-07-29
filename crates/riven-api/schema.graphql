@@ -39,6 +39,16 @@ type AnilistRating {
 	score: Float
 }
 
+type CacheHealth {
+	name: String!
+	bytesUsed: Int!
+	bytesMax: Int!
+	entries: Int!
+	hits: Int!
+	misses: Int!
+	hitRate: Float!
+}
+
 type CalendarEntry {
 	itemId: Int!
 	showTitle: String!
@@ -1077,11 +1087,7 @@ type UsenetProviderTraffic {
 }
 
 type UsenetStreamingHealth {
-	cacheBytesUsed: Int!
-	cacheBytesMax: Int!
-	cacheEntries: Int!
-	cacheHits: Int!
-	cacheMisses: Int!
+	caches: [CacheHealth!]!
 	cacheHitRate: Float!
 	fetchesOk: Int!
 	fetchesFailed: Int!

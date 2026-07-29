@@ -45,8 +45,18 @@ pub struct ClientPool {
 
 impl ClientPool {
     pub fn new(provider: NntpProvider) -> Arc<Self> {
+        let pool = Self::unreaped(provider);
+        spawn_reaper(Arc::downgrade(&pool));
+        pool
+    }
+
+    /// A pool with no background reaper, so a test can age the idle queue past
+    /// [`MAX_IDLE`] and still observe what [`ClientPool::acquire`] does with it.
+    /// Advancing a paused clock fires the reaper's timer, which would otherwise
+    /// clean up first and hide the checkout path entirely.
+    fn unreaped(provider: NntpProvider) -> Arc<Self> {
         let capacity = provider.config.max_connections.max(1) as usize;
-        let pool = Arc::new(Self {
+        Arc::new(Self {
             config: Arc::new(provider.config),
             priority: provider.priority,
             is_backup: provider.is_backup,
@@ -57,9 +67,7 @@ impl ClientPool {
             leased: AtomicUsize::new(0),
             consecutive_not_found: AtomicU32::new(0),
             consecutive_success: AtomicU32::new(0),
-        });
-        spawn_reaper(Arc::downgrade(&pool));
-        pool
+        })
     }
 
     pub fn host(&self) -> &str {
@@ -141,7 +149,36 @@ impl ClientPool {
             );
         }
 
-        if let Some(mut client) = self.idle.lock().pop() {
+        // Age is checked *here*, not only in [`ClientPool::reap`]. The reaper
+        // runs on an interval, so trusting it alone hands out connections up to
+        // `REAP_INTERVAL` past `MAX_IDLE` — and a socket the provider has
+        // already dropped costs a reconnect plus a whole re-fetch at best. At
+        // worst the FIN never arrives, the `BODY` write goes into a half-open
+        // socket, and the read waits on TCP retransmission for minutes: three
+        // articles measured at 182-189 s against a provider whose own p99 for
+        // the same articles is 1.7 s. Discarding on the way out costs one
+        // comparison. Walk the whole idle stack, because every entry below a
+        // stale one is older still.
+        let mut stale = 0usize;
+        let reused = loop {
+            let Some(client) = self.idle.lock().pop() else {
+                break None;
+            };
+            if Instant::now().duration_since(client.last_used()) < MAX_IDLE {
+                break Some(client);
+            }
+            drop(client);
+            stale += 1;
+        };
+        if stale > 0 {
+            self.open.fetch_sub(stale, Ordering::Relaxed);
+            tracing::debug!(
+                host = %self.config.host,
+                stale,
+                "closed idle nntp connections the provider had likely dropped"
+            );
+        }
+        if let Some(mut client) = reused {
             client.touch();
             self.leased.fetch_add(1, Ordering::Relaxed);
             return Ok(Lease {
@@ -391,6 +428,45 @@ mod tests {
         pool.reap();
         assert_eq!(pool.health().idle_connections, 0);
         assert_eq!(pool.health().open_connections, 0);
+    }
+
+    /// The reaper is an interval sweep, so it is never the thing that decides
+    /// whether *this* connection is safe to use. Between sweeps a socket the
+    /// provider dropped would otherwise be handed straight to a `BODY`, and a
+    /// half-open one takes the read down for minutes.
+    #[tokio::test]
+    async fn a_stale_idle_connection_is_never_handed_out() {
+        let (addr, _server) = spawn_fake_nntp_server().await;
+        // No reaper: this test is about what `acquire` does between sweeps.
+        let pool = ClientPool::unreaped(test_provider(addr, 4));
+
+        // Two idle connections, so reuse and replacement are distinguishable:
+        // reusing one leaves the other open, replacing closes both.
+        {
+            let mut first = pool.acquire().await.unwrap();
+            let mut second = pool.acquire().await.unwrap();
+            assert!(first.stat("a@test").await.unwrap());
+            assert!(second.stat("b@test").await.unwrap());
+        }
+        assert_eq!(pool.health().open_connections, 2);
+        assert_eq!(pool.health().idle_connections, 2);
+
+        // Past the idle limit with no sweep in between — exactly the window
+        // `REAP_INTERVAL` leaves open, and where the provider has already
+        // dropped its side.
+        tokio::time::pause();
+        tokio::time::advance(MAX_IDLE + Duration::from_secs(1)).await;
+        tokio::time::resume();
+
+        let mut lease = pool.acquire().await.unwrap();
+        assert!(lease.stat("c@test").await.unwrap());
+        let health = pool.health();
+        assert_eq!(
+            health.open_connections, 1,
+            "both stale connections must be closed and one dialled fresh, \
+             not popped and reused"
+        );
+        assert_eq!(health.idle_connections, 0);
     }
 
     #[tokio::test]

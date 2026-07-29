@@ -95,11 +95,15 @@ impl NntpStream {
     }
 
     /// Read a `.`-terminated multi-line response into the caller-provided
-    /// `out`. `timeout` applies as an inactivity deadline shared across
-    /// every read in this call: a single `tokio::time::Sleep` is pinned
-    /// once outside the loop and `reset()` each time a read returns data,
-    /// rather than wrapping each read in a fresh `tokio::time::timeout()`
-    /// future. Profile showed ~0.5 % of CPU in `Timeout::poll`'s memset.
+    /// `out`. `timeout` is an **absolute** deadline for the whole response,
+    /// not an inactivity timer: a connection that keeps trickling a few bytes
+    /// resets an inactivity timer forever, and a body that never ends is the
+    /// one case a streaming reader cannot afford to wait out. This matches
+    /// streamnzb, which sets one `SetDeadline` when the body starts.
+    ///
+    /// A single `tokio::time::Sleep` is pinned once outside the loop rather
+    /// than wrapping each read in a fresh `tokio::time::timeout()` future —
+    /// profile showed ~0.5 % of CPU in `Timeout::poll`'s memset.
     ///
     /// `out` is cleared on entry; the caller threads it from the encoded
     /// buffer pool (a `crate::bufpool::PooledBuf`) so the next BODY fetch
@@ -153,7 +157,6 @@ impl NntpStream {
                     ));
                 }
             };
-            sleep.as_mut().reset(tokio::time::Instant::now() + timeout);
         };
 
         out.truncate(term_end - 3);
