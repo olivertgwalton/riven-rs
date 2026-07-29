@@ -8,15 +8,16 @@
 
 use bytes::Bytes;
 
-/// How an origin is physically chunked, so read-ahead can be sized in the
-/// origin's own units instead of an arbitrary byte figure.
+/// How an origin is physically chunked, so read-ahead fetches whole units of
+/// the origin's own instead of straddling them.
+///
+/// Presence is the signal: a layout means the origin fetches articles, and
+/// read-ahead sizes its cushion in bytes and divides by `chunk_size`. Absence
+/// means a plain ranged HTTP origin, chunked into 8 MiB by the reader.
 #[derive(Debug, Clone)]
 pub struct SourceLayout {
     /// Natural fetch unit — one usenet article's decoded size.
     pub chunk_size: u64,
-    /// Virtual offsets at which a new container volume begins. Crossing one
-    /// is where a stall shows up, so read-ahead widens as it approaches.
-    pub boundaries: Vec<u64>,
 }
 
 /// A read-by-range byte source addressed by `(info_hash, file_index)`,

@@ -14,9 +14,10 @@ use axum::{
     },
     response::{IntoResponse, Response},
 };
-use riven_core::local_source::LocalByteSource;
 use riven_core::stream_link::request_stream_url;
 use riven_usenet::UsenetStreamer;
+use riven_vfs::prefetch::{FileKey, Prefetcher};
+use riven_vfs::source::{ByteSource, UsenetSource};
 
 use super::ApiState;
 use super::auth::check_api_key;
@@ -358,7 +359,8 @@ fn resolve_concrete_range(range: Option<RequestedRange>, file_size: u64) -> (u64
 
 /// Stream a usenet-backed entry directly from the in-process streamer. Usenet
 /// entries have no HTTP origin, so the debrid proxy path cannot serve them;
-/// instead we read the requested byte range in chunks via `LocalByteSource`.
+/// instead the range is read through the same read-ahead window the FUSE mount
+/// uses, so both paths share one buffering policy and one unit cache.
 async fn serve_usenet_media(
     entry: &riven_db::entities::FileSystemEntry,
     info_hash: String,
@@ -428,39 +430,60 @@ async fn serve_usenet_media(
             .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
     }
 
-    const CHUNK: u64 = 8 * 1024 * 1024;
-    let info_hash: Arc<str> = Arc::from(info_hash.as_str());
+    // Read through the same [`Prefetcher`] the FUSE mount uses, rather than
+    // walking articles here.
+    //
+    // This path used to call `LocalByteSource::read_range` itself from a
+    // `stream::unfold`, which is strictly sequential: every 8 MiB chunk started
+    // with nothing on the wire, blocked on the slowest article it spanned, then
+    // left the wire idle through the concatenation and the whole client write
+    // before the next chunk began. It measured 3.2 MB/s against 40 MB/s from a
+    // client that simply keeps its connections busy, and ~64 MB/s from raw NNTP
+    // at the same connection count. The read-ahead window is what keeps the wire
+    // busy across chunk boundaries, and there is no reason to have a second,
+    // worse copy of it here.
+    let filename = entry.path.rsplit('/').next().unwrap_or(&entry.path);
+    let source: Arc<dyn ByteSource> = Arc::new(UsenetSource::new(
+        Arc::new(streamer),
+        Arc::from(info_hash.as_str()),
+        file_index,
+        file_size,
+        filename,
+    ));
+    // Dropped with the response body, which aborts whatever the window still
+    // has in flight — so a cancelled download stops costing connections.
+    let reader = Arc::new(Prefetcher::new(
+        source,
+        FileKey::bridge(entry.id),
+        &tokio::runtime::Handle::current(),
+    ));
+
+    // Deliberately far smaller than the old 8 MiB. A request spanning more units
+    // than the window holds is served directly by the prefetcher, bypassing the
+    // very read-ahead this change exists to use — and at a 716 KiB article, 8 MiB
+    // spans twelve units against a non-archive window of eight.
+    const CHUNK: usize = 1024 * 1024;
     // The entry path rides along with the stream state purely so a mid-stream
     // read failure names the title instead of only its info_hash.
     let entry_path: Arc<str> = Arc::from(entry.path.as_str());
     let body_stream = futures::stream::unfold(
-        (
-            streamer,
-            info_hash,
-            entry_path,
-            file_index,
-            start,
-            end_inclusive,
-        ),
-        move |(streamer, info_hash, entry_path, file_index, pos, end)| async move {
+        (reader, entry_path, start, end_inclusive),
+        move |(reader, entry_path, pos, end)| async move {
             if pos > end {
                 return None;
             }
-            let chunk_end = end.min(pos + CHUNK - 1);
-            match LocalByteSource::read_range(&streamer, &info_hash, file_index, pos, chunk_end)
-                .await
-            {
+            let len = CHUNK.min((end - pos + 1) as usize);
+            match reader.read(pos, len).await {
                 Ok(bytes) if !bytes.is_empty() => {
                     let next = pos + bytes.len() as u64;
                     Some((
                         Ok::<bytes::Bytes, std::io::Error>(bytes),
-                        (streamer, info_hash, entry_path, file_index, next, end),
+                        (reader, entry_path, next, end),
                     ))
                 }
                 Ok(_) => None,
                 Err(error) => {
                     tracing::warn!(
-                        info_hash = %info_hash,
                         file = %entry_path,
                         file_index,
                         pos,
@@ -469,7 +492,7 @@ async fn serve_usenet_media(
                     );
                     Some((
                         Err(std::io::Error::other("usenet read failed")),
-                        (streamer, info_hash, entry_path, file_index, end + 1, end),
+                        (reader, entry_path, end + 1, end),
                     ))
                 }
             }

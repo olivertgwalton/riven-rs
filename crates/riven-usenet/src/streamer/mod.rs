@@ -541,32 +541,18 @@ impl riven_core::local_source::LocalByteSource for UsenetStreamer {
     ) -> Option<riven_core::local_source::SourceLayout> {
         let meta = self.load_meta(info_hash).await.ok()?;
         let file = meta.files.get(file_index)?;
-        match &file.source {
+        // Both arms report the article size and nothing else. Read-ahead sizes
+        // its cushion in bytes from it; whether the post is a RAR set says
+        // nothing about how fast its articles arrive.
+        let chunk_size = match &file.source {
             NzbMetaSource::Direct { offsets, .. } => {
-                let chunk_size = offsets.windows(2).next().map(|w| w[1] - w[0])?;
-                (chunk_size > 0).then(|| riven_core::local_source::SourceLayout {
-                    chunk_size,
-                    boundaries: Vec::new(),
-                })
+                offsets.windows(2).next().map(|w| w[1] - w[0])?
             }
-            NzbMetaSource::Rar { parts, slices } => {
-                let chunk_size = parts
-                    .iter()
-                    .find_map(|part| part.decoded_seg_size.filter(|size| *size > 0))?;
-                // Virtual offset at which each slice — and so each volume —
-                // starts, which is where a boundary stall would land.
-                let mut boundaries = Vec::with_capacity(slices.len());
-                let mut position = 0u64;
-                for slice in slices {
-                    boundaries.push(position);
-                    position += slice.length;
-                }
-                Some(riven_core::local_source::SourceLayout {
-                    chunk_size,
-                    boundaries,
-                })
-            }
-        }
+            NzbMetaSource::Rar { parts, .. } => parts
+                .iter()
+                .find_map(|part| part.decoded_seg_size.filter(|size| *size > 0))?,
+        };
+        (chunk_size > 0).then_some(riven_core::local_source::SourceLayout { chunk_size })
     }
 
     async fn read_range(

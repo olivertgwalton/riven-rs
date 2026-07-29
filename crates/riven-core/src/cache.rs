@@ -39,7 +39,31 @@ pub const NZB_META: Pool = Pool::new("nzb-meta", "RIVEN_USENET_META_CACHE_BYTES"
 pub const NZB_BODY: Pool = Pool::new("nzb-body", "RIVEN_USENET_NZB_CACHE_BYTES", 64 * MIB);
 /// Decoded article bodies: staging between a warm fetch landing and the walk
 /// that warmed it consuming the bytes, so bounded by in-flight work.
-pub const SEGMENT: Pool = Pool::new("segment", "RIVEN_USENET_CACHE_BYTES", 64 * MIB);
+///
+/// Derived from that in-flight work rather than picked, because picking a flat
+/// figure is what broke it: 64 MiB held 93 of the ~700 KiB articles it was
+/// written for, but only 17 of a 3.84 MB post's — fewer than the 16 riven runs
+/// at once. One in-flight generation then evicted the whole cache, so an
+/// article that landed after its reader gave up was gone before that reader
+/// came back for it, and every reopened range refetched from the wire.
+pub const SEGMENT: Pool = Pool::new(
+    "segment",
+    "RIVEN_USENET_CACHE_BYTES",
+    MAX_ARTICLE_BYTES * ARTICLE_MAX_IN_FLIGHT as u64 * STAGING_GENERATIONS,
+);
+
+/// Article fetches riven runs at once. Lives here, beside the cache it sizes,
+/// because the two cannot be chosen independently: a staging cache smaller than
+/// one in-flight generation evicts articles before their reader arrives.
+/// `riven-vfs` reads this as its own in-flight cap.
+pub const ARTICLE_MAX_IN_FLIGHT: usize = 16;
+/// Largest article size to budget for. Posters choose the segment size; 3.84 MB
+/// is the largest seen in practice, and sizing for it costs memory on a
+/// small-segment post but never under-sizes on a large-segment one.
+const MAX_ARTICLE_BYTES: u64 = 4 * MIB;
+/// In-flight generations the staging cache holds: one on the wire, one landed
+/// and not yet consumed, one whose reader went away and will be back.
+const STAGING_GENERATIONS: u64 = 3;
 
 const POOLS: [Pool; 4] = [READ_AHEAD, NZB_META, NZB_BODY, SEGMENT];
 
@@ -318,6 +342,25 @@ mod tests {
             READ_AHEAD.default_bytes / SEGMENT.default_bytes
         );
         assert!(total <= 512 * MIB / LIMIT_DIVISOR);
+    }
+
+    /// The regression this sizing exists for. A staging cache that cannot hold
+    /// one whole in-flight generation is evicted by that generation alone, so an
+    /// article landing after its reader gave up is gone before the reader comes
+    /// back — and every reopened range refetches from the wire. At a flat 64 MiB
+    /// this failed for any article over 4 MiB / 16.
+    #[test]
+    fn the_segment_cache_holds_a_whole_in_flight_generation() {
+        let generation = MAX_ARTICLE_BYTES * ARTICLE_MAX_IN_FLIGHT as u64;
+        assert!(
+            SEGMENT.default_bytes >= generation,
+            "segment cache {} cannot hold one generation of {generation}",
+            SEGMENT.default_bytes
+        );
+        // And still holds a generation on a host tight enough to scale every
+        // pool down to its floor.
+        let tight = Some(512);
+        assert!(budget_for(SEGMENT, None, tight) >= SEGMENT.default_bytes / FLOOR_DIVISOR);
     }
 
     #[test]

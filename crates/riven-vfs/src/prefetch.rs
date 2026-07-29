@@ -1,10 +1,12 @@
 //! One bounded read-ahead engine for every immutable network source.
 //!
-//! HTTP/debrid uses an 8 MiB fetch unit. Usenet reports its decoded article
-//! size, so the same eight-unit window becomes eight NNTP segments, matching
-//! streamnzb's `DefaultReadAhead`. Archive boundaries widen it to 24, matching
-//! its `PlaybackReadAheadSegments`. Demand units are always dispatched before
-//! speculative units.
+//! HTTP/debrid uses an 8 MiB fetch unit and buffers eight of them. Usenet
+//! reports its decoded article size instead, and there the cushion is set in
+//! bytes and divided by that size — a depth counted in articles is whatever
+//! the poster chose, and the same "eight" was 5.6 MB on one post and 30 MB on
+//! another. Depth is held to twice the number of fetches allowed on the wire,
+//! so a slow article never leaves the window with nothing left to schedule.
+//! Demand units are always dispatched before speculative units.
 //!
 //! Decoded units live in one process-wide [`UnitCache`] keyed by file; the
 //! window and cursor stay per-handle. streamnzb splits it the same way, and the
@@ -28,20 +30,30 @@ use crate::source::ByteSource;
 
 const MIB: u64 = 1024 * 1024;
 const HTTP_CHUNK: u64 = 8 * MIB;
-const READ_AHEAD_UNITS: usize = 8;
-/// Units of cushion held ahead of the cursor on an archive source.
+/// Units of cushion on the HTTP origin, where a unit is one 8 MiB range
+/// request and the depth is already 64 MB of bytes.
+const HTTP_READ_AHEAD_UNITS: usize = 8;
+/// Cushion held ahead of the cursor on an article origin, in **bytes**.
 ///
-/// An article's arrival time has a long tail — p90 around 2.3s and outliers
-/// past 6s against this provider — so the cushion has to be measured in
-/// seconds of playback, not units. 64 articles is ~46 MB, which is 5.3s at
-/// 68.7 Mbps: enough to sit through the tail instead of draining into it.
-const ARCHIVE_READ_AHEAD_UNITS: usize = 64;
-/// Unit fetches allowed on the wire at once, independent of the cushion above.
+/// Counted in units this was meaningless: a unit is one article, and posters
+/// choose the segment size. The same depth of 8 bought 5.6 MB on a 720 KiB
+/// post and 30 MB on a 3.84 MB one — and 30 MB is 3.0s at the 81 Mbps a UHD
+/// remux wants, against a median 4.7s to fetch one article. The cushion has to
+/// be measured in seconds of playback, so it is measured in bytes here and
+/// divided into units by whatever size this post happens to use.
+const ARTICLE_READ_AHEAD_BYTES: u64 = 96 * MIB;
+/// Article fetches allowed on the wire at once, independent of the cushion
+/// above.
 ///
-/// A unit usually spans two articles, so this is roughly 32 concurrent article
-/// fetches — the top of the measured plateau, and short of the connection count
-/// where the provider's aggregate collapses.
-const ARCHIVE_MAX_IN_FLIGHT_UNITS: usize = 16;
+/// Separate from the cushion because the two want opposite things: depth wants
+/// to be large, to ride out a slow origin, while concurrency wants to be small
+/// — a provider divides an account's bandwidth by connection count, and past
+/// its limit the aggregate collapses rather than plateaus (measured as
+/// 438 Mbps over 16 connections against ~108 Mbps over 63).
+///
+/// Defined in `riven-core` beside the segment cache, which has to be able to
+/// hold a whole generation of these fetches at once.
+const ARTICLE_MAX_IN_FLIGHT_UNITS: usize = riven_core::cache::ARTICLE_MAX_IN_FLIGHT;
 const RETAIN_BEHIND_UNITS: u64 = 2;
 const MIN_TAIL_PROBE: u64 = 16 * 1024;
 const MAX_TAIL_PROBE: u64 = 10 * MIB;
@@ -65,6 +77,23 @@ pub struct FileKey {
     pub ino: u64,
 }
 
+impl FileKey {
+    /// Key for a reader outside the FUSE mount — the HTTP media bridge, which
+    /// reads by entry id rather than by inode.
+    ///
+    /// The reserved revision keeps the two namespaces apart. Mounted files take
+    /// their revision from the filesystem settings counter, which starts at 0
+    /// and is bumped a handful of times per process, so it can never reach this
+    /// value — and it must not, because an entry id colliding with an unrelated
+    /// inode would serve one file's cached bytes as another's.
+    pub fn bridge(entry_id: i64) -> Self {
+        Self {
+            revision: u64::MAX,
+            ino: entry_id.cast_unsigned(),
+        }
+    }
+}
+
 /// Bounded by bytes, not entries: a unit is an 8 MiB HTTP chunk on one backend
 /// and a ~700 KiB article on the other. Every file shares the one LRU, so a
 /// file that stops being read loses its place to one that has not.
@@ -73,7 +102,14 @@ pub type UnitCache = ByteLru<(FileKey, u64), Bytes>;
 #[derive(Clone)]
 struct Config {
     unit: u64,
-    boundaries: Arc<[u64]>,
+    /// Whether the origin has a natural fetch unit of its own — an article —
+    /// as opposed to the 8 MiB chunk we impose on a plain ranged HTTP origin.
+    ///
+    /// This, and not whether the file happens to be a RAR, is what decides the
+    /// read-ahead policy. Keying it off container layout was the bug: a
+    /// non-RAR usenet post fell through to the HTTP numbers and streamed 8
+    /// articles deep on 8 connections, out of the 100 the provider allows.
+    articles: bool,
 }
 
 impl Config {
@@ -81,11 +117,11 @@ impl Config {
         match layout {
             Some(layout) => Self {
                 unit: layout.chunk_size.max(1),
-                boundaries: layout.boundaries.into(),
+                articles: true,
             },
             None => Self {
                 unit: HTTP_CHUNK,
-                boundaries: Arc::from([]),
+                articles: false,
             },
         }
     }
@@ -93,28 +129,34 @@ impl Config {
     /// How far ahead of the cursor to keep units buffered. This is the depth of
     /// the cushion, not a concurrency limit — see [`Config::max_in_flight`].
     fn window_units(&self) -> usize {
-        if self.boundaries.is_empty() {
-            READ_AHEAD_UNITS
-        } else {
-            ARCHIVE_READ_AHEAD_UNITS
+        if !self.articles {
+            return HTTP_READ_AHEAD_UNITS;
         }
+        // Deep enough to hold the cushion, and never less than twice the wire
+        // is wide — that margin is what [`Config::max_in_flight`] needs. The
+        // floor is itself clamped to twice the cushion, so an unusually large
+        // segment buys the margin in units without buying it in memory.
+        let by_bytes = ARTICLE_READ_AHEAD_BYTES.div_ceil(self.unit) as usize;
+        let floor = (ARTICLE_MAX_IN_FLIGHT_UNITS * 2)
+            .min((ARTICLE_READ_AHEAD_BYTES * 2).div_ceil(self.unit) as usize);
+        by_bytes.max(floor).max(2)
     }
 
     /// How many unit fetches may be on the wire at once.
     ///
-    /// Separate from [`Config::window_units`] because the two want opposite
-    /// things. Depth wants to be large, to ride out a slow origin. Concurrency
-    /// wants to be small: a provider divides an account's bandwidth by
-    /// connection count, and past its limit the aggregate collapses rather than
-    /// plateaus — measured here as 438 Mbps over 16 connections against
-    /// ~108 Mbps over 63. While they shared one number, buffering deeper meant
-    /// connecting wider, and the second effect cancelled the first.
+    /// Held to half the window so the cushion is always deeper than the wire is
+    /// wide. That margin is what [`Actor::dispatch`] needs to pull work forward
+    /// past a unit that is taking its time: while the two were one number, the
+    /// units around a slow one all went cached-or-active, nothing further was
+    /// schedulable, and the wire went idle at exactly the moment the player's
+    /// buffer was draining.
     fn max_in_flight(&self) -> usize {
-        if self.boundaries.is_empty() {
-            READ_AHEAD_UNITS
-        } else {
-            ARCHIVE_MAX_IN_FLIGHT_UNITS
+        if !self.articles {
+            return HTTP_READ_AHEAD_UNITS;
         }
+        ARTICLE_MAX_IN_FLIGHT_UNITS
+            .min(self.window_units() / 2)
+            .max(1)
     }
 
     fn unit_start(&self, position: u64) -> u64 {
@@ -565,7 +607,6 @@ mod tests {
     struct Source {
         size: u64,
         unit: u64,
-        boundaries: Vec<u64>,
         max_return: usize,
         calls: Mutex<Vec<(u64, u64)>>,
         active: AtomicUsize,
@@ -577,19 +618,6 @@ mod tests {
             Arc::new(Self {
                 size,
                 unit,
-                boundaries: Vec::new(),
-                max_return: usize::MAX,
-                calls: Mutex::new(Vec::new()),
-                active: AtomicUsize::new(0),
-                peak: AtomicUsize::new(0),
-            })
-        }
-
-        fn with_boundaries(size: u64, unit: u64, boundaries: Vec<u64>) -> Arc<Self> {
-            Arc::new(Self {
-                size,
-                unit,
-                boundaries,
                 max_return: usize::MAX,
                 calls: Mutex::new(Vec::new()),
                 active: AtomicUsize::new(0),
@@ -617,7 +645,6 @@ mod tests {
         async fn layout(&self) -> Option<SourceLayout> {
             Some(SourceLayout {
                 chunk_size: self.unit,
-                boundaries: self.boundaries.clone(),
             })
         }
 
@@ -639,6 +666,25 @@ mod tests {
         Prefetcher::new(source, next_file(), &Handle::current())
     }
 
+    /// Wait until read-ahead stops issuing fetches. These tests care that the
+    /// window has settled, not how many units that took — which depends on where
+    /// the cursor landed and on the cushion arithmetic under test.
+    async fn wait_until_settled(source: &Source) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let mut last = usize::MAX;
+            loop {
+                let seen = source.call_count();
+                if seen > 0 && seen == last {
+                    return;
+                }
+                last = seen;
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+
     async fn wait_for_calls(source: &Source, count: usize) {
         tokio::time::timeout(Duration::from_secs(2), async {
             while source.call_count() < count {
@@ -650,42 +696,108 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn one_engine_keeps_exactly_eight_units_in_flight() {
+    async fn a_stream_fills_its_cushion_and_stops_there() {
         let source = Source::new(10_000, 100);
         let prefetcher = reader(source.clone());
 
         let data = prefetcher.read(0, 50).await.unwrap();
         assert_eq!(data.len(), 50);
-        wait_for_calls(&source, READ_AHEAD_UNITS).await;
-        tokio::task::yield_now().await;
+        wait_until_settled(&source).await;
 
-        assert_eq!(source.call_count(), READ_AHEAD_UNITS);
-        assert!(source.peak.load(Ordering::SeqCst) <= READ_AHEAD_UNITS);
+        // A 100-byte unit puts this whole file inside one cushion, so it stops
+        // at the end of the file and does not walk off the back.
+        assert_eq!(source.call_count(), 10_000usize.div_ceil(100));
         let snapshot = prefetcher.snapshot().await;
         assert_eq!(snapshot.unit, 100);
-        assert_eq!(snapshot.window, READ_AHEAD_UNITS);
+    }
+
+    /// The regression this policy exists for: a cushion counted in units is
+    /// whatever size the poster chose. The same depth of 8 was 5.6 MB on a
+    /// 720 KiB post and 30 MB on a 3.84 MB one — 3.0s of a UHD remux, against a
+    /// median 4.7s to fetch one article — and only the first was ever measured.
+    #[test]
+    fn the_article_cushion_is_the_same_bytes_whatever_the_segment_size() {
+        for unit in [716 * 1024, 768_000, 3_840_000] {
+            let config = Config {
+                unit,
+                articles: true,
+            };
+            let cushion = config.window_units() as u64 * unit;
+            assert!(
+                cushion >= ARTICLE_READ_AHEAD_BYTES,
+                "a {unit}-byte segment bought only a {cushion}-byte cushion"
+            );
+        }
+    }
+
+    /// Depth must exceed the wire, or `dispatch` has nothing left to schedule
+    /// once the units around a slow one are all cached-or-active — which is how
+    /// the wire went idle at exactly the moment the player's buffer drained.
+    #[test]
+    fn the_cushion_is_always_deeper_than_the_wire_is_wide() {
+        for unit in [1, 716 * 1024, 3_840_000, MIB, 32 * MIB] {
+            let config = Config {
+                unit,
+                articles: true,
+            };
+            assert!(
+                config.max_in_flight() < config.window_units(),
+                "unit {unit}: {} in flight against a {}-unit window",
+                config.max_in_flight(),
+                config.window_units()
+            );
+        }
+    }
+
+    /// A large segment buys its margin in units, not in memory.
+    #[test]
+    fn a_large_segment_cannot_blow_the_cushion_out() {
+        for unit in [MIB, 8 * MIB, 32 * MIB] {
+            let config = Config {
+                unit,
+                articles: true,
+            };
+            let cushion = config.window_units() as u64 * unit;
+            assert!(
+                cushion <= ARTICLE_READ_AHEAD_BYTES * 2 + unit,
+                "a {unit}-byte segment held {cushion} bytes ahead of the cursor"
+            );
+        }
+    }
+
+    /// The HTTP origin is untouched by all of the above: one 8 MiB range request
+    /// per unit, 8 deep and the same 8 on the wire.
+    #[test]
+    fn an_http_origin_keeps_its_own_numbers() {
+        let config = Config::from_layout(None);
+        assert_eq!(config.unit, HTTP_CHUNK);
+        assert_eq!(config.window_units(), HTTP_READ_AHEAD_UNITS);
+        assert_eq!(config.max_in_flight(), HTTP_READ_AHEAD_UNITS);
     }
 
     #[tokio::test]
-    async fn an_archive_buffers_deeper_than_it_connects() {
-        let source = Source::with_boundaries(1_000_000, 100, vec![800]);
+    async fn depth_never_costs_connections() {
+        let source = Source::new(1_000_000, 100);
         let prefetcher = reader(source.clone());
 
         prefetcher.read(0, 50).await.unwrap();
-        // The cushion is deeper than the wire is wide, so the whole window is
-        // eventually fetched...
-        wait_for_calls(&source, ARCHIVE_READ_AHEAD_UNITS).await;
-        let snapshot = prefetcher.snapshot().await;
-        assert_eq!(snapshot.window, ARCHIVE_READ_AHEAD_UNITS);
+        wait_for_calls(&source, ARTICLE_MAX_IN_FLIGHT_UNITS * 4).await;
 
-        // ...without ever opening more than the in-flight cap at once. This is
-        // the whole point of the split: depth must not cost connections.
+        let snapshot = prefetcher.snapshot().await;
         assert!(
-            source.peak.load(Ordering::SeqCst) <= ARCHIVE_MAX_IN_FLIGHT_UNITS,
-            "peak {} exceeded in-flight cap {ARCHIVE_MAX_IN_FLIGHT_UNITS}",
+            snapshot.window > ARTICLE_MAX_IN_FLIGHT_UNITS,
+            "a {}-unit window leaves nothing to schedule past a slow unit",
+            snapshot.window
+        );
+
+        // However deep the cushion, the wire stays capped. That is the whole
+        // point of the split: buffering deeper must not mean connecting wider,
+        // because past the provider's limit the aggregate collapses.
+        assert!(
+            source.peak.load(Ordering::SeqCst) <= ARTICLE_MAX_IN_FLIGHT_UNITS,
+            "peak {} exceeded the in-flight cap {ARTICLE_MAX_IN_FLIGHT_UNITS}",
             source.peak.load(Ordering::SeqCst)
         );
-        const { assert!(ARCHIVE_MAX_IN_FLIGHT_UNITS < ARCHIVE_READ_AHEAD_UNITS) };
     }
 
     #[tokio::test]
@@ -694,7 +806,7 @@ mod tests {
         let prefetcher = reader(source.clone());
 
         prefetcher.read(0, 50).await.unwrap();
-        wait_for_calls(&source, READ_AHEAD_UNITS).await;
+        wait_until_settled(&source).await;
         let before = source.call_count();
         assert_eq!(prefetcher.read(10, 20).await.unwrap().len(), 20);
         tokio::task::yield_now().await;
@@ -710,8 +822,7 @@ mod tests {
         // request does every couple of seconds.
         let first = Prefetcher::new(source.clone(), file, &Handle::current());
         first.read(5_000, 50).await.unwrap();
-        wait_for_calls(&source, READ_AHEAD_UNITS).await;
-        tokio::task::yield_now().await;
+        wait_until_settled(&source).await;
         let warm = source.call_count();
         drop(first);
 
@@ -729,8 +840,7 @@ mod tests {
 
         let first = Prefetcher::new(source.clone(), file, &Handle::current());
         first.read(5_000, 50).await.unwrap();
-        wait_for_calls(&source, READ_AHEAD_UNITS).await;
-        tokio::task::yield_now().await;
+        wait_until_settled(&source).await;
         let warm = source.call_count();
         drop(first);
 
@@ -758,7 +868,7 @@ mod tests {
         let after = prefetcher.snapshot().await;
 
         assert!(after.cursor >= 50_050);
-        assert!(after.active <= READ_AHEAD_UNITS);
+        assert!(after.active <= ARTICLE_MAX_IN_FLIGHT_UNITS);
     }
 
     #[tokio::test]
@@ -767,12 +877,11 @@ mod tests {
         let prefetcher = reader(source.clone());
 
         prefetcher.read(5_000, 50).await.unwrap();
-        wait_for_calls(&source, READ_AHEAD_UNITS).await;
+        wait_until_settled(&source).await;
 
         // Far enough back to leave the window, the way a player probes.
         prefetcher.read(0, 50).await.unwrap();
-        wait_for_calls(&source, READ_AHEAD_UNITS * 2).await;
-        tokio::task::yield_now().await;
+        wait_until_settled(&source).await;
         let settled = source.call_count();
 
         // Back to where playback was: those bytes were never discarded.
@@ -786,7 +895,6 @@ mod tests {
         let source = Arc::new(Source {
             size: 10_000,
             unit: 100,
-            boundaries: Vec::new(),
             max_return: 7,
             calls: Mutex::new(Vec::new()),
             active: AtomicUsize::new(0),
