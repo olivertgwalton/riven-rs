@@ -14,7 +14,6 @@ async-trait = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 redis = { workspace = true }
-lru = { workspace = true }
 sea-orm = { workspace = true }
 tokio = { workspace = true }
 

@@ -9,8 +9,8 @@
 //! communicate only through Redis-stored NZB metadata.
 
 use async_trait::async_trait;
-use lru::LruCache;
 use redis::AsyncCommands;
+use riven_core::cache::{ByteLru, NZB_BODY};
 use riven_core::events::{EventType, HookResponse};
 use riven_core::http::HttpServiceProfile;
 use riven_core::plugin::{FieldType, Plugin, PluginContext, SettingField};
@@ -21,17 +21,19 @@ use riven_core::types::{
 };
 use riven_usenet::nntp::{NntpProvider, NntpServerConfig};
 use riven_usenet::{NntpConfig, UsenetStreamer};
-use std::num::NonZeroUsize;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 mod health_check;
 
 pub(crate) const PROVIDER: &str = "usenet";
 
-fn nzb_body_cache() -> &'static Mutex<LruCache<String, Arc<String>>> {
-    static C: OnceLock<Mutex<LruCache<String, Arc<String>>>> = OnceLock::new();
-    C.get_or_init(|| Mutex::new(LruCache::new(NonZeroUsize::new(256).unwrap())))
+/// Raw NZB documents, keyed by info-hash. Bounded by bytes, not entries: an NZB
+/// for a large release is tens of MB of XML, so a fixed 256 entries was no
+/// ceiling at all.
+fn nzb_body_cache() -> &'static ByteLru<String, Arc<String>> {
+    static C: OnceLock<ByteLru<String, Arc<String>>> = OnceLock::new();
+    C.get_or_init(|| ByteLru::with_budget(NZB_BODY))
 }
 
 pub(crate) const PROFILE: HttpServiceProfile =
@@ -513,7 +515,7 @@ async fn nzb_url_for_hash(info_hash: &str, ctx: &PluginContext) -> Option<String
 }
 
 async fn fetch_nzb_xml(info_hash: &str, ctx: &PluginContext) -> Option<Arc<String>> {
-    if let Some(hit) = nzb_body_cache().lock().unwrap().get(info_hash).cloned() {
+    if let Some(hit) = nzb_body_cache().get(info_hash) {
         return Some(hit);
     }
     let nzb_url = nzb_url_for_hash(info_hash, ctx).await?;
@@ -530,9 +532,6 @@ async fn fetch_nzb_xml(info_hash: &str, ctx: &PluginContext) -> Option<Arc<Strin
     }
     let xml = resp.text().ok()?;
     let arc = Arc::new(xml);
-    nzb_body_cache()
-        .lock()
-        .unwrap()
-        .put(info_hash.to_string(), arc.clone());
+    nzb_body_cache().put(info_hash.to_string(), arc.clone(), arc.len() as u64);
     Some(arc)
 }

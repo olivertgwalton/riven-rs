@@ -6,24 +6,19 @@
 //! its `PlaybackReadAheadSegments`. Demand units are always dispatched before
 //! speculative units.
 //!
-//! Memory is bounded once, by the shared decoded-segment cache below this
-//! layer — the same place streamnzb bounds it. There is no second per-file
-//! reservation here.
-//!
-//! Decoded units live in a [`UnitCache`] owned by the *file*, not by the
-//! handle; the window and cursor stay per-handle. streamnzb splits it the same
-//! way — cache and in-flight map on its `File`, cursor on each
-//! `SegmentReader` — and the split matters because players open the same file
-//! repeatedly and at several positions at once. Sharing the bytes makes a
-//! re-open warm; sharing a cursor would make those positions fight.
+//! Decoded units live in one process-wide [`UnitCache`] keyed by file; the
+//! window and cursor stay per-handle. streamnzb splits it the same way, and the
+//! split matters because players open the same file repeatedly and at several
+//! positions at once: sharing the bytes makes a re-open warm, sharing a cursor
+//! would make those positions fight.
 
 use std::collections::BTreeMap;
 use std::io;
 use std::sync::Arc;
+use std::sync::OnceLock;
 
 use bytes::{Bytes, BytesMut};
-use lru::LruCache;
-use parking_lot::Mutex;
+use riven_core::cache::{ByteLru, CacheStats, READ_AHEAD};
 use riven_core::local_source::SourceLayout;
 use tokio::runtime::Handle;
 use tokio::sync::{mpsc, oneshot};
@@ -50,64 +45,30 @@ const ARCHIVE_MAX_IN_FLIGHT_UNITS: usize = 16;
 const RETAIN_BEHIND_UNITS: u64 = 2;
 const MIN_TAIL_PROBE: u64 = 16 * 1024;
 const MAX_TAIL_PROBE: u64 = 10 * MIB;
-/// Decoded bytes retained per open file. Wide enough to cover several handles'
-/// windows at once, since a player streams one file from several positions.
-pub const UNIT_CACHE_BYTES: u64 = 192 * MIB;
-
-/// Decoded read-ahead units for one file, shared by every handle open on it.
-///
-/// Bounded by bytes rather than entries because a unit is an 8 MiB HTTP chunk
-/// on one backend and a ~700 KiB article on the other.
-pub struct UnitCache {
-    state: Mutex<UnitCacheState>,
-    max_bytes: u64,
+/// The one read-ahead cache: every open file, both origins, one budget. Its hit
+/// rate is the one that answers "did the player's read touch the origin?".
+pub fn shared_unit_cache() -> &'static UnitCache {
+    static CACHE: OnceLock<UnitCache> = OnceLock::new();
+    CACHE.get_or_init(|| UnitCache::with_budget(READ_AHEAD))
 }
 
-struct UnitCacheState {
-    units: LruCache<u64, Bytes>,
-    bytes: u64,
+pub fn read_ahead_stats() -> CacheStats {
+    shared_unit_cache().stats()
 }
 
-impl UnitCache {
-    pub fn new(max_bytes: u64) -> Arc<Self> {
-        Arc::new(Self {
-            state: Mutex::new(UnitCacheState {
-                units: LruCache::unbounded(),
-                bytes: 0,
-            }),
-            max_bytes,
-        })
-    }
-
-    fn get(&self, start: u64) -> Option<Bytes> {
-        self.state.lock().units.get(&start).cloned()
-    }
-
-    /// Whether a unit is held, without counting as a use: scheduling decisions
-    /// must not keep a unit alive that no reader has actually wanted.
-    fn contains(&self, start: u64) -> bool {
-        self.state.lock().units.peek(&start).is_some()
-    }
-
-    fn put(&self, start: u64, data: Bytes) {
-        let mut state = self.state.lock();
-        let added = data.len() as u64;
-        if let Some(previous) = state.units.put(start, data) {
-            state.bytes = state.bytes.saturating_sub(previous.len() as u64);
-        }
-        state.bytes = state.bytes.saturating_add(added);
-        while state.bytes > self.max_bytes && state.units.len() > 1 {
-            let Some((_, evicted)) = state.units.pop_lru() else {
-                break;
-            };
-            state.bytes = state.bytes.saturating_sub(evicted.len() as u64);
-        }
-    }
-
-    fn len(&self) -> usize {
-        self.state.lock().units.len()
-    }
+/// Bumping `revision` makes every unit cached under the old one unreachable.
+/// That is the whole of read-ahead invalidation: no sweep, and the stale units
+/// age out of the LRU as the cold entries they are.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct FileKey {
+    pub revision: u64,
+    pub ino: u64,
 }
+
+/// Bounded by bytes, not entries: a unit is an 8 MiB HTTP chunk on one backend
+/// and a ~700 KiB article on the other. Every file shares the one LRU, so a
+/// file that stops being read loses its place to one that has not.
+pub type UnitCache = ByteLru<(FileKey, u64), Bytes>;
 
 #[derive(Clone)]
 struct Config {
@@ -202,7 +163,7 @@ pub struct Prefetcher {
 }
 
 impl Prefetcher {
-    pub fn new(source: Arc<dyn ByteSource>, cache: Arc<UnitCache>, runtime: &Handle) -> Self {
+    pub fn new(source: Arc<dyn ByteSource>, file: FileKey, runtime: &Handle) -> Self {
         let size = source.size();
         let (command_tx, command_rx) = mpsc::unbounded_channel();
         let (fill_tx, fill_rx) = mpsc::unbounded_channel();
@@ -219,7 +180,8 @@ impl Prefetcher {
                 direct_tx,
                 cursor: 0,
                 resets: 0,
-                cache,
+                file,
+                cache: shared_unit_cache(),
                 active: BTreeMap::new(),
                 direct_active: BTreeMap::new(),
                 next_direct_id: 1,
@@ -266,8 +228,9 @@ struct Actor {
     direct_tx: mpsc::UnboundedSender<Direct>,
     cursor: u64,
     resets: u64,
-    /// Shared with every other handle on this file; see [`UnitCache`].
-    cache: Arc<UnitCache>,
+    /// Which file this actor's units belong to in the shared cache.
+    file: FileKey,
+    cache: &'static UnitCache,
     active: BTreeMap<u64, JoinHandle<()>>,
     direct_active: BTreeMap<u64, JoinHandle<()>>,
     next_direct_id: u64,
@@ -275,6 +238,10 @@ struct Actor {
 }
 
 impl Actor {
+    fn key(&self, start: u64) -> (FileKey, u64) {
+        (self.file, start)
+    }
+
     async fn run(mut self) {
         self.config = Config::from_layout(self.source.layout().await);
 
@@ -312,15 +279,19 @@ impl Actor {
         self.source.report_position(request.start);
 
         if self.is_tail_probe(&request) {
+            // Bypasses the cache for the origin, so it costs what a miss costs.
+            self.cache.record(false);
             self.spawn_direct(request);
             return;
         }
 
         if let Some(data) = self.read_cached(request.start, request.len) {
+            self.cache.record(true);
             self.finish(request, data);
             self.dispatch();
             return;
         }
+        self.cache.record(false);
 
         if !self.in_current_window(&request) {
             self.reset(request.start);
@@ -343,7 +314,8 @@ impl Actor {
         self.active.remove(&fill.start);
         match fill.result {
             Ok(data) => {
-                self.cache.put(fill.start, data);
+                let weight = data.len() as u64;
+                self.cache.put(self.key(fill.start), data, weight);
                 self.serve_pending();
                 self.dispatch();
             }
@@ -384,7 +356,7 @@ impl Actor {
             to = position,
             jump = position as i64 - self.cursor as i64,
             window_bytes = self.config.unit * self.config.window_units() as u64,
-            cached_units = self.cache.len(),
+            cached_units = self.cache.stats().entries,
             inflight_units = self.active.len(),
             "read-ahead window reset"
         );
@@ -446,7 +418,10 @@ impl Actor {
     }
 
     fn schedule_unit(&mut self, start: u64) {
-        if self.cache.contains(start) || self.active.contains_key(&start) || start >= self.size {
+        if self.cache.contains(&self.key(start))
+            || self.active.contains_key(&start)
+            || start >= self.size
+        {
             return;
         }
         let end = start.saturating_add(self.config.unit).min(self.size);
@@ -498,7 +473,7 @@ impl Actor {
         let end = start.checked_add(len as u64)?;
         let first_start = self.config.unit_start(start);
         if end <= first_start.saturating_add(self.config.unit) {
-            let data = self.cache.get(first_start)?;
+            let data = self.cache.touch(&self.key(first_start))?;
             let offset = (start - first_start) as usize;
             let wanted_end = offset.checked_add(len)?;
             return (wanted_end <= data.len()).then(|| data.slice(offset..wanted_end));
@@ -508,7 +483,7 @@ impl Actor {
         let mut position = start;
         while position < end {
             let unit_start = self.config.unit_start(position);
-            let data = self.cache.get(unit_start)?;
+            let data = self.cache.touch(&self.key(unit_start))?;
             let offset = (position - unit_start) as usize;
             if offset >= data.len() {
                 return None;
@@ -582,7 +557,7 @@ struct Snapshot {
 #[cfg(test)]
 mod tests {
     use std::sync::Mutex;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
     use std::time::Duration;
 
     use super::*;
@@ -651,8 +626,17 @@ mod tests {
         }
     }
 
+    /// Tests share the one process-wide cache, so each takes its own key.
+    fn next_file() -> FileKey {
+        static NEXT_INO: AtomicU64 = AtomicU64::new(1);
+        FileKey {
+            revision: 0,
+            ino: NEXT_INO.fetch_add(1, Ordering::SeqCst),
+        }
+    }
+
     fn reader(source: Arc<Source>) -> Prefetcher {
-        Prefetcher::new(source, UnitCache::new(UNIT_CACHE_BYTES), &Handle::current())
+        Prefetcher::new(source, next_file(), &Handle::current())
     }
 
     async fn wait_for_calls(source: &Source, count: usize) {
@@ -720,22 +704,48 @@ mod tests {
     #[tokio::test]
     async fn a_reopened_handle_reads_the_previous_one_s_bytes_off_the_wire() {
         let source = Source::new(100_000, 100);
-        let cache = UnitCache::new(UNIT_CACHE_BYTES);
+        let file = next_file();
 
         // One handle warms the window, then goes away — as a player's range
         // request does every couple of seconds.
-        let first = Prefetcher::new(source.clone(), Arc::clone(&cache), &Handle::current());
+        let first = Prefetcher::new(source.clone(), file, &Handle::current());
         first.read(5_000, 50).await.unwrap();
         wait_for_calls(&source, READ_AHEAD_UNITS).await;
         tokio::task::yield_now().await;
         let warm = source.call_count();
         drop(first);
 
-        // Its replacement starts with a cold cursor but a warm cache: the read
-        // it opens with must be served without touching the origin again.
-        let second = Prefetcher::new(source.clone(), cache, &Handle::current());
+        // Its replacement starts with a cold cursor but the same key, so it
+        // finds those units and must not touch the origin again.
+        let second = Prefetcher::new(source.clone(), file, &Handle::current());
         assert_eq!(second.read(5_000, 50).await.unwrap().len(), 50);
         assert_eq!(source.call_count(), warm);
+    }
+
+    #[tokio::test]
+    async fn a_new_revision_makes_warm_units_unreachable() {
+        let source = Source::new(100_000, 100);
+        let file = next_file();
+
+        let first = Prefetcher::new(source.clone(), file, &Handle::current());
+        first.read(5_000, 50).await.unwrap();
+        wait_for_calls(&source, READ_AHEAD_UNITS).await;
+        tokio::task::yield_now().await;
+        let warm = source.call_count();
+        drop(first);
+
+        // A settings change can repoint the path at different bytes, so the
+        // warm units must not be reused however hot they are.
+        let bumped = FileKey {
+            revision: file.revision + 1,
+            ..file
+        };
+        let second = Prefetcher::new(source.clone(), bumped, &Handle::current());
+        assert_eq!(second.read(5_000, 50).await.unwrap().len(), 50);
+        assert!(
+            source.call_count() > warm,
+            "a new revision must refetch rather than serve stale bytes"
+        );
     }
 
     #[tokio::test]

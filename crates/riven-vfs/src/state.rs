@@ -8,7 +8,7 @@ use riven_core::settings::LibraryProfileMembership;
 use riven_core::types::FileSystemEntryType;
 use riven_db::entities::FileSystemEntry;
 
-use crate::prefetch::{Prefetcher, UNIT_CACHE_BYTES, UnitCache};
+use crate::prefetch::{FileKey, Prefetcher};
 use crate::readdir::DirEntry;
 
 pub(crate) const ROOT_INO: u64 = 1;
@@ -16,16 +16,6 @@ pub(crate) const MOVIES_INO: u64 = 2;
 pub(crate) const SHOWS_INO: u64 = 3;
 const FIRST_DYNAMIC_INO: u64 = 100;
 const READDIR_CACHE_TTL: Duration = Duration::from_secs(30);
-/// How long a file's decoded read-ahead survives with no handle open on it.
-///
-/// Players re-open the same file every couple of seconds, and a cache that
-/// died with its handle threw away a full read-ahead window every time — which
-/// is what made playback stall. streamnzb keeps the equivalent state on its
-/// `File` for the life of the session rather than on the per-request
-/// `SegmentReader`; this is the same idea with an idle bound so a finished
-/// stream is not held forever.
-const STREAM_IDLE_TTL: Duration = Duration::from_secs(60);
-
 pub(crate) enum OpenedFile {
     /// Any network-backed file. The origin (usenet or HTTP) is behind
     /// `ByteSource`, and read-ahead is the same for both — so there is one
@@ -89,19 +79,9 @@ impl CachedEntry {
     }
 }
 
-/// One file's decoded read-ahead, shared by every handle open on it and kept
-/// warm across the gaps between them. Each handle still keeps its own cursor
-/// and window — only the bytes are shared.
-struct Stream {
-    cache: Arc<UnitCache>,
-    last_used: Mutex<Instant>,
-}
-
 pub(crate) struct VfsState {
     revision: AtomicU64,
     pub file_handles: DashMap<u64, Mutex<OpenedFile>>,
-    /// Keyed by inode, not by handle: see [`STREAM_IDLE_TTL`].
-    streams: DashMap<u64, Stream>,
     path_to_ino: DashMap<Arc<str>, u64>,
     ino_to_path: DashMap<u64, Arc<str>>,
     next_ino: AtomicU64,
@@ -114,7 +94,6 @@ impl VfsState {
         let state = Self {
             revision: AtomicU64::new(0),
             file_handles: DashMap::new(),
-            streams: DashMap::new(),
             path_to_ino: DashMap::new(),
             ino_to_path: DashMap::new(),
             next_ino: AtomicU64::new(FIRST_DYNAMIC_INO),
@@ -138,33 +117,24 @@ impl VfsState {
         }
         self.readdir_cache.clear();
         // A settings change can repoint a path at different bytes, so a warm
-        // read-ahead for it is no longer trustworthy.
-        self.streams.clear();
+        // read-ahead for it is no longer trustworthy. Storing the new revision
+        // is the invalidation: it is half of every read-ahead cache key, so
+        // units fetched under the old one become unreachable.
         self.revision.store(revision, Ordering::SeqCst);
     }
 
-    /// The decoded read-ahead cache for `ino`, creating it on first use.
+    /// This file's identity in the shared read-ahead cache.
     ///
     /// Handles come and go every couple of seconds; the bytes they fetched
-    /// should not. A re-open builds a fresh window but finds the units around
-    /// the play position already decoded, instead of starting cold.
-    pub(crate) fn unit_cache(&self, ino: u64) -> Arc<UnitCache> {
-        self.evict_idle_streams();
-        let stream = self.streams.entry(ino).or_insert_with(|| Stream {
-            cache: UnitCache::new(UNIT_CACHE_BYTES),
-            last_used: Mutex::new(Instant::now()),
-        });
-        *stream.last_used.lock() = Instant::now();
-        Arc::clone(&stream.cache)
-    }
-
-    /// Drop caches that no handle has touched for [`STREAM_IDLE_TTL`]. Called
-    /// from `unit_cache`, so a process that stops streaming stops paying.
-    fn evict_idle_streams(&self) {
-        self.streams.retain(|_ino, stream| {
-            Arc::strong_count(&stream.cache) > 1
-                || stream.last_used.lock().elapsed() < STREAM_IDLE_TTL
-        });
+    /// should not. A re-open builds a fresh window but derives the same key, so
+    /// it finds the units around the play position already decoded instead of
+    /// starting cold — and a file nothing is reading any more simply goes cold
+    /// in the shared LRU, which is what reclaims it.
+    pub(crate) fn file_key(&self, ino: u64) -> FileKey {
+        FileKey {
+            revision: self.revision.load(Ordering::SeqCst),
+            ino,
+        }
     }
 
     pub(crate) fn get_or_create_ino(&self, path: &str) -> u64 {
@@ -240,7 +210,7 @@ mod tests {
     fn handle(state: &VfsState, ino: u64) -> u64 {
         let prefetcher = Arc::new(Prefetcher::new(
             Arc::new(EmptySource),
-            state.unit_cache(ino),
+            state.file_key(ino),
             &tokio::runtime::Handle::current(),
         ));
         state.open(OpenedFile::Streamed {
@@ -254,14 +224,14 @@ mod tests {
         let state = VfsState::new();
         let ino = state.get_or_create_ino("/movies/Film/film.mkv");
 
-        let first = state.unit_cache(ino);
+        let first = state.file_key(ino);
         let fd = handle(&state, ino);
         // The player closes every handle it has before opening the next one.
         state.close(fd);
 
-        let reopened = state.unit_cache(ino);
-        assert!(Arc::ptr_eq(&first, &reopened));
-        assert_eq!(state.streams.len(), 1);
+        // Same key, so the re-open reads the units the last handle fetched
+        // rather than starting cold.
+        assert_eq!(first, state.file_key(ino));
     }
 
     #[tokio::test]
@@ -273,7 +243,11 @@ mod tests {
         let one = handle(&state, ino);
         let two = handle(&state, ino);
         assert_ne!(one, two);
-        assert_eq!(state.streams.len(), 1, "one shared cache");
+        assert_eq!(
+            state.file_key(ino),
+            state.file_key(ino),
+            "both handles address one set of shared bytes"
+        );
         assert_eq!(state.file_handles.len(), 2, "two independent windows");
     }
 
@@ -281,10 +255,10 @@ mod tests {
     async fn a_settings_change_drops_warm_read_ahead() {
         let state = VfsState::new();
         let ino = state.get_or_create_ino("/movies/Film/film.mkv");
-        let cache = state.unit_cache(ino);
+        let before = state.file_key(ino);
         state.refresh(1);
-        assert_eq!(state.streams.len(), 0);
-        assert!(!Arc::ptr_eq(&cache, &state.unit_cache(ino)));
+        // A new key, so every unit cached under the old one is unreachable.
+        assert_ne!(before, state.file_key(ino));
     }
 
     #[test]

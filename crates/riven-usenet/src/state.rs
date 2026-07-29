@@ -9,16 +9,9 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 
-use lru::LruCache;
 use parking_lot::Mutex;
+use riven_core::cache::{ByteLru, NZB_META};
 use tokio::sync::{Notify, mpsc};
-
-/// Default budget for the deserialized-meta cache. Each `NzbMeta` holds the
-/// full per-segment address book for one release, so a big remux can be tens
-/// of MB. A library scan touches every ingested file, so without a bound the
-/// cache grows to hold all of them. Override with
-/// `RIVEN_USENET_META_CACHE_BYTES`.
-const DEFAULT_META_CACHE_BYTES: u64 = 256 * 1024 * 1024;
 
 pub struct StreamerState {
     pub meta_cache: MetaCache,
@@ -33,10 +26,7 @@ pub struct StreamerState {
 impl StreamerState {
     fn new() -> Self {
         Self {
-            meta_cache: MetaCache::new(env_positive(
-                "RIVEN_USENET_META_CACHE_BYTES",
-                DEFAULT_META_CACHE_BYTES,
-            )),
+            meta_cache: MetaCache::with_budget(NZB_META),
             meta_loads: InFlight::default(),
             migrated: MigratedMetas::default(),
         }
@@ -54,72 +44,15 @@ pub fn global_active_streams() -> Arc<ActiveStreams> {
         .clone()
 }
 
-/// Read a positive number from an env var. Zero is treated as "use default"
-/// so a stray `=0` can't silently disable a cache.
-fn env_positive<T: std::str::FromStr + Default + PartialOrd>(name: &str, default: T) -> T {
-    std::env::var(name)
-        .ok()
-        .and_then(|raw| raw.parse::<T>().ok())
-        .filter(|value| *value > T::default())
-        .unwrap_or(default)
-}
+/// Deserialized metadata, weighed by [`estimate_meta_bytes`]. Cold releases
+/// re-load from Postgres; an in-flight stream is unaffected because it holds
+/// its own `Arc<NzbMeta>`. Every usenet read consults this before it can plan
+/// anything, so unlike the segment cache it is genuinely high-hit.
+pub type MetaCache = ByteLru<String, Arc<crate::streamer::NzbMeta>>;
 
-/// Deserialized metadata cache, bounded by an estimate of each entry's
-/// footprint and evicted LRU. Cold releases re-load from Postgres; an
-/// in-flight stream is unaffected because it holds its own `Arc<NzbMeta>`.
-pub struct MetaCache {
-    state: Mutex<MetaCacheState>,
-    max_bytes: u64,
-}
-
-struct MetaCacheState {
-    /// The value carries its estimated weight so eviction never has to
-    /// re-walk a meta that may hold hundreds of thousands of segments.
-    lru: LruCache<String, (Arc<crate::streamer::NzbMeta>, u64)>,
-    current_bytes: u64,
-}
-
-impl MetaCache {
-    pub fn new(max_bytes: u64) -> Self {
-        Self {
-            state: Mutex::new(MetaCacheState {
-                lru: LruCache::unbounded(),
-                current_bytes: 0,
-            }),
-            max_bytes,
-        }
-    }
-
-    pub fn get(&self, info_hash: &str) -> Option<Arc<crate::streamer::NzbMeta>> {
-        let mut state = self.state.lock();
-        state.lru.get(info_hash).map(|(meta, _)| meta.clone())
-    }
-
-    pub fn put(&self, info_hash: String, meta: Arc<crate::streamer::NzbMeta>) {
-        let weight = estimate_meta_bytes(&meta);
-        let mut state = self.state.lock();
-        if let Some((_, previous)) = state.lru.put(info_hash, (meta, weight)) {
-            state.current_bytes = state.current_bytes.saturating_sub(previous);
-        }
-        state.current_bytes = state.current_bytes.saturating_add(weight);
-
-        while state.current_bytes > self.max_bytes && state.lru.len() > 1 {
-            let Some((_, (_, popped))) = state.lru.pop_lru() else {
-                break;
-            };
-            state.current_bytes = state.current_bytes.saturating_sub(popped);
-        }
-    }
-
-    #[cfg(test)]
-    pub fn current_bytes(&self) -> u64 {
-        self.state.lock().current_bytes
-    }
-
-    #[cfg(test)]
-    pub fn entry_count(&self) -> usize {
-        self.state.lock().lru.len()
-    }
+pub fn cache_meta(cache: &MetaCache, info_hash: String, meta: Arc<crate::streamer::NzbMeta>) {
+    let weight = estimate_meta_bytes(&meta);
+    cache.put(info_hash, meta, weight);
 }
 
 /// Estimate the heap footprint of a deserialized `NzbMeta`, dominated by the
@@ -350,22 +283,22 @@ mod tests {
         let one = estimate_meta_bytes(&meta_with_segments("probe", 1_000));
         let cache = MetaCache::new(one * 2 + one / 2);
 
-        cache.put("a".into(), meta_with_segments("a", 1_000));
-        cache.put("b".into(), meta_with_segments("b", 1_000));
+        cache_meta(&cache, "a".into(), meta_with_segments("a", 1_000));
+        cache_meta(&cache, "b".into(), meta_with_segments("b", 1_000));
         assert!(cache.get("a").is_some());
-        cache.put("c".into(), meta_with_segments("c", 1_000));
+        cache_meta(&cache, "c".into(), meta_with_segments("c", 1_000));
 
         assert!(cache.get("a").is_some(), "recently-used survives");
         assert!(cache.get("b").is_none(), "LRU evicted");
         assert!(cache.get("c").is_some(), "newest survives");
-        assert!(cache.current_bytes() <= one * 2 + one / 2);
+        assert!(cache.stats().bytes_used <= one * 2 + one / 2);
     }
 
     #[test]
     fn meta_cache_keeps_oversized_single_entry() {
         let cache = MetaCache::new(1024);
-        cache.put("big".into(), meta_with_segments("big", 50_000));
+        cache_meta(&cache, "big".into(), meta_with_segments("big", 50_000));
         assert!(cache.get("big").is_some());
-        assert_eq!(cache.entry_count(), 1);
+        assert_eq!(cache.stats().entries, 1);
     }
 }

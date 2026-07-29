@@ -3382,7 +3382,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "lru",
  "redis",
  "riven-core",
  "riven-db",
@@ -3955,6 +3954,7 @@ dependencies = [
  "hickory-resolver",
  "hyper",
  "log",
+ "lru",
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry_sdk",

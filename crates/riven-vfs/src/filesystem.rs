@@ -572,7 +572,7 @@ impl Filesystem for RivenFs {
             ));
             let prefetcher = Arc::new(Prefetcher::new(
                 byte_source,
-                s.state.unit_cache(ino),
+                s.state.file_key(ino),
                 &s.runtime,
             ));
             let fd = s.state.open(OpenedFile::Streamed { path, prefetcher });
@@ -616,7 +616,7 @@ impl Filesystem for RivenFs {
         ));
         let prefetcher = Arc::new(Prefetcher::new(
             byte_source,
-            s.state.unit_cache(ino),
+            s.state.file_key(ino),
             &s.runtime,
         ));
         let fd = s.state.open(OpenedFile::Streamed { path, prefetcher });
