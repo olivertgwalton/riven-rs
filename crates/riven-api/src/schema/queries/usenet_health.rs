@@ -417,16 +417,7 @@ impl UsenetHealthQuery {
     }
 }
 
-/// `good / (good + bad)`, or 0.0 before anything has happened.
-fn ratio(good: u64, bad: u64) -> f64 {
-    let total = good + bad;
-    if total > 0 {
-        good as f64 / total as f64
-    } else {
-        0.0
-    }
-}
-
+/// `ok / (ok + bad)`, or 0.0 before anything has happened.
 fn rate(ok: u64, bad: u64) -> f64 {
     let total = ok + bad;
     if total > 0 {
