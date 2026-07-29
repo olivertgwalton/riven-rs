@@ -54,8 +54,6 @@ services:
 #    plex:
 #        image: plexinc/pms-docker:latest
 #        env_file: .env
-#        environment:
-#            - PLEX_CLAIM=claim-RoH1nU1Egxh9Xt9pzyi5
 #        network_mode: host
 #        volumes:
 #            - plex_config:/config
