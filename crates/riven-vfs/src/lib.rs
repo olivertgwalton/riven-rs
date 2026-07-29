@@ -110,9 +110,11 @@ pub fn mount(
         fuser::MountOption::FSName("riven".to_string()),
         fuser::MountOption::AutoUnmount,
         fuser::MountOption::DefaultPermissions,
-        // Align the largest kernel request with the VFS cache granularity.
-        // Larger requests can delay a reply while several chunks are fetched;
-        // smaller requests add avoidable FUSE round trips.
+        // Cap one kernel request at 1 MiB. This is deliberately *below* the
+        // prefetcher's cache unit (8 MiB for HTTP sources): a request larger
+        // than a unit would stall the reply while several units are fetched,
+        // while smaller ones are served straight from cache once the unit
+        // lands. Smaller still would only add avoidable FUSE round trips.
         fuser::MountOption::CUSTOM("max_read=1048576".to_string()),
     ];
     let session = fuser::spawn_mount2(fs, mount_path, &config)?;

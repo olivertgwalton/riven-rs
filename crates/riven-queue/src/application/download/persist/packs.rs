@@ -333,17 +333,33 @@ pub async fn persist_show(
 
     let mut completed_episode_ids: Vec<i64> = Vec::new();
 
+    // One query for every season's episodes rather than one per season.
+    let season_ids: Vec<i64> = seasons.iter().map(|season| season.id).collect();
+    // Loading all seasons in one query means a failure is now total rather than
+    // per-season, so it is reported the same way as the seasons query above
+    // rather than logged and skipped.
+    let episodes_by_season = match repo::list_episodes_for_seasons(&season_ids).await {
+        Ok(grouped) => grouped,
+        Err(e) => {
+            tracing::error!(id, error = %e, "failed to load episodes for seasons");
+            queue
+                .notify(RivenEvent::MediaItemDownloadError {
+                    id,
+                    title: item.title.clone(),
+                    error: e.to_string(),
+                })
+                .await;
+            return SeasonPersistOutcome::Failed;
+        }
+    };
+
     for season in &seasons {
         let season_number = season.season_number.unwrap_or(1);
-        let episodes = match repo::list_episodes(season.id).await {
-            Ok(eps) => eps,
-            Err(e) => {
-                tracing::error!(id, season_id = season.id, error = %e, "failed to load episodes for season");
-                continue;
-            }
+        let Some(episodes) = episodes_by_season.get(&season.id) else {
+            continue;
         };
 
-        for ep in &episodes {
+        for ep in episodes {
             let episode_number = ep.episode_number.unwrap_or(1);
             let matched: Vec<(&DownloadFile, riven_rank::ParsedData)> = parsed_video_files
                 .iter()

@@ -3,6 +3,7 @@ pub mod dns;
 pub mod downloader;
 pub mod entities;
 pub mod events;
+pub mod filename;
 pub mod http;
 pub mod local_source;
 pub mod logging;

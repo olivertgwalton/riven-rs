@@ -18,23 +18,52 @@ use usenet::setting_u64;
 
 const USER_AGENT: &str = concat!("riven-rs/", env!("CARGO_PKG_VERSION"));
 
-fn build_http_client() -> Result<reqwest::Client> {
+/// Client for outbound API calls — metadata providers, scrapers, notification
+/// targets.
+///
+/// Kept separate from [`build_stream_client`] because the two workloads want
+/// opposite settings, and one client cannot hold both. These are many small
+/// JSON requests to a handful of repeatedly-polled hosts, so HTTP/2 is left
+/// enabled (multiplexing and header compression both pay off) and a total
+/// request deadline is meaningful.
+fn build_api_client() -> Result<reqwest::Client> {
+    use riven_core::config::api;
+
     Ok(reqwest::Client::builder()
         .user_agent(USER_AGENT)
         .dns_resolver(riven_core::dns::CachedDnsResolver)
-        .connect_timeout(Duration::from_secs(
-            riven_core::config::vfs::CONNECT_TIMEOUT_SECS,
-        ))
-        .timeout(Duration::from_secs(
-            riven_core::config::vfs::ACTIVITY_TIMEOUT_SECS,
-        ))
-        .pool_idle_timeout(Duration::from_secs(
-            riven_core::config::vfs::ACTIVITY_TIMEOUT_SECS,
-        ))
+        .connect_timeout(Duration::from_secs(api::CONNECT_TIMEOUT_SECS))
+        .timeout(Duration::from_secs(api::REQUEST_TIMEOUT_SECS))
+        .pool_idle_timeout(Duration::from_secs(api::POOL_IDLE_TIMEOUT_SECS))
+        .pool_max_idle_per_host(16)
+        .tcp_keepalive(Duration::from_secs(30))
+        .tcp_nodelay(true)
+        .connection_verbose(false)
+        .build()?)
+}
+
+/// Client for VFS range reads against debrid origins.
+///
+/// The principal difference from [`build_api_client`] is its timeout policy:
+///
+/// `read_timeout`, not `timeout`. Reqwest's `timeout` is a total deadline
+///   covering the body; on a multi-megabyte ranged read that caps throughput
+///   instead of detecting a fault, and it trips hardest exactly when archive
+///   read-ahead has several fetches sharing the link. `read_timeout` resets on
+///   every successful read, so it catches a genuinely stalled connection and
+///   leaves a slow-but-progressing one alone.
+fn build_stream_client() -> Result<reqwest::Client> {
+    use riven_core::config::vfs;
+
+    Ok(reqwest::Client::builder()
+        .user_agent(USER_AGENT)
+        .dns_resolver(riven_core::dns::CachedDnsResolver)
+        .connect_timeout(Duration::from_secs(vfs::CONNECT_TIMEOUT_SECS))
+        .read_timeout(Duration::from_secs(vfs::ACTIVITY_TIMEOUT_SECS))
+        .pool_idle_timeout(Duration::from_secs(vfs::ACTIVITY_TIMEOUT_SECS))
         .pool_max_idle_per_host(32)
         .tcp_keepalive(Duration::from_secs(30))
         .tcp_nodelay(true)
-        .http1_only()
         .connection_verbose(false)
         .build()?)
 }
@@ -71,9 +100,8 @@ async fn main() -> Result<()> {
     let redis_conn = riven_queue::connect_managed(settings.redis_url.as_str()).await?;
     tracing::info!("redis connection established");
 
-    let reqwest_client = build_http_client()?;
-    let http_client = riven_core::http::HttpClient::new(reqwest_client.clone());
-    let stream_http_client = reqwest_client;
+    let http_client = riven_core::http::HttpClient::new(build_api_client()?);
+    let stream_http_client = build_stream_client()?;
 
     let registry = setup::register_plugins(
         http_client.clone(),

@@ -125,9 +125,7 @@ impl JobQueue {
     /// manual "Re-grab" mutation and the usenet auto-repair worker.
     pub async fn regrab_media_item(&self, media_item_id: i64) -> anyhow::Result<()> {
         use riven_core::entities::filesystem_entries;
-        // The path comes along only so the failure log below can name the
-        // entry being re-grabbed rather than printing a bare hash.
-        let entries: Vec<(i64, Option<String>, String)> = filesystem_entries::Entity::find()
+        let entries: Vec<(i64, Option<String>)> = filesystem_entries::Entity::find()
             .filter(filesystem_entries::Column::MediaItemId.eq(media_item_id))
             .filter(
                 filesystem_entries::Column::EntryType
@@ -136,33 +134,42 @@ impl JobQueue {
             .select_only()
             .column(filesystem_entries::Column::Id)
             .column(filesystem_entries::Column::UsenetInfoHash)
-            .column(filesystem_entries::Column::Path)
-            .into_tuple::<(i64, Option<String>, String)>()
+            .into_tuple::<(i64, Option<String>)>()
             .all(riven_db::orm())
             .await?;
 
-        for (_, info_hash, path) in &entries {
-            if let Some(info_hash) = info_hash
-                && let Err(error) =
-                    riven_db::repo::blacklist_stream_permanent_by_hash(media_item_id, info_hash)
-                        .await
-            {
+        let info_hashes: Vec<&str> = entries
+            .iter()
+            .filter_map(|(_, info_hash)| info_hash.as_deref())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        if let Err(error) =
+            riven_db::repo::blacklist_streams_permanent_by_hashes(media_item_id, &info_hashes).await
+        {
+            tracing::warn!(
+                %error,
+                hashes = info_hashes.len(),
+                "regrab: failed to blacklist releases"
+            );
+        }
+
+        let entry_ids: Vec<i64> = entries.iter().map(|(id, _)| *id).collect();
+        let state_recomputed = match riven_db::repo::delete_filesystem_entries(&entry_ids).await {
+            Ok(affected) => affected.contains(&media_item_id),
+            Err(error) => {
                 tracing::warn!(
                     %error,
-                    info_hash,
-                    file = %path,
-                    "regrab: failed to blacklist release"
+                    entries = entry_ids.len(),
+                    "regrab: failed to delete filesystem entries"
                 );
+                false
             }
+        };
+        if !state_recomputed {
+            riven_db::repo::recompute(&[media_item_id]).await?;
         }
 
-        for (id, _, _) in &entries {
-            if let Err(error) = riven_db::repo::delete_filesystem_entry(*id).await {
-                tracing::warn!(%error, entry_id = *id, "regrab: failed to delete filesystem entry");
-            }
-        }
-
-        riven_db::repo::recompute(&[media_item_id]).await?;
         self.push_process_media_item(ProcessMediaItemJob::new(media_item_id))
             .await;
         Ok(())

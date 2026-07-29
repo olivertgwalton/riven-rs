@@ -1,7 +1,7 @@
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use riven_core::entities::{
-    filesystem_entries, media_item_blacklisted_streams, media_item_streams, streams, usenet_meta,
+    filesystem_entries, media_item_blacklisted_streams, media_item_streams, streams,
 };
 use riven_core::types::FileSystemEntryType;
 use sea_orm::ActiveValue::{Set, Unchanged};
@@ -10,7 +10,7 @@ use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectionTrait, DbBackend, EntityTrait, FromQueryResult,
     QueryFilter, QuerySelect, Statement,
 };
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 
 use crate::entities::*;
 use crate::orm;
@@ -23,33 +23,100 @@ pub async fn upsert_stream(
     rank: Option<i64>,
     file_size_bytes: Option<u64>,
 ) -> Result<Stream> {
-    // Kept as a raw Statement: the magnet column uses a CASE expression on
-    // conflict (`CASE WHEN $2 <> '' THEN $2 ELSE streams.magnet END`) that the
-    // ActiveModel upsert path can't express cleanly.
-    let file_size = file_size_bytes.map(|s| i64::try_from(s).unwrap_or(i64::MAX));
-    let stream = Stream::find_by_statement(Statement::from_sql_and_values(
-        DbBackend::Postgres,
-        "INSERT INTO streams (info_hash, magnet, parsed_data, rank, file_size_bytes) \
-         VALUES ($1, $2, $3, $4, $5) \
-         ON CONFLICT (info_hash) DO UPDATE SET \
-             magnet = CASE WHEN $2 <> '' THEN $2 ELSE streams.magnet END, \
-             parsed_data = COALESCE($3, streams.parsed_data), \
-             rank = COALESCE($4, streams.rank), \
-             file_size_bytes = COALESCE($5, streams.file_size_bytes), \
-             updated_at = NOW() \
-         RETURNING *",
-        [
-            info_hash.into(),
-            magnet.into(),
-            parsed_data.into(),
-            rank.into(),
-            file_size.into(),
-        ],
-    ))
-    .one(orm())
-    .await?
-    .ok_or_else(|| anyhow::anyhow!("upsert_stream returned no row"))?;
-    Ok(stream)
+    let row = StreamUpsert {
+        info_hash: info_hash.to_owned(),
+        magnet: magnet.to_owned(),
+        parsed_data,
+        rank,
+        file_size_bytes,
+    };
+    upsert_streams(std::slice::from_ref(&row))
+        .await?
+        .pop()
+        .ok_or_else(|| anyhow::anyhow!("upsert_stream returned no row"))
+}
+
+/// One row for [`upsert_streams`].
+pub struct StreamUpsert {
+    pub info_hash: String,
+    pub magnet: String,
+    pub parsed_data: Option<serde_json::Value>,
+    pub rank: Option<i64>,
+    pub file_size_bytes: Option<u64>,
+}
+
+/// Batch form of [`upsert_stream`] — one statement for the whole set instead of
+/// one round trip per stream. A manual scrape can produce hundreds of results,
+/// and at that size the per-row latency dominates the work.
+///
+/// Returns the upserted rows, in unspecified order. Postgres caps a statement
+/// at 65535 bound parameters and this binds five per row, so the input is
+/// chunked rather than trusted to be small.
+///
+/// Rows repeating an `info_hash` are collapsed to the first occurrence:
+/// `ON CONFLICT DO UPDATE` rejects a statement that would touch the same target
+/// row twice, so a duplicate would otherwise fail the whole batch.
+pub async fn upsert_streams(rows: &[StreamUpsert]) -> Result<Vec<Stream>> {
+    // Five columns are Set per row, so five bound parameters per row.
+    const PARAMS_PER_ROW: usize = 5;
+    const MAX_ROWS_PER_STATEMENT: usize = 65535 / PARAMS_PER_ROW;
+
+    let mut seen: HashSet<&str> = HashSet::with_capacity(rows.len());
+    let deduped: Vec<&StreamUpsert> = rows
+        .iter()
+        .filter(|row| seen.insert(row.info_hash.as_str()))
+        .collect();
+
+    let mut out = Vec::with_capacity(deduped.len());
+    for chunk in deduped.chunks(MAX_ROWS_PER_STATEMENT) {
+        let models = chunk.iter().map(|row| streams::ActiveModel {
+            info_hash: Set(row.info_hash.clone()),
+            magnet: Set(row.magnet.clone()),
+            parsed_data: Set(row.parsed_data.clone()),
+            rank: Set(row.rank),
+            file_size_bytes: Set(row
+                .file_size_bytes
+                .map(|s| i64::try_from(s).unwrap_or(i64::MAX))),
+            ..Default::default()
+        });
+
+        // The same conflict clause as the single-row `upsert_stream`, reading
+        // the incoming values from EXCLUDED. Unlike that one this does go
+        // through the builder: `OnConflict::value` takes an arbitrary
+        // expression, so the CASE and COALESCE columns are expressible here.
+        out.extend(
+            streams::Entity::insert_many(models)
+                .on_conflict(
+                    OnConflict::column(streams::Column::InfoHash)
+                        .value(
+                            streams::Column::Magnet,
+                            Expr::cust(
+                                "CASE WHEN EXCLUDED.magnet <> '' \
+                                 THEN EXCLUDED.magnet ELSE streams.magnet END",
+                            ),
+                        )
+                        .value(
+                            streams::Column::ParsedData,
+                            Expr::cust("COALESCE(EXCLUDED.parsed_data, streams.parsed_data)"),
+                        )
+                        .value(
+                            streams::Column::Rank,
+                            Expr::cust("COALESCE(EXCLUDED.rank, streams.rank)"),
+                        )
+                        .value(
+                            streams::Column::FileSizeBytes,
+                            Expr::cust(
+                                "COALESCE(EXCLUDED.file_size_bytes, streams.file_size_bytes)",
+                            ),
+                        )
+                        .value(streams::Column::UpdatedAt, Expr::cust("NOW()"))
+                        .to_owned(),
+                )
+                .exec_with_returning_many(orm())
+                .await?,
+        );
+    }
+    Ok(out)
 }
 
 /// Delete streams referenced by nothing — not a candidate list, not a
@@ -88,26 +155,52 @@ pub async fn update_stream_file_size(info_hash: &str, file_size_bytes: u64) -> R
 }
 
 pub async fn link_stream_to_item(media_item_id: i64, stream_id: i64) -> Result<bool> {
-    let insert = media_item_streams::Entity::insert(media_item_streams::ActiveModel {
-        media_item_id: Set(media_item_id),
-        stream_id: Set(stream_id),
-    })
-    .on_conflict(
-        OnConflict::columns([
-            media_item_streams::Column::MediaItemId,
-            media_item_streams::Column::StreamId,
-        ])
-        .do_nothing()
-        .to_owned(),
-    );
-    // `do_nothing` + an existing row surfaces as `RecordNotInserted`; that is
-    // the ON CONFLICT DO NOTHING no-op, not an error — and means not inserted.
-    let inserted = match insert.exec(orm()).await {
-        Ok(_) => true,
-        Err(sea_orm::DbErr::RecordNotInserted) => false,
-        Err(error) => return Err(error.into()),
-    };
-    if inserted {
+    Ok(link_streams_to_item(media_item_id, &[stream_id]).await? > 0)
+}
+
+/// Batch form of [`link_stream_to_item`]: one insert for every link, and a
+/// single state recompute afterwards rather than one per link.
+///
+/// Returns the number of links actually created (existing links conflict away).
+pub async fn link_streams_to_item(media_item_id: i64, stream_ids: &[i64]) -> Result<u64> {
+    if stream_ids.is_empty() {
+        return Ok(0);
+    }
+
+    // Two columns Set per row, so two bound parameters per row.
+    const MAX_ROWS_PER_STATEMENT: usize = 65535 / 2;
+
+    let mut inserted = 0u64;
+    for chunk in stream_ids.chunks(MAX_ROWS_PER_STATEMENT) {
+        let models = chunk
+            .iter()
+            .map(|&stream_id| media_item_streams::ActiveModel {
+                media_item_id: Set(media_item_id),
+                stream_id: Set(stream_id),
+            });
+        // `do_nothing` + RETURNING gives back only the rows that were really
+        // inserted, so existing links don't count towards the recompute below.
+        // A chunk where every link already existed surfaces as
+        // `RecordNotInserted` — the ON CONFLICT no-op, not an error.
+        match media_item_streams::Entity::insert_many(models)
+            .on_conflict(
+                OnConflict::columns([
+                    media_item_streams::Column::MediaItemId,
+                    media_item_streams::Column::StreamId,
+                ])
+                .do_nothing()
+                .to_owned(),
+            )
+            .exec_with_returning_many(orm())
+            .await
+        {
+            Ok(rows) => inserted += rows.len() as u64,
+            Err(sea_orm::DbErr::RecordNotInserted) => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+
+    if inserted > 0 {
         super::state::recompute(&[media_item_id]).await?;
     }
     Ok(inserted)
@@ -172,35 +265,55 @@ pub async fn blacklist_stream_permanent_by_hash(
     media_item_id: i64,
     info_hash: &str,
 ) -> Result<bool> {
-    let stream_id: Option<i64> = streams::Entity::find()
-        .filter(streams::Column::InfoHash.eq(info_hash))
+    Ok(blacklist_streams_permanent_by_hashes(media_item_id, &[info_hash]).await? > 0)
+}
+
+/// Permanently blacklist every matching stream in one lookup and one upsert.
+///
+/// Returns the number of supplied hashes that matched a stream. State is
+/// recomputed once for the whole batch.
+pub async fn blacklist_streams_permanent_by_hashes(
+    media_item_id: i64,
+    info_hashes: &[&str],
+) -> Result<usize> {
+    if info_hashes.is_empty() {
+        return Ok(0);
+    }
+
+    let stream_ids: Vec<i64> = streams::Entity::find()
+        .filter(streams::Column::InfoHash.is_in(info_hashes.iter().copied()))
         .select_only()
         .column(streams::Column::Id)
         .into_tuple()
-        .one(orm())
+        .all(orm())
         .await?;
-    let Some(stream_id) = stream_id else {
-        return Ok(false);
-    };
-    media_item_blacklisted_streams::Entity::insert(media_item_blacklisted_streams::ActiveModel {
-        media_item_id: Set(media_item_id),
-        stream_id: Set(stream_id),
-        permanent: Set(true),
-    })
-    .on_conflict(
-        OnConflict::columns([
-            media_item_blacklisted_streams::Column::MediaItemId,
-            media_item_blacklisted_streams::Column::StreamId,
-        ])
-        .update_column(media_item_blacklisted_streams::Column::Permanent)
-        .to_owned(),
-    )
-    .exec(orm())
-    .await?;
+    if stream_ids.is_empty() {
+        return Ok(0);
+    }
+
+    let models = stream_ids
+        .iter()
+        .map(|&stream_id| media_item_blacklisted_streams::ActiveModel {
+            media_item_id: Set(media_item_id),
+            stream_id: Set(stream_id),
+            permanent: Set(true),
+        });
+    media_item_blacklisted_streams::Entity::insert_many(models)
+        .on_conflict(
+            OnConflict::columns([
+                media_item_blacklisted_streams::Column::MediaItemId,
+                media_item_blacklisted_streams::Column::StreamId,
+            ])
+            .update_column(media_item_blacklisted_streams::Column::Permanent)
+            .to_owned(),
+        )
+        .exec_without_returning(orm())
+        .await?;
+
     // Blacklisting changes `has_non_blacklisted_stream`, which can flip the item
     // out of `Scraped`; recompute so the derived state can't go stale.
     super::state::recompute(&[media_item_id]).await?;
-    Ok(true)
+    Ok(stream_ids.len())
 }
 
 /// Load resolution ranks from the `rank_settings` DB key.
@@ -717,59 +830,7 @@ pub async fn create_media_entry(input: MediaEntryInput<'_>) -> Result<FileSystem
     Ok(entry)
 }
 
-fn parse_filename_metadata(filename: &str) -> serde_json::Value {
-    let parsed = riven_rank::parse(filename);
-
-    let (width, height) = match parsed.resolution.to_lowercase().trim_end_matches('p') {
-        "2160" | "4k" | "uhd" => (Some(3840_i64), Some(2160_i64)),
-        "1440" | "2k" | "qhd" => (Some(2560_i64), Some(1440_i64)),
-        "1080" | "fhd" => (Some(1920_i64), Some(1080_i64)),
-        "720" | "hd" => (Some(1280_i64), Some(720_i64)),
-        "480" | "sd" => (Some(854_i64), Some(480_i64)),
-        _ => (None, None),
-    };
-
-    let hdr_type = parsed.hdr.first().cloned();
-    let bit_depth: Option<i64> = parsed.bit_depth.as_deref().and_then(|b| {
-        b.trim_end_matches("-bit")
-            .trim_end_matches("bit")
-            .trim()
-            .parse()
-            .ok()
-    });
-
-    let audio_tracks: Vec<serde_json::Value> = parsed
-        .audio
-        .iter()
-        .map(|codec| serde_json::json!({ "codec": codec }))
-        .collect();
-
-    let container_formats: Vec<String> = parsed.container.into_iter().collect();
-
-    serde_json::json!({
-        "filename": filename,
-        "parsed_title": parsed.parsed_title,
-        "year": parsed.year,
-        "video": {
-            "codec": parsed.codec,
-            "resolution_width": width,
-            "resolution_height": height,
-            "bit_depth": bit_depth,
-            "hdr_type": hdr_type,
-            "frame_rate": null
-        },
-        "audio_tracks": audio_tracks,
-        "subtitle_tracks": [],
-        "quality_source": parsed.quality,
-        "bitrate": null,
-        "duration": null,
-        "is_remux": false,
-        "is_proper": parsed.proper,
-        "is_repack": parsed.repack,
-        "container_format": container_formats,
-        "data_source": "parsed"
-    })
-}
+use riven_rank::derive_media_metadata as parse_filename_metadata;
 
 pub async fn list_vfs_dir_names(pattern: &str, depth: u32) -> Result<Vec<VfsDirName>> {
     // Raw Statement: split_part with interpolated depth.
@@ -868,50 +929,81 @@ pub async fn count_vfs_distinct_dirs(pattern: &str, depth: u32) -> Result<i64> {
 /// instead of `UsenetStreamer::ingest`'s idempotency fast path silently
 /// reusing a stale, possibly already-known-bad, cached parse.
 pub async fn delete_orphaned_usenet_meta(info_hash: &str) -> Result<bool> {
-    let still_referenced = filesystem_entries::Entity::find()
-        .filter(filesystem_entries::Column::UsenetInfoHash.eq(info_hash))
-        .limit(1)
-        .one(orm())
-        .await?
-        .is_some();
-    if still_referenced {
-        return Ok(false);
+    Ok(delete_orphaned_usenet_metas(&[info_hash.to_owned()]).await? > 0)
+}
+
+/// Batch form of [`delete_orphaned_usenet_meta`].
+pub async fn delete_orphaned_usenet_metas(info_hashes: &[String]) -> Result<u64> {
+    if info_hashes.is_empty() {
+        return Ok(0);
     }
-    let result = usenet_meta::Entity::delete_by_id(info_hash.to_owned())
-        .exec(orm())
+
+    let result = orm()
+        .execute(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "DELETE FROM usenet_meta u \
+             WHERE u.info_hash = ANY($1) \
+               AND NOT EXISTS (\
+                   SELECT 1 FROM filesystem_entries f \
+                   WHERE f.usenet_info_hash = u.info_hash\
+               )",
+            [info_hashes.to_vec().into()],
+        ))
         .await?;
-    Ok(result.rows_affected > 0)
+    Ok(result.rows_affected())
 }
 
 /// Returns `(was_deleted, owning_media_item_id)`. Losing a media entry can
 /// flip Completed → Scraped/Indexed, so the affected item is recomputed
 /// before returning.
 pub async fn delete_filesystem_entry(entry_id: i64) -> Result<(bool, Option<i64>)> {
-    // Raw Statement: DELETE ... RETURNING to learn the owning item (and, for
-    // usenet entries, the info_hash to check for orphaned meta) in one trip.
-    let row = orm()
-        .query_one(Statement::from_sql_and_values(
+    let media_item_id = delete_filesystem_entries(&[entry_id]).await?.pop();
+    Ok((media_item_id.is_some(), media_item_id))
+}
+
+/// Batch form of [`delete_filesystem_entry`] — one DELETE for the whole set
+/// rather than a round trip per entry, plus one state recompute per affected
+/// item instead of one per entry. A season-pack regrab deletes a couple of
+/// dozen entries at a time, all belonging to the same show.
+///
+/// Semantics match calling the single-entry form in a loop: only `media`
+/// entries are removed, orphaned usenet meta is cleaned up for each distinct
+/// info hash, and affected items have their state recomputed.
+///
+/// Returns the ids of the media items that owned the deleted entries.
+pub async fn delete_filesystem_entries(entry_ids: &[i64]) -> Result<Vec<i64>> {
+    if entry_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Raw Statement: DELETE ... RETURNING has no builder form — the same
+    // reason the single-entry `delete_filesystem_entry` above stays raw.
+    let rows = orm()
+        .query_all(Statement::from_sql_and_values(
             DbBackend::Postgres,
             "DELETE FROM filesystem_entries \
-             WHERE id = $1 AND entry_type = 'media' \
+             WHERE id = ANY($1) AND entry_type = 'media' \
              RETURNING media_item_id, usenet_info_hash",
-            [entry_id.into()],
+            [entry_ids.to_vec().into()],
         ))
         .await?;
-    let (media_item_id, usenet_info_hash) = match &row {
-        Some(row) => (
-            Some(row.try_get::<i64>("", "media_item_id")?),
-            row.try_get::<Option<String>>("", "usenet_info_hash")?,
-        ),
-        None => (None, None),
-    };
-    if let Some(info_hash) = usenet_info_hash.as_deref() {
-        delete_orphaned_usenet_meta(info_hash).await?;
+
+    let mut media_item_ids: BTreeSet<i64> = BTreeSet::new();
+    let mut info_hashes: BTreeSet<String> = BTreeSet::new();
+    for row in &rows {
+        media_item_ids.insert(row.try_get::<i64>("", "media_item_id")?);
+        if let Some(hash) = row.try_get::<Option<String>>("", "usenet_info_hash")? {
+            info_hashes.insert(hash);
+        }
     }
-    if let Some(id) = media_item_id {
-        super::state::recompute(&[id]).await?;
+
+    delete_orphaned_usenet_metas(&info_hashes.into_iter().collect::<Vec<_>>()).await?;
+
+    let media_item_ids: Vec<i64> = media_item_ids.into_iter().collect();
+    if !media_item_ids.is_empty() {
+        super::state::recompute(&media_item_ids).await?;
     }
-    Ok((media_item_id.is_some(), media_item_id))
+    Ok(media_item_ids)
 }
 
 pub async fn update_stream_url(entry_id: i64, stream_url: &str) -> Result<()> {

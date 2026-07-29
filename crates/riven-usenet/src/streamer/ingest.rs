@@ -7,10 +7,7 @@ use crate::nzb::{
     NzbFile, NzbSegment, detect_rar_volume_groups, filename_from_subject, looks_like_media,
     looks_obfuscated, parse_nzb_document,
 };
-use crate::par2::{
-    Par2Block, Par2FileDesc, looks_like_par2, parse_file_descriptors, parse_ifsc_packets,
-    parse_slice_size,
-};
+use crate::par2::{Par2Block, Par2FileDesc, looks_like_par2, parse_file_descriptors, parse_set};
 use crate::rar::{self, RarEncryption, RarVolumeFileEntry};
 
 use super::meta::{UNKNOWN_FILE_LABEL, is_media_filename};
@@ -829,13 +826,16 @@ impl UsenetStreamer {
     /// Main or IFSC packet — PAR2 cover is optional, releases without usable
     /// IFSC data ingest exactly as before this check existed.
     fn build_par2_index(&self, blob: &[u8]) -> Option<Par2Index> {
-        let slice_size = parse_slice_size(blob).ok().filter(|s| *s > 0)?;
-        let filedescs = parse_file_descriptors(blob).ok()?;
-        let ifsc = parse_ifsc_packets(blob).ok()?;
+        // One walk over the blob, not three — see `par2::parse_set`.
+        let set = parse_set(blob).ok()?;
+        let slice_size = set.slice_size;
+        if slice_size == 0 {
+            return None;
+        }
 
         let mut blocks_by_filename = std::collections::HashMap::new();
-        for desc in filedescs {
-            if let Some(blocks) = ifsc.get(&desc.file_id) {
+        for desc in set.file_descs {
+            if let Some(blocks) = set.ifsc.get(&desc.file_id) {
                 blocks_by_filename.insert(normalize_par2_name(&desc.filename), blocks.clone());
             }
         }

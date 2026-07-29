@@ -4,7 +4,7 @@ use riven_core::entities::media_items;
 use riven_core::types::*;
 use sea_orm::{
     ColumnTrait, ConnectionTrait, DbBackend, EntityTrait, FromQueryResult, PaginatorTrait,
-    QueryFilter, QueryOrder, Statement,
+    QueryFilter, QueryOrder, QuerySelect, Statement,
 };
 
 use crate::entities::*;
@@ -81,6 +81,68 @@ pub async fn count_episodes_in_season(season_id: i64) -> Result<i64> {
         .count(orm())
         .await
         .map(|c| i64::try_from(c).unwrap_or(i64::MAX))?)
+}
+
+/// Episodes for several seasons at once, grouped by season id.
+///
+/// Batch form of [`list_episodes`]: a season-pack persist walks every season of
+/// a show, and one query per season turns a single persist into a chain of
+/// sequential round trips. Each season's episodes keep `list_episodes`'
+/// episode-number ordering; seasons with no episodes are absent from the map.
+pub async fn list_episodes_for_seasons(
+    season_ids: &[i64],
+) -> Result<std::collections::HashMap<i64, Vec<MediaItem>>> {
+    if season_ids.is_empty() {
+        return Ok(std::collections::HashMap::new());
+    }
+
+    let episodes = media_items::Entity::find()
+        .filter(media_items::Column::ItemType.eq(MediaItemType::Episode))
+        .filter(media_items::Column::ParentId.is_in(season_ids.iter().copied()))
+        .order_by_asc(media_items::Column::ParentId)
+        .order_by_asc(media_items::Column::EpisodeNumber)
+        .into_model::<MediaItem>()
+        .all(orm())
+        .await?;
+
+    let mut grouped: std::collections::HashMap<i64, Vec<MediaItem>> =
+        std::collections::HashMap::new();
+    for episode in episodes {
+        if let Some(season_id) = episode.parent_id {
+            grouped.entry(season_id).or_default().push(episode);
+        }
+    }
+    Ok(grouped)
+}
+
+/// Season ids from `season_ids` that have at least one episode.
+///
+/// Batch form of asking [`count_episodes_in_season`] (or `list_episodes`) per
+/// season. Callers that only need "does this season have episodes?" across a
+/// whole show should use this — a show with 20 seasons otherwise costs 20
+/// sequential round trips to answer one boolean.
+pub async fn seasons_with_episodes(season_ids: &[i64]) -> Result<std::collections::HashSet<i64>> {
+    if season_ids.is_empty() {
+        return Ok(std::collections::HashSet::new());
+    }
+
+    #[derive(FromQueryResult)]
+    struct SeasonId {
+        parent_id: i64,
+    }
+
+    Ok(media_items::Entity::find()
+        .filter(media_items::Column::ItemType.eq(MediaItemType::Episode))
+        .filter(media_items::Column::ParentId.is_in(season_ids.iter().copied()))
+        .select_only()
+        .column(media_items::Column::ParentId)
+        .distinct()
+        .into_model::<SeasonId>()
+        .all(orm())
+        .await?
+        .into_iter()
+        .map(|row| row.parent_id)
+        .collect())
 }
 
 /// Count the total expected downloadable episode files for a show.

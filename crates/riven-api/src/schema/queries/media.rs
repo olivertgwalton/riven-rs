@@ -40,27 +40,16 @@ fn take_group<T, K: PartialEq>(groups: &mut Vec<(K, Vec<T>)>, key: &K) -> Vec<T>
 /// Load a show's seasons together with its episodes grouped per season.
 ///
 /// Fetches the show's seasons, then all their episodes in one query
-/// (ordered by `parent_id` so a linear group-by yields contiguous buckets).
-/// Returns the seasons and a `Vec<(season_id, episodes)>` keyed by parent id.
+/// through the shared repository batch helper.
 async fn load_show_tree(
     show_id: i64,
-) -> async_graphql::Result<(Vec<MediaItem>, Vec<(i64, Vec<MediaItem>)>)> {
+) -> async_graphql::Result<(
+    Vec<MediaItem>,
+    std::collections::HashMap<i64, Vec<MediaItem>>,
+)> {
     let seasons = repo::list_seasons(show_id).await?;
     let season_ids: Vec<i64> = seasons.iter().map(|s| s.id).collect();
-    let episodes = if season_ids.is_empty() {
-        Vec::new()
-    } else {
-        media_items::Entity::find()
-            .filter(media_items::Column::ItemType.eq(MediaItemType::Episode))
-            .filter(media_items::Column::ParentId.is_in(season_ids.iter().copied()))
-            .order_by_asc(media_items::Column::ParentId)
-            .order_by_asc(media_items::Column::EpisodeNumber)
-            .into_model::<MediaItem>()
-            .all(orm())
-            .await?
-    };
-
-    let episodes_by_season = group_sorted_by_key(episodes, |e| e.parent_id.unwrap_or_default());
+    let episodes_by_season = repo::list_episodes_for_seasons(&season_ids).await?;
     Ok((seasons, episodes_by_season))
 }
 
@@ -313,9 +302,8 @@ impl MediaQuery {
                     .iter()
                     .map(|s| {
                         episodes_by_season
-                            .iter()
-                            .find(|(pid, _)| *pid == s.id)
-                            .map_or(0, |(_, eps)| eps.len() as i64)
+                            .get(&s.id)
+                            .map_or(0, |episodes| episodes.len() as i64)
                     })
                     .sum()
             };
@@ -323,7 +311,9 @@ impl MediaQuery {
             let seasons: Vec<SeasonState> = seasons
                 .into_iter()
                 .map(|season| {
-                    let eps: Vec<EpisodeState> = take_group(&mut episodes_by_season, &season.id)
+                    let eps: Vec<EpisodeState> = episodes_by_season
+                        .remove(&season.id)
+                        .unwrap_or_default()
                         .into_iter()
                         .map(|episode| EpisodeState {
                             id: episode.id,
@@ -384,8 +374,8 @@ impl MediaQuery {
         let seasons = if item.item_type == MediaItemType::Show {
             let (seasons, mut episodes_by_season) = load_show_tree(item.id).await?;
             let episode_ids: Vec<i64> = episodes_by_season
-                .iter()
-                .flat_map(|(_, eps)| eps.iter().map(|e| e.id))
+                .values()
+                .flat_map(|episodes| episodes.iter().map(|episode| episode.id))
                 .collect();
             let mut episode_entries = if episode_ids.is_empty() {
                 Vec::new()
@@ -408,7 +398,7 @@ impl MediaQuery {
 
             let mut season_fulls = Vec::with_capacity(seasons.len());
             for season in seasons {
-                let season_episodes = take_group(&mut episodes_by_season, &season.id);
+                let season_episodes = episodes_by_season.remove(&season.id).unwrap_or_default();
                 let mut episode_fulls = Vec::with_capacity(season_episodes.len());
                 for episode in season_episodes {
                     let ep_media = take_group(&mut entries_by_episode, &episode.id);

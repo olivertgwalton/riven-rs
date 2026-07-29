@@ -328,43 +328,7 @@ pub fn parse_nzb_document(xml: &str) -> Result<NzbDocument, NzbError> {
     Ok(NzbDocument { meta, files })
 }
 
-/// Heuristic check for an obfuscated filename — random hash/blob stems with
-/// no release-name structure. A real release name always has at least one
-/// separator (`.`, ` `, `-`, `_`).
-///
-/// Flags:
-/// - `abc.xyz...` placeholder prefix.
-/// - 32-char hex stem (md5/etag-like).
-/// - 40+ char hex/dot stems.
-/// - 24+ char alphanumeric stems with no separators (covers iVy/FLUX
-///   `VfYc6l3ibzTHwlPkvX1hocwymwUNt6yt`-style names).
-pub fn looks_obfuscated(filename: &str) -> bool {
-    let stem = match filename.rfind('.') {
-        Some(i) if i > 0 => &filename[..i],
-        _ => filename,
-    };
-    if stem.is_empty() {
-        return false;
-    }
-    if stem.starts_with("abc.xyz") {
-        return true;
-    }
-    let lower = stem.to_ascii_lowercase();
-    let is_hex = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_hexdigit());
-    if stem.len() == 32 && is_hex(&lower) {
-        return true;
-    }
-    if lower.len() >= 40 && lower.chars().all(|c| c.is_ascii_hexdigit() || c == '.') {
-        return true;
-    }
-    if stem.len() >= 24
-        && !stem.contains(['.', ' ', '-', '_'])
-        && stem.chars().all(|c| c.is_ascii_alphanumeric())
-    {
-        return true;
-    }
-    false
-}
+pub use riven_core::filename::looks_obfuscated;
 
 /// Best-effort filename extractor for a yEnc subject. Used to detect RAR
 /// volume patterns. Returns the subject verbatim if no quoted name is found.

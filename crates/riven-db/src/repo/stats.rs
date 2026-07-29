@@ -219,6 +219,29 @@ pub async fn get_setting(key: &str) -> Result<Option<serde_json::Value>> {
         .await?)
 }
 
+/// Batch form of [`get_setting`]. Plugin registration needs two settings rows
+/// per plugin, and doing that one key at a time makes startup wait on ~40
+/// sequential round trips before the first plugin is live.
+///
+/// Keys with no row are simply absent from the returned map.
+pub async fn get_settings(
+    keys: &[String],
+) -> Result<std::collections::HashMap<String, serde_json::Value>> {
+    if keys.is_empty() {
+        return Ok(std::collections::HashMap::new());
+    }
+    Ok(settings::Entity::find()
+        .filter(settings::Column::Key.is_in(keys.iter().map(String::as_str)))
+        .select_only()
+        .column(settings::Column::Key)
+        .column(settings::Column::Value)
+        .into_tuple::<(String, serde_json::Value)>()
+        .all(orm())
+        .await?
+        .into_iter()
+        .collect())
+}
+
 pub async fn set_setting(key: &str, value: serde_json::Value) -> Result<()> {
     settings::Entity::insert(settings::ActiveModel {
         key: Set(key.to_owned()),
