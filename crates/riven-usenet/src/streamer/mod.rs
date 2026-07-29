@@ -16,6 +16,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use sea_orm::DatabaseConnection;
 
+use riven_core::cache::CacheStats;
+
 use crate::nntp::NntpConfig;
 use crate::pool::SegmentPool;
 use crate::state::StreamerState;
@@ -252,9 +254,7 @@ impl UsenetStreamer {
         }
 
         let arc = Arc::new(meta);
-        self.state
-            .meta_cache
-            .put(info_hash.to_string(), arc.clone());
+        crate::state::cache_meta(&self.state.meta_cache, info_hash.to_string(), arc.clone());
         self.maybe_kick_backfill(&arc);
         Ok(arc)
     }
@@ -478,11 +478,8 @@ fn shared_cell() -> &'static Mutex<Option<(u64, UsenetStreamer)>> {
 /// process start; the API derives rates by sampling deltas.
 #[derive(Debug, Clone, Default)]
 pub struct StreamingHealth {
-    pub cache_bytes_used: u64,
-    pub cache_bytes_max: u64,
-    pub cache_entries: u64,
-    pub cache_hits: u64,
-    pub cache_misses: u64,
+    pub segment_cache: CacheStats,
+    pub meta_cache: CacheStats,
     pub fetches_ok: u64,
     pub fetches_failed: u64,
     pub bytes_decoded: u64,
@@ -503,11 +500,8 @@ pub fn streaming_health() -> StreamingHealth {
     };
     let pool = &streamer.pool;
     StreamingHealth {
-        cache_bytes_used: pool.cache().current_bytes(),
-        cache_bytes_max: pool.cache().max_bytes(),
-        cache_entries: pool.cache().entry_count() as u64,
-        cache_hits: pool.cache().hits(),
-        cache_misses: pool.cache().misses(),
+        segment_cache: pool.cache().stats(),
+        meta_cache: crate::state::StreamerState::global().meta_cache.stats(),
         fetches_ok: pool.metrics().ok(),
         fetches_failed: pool.metrics().failed(),
         bytes_decoded: pool.metrics().bytes_decoded(),

@@ -7,6 +7,7 @@
 //! usenet isn't configured) without spinning up a pool.
 
 use async_graphql::{Context, Object, Result, SimpleObject};
+use riven_core::cache::{CacheStats, NZB_META, Pool, READ_AHEAD, SEGMENT};
 use riven_db::orm;
 use riven_usenet::UsenetStreamer;
 use sea_orm::{DbBackend, FromQueryResult, Statement};
@@ -34,15 +35,41 @@ pub struct NntpProviderHealth {
     pub consecutive_not_found: i64,
 }
 
-/// In-process streaming engine health (segment cache + NNTP fetch counters).
+/// One cache's live figures.
+#[derive(SimpleObject)]
+pub struct CacheHealth {
+    /// `read-ahead`, `nzb-meta` or `segment`.
+    pub name: String,
+    pub bytes_used: i64,
+    pub bytes_max: i64,
+    pub entries: i64,
+    pub hits: i64,
+    pub misses: i64,
+    /// Over all lookups since start, 0.0–1.0.
+    pub hit_rate: f64,
+}
+
+impl CacheHealth {
+    fn new(pool: Pool, stats: CacheStats) -> Self {
+        Self {
+            name: pool.label.to_string(),
+            bytes_used: stats.bytes_used as i64,
+            bytes_max: stats.bytes_max as i64,
+            entries: stats.entries as i64,
+            hits: stats.hits as i64,
+            misses: stats.misses as i64,
+            hit_rate: stats.hit_rate(),
+        }
+    }
+}
+
+/// In-process streaming engine health (caches + NNTP fetch counters).
 #[derive(SimpleObject)]
 pub struct UsenetStreamingHealth {
-    pub cache_bytes_used: i64,
-    pub cache_bytes_max: i64,
-    pub cache_entries: i64,
-    pub cache_hits: i64,
-    pub cache_misses: i64,
-    /// Cache hit rate over all lookups since start, 0.0–1.0.
+    /// Largest budget first, so `read-ahead` — the cache that decides whether a
+    /// read reaches the network — comes before the ones behind it.
+    pub caches: Vec<CacheHealth>,
+    /// Read-ahead hit rate, flattened: the headline figure for a dashboard.
     pub cache_hit_rate: f64,
     /// Successful wire fetches (cache misses that decoded cleanly).
     pub fetches_ok: i64,
@@ -369,32 +396,42 @@ impl UsenetHealthQuery {
     /// Cache + fetch metrics for the in-process usenet streaming engine.
     async fn usenet_streaming_health(&self, _ctx: &Context<'_>) -> Result<UsenetStreamingHealth> {
         let h = riven_usenet::streamer::streaming_health();
-        let lookups = h.cache_hits + h.cache_misses;
-        let cache_hit_rate = if lookups > 0 {
-            h.cache_hits as f64 / lookups as f64
-        } else {
-            0.0
-        };
-        let fetches = h.fetches_ok + h.fetches_failed;
-        let fetch_success_rate = if fetches > 0 {
-            h.fetches_ok as f64 / fetches as f64
-        } else {
-            0.0
-        };
+        let read_ahead = riven_vfs::prefetch::read_ahead_stats();
+        // `NZB_BODY` is absent: it belongs to the usenet plugin, which the
+        // API does not depend on.
         Ok(UsenetStreamingHealth {
-            cache_bytes_used: h.cache_bytes_used as i64,
-            cache_bytes_max: h.cache_bytes_max as i64,
-            cache_entries: h.cache_entries as i64,
-            cache_hits: h.cache_hits as i64,
-            cache_misses: h.cache_misses as i64,
-            cache_hit_rate,
+            caches: vec![
+                CacheHealth::new(READ_AHEAD, read_ahead),
+                CacheHealth::new(NZB_META, h.meta_cache),
+                CacheHealth::new(SEGMENT, h.segment_cache),
+            ],
+            cache_hit_rate: read_ahead.hit_rate(),
             fetches_ok: h.fetches_ok as i64,
             fetches_failed: h.fetches_failed as i64,
-            fetch_success_rate,
+            fetch_success_rate: rate(h.fetches_ok, h.fetches_failed),
             bytes_decoded: h.bytes_decoded as i64,
             in_flight: h.in_flight as i32,
             dead_segments: h.dead_segments as i64,
             active_streams: h.active_streams as i32,
         })
+    }
+}
+
+/// `good / (good + bad)`, or 0.0 before anything has happened.
+fn ratio(good: u64, bad: u64) -> f64 {
+    let total = good + bad;
+    if total > 0 {
+        good as f64 / total as f64
+    } else {
+        0.0
+    }
+}
+
+fn rate(ok: u64, bad: u64) -> f64 {
+    let total = ok + bad;
+    if total > 0 {
+        ok as f64 / total as f64
+    } else {
+        0.0
     }
 }

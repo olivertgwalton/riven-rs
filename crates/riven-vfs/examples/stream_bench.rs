@@ -259,7 +259,10 @@ async fn main() -> anyhow::Result<()> {
             source,
             // One cache per handle here, not per file: the harness's handles
             // are independent readers, unlike a player's overlapping requests.
-            riven_vfs::prefetch::UnitCache::new(riven_vfs::prefetch::UNIT_CACHE_BYTES),
+            riven_vfs::prefetch::FileKey {
+                revision: 0,
+                ino: 1,
+            },
             &tokio::runtime::Handle::current(),
         ));
         let bytes_total = Arc::clone(&bytes_total);

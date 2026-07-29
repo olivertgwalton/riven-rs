@@ -12,6 +12,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use bytes::Bytes;
 use lru::LruCache;
 use parking_lot::Mutex;
+use riven_core::cache::{ByteLru, SEGMENT};
 use tokio::sync::oneshot;
 
 use crate::nntp::{ClientPool, NntpError, NntpProvider, ProviderHealth, ProviderTraffic};
@@ -19,10 +20,18 @@ use crate::state::{FetchEntry, InFlight};
 use crate::yenc;
 
 mod missing;
-mod segment_cache;
 
 pub use missing::MissingCache;
-pub use segment_cache::{Budget, SegmentCache};
+
+/// Decoded article bodies, keyed by message-id. **Staging, not retention:** the
+/// VFS read-ahead cache above holds the same bytes at the same granularity, so
+/// re-reads never reach here. What is left is holding an article between a warm
+/// fetch landing and the walk that warmed it consuming the bytes.
+///
+/// Values are `Bytes`, so a hit slices a range with no copy. Which provider
+/// served a segment is not stored: a hit is not traffic, and crediting one
+/// would inflate that provider's usage figures.
+pub type SegmentCache = ByteLru<Arc<str>, Bytes>;
 
 /// Cap on the decoded-size memo. One `(message_id, u64)` entry per segment
 /// ever fetched, ~80 bytes each.
@@ -48,7 +57,7 @@ impl SegmentPool {
         });
         Arc::new(Self {
             providers: providers.into_iter().map(ClientPool::new).collect(),
-            cache: SegmentCache::new(Budget::from_env()),
+            cache: SegmentCache::with_budget(SEGMENT),
             missing: MissingCache::default(),
             inflight: InFlight::default(),
             decoded_sizes: DecodedSizes::new(DECODED_SIZES_ENTRIES),
@@ -237,7 +246,8 @@ impl SegmentPool {
         self.metrics.record_ok(decoded.len() as u64);
         self.decoded_sizes
             .put(message_id.clone(), decoded.len() as u64);
-        self.cache.put(message_id.clone(), decoded.clone());
+        self.cache
+            .put(message_id.clone(), decoded.clone(), decoded.len() as u64);
         Ok(decoded)
     }
 
@@ -391,7 +401,7 @@ mod tests {
         pool.fetch_segment("a@test").await.unwrap();
         pool.fetch_segment("a@test").await.unwrap();
         assert_eq!(pool.metrics().ok(), 1, "cache hit must not re-fetch");
-        assert_eq!(pool.cache().hits(), 1);
+        assert_eq!(pool.cache().stats().hits, 1);
     }
 
     #[tokio::test]

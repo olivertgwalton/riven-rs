@@ -102,7 +102,7 @@ impl UsenetStreamer {
         store::store(&self.db, info_hash, &meta).await?;
         let release = meta.label().to_string();
         let arc = Arc::new(meta);
-        self.state.meta_cache.put(info_hash.to_string(), arc);
+        crate::state::cache_meta(&self.state.meta_cache, info_hash.to_string(), arc);
 
         tracing::info!(
             info_hash,

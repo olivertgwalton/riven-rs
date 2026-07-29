@@ -184,9 +184,11 @@ impl UsenetStreamer {
                 file_count = existing.files.len(),
                 "usenet ingest: reusing persisted NZB meta (idempotent hit)"
             );
-            self.state
-                .meta_cache
-                .put(info_hash.to_string(), Arc::new(existing.clone()));
+            crate::state::cache_meta(
+                &self.state.meta_cache,
+                info_hash.to_string(),
+                Arc::new(existing.clone()),
+            );
             return Ok(existing);
         }
 
@@ -349,9 +351,11 @@ impl UsenetStreamer {
 
         store::store(&self.db, info_hash, &meta).await?;
 
-        self.state
-            .meta_cache
-            .put(info_hash.to_string(), Arc::new(meta.clone()));
+        crate::state::cache_meta(
+            &self.state.meta_cache,
+            info_hash.to_string(),
+            Arc::new(meta.clone()),
+        );
 
         Ok(meta)
     }
