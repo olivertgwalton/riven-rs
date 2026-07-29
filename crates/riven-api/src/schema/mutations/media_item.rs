@@ -115,17 +115,25 @@ impl MediaItemMutations {
             .map(|stream| stream.id)
             .collect();
 
-        for (info_hash, parsed_data) in results {
-            let stream = repo::upsert_stream(
-                &info_hash,
-                &build_magnet_uri(&info_hash),
-                Some(parsed_data),
-                None,
-                None,
-            )
-            .await?;
-            repo::link_stream_to_item(input.id, stream.id).await?;
-        }
+        // Two statements for the whole result set rather than three round trips
+        // per stream (upsert, link, state recompute) — a manual scrape routinely
+        // returns hundreds of results.
+        let upserts: Vec<repo::StreamUpsert> = results
+            .into_iter()
+            .map(|(info_hash, parsed_data)| repo::StreamUpsert {
+                magnet: build_magnet_uri(&info_hash),
+                info_hash,
+                parsed_data: Some(parsed_data),
+                rank: None,
+                file_size_bytes: None,
+            })
+            .collect();
+        let stream_ids: Vec<i64> = repo::upsert_streams(&upserts)
+            .await?
+            .into_iter()
+            .map(|stream| stream.id)
+            .collect();
+        repo::link_streams_to_item(input.id, &stream_ids).await?;
 
         repo::update_scraped(input.id).await?;
 

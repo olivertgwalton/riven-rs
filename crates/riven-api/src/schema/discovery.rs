@@ -378,20 +378,30 @@ pub async fn ensure_show_target(
         .map_err(Error::from)?;
 
     let existing_seasons = repo::list_seasons(outcome.item.id).await?;
-    let mut needs_index = outcome.item.imdb_id.is_none();
-    for &season_number in seasons {
-        match existing_seasons
-            .iter()
-            .find(|season| season.season_number == Some(season_number))
-        {
-            None => needs_index = true,
-            Some(season) => {
-                if repo::list_episodes(season.id).await?.is_empty() {
-                    needs_index = true;
-                }
-            }
-        }
-    }
+
+    // One query for "which of these seasons have episodes?" instead of one per
+    // requested season.
+    let existing_by_number: HashMap<i32, &MediaItem> = existing_seasons
+        .iter()
+        .filter_map(|season| season.season_number.map(|number| (number, season)))
+        .collect();
+    let requested_season_ids: Vec<i64> = seasons
+        .iter()
+        .filter_map(|season_number| {
+            existing_by_number
+                .get(season_number)
+                .map(|season| season.id)
+        })
+        .collect();
+    let populated = repo::seasons_with_episodes(&requested_season_ids).await?;
+
+    let needs_index = outcome.item.imdb_id.is_none()
+        || seasons.iter().any(
+            |season_number| match existing_by_number.get(season_number) {
+                Some(season) => !populated.contains(&season.id),
+                None => true,
+            },
+        );
 
     if needs_index {
         let indexed =

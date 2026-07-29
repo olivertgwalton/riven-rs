@@ -16,23 +16,35 @@ pub async fn register_plugins(
 
     tracing::info!(count = plugins.len(), "discovered plugins");
 
+    // Every plugin needs two settings rows. Fetch them all in one query rather
+    // than blocking startup on two sequential round trips per plugin.
+    let setting_keys: Vec<String> = plugins
+        .iter()
+        .flat_map(|plugin| {
+            let name = plugin.name();
+            [format!("plugin.{name}"), format!("plugin_enabled.{name}")]
+        })
+        .collect();
+    let db_settings = riven_db::repo::get_settings(&setting_keys)
+        .await
+        .unwrap_or_else(|error| {
+            tracing::warn!(%error, "failed to load plugin settings; using file/env defaults");
+            Default::default()
+        });
+
     for plugin in plugins {
         let name = plugin.name();
         let prefix = name.to_uppercase();
         let mut plugin_settings = PluginSettings::load(&prefix);
 
-        let db_key = format!("plugin.{name}");
-        if let Ok(Some(db_val)) = riven_db::repo::get_setting(&db_key).await {
-            plugin_settings.merge_db_override(&db_val);
+        if let Some(db_val) = db_settings.get(&format!("plugin.{name}")) {
+            plugin_settings.merge_db_override(db_val);
         }
 
-        let enabled = riven_db::repo::get_plugin_enabled_setting(name)
-            .await
-            .ok()
-            .flatten()
-            .unwrap_or_else(|| {
-                settings.plugin_enabled_default(name, plugin_settings.has_effective_values())
-            });
+        let enabled = match db_settings.get(&format!("plugin_enabled.{name}")) {
+            Some(serde_json::Value::Bool(enabled)) => *enabled,
+            _ => settings.plugin_enabled_default(name, plugin_settings.has_effective_values()),
+        };
 
         registry
             .register(
