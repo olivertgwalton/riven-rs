@@ -26,10 +26,108 @@ macro_rules! sql_migrations {
 
         impl MigratorTrait for Migrator {
             fn migrations() -> Vec<Box<dyn MigrationTrait>> {
-                vec![$(Box::new($ty)),*]
+                let mut migrations: Vec<Box<dyn MigrationTrait>> = vec![$(Box::new($ty)),*];
+                migrations.push(Box::new(auth::M036Auth));
+                migrations
             }
         }
     };
+}
+
+/// Authentication tables, generated from entities rather than hand-written SQL.
+///
+/// The four app-owned tables (`auth_users`, `auth_sessions`, `auth_accounts`,
+/// `auth_verifications`) come from riven's own entities; the remaining tables are
+/// `better-auth`'s, generated from *its* entities. That matters because
+/// `better-auth` is pinned to an alpha branch whose schema may change between
+/// releases, and because its own `AuthMigrator` is not public API — so hand-written
+/// SQL here would be a second copy of a moving target, free to drift silently.
+/// Generating from the entities makes a schema change a compile-or-migrate event
+/// instead of a runtime column-not-found.
+mod auth {
+    use sea_orm::{ConnectionTrait, Schema};
+    use sea_orm_migration::{MigrationName, MigrationTrait, SchemaManager};
+
+    use better_auth_seaorm::store::entities as ba;
+    use riven_core::entities::auth as app;
+
+    pub struct M036Auth;
+
+    impl MigrationName for M036Auth {
+        fn name(&self) -> &str {
+            "m036_better_auth_tables"
+        }
+    }
+
+    /// `create_table_from_entity` + `if_not_exists`, so the migration is
+    /// idempotent and safe to re-run against a database that already has some of
+    /// these tables (e.g. a partially-migrated environment).
+    macro_rules! create_tables {
+        ($manager:expr, $schema:expr, $($entity:expr),* $(,)?) => {
+            $(
+                let statement = $schema.create_table_from_entity($entity).if_not_exists().to_owned();
+                $manager.get_connection().execute(&statement).await?;
+            )*
+        };
+    }
+
+    #[async_trait::async_trait]
+    impl MigrationTrait for M036Auth {
+        async fn up(&self, manager: &SchemaManager) -> Result<(), sea_orm::DbErr> {
+            let backend = manager.get_connection().get_database_backend();
+            let schema = Schema::new(backend);
+
+            // App-owned: the four AuthSchema slots.
+            create_tables!(
+                manager,
+                schema,
+                app::user::Entity,
+                app::session::Entity,
+                app::account::Entity,
+                app::verification::Entity,
+            );
+
+            // Library-owned: the plugin tables. Names are fixed by better-auth
+            // (`api_keys`, `passkeys`, `two_factor`, `organization`, `member`,
+            // `invitation`, `device_code`) and are not ours to choose.
+            create_tables!(
+                manager,
+                schema,
+                ba::api_key::Entity,
+                ba::passkey::Entity,
+                ba::two_factor::Entity,
+                ba::organization::Entity,
+                ba::member::Entity,
+                ba::invitation::Entity,
+                ba::device_code::Entity,
+            );
+
+            Ok(())
+        }
+
+        async fn down(&self, manager: &SchemaManager) -> Result<(), sea_orm::DbErr> {
+            // Dropped children-first: accounts/sessions reference users.
+            for table in [
+                "device_code",
+                "invitation",
+                "member",
+                "organization",
+                "two_factor",
+                "passkeys",
+                "api_keys",
+                "auth_verifications",
+                "auth_accounts",
+                "auth_sessions",
+                "auth_users",
+            ] {
+                manager
+                    .get_connection()
+                    .execute_unprepared(&format!("DROP TABLE IF EXISTS \"{table}\" CASCADE"))
+                    .await?;
+            }
+            Ok(())
+        }
+    }
 }
 
 sql_migrations![

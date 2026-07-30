@@ -1,17 +1,7 @@
+# The frontend is no longer a service: riven serves the static bundle itself
+# from RIVEN_STATIC_DIR, baked into its image. Build the bundle first:
+#   docker build -t riven-frontend:bundle ../riven-frontend
 services:
-    riven-frontend:
-        image: riven-frontend
-        container_name: riven-frontend
-        restart: unless-stopped
-        env_file: .env
-        ports:
-            - "3000:3000"
-        depends_on:
-            riven:
-                condition: service_healthy
-        volumes:
-            - riven-frontend-data:/riven/data
-
     postgres:
         image: postgres:18-alpine
         env_file: .env
@@ -102,7 +92,6 @@ volumes:
     jellyfin_data:
     jellyfin_cache:
     riven_logs:
-    riven-frontend-data:
 
 networks:
     default:

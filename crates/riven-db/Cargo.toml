@@ -6,6 +6,8 @@ rust-version.workspace = true
 
 [dependencies]
 riven-core = { path = "../riven-core" }
+better-auth = { workspace = true }
+better-auth-seaorm = { workspace = true }
 riven-rank = { path = "../riven-rank" }
 sea-orm = { workspace = true }
 sea-orm-migration = { version = "2.0", default-features = false, features = ["sqlx-postgres", "runtime-tokio-rustls", "with-chrono", "with-json"] }
@@ -17,6 +19,10 @@ anyhow = { workspace = true }
 tracing = { workspace = true }
 async-graphql = { workspace = true }
 log = "0.4"
+
+[dev-dependencies]
+# For the `run_migrations` example, which needs its own async runtime.
+tokio = { workspace = true }
 
 [lints]
 workspace = true

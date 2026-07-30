@@ -42,6 +42,7 @@ dashmap = { workspace = true }
 bytes = { workspace = true }
 redis = { workspace = true }
 sea-orm = { workspace = true }
+better-auth = { workspace = true }
 
 [dev-dependencies]
 axum = { workspace = true }

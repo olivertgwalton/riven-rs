@@ -1,18 +1,11 @@
 use axum::http::HeaderMap;
 use chrono::Utc;
-use hmac::{Hmac, KeyInit, Mac};
-use sha2::Sha256;
+
+use better_auth::prelude::{AuthSession, AuthUser};
 
 use crate::schema::auth::{RequestAuth, UserRole};
 
 use super::ApiState;
-
-pub(super) const FRONTEND_AUTH_SOURCE_HEADER: &str = "x-riven-auth-source";
-pub(super) const FRONTEND_ROLE_HEADER: &str = "x-riven-user-role";
-pub(super) const FRONTEND_USER_ID_HEADER: &str = "x-riven-user-id";
-pub(super) const FRONTEND_AUTH_TIMESTAMP_HEADER: &str = "x-riven-auth-timestamp";
-pub(super) const FRONTEND_AUTH_SIGNATURE_HEADER: &str = "x-riven-auth-signature";
-const FRONTEND_AUTH_MAX_SKEW_SECS: u64 = 300;
 
 /// `query` is the raw request query string (e.g. from `Uri::query()`), checked
 /// for `api_key=...` when no header credential is present. This exists for
@@ -61,176 +54,187 @@ pub(super) enum AuthError {
     Forbidden,
 }
 
-fn signing_payload(user_id: &str, role: &str, timestamp: i64) -> String {
-    format!("v1\n{user_id}\n{role}\n{timestamp}")
-}
-
-fn timestamp_within_allowed_skew(now: i64, timestamp: i64) -> bool {
-    now.abs_diff(timestamp) <= FRONTEND_AUTH_MAX_SKEW_SECS
-}
-
-pub(super) fn authorize_request(
+/// Resolve the caller's role.
+///
+/// Order matters. A `better-auth` session is the primary credential: it is
+/// verified here, against this process's own store, so the role it yields is one
+/// riven established rather than one it was told. The API key is the fallback,
+/// for machine callers that have no session.
+///
+/// This replaced a scheme where the SvelteKit frontend signed `x-riven-user-role`
+/// with a shared HMAC secret and riven trusted it. That put the trust boundary in
+/// a Node process which also proxied media, and made "who is an admin" a claim
+/// rather than a lookup — anyone holding the signing secret could mint any role.
+pub(super) async fn authorize_request(
     state: &ApiState,
     headers: &HeaderMap,
     query: Option<&str>,
 ) -> Result<RequestAuth, AuthError> {
-    if !check_api_key(state, headers, query) {
-        tracing::warn!("auth rejected: api key missing or mismatched");
-        return Err(AuthError::Unauthorized);
+    if let Some(role) = session_role(state, headers).await? {
+        return Ok(RequestAuth { role });
     }
 
-    let source = headers
-        .get(FRONTEND_AUTH_SOURCE_HEADER)
-        .and_then(|value| value.to_str().ok());
-
-    if source != Some("frontend") {
+    // No session. Fall back to the API key, which also covers the
+    // "no API key configured" case where the instance is deliberately open.
+    if check_api_key(state, headers, query) {
         return Ok(RequestAuth::trusted_api_key());
     }
 
-    let role_header = match headers
-        .get(FRONTEND_ROLE_HEADER)
+    tracing::warn!("auth rejected: no valid session and no matching api key");
+    Err(AuthError::Unauthorized)
+}
+
+/// The session token, from `Authorization: Bearer` or the session cookie —
+/// matching what better-auth's own extractors accept, so a caller authenticates
+/// the same way whether it hits riven's routes or better-auth's.
+fn session_token(headers: &HeaderMap, cookie_name: &str) -> Option<String> {
+    if let Some(token) = headers
+        .get(axum::http::header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .filter(|token| !token.is_empty())
     {
-        Some(role @ ("admin" | "manager" | "user")) => role,
-        other => {
-            tracing::warn!(
-                received = ?other,
-                "frontend auth rejected: missing or invalid x-riven-user-role header"
-            );
-            return Err(AuthError::Forbidden);
-        }
+        return Some(token.to_string());
+    }
+
+    let cookies = headers
+        .get(axum::http::header::COOKIE)
+        .and_then(|value| value.to_str().ok())?;
+    let prefix = format!("{cookie_name}=");
+    cookies
+        .split(';')
+        .map(str::trim)
+        .find_map(|part| part.strip_prefix(&prefix))
+        .filter(|token| !token.is_empty())
+        .map(str::to_string)
+}
+
+/// `Ok(None)` means "no session was presented" — the caller should fall back to
+/// the API key. An *invalid* session is `Err(Unauthorized)` rather than a
+/// fallback, so a stale cookie can't silently escalate to the API key's admin
+/// role on an instance where the key is unset.
+async fn session_role(
+    state: &ApiState,
+    headers: &HeaderMap,
+) -> Result<Option<UserRole>, AuthError> {
+    let cookie_name = &state.auth.config().session.cookie_name;
+    let Some(token) = session_token(headers, cookie_name) else {
+        return Ok(None);
     };
 
-    let user_id = match headers
-        .get(FRONTEND_USER_ID_HEADER)
-        .and_then(|value| value.to_str().ok())
-        .filter(|value| !value.trim().is_empty())
-    {
-        Some(id) => id,
-        None => {
-            tracing::warn!("frontend auth rejected: missing or empty x-riven-user-id header");
-            return Err(AuthError::Forbidden);
-        }
-    };
+    let store = state.auth.store();
+    let session = store
+        .get_session(&token)
+        .await
+        .map_err(|error| {
+            tracing::warn!(%error, "session lookup failed");
+            AuthError::Unauthorized
+        })?
+        .ok_or(AuthError::Unauthorized)?;
 
-    let timestamp = match headers
-        .get(FRONTEND_AUTH_TIMESTAMP_HEADER)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.parse::<i64>().ok())
-    {
-        Some(ts) => ts,
-        None => {
-            tracing::warn!(
-                user_id,
-                "frontend auth rejected: missing or unparseable x-riven-auth-timestamp header"
-            );
-            return Err(AuthError::Forbidden);
-        }
-    };
+    if session.expires_at() <= Utc::now() {
+        tracing::debug!("auth rejected: session expired");
+        return Err(AuthError::Unauthorized);
+    }
 
-    let now = Utc::now().timestamp();
-    let skew = now.abs_diff(timestamp);
-    if !timestamp_within_allowed_skew(now, timestamp) {
-        tracing::warn!(
-            user_id,
-            client_timestamp = timestamp,
-            server_timestamp = now,
-            skew_secs = skew,
-            max_skew_secs = FRONTEND_AUTH_MAX_SKEW_SECS,
-            "frontend auth rejected: clock skew exceeds maximum (check NTP on host)"
-        );
+    let user = store
+        .get_user_by_id(&session.user_id())
+        .await
+        .map_err(|error| {
+            tracing::warn!(%error, "user lookup failed");
+            AuthError::Unauthorized
+        })?
+        .ok_or(AuthError::Unauthorized)?;
+
+    // A ban with no expiry is permanent; one in the past has lapsed.
+    let banned = user.banned() && user.ban_expires().is_none_or(|until| until > Utc::now());
+    if banned {
+        tracing::warn!(user_id = %user.id(), "auth rejected: user is banned");
         return Err(AuthError::Forbidden);
     }
 
-    let signature = match headers
-        .get(FRONTEND_AUTH_SIGNATURE_HEADER)
-        .and_then(|value| value.to_str().ok())
-    {
-        Some(sig) => sig,
-        None => {
-            tracing::warn!(
-                user_id,
-                "frontend auth rejected: missing x-riven-auth-signature header"
-            );
-            return Err(AuthError::Forbidden);
-        }
-    };
+    Ok(Some(role_from_user(user.role())))
+}
 
-    let secret = match state
-        .frontend_auth_signing_secret
-        .as_deref()
-        .filter(|value| !value.is_empty())
-    {
-        Some(s) => s,
-        None => {
-            tracing::warn!(
-                user_id,
-                "frontend auth rejected: backend RIVEN_SETTING__FRONTEND_AUTH_SIGNING_SECRET is unset or empty"
-            );
-            return Err(AuthError::Forbidden);
-        }
-    };
-
-    let provided_signature = match hex::decode(signature) {
-        Ok(bytes) => bytes,
-        Err(error) => {
-            tracing::warn!(
-                user_id,
-                error = %error,
-                "frontend auth rejected: x-riven-auth-signature is not valid hex"
-            );
-            return Err(AuthError::Forbidden);
-        }
-    };
-    let mut mac = match Hmac::<Sha256>::new_from_slice(secret.as_bytes()) {
-        Ok(mac) => mac,
-        Err(error) => {
-            tracing::warn!(
-                user_id,
-                error = %error,
-                "frontend auth rejected: failed to initialise HMAC with configured secret"
-            );
-            return Err(AuthError::Forbidden);
-        }
-    };
-    mac.update(signing_payload(user_id, role_header, timestamp).as_bytes());
-    if let Err(error) = mac.verify_slice(&provided_signature) {
-        tracing::warn!(
-            user_id,
-            role = role_header,
-            timestamp,
-            error = %error,
-            "frontend auth rejected: HMAC signature mismatch (frontend and backend secrets differ, \
-             or signing payload format differs from `v1\\n{{user_id}}\\n{{role}}\\n{{timestamp}}`)"
-        );
-        return Err(AuthError::Forbidden);
+/// Map better-auth's free-text admin-plugin role onto riven's ladder.
+///
+/// Unrecognised and absent roles both land on `User`, the least privilege —
+/// a typo in the column must not become an escalation.
+fn role_from_user(role: Option<&str>) -> UserRole {
+    match role.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
+        Some("admin") => UserRole::Admin,
+        Some("manager") => UserRole::Manager,
+        _ => UserRole::User,
     }
-
-    let role = match role_header {
-        "admin" => UserRole::Admin,
-        "manager" => UserRole::Manager,
-        "user" => UserRole::User,
-        _ => return Err(AuthError::Forbidden),
-    };
-
-    tracing::debug!(user_id, role = role_header, "frontend auth accepted");
-    Ok(RequestAuth { role })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{FRONTEND_AUTH_MAX_SKEW_SECS, timestamp_within_allowed_skew};
+    use super::*;
+
+    fn headers_with(name: &str, value: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::HeaderName::from_bytes(name.as_bytes()).unwrap(),
+            value.parse().unwrap(),
+        );
+        headers
+    }
 
     #[test]
-    fn timestamp_skew_accepts_boundaries_and_rejects_extremes() {
-        let now = 1_750_000_000;
-        let limit = FRONTEND_AUTH_MAX_SKEW_SECS as i64;
+    fn a_bearer_token_wins_over_the_cookie() {
+        let mut headers = headers_with("authorization", "Bearer from-header");
+        headers.insert(
+            axum::http::header::COOKIE,
+            "riven.session_token=from-cookie".parse().unwrap(),
+        );
+        assert_eq!(
+            session_token(&headers, "riven.session_token").as_deref(),
+            Some("from-header")
+        );
+    }
 
-        assert!(timestamp_within_allowed_skew(now, now - limit));
-        assert!(timestamp_within_allowed_skew(now, now + limit));
-        assert!(!timestamp_within_allowed_skew(now, now - limit - 1));
-        assert!(!timestamp_within_allowed_skew(now, now + limit + 1));
-        assert!(!timestamp_within_allowed_skew(now, i64::MIN));
-        assert!(!timestamp_within_allowed_skew(now, i64::MAX));
+    #[test]
+    fn the_session_cookie_is_found_among_others() {
+        let headers = headers_with("cookie", "theme=dark; riven.session_token=abc123; other=1");
+        assert_eq!(
+            session_token(&headers, "riven.session_token").as_deref(),
+            Some("abc123")
+        );
+    }
+
+    #[test]
+    fn a_differently_named_cookie_is_not_mistaken_for_the_session() {
+        let headers = headers_with("cookie", "not_riven.session_token=abc123");
+        assert_eq!(session_token(&headers, "riven.session_token"), None);
+        assert_eq!(
+            session_token(&HeaderMap::new(), "riven.session_token"),
+            None
+        );
+    }
+
+    #[test]
+    fn empty_credentials_are_treated_as_absent() {
+        assert_eq!(
+            session_token(&headers_with("authorization", "Bearer "), "sess"),
+            None
+        );
+        assert_eq!(
+            session_token(&headers_with("cookie", "sess="), "sess"),
+            None
+        );
+    }
+
+    /// An unknown role must not inherit privilege — the escalation this guards
+    /// against is a typo or a role added by a future better-auth plugin.
+    #[test]
+    fn roles_map_to_the_ladder_and_default_to_least_privilege() {
+        assert_eq!(role_from_user(Some("admin")), UserRole::Admin);
+        assert_eq!(role_from_user(Some("ADMIN")), UserRole::Admin);
+        assert_eq!(role_from_user(Some(" manager ")), UserRole::Manager);
+        assert_eq!(role_from_user(Some("user")), UserRole::User);
+        assert_eq!(role_from_user(Some("superadmin")), UserRole::User);
+        assert_eq!(role_from_user(Some("")), UserRole::User);
+        assert_eq!(role_from_user(None), UserRole::User);
     }
 }

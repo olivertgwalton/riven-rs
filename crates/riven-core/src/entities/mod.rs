@@ -1,5 +1,6 @@
 //! SeaORM entity models.
 
+pub mod auth;
 pub mod filesystem_entries;
 pub mod helpers;
 pub mod item_requests;
