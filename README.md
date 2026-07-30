@@ -168,6 +168,10 @@ make verify-all   # everything above, matching CI
 `schema.graphql` and `frontend/src/lib/gql/` are generated and committed. Run
 `make schema` after changing the GraphQL API, or CI will fail on the drift.
 
+**[Full development setup lives in `docs/development.md`](docs/development.md)** —
+running natively vs in Docker, the required environment, working on the
+frontend, and the schema/authorization workflows.
+
 For a direct release build:
 
 ```sh

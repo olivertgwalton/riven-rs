@@ -14,10 +14,14 @@ This workspace enforces the following baseline standards:
 
 ## Local Workflow
 
+See **[docs/development.md](docs/development.md)** for getting Riven running —
+required environment, Docker vs native, and the frontend and schema workflows.
+
 Run the full standards gate before opening or updating a change:
 
 ```sh
-make verify
+make verify       # Rust: fmt, check, clippy, tests, generated docs
+make verify-all   # the above plus frontend lint/check/build and schema drift
 ```
 
 Useful individual targets:
@@ -28,7 +32,13 @@ make fmt-check
 make check
 make lint
 make test
+make docs         # regenerate docs/environment.md and docs/plugins
+make schema       # regenerate schema.graphql and the frontend's types
 ```
+
+`make verify` includes `docs-check`, and `docs/environment.md` records the file
+and line of every `env::var` call — so moving code makes it stale. Run
+`make docs` and commit the result.
 
 ## Testing Expectations
 
