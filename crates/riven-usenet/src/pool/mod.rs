@@ -202,19 +202,10 @@ impl SegmentPool {
         provider: &Arc<ClientPool>,
         message_id: &Arc<str>,
     ) -> Result<Bytes, NntpError> {
-        // Split so a slow article can be attributed. Raw NNTP against this
-        // provider fetches a 722 KiB article in ~87 ms p50, so anything near a
-        // second is riven's own cost and this says which part of it.
-        let started = std::time::Instant::now();
         let mut lease = provider.acquire().await?;
-        let acquire_us = started.elapsed().as_micros() as u64;
-
-        let wire = std::time::Instant::now();
         let body = lease.body(message_id).await?;
         drop(lease);
-        let body_us = wire.elapsed().as_micros() as u64;
 
-        let blocking = std::time::Instant::now();
         let decoded = match tokio::task::spawn_blocking(move || yenc::decode(&body)).await {
             Ok(Ok((decoded, _info))) => decoded,
             Ok(Err(error)) => {
@@ -226,22 +217,6 @@ impl SegmentPool {
                 return Err(NntpError::Protocol("yenc decode task panicked"));
             }
         };
-
-        let decode_us = blocking.elapsed().as_micros() as u64;
-        let total_us = started.elapsed().as_micros() as u64;
-        if total_us >= 300_000 {
-            tracing::debug!(
-                host = %provider.host(),
-                bytes = decoded.len(),
-                acquire_ms = acquire_us / 1000,
-                body_ms = body_us / 1000,
-                // Includes waiting for a blocking-pool thread, not just the
-                // decode: saturation there would show up here and nowhere else.
-                decode_ms = decode_us / 1000,
-                total_ms = total_us / 1000,
-                "slow article fetch"
-            );
-        }
 
         self.metrics.record_ok(decoded.len() as u64);
         self.decoded_sizes

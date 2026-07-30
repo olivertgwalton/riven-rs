@@ -32,36 +32,9 @@ impl UsenetStreamer {
     /// instead of concatenating them, so a single-segment read is served by
     /// slicing the cached `Bytes` with no copy.
     ///
-    /// Slow origin fetches are logged at `debug`. Both demand and speculative
-    /// calls come from the one unified VFS window; there is no nested Usenet
-    /// scheduler.
+    /// Both demand and speculative calls come from the one unified VFS window;
+    /// there is no nested Usenet scheduler.
     pub async fn read_range_slices(
-        &self,
-        info_hash: &str,
-        file_index: usize,
-        start: u64,
-        end_inclusive: u64,
-    ) -> Result<Vec<Bytes>, StreamerError> {
-        let started = std::time::Instant::now();
-        let result = self
-            .read_range_slices_inner(info_hash, file_index, start, end_inclusive)
-            .await;
-        let elapsed_ms = started.elapsed().as_millis();
-        if elapsed_ms > 300 {
-            tracing::debug!(
-                info_hash,
-                file = %self.cached_file_label(info_hash, file_index),
-                start,
-                len = end_inclusive.saturating_sub(start) + 1,
-                elapsed_ms,
-                ok = result.is_ok(),
-                "slow origin read"
-            );
-        }
-        result
-    }
-
-    async fn read_range_slices_inner(
         &self,
         info_hash: &str,
         file_index: usize,
