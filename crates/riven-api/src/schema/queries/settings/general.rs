@@ -1,5 +1,11 @@
 use super::*;
 
+/// Derived, display-only key in the general section. Never persisted — see
+/// `general_settings_values` and `apply_general_settings`.
+pub(crate) const STREMIO_MANIFEST_URL_KEY: &str = "stremio_manifest_url";
+/// User-editable public origin the Stremio manifest URL is built from.
+pub(crate) const STREMIO_BASE_URL_KEY: &str = "stremio_base_url";
+
 /// The SettingField schema describing the general (non-plugin) settings.
 /// Single source of truth, shared by `settingsSections` and the writer.
 fn general_settings_schema_fields(
@@ -55,6 +61,14 @@ fn general_settings_schema_fields(
             SettingField::new("vfs_debug_logging", "VFS debug logging", FieldType::Boolean)
                 .with_section("Logging")
                 .with_description("Log detailed virtual filesystem activity. Enable when troubleshooting file access issues."),
+            SettingField::new(STREMIO_BASE_URL_KEY, "Public URL", FieldType::Url)
+                .with_section("Stremio")
+                .with_placeholder("https://riven.example.com")
+                .with_description("The public URL Riven is reachable at. Stremio needs an absolute address, so the manifest URL below can only be built once this is set."),
+            SettingField::new(STREMIO_MANIFEST_URL_KEY, "Manifest URL", FieldType::Url)
+                .with_section("Stremio")
+                .read_only()
+                .with_description("Paste this into Stremio's Addons page to make your library appear in the stream picker. Rotating the API key invalidates it."),
             SettingField::new("filesystem", "Filesystem", FieldType::Object)
                 .with_section("Filesystem")
                 .with_description("Where to mount Riven's virtual filesystem and any custom library views.")
@@ -121,9 +135,10 @@ fn general_settings_schema_fields(
     ]
 }
 
-/// Effective general settings: defaults merged with stored DB overrides.
+/// Effective general settings: defaults merged with stored DB overrides, then
+/// backend-derived values layered on top.
 /// Single source of truth, shared by `settingsSections` and the writer.
-async fn general_settings_values() -> Result<serde_json::Value> {
+async fn general_settings_values(addon_token: Option<&str>) -> Result<serde_json::Value> {
     let defaults = RivenSettings::default();
     let mut result = serde_json::json!({
         "dubbed_anime_only": defaults.dubbed_anime_only,
@@ -138,6 +153,7 @@ async fn general_settings_values() -> Result<serde_json::Value> {
         "log_max_files": defaults.log_max_files,
         "vfs_debug_logging": defaults.vfs_debug_logging,
         "filesystem": defaults.filesystem,
+        STREMIO_BASE_URL_KEY: "",
     });
     if let Some(stored) = repo::get_setting("general").await?
         && let (Some(obj), Some(stored_obj)) = (result.as_object_mut(), stored.as_object())
@@ -146,11 +162,27 @@ async fn general_settings_values() -> Result<serde_json::Value> {
             obj.insert(k.clone(), v.clone());
         }
     }
+
+    // Derived last, so a value a client previously round-tripped into the
+    // stored blob can never shadow the real one.
+    if let Some(obj) = result.as_object_mut() {
+        let base_url = obj
+            .get(STREMIO_BASE_URL_KEY)
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        let manifest_url =
+            riven_core::stremio::manifest_url(base_url, addon_token).unwrap_or_default();
+        obj.insert(
+            STREMIO_MANIFEST_URL_KEY.to_string(),
+            serde_json::Value::String(manifest_url),
+        );
+    }
     Ok(result)
 }
 
-/// Build the instance-wide "general" settings section.
-pub(crate) async fn build_general_section() -> Result<SettingsSection> {
+/// Build the instance-wide "general" settings section. `addon_token` is the
+/// Stremio addon token for this instance (`None` when the API is unauthenticated).
+pub(crate) async fn build_general_section(addon_token: Option<&str>) -> Result<SettingsSection> {
     let options = match repo::list_filesystem_library_filter_options().await {
         Ok(options) => options,
         Err(error) => {
@@ -164,7 +196,7 @@ pub(crate) async fn build_general_section() -> Result<SettingsSection> {
         title: "General".to_string(),
         kind: "general".to_string(),
         schema: serde_json::to_value(&schema).unwrap_or(serde_json::Value::Array(vec![])),
-        values: general_settings_values().await?,
+        values: general_settings_values(addon_token).await?,
         category: None,
         enabled: None,
         valid: None,

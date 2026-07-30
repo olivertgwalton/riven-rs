@@ -25,16 +25,38 @@ pub async fn validate_search(
 
     match resp {
         Ok(resp) => {
-            if !resp.status().is_success() {
-                return Ok(false);
-            }
+            let status = resp.status();
             let payload: AioStreamsResponse = match resp.json().await {
                 Ok(payload) => payload,
-                Err(_) => return Ok(false),
+                Err(e) => {
+                    tracing::warn!(
+                        %url,
+                        %status,
+                        error = %e,
+                        "aiostreams validation failed: unparseable response"
+                    );
+                    return Ok(false);
+                }
             };
-            Ok(payload.success && payload.data.is_some())
+            if !status.is_success() || !payload.success {
+                tracing::warn!(
+                    %url,
+                    %status,
+                    reason = payload.error_message().unwrap_or("unknown aiostreams error"),
+                    "aiostreams validation rejected"
+                );
+                return Ok(false);
+            }
+            if payload.data.is_none() {
+                tracing::warn!(%url, "aiostreams validation failed: response had no data");
+                return Ok(false);
+            }
+            Ok(true)
         }
-        Err(_) => Ok(false),
+        Err(e) => {
+            tracing::warn!(%url, error = %e, "aiostreams validation request failed");
+            Ok(false)
+        }
     }
 }
 

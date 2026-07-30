@@ -56,7 +56,11 @@ pub const SEGMENT: Pool = Pool::new(
 /// because the two cannot be chosen independently: a staging cache smaller than
 /// one in-flight generation evicts articles before their reader arrives.
 /// `riven-vfs` reads this as its own in-flight cap.
-pub const ARTICLE_MAX_IN_FLIGHT: usize = 16;
+///
+/// Set to match streamnzb, which keeps 8 segments of read-ahead
+/// (`DefaultReadAhead` in `pkg/media/loader/segment_reader.go`) and therefore
+/// half that on the wire under riven's depth-versus-width split.
+pub const ARTICLE_MAX_IN_FLIGHT: usize = 4;
 /// Largest article size to budget for. Posters choose the segment size; 3.84 MB
 /// is the largest seen in practice, and sizing for it costs memory on a
 /// small-segment post but never under-sizes on a large-segment one.

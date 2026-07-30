@@ -20,7 +20,7 @@ use riven_vfs::prefetch::{FileKey, Prefetcher};
 use riven_vfs::source::{ByteSource, UsenetSource};
 
 use super::ApiState;
-use super::auth::check_api_key;
+use super::auth::{check_api_key, check_stremio_token};
 
 const MEDIA_RESPONSE_HEADERS: [HeaderName; 7] = [
     ACCEPT_RANGES,
@@ -282,9 +282,16 @@ async fn load_media_entry(entry_id: i64) -> Result<Option<riven_db::entities::Fi
 /// Query string for the media bridge. `?download=1` (any value) flips the
 /// response to a forced browser download (`Content-Disposition: attachment`)
 /// instead of inline playback.
+///
+/// `api_key` and `token` exist because playback clients can't set headers.
+/// Stremio in particular only ever gets a URL, so the credential has to be in
+/// it — `token` carries the derived Stremio addon token (see
+/// `auth::stremio_addon_token`) so the real API key never leaves Riven.
 #[derive(Debug, Default, serde::Deserialize)]
 pub(super) struct MediaQuery {
     download: Option<String>,
+    api_key: Option<String>,
+    token: Option<String>,
 }
 
 /// Resolve the in-process usenet target `(info_hash, file_index)` for an entry,
@@ -504,6 +511,31 @@ async fn serve_usenet_media(
         .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
 }
 
+/// Accept the usual header credential, or either URL-borne credential a player
+/// can carry: the API key itself, or the derived Stremio addon token.
+fn media_credential_ok(state: &ApiState, headers: &HeaderMap, query: &MediaQuery) -> bool {
+    if check_api_key(state, headers, None) {
+        return true;
+    }
+    if let Some(api_key) = query.api_key.as_deref() {
+        let encoded = format!("api_key={}", urlencoding_encode(api_key));
+        if check_api_key(state, headers, Some(&encoded)) {
+            return true;
+        }
+    }
+    query
+        .token
+        .as_deref()
+        .is_some_and(|token| check_stremio_token(state, token))
+}
+
+/// `check_api_key` parses its `query` argument as a form-encoded string, so a
+/// value lifted out of an already-decoded `MediaQuery` has to be re-encoded
+/// before being handed back to it.
+fn urlencoding_encode(value: &str) -> String {
+    url::form_urlencoded::byte_serialize(value.as_bytes()).collect()
+}
+
 pub(super) async fn media_bridge_handler(
     State(state): State<ApiState>,
     Path(entry_id): Path<i64>,
@@ -513,7 +545,7 @@ pub(super) async fn media_bridge_handler(
 ) -> Response {
     let request_started = Instant::now();
 
-    if !check_api_key(&state, &headers, None) {
+    if !media_credential_ok(&state, &headers, &query) {
         return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
     }
 

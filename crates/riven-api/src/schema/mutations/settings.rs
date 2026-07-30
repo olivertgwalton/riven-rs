@@ -172,7 +172,8 @@ impl SettingsMutations {
         require_settings_access(ctx)?;
         if section == "general" {
             apply_general_settings(ctx, values).await?;
-            build_general_section().await
+            let addon_token = ctx.data::<crate::schema::StremioAddonToken>()?.clone();
+            build_general_section(addon_token.as_deref()).await
         } else {
             apply_plugin_settings(ctx, &section, values).await?;
             let registry = ctx.data::<Arc<PluginRegistry>>()?;
@@ -199,7 +200,19 @@ impl SettingsMutations {
 /// apply to the live runtime (logging, downloader config, scheduling, and the
 /// filesystem layout — rematching library profiles when the mount changes).
 /// The single source of truth for general-settings side effects.
-async fn apply_general_settings(ctx: &Context<'_>, settings: serde_json::Value) -> Result<()> {
+/// Drop backend-derived keys from a general-settings payload before it is
+/// persisted. The section round-trips through the client, so a derived value
+/// would otherwise be stored and then shadow the live one on the next read.
+fn strip_derived_general_keys(settings: &mut serde_json::Value) {
+    if let Some(obj) = settings.as_object_mut() {
+        obj.remove(crate::schema::queries::settings::STREMIO_MANIFEST_URL_KEY);
+    }
+}
+
+async fn apply_general_settings(ctx: &Context<'_>, mut settings: serde_json::Value) -> Result<()> {
+    strip_derived_general_keys(&mut settings);
+    let settings = settings;
+
     repo::set_setting("general", settings.clone()).await?;
 
     let log_control = ctx.data::<Arc<LogControl>>()?;
@@ -331,4 +344,44 @@ async fn apply_plugin_settings(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn derived_manifest_url_is_never_persisted() {
+        let mut settings = serde_json::json!({
+            "log_level": "info",
+            "stremio_base_url": "https://riven.example.uk",
+            "stremio_manifest_url": "https://stale.example/stremio/old-token/manifest.json",
+        });
+        strip_derived_general_keys(&mut settings);
+
+        assert_eq!(settings.get("stremio_manifest_url"), None);
+        // Editable neighbours are untouched.
+        assert_eq!(
+            settings.get("stremio_base_url").and_then(|v| v.as_str()),
+            Some("https://riven.example.uk")
+        );
+        assert_eq!(
+            settings.get("log_level").and_then(|v| v.as_str()),
+            Some("info")
+        );
+    }
+
+    #[test]
+    fn stripping_tolerates_a_missing_key_and_non_objects() {
+        let mut absent = serde_json::json!({ "log_level": "info" });
+        strip_derived_general_keys(&mut absent);
+        assert_eq!(
+            absent.get("log_level").and_then(|v| v.as_str()),
+            Some("info")
+        );
+
+        let mut not_an_object = serde_json::json!("nonsense");
+        strip_derived_general_keys(&mut not_an_object);
+        assert_eq!(not_an_object, serde_json::json!("nonsense"));
+    }
 }

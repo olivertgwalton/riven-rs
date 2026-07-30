@@ -78,6 +78,13 @@ pub struct SettingField {
     pub true_label: Option<Cow<'static, str>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub false_label: Option<Cow<'static, str>>,
+    /// Display-only field: the value is derived by the backend, not edited.
+    /// The frontend should render it non-editable with a copy affordance rather
+    /// than an input. Omitted from the wire format unless set, so existing
+    /// renderers are unaffected — they fall back to showing a normal (editable)
+    /// field containing the value, which is still selectable and copyable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub read_only: Option<bool>,
 }
 
 impl SettingField {
@@ -104,7 +111,14 @@ impl SettingField {
             display: None,
             true_label: None,
             false_label: None,
+            read_only: None,
         }
+    }
+
+    /// Mark the field as backend-derived and non-editable — see [`Self::read_only`].
+    pub fn read_only(mut self) -> Self {
+        self.read_only = Some(true);
+        self
     }
 
     pub fn required(mut self) -> Self {

@@ -2,10 +2,15 @@ mod auth;
 mod board;
 mod graphql;
 mod media;
+mod stremio;
 
 use std::sync::Arc;
 
 use anyhow::Result;
+use axum::http::{
+    Method,
+    header::{ACCEPT_RANGES, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE},
+};
 use axum::{Router, routing::get};
 use riven_core::http::HttpClient;
 use riven_core::logging::LogControl;
@@ -98,6 +103,9 @@ pub async fn start_server(config: StartServerConfig) -> Result<()> {
         log_control,
         log_tx.clone(),
         vfs_mount_manager,
+        crate::schema::StremioAddonToken(riven_core::stremio::addon_token(
+            api_key.as_deref().unwrap_or_default(),
+        )),
     );
 
     start_event_controller(job_queue.clone());
@@ -132,22 +140,50 @@ pub async fn start_server(config: StartServerConfig) -> Result<()> {
         runtime: tokio::runtime::Handle::current(),
     };
 
+    // Routes reached by third-party players. Stremio and whatever player it
+    // hands a stream URL to are origins we can't enumerate, and the instance
+    // allowlist emits no `access-control-allow-origin` for anything outside it —
+    // which fails the fetch before a body is read. These authenticate by token
+    // in the URL rather than by cookie, so a wildcard origin grants no ambient
+    // authority and they carry their own permissive CORS. The allowlist stays in
+    // force for /graphql, /board and the frontend.
+    let player_routes = Router::new()
+        .route(
+            "/media/{entry_id}",
+            get(media::media_bridge_handler).head(media::media_bridge_handler),
+        )
+        // Alias of the above, so every path Stremio touches lives under
+        // `/stremio` and one proxy rule covers manifest, streams and bytes.
+        .route(
+            "/stremio/media/{entry_id}",
+            get(media::media_bridge_handler).head(media::media_bridge_handler),
+        )
+        .route(
+            "/stremio/{token}/manifest.json",
+            get(stremio::manifest_handler),
+        )
+        .route(
+            "/stremio/{token}/stream/{kind}/{id}",
+            get(stremio::stream_handler),
+        )
+        .layer(build_player_cors_layer());
+
     let routes = Router::new()
         .route(
             "/graphql",
             get(graphql::graphql_get_handler).post(graphql::graphql_handler),
         )
-        .route(
-            "/media/{entry_id}",
-            get(media::media_bridge_handler).head(media::media_bridge_handler),
-        )
+        // Hands out the addon token, so it stays on the instance allowlist —
+        // only the frontend should be able to read it.
+        .route("/stremio/manifest-url", get(stremio::manifest_url_handler))
         .nest("/api/v1", board_api.with_state(()))
         .nest("/board", board_ui.with_state(()))
-        .fallback_service(serve_frontend);
+        .fallback_service(serve_frontend)
+        .layer(build_cors_layer(cors_allowed_origins));
 
-    let app = routes
+    let app = player_routes
+        .merge(routes)
         .layer(axum::middleware::from_fn(board::board_assets_middleware))
-        .layer(build_cors_layer(cors_allowed_origins))
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(format!("{host}:{port}")).await?;
@@ -158,6 +194,20 @@ pub async fn start_server(config: StartServerConfig) -> Result<()> {
         .await?;
 
     Ok(())
+}
+
+/// CORS for the token-authenticated player routes. Origin is wildcarded because
+/// the set of clients is open-ended (Stremio, VLC-in-a-webview, Infuse), and
+/// `Range` has to be allowed or seeking fails. `Content-Range`/`Accept-Ranges`
+/// are exposed so a scripted player can read them back. Credentials are
+/// deliberately not allowed — the token in the URL is the only credential, so
+/// there is no cookie for a wildcard origin to leak.
+fn build_player_cors_layer() -> CorsLayer {
+    CorsLayer::new()
+        .allow_origin(tower_http::cors::Any)
+        .allow_methods([Method::GET, Method::HEAD, Method::OPTIONS])
+        .allow_headers(tower_http::cors::Any)
+        .expose_headers([ACCEPT_RANGES, CONTENT_RANGE, CONTENT_LENGTH, CONTENT_TYPE])
 }
 
 fn build_cors_layer(allowed: Vec<String>) -> CorsLayer {

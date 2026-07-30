@@ -11,7 +11,7 @@ mod general;
 mod plugins;
 mod ranking;
 
-pub(crate) use general::build_general_section;
+pub(crate) use general::{STREMIO_MANIFEST_URL_KEY, build_general_section};
 pub(crate) use plugins::build_plugin_section;
 use plugins::plugin_section_from;
 use ranking::{
@@ -182,7 +182,8 @@ impl CoreSettingsQuery {
         require_settings_access(ctx)?;
         let registry = ctx.data::<Arc<PluginRegistry>>()?;
 
-        let mut sections = vec![build_general_section().await?];
+        let addon_token = ctx.data::<crate::schema::StremioAddonToken>()?.clone();
+        let mut sections = vec![build_general_section(addon_token.as_deref()).await?];
         for p in registry.all_plugins_info().await {
             sections.push(plugin_section_from(registry, &p).await);
         }
