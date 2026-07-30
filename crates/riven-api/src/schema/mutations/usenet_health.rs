@@ -11,6 +11,8 @@ use riven_queue::JobQueue;
 use riven_usenet::UsenetStreamer;
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
 
+use crate::schema::auth::{Capability, require};
+
 #[derive(Default)]
 pub struct UsenetHealthMutations;
 
@@ -23,6 +25,10 @@ impl UsenetHealthMutations {
     /// re-scrape's ingest availability probe skips any incomplete release, so a
     /// complete one is picked.
     async fn regrab_usenet_title(&self, ctx: &Context<'_>, media_item_id: i64) -> Result<String> {
+        // Both, because this does both: it permanently blacklists the current
+        // releases and deletes their filesystem entries, then re-scrapes.
+        require(ctx, Capability::DeleteItems)?;
+        require(ctx, Capability::ScrapeItems)?;
         let job_queue = ctx.data::<Arc<JobQueue>>()?;
         job_queue.regrab_media_item(media_item_id).await?;
         Ok("re-grab queued".to_string())
@@ -32,10 +38,11 @@ impl UsenetHealthMutations {
     /// result. Returns the new status (`healthy` / `unhealthy` / `unknown`).
     async fn rescan_usenet_health(
         &self,
-        _ctx: &Context<'_>,
+        ctx: &Context<'_>,
         info_hash: String,
         file_index: i32,
     ) -> Result<String> {
+        require(ctx, Capability::ScrapeItems)?;
         let Some(streamer) = UsenetStreamer::existing_shared() else {
             return Ok("unknown".to_string());
         };

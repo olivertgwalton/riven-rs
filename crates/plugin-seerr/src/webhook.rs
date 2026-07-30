@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use async_graphql::{Context, Object};
+use riven_core::auth::{Capability, require};
 use riven_queue::JobQueue;
 use riven_queue::lifecycle::{LibraryOrchestrator, upsert_requested_movie, upsert_requested_show};
 use serde::Deserialize;
@@ -25,6 +26,11 @@ impl SeerrMutations {
         ctx: &Context<'_>,
         payload: async_graphql::Json<serde_json::Value>,
     ) -> async_graphql::Result<bool> {
+        // Seerr itself authenticates with the instance API key, which resolves
+        // to admin, so this costs the real caller nothing — it stops any
+        // signed-in browser from injecting library additions through a path
+        // that skips `requestMovie`/`requestShow`'s own handling.
+        require(ctx, Capability::RequestItems)?;
         let job_queue = ctx.data::<Arc<JobQueue>>()?;
 
         let parsed: SeerrWebhookPayload = match serde_json::from_value(payload.0) {

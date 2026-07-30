@@ -20,7 +20,7 @@ use riven_vfs::prefetch::{FileKey, Prefetcher};
 use riven_vfs::source::{ByteSource, UsenetSource};
 
 use super::ApiState;
-use super::auth::{check_api_key, check_stremio_token};
+use super::auth::{check_stremio_token, has_valid_api_key};
 
 const MEDIA_RESPONSE_HEADERS: [HeaderName; 7] = [
     ACCEPT_RANGES,
@@ -514,12 +514,12 @@ async fn serve_usenet_media(
 /// Accept the usual header credential, or either URL-borne credential a player
 /// can carry: the API key itself, or the derived Stremio addon token.
 fn media_credential_ok(state: &ApiState, headers: &HeaderMap, query: &MediaQuery) -> bool {
-    if check_api_key(state, headers, None) {
+    if has_valid_api_key(state, headers, None) {
         return true;
     }
     if let Some(api_key) = query.api_key.as_deref() {
         let encoded = format!("api_key={}", urlencoding_encode(api_key));
-        if check_api_key(state, headers, Some(&encoded)) {
+        if has_valid_api_key(state, headers, Some(&encoded)) {
             return true;
         }
     }
@@ -529,7 +529,7 @@ fn media_credential_ok(state: &ApiState, headers: &HeaderMap, query: &MediaQuery
         .is_some_and(|token| check_stremio_token(state, token))
 }
 
-/// `check_api_key` parses its `query` argument as a form-encoded string, so a
+/// `has_valid_api_key` parses its `query` argument as a form-encoded string, so a
 /// value lifted out of an already-decoded `MediaQuery` has to be re-encoded
 /// before being handed back to it.
 fn urlencoding_encode(value: &str) -> String {

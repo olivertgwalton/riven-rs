@@ -47,11 +47,17 @@ THIS IS AN ALTERNATIVE, RIVEN-TS IS THE MAIN DEVELOPMENT EFFORT
    ```sh
    RIVEN_STORAGE_PATH=/path/on/host/for/riven-storage
    ORIGIN=https://riven.example.com
-   PASSKEY_RP_ID=riven.example.com
-   RIVEN_SETTING__API_KEY=<shared-backend-api-key>
-   RIVEN_SETTING__FRONTEND_AUTH_SIGNING_SECRET=<shared-frontend-signing-secret>
-   AUTH_SECRET=<frontend-auth-secret>
+   RIVEN_SETTING__PUBLIC_URL=https://riven.example.com
+   RIVEN_SETTING__API_KEY=<openssl rand -hex 32>
+   RIVEN_SETTING__AUTH_SECRET=<openssl rand -hex 32>
    ```
+
+   Riven refuses to start without `API_KEY` and `AUTH_SECRET`. `PUBLIC_URL` is
+   the origin passkeys are bound to — changing it later invalidates every
+   registered passkey.
+
+   Open the UI once it is up: the first account you create becomes the admin,
+   and sign-up closes permanently after it.
 
 3. Start the stack:
 

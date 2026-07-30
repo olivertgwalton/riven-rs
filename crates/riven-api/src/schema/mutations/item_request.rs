@@ -6,7 +6,7 @@ use riven_queue::lifecycle::{upsert_requested_movie, upsert_requested_show};
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use crate::schema::auth::require_request_access;
+use crate::schema::auth::{Capability, require};
 
 use super::MutationStatusText;
 
@@ -81,7 +81,7 @@ impl ItemRequestMutations {
         ctx: &Context<'_>,
         input: MovieRequestInput,
     ) -> Result<RequestItemMutationResponse> {
-        require_request_access(ctx)?;
+        require(ctx, Capability::RequestItems)?;
         let job_queue = ctx.data::<Arc<JobQueue>>()?;
         let outcome = match upsert_requested_movie(
             &input.title,
@@ -137,7 +137,7 @@ impl ItemRequestMutations {
         ctx: &Context<'_>,
         input: ShowRequestInput,
     ) -> Result<RequestItemMutationResponse> {
-        require_request_access(ctx)?;
+        require(ctx, Capability::RequestItems)?;
         let job_queue = ctx.data::<Arc<JobQueue>>()?;
         let outcome = match upsert_requested_show(
             &input.title,
@@ -211,7 +211,7 @@ impl ItemRequestMutations {
         movies: Vec<MovieRequestInput>,
         shows: Vec<ShowRequestInput>,
     ) -> Result<RequestItemsResult> {
-        require_request_access(ctx)?;
+        require(ctx, Capability::RequestItems)?;
         let job_queue = ctx.data::<Arc<JobQueue>>()?;
         let mut seen: HashSet<String> = HashSet::new();
         let mut new_items: Vec<ItemRequest> = Vec::new();

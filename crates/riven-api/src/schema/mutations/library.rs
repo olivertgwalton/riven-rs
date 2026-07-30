@@ -7,7 +7,7 @@ use riven_queue::lifecycle::{upsert_requested_movie, upsert_requested_show};
 use riven_queue::{IndexJob, JobQueue};
 use std::sync::Arc;
 
-use crate::schema::auth::{require_library_access, require_settings_access};
+use crate::schema::auth::{Capability, require, require_settings_access};
 
 #[derive(Default)]
 pub struct LibraryMutations;
@@ -18,7 +18,7 @@ impl LibraryMutations {
     /// Returns true if the entry was found and deleted. The DB trigger on
     /// `filesystem_entries` recomputes the owning item's state automatically.
     async fn delete_filesystem_entry(&self, ctx: &Context<'_>, id: i64) -> Result<bool> {
-        require_library_access(ctx)?;
+        require(ctx, Capability::DeleteItems)?;
         let (deleted, _item_id) = repo::delete_filesystem_entry(id).await?;
         Ok(deleted)
     }
@@ -30,19 +30,19 @@ impl LibraryMutations {
 
     /// Reset items to Indexed state and clear failed_attempts.
     async fn reset_items(&self, ctx: &Context<'_>, ids: Vec<i64>) -> Result<i64> {
-        require_library_access(ctx)?;
+        require(ctx, Capability::ResetItems)?;
         Ok(repo::reset_items_by_ids(ids).await? as i64)
     }
 
     /// Clear failed_attempts for items so they will be retried.
     async fn retry_items(&self, ctx: &Context<'_>, ids: Vec<i64>) -> Result<i64> {
-        require_library_access(ctx)?;
+        require(ctx, Capability::RetryItems)?;
         Ok(repo::retry_items_by_ids(ids).await? as i64)
     }
 
     /// Remove items by ID.
     async fn remove_items(&self, ctx: &Context<'_>, ids: Vec<i64>) -> Result<i64> {
-        require_library_access(ctx)?;
+        require(ctx, Capability::DeleteItems)?;
         let job_queue = ctx.data::<Arc<JobQueue>>()?;
 
         let deleted_paths = repo::get_media_entry_paths_for_items(&ids)
@@ -70,13 +70,13 @@ impl LibraryMutations {
 
     /// Pause items.
     async fn pause_items(&self, ctx: &Context<'_>, ids: Vec<i64>) -> Result<i64> {
-        require_library_access(ctx)?;
+        require(ctx, Capability::PauseItems)?;
         Ok(repo::pause_items_by_ids(ids).await? as i64)
     }
 
     /// Unpause items (derives next state from current facts).
     async fn unpause_items(&self, ctx: &Context<'_>, ids: Vec<i64>) -> Result<i64> {
-        require_library_access(ctx)?;
+        require(ctx, Capability::PauseItems)?;
         Ok(repo::unpause_items_by_ids(ids).await? as i64)
     }
 
@@ -89,7 +89,7 @@ impl LibraryMutations {
         id: i64,
         season_numbers: Option<Vec<i32>>,
     ) -> Result<String> {
-        require_library_access(ctx)?;
+        require(ctx, Capability::ScrapeItems)?;
         let job_queue = ctx.data::<Arc<JobQueue>>()?;
 
         let item = repo::get_media_item(id)
@@ -124,7 +124,7 @@ impl LibraryMutations {
         tvdb_id: Option<String>,
         seasons: Option<Vec<i32>>,
     ) -> Result<MediaItem> {
-        require_library_access(ctx)?;
+        require(ctx, Capability::AddItems)?;
         let job_queue = ctx.data::<Arc<JobQueue>>()?;
         let outcome = match item_type {
             MediaItemType::Movie => {
@@ -167,7 +167,7 @@ impl LibraryMutations {
         tvdb_id: Option<String>,
         _seasons: Option<Vec<i32>>,
     ) -> Result<MediaItem> {
-        require_library_access(ctx)?;
+        require(ctx, Capability::AddItems)?;
         if !matches!(item_type, MediaItemType::Movie | MediaItemType::Show) {
             return Err(Error::new(
                 "Only Movie and Show types can be discovered directly",

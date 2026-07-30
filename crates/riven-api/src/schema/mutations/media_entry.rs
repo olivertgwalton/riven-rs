@@ -2,7 +2,7 @@ use async_graphql::*;
 use riven_db::entities::FileSystemEntry;
 use riven_db::repo;
 
-use crate::schema::auth::require_library_access;
+use crate::schema::auth::{Capability, require};
 
 use super::MutationStatusText;
 
@@ -30,7 +30,7 @@ impl MediaEntryMutations {
         id: i64,
         url: String,
     ) -> Result<SaveStreamUrlMutationResponse> {
-        require_library_access(ctx)?;
+        require(ctx, Capability::ScrapeItems)?;
 
         repo::update_stream_url(id, &url).await?;
 
