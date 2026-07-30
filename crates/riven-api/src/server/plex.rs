@@ -19,6 +19,7 @@
 //! four steps in Node.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode, header::USER_AGENT};
@@ -38,6 +39,17 @@ const PLEX_AUTH_URL: &str = "https://app.plex.tv/auth#?";
 /// `provider_id` on the account row. Matches what the TypeScript flow wrote, so
 /// a user who linked Plex before the migration keeps the same account row.
 const PROVIDER_ID: &str = "plex";
+
+/// Total deadline for each call to plex.tv.
+///
+/// `stream_client` is shared with the VFS, which deliberately sets only a
+/// `read_timeout` — a total deadline there would cap throughput on a
+/// multi-megabyte range read rather than detect a fault. These are small JSON
+/// requests to a third party, so the opposite is wanted: a server that accepts
+/// the connection and then trickles forever must not pin this handler task.
+/// Applied per request, which overrides the client-level policy for these calls
+/// only.
+const PLEX_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Identifies this installation to Plex. Stable per instance: Plex ties the PIN
 /// and the resulting token to it, so a value that changed per request would
@@ -129,6 +141,7 @@ pub(super) async fn start(State(state): State<ApiState>) -> Response {
         .post(PLEX_PINS_URL)
         .headers(plex_headers(&state, None))
         .query(&[("strong", "true")])
+        .timeout(PLEX_REQUEST_TIMEOUT)
         .send()
         .await;
 
@@ -177,6 +190,7 @@ pub(super) async fn poll(
         .stream_client
         .get(format!("{PLEX_PINS_URL}/{pin_id}"))
         .headers(plex_headers(&state, None))
+        .timeout(PLEX_REQUEST_TIMEOUT)
         .send()
         .await
     {
@@ -196,6 +210,7 @@ pub(super) async fn poll(
         .stream_client
         .get(PLEX_USER_URL)
         .headers(plex_headers(&state, Some(&token)))
+        .timeout(PLEX_REQUEST_TIMEOUT)
         .send()
         .await
     {

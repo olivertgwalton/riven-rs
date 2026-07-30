@@ -1,5 +1,6 @@
 use axum::http::HeaderMap;
 use chrono::Utc;
+use subtle::ConstantTimeEq;
 
 use better_auth::prelude::{AuthSession, AuthUser};
 
@@ -40,7 +41,7 @@ fn api_key_matches(configured: Option<&str>, headers: &HeaderMap, query: Option<
         .or_else(|| headers.get("authorization"))
         .and_then(|v| v.to_str().ok())
         .map(|s| s.trim_start_matches("Bearer ").trim());
-    if header_value == Some(expected) {
+    if header_value.is_some_and(|value| secret_eq(value, expected)) {
         return true;
     }
     let query_value = query.and_then(|q| {
@@ -48,7 +49,15 @@ fn api_key_matches(configured: Option<&str>, headers: &HeaderMap, query: Option<
             .find(|(key, _)| key == "api_key")
             .map(|(_, value)| value.into_owned())
     });
-    query_value.as_deref() == Some(expected)
+    query_value.is_some_and(|value| secret_eq(&value, expected))
+}
+
+/// Constant-time comparison, matching how `legacy_password` compares hashes.
+///
+/// The lengths are compared first and in variable time, which leaks only the
+/// length of the configured key — `ct_eq` requires equal-length inputs anyway.
+fn secret_eq(candidate: &str, expected: &str) -> bool {
+    candidate.len() == expected.len() && bool::from(candidate.as_bytes().ct_eq(expected.as_bytes()))
 }
 
 /// The addon token for this instance, or `None` when no API key is configured.
@@ -138,10 +147,20 @@ fn session_token(headers: &HeaderMap, cookie_name: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-/// `Ok(None)` means "no session was presented" — the caller should fall back to
-/// the API key. An *invalid* session is `Err(Unauthorized)` rather than a
-/// fallback, so a stale cookie can't silently escalate to the API key's admin
-/// role on an instance where the key is unset.
+/// `Ok(None)` means "no session was established from what was presented" — the
+/// caller should fall back to the API key.
+///
+/// A credential that matches no session row yields `Ok(None)` rather than an
+/// error, because `Authorization: Bearer` carries *either* a session token or
+/// the API key and there is no way to tell them apart before the lookup. Failing
+/// here made `Authorization: Bearer <api-key>` — a documented, supported way to
+/// call the API — impossible: it was read as a session token, found nothing, and
+/// returned 401 without ever reaching `has_valid_api_key`.
+///
+/// A session that *exists* but is unusable (expired, or its user banned) still
+/// returns `Err`. That is what the escalation guard is for, and it is intact:
+/// falling through only offers the value to `api_key_matches`, which grants
+/// nothing unless it equals the configured key.
 async fn session_role(
     state: &ApiState,
     headers: &HeaderMap,
@@ -152,14 +171,13 @@ async fn session_role(
     };
 
     let store = state.auth.store();
-    let session = store
-        .get_session(&token)
-        .await
-        .map_err(|error| {
-            tracing::warn!(%error, "session lookup failed");
-            AuthError::Unauthorized
-        })?
-        .ok_or(AuthError::Unauthorized)?;
+    let Some(session) = store.get_session(&token).await.map_err(|error| {
+        tracing::warn!(%error, "session lookup failed");
+        AuthError::Unauthorized
+    })?
+    else {
+        return Ok(None);
+    };
 
     if session.expires_at() <= Utc::now() {
         tracing::debug!("auth rejected: session expired");
@@ -228,6 +246,30 @@ mod tests {
         // Same for the Stremio addon token, whose URLs carry no cookie at all.
         assert!(!stremio_token_matches(None, "any-token"));
         assert!(!stremio_token_matches(Some(""), ""));
+    }
+
+    /// `Authorization: Bearer <api-key>` is documented as a supported way to
+    /// call the API, and `api_key_matches` reads that header — but every such
+    /// request was rejected before reaching it, because `session_role` treated
+    /// the value as a session token and failed on the miss.
+    #[test]
+    fn an_api_key_presented_as_a_bearer_token_is_accepted() {
+        const KEY: &str = "s3cret";
+        assert!(api_key_matches(
+            Some(KEY),
+            &headers_with("authorization", &format!("Bearer {KEY}")),
+            None
+        ));
+    }
+
+    #[test]
+    fn secret_comparison_rejects_near_misses_and_length_differences() {
+        assert!(secret_eq("abc123", "abc123"));
+        assert!(!secret_eq("abc124", "abc123"));
+        assert!(!secret_eq("abc12", "abc123"));
+        assert!(!secret_eq("abc1234", "abc123"));
+        assert!(!secret_eq("", "abc123"));
+        assert!(secret_eq("", ""));
     }
 
     #[test]

@@ -275,8 +275,44 @@ fn build_cors_layer(allowed: Vec<String>) -> CorsLayer {
         );
         return CorsLayer::permissive();
     }
-    let origins: Vec<axum::http::HeaderValue> =
-        allowed.iter().filter_map(|o| o.parse().ok()).collect();
+
+    // `*` cannot be paired with credentials — the Fetch spec forbids it and
+    // `tower-http` panics rather than emitting a header browsers would refuse.
+    // Treat it as the operator asking for the open configuration, which is the
+    // permissive layer below, not as one entry in a list.
+    if allowed.iter().any(|origin| origin.trim() == "*") {
+        tracing::warn!(
+            "RIVEN_SETTING__CORS_ALLOWED_ORIGINS contains `*` — falling back to \
+             permissive, cookie-less CORS. A wildcard origin cannot carry credentials, \
+             so list the exact origins instead if a cross-origin frontend needs a session"
+        );
+        return CorsLayer::permissive();
+    }
+
+    let mut origins: Vec<axum::http::HeaderValue> = Vec::with_capacity(allowed.len());
+    for origin in &allowed {
+        match origin.parse() {
+            Ok(value) => origins.push(value),
+            // Previously `filter_map(…ok())`, which dropped typos in silence. A
+            // single bad entry is worth naming; an all-bad list is worse than
+            // no list, because `AllowOrigin::list([])` matches nothing and every
+            // cross-origin request fails with no explanation.
+            Err(_) => tracing::error!(
+                %origin,
+                "ignoring unparseable entry in RIVEN_SETTING__CORS_ALLOWED_ORIGINS"
+            ),
+        }
+    }
+
+    if origins.is_empty() {
+        tracing::error!(
+            "every entry in RIVEN_SETTING__CORS_ALLOWED_ORIGINS was unparseable — \
+             falling back to permissive, cookie-less CORS rather than an allowlist \
+             that would reject every cross-origin request in silence"
+        );
+        return CorsLayer::permissive();
+    }
+
     CorsLayer::new()
         .allow_origin(AllowOrigin::list(origins))
         .allow_credentials(true)

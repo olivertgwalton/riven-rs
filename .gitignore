@@ -1,3 +1,8 @@
 target/
 .env
 **/.DS_Store
+
+# Auth imports are deployment-specific and contain password hashes.
+# See docs/migrating-auth-from-the-typescript-frontend.md
+crates/riven-db/migrations/data/
+*import_frontend_auth*.sql

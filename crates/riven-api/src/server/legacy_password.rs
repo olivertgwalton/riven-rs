@@ -97,23 +97,49 @@ impl DualFormatHasher {
             .verify_password(password.as_bytes(), &parsed)
             .is_ok())
     }
-}
 
-#[async_trait]
-impl PasswordHasher for DualFormatHasher {
-    async fn hash(&self, password: &str) -> AuthResult<String> {
+    fn hash_argon2(password: &str) -> AuthResult<String> {
         let salt = SaltString::generate(&mut OsRng);
         Argon2::default()
             .hash_password(password.as_bytes(), &salt)
             .map(|hash| hash.to_string())
             .map_err(|error| AuthError::internal(format!("failed to hash password: {error}")))
     }
+}
+
+/// Run one KDF off the async executor.
+///
+/// Both algorithms here are deliberately expensive — Argon2's defaults cost
+/// ~19 MiB and two passes, and scrypt at `log_n = 14` is comparable — so running
+/// them inline parks a runtime worker for the whole of every sign-in, and a
+/// handful of concurrent attempts stalls unrelated request handling on the same
+/// thread. The work is CPU-bound with no await points, which is exactly what
+/// `spawn_blocking` is for.
+async fn off_executor<T, F>(work: F) -> AuthResult<T>
+where
+    F: FnOnce() -> AuthResult<T> + Send + 'static,
+    T: Send + 'static,
+{
+    tokio::task::spawn_blocking(work)
+        .await
+        .map_err(|error| AuthError::internal(format!("password hashing task failed: {error}")))?
+}
+
+#[async_trait]
+impl PasswordHasher for DualFormatHasher {
+    async fn hash(&self, password: &str) -> AuthResult<String> {
+        let password = password.to_string();
+        off_executor(move || Self::hash_argon2(&password)).await
+    }
 
     async fn verify(&self, hash: &str, password: &str) -> AuthResult<bool> {
-        match Self::as_scrypt(hash) {
-            Some((salt_hex, key_hex)) => Self::verify_scrypt(salt_hex, key_hex, password),
-            None => Self::verify_argon2(hash, password),
-        }
+        let hash = hash.to_string();
+        let password = password.to_string();
+        off_executor(move || match Self::as_scrypt(&hash) {
+            Some((salt_hex, key_hex)) => Self::verify_scrypt(salt_hex, key_hex, &password),
+            None => Self::verify_argon2(&hash, &password),
+        })
+        .await
     }
 }
 

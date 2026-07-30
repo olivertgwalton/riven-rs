@@ -29,8 +29,9 @@ anything outside the markers survives regeneration. -->
 
 | Variable | Kind | Read at |
 | --- | --- | --- |
-| `ORIGIN` | variable | `crates/riven-app/src/main.rs:273`<br>`crates/riven-app/src/main.rs:287` |
-| `RIVEN_SETTING__API_KEY` | variable | `crates/riven-app/src/main.rs:379` |
+| `ORIGIN` | variable | `crates/riven-app/src/main.rs:340`<br>`crates/riven-app/src/main.rs:358` |
+| `RIVEN_SETTING__API_KEY` | variable | `crates/riven-app/src/main.rs:520` |
+| `RIVEN_SETTING__PUBLIC_URL` | variable | `crates/riven-app/src/main.rs:146` |
 | `RIVEN_USENET_AUTO_REPAIR` | variable | `crates/riven-app/src/usenet.rs:49` |
 | `RIVEN_USENET_HEALTH_SCAN_BATCH` | variable | `crates/riven-app/src/usenet.rs:46` |
 | `RIVEN_USENET_HEALTH_SCAN_INTERVAL_SECS` | variable | `crates/riven-app/src/usenet.rs:43` |
@@ -45,7 +46,7 @@ anything outside the markers survives regeneration. -->
 | `OTEL_SERVICE_NAME` | variable | `crates/riven-core/src/logging.rs:202` |
 | `RIVEN_MEMORY_LIMIT_MB` | variable | `crates/riven-core/src/cache.rs:85` |
 | `RIVEN_READ_AHEAD_CACHE_BYTES` | variable | `crates/riven-core/src/cache.rs:34` |
-| `RIVEN_SETTING__` | prefix | `crates/riven-core/src/settings/app.rs:133` |
+| `RIVEN_SETTING__` | prefix | `crates/riven-core/src/settings/app.rs:138` |
 | `RIVEN_USENET_CACHE_BYTES` | variable | `crates/riven-core/src/cache.rs:51` |
 | `RIVEN_USENET_META_CACHE_BYTES` | variable | `crates/riven-core/src/cache.rs:37` |
 | `RIVEN_USENET_NZB_CACHE_BYTES` | variable | `crates/riven-core/src/cache.rs:39` |

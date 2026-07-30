@@ -97,10 +97,88 @@ fn validate_auth_settings(settings: &riven_core::settings::RivenSettings) -> Res
     Ok(())
 }
 
+/// Whether `host` is a wildcard bind address rather than somewhere a browser
+/// can go. Parsed rather than string-matched so `::`, `[::]` and the expanded
+/// `0:0:0:0:0:0:0:0` are all caught alongside `0.0.0.0`.
+fn is_unspecified_host(host: &str) -> bool {
+    host.trim()
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .parse::<std::net::IpAddr>()
+        .is_ok_and(|ip| ip.is_unspecified())
+}
+
+/// The host component of a URL, without scheme, port or path.
+fn url_host(url: &str) -> Option<&str> {
+    let after_scheme = url.split_once("://").map(|(_, rest)| rest).unwrap_or(url);
+    let authority = after_scheme
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or(after_scheme);
+    // An IPv6 literal keeps its brackets, so only split a port off after them.
+    let host = match authority.rsplit_once(']') {
+        Some((bracketed, _)) => &authority[..bracketed.len() + 1],
+        None => authority.split(':').next().unwrap_or(authority),
+    };
+    (!host.is_empty()).then_some(host)
+}
+
+/// The public origin browsers reach riven at.
+///
+/// Explicit configuration wins, then `ORIGIN` (the same value the CORS allowlist
+/// falls back to), then the bind address.
+///
+/// The bind address is the interesting case: `gql_host` defaults to `0.0.0.0`,
+/// which is meaningful to `bind()` and meaningless to a browser. Used verbatim
+/// it became better-auth's `base_url`, which sets the cookie scope and — because
+/// the passkey relying-party ID is that URL's host — produced an RP ID of
+/// `0.0.0.0`, which every browser rejects. Passkeys then failed at registration
+/// with nothing in the logs pointing here. A wildcard bind is normal, so it is
+/// resolved to loopback rather than refused; a wildcard someone typed into
+/// `PUBLIC_URL` or `ORIGIN` is a mistake, so it fails the boot.
+fn resolve_public_url(
+    configured: &str,
+    origin_env: Option<String>,
+    gql_host: &str,
+    gql_port: u16,
+) -> Result<String> {
+    for (value, source) in [
+        (configured.trim(), "RIVEN_SETTING__PUBLIC_URL"),
+        (origin_env.as_deref().map(str::trim).unwrap_or(""), "ORIGIN"),
+    ] {
+        if value.is_empty() {
+            continue;
+        }
+        anyhow::ensure!(
+            !url_host(value).is_some_and(is_unspecified_host),
+            "{source} is set to `{value}`, whose host is a wildcard bind address. \
+             It must be the origin a browser reaches riven at — passkeys are bound \
+             to this hostname and will not register against a wildcard."
+        );
+        return Ok(value.to_string());
+    }
+
+    if is_unspecified_host(gql_host) {
+        let fallback = format!("http://localhost:{gql_port}");
+        tracing::info!(
+            %gql_host,
+            public_url = %fallback,
+            "no public URL configured; assuming loopback because the bind host is a wildcard"
+        );
+        return Ok(fallback);
+    }
+    Ok(format!("http://{gql_host}:{gql_port}"))
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let mut settings = riven_core::settings::RivenSettings::load()?;
     validate_auth_settings(&settings)?;
+    // Validation accepted the trimmed form, so make that the stored form.
+    // Otherwise a key with stray whitespace passes the check and then fails
+    // every comparison: `api_key_matches` trims the incoming header, and the
+    // Stremio addon token is an HMAC keyed on the untrimmed value.
+    settings.api_key = settings.api_key.trim().to_string();
     // `connect` opens the SeaORM connection and publishes it as the process-wide
     // global that the migrated repo functions read via `riven_db::orm()`. It must
     // run before any repo call. The returned handle is only needed locally for
@@ -257,6 +335,13 @@ async fn main() -> Result<()> {
     let gql_port = settings.gql_port;
     // Auth configuration was validated before the database was opened; see
     // `validate_auth_settings`.
+    let public_url = resolve_public_url(
+        &settings.public_url,
+        std::env::var("ORIGIN").ok(),
+        &gql_host,
+        gql_port,
+    )?;
+
     let gql_handle = tokio::spawn({
         let jq = job_queue.clone();
         let reg = registry.clone();
@@ -281,14 +366,7 @@ async fn main() -> Result<()> {
         // Cookie scope and trusted redirect targets are derived from this, so
         // prefer explicit config, then the same ORIGIN the CORS allowlist uses,
         // then the bind address for local runs.
-        let public_url = if !settings.public_url.is_empty() {
-            settings.public_url.clone()
-        } else {
-            std::env::var("ORIGIN")
-                .ok()
-                .filter(|origin| !origin.trim().is_empty())
-                .unwrap_or_else(|| format!("http://{gql_host}:{gql_port}"))
-        };
+        let public_url = public_url.clone();
         let log_tx = log_tx.clone();
         let notif_tx = notification_tx.clone();
         let log_control = log_control.clone();
@@ -345,7 +423,7 @@ async fn main() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::validate_auth_settings;
+    use super::{resolve_public_url, url_host, validate_auth_settings};
     use riven_core::settings::RivenSettings;
 
     fn settings(api_key: &str, auth_secret: &str) -> RivenSettings {
@@ -357,6 +435,69 @@ mod tests {
     }
 
     const GOOD_SECRET: &str = "0123456789abcdef0123456789abcdef";
+
+    /// The bug this guards: `0.0.0.0` reaching better-auth as `base_url` makes
+    /// the passkey relying-party ID `0.0.0.0`, which browsers reject.
+    #[test]
+    fn a_wildcard_bind_host_resolves_to_loopback() {
+        assert_eq!(
+            resolve_public_url("", None, "0.0.0.0", 8080).unwrap(),
+            "http://localhost:8080"
+        );
+        assert_eq!(
+            resolve_public_url("", None, "::", 8080).unwrap(),
+            "http://localhost:8080"
+        );
+        // A real bind host is already an origin and is left alone.
+        assert_eq!(
+            resolve_public_url("", None, "127.0.0.1", 3000).unwrap(),
+            "http://127.0.0.1:3000"
+        );
+    }
+
+    #[test]
+    fn explicit_configuration_wins_over_the_bind_address() {
+        assert_eq!(
+            resolve_public_url("https://riven.example.com", None, "0.0.0.0", 8080).unwrap(),
+            "https://riven.example.com"
+        );
+        assert_eq!(
+            resolve_public_url(
+                "",
+                Some("https://from-origin.example".to_string()),
+                "0.0.0.0",
+                8080
+            )
+            .unwrap(),
+            "https://from-origin.example"
+        );
+    }
+
+    /// A wildcard someone typed is a mistake, not a default to paper over.
+    #[test]
+    fn an_explicitly_configured_wildcard_is_refused() {
+        for (configured, origin) in [
+            ("http://0.0.0.0:8080", None),
+            ("https://[::]", None),
+            ("", Some("http://0.0.0.0:8080".to_string())),
+        ] {
+            let error = resolve_public_url(configured, origin, "127.0.0.1", 8080)
+                .expect_err("a wildcard host must not boot")
+                .to_string();
+            assert!(error.contains("wildcard bind address"), "{error}");
+        }
+    }
+
+    #[test]
+    fn url_hosts_are_extracted_without_scheme_port_or_path() {
+        assert_eq!(
+            url_host("https://riven.example.com/x?y"),
+            Some("riven.example.com")
+        );
+        assert_eq!(url_host("http://0.0.0.0:8080"), Some("0.0.0.0"));
+        assert_eq!(url_host("https://[::1]:8443/a"), Some("[::1]"));
+        assert_eq!(url_host("riven.example.com"), Some("riven.example.com"));
+    }
 
     #[test]
     fn a_complete_configuration_is_accepted() {

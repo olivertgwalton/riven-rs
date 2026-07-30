@@ -62,8 +62,13 @@ pub struct RivenSettings {
     /// Rotating it logs everyone out.
     pub auth_secret: String,
     /// Public origin browsers reach riven at, e.g. `https://riven.example.com`.
-    /// `better-auth` derives cookie scope and trusted redirect targets from it;
-    /// falls back to `http://{gql_host}:{gql_port}` for local runs.
+    ///
+    /// `better-auth` derives cookie scope, trusted redirect targets and the
+    /// passkey relying-party ID from it, so it must be a hostname a browser can
+    /// resolve. When unset, `resolve_public_url` in `riven-app` falls back to
+    /// `ORIGIN` and then to the bind address — substituting loopback when that
+    /// bind host is a wildcard, since `0.0.0.0` is not an origin. A wildcard set
+    /// here explicitly is refused at startup rather than silently rewritten.
     pub public_url: String,
 
     /// Comma-separated list of allowed CORS origins for the API.
