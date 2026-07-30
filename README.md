@@ -25,6 +25,7 @@ THIS IS AN ALTERNATIVE, RIVEN-TS IS THE MAIN DEVELOPMENT EFFORT
 | `crates/riven-rank` | Filename parsing, stream ranking, and release scoring helpers. |
 | `crates/riven-vfs` | FUSE filesystem and stream-aware virtual media files. |
 | `crates/plugin-*` | Built-in plugins for metadata, stream providers, media servers, content lists, notifications, dashboard, calendar, logs, and integrations. |
+| `frontend` | SvelteKit SPA, built to static files and served by riven itself. Its GraphQL types are generated from `schema.graphql`. |
 
 ## Requirements
 
@@ -65,10 +66,9 @@ THIS IS AN ALTERNATIVE, RIVEN-TS IS THE MAIN DEVELOPMENT EFFORT
    docker compose up --build
    ```
 
-The compose file starts `riven`, PostgreSQL, Redis, Jellyfin, and a `riven-frontend` container. It mounts `${RIVEN_STORAGE_PATH}` into Riven and Jellyfin, grants the Riven container FUSE access, and exposes:
+The compose file starts `riven`, PostgreSQL, Redis and Jellyfin. There is no separate frontend container: the image builds the SPA from `frontend/` and riven serves it itself from `RIVEN_STATIC_DIR`, so the UI and the API share one origin — which is what keeps the session cookie first-party. It mounts `${RIVEN_STORAGE_PATH}` into Riven and Jellyfin, grants the Riven container FUSE access, and exposes:
 
-- Riven API: `http://localhost:8080`
-- Frontend: `http://localhost:3000`
+- Riven (UI and API): `http://localhost:8080`
 - Jellyfin: `http://localhost:8096`
 
 ## Configuration
@@ -82,8 +82,9 @@ Common settings:
 | `RIVEN_SETTING__DATABASE_URL` | `postgresql://localhost/riven` | PostgreSQL connection string. |
 | `RIVEN_SETTING__REDIS_URL` | `redis://localhost:6379` | Redis connection string. |
 | `RIVEN_SETTING__GQL_PORT` | `8080` | API server port. |
-| `RIVEN_SETTING__API_KEY` | empty | Optional bearer/API key required by GraphQL. Empty disables API auth. |
-| `RIVEN_SETTING__FRONTEND_AUTH_SIGNING_SECRET` | empty | Shared secret used to verify frontend-signed RBAC headers on GraphQL requests. |
+| `RIVEN_SETTING__API_KEY` | — | **Required.** Bearer/API key for machine callers; also seeds the Stremio addon token. Riven will not start without it. |
+| `RIVEN_SETTING__AUTH_SECRET` | — | **Required**, minimum 32 characters. Signs session tokens; rotating it signs everyone out. |
+| `RIVEN_SETTING__PUBLIC_URL` | bind address | Public origin browsers reach riven at. Sets cookie scope and the passkey relying-party ID. |
 | `RIVEN_SETTING__LOG_DIRECTORY` | `./logs` | Directory for log output. |
 | `RIVEN_SETTING__VFS_MOUNT_PATH` | empty | VFS mount path. |
 | `RIVEN_SETTING__FILESYSTEM__MOUNT_PATH` | empty | Preferred VFS mount path. |
@@ -120,9 +121,9 @@ When running locally on the default port:
 - Apalis board UI: `http://localhost:8080/board`
 - Media bridge: `GET` or `HEAD http://localhost:8080/media/{entry_id}`
 
-If `RIVEN_SETTING__API_KEY` is set, GraphQL requests must include the configured key with either the `x-api-key` header, an `Authorization: Bearer <key>` header, or an `?api_key=<key>` query parameter (needed for Seerr's webhook, which POSTs to `/graphql` calling the `seerrHandleWebhook` mutation and can't set custom headers — see `crates/plugin-seerr`).
+Every GraphQL request must present a credential: either a signed-in session cookie, or the configured `RIVEN_SETTING__API_KEY` via the `x-api-key` header, an `Authorization: Bearer <key>` header, or an `?api_key=<key>` query parameter (that last one is for Seerr's webhook, which POSTs to `/graphql` calling `seerrHandleWebhook` and cannot set custom headers — see `crates/plugin-seerr`). There is no anonymous access.
 
-When browser traffic goes through `riven-frontend`, the frontend signs the authenticated user's role claims and the backend verifies them with `RIVEN_SETTING__FRONTEND_AUTH_SIGNING_SECRET` before applying RBAC. `riven-frontend` can read that same variable directly in shared deployments, or `BACKEND_AUTH_SIGNING_SECRET` in standalone frontend deployments. Direct non-frontend API-key clients still work without those signed headers.
+Roles come from the session riven verifies against its own store, and each resolver names the capability it needs (`crates/riven-core/src/auth.rs`). The frontend never derives permissions — it asks the `viewer` query what it may do.
 
 ## Plugins
 
@@ -152,8 +153,20 @@ make lint         # cargo clippy --workspace --all-targets -- -D warnings
 make test         # cargo test --workspace
 make docs         # regenerate docs/plugins from the plugins' settings schemas
 make docs-check   # fail if docs/plugins is out of date
-make verify       # fmt-check, check, lint, test, and docs-check
+make verify       # fmt-check, check, lint, test, and docs-check (Rust only)
+
+make frontend-install   # pnpm install --frozen-lockfile
+make frontend-lint      # prettier + eslint
+make frontend-check     # svelte-check
+make frontend-build     # build the SPA into frontend/build
+
+make schema       # regenerate schema.graphql, then the frontend's types from it
+make schema-check # fail if either committed artefact is stale
+make verify-all   # everything above, matching CI
 ```
+
+`schema.graphql` and `frontend/src/lib/gql/` are generated and committed. Run
+`make schema` after changing the GraphQL API, or CI will fail on the drift.
 
 For a direct release build:
 

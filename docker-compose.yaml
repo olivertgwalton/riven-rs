@@ -1,6 +1,6 @@
-# The frontend is no longer a service: riven serves the static bundle itself
-# from RIVEN_STATIC_DIR, baked into its image. Build the bundle first:
-#   docker build -t riven-frontend:bundle ../riven-frontend
+# The frontend is not a service: riven serves the static bundle itself from
+# RIVEN_STATIC_DIR, and the image builds it from `frontend/` in this repo. No
+# separate build step.
 services:
     postgres:
         image: postgres:18-alpine

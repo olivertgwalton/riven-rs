@@ -26,3 +26,80 @@ jobs:
 
       - name: Verify workspace standards
         run: make verify
+
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint
+        run: pnpm run lint
+
+      - name: Typecheck
+        run: pnpm run check
+
+      - name: Build
+        run: pnpm run build
+
+  # The frontend's types are generated from the backend's schema, and both
+  # artefacts are committed. Regenerating them here catches the drift a
+  # committed artefact otherwise hides — a resolver change nobody re-ran
+  # codegen for. This is the check that only becomes possible in one repo.
+  schema:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - name: Regenerate schema.graphql
+        run: cargo run --quiet -p riven-api --example dump_schema
+
+      - name: Regenerate frontend types
+        working-directory: frontend
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm run codegen
+
+      - name: Fail if either is out of date
+        run: |
+          if ! git diff --quiet -- schema.graphql frontend/src/lib/gql; then
+            echo "::error::schema.graphql or frontend/src/lib/gql is stale."
+            echo "Run: cargo run -p riven-api --example dump_schema && (cd frontend && pnpm codegen)"
+            git --no-pager diff -- schema.graphql frontend/src/lib/gql
+            exit 1
+          fi

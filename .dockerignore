@@ -17,11 +17,15 @@ target/
 *.md
 LICENSE*
 
-# Frontend assets — built separately, served via RIVEN_STATIC_DIR
-frontend/
-
 # Benchmarks (not part of the binary build)
 benchmarks/
 
-# Node tooling that may sneak in
-node_modules/
+# Node tooling. `frontend/` itself IS part of the build context now — the image
+# compiles it — but its install and build outputs must not be.
+#
+# `**/` matters: a bare `node_modules/` anchors to the context root, so it would
+# not match `frontend/node_modules`, and `COPY frontend/ .` would then paste a
+# host install (with host-platform binaries) over the one done in the image.
+**/node_modules
+**/.svelte-kit
+frontend/build/

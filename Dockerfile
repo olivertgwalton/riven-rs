@@ -1,9 +1,3 @@
-# Built from the riven-frontend repo, which emits a `scratch` image holding only
-# the static files. Declared here because an ARG used by a FROM must precede the
-# first FROM in the file. Build it first:
-#   docker build -t riven-frontend:bundle ../riven-frontend
-ARG FRONTEND_IMAGE=riven-frontend:bundle
-
 # ── Base layer with toolchain + cargo-chef ────────────────────────────────────
 FROM rust:alpine AS chef
 # openssl-dev/-libs-static are for webauthn-rs, which better-auth's passkey
@@ -37,11 +31,28 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     cp target/release/riven /riven
 
 # ── Frontend bundle ───────────────────────────────────────────────────────────
-# Built from the riven-frontend repo, which now emits a `scratch` image holding
-# only the static files. Build it first:
-#   docker build -t riven-frontend:bundle ../riven-frontend
-# Override with `--build-arg FRONTEND_IMAGE=` to pin a registry tag.
-FROM ${FRONTEND_IMAGE} AS frontend
+# Built here, from `frontend/` in this repo. It used to be `FROM
+# ${FRONTEND_IMAGE}` pointing at a `riven-frontend:bundle` tag built by hand from
+# a sibling checkout — which meant CI had no such tag, buildx resolved the name
+# against Docker Hub, and the build died on `pull access denied`.
+#
+# Manifest files are copied on their own so the install layer caches on the
+# lockfile rather than on every source edit.
+FROM node:26-alpine AS frontend
+ENV PNPM_HOME=/pnpm
+ENV PATH=$PNPM_HOME:$PATH
+# pnpm 11 re-checks dependency state before running a script and prompts before
+# purging anything it thinks is stale; there is no tty here to answer it.
+ENV CI=true
+RUN npm install -g --force corepack@latest && corepack enable
+WORKDIR /app
+
+COPY frontend/package.json frontend/pnpm-lock.yaml frontend/pnpm-workspace.yaml frontend/.npmrc ./
+RUN --mount=type=cache,id=pnpm,target=/pnpm/store \
+    pnpm install --frozen-lockfile
+
+COPY frontend/ .
+RUN pnpm run build
 
 # ── Runtime ───────────────────────────────────────────────────────────────────
 FROM alpine:3.21
@@ -54,7 +65,7 @@ COPY --from=builder /riven /usr/local/bin/riven
 # links into client-side routes resolve without a separate web server. Serving
 # both from one origin is the point — the session cookie stays first-party and
 # there is no proxy hop in front of /media or /stremio.
-COPY --from=frontend /dist /riven/frontend
+COPY --from=frontend /app/build /riven/frontend
 ENV RIVEN_STATIC_DIR=/riven/frontend
 
 RUN mkdir -p /logs && \

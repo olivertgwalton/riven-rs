@@ -1,0 +1,6 @@
+allowBuilds:
+    "@tailwindcss/oxide": true
+    esbuild: true
+
+minimumReleaseAgeExclude:
+    - "@lucide/svelte@1.18.0"

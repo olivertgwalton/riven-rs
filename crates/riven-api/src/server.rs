@@ -150,7 +150,7 @@ pub async fn start_server(config: StartServerConfig) -> Result<()> {
     let board_ui = Router::new().fallback_service(ServeUI::new());
 
     let static_dir =
-        std::env::var("RIVEN_STATIC_DIR").unwrap_or_else(|_| "./frontend/dist".to_string());
+        std::env::var("RIVEN_STATIC_DIR").unwrap_or_else(|_| "./frontend/build".to_string());
     let serve_frontend =
         ServeDir::new(&static_dir).fallback(ServeFile::new(format!("{static_dir}/index.html")));
 
