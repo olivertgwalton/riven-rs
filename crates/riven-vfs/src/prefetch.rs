@@ -1,12 +1,13 @@
 //! One bounded read-ahead engine for every immutable network source.
 //!
 //! HTTP/debrid uses an 8 MiB fetch unit and buffers eight of them. Usenet
-//! reports its decoded article size instead, and there the cushion is set in
-//! bytes and divided by that size — a depth counted in articles is whatever
-//! the poster chose, and the same "eight" was 5.6 MB on one post and 30 MB on
-//! another. Depth is held to twice the number of fetches allowed on the wire,
-//! so a slow article never leaves the window with nothing left to schedule.
-//! Demand units are always dispatched before speculative units.
+//! reports its decoded article size instead, and buffers eight articles — the
+//! same depth streamnzb uses. A count rather than a byte budget means the
+//! cushion's duration varies with the poster's segment size; that is accepted
+//! deliberately, to stream at streamnzb's depth. Depth is held to at least twice
+//! the number of fetches allowed on the wire, so a slow article never leaves the
+//! window with nothing left to schedule. Demand units are always dispatched
+//! before speculative units.
 //!
 //! Decoded units live in one process-wide [`UnitCache`] keyed by file; the
 //! window and cursor stay per-handle. streamnzb splits it the same way, and the
@@ -33,15 +34,17 @@ const HTTP_CHUNK: u64 = 8 * MIB;
 /// Units of cushion on the HTTP origin, where a unit is one 8 MiB range
 /// request and the depth is already 64 MB of bytes.
 const HTTP_READ_AHEAD_UNITS: usize = 8;
-/// Cushion held ahead of the cursor on an article origin, in **bytes**.
+/// Cushion held ahead of the cursor on an article origin, in **articles**.
 ///
-/// Counted in units this was meaningless: a unit is one article, and posters
-/// choose the segment size. The same depth of 8 bought 5.6 MB on a 720 KiB
-/// post and 30 MB on a 3.84 MB one — and 30 MB is 3.0s at the 81 Mbps a UHD
-/// remux wants, against a median 4.7s to fetch one article. The cushion has to
-/// be measured in seconds of playback, so it is measured in bytes here and
-/// divided into units by whatever size this post happens to use.
-const ARTICLE_READ_AHEAD_BYTES: u64 = 96 * MIB;
+/// Set to match streamnzb's `DefaultReadAhead` (8) in
+/// `pkg/media/loader/segment_reader.go`, so the two stream with the same depth.
+///
+/// Note the tradeoff this accepts: a unit is one article and posters choose the
+/// segment size, so a fixed count buys a cushion whose *duration* varies with
+/// the post — 8 articles is ~5.6 MB on a 720 KiB post but ~30 MB on a 3.84 MB
+/// one. The previous policy sized the cushion in bytes (96 MiB) for that reason.
+/// Matching streamnzb's count was chosen deliberately over matching its bytes.
+const ARTICLE_READ_AHEAD_UNITS: usize = 8;
 /// Article fetches allowed on the wire at once, independent of the cushion
 /// above.
 ///
@@ -132,14 +135,12 @@ impl Config {
         if !self.articles {
             return HTTP_READ_AHEAD_UNITS;
         }
-        // Deep enough to hold the cushion, and never less than twice the wire
-        // is wide — that margin is what [`Config::max_in_flight`] needs. The
-        // floor is itself clamped to twice the cushion, so an unusually large
-        // segment buys the margin in units without buying it in memory.
-        let by_bytes = ARTICLE_READ_AHEAD_BYTES.div_ceil(self.unit) as usize;
-        let floor = (ARTICLE_MAX_IN_FLIGHT_UNITS * 2)
-            .min((ARTICLE_READ_AHEAD_BYTES * 2).div_ceil(self.unit) as usize);
-        by_bytes.max(floor).max(2)
+        // A flat article count, matching streamnzb. Floored at twice the wire so
+        // [`Config::max_in_flight`] keeps its margin whatever the constants are
+        // set to.
+        ARTICLE_READ_AHEAD_UNITS
+            .max(ARTICLE_MAX_IN_FLIGHT_UNITS * 2)
+            .max(2)
     }
 
     /// How many unit fetches may be on the wire at once.
@@ -685,16 +686,6 @@ mod tests {
         .unwrap();
     }
 
-    async fn wait_for_calls(source: &Source, count: usize) {
-        tokio::time::timeout(Duration::from_secs(2), async {
-            while source.call_count() < count {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .unwrap();
-    }
-
     #[tokio::test]
     async fn a_stream_fills_its_cushion_and_stops_there() {
         let source = Source::new(10_000, 100);
@@ -704,28 +695,39 @@ mod tests {
         assert_eq!(data.len(), 50);
         wait_until_settled(&source).await;
 
-        // A 100-byte unit puts this whole file inside one cushion, so it stops
-        // at the end of the file and does not walk off the back.
-        assert_eq!(source.call_count(), 10_000usize.div_ceil(100));
         let snapshot = prefetcher.snapshot().await;
         assert_eq!(snapshot.unit, 100);
+        // The cushion is a flat unit count, so read-ahead stops one window past
+        // the cursor rather than running to the end of the file. The demand unit
+        // is fetched alongside the window, hence the +1.
+        let units_available = 10_000usize.div_ceil(100);
+        assert!(
+            source.call_count() <= snapshot.window + 1,
+            "fetched {} units for a {}-unit window",
+            source.call_count(),
+            snapshot.window
+        );
+        assert!(
+            source.call_count() < units_available,
+            "read-ahead ran to the end of the file instead of stopping at the cushion"
+        );
     }
 
-    /// The regression this policy exists for: a cushion counted in units is
-    /// whatever size the poster chose. The same depth of 8 was 5.6 MB on a
-    /// 720 KiB post and 30 MB on a 3.84 MB one — 3.0s of a UHD remux, against a
-    /// median 4.7s to fetch one article — and only the first was ever measured.
+    /// The cushion is a flat article count, matching streamnzb — so it is the
+    /// same number of units on every post, and the bytes it buys vary with the
+    /// poster's segment size. That variance is the accepted cost of matching
+    /// streamnzb's depth rather than its byte cushion.
     #[test]
-    fn the_article_cushion_is_the_same_bytes_whatever_the_segment_size() {
+    fn the_article_cushion_is_a_flat_unit_count_whatever_the_segment_size() {
         for unit in [716 * 1024, 768_000, 3_840_000] {
             let config = Config {
                 unit,
                 articles: true,
             };
-            let cushion = config.window_units() as u64 * unit;
-            assert!(
-                cushion >= ARTICLE_READ_AHEAD_BYTES,
-                "a {unit}-byte segment bought only a {cushion}-byte cushion"
+            assert_eq!(
+                config.window_units(),
+                ARTICLE_READ_AHEAD_UNITS,
+                "a {unit}-byte segment changed the unit depth"
             );
         }
     }
@@ -749,18 +751,21 @@ mod tests {
         }
     }
 
-    /// A large segment buys its margin in units, not in memory.
+    /// The flat count applies to large segments too, so the bytes held ahead of
+    /// the cursor scale with the segment size rather than being capped. Recorded
+    /// here because it is the sharp edge of matching streamnzb by count: a
+    /// 32 MiB-segment post buffers 8 × 32 MiB.
     #[test]
-    fn a_large_segment_cannot_blow_the_cushion_out() {
+    fn a_large_segment_scales_the_cushion_in_bytes() {
         for unit in [MIB, 8 * MIB, 32 * MIB] {
             let config = Config {
                 unit,
                 articles: true,
             };
-            let cushion = config.window_units() as u64 * unit;
-            assert!(
-                cushion <= ARTICLE_READ_AHEAD_BYTES * 2 + unit,
-                "a {unit}-byte segment held {cushion} bytes ahead of the cursor"
+            assert_eq!(config.window_units(), ARTICLE_READ_AHEAD_UNITS);
+            assert_eq!(
+                config.window_units() as u64 * unit,
+                ARTICLE_READ_AHEAD_UNITS as u64 * unit
             );
         }
     }
@@ -781,7 +786,10 @@ mod tests {
         let prefetcher = reader(source.clone());
 
         prefetcher.read(0, 50).await.unwrap();
-        wait_for_calls(&source, ARTICLE_MAX_IN_FLIGHT_UNITS * 4).await;
+        // Wait for the window to settle rather than for a fixed call count: the
+        // cushion is now a flat 8 units, so it stops well short of any multiple
+        // of the in-flight cap.
+        wait_until_settled(&source).await;
 
         let snapshot = prefetcher.snapshot().await;
         assert!(

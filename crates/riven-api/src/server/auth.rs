@@ -43,6 +43,19 @@ pub(super) fn check_api_key(state: &ApiState, headers: &HeaderMap, query: Option
     query_value.as_deref() == Some(expected.as_str())
 }
 
+/// The addon token for this instance, or `None` when no API key is configured.
+/// Derivation lives in `riven_core::stremio` so the settings schema and this
+/// HTTP layer can never disagree about the value.
+pub(super) fn stremio_addon_token(state: &ApiState) -> Option<String> {
+    riven_core::stremio::addon_token(state.api_key.as_deref().unwrap_or_default())
+}
+
+/// Verify a token from a Stremio addon URL. Returns `true` when no API key is
+/// configured, matching `check_api_key`'s open-by-default behaviour.
+pub(super) fn check_stremio_token(state: &ApiState, token: &str) -> bool {
+    riven_core::stremio::verify_addon_token(state.api_key.as_deref().unwrap_or_default(), token)
+}
+
 pub(super) enum AuthError {
     Unauthorized,
     Forbidden,
