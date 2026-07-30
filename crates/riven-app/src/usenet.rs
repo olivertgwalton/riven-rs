@@ -239,7 +239,7 @@ pub(crate) fn spawn_background_tasks(
                 // `entry_type` is a Postgres enum; compare against its text form
                 // so the literal binds cleanly, and read back only the bigint id.
                 let media_item_id: Option<i64> = match riven_db::orm()
-                    .query_one(sea_orm::Statement::from_sql_and_values(
+                    .query_one_raw(sea_orm::Statement::from_sql_and_values(
                         sea_orm::DbBackend::Postgres,
                         "SELECT media_item_id FROM filesystem_entries \
                          WHERE usenet_info_hash = $1 AND usenet_file_index = $2 \

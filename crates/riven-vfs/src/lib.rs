@@ -117,7 +117,7 @@ pub fn mount(
         // lands. Smaller still would only add avoidable FUSE round trips.
         fuser::MountOption::CUSTOM("max_read=1048576".to_string()),
     ];
-    let session = fuser::spawn_mount2(fs, mount_path, &config)?;
+    let session = fuser::spawn_mount(fs, mount_path, &config)?;
     tracing::info!(path = %mount_path.display(), "VFS mounted");
 
     Ok(Some(FuseSession { session }))

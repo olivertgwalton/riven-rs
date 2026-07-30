@@ -184,15 +184,13 @@ fn init_sentry() -> Option<ClientInitGuard> {
         .ok()
         .filter(|v| !v.trim().is_empty())?;
     let environment = std::env::var("SENTRY_ENVIRONMENT").ok().map(Into::into);
-    let guard = sentry::init((
-        dsn,
-        sentry::ClientOptions {
-            release: sentry::release_name!(),
-            environment,
-            attach_stacktrace: true,
-            ..Default::default()
-        },
-    ));
+    // `ClientOptions` is `#[non_exhaustive]` as of sentry 0.49, so it has to be
+    // built by mutating the default rather than by struct expression.
+    let mut options = sentry::ClientOptions::default();
+    options.release = sentry::release_name!();
+    options.environment = environment;
+    options.attach_stacktrace = true;
+    let guard = sentry::init((dsn, options));
     Some(guard)
 }
 

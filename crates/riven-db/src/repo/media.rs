@@ -3,6 +3,7 @@ use chrono::Utc;
 use riven_core::entities::{item_requests, media_item_blacklisted_streams, media_items, streams};
 use riven_core::types::*;
 use sea_orm::ActiveValue::{NotSet, Set, Unchanged};
+use sea_orm::ExprTrait;
 use sea_orm::sea_query::{Expr, NullOrdering, OnConflict};
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, Condition, EntityTrait, Order, QueryFilter, QueryOrder,

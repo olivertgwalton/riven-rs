@@ -112,7 +112,7 @@ pub async fn upsert_streams(rows: &[StreamUpsert]) -> Result<Vec<Stream>> {
                         .value(streams::Column::UpdatedAt, Expr::cust("NOW()"))
                         .to_owned(),
                 )
-                .exec_with_returning_many(orm())
+                .exec_with_returning(orm())
                 .await?,
         );
     }
@@ -128,7 +128,7 @@ pub async fn delete_orphan_streams() -> Result<u64> {
     // Kept as a raw Statement: the DELETE has four correlated NOT EXISTS
     // subqueries against other tables, outside what the builder DELETE expresses.
     let result = orm()
-        .execute(Statement::from_string(
+        .execute_raw(Statement::from_string(
             DbBackend::Postgres,
             "DELETE FROM streams s \
              WHERE NOT EXISTS (SELECT 1 FROM media_item_streams m WHERE m.stream_id = s.id) \
@@ -191,7 +191,7 @@ pub async fn link_streams_to_item(media_item_id: i64, stream_ids: &[i64]) -> Res
                 .do_nothing()
                 .to_owned(),
             )
-            .exec_with_returning_many(orm())
+            .exec_with_returning(orm())
             .await
         {
             Ok(rows) => inserted += rows.len() as u64,
@@ -414,7 +414,7 @@ pub async fn get_media_entry_paths_for_items(root_ids: &[i64]) -> Result<Vec<Str
 
     // Raw Statement: recursive CTE with id = ANY($1).
     let rows = orm()
-        .query_all(Statement::from_sql_and_values(
+        .query_all_raw(Statement::from_sql_and_values(
             DbBackend::Postgres,
             "WITH RECURSIVE media_tree AS (
                  SELECT id FROM media_items WHERE id = ANY($1)
@@ -775,7 +775,7 @@ pub async fn create_media_entry(input: MediaEntryInput<'_>) -> Result<FileSystem
     // COALESCE(EXCLUDED, existing) per-column — not expressible via ActiveModel
     // upsert. Re-fetch the row through `get_media_entry_by_id` afterward.
     let row = orm()
-        .query_one(Statement::from_sql_and_values(
+        .query_one_raw(Statement::from_sql_and_values(
             DbBackend::Postgres,
             "INSERT INTO filesystem_entries \
              (media_item_id, entry_type, path, file_size, original_filename, download_url, stream_url, \
@@ -905,7 +905,7 @@ pub async fn count_vfs_distinct_dirs(pattern: &str, depth: u32) -> Result<i64> {
          WHERE path LIKE $1 AND entry_type = 'media'"
     );
     let row = orm()
-        .query_one(Statement::from_sql_and_values(
+        .query_one_raw(Statement::from_sql_and_values(
             DbBackend::Postgres,
             sql,
             [pattern.into()],
@@ -939,7 +939,7 @@ pub async fn delete_orphaned_usenet_metas(info_hashes: &[String]) -> Result<u64>
     }
 
     let result = orm()
-        .execute(Statement::from_sql_and_values(
+        .execute_raw(Statement::from_sql_and_values(
             DbBackend::Postgres,
             "DELETE FROM usenet_meta u \
              WHERE u.info_hash = ANY($1) \
@@ -979,7 +979,7 @@ pub async fn delete_filesystem_entries(entry_ids: &[i64]) -> Result<Vec<i64>> {
     // Raw Statement: DELETE ... RETURNING has no builder form — the same
     // reason the single-entry `delete_filesystem_entry` above stays raw.
     let rows = orm()
-        .query_all(Statement::from_sql_and_values(
+        .query_all_raw(Statement::from_sql_and_values(
             DbBackend::Postgres,
             "DELETE FROM filesystem_entries \
              WHERE id = ANY($1) AND entry_type = 'media' \

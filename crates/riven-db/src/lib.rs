@@ -70,7 +70,7 @@ pub async fn run_migrations(db: &DatabaseConnection) -> Result<()> {
 
 async fn table_exists(db: &DatabaseConnection, name: &str) -> Result<bool> {
     let row = db
-        .query_one(Statement::from_sql_and_values(
+        .query_one_raw(Statement::from_sql_and_values(
             DbBackend::Postgres,
             "SELECT to_regclass($1) IS NOT NULL AS present",
             [format!("public.{name}").into()],
@@ -90,7 +90,7 @@ async fn import_legacy_migration_state(db: &DatabaseConnection) -> Result<()> {
         .collect();
 
     let applied: HashSet<i64> = db
-        .query_all(Statement::from_string(
+        .query_all_raw(Statement::from_string(
             DbBackend::Postgres,
             "SELECT version FROM _sqlx_migrations WHERE success",
         ))
@@ -102,7 +102,7 @@ async fn import_legacy_migration_state(db: &DatabaseConnection) -> Result<()> {
     for (idx, name) in names.iter().enumerate() {
         let version = i64::try_from(idx + 1).unwrap_or(0);
         if applied.contains(&version) {
-            db.execute(Statement::from_sql_and_values(
+            db.execute_raw(Statement::from_sql_and_values(
                 DbBackend::Postgres,
                 "INSERT INTO seaql_migrations (version, applied_at) \
                  VALUES ($1, EXTRACT(EPOCH FROM now())::bigint) \

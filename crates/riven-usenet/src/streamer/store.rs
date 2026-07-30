@@ -35,7 +35,7 @@ pub(super) async fn load(
         "SELECT meta::text FROM usenet_meta WHERE info_hash = $1",
         [info_hash.to_owned().into()],
     );
-    let Some(row) = db.query_one(stmt).await? else {
+    let Some(row) = db.query_one_raw(stmt).await? else {
         return Ok(None);
     };
     let json: String = row.try_get_by_index(0)?;

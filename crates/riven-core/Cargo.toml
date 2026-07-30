@@ -34,8 +34,10 @@ figment = { workspace = true }
 parking_lot = { workspace = true }
 lru = { workspace = true }
 sha1 = "0.11"
+hmac = { workspace = true }
+sha2 = { workspace = true }
 hex = { workspace = true }
-quick-xml = "0.40"
+quick-xml = "0.41"
 dashmap = { workspace = true }
 bytes = { workspace = true }
 redis = { workspace = true }

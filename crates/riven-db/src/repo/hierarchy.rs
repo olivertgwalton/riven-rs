@@ -2,6 +2,7 @@ use anyhow::Result;
 use chrono::Utc;
 use riven_core::entities::media_items;
 use riven_core::types::*;
+use sea_orm::ExprTrait;
 use sea_orm::{
     ColumnTrait, ConnectionTrait, DbBackend, EntityTrait, FromQueryResult, PaginatorTrait,
     QueryFilter, QueryOrder, QuerySelect, Statement,
@@ -181,7 +182,7 @@ pub async fn count_expected_files_for_show(show_id: i64) -> Result<i64> {
            JOIN media_items e ON e.parent_id = qs.id AND e.item_type = 'episode'
            WHERE qs.rn <= COALESCE((SELECT cap FROM season_cap), 0)"#;
     let row = orm()
-        .query_one(Statement::from_sql_and_values(
+        .query_one_raw(Statement::from_sql_and_values(
             DbBackend::Postgres,
             sql,
             [show_id.into()],
@@ -207,7 +208,7 @@ pub async fn is_item_descendant_of(item_id: i64, target_id: i64) -> Result<bool>
            )
            SELECT EXISTS(SELECT 1 FROM ancestors WHERE id = $2) AS exists"#;
     let row = orm()
-        .query_one(Statement::from_sql_and_values(
+        .query_one_raw(Statement::from_sql_and_values(
             DbBackend::Postgres,
             sql,
             [item_id.into(), target_id.into()],
@@ -462,7 +463,7 @@ pub async fn mark_seasons_requested_and_get_episodes(
 
     // Correlated `parent_id IN (SELECT ... season_number = ANY($2))` subquery —
     // keep raw.
-    db.execute(Statement::from_sql_and_values(
+    db.execute_raw(Statement::from_sql_and_values(
         DbBackend::Postgres,
         r#"UPDATE media_items
            SET is_requested = true, updated_at = NOW()
@@ -578,7 +579,10 @@ pub async fn list_items_paginated(
     search: Option<String>,
     states: Option<Vec<MediaItemState>>,
 ) -> Result<Vec<MediaItemListRow>> {
-    let page = page.max(1);
+    // Disambiguated because `sea_orm::ExprTrait` (in scope for the query
+    // builders below) also provides a `max`, making the bare method call
+    // ambiguous on an integer.
+    let page = Ord::max(page, 1);
     let limit = limit.clamp(1, 200);
     let offset = (page - 1) * limit;
     let (filters, search_param) =
@@ -637,7 +641,7 @@ pub async fn count_items_filtered(
     let sql = format!("SELECT COUNT(*) AS count FROM media_items WHERE 1=1{filters}");
     let values: Vec<sea_orm::Value> = search_param.into_iter().map(Into::into).collect();
     let row = orm()
-        .query_one(Statement::from_sql_and_values(
+        .query_one_raw(Statement::from_sql_and_values(
             DbBackend::Postgres,
             sql,
             values,

@@ -4,6 +4,7 @@
 use anyhow::Result;
 use riven_core::entities::{usenet_provider_traffic, usenet_traffic_daily};
 use sea_orm::ActiveValue::Set;
+use sea_orm::ExprTrait;
 use sea_orm::sea_query::{Expr, OnConflict};
 use sea_orm::{DbBackend, EntityTrait, FromQueryResult, QueryOrder, Statement};
 
