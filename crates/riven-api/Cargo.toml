@@ -5,6 +5,8 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+better-auth = { workspace = true }
+better-auth-core = { workspace = true }
 riven-core = { path = "../riven-core" }
 riven-db = { path = "../riven-db" }
 riven-rank = { path = "../riven-rank" }
@@ -33,6 +35,11 @@ reqwest = { workspace = true }
 hmac = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
+scrypt = { version = "0.12", default-features = false }
+subtle = "2"
+unicode-normalization = "0.1"
+argon2 = "0.5"
+async-trait = { workspace = true }
 url = "2"
 
 [lints]

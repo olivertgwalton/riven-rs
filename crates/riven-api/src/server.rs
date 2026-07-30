@@ -1,6 +1,8 @@
 mod auth;
+mod authn;
 mod board;
 mod graphql;
+mod legacy_password;
 mod media;
 mod stremio;
 
@@ -12,6 +14,7 @@ use axum::http::{
     header::{ACCEPT_RANGES, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE},
 };
 use axum::{Router, routing::get};
+use better_auth::integrations::axum::AxumIntegration;
 use riven_core::http::HttpClient;
 use riven_core::logging::LogControl;
 use riven_core::plugin::PluginRegistry;
@@ -37,7 +40,6 @@ pub struct StartServerConfig {
     pub job_queue: Arc<JobQueue>,
     pub http_client: HttpClient,
     pub api_key: Option<String>,
-    pub frontend_auth_signing_secret: Option<String>,
     pub log_directory: String,
     pub log_tx: broadcast::Sender<String>,
     pub notification_tx: broadcast::Sender<String>,
@@ -48,28 +50,45 @@ pub struct StartServerConfig {
     pub cors_allowed_origins: Vec<String>,
     pub vfs_mount_manager: Arc<VfsMountManager>,
     pub cancel: tokio_util::sync::CancellationToken,
+    /// Signing key for `better-auth` sessions. Must be at least 32 bytes;
+    /// rotating it invalidates every session.
+    pub auth_secret: String,
+    /// Public origin the browser reaches riven at. `better-auth` uses it for
+    /// cookie scope and trusted redirect targets, so a wrong value is a login
+    /// loop rather than a loud failure.
+    pub public_url: String,
 }
 
 mod state {
     use std::sync::Arc;
 
+    use axum::extract::FromRef;
     use riven_core::stream_link::LinkRequest;
     use riven_queue::JobQueue;
     use tokio::sync::broadcast;
 
     use crate::schema::AppSchema;
+    use crate::server::authn::RivenAuth;
 
     #[derive(Clone)]
     pub struct ApiState {
         pub schema: AppSchema,
         pub job_queue: Arc<JobQueue>,
         pub api_key: Option<String>,
-        pub frontend_auth_signing_secret: Option<String>,
         pub log_tx: broadcast::Sender<String>,
         pub notification_tx: broadcast::Sender<String>,
         pub stream_client: reqwest::Client,
         pub link_request_tx: tokio::sync::mpsc::Sender<LinkRequest>,
         pub runtime: tokio::runtime::Handle,
+        pub auth: Arc<RivenAuth>,
+    }
+
+    /// Lets `better-auth`'s router and its `CurrentSession` / `OptionalSession`
+    /// extractors pull the auth handle out of riven's own state.
+    impl FromRef<ApiState> for Arc<RivenAuth> {
+        fn from_ref(state: &ApiState) -> Self {
+            state.auth.clone()
+        }
     }
 }
 
@@ -81,7 +100,6 @@ pub async fn start_server(config: StartServerConfig) -> Result<()> {
         job_queue,
         http_client,
         api_key,
-        frontend_auth_signing_secret,
         log_directory,
         log_tx,
         notification_tx,
@@ -92,7 +110,13 @@ pub async fn start_server(config: StartServerConfig) -> Result<()> {
         cors_allowed_origins,
         vfs_mount_manager,
         cancel,
+        auth_secret,
+        public_url,
     } = config;
+
+    // Built before the router so a bad secret fails startup loudly rather than
+    // at the first login attempt.
+    let auth = authn::build(&auth_secret, &public_url, cors_allowed_origins.clone()).await?;
 
     let schema = build_schema(
         registry,
@@ -132,12 +156,12 @@ pub async fn start_server(config: StartServerConfig) -> Result<()> {
         schema,
         job_queue,
         api_key,
-        frontend_auth_signing_secret,
         log_tx,
         notification_tx,
         stream_client,
         link_request_tx,
         runtime: tokio::runtime::Handle::current(),
+        auth: auth.clone(),
     };
 
     // Routes reached by third-party players. Stremio and whatever player it
@@ -176,6 +200,16 @@ pub async fn start_server(config: StartServerConfig) -> Result<()> {
         // Hands out the addon token, so it stays on the instance allowlist —
         // only the frontend should be able to read it.
         .route("/stremio/manifest-url", get(stremio::manifest_url_handler))
+        // better-auth's own endpoints: sign-in/out, sessions, password, 2FA,
+        // passkeys, API keys, admin.
+        //
+        // `axum_router_with_state` yields *unprefixed* routes (`/sign-in/email`,
+        // `/get-session`, …) — `AuthConfig::base_path` governs cookie scope and
+        // generated URLs, not where the router mounts. So this must be nested,
+        // not merged: merging put every endpoint at the root, where `/auth/*`
+        // then fell through to the SPA fallback and answered POSTs with 405.
+        // The prefix here and `base_path` in `authn::build` must stay in step.
+        .nest("/auth", auth.clone().axum_router_with_state::<ApiState>())
         .nest("/api/v1", board_api.with_state(()))
         .nest("/board", board_ui.with_state(()))
         .fallback_service(serve_frontend)

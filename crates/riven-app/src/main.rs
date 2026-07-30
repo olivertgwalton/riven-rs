@@ -228,17 +228,15 @@ async fn main() -> Result<()> {
     if settings.api_key.is_empty() {
         tracing::warn!("RIVEN_SETTING__API_KEY is empty — GraphQL API auth is DISABLED (dev only)");
     }
-    if settings.frontend_auth_signing_secret.is_empty() {
-        tracing::warn!(
-            "RIVEN_SETTING__FRONTEND_AUTH_SIGNING_SECRET is empty — frontend RBAC is DISABLED"
-        );
+    // Roles come from a session riven verifies itself, so there is no
+    // frontend-signed claim left to configure.
+    if settings.auth_secret.is_empty() {
+        tracing::warn!("RIVEN_SETTING__AUTH_SECRET is empty — session auth cannot start");
     }
     let gql_handle = tokio::spawn({
         let jq = job_queue.clone();
         let reg = registry.clone();
         let api_key = (!settings.api_key.is_empty()).then(|| settings.api_key.clone());
-        let frontend_auth_signing_secret = (!settings.frontend_auth_signing_secret.is_empty())
-            .then(|| settings.frontend_auth_signing_secret.clone());
         let log_dir = settings.log_directory.clone();
         let mut cors_allowed_origins: Vec<String> = settings
             .cors_allowed_origins
@@ -254,6 +252,19 @@ async fn main() -> Result<()> {
             tracing::info!(origin, "CORS allowlist falling back to ORIGIN");
             cors_allowed_origins.push(origin);
         }
+        // better-auth signs sessions with this.
+        let auth_secret = settings.auth_secret.clone();
+        // Cookie scope and trusted redirect targets are derived from this, so
+        // prefer explicit config, then the same ORIGIN the CORS allowlist uses,
+        // then the bind address for local runs.
+        let public_url = if !settings.public_url.is_empty() {
+            settings.public_url.clone()
+        } else {
+            std::env::var("ORIGIN")
+                .ok()
+                .filter(|origin| !origin.trim().is_empty())
+                .unwrap_or_else(|| format!("http://{gql_host}:{gql_port}"))
+        };
         let log_tx = log_tx.clone();
         let notif_tx = notification_tx.clone();
         let log_control = log_control.clone();
@@ -267,7 +278,6 @@ async fn main() -> Result<()> {
                 job_queue: jq.clone(),
                 http_client: http_client.clone(),
                 api_key,
-                frontend_auth_signing_secret,
                 log_directory: log_dir,
                 log_tx,
                 notification_tx: notif_tx,
@@ -278,6 +288,8 @@ async fn main() -> Result<()> {
                 cors_allowed_origins,
                 vfs_mount_manager,
                 cancel,
+                auth_secret,
+                public_url,
             })
             .await
             {
