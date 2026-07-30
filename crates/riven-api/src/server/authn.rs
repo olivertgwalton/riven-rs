@@ -26,6 +26,7 @@ use better_auth::{AuthConfig, BetterAuth};
 use better_auth_core::PasswordHasher;
 use riven_core::entities::auth::RivenAuthSchema;
 
+use super::first_user::FirstUserIsAdmin;
 use super::legacy_password::DualFormatHasher;
 
 /// Sessions last a week, refreshed daily. Matches what the frontend's
@@ -33,6 +34,12 @@ use super::legacy_password::DualFormatHasher;
 /// once on cutover.
 const SESSION_EXPIRES_IN_DAYS: i64 = 7;
 const SESSION_UPDATE_AGE_DAYS: i64 = 1;
+
+/// How long a WebAuthn challenge stays valid. The challenge is held in a cookie
+/// between `generate-*-options` and `verify-*`, so this is the window the user
+/// has to touch their authenticator. Five minutes matches better-auth's own
+/// default and the platform prompts' own timeouts.
+const PASSKEY_CHALLENGE_TTL_SECS: i64 = 300;
 
 /// The instance's auth handle, shared by the router and the session extractors.
 pub type RivenAuth = BetterAuth<RivenAuthSchema>;
@@ -55,6 +62,22 @@ pub async fn build(
         secret.len()
     );
 
+    // Logged rather than validated: a wrong relying-party ID is not something
+    // this function can detect, only something the operator can recognise. It
+    // shows up as passkeys that register fine and then refuse to authenticate,
+    // which is otherwise a miserable thing to diagnose.
+    match passkey_rp_id(base_url) {
+        Some(rp_id) => tracing::info!(
+            %rp_id,
+            "passkeys are bound to this relying-party ID; browsers reaching riven \
+             at any other hostname will not be offered them"
+        ),
+        None => tracing::warn!(
+            %base_url,
+            "public URL has no host — passkeys will fail; set RIVEN_SETTING__PUBLIC_URL"
+        ),
+    }
+
     let config = AuthConfig::new(secret)
         .app_name("Riven")
         .base_url(base_url)
@@ -67,7 +90,8 @@ pub async fn build(
     // Shares riven's existing pool rather than opening a second one — the whole
     // reason for the sea-orm 2 upgrade, which put better-auth's entities and
     // riven's in one model graph.
-    let store = SeaOrmStore::<RivenAuthSchema>::new(config.clone(), riven_db::orm().clone());
+    let store = SeaOrmStore::<RivenAuthSchema>::new(config.clone(), riven_db::orm().clone())
+        .hook(FirstUserIsAdmin);
 
     // Verifies both the frontend's scrypt hashes and better-auth-rs's own
     // Argon2 — without it every existing user is locked out at cutover. Shared
@@ -77,12 +101,13 @@ pub async fn build(
 
     let auth = BetterAuth::<RivenAuthSchema>::new(config)
         .store(store)
-        // Signup is disabled: riven is a private media server, not a service
-        // anyone should be able to register against. Users are created by an
-        // admin through the user-management plugin.
+        // Sign-up is open at the route level and closed by `FirstUserIsAdmin`
+        // once an account exists — riven is a private media server, but a fresh
+        // install still needs a way to create its first admin. Every later user
+        // is created by that admin through the user-management plugin.
         .plugin(
             EmailPasswordPlugin::new()
-                .enable_signup(false)
+                .enable_signup(true)
                 .password_hasher(hasher.clone()),
         )
         .plugin(SessionManagementPlugin::new())
@@ -91,7 +116,23 @@ pub async fn build(
         .plugin(UserManagementPlugin::new())
         .plugin(EmailVerificationPlugin::new())
         .plugin(TwoFactorPlugin::new())
-        .plugin(PasskeyPlugin::new())
+        .plugin(
+            PasskeyPlugin::new()
+                // Shown by the OS credential picker ("Save a passkey for …"),
+                // so leaving the library's "Better Auth" default would name the
+                // wrong product on the user's device — and the name is baked
+                // into the credential at registration, not read back later.
+                .rp_name("Riven")
+                // `rp_id` and `origin` are deliberately left empty. Empty means
+                // "derive from `base_url`": the relying-party ID becomes its
+                // host, and registration options are generated against it, while
+                // *verification* accepts the request's own `Origin`. That is the
+                // behaviour we want — `public_url` is already the one setting
+                // that says where browsers reach riven, and a second knob could
+                // only ever disagree with it. See `passkey_rp_id` below for the
+                // consequence when they do.
+                .challenge_ttl_secs(PASSKEY_CHALLENGE_TTL_SECS),
+        )
         // `ApiKeyPlugin` carries a `bon` builder rather than the plain `new()`
         // the other plugins get from the `PluginConfig` derive.
         .plugin(ApiKeyPlugin::builder().build())
@@ -100,6 +141,20 @@ pub async fn build(
         .await?;
 
     Ok(Arc::new(auth))
+}
+
+/// The relying-party ID better-auth will derive for passkeys — the host of
+/// `base_url`, with no port and no scheme, exactly as `PasskeyPlugin` computes
+/// it when `rp_id` is left empty.
+///
+/// A passkey is sealed to this value by the authenticator itself, so it is the
+/// one piece of auth config that cannot be changed after the fact without
+/// invalidating every credential already registered.
+fn passkey_rp_id(base_url: &str) -> Option<String> {
+    url::Url::parse(base_url)
+        .ok()?
+        .host_str()
+        .map(str::to_owned)
 }
 
 #[cfg(test)]
@@ -184,6 +239,21 @@ mod tests {
             text.contains("token") || response.headers.get_all("set-cookie").next().is_some(),
             "sign-in returned no session: {text}"
         );
+    }
+
+    /// The port is deliberately absent: WebAuthn relying-party IDs are domains,
+    /// so `localhost:8080` would be rejected by every browser.
+    #[test]
+    fn the_passkey_relying_party_is_the_public_url_host_without_its_port() {
+        assert_eq!(
+            passkey_rp_id("https://riven.example.com/").as_deref(),
+            Some("riven.example.com")
+        );
+        assert_eq!(
+            passkey_rp_id("http://localhost:8080").as_deref(),
+            Some("localhost")
+        );
+        assert_eq!(passkey_rp_id("riven.example.com"), None);
     }
 
     #[tokio::test]

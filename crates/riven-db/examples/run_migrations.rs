@@ -19,7 +19,7 @@ use sea_orm::{ConnectionTrait, Statement};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let url = std::env::var("MIGRATION_TEST_DATABASE_URL").map_err(|_| {
+    let url = std::env::var("MIGRATION_TEST_DATABASE_URL").map_err(|_unset| {
         anyhow::anyhow!(
             "set MIGRATION_TEST_DATABASE_URL (this tool refuses to read DATABASE_URL, \
              so it cannot be pointed at production by accident)"

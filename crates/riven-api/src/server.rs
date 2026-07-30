@@ -1,17 +1,19 @@
 mod auth;
 mod authn;
 mod board;
+mod first_user;
 mod graphql;
 mod legacy_password;
 mod media;
+mod plex;
 mod stremio;
 
 use std::sync::Arc;
 
 use anyhow::Result;
 use axum::http::{
-    Method,
-    header::{ACCEPT_RANGES, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE},
+    HeaderName, Method,
+    header::{ACCEPT_RANGES, AUTHORIZATION, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE},
 };
 use axum::{Router, routing::get};
 use better_auth::integrations::axum::AxumIntegration;
@@ -200,6 +202,13 @@ pub async fn start_server(config: StartServerConfig) -> Result<()> {
         // Hands out the addon token, so it stays on the instance allowlist —
         // only the frontend should be able to read it.
         .route("/stremio/manifest-url", get(stremio::manifest_url_handler))
+        // Plex sign-in. Not under better-auth's router because Plex is a
+        // PIN-and-poll flow, not OAuth2 — see `plex.rs`.
+        .route("/auth/plex/start", axum::routing::post(plex::start))
+        .route("/auth/plex/poll/{pin_id}", get(plex::poll))
+        // Whether better-auth's own `/auth/sign-up/email` will accept a caller.
+        // See `first_user.rs`: it does exactly once, for the first account.
+        .route("/auth/first-user", get(first_user::availability))
         // better-auth's own endpoints: sign-in/out, sessions, password, 2FA,
         // passkeys, API keys, admin.
         //
@@ -244,11 +253,25 @@ fn build_player_cors_layer() -> CorsLayer {
         .expose_headers([ACCEPT_RANGES, CONTENT_RANGE, CONTENT_LENGTH, CONTENT_TYPE])
 }
 
+/// CORS for the instance's own surface: GraphQL, `/auth`, the board, the bundle.
+///
+/// Credentials are allowed, because the session — and the passkey challenge that
+/// briefly sits beside it — are cookies, and a cross-origin `fetch` with
+/// `credentials: "include"` is rejected outright without
+/// `access-control-allow-credentials: true`. That is also why the header and
+/// method lists are spelled out: the Fetch spec forbids pairing `*` with
+/// credentials, and `tower-http` panics rather than emitting a header a browser
+/// would refuse.
+///
+/// With no allowlist there is no safe answer — `*` and credentials cannot
+/// coexist — so the permissive fallback stays credential-less. Same-origin still
+/// works there (riven serves the bundle itself), but a separate dev server at
+/// another port will not get a session until an origin is configured.
 fn build_cors_layer(allowed: Vec<String>) -> CorsLayer {
     if allowed.is_empty() {
         tracing::warn!(
-            "CORS is permissive — set RIVEN_SETTING__CORS_ALLOWED_ORIGINS to \
-             constrain cross-origin browser access"
+            "CORS is permissive and cookie-less — set RIVEN_SETTING__CORS_ALLOWED_ORIGINS \
+             to allow a cross-origin frontend to hold a session"
         );
         return CorsLayer::permissive();
     }
@@ -256,6 +279,19 @@ fn build_cors_layer(allowed: Vec<String>) -> CorsLayer {
         allowed.iter().filter_map(|o| o.parse().ok()).collect();
     CorsLayer::new()
         .allow_origin(AllowOrigin::list(origins))
-        .allow_headers(tower_http::cors::Any)
-        .allow_methods(tower_http::cors::Any)
+        .allow_credentials(true)
+        .allow_headers([
+            CONTENT_TYPE,
+            AUTHORIZATION,
+            HeaderName::from_static("x-api-key"),
+        ])
+        .allow_methods([
+            Method::GET,
+            Method::HEAD,
+            Method::POST,
+            Method::PUT,
+            Method::PATCH,
+            Method::DELETE,
+            Method::OPTIONS,
+        ])
 }

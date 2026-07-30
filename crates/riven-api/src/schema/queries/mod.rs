@@ -22,8 +22,11 @@ pub use trakt::CoreTraktQuery;
 pub use tvdb::CoreTvdbQuery;
 pub use usenet_health::UsenetHealthQuery;
 
+use crate::schema::auth::ViewerQuery;
+
 #[derive(MergedObject, Default)]
 pub struct CoreQuery(
+    ViewerQuery,
     MediaQuery,
     CoreSettingsQuery,
     CoreTmdbQuery,

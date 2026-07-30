@@ -20,7 +20,7 @@ use riven_db::entities::FileSystemEntry;
 use serde_json::{Value, json};
 
 use super::ApiState;
-use super::auth::{check_api_key, check_stremio_token, stremio_addon_token};
+use super::auth::{check_stremio_token, has_valid_api_key, stremio_addon_token};
 
 const ADDON_ID: &str = "com.rivenmedia.riven.library";
 const ADDON_NAME: &str = "Riven Library";
@@ -308,7 +308,7 @@ pub(super) async fn manifest_url_handler(
     headers: HeaderMap,
     raw_query: axum::extract::RawQuery,
 ) -> Response {
-    if !check_api_key(&state, &headers, raw_query.0.as_deref()) {
+    if !has_valid_api_key(&state, &headers, raw_query.0.as_deref()) {
         return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
     }
 

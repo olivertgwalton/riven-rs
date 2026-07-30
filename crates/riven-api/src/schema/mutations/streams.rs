@@ -5,7 +5,7 @@ use riven_db::repo;
 use riven_queue::{JobQueue, RankStreamsJob};
 use std::sync::Arc;
 
-use crate::schema::auth::require_library_access;
+use crate::schema::auth::{Capability, require};
 use crate::schema::discovery::{
     discover_streams, ensure_download_target, ensure_show_target, resolve_pack_seasons,
 };
@@ -28,7 +28,7 @@ impl StreamsMutations {
         seasons: Option<Vec<i32>>,
         cached_only: Option<bool>,
     ) -> Result<Vec<DiscoveredStream>> {
-        require_library_access(ctx)?;
+        require(ctx, Capability::ScrapeItems)?;
         let registry = ctx.data::<Arc<PluginRegistry>>()?;
 
         discover_streams(
@@ -65,7 +65,7 @@ impl StreamsMutations {
         parsed_data: Option<serde_json::Value>,
         rank: Option<i64>,
     ) -> Result<String> {
-        require_library_access(ctx)?;
+        require(ctx, Capability::ScrapeItems)?;
         let registry = ctx.data::<Arc<PluginRegistry>>()?;
         let job_queue = ctx.data::<Arc<JobQueue>>()?;
 

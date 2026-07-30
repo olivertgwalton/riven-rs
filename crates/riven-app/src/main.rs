@@ -68,9 +68,39 @@ fn build_stream_client() -> Result<reqwest::Client> {
         .build()?)
 }
 
+/// Reject a misconfigured instance before anything is opened or written.
+///
+/// Both values come from the environment only — `apply_general_db_override`
+/// does not touch them — so this runs on the first line, ahead of migrations
+/// and ahead of the optional startup wipe.
+///
+/// Refusing to boot is what riven-ts did: its `hooks.server.ts` threw when the
+/// API key was absent, so there was never an unconfigured instance to be lenient
+/// about. The Rust port made both optional, and the two failure modes were
+/// quiet: a missing key disabled the only credential machine callers have, and a
+/// missing secret left the process running with a dead GraphQL server, because
+/// `authn::build`'s error surfaced inside a spawned task that only logged it.
+fn validate_auth_settings(settings: &riven_core::settings::RivenSettings) -> Result<()> {
+    anyhow::ensure!(
+        !settings.api_key.trim().is_empty(),
+        "RIVEN_SETTING__API_KEY is required. It authenticates machine callers \
+         (Overseerr/Jellyseerr webhooks) and derives the Stremio addon token. \
+         Generate one with `openssl rand -hex 32`."
+    );
+    anyhow::ensure!(
+        settings.auth_secret.len() >= 32,
+        "RIVEN_SETTING__AUTH_SECRET must be at least 32 characters (got {}). \
+         It signs session tokens, so rotating it signs everyone out. \
+         Generate one with `openssl rand -hex 32`.",
+        settings.auth_secret.len()
+    );
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let mut settings = riven_core::settings::RivenSettings::load()?;
+    validate_auth_settings(&settings)?;
     // `connect` opens the SeaORM connection and publishes it as the process-wide
     // global that the migrated repo functions read via `riven_db::orm()`. It must
     // run before any repo call. The returned handle is only needed locally for
@@ -225,14 +255,8 @@ async fn main() -> Result<()> {
 
     let gql_host = settings.gql_host.clone();
     let gql_port = settings.gql_port;
-    if settings.api_key.is_empty() {
-        tracing::warn!("RIVEN_SETTING__API_KEY is empty — GraphQL API auth is DISABLED (dev only)");
-    }
-    // Roles come from a session riven verifies itself, so there is no
-    // frontend-signed claim left to configure.
-    if settings.auth_secret.is_empty() {
-        tracing::warn!("RIVEN_SETTING__AUTH_SECRET is empty — session auth cannot start");
-    }
+    // Auth configuration was validated before the database was opened; see
+    // `validate_auth_settings`.
     let gql_handle = tokio::spawn({
         let jq = job_queue.clone();
         let reg = registry.clone();
@@ -317,4 +341,55 @@ async fn main() -> Result<()> {
 
     tracing::info!("riven shutdown complete");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_auth_settings;
+    use riven_core::settings::RivenSettings;
+
+    fn settings(api_key: &str, auth_secret: &str) -> RivenSettings {
+        RivenSettings {
+            api_key: api_key.to_string(),
+            auth_secret: auth_secret.to_string(),
+            ..RivenSettings::default()
+        }
+    }
+
+    const GOOD_SECRET: &str = "0123456789abcdef0123456789abcdef";
+
+    #[test]
+    fn a_complete_configuration_is_accepted() {
+        assert!(validate_auth_settings(&settings("a-key", GOOD_SECRET)).is_ok());
+    }
+
+    /// The default settings carry empty strings for both, so a bare `docker run`
+    /// with no env must fail here rather than come up unauthenticated.
+    #[test]
+    fn the_defaults_do_not_boot() {
+        assert!(validate_auth_settings(&RivenSettings::default()).is_err());
+    }
+
+    #[test]
+    fn a_missing_or_blank_api_key_is_rejected() {
+        for key in ["", "   "] {
+            let error = validate_auth_settings(&settings(key, GOOD_SECRET))
+                .expect_err("a blank api key must not boot")
+                .to_string();
+            assert!(error.contains("RIVEN_SETTING__API_KEY"), "{error}");
+        }
+    }
+
+    /// Matches `authn::build`'s own floor, so the failure lands at startup
+    /// rather than inside the spawned GraphQL task where it only got logged.
+    #[test]
+    fn a_short_auth_secret_is_rejected() {
+        for secret in ["", "too-short"] {
+            let error = validate_auth_settings(&settings("a-key", secret))
+                .expect_err("a short secret must not boot")
+                .to_string();
+            assert!(error.contains("at least 32 characters"), "{error}");
+        }
+        assert!(validate_auth_settings(&settings("a-key", &"x".repeat(32))).is_ok());
+    }
 }
