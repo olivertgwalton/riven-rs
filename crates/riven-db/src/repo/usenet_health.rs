@@ -4,6 +4,7 @@
 use anyhow::Result;
 use riven_core::entities::usenet_file_health;
 use sea_orm::ActiveValue::Set;
+use sea_orm::ExprTrait;
 use sea_orm::sea_query::{Expr, OnConflict};
 use sea_orm::{
     ColumnTrait, DbBackend, EntityTrait, FromQueryResult, QueryFilter, QuerySelect, Statement,

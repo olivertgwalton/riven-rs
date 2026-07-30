@@ -32,7 +32,7 @@ pub async fn reset_library() -> Result<u64> {
 
     // SeaORM has no TRUNCATE builder; keep the multi-table reset raw.
     orm()
-        .execute(Statement::from_string(
+        .execute_raw(Statement::from_string(
             DbBackend::Postgres,
             "TRUNCATE TABLE media_items, streams, item_requests, usenet_meta \
              RESTART IDENTITY CASCADE",
@@ -135,7 +135,7 @@ pub async fn delete_items_by_ids(ids: Vec<i64>) -> Result<u64> {
     // Carries the entry path alongside the hash so the cleanup log below can
     // name what it is dropping.
     let info_hashes: Vec<(String, String)> = orm()
-        .query_all(Statement::from_sql_and_values(
+        .query_all_raw(Statement::from_sql_and_values(
             DbBackend::Postgres,
             "WITH RECURSIVE descendants AS ( \
                  SELECT id FROM media_items WHERE id = ANY($1) \

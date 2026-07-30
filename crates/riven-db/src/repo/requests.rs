@@ -360,7 +360,7 @@ async fn count_episodes_raw(
         None => sql.to_owned(),
     };
     let row = orm()
-        .query_one(Statement::from_sql_and_values(
+        .query_one_raw(Statement::from_sql_and_values(
             DbBackend::Postgres,
             &sql,
             [show_id.into()],
