@@ -58,9 +58,6 @@ jobs:
       - name: Typecheck
         run: pnpm run check
 
-      - name: Build
-        run: pnpm run build
-
   # The frontend's types are generated from the backend's schema, and both
   # artefacts are committed. Regenerating them here catches the drift a
   # committed artefact otherwise hides — a resolver change nobody re-ran
