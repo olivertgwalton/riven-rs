@@ -13,7 +13,7 @@
 		"check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
 		"check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
 		"format": "biome format --write .",
-		"lint": "biome lint src vite.config.ts svelte.config.js codegen.ts"
+		"lint": "biome lint src vite.config.ts svelte.config.ts codegen.ts"
 	},
 	"devDependencies": {
 		"@biomejs/biome": "^2.5.6",

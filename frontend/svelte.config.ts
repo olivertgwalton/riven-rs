@@ -1,13 +1,10 @@
 import adapter from "@sveltejs/adapter-static";
+import type { Config } from "@sveltejs/kit";
 import { vitePreprocess } from "@sveltejs/vite-plugin-svelte";
 
-const config = {
+const config: Config = {
 	preprocess: [vitePreprocess()],
 	kit: {
-		// Static bundle: the Rust backend owns auth, data and media, so there
-		// is no server here to run loads, actions or remote functions.
-		// `fallback` makes it a single-page app, so deep links to dynamic
-		// routes (/details/media/123/movie) resolve client-side.
 		adapter: adapter({ fallback: "index.html", strict: false }),
 	},
 	compilerOptions: {
