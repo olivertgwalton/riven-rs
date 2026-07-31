@@ -10,14 +10,20 @@
 //! are Argon2, old ones keep working, and the scrypt hashes drain away naturally
 //! as people change passwords.
 //!
-//! # Why hashes are not upgraded in place
+//! # Why a verified scrypt hash is rewritten
 //!
-//! `PasswordHasher::verify` returns a `bool` and is handed no store, so it
-//! cannot rewrite the row it just verified. Transparent re-hash-on-login would
-//! need a hook with storage access; until then, dual-format verification is
-//! permanent rather than transitional. That is not a problem — it costs one
-//! branch per login — but it does mean scrypt hashes persist until their owner
-//! changes password.
+//! Dual-format verification only covers the code paths that use *this* hasher.
+//! Several better-auth plugins verify against `verify_password(None, …)` — the
+//! library's built-in Argon2 — no matter what hasher the instance is configured
+//! with. `/delete-user` is one: it asks for the account password, hands the
+//! stored hash to Argon2's PHC parser, and a scrypt hash fails to parse, so the
+//! confirmation dialog says "Invalid password" whatever you type.
+//!
+//! Riven cannot pass its hasher to those plugins, so instead it makes sure they
+//! never meet a scrypt hash: the first sign-in that verifies one rewrites it as
+//! Argon2, in the background, keyed on the hash's own value. Migrated accounts
+//! therefore heal on their next login rather than staying half-usable until
+//! their owner happens to change password.
 //!
 //! # scrypt parameters
 //!
@@ -34,6 +40,9 @@ use argon2::{Argon2, PasswordHasher as _, PasswordVerifier};
 use async_trait::async_trait;
 use better_auth::{AuthError, AuthResult};
 use better_auth_core::PasswordHasher;
+use chrono::Utc;
+use riven_core::entities::auth::account;
+use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, Set};
 use subtle::ConstantTimeEq;
 use unicode_normalization::UnicodeNormalization;
 
@@ -47,9 +56,67 @@ const SCRYPT_DK_LEN: usize = 64;
 const SCRYPT_SALT_HEX_LEN: usize = 32;
 const SCRYPT_KEY_HEX_LEN: usize = SCRYPT_DK_LEN * 2;
 
-pub struct DualFormatHasher;
+pub struct DualFormatHasher {
+    /// Where a verified scrypt hash is rewritten as Argon2. `None` disables the
+    /// rewrite, which is how the hashing tests below run without a database.
+    db: Option<DatabaseConnection>,
+}
 
 impl DualFormatHasher {
+    pub fn new(db: DatabaseConnection) -> Self {
+        Self { db: Some(db) }
+    }
+
+    /// Verification only — a verified legacy hash stays as it is.
+    #[cfg(test)]
+    fn offline() -> Self {
+        Self { db: None }
+    }
+
+    /// Replace a scrypt hash with an Argon2 one, off the request's critical
+    /// path: the caller is mid-sign-in and the rewrite is an optimisation, not
+    /// part of the answer.
+    ///
+    /// The row is found by the hash itself rather than by user id, which
+    /// `verify` is not given. Salts are 16 random bytes, so the value
+    /// identifies one account; and matching on it is what makes the update
+    /// safe to race against a password change writing the same column — that
+    /// write replaces the value this one is looking for, so it simply matches
+    /// nothing.
+    fn upgrade(&self, legacy_hash: String, password: String) {
+        let Some(db) = self.db.clone() else {
+            return;
+        };
+
+        tokio::spawn(async move {
+            let hashed = off_executor(move || Self::hash_argon2(&password)).await;
+            let hashed = match hashed {
+                Ok(hashed) => hashed,
+                Err(error) => {
+                    tracing::warn!(%error, "could not re-hash a legacy password");
+                    return;
+                }
+            };
+
+            let updated = account::Entity::update_many()
+                .set(account::ActiveModel {
+                    password: Set(Some(hashed)),
+                    updated_at: Set(Utc::now()),
+                    ..Default::default()
+                })
+                .filter(account::Column::Password.eq(legacy_hash))
+                .exec(&db)
+                .await;
+
+            match updated {
+                Ok(result) if result.rows_affected > 0 => {
+                    tracing::info!("upgraded a scrypt password hash to argon2");
+                }
+                Ok(_) => {}
+                Err(error) => tracing::warn!(%error, "could not store a re-hashed password"),
+            }
+        });
+    }
     /// Split a stored hash into `(salt_hex, key_hex)` if it has the shape the
     /// TypeScript library writes. Anything else — notably Argon2's `$argon2id$…`
     /// PHC string — returns `None` and falls through to Argon2.
@@ -133,13 +200,25 @@ impl PasswordHasher for DualFormatHasher {
     }
 
     async fn verify(&self, hash: &str, password: &str) -> AuthResult<bool> {
-        let hash = hash.to_string();
-        let password = password.to_string();
-        off_executor(move || match Self::as_scrypt(&hash) {
-            Some((salt_hex, key_hex)) => Self::verify_scrypt(salt_hex, key_hex, &password),
-            None => Self::verify_argon2(&hash, &password),
-        })
-        .await
+        let Some((salt_hex, key_hex)) = Self::as_scrypt(hash) else {
+            let hash = hash.to_string();
+            let password = password.to_string();
+            return off_executor(move || Self::verify_argon2(&hash, &password)).await;
+        };
+
+        let (salt_hex, key_hex) = (salt_hex.to_string(), key_hex.to_string());
+        let verified = {
+            let password = password.to_string();
+            off_executor(move || Self::verify_scrypt(&salt_hex, &key_hex, &password)).await?
+        };
+
+        // Only a hash that just proved itself is worth rewriting, and only the
+        // password that proved it can produce the replacement.
+        if verified {
+            self.upgrade(hash.to_string(), password.to_string());
+        }
+
+        Ok(verified)
     }
 }
 
@@ -156,7 +235,10 @@ mod tests {
     #[tokio::test]
     async fn verifies_a_hash_produced_by_the_typescript_library() {
         assert!(
-            DualFormatHasher.verify(TS_HASH, TS_PASSWORD).await.unwrap(),
+            DualFormatHasher::offline()
+                .verify(TS_HASH, TS_PASSWORD)
+                .await
+                .unwrap(),
             "scrypt parameters or salt encoding do not match better-auth"
         );
     }
@@ -164,7 +246,7 @@ mod tests {
     #[tokio::test]
     async fn rejects_a_wrong_password_against_the_typescript_hash() {
         assert!(
-            !DualFormatHasher
+            !DualFormatHasher::offline()
                 .verify(TS_HASH, "not the password")
                 .await
                 .unwrap()
@@ -173,13 +255,23 @@ mod tests {
 
     #[tokio::test]
     async fn round_trips_its_own_argon2_hashes() {
-        let hash = DualFormatHasher.hash("hunter2").await.unwrap();
+        let hash = DualFormatHasher::offline().hash("hunter2").await.unwrap();
         assert!(
             hash.starts_with("$argon2"),
             "expected PHC string, got {hash}"
         );
-        assert!(DualFormatHasher.verify(&hash, "hunter2").await.unwrap());
-        assert!(!DualFormatHasher.verify(&hash, "hunter3").await.unwrap());
+        assert!(
+            DualFormatHasher::offline()
+                .verify(&hash, "hunter2")
+                .await
+                .unwrap()
+        );
+        assert!(
+            !DualFormatHasher::offline()
+                .verify(&hash, "hunter3")
+                .await
+                .unwrap()
+        );
     }
 
     #[test]
@@ -200,13 +292,18 @@ mod tests {
         // typed either way must verify against one stored hash.
         let composed = "caf\u{00e9}";
         let decomposed = "cafe\u{0301}";
-        let hash = DualFormatHasher.hash(composed).await.unwrap();
+        let hash = DualFormatHasher::offline().hash(composed).await.unwrap();
         assert_eq!(
             DualFormatHasher::normalize(composed),
             DualFormatHasher::normalize(decomposed)
         );
         // Argon2 path does not normalise, so this documents the known gap:
         // only the scrypt path applies NFKC, matching better-auth's behaviour.
-        assert!(DualFormatHasher.verify(&hash, composed).await.unwrap());
+        assert!(
+            DualFormatHasher::offline()
+                .verify(&hash, composed)
+                .await
+                .unwrap()
+        );
     }
 }

@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
     Deserialize,
     async_graphql::SimpleObject,
 )]
-#[graphql(name = "FileSystemEntry")]
+#[graphql(name = "FileSystemEntry", complex)]
 #[sea_orm(table_name = "filesystem_entries")]
 pub struct Model {
     #[sea_orm(primary_key)]
@@ -28,8 +28,12 @@ pub struct Model {
     pub path: String,
     #[sea_orm(column_type = "Text", nullable)]
     pub original_filename: Option<String>,
+    /// Resolved through the [`ComplexObject`] impl below rather than exposed
+    /// directly — see `download_url` there for why.
+    #[graphql(skip)]
     #[sea_orm(column_type = "Text", nullable)]
     pub download_url: Option<String>,
+    #[graphql(skip)]
     #[sea_orm(column_type = "Text", nullable)]
     pub stream_url: Option<String>,
     #[sea_orm(column_type = "Text", nullable)]
@@ -65,6 +69,34 @@ pub struct Model {
     #[sea_orm(column_type = "Text", nullable)]
     pub usenet_info_hash: Option<String>,
     pub usenet_file_index: Option<i32>,
+}
+
+#[async_graphql::ComplexObject]
+impl Model {
+    async fn download_url(&self, ctx: &async_graphql::Context<'_>) -> Option<&str> {
+        self.credential(ctx, self.download_url.as_deref())
+    }
+
+    async fn stream_url(&self, ctx: &async_graphql::Context<'_>) -> Option<&str> {
+        self.credential(ctx, self.stream_url.as_deref())
+    }
+}
+
+impl Model {
+    /// `value` when the caller may act on releases, `None` otherwise.
+    ///
+    /// `ScrapeItems` is the threshold because it is already the capability that
+    /// governs choosing and committing a release — anyone who holds it can
+    /// obtain these URLs through the download flow anyway.
+    fn credential<'a>(
+        &self,
+        ctx: &async_graphql::Context<'_>,
+        value: Option<&'a str>,
+    ) -> Option<&'a str> {
+        let allowed = crate::auth::request_role(ctx)
+            .is_ok_and(|role| crate::auth::Capability::ScrapeItems.granted_to(role));
+        allowed.then_some(value).flatten()
+    }
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

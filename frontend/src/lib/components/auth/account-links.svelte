@@ -66,7 +66,7 @@
         const deadline = Date.now() + 3 * 60 * 1000;
         while (Date.now() < deadline) {
             await new Promise((resolve) => setTimeout(resolve, 2000));
-            const { data: status, error: pollError } = await authClient.plex.poll(data.id);
+            const { data: status, error: pollError } = await authClient.plex.poll(data.handle);
             if (pollError) {
                 busy = null;
                 toast.error(pollError.message);

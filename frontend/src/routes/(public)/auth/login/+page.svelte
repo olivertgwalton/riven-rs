@@ -31,7 +31,7 @@
     // whether to render the tab.
     let signUpAvailable = $state(false);
     let activeTab = $state("login");
-    let signUpName = $state("");
+    let signUpUsername = $state("");
     let signUpEmail = $state("");
     let signUpPassword = $state("");
     let signUpConfirm = $state("");
@@ -76,8 +76,7 @@
 
         submitting = true;
         const { error } = await authClient.signUp.email({
-            name: signUpName,
-            username: signUpName,
+            username: signUpUsername,
             email: signUpEmail,
             password: signUpPassword
         });
@@ -181,7 +180,7 @@
         const deadline = Date.now() + 3 * 60 * 1000;
         while (Date.now() < deadline) {
             await new Promise((resolve) => setTimeout(resolve, 2000));
-            const { data: status, error: pollError } = await authClient.plex.poll(data.id);
+            const { data: status, error: pollError } = await authClient.plex.poll(data.handle);
             if (pollError) {
                 plexBusy = false;
                 errorMessage = pollError.message;
@@ -320,11 +319,11 @@
                             <Card.Content>
                                 <form onsubmit={signUp} class="space-y-4">
                                     <div class="space-y-2">
-                                        <Label for="signUpName">Username</Label>
+                                        <Label for="signUpUsername">Username</Label>
                                         <Input
-                                            id="signUpName"
+                                            id="signUpUsername"
                                             autocomplete="username"
-                                            bind:value={signUpName}
+                                            bind:value={signUpUsername}
                                             required />
                                     </div>
                                     <div class="space-y-2">

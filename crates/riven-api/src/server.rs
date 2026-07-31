@@ -1,3 +1,4 @@
+mod artwork;
 mod auth;
 mod authn;
 mod board;
@@ -12,7 +13,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use axum::http::{
-    HeaderName, Method,
+    HeaderName, HeaderValue, Method,
     header::{ACCEPT_RANGES, AUTHORIZATION, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE},
 };
 use axum::{Router, routing::get};
@@ -83,6 +84,9 @@ mod state {
         pub link_request_tx: tokio::sync::mpsc::Sender<LinkRequest>,
         pub runtime: tokio::runtime::Handle,
         pub auth: Arc<RivenAuth>,
+        /// Held here as well as in the schema so the artwork proxy can dispatch
+        /// to media-server plugins without going through GraphQL.
+        pub registry: Arc<riven_core::plugin::PluginRegistry>,
     }
 
     /// Lets `better-auth`'s router and its `CurrentSession` / `OptionalSession`
@@ -121,7 +125,7 @@ pub async fn start_server(config: StartServerConfig) -> Result<()> {
     let auth = authn::build(&auth_secret, &public_url, cors_allowed_origins.clone()).await?;
 
     let schema = build_schema(
-        registry,
+        registry.clone(),
         job_queue.clone(),
         http_client,
         log_directory,
@@ -164,7 +168,11 @@ pub async fn start_server(config: StartServerConfig) -> Result<()> {
         link_request_tx,
         runtime: tokio::runtime::Handle::current(),
         auth: auth.clone(),
+        registry,
     };
+
+    let board_guard =
+        axum::middleware::from_fn_with_state(state.clone(), board::require_board_admin);
 
     // Routes reached by third-party players. Stremio and whatever player it
     // hands a stream URL to are origins we can't enumerate, and the instance
@@ -202,10 +210,13 @@ pub async fn start_server(config: StartServerConfig) -> Result<()> {
         // Hands out the addon token, so it stays on the instance allowlist —
         // only the frontend should be able to read it.
         .route("/stremio/manifest-url", get(stremio::manifest_url_handler))
+        // Proxies media-server artwork so the browser never receives the Plex
+        // token / Emby API key that fetching it requires. See `artwork.rs`.
+        .route("/artwork/{server}", get(artwork::artwork_handler))
         // Plex sign-in. Not under better-auth's router because Plex is a
         // PIN-and-poll flow, not OAuth2 — see `plex.rs`.
         .route("/auth/plex/start", axum::routing::post(plex::start))
-        .route("/auth/plex/poll/{pin_id}", get(plex::poll))
+        .route("/auth/plex/poll/{handle}", get(plex::poll))
         // Whether better-auth's own `/auth/sign-up/email` will accept a caller.
         // See `first_user.rs`: it does exactly once, for the first account.
         .route("/auth/first-user", get(first_user::availability))
@@ -219,15 +230,24 @@ pub async fn start_server(config: StartServerConfig) -> Result<()> {
         // then fell through to the SPA fallback and answered POSTs with 405.
         // The prefix here and `base_path` in `authn::build` must stay in step.
         .nest("/auth", auth.clone().axum_router_with_state::<ApiState>())
-        .nest("/api/v1", board_api.with_state(()))
-        .nest("/board", board_ui.with_state(()))
+        // The board crate authenticates nothing itself, and `push_task` on
+        // `/api/v1` enqueues whatever it is handed. Both halves are admin-only.
+        .nest("/api/v1", board_api.with_state(()).layer(board_guard.clone()))
+        .nest("/board", board_ui.with_state(()).layer(board_guard))
         .fallback_service(serve_frontend)
         .layer(build_cors_layer(cors_allowed_origins));
 
-    let app = player_routes
+    let mut app = player_routes
         .merge(routes)
-        .layer(axum::middleware::from_fn(board::board_assets_middleware))
-        .with_state(state);
+        .layer(axum::middleware::from_fn(board::board_assets_middleware));
+
+    // Applied above the asset middleware so the board's own bundle is covered
+    // too, and outside both routers so a 404 carries them as well.
+    for header in SECURITY_HEADERS {
+        app = app.layer(security_header_layer(header));
+    }
+
+    let app = app.with_state(state);
 
     let listener = tokio::net::TcpListener::bind(format!("{host}:{port}")).await?;
     tracing::info!(host = %host, port = port, "GraphQL server listening");
@@ -237,6 +257,45 @@ pub async fn start_server(config: StartServerConfig) -> Result<()> {
         .await?;
 
     Ok(())
+}
+
+/// Response headers applied to everything riven serves.
+///
+/// `frame-ancestors 'none'` is the load-bearing one: without it the admin UI is
+/// framable, and a mutation like `removeItems` is one clickjacked button away.
+/// It is spelled as CSP rather than `X-Frame-Options` because the latter is
+/// obsolete, plus `X-Frame-Options` for the handful of engines that never
+/// implemented `frame-ancestors`.
+///
+/// `strict-origin-when-cross-origin` keeps query strings out of the `Referer`,
+/// which matters for any route that carries a credential in the URL — the
+/// Stremio addon token and the `?api_key=` fallback both do.
+///
+/// The CSP is otherwise deliberately loose. The SPA is Vite-built with hashed
+/// assets and no inline scripts, but the board UI it shares an origin with loads
+/// WebAssembly, and metadata posters come from TMDB/TVDB/Plex — a tight
+/// `default-src` would have to enumerate all of that and would break on the
+/// first new artwork host. `frame-ancestors` and `nosniff` are the parts that
+/// buy real protection here; there is no `{@html}`, `innerHTML` or `eval`
+/// anywhere in the frontend for a script-src to defend.
+///
+/// Spelled as a list because `SetResponseHeaderLayer` carries one header each;
+/// [`start_server`] folds them onto the router.
+const SECURITY_HEADERS: [(&str, &str); 4] = [
+    ("content-security-policy", "frame-ancestors 'none'"),
+    // For the handful of engines that never implemented `frame-ancestors`.
+    ("x-frame-options", "DENY"),
+    ("x-content-type-options", "nosniff"),
+    ("referrer-policy", "strict-origin-when-cross-origin"),
+];
+
+fn security_header_layer(
+    (name, value): (&'static str, &'static str),
+) -> tower_http::set_header::SetResponseHeaderLayer<HeaderValue> {
+    tower_http::set_header::SetResponseHeaderLayer::overriding(
+        HeaderName::from_static(name),
+        HeaderValue::from_static(value),
+    )
 }
 
 /// CORS for the token-authenticated player routes. Origin is wildcarded because

@@ -95,4 +95,8 @@ volumes:
 
 networks:
     default:
+        # Docker assigns a ULA prefix (fd00::/8) here, which is not globally
+        # routable — so this does not make the unpublished postgres/redis ports
+        # reachable from outside. Worth re-checking if this ever runs somewhere
+        # that hands containers a global prefix instead.
         enable_ipv6: true

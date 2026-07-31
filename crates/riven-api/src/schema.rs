@@ -68,8 +68,25 @@ pub fn build_schema(
     .data(stremio_addon_token);
     let builder = queries::logs::register_with_schema(builder, log_directory);
     let builder = plugin_dashboard::register_with_schema(builder);
-    builder.finish()
+    builder
+        .limit_depth(MAX_QUERY_DEPTH)
+        .limit_complexity(MAX_QUERY_COMPLEXITY)
+        .finish()
 }
+
+/// The type graph is cyclic — `Show.seasons → Season.show → Show.seasons`, and
+/// the same through `Season.episodes → Episode.season` — and every hop is a
+/// database round trip. Without a ceiling, one authenticated request at modest
+/// nesting expands into an exponential number of queries, which is a denial of
+/// service available to the lowest role on the instance.
+///
+/// Both limits are set well above what the frontend actually asks for: the
+/// deepest real query is the media-detail page at roughly eight levels. They are
+/// a backstop against a pathological query, not a budget the UI has to live
+/// within — if a legitimate page ever trips one, raise it rather than reshaping
+/// the page.
+const MAX_QUERY_DEPTH: usize = 15;
+const MAX_QUERY_COMPLEXITY: usize = 2000;
 
 /// The schema as SDL, for the frontend's type generation.
 ///

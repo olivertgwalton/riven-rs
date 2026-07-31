@@ -18,9 +18,9 @@
 
     type ManagedUser = {
         id: string;
-        name?: string | null;
         email?: string | null;
         username?: string | null;
+        displayUsername?: string | null;
         role?: string | null;
         banned?: boolean | null;
         createdAt?: string | null;
@@ -45,13 +45,10 @@
                 if (!form.valid) return;
 
                 const { error } = await authClient.admin.createUser({
-                    name: form.data.username,
+                    username: form.data.username,
                     email: form.data.email,
                     password: form.data.password,
-                    role: form.data.role,
-                    // `username` is riven's sign-in handle and lives outside
-                    // better-auth's core user shape, so it travels in `data`.
-                    data: { username: form.data.username }
+                    role: form.data.role
                 });
 
                 if (error) {
@@ -75,7 +72,7 @@
     }
 
     async function deleteUser(user: ManagedUser) {
-        const label = user.username ?? user.name ?? user.email ?? user.id;
+        const label = user.displayUsername ?? user.username ?? user.email ?? user.id;
         if (!confirm(`Delete ${label}? This cannot be undone.`)) return;
 
         deletingId = user.id;
@@ -102,7 +99,7 @@
                 <Form.Control>
                     {#snippet children({ props })}
                         <Form.Label for="username">Username</Form.Label>
-                        <Input placeholder="new-user" {...props} bind:value={$formData.username} />
+                        <Input placeholder="new_user" {...props} bind:value={$formData.username} />
                     {/snippet}
                 </Form.Control>
                 <Form.FieldErrors />
@@ -185,7 +182,7 @@
                     {#each users as user (user.id)}
                         <Table.Row>
                             <Table.Cell>
-                                <div class="font-medium">{user.username ?? user.name}</div>
+                                <div class="font-medium">{user.displayUsername ?? user.username}</div>
                                 <div class="text-muted-foreground text-xs">{user.email}</div>
                             </Table.Cell>
                             <Table.Cell>

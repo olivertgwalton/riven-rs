@@ -74,9 +74,15 @@ impl SeaOrmHooks<RivenAuthSchema> for FirstUserIsAdmin {
         }
 
         create_user.role = Some("admin".to_string());
-        // Nothing here can send mail, so an unverified first admin would be
-        // locked out of anything gated on verification.
-        create_user.email_verified = Some(true);
+        // `email_verified` is deliberately left alone. Marking the first admin
+        // verified reads like a kindness — nothing here can send mail, so it
+        // would spare them a gate they could never pass — but riven gates
+        // nothing on it (`require_verification_for_signin` is off, and no route
+        // of ours checks the flag), while `/change-email` treats a *verified*
+        // address as one that may only be changed by confirming a mailed link.
+        // With no mail provider that link is written to the log and the address
+        // never changes, so a verified first admin is an admin who cannot
+        // change their email.
         tracing::info!("first user is being created as an admin");
         Ok(HookControl::Continue)
     }

@@ -171,6 +171,21 @@ pub trait Plugin: Send + Sync + 'static {
         Ok(HookResponse::Empty)
     }
 
+    /// Fetch one artwork image from this media server.
+    ///
+    /// Only the plugin whose name matches `server` should answer; the default
+    /// is `Empty`, so a plugin that does not serve artwork simply declines.
+    /// `reference` came in over HTTP — validate it before building a URL from
+    /// it, since the credential used here is the server's admin token.
+    async fn on_artwork_requested(
+        &self,
+        _server: &str,
+        _reference: &str,
+        _ctx: &PluginContext,
+    ) -> anyhow::Result<HookResponse> {
+        Ok(HookResponse::Empty)
+    }
+
     /// Default dispatcher — do not override. Routes a `RivenEvent` to the matching `on_*` hook.
     async fn handle_event(
         &self,
@@ -300,6 +315,9 @@ pub trait Plugin: Send + Sync + 'static {
             RivenEvent::DebridUserInfoRequested => self.on_debrid_user_info_requested(ctx).await,
             RivenEvent::ActivePlaybackSessionsRequested => {
                 self.on_active_playback_sessions_requested(ctx).await
+            }
+            RivenEvent::ArtworkRequested { server, reference } => {
+                self.on_artwork_requested(server, reference, ctx).await
             }
         }
     }

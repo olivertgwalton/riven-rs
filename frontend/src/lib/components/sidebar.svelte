@@ -50,6 +50,11 @@
     ];
 
     let { user } = $props();
+
+    // An account has one handle. `displayUsername` is the same string with the
+    // casing its owner typed; `username` is the lower-cased form sign-in uses.
+    const handle = $derived(user?.displayUsername ?? user?.username ?? "");
+
     const visibleNavItems = $derived(
         navItems.filter((item) => !item.adminOnly || can(page.data.permissions, "MANAGE_SETTINGS"))
     );
@@ -100,17 +105,17 @@
                     <a href={resolve("/auth")} class="cursor-pointer" aria-label="Profile">
                         <Avatar.Root>
                             {#if user.image}
-                                <Avatar.Image src={user.image} alt={user.name} />
+                                <Avatar.Image src={user.image} alt={handle} />
                             {/if}
                             <Avatar.Fallback class="bg-primary text-primary-foreground">
-                                {getInitials(user.name)}
+                                {getInitials(handle)}
                             </Avatar.Fallback>
                         </Avatar.Root>
                     </a>
                 {/snippet}
                 {#snippet content()}
                     <p class="font-medium">
-                        {user.name}
+                        {handle}
                     </p>
                 {/snippet}
             </Tooltip>
@@ -165,14 +170,14 @@
                         onclick={() => SidebarStore.toggle()}>
                         <Avatar.Root class="size-8">
                             {#if user.image}
-                                <Avatar.Image src={user.image} alt={user.name} />
+                                <Avatar.Image src={user.image} alt={handle} />
                             {/if}
                             <Avatar.Fallback class="bg-primary text-primary-foreground text-xs">
-                                {getInitials(user.name)}
+                                {getInitials(handle)}
                             </Avatar.Fallback>
                         </Avatar.Root>
                         <p class="text-foreground/90 text-sm font-medium">
-                            {user.username}
+                            {handle}
                         </p>
                     </a>
 

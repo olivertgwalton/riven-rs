@@ -35,11 +35,18 @@ pub fn addon_token(api_key: &str) -> Option<String> {
 }
 
 /// Verify a token taken from an addon URL. Comparison goes through
-/// `verify_slice` so it stays constant-time. An empty `api_key` means auth is
-/// disabled, so anything is accepted.
+/// `verify_slice` so it stays constant-time.
+///
+/// An empty `api_key` verifies **nothing**: with no key there is no token to
+/// check against, and `addon_token` cannot mint one either, so the only honest
+/// answer is `false`. This used to return `true` — "auth disabled" — which is a
+/// fail-open primitive sitting behind URLs that carry no cookie and are the only
+/// thing between the open internet and the instance's media. The sole call site
+/// happened to guard against it, and `main.rs` refuses to start without a key,
+/// but a verification helper must not depend on its callers for that.
 pub fn verify_addon_token(api_key: &str, token: &str) -> bool {
     if api_key.is_empty() {
-        return true;
+        return false;
     }
     let Ok(provided) = hex::decode(token) else {
         return false;
@@ -195,8 +202,10 @@ mod tests {
         assert!(!verify_addon_token("other", &token));
         assert!(!verify_addon_token("secret", "not-hex"));
         assert!(!verify_addon_token("secret", ""));
-        // Auth disabled accepts anything, matching `check_api_key`.
-        assert!(verify_addon_token("", "whatever"));
+        // With no key there is nothing to verify against, so nothing verifies.
+        // This used to return `true`, which made the helper fail open.
+        assert!(!verify_addon_token("", "whatever"));
+        assert!(!verify_addon_token("", ""));
     }
 
     #[test]

@@ -4,7 +4,7 @@ use riven_core::events::{DownloadSuccessInfo, EventType, HookResponse};
 use riven_core::http::HttpServiceProfile;
 use riven_core::plugin::{FieldType, Plugin, PluginContext, SettingField};
 use riven_core::settings::PluginSettings;
-use riven_core::types::{ActivePlaybackSession, PlaybackMethod, PlaybackState};
+use riven_core::types::{ActivePlaybackSession, PlaybackMethod, PlaybackState, artwork_path};
 use riven_db::repo;
 use serde::Deserialize;
 use serde::Serialize;
@@ -206,6 +206,7 @@ macro_rules! impl_media_server_plugin {
                     EventType::MediaItemDownloadSuccess,
                     EventType::MediaItemsDeleted,
                     EventType::ActivePlaybackSessionsRequested,
+                    EventType::ArtworkRequested,
                 ]
             }
 
@@ -234,6 +235,25 @@ macro_rules! impl_media_server_plugin {
                 Ok(HookResponse::ActivePlaybackSessions(sessions))
             }
 
+            async fn on_artwork_requested(
+                &self,
+                server: &str,
+                reference: &str,
+                ctx: &PluginContext,
+            ) -> anyhow::Result<HookResponse> {
+                if server != $name {
+                    return Ok(HookResponse::Empty);
+                }
+                let url = ctx
+                    .require_setting("url")?
+                    .trim_end_matches('/')
+                    .to_string();
+                let api_key = ctx.require_setting("apikey")?;
+                Ok(HookResponse::Artwork(
+                    get_artwork(&ctx.http, &url, api_key, $name, reference).await?,
+                ))
+            }
+
             async fn on_download_success(
                 &self,
                 info: &DownloadSuccessInfo<'_>,
@@ -257,6 +277,70 @@ macro_rules! impl_media_server_plugin {
 
 impl_media_server_plugin!(EmbyPlugin, "emby");
 impl_media_server_plugin!(JellyfinPlugin, "jellyfin");
+
+/// The largest artwork riven will relay — see the Plex counterpart. Only exists
+/// so a misbehaving upstream cannot stream an unbounded body through riven.
+const MAX_ARTWORK_BYTES: usize = 8 * 1024 * 1024;
+
+/// Fetch one artwork image, with the API key in a header rather than the URL.
+///
+/// `item_id` arrives from the browser, so it is constrained to the id shape
+/// Emby and Jellyfin actually use (hex GUIDs, occasionally with dashes) before
+/// being interpolated into a path. The request carries an admin key, so an
+/// unchecked value here would let a caller aim it at any endpoint on the media
+/// server.
+async fn get_artwork(
+    http: &riven_core::http::HttpClient,
+    base_url: &str,
+    api_key: &str,
+    server: &str,
+    item_id: &str,
+) -> anyhow::Result<riven_core::events::Artwork> {
+    anyhow::ensure!(
+        !item_id.is_empty()
+            && item_id.len() <= 64
+            && item_id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-'),
+        "refusing to fetch artwork for an item id that is not alphanumeric"
+    );
+
+    let url = format!(
+        "{}/Items/{item_id}/Images/Primary",
+        base_url.trim_end_matches('/')
+    );
+    let response = http
+        .send(server_profile(server), |client| {
+            media_server_request(client, Method::GET, &url, api_key).header("accept", "image/*")
+        })
+        .await?
+        .error_for_status()?;
+
+    // An error page served back under riven's own origin would be an HTML
+    // injection point, so anything that is not an image is refused.
+    let content_type = response
+        .headers()
+        .get("content-type")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    anyhow::ensure!(
+        content_type.starts_with("image/"),
+        "{server} returned {content_type:?} for artwork, which is not an image"
+    );
+
+    let bytes = response.bytes().await?;
+    anyhow::ensure!(
+        bytes.len() <= MAX_ARTWORK_BYTES,
+        "{server} artwork is {} bytes, over the {MAX_ARTWORK_BYTES} limit",
+        bytes.len()
+    );
+
+    Ok(riven_core::events::Artwork {
+        content_type,
+        bytes: bytes.to_vec(),
+    })
+}
 
 async fn get_active_sessions(
     http: &riven_core::http::HttpClient,
@@ -304,8 +388,12 @@ async fn get_active_sessions(
                 duration_seconds: duration.and_then(|v| u64::try_from(v / 10_000_000).ok()),
                 device_name: session.device_name,
                 client_name: session.client,
-                image_url: item_id
-                    .map(|id| format!("{base_url}/Items/{id}/Images/Primary?api_key={api_key}")),
+                // A riven-relative path, not a media-server URL. `?api_key=`
+                // here put the Emby/Jellyfin admin key into a response every
+                // authenticated user can request, and from there into the DOM
+                // and the browser's cache. riven proxies the image and keeps
+                // the key server-side. Only the item id travels.
+                image_url: item_id.map(|id| artwork_path(server, &id)),
             })
         })
         .collect())

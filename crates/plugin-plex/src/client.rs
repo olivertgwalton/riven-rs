@@ -1,4 +1,5 @@
 use super::*;
+use riven_core::events::Artwork;
 
 pub(crate) async fn get_library_sections(
     http: &riven_core::http::HttpClient,
@@ -39,6 +40,72 @@ pub(crate) async fn refresh_section(
         .await?;
     response.error_for_status()?;
     Ok(())
+}
+
+/// The largest artwork riven will relay. Plex thumbnails are tens of kilobytes;
+/// this only exists so a misbehaving or hostile upstream cannot stream an
+/// unbounded body through riven into a browser.
+const MAX_ARTWORK_BYTES: usize = 8 * 1024 * 1024;
+
+/// Fetch one artwork image, with the Plex token in a header rather than the URL.
+///
+/// `reference` arrives from the browser, so it is checked rather than trusted:
+/// it must be the absolute, single-segment-rooted `thumb` path Plex itself
+/// produced. Without that check a caller could steer this at any path on the
+/// Plex server — the request carries an admin token, so it would read whatever
+/// it was pointed at, and `..` would let it climb out of `/library` entirely.
+pub(crate) async fn get_artwork(
+    http: &riven_core::http::HttpClient,
+    plex_url: &str,
+    token: &str,
+    reference: &str,
+) -> anyhow::Result<Artwork> {
+    anyhow::ensure!(
+        reference.starts_with('/')
+            && !reference.starts_with("//")
+            && !reference.contains("..")
+            && !reference.contains('?')
+            && !reference.contains('#')
+            && !reference.contains('\\'),
+        "refusing to fetch artwork for a reference that is not a plain plex path"
+    );
+
+    let url = format!("{}{reference}", plex_url.trim_end_matches('/'));
+    let response = http
+        .send(PROFILE, |client| {
+            client
+                .get(&url)
+                .header("x-plex-token", token)
+                .header("accept", "image/*")
+        })
+        .await?
+        .error_for_status()?;
+
+    // Plex answers a bad path with an HTML error page rather than a 4xx in some
+    // versions. Serving that back under riven's own origin would be an HTML
+    // injection point, so anything that is not an image is refused here.
+    let content_type = response
+        .headers()
+        .get("content-type")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    anyhow::ensure!(
+        content_type.starts_with("image/"),
+        "plex returned {content_type:?} for artwork, which is not an image"
+    );
+
+    let bytes = response.bytes().await?;
+    anyhow::ensure!(
+        bytes.len() <= MAX_ARTWORK_BYTES,
+        "plex artwork is {} bytes, over the {MAX_ARTWORK_BYTES} limit",
+        bytes.len()
+    );
+
+    Ok(Artwork {
+        content_type,
+        bytes: bytes.to_vec(),
+    })
 }
 
 pub(crate) async fn get_active_sessions(
@@ -101,9 +168,13 @@ pub(crate) async fn get_active_sessions(
                 duration_seconds: duration.and_then(|v| u64::try_from(v / 1000).ok()),
                 device_name,
                 client_name,
-                image_url: thumb
-                    .as_ref()
-                    .map(|thumb| format!("{plex_url}{thumb}?X-Plex-Token={token}")),
+                // A riven-relative path, not a Plex URL. Embedding
+                // `?X-Plex-Token=` here handed the Plex server's admin token to
+                // every caller of `activePlaybackSessions` — a query any
+                // authenticated user can run — and then to the DOM, the browser
+                // cache and the `Referer` of whatever the dashboard loaded next.
+                // riven proxies the image instead and keeps the token server-side.
+                image_url: thumb.as_ref().map(|thumb| artwork_path("plex", thumb)),
             }
         })
         .collect())

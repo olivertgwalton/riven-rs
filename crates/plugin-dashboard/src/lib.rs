@@ -1,5 +1,6 @@
 use async_graphql::{Context, Object, Result as GqlResult, SchemaBuilder, SimpleObject};
 use async_trait::async_trait;
+use riven_core::auth::{Capability, require};
 use riven_core::events::{HookResponse, RivenEvent};
 use riven_core::plugin::{Plugin, PluginRegistry};
 use riven_core::types::{ActivePlaybackSession, DebridUserInfo};
@@ -151,6 +152,13 @@ impl DashboardQuery {
 
     /// Get debrid account information for all configured stores.
     async fn debrid_account_info(&self, ctx: &Context<'_>) -> GqlResult<Vec<DebridUserInfo>> {
+        // The debrid account's email and subscription state belong to whoever
+        // pays for the instance, not to everyone with a login. Empty rather
+        // than `Err`, matching `nntpProviders` — the dashboard renders the
+        // absence fine, and a field error would only add noise.
+        if require(ctx, Capability::ManageSettings).is_err() {
+            return Ok(Vec::new());
+        }
         let registry = ctx.data::<Arc<PluginRegistry>>()?;
         let results = registry
             .dispatch(&RivenEvent::DebridUserInfoRequested)

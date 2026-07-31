@@ -3,36 +3,52 @@
 use sea_orm::ConnectionTrait;
 use sea_orm_migration::{MigrationName, MigrationTrait, MigratorTrait, SchemaManager};
 
+macro_rules! sql_migration {
+    ($ty:ident, $name:literal, $file:literal) => {
+        struct $ty;
+        impl MigrationName for $ty {
+            fn name(&self) -> &str {
+                $name
+            }
+        }
+        #[async_trait::async_trait]
+        impl MigrationTrait for $ty {
+            async fn up(&self, manager: &SchemaManager) -> Result<(), sea_orm::DbErr> {
+                manager
+                    .get_connection()
+                    .execute_unprepared(include_str!(concat!("../migrations/", $file)))
+                    .await?;
+                Ok(())
+            }
+        }
+    };
+}
+
 macro_rules! sql_migrations {
     ($(($ty:ident, $name:literal, $file:literal)),* $(,)?) => {
-        $(
-            struct $ty;
-            impl MigrationName for $ty {
-                fn name(&self) -> &str { $name }
-            }
-            #[async_trait::async_trait]
-            impl MigrationTrait for $ty {
-                async fn up(&self, manager: &SchemaManager) -> Result<(), sea_orm::DbErr> {
-                    manager
-                        .get_connection()
-                        .execute_unprepared(include_str!(concat!("../migrations/", $file)))
-                        .await?;
-                    Ok(())
-                }
-            }
-        )*
+        $( sql_migration!($ty, $name, $file); )*
 
         pub struct Migrator;
 
         impl MigratorTrait for Migrator {
             fn migrations() -> Vec<Box<dyn MigrationTrait>> {
                 let mut migrations: Vec<Box<dyn MigrationTrait>> = vec![$(Box::new($ty)),*];
+                // Generated from entities rather than written as SQL, so it
+                // cannot take its turn in file order…
                 migrations.push(Box::new(auth::M036Auth));
+                // …and anything touching the tables it creates has to follow it.
+                migrations.push(Box::new(M037AuthUsernameIsName));
                 migrations
             }
         }
     };
 }
+
+sql_migration!(
+    M037AuthUsernameIsName,
+    "m037_auth_username_is_name",
+    "037_auth_username_is_name.sql"
+);
 
 /// Authentication tables, generated from entities rather than hand-written SQL.
 ///

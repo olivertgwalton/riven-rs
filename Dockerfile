@@ -71,6 +71,11 @@ ENV RIVEN_STATIC_DIR=/riven/frontend
 RUN mkdir -p /logs && \
     echo "user_allow_other" >> /etc/fuse.conf
 
+RUN addgroup -g 1000 riven && \
+    adduser -D -u 1000 -G riven riven && \
+    chown -R riven:riven /logs /riven
+USER riven
+
 ENV SQLX_OFFLINE=true
 
 ENTRYPOINT ["riven"]

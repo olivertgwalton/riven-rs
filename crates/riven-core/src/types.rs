@@ -15,6 +15,6 @@ pub use enums::{
     MediaItemType, ShowStatus,
 };
 pub use index::{IndexedEpisode, IndexedMediaItem, IndexedSeason};
-pub use playback::{ActivePlaybackSession, PlaybackMethod, PlaybackState};
+pub use playback::{ActivePlaybackSession, PlaybackMethod, PlaybackState, artwork_path};
 pub use provider::{DebridUserInfo, ProviderInfo};
 pub use stream::StreamLinkResponse;

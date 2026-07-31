@@ -73,6 +73,8 @@ pub enum EventType {
     DebridUserInfoRequested,
     #[serde(rename = "riven.media-server.active-sessions.requested")]
     ActivePlaybackSessionsRequested,
+    #[serde(rename = "riven.media-server.artwork.requested")]
+    ArtworkRequested,
 }
 
 impl EventType {
@@ -117,6 +119,7 @@ impl EventType {
             Self::MediaItemsDeleted => "riven.media-item.deleted",
             Self::DebridUserInfoRequested => "riven.debrid.user-info.requested",
             Self::ActivePlaybackSessionsRequested => "riven.media-server.active-sessions.requested",
+            Self::ArtworkRequested => "riven.media-server.artwork.requested",
         }
     }
 
@@ -171,7 +174,10 @@ impl EventType {
             | Self::MediaItemDownloadProviderListRequested
             | Self::MediaItemStreamLinkRequested
             | Self::ActivePlaybackSessionsRequested
-            | Self::DebridUserInfoRequested => Inline,
+            | Self::DebridUserInfoRequested
+            // Serves one browser request; the caller needs the bytes back, so
+            // it cannot be queued.
+            | Self::ArtworkRequested => Inline,
 
             Self::MediaItemScrapeRequested => FanIn { prefix: "scrape" },
             Self::MediaItemIndexRequested => FanIn { prefix: "index" },
@@ -232,6 +238,7 @@ mod tests {
             MediaItemsDeleted,
             DebridUserInfoRequested,
             ActivePlaybackSessionsRequested,
+            ArtworkRequested,
         ];
         for variant in all {
             match variant {
@@ -259,7 +266,8 @@ mod tests {
                 | MediaItemStreamLinkRequested
                 | MediaItemsDeleted
                 | DebridUserInfoRequested
-                | ActivePlaybackSessionsRequested => {}
+                | ActivePlaybackSessionsRequested
+                | ArtworkRequested => {}
             }
         }
         all.to_vec()

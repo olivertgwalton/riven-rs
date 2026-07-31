@@ -12,6 +12,8 @@ use riven_db::orm;
 use riven_usenet::UsenetStreamer;
 use sea_orm::{DbBackend, FromQueryResult, Statement};
 
+use crate::schema::auth::require_settings_access;
+
 /// Live health of one configured NNTP provider.
 #[derive(SimpleObject)]
 pub struct NntpProviderHealth {
@@ -229,7 +231,17 @@ pub struct UsenetHealthQuery;
 impl UsenetHealthQuery {
     /// Per-provider NNTP health (connections + demotion state). Empty when
     /// usenet isn't configured.
-    async fn nntp_providers(&self, _ctx: &Context<'_>) -> Result<Vec<NntpProviderHealth>> {
+    async fn nntp_providers(&self, ctx: &Context<'_>) -> Result<Vec<NntpProviderHealth>> {
+        // Names the instance's usenet providers and their connection counts —
+        // operator detail, not something an ordinary user needs.
+        //
+        // Empty rather than `Err` for a non-admin: the dashboard asks for this
+        // in the same query as the rest of the usenet panel, and a field error
+        // fails the whole response, which would blank four panels a
+        // non-admin is still meant to see.
+        if require_settings_access(ctx).is_err() {
+            return Ok(Vec::new());
+        }
         let providers = match UsenetStreamer::existing_shared() {
             Some(streamer) => streamer.pool().health(),
             None => Vec::new(),

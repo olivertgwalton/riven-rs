@@ -12,6 +12,10 @@ type ActivePlaybackSession {
 	durationSeconds: Int
 	deviceName: String
 	clientName: String
+	"""
+	Artwork for the item, as a path on this riven instance — fetch it from
+	here, not from the media server.
+	"""
 	imageUrl: String
 }
 
@@ -287,8 +291,6 @@ type FileSystemEntry {
 	entryType: FileSystemEntryType!
 	path: String!
 	originalFilename: String
-	downloadUrl: String
-	streamUrl: String
 	plugin: String
 	provider: String
 	providerDownloadId: String
@@ -307,6 +309,8 @@ type FileSystemEntry {
 	sourceId: String
 	usenetInfoHash: String
 	usenetFileIndex: Int
+	downloadUrl: String
+	streamUrl: String
 }
 
 enum FileSystemEntryType {

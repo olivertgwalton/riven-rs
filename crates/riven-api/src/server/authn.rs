@@ -78,6 +78,8 @@ pub async fn build(
         ),
     }
 
+    warn_if_session_cookie_will_not_be_secure(base_url);
+
     let config = AuthConfig::new(secret)
         .app_name("Riven")
         .base_url(base_url)
@@ -97,7 +99,7 @@ pub async fn build(
     // Argon2 — without it every existing user is locked out at cutover. Shared
     // by both plugins that touch passwords, so sign-in and password-change agree
     // on what a valid hash looks like.
-    let hasher: Arc<dyn PasswordHasher> = Arc::new(DualFormatHasher);
+    let hasher: Arc<dyn PasswordHasher> = Arc::new(DualFormatHasher::new(riven_db::orm().clone()));
 
     let auth = BetterAuth::<RivenAuthSchema>::new(config)
         .store(store)
@@ -157,6 +159,40 @@ pub async fn build(
         .await?;
 
     Ok(Arc::new(auth))
+}
+
+/// Warn when the session cookie will go out without `Secure`.
+///
+/// `AuthConfig::base_url` sets `session.cookie_secure` from the scheme, so a
+/// `public_url` of `http://…` yields a session cookie any network path can read
+/// — and it does so silently. The common way to land here is a TLS-terminating
+/// reverse proxy with `public_url` pointed at the internal address rather than
+/// the public one, which looks like it works.
+///
+/// Loopback is exempt: browsers treat it as a secure context, and a local `http`
+/// URL is the normal way to run riven on your own machine.
+fn warn_if_session_cookie_will_not_be_secure(base_url: &str) {
+    let Ok(url) = url::Url::parse(base_url) else {
+        return;
+    };
+    if url.scheme() != "http" {
+        return;
+    }
+    let is_loopback = matches!(
+        url.host_str(),
+        Some("localhost" | "127.0.0.1" | "[::1]" | "::1")
+    );
+    if is_loopback {
+        return;
+    }
+
+    tracing::warn!(
+        %base_url,
+        "RIVEN_SETTING__PUBLIC_URL is http, so the session cookie will be sent \
+         without the Secure flag and is readable by anything on the network path. \
+         If riven sits behind a TLS-terminating proxy, set this to the https URL \
+         browsers actually use"
+    );
 }
 
 /// The relying-party ID better-auth will derive for passkeys — the host of

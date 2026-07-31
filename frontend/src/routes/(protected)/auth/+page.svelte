@@ -22,7 +22,7 @@
 
     let { data }: PageProps = $props();
 
-    const displayName = $derived(data.user?.name ?? data.user?.username ?? "");
+    const displayName = $derived(data.user?.displayUsername ?? data.user?.username ?? "");
 
     /**
      * Every riven account has a `credential` row unless it was created purely

@@ -20,7 +20,7 @@ plugin-seerr = { path = "../plugin-seerr" }
 async-graphql = { workspace = true }
 async-graphql-axum = { workspace = true }
 axum = { workspace = true }
-tower-http = { workspace = true, features = ["fs"] }
+tower-http = { workspace = true, features = ["fs", "set-header"] }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 serde = { workspace = true }

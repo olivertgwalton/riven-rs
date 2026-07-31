@@ -1,7 +1,5 @@
 <script lang="ts">
-    import "@fontsource/oxanium/300.css";
-    import "@fontsource/oxanium/500.css";
-    import "@fontsource/oxanium/600.css";
+    // Fonts are imported once, in the root layout.
     import oxanium400Woff2 from "@fontsource/oxanium/files/oxanium-latin-400-normal.woff2?url";
     import { afterNavigate, beforeNavigate } from "$app/navigation";
     import Sidebar from "$lib/components/sidebar.svelte";

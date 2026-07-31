@@ -25,5 +25,22 @@ pub enum HookResponse {
     StreamLinkDead,
     UserInfo(Vec<DebridUserInfo>),
     ActivePlaybackSessions(Vec<ActivePlaybackSession>),
+    /// One artwork image, already fetched from the media server with the
+    /// credential riven holds. Answers [`RivenEvent::ArtworkRequested`].
+    ///
+    /// [`RivenEvent::ArtworkRequested`]: crate::events::RivenEvent::ArtworkRequested
+    Artwork(Artwork),
     Empty,
+}
+
+/// Image bytes plus the content type the media server reported.
+///
+/// `content_type` is validated by the plugin before it gets here — riven serves
+/// these bytes back to a browser, so an upstream that answered with
+/// `text/html` must not be able to turn the artwork route into a
+/// same-origin HTML injection point.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Artwork {
+    pub content_type: String,
+    pub bytes: Vec<u8>,
 }

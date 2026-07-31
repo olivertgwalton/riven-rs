@@ -27,9 +27,8 @@
 
                 // Blank means "leave this alone", so the payload is built from
                 // the filled fields only. `/update-user` rejects an empty body.
-                const payload: { username?: string; name?: string; image?: string } = {};
+                const payload: { username?: string; image?: string } = {};
                 if (form.data.newUsername.trim()) payload.username = form.data.newUsername.trim();
-                if (form.data.newName.trim()) payload.name = form.data.newName.trim();
                 if (form.data.newAvatar.trim()) payload.image = form.data.newAvatar.trim();
 
                 if (Object.keys(payload).length === 0) {
@@ -57,7 +56,7 @@
 
 <FormBase
     title="Update Profile"
-    description="Update your user profile information including username, name, and avatar.">
+    description="Update your username and avatar.">
     {#snippet content()}
         <form method="POST" use:enhance>
             <Form.Field {form} name="newUsername">
@@ -68,19 +67,6 @@
                             placeholder="Your new username"
                             {...props}
                             bind:value={$formData.newUsername} />
-                    {/snippet}
-                </Form.Control>
-                <Form.FieldErrors />
-            </Form.Field>
-
-            <Form.Field {form} name="newName">
-                <Form.Control>
-                    {#snippet children({ props })}
-                        <Form.Label for="newName">Name</Form.Label>
-                        <Input
-                            placeholder="Your new name"
-                            {...props}
-                            bind:value={$formData.newName} />
                     {/snippet}
                 </Form.Control>
                 <Form.FieldErrors />

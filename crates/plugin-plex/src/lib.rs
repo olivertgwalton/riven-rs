@@ -8,13 +8,15 @@ use riven_core::events::{DownloadSuccessInfo, EventType, HookResponse};
 use riven_core::http::HttpServiceProfile;
 use riven_core::plugin::{Plugin, PluginContext};
 use riven_core::settings::{FilesystemSettings, LibraryProfileMembership, PluginSettings};
-use riven_core::types::{ActivePlaybackSession, PlaybackMethod, PlaybackState};
+use riven_core::types::{ActivePlaybackSession, PlaybackMethod, PlaybackState, artwork_path};
 use riven_db::repo;
 
 mod client;
 mod paths;
 
-use client::{PlexSection, get_active_sessions, get_library_sections, refresh_section};
+use client::{
+    PlexSection, get_active_sessions, get_artwork, get_library_sections, refresh_section,
+};
 #[cfg(test)]
 use client::{map_playback_method, map_playback_state, urlencoding};
 use paths::{effective_library_path, entry_vfs_dirs, load_filesystem_settings};
@@ -49,6 +51,7 @@ impl Plugin for PlexPlugin {
         &[
             EventType::MediaItemDownloadSuccess,
             EventType::ActivePlaybackSessionsRequested,
+            EventType::ArtworkRequested,
         ]
     }
 
@@ -179,6 +182,22 @@ impl Plugin for PlexPlugin {
         let plex_url = ctx.require_setting("plexserverurl")?.trim_end_matches('/');
         let sessions = get_active_sessions(&ctx.http, plex_url, plex_token).await?;
         Ok(HookResponse::ActivePlaybackSessions(sessions))
+    }
+
+    async fn on_artwork_requested(
+        &self,
+        server: &str,
+        reference: &str,
+        ctx: &PluginContext,
+    ) -> anyhow::Result<HookResponse> {
+        if server != self.name() {
+            return Ok(HookResponse::Empty);
+        }
+        let plex_token = ctx.require_setting("plextoken")?;
+        let plex_url = ctx.require_setting("plexserverurl")?.trim_end_matches('/');
+        Ok(HookResponse::Artwork(
+            get_artwork(&ctx.http, plex_url, plex_token, reference).await?,
+        ))
     }
 }
 

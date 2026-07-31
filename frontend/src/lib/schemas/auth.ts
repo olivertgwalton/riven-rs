@@ -30,20 +30,27 @@ export const emailChangeSchema = z.object({
 
 export type EmailChangeSchema = z.infer<typeof emailChangeSchema>;
 
+/**
+ * The character and length rules for a username, and the only place they are
+ * enforced on the way in — the database derives the column but does not judge
+ * it. Minimum length and character set match better-auth-rs's own
+ * `utils::username`, which it applies at both ends, creation *and* sign-in: a
+ * username the library would refuse is not merely rejected on save, it could
+ * never be typed at the login page either. The 20-character cap is riven's,
+ * stricter than the library's 30.
+ */
+const usernameSchema = z
+	.string()
+	.min(3, "Username must be at least 3 characters long")
+	.max(20, "Username must be at most 20 characters long")
+	.regex(
+		/^[A-Za-z0-9._]+$/,
+		"Username may only contain letters, numbers, '.' and '_'",
+	);
+
 export const changeUserDataSchema = z.object({
 	newUsername: z
-		.union([
-			z.literal(""),
-			z
-				.string()
-				.min(3, "Username must be at least 3 characters long")
-				.max(31, "Username must be at most 31 characters long"),
-		])
-		.optional()
-		.default(""),
-	newName: z
-		.string()
-		.max(100, "Name must be at most 100 characters long")
+		.union([z.literal(""), usernameSchema])
 		.optional()
 		.default(""),
 	newAvatar: z
@@ -56,10 +63,7 @@ export type ChangeUserDataSchema = z.infer<typeof changeUserDataSchema>;
 
 export const createUserSchema = z
 	.object({
-		username: z
-			.string()
-			.min(3, "Username must be at least 3 characters long")
-			.max(31, "Username must be at most 31 characters long"),
+		username: usernameSchema,
 		email: z.email("Invalid email address"),
 		password: z.string().min(8, "Password must have 8 characters or more."),
 		confirmPassword: z.string(),

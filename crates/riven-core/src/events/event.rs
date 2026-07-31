@@ -145,6 +145,19 @@ pub enum RivenEvent {
     DebridUserInfoRequested,
     #[serde(rename = "riven.media-server.active-sessions.requested")]
     ActivePlaybackSessionsRequested,
+    /// Fetch one artwork image from a media server, on behalf of a browser that
+    /// must not be given the server's credential.
+    ///
+    /// `reference` is whatever the plugin that produced
+    /// [`ActivePlaybackSession::image_url`] put there — a Plex `thumb` path, an
+    /// Emby item id — and is only ever handed back to the plugin that minted it,
+    /// selected by `server`. Plugins must treat it as untrusted input.
+    #[serde(rename = "riven.media-server.artwork.requested")]
+    ArtworkRequested {
+        /// Which plugin should answer, matching `ActivePlaybackSession::server`.
+        server: String,
+        reference: String,
+    },
 }
 
 impl RivenEvent {
@@ -218,6 +231,7 @@ impl RivenEvent {
             Self::MediaItemsDeleted { .. } => EventType::MediaItemsDeleted,
             Self::DebridUserInfoRequested => EventType::DebridUserInfoRequested,
             Self::ActivePlaybackSessionsRequested => EventType::ActivePlaybackSessionsRequested,
+            Self::ArtworkRequested { .. } => EventType::ArtworkRequested,
         }
     }
 }

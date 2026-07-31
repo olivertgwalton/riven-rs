@@ -14,10 +14,17 @@ import { createPasskey, getPasskeyAssertion } from "$lib/passkeys";
  */
 const AUTH_URL = "/auth";
 
+/**
+ * There is no `name` here on purpose. An account is a username and an email;
+ * `name` is only a field better-auth's own request shapes insist on, and the
+ * database keeps it equal to the username (migration
+ * `037_auth_username_is_name.sql`), so it is never a second identity. The
+ * wrappers below fill it in where the wire demands it, so no call site has to
+ * think about it.
+ */
 export interface AuthUser {
 	id: string;
 	email?: string | null;
-	name?: string | null;
 	image?: string | null;
 	username?: string | null;
 	displayUsername?: string | null;
@@ -164,15 +171,10 @@ export const authClient = {
 	 * before offering the form.
 	 */
 	signUp: {
-		email(body: {
-			name: string;
-			username: string;
-			email: string;
-			password: string;
-		}) {
+		email(body: { username: string; email: string; password: string }) {
 			return call<{ user: AuthUser; token?: string }>("/sign-up/email", {
 				method: "POST",
-				body,
+				body: { ...body, name: body.username },
 			});
 		},
 	},
@@ -181,15 +183,24 @@ export const authClient = {
 		return call<{ available: boolean }>("/first-user");
 	},
 
-	/** `poll` answers `{ pending: true }` with a 202 until the user approves. */
+	/**
+	 * `poll` answers `{ pending: true }` with a 202 until the user approves.
+	 *
+	 * `handle` is an opaque token for this sign-in attempt, not the Plex PIN id.
+	 * The id used to be the path parameter, which made polling enumerable — PIN
+	 * ids are sequential, and a poll that finds an approved PIN sets a session
+	 * cookie. Only the caller that ran `start` holds the handle.
+	 */
 	plex: {
 		start() {
-			return call<{ id: number; auth_url: string }>("/plex/start", {
+			return call<{ handle: string; auth_url: string }>("/plex/start", {
 				method: "POST",
 			});
 		},
-		poll(pinId: number) {
-			return call<{ pending: boolean }>(`/plex/poll/${pinId}`);
+		poll(handle: string) {
+			return call<{ pending: boolean }>(
+				`/plex/poll/${encodeURIComponent(handle)}`,
+			);
 		},
 	},
 
@@ -276,7 +287,7 @@ export const authClient = {
 	 * rejected by the backend with "No fields to update". `email` is not
 	 * accepted here; `changeEmail` owns that.
 	 */
-	updateUser(body: { name?: string; image?: string; username?: string }) {
+	updateUser(body: { username?: string; image?: string }) {
 		return call<{ status: boolean }>("/update-user", { method: "POST", body });
 	},
 
@@ -326,20 +337,15 @@ export const authClient = {
 				`/admin/list-users${suffix}`,
 			);
 		},
-		/**
-		 * `data` carries columns outside better-auth's core user shape —
-		 * `username` among them, which riven signs in with.
-		 */
 		createUser(body: {
+			username: string;
 			email: string;
 			password: string;
-			name: string;
 			role?: string;
-			data?: Record<string, unknown>;
 		}) {
 			return call<{ user: AuthUser }>("/admin/create-user", {
 				method: "POST",
-				body,
+				body: { ...body, name: body.username },
 			});
 		},
 		removeUser(body: { userId: string }) {

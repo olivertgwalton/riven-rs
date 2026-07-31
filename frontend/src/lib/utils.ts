@@ -27,7 +27,9 @@ export function deduplicateById<T extends { id?: unknown }>(items: T[]): T[] {
 	});
 }
 
-export type WithoutChild<T> = T extends { child?: unknown } ? Omit<T, "child"> : T;
+export type WithoutChild<T> = T extends { child?: unknown }
+	? Omit<T, "child">
+	: T;
 export type WithoutChildren<T> = T extends { children?: unknown }
 	? Omit<T, "children">
 	: T;

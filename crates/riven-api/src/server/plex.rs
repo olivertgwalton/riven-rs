@@ -18,8 +18,11 @@
 //! Ported from the SvelteKit `plex-oauth.ts` this replaces, which ran the same
 //! four steps in Node.
 
-use std::sync::Arc;
-use std::time::Duration;
+use std::collections::HashMap;
+use std::sync::{Arc, LazyLock, Mutex};
+use std::time::{Duration, Instant};
+
+use argon2::password_hash::rand_core::{OsRng, RngCore};
 
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode, header::USER_AGENT};
@@ -125,9 +128,80 @@ struct PlexProfile {
 
 #[derive(Serialize)]
 pub(super) struct PinResponse {
-    id: i64,
+    /// Opaque handle for this sign-in attempt. Not the Plex PIN id — see
+    /// [`PENDING_PINS`].
+    handle: String,
     /// Where to send the browser. The user approves there, then the caller polls.
     auth_url: String,
+}
+
+/// How long a minted handle stays pollable. The user has to visit plex.tv and
+/// approve in that time; Plex's own PIN expiry is 15 minutes, so this is the
+/// shorter of the two and bounds how long a stolen handle is worth anything.
+const HANDLE_TTL: Duration = Duration::from_secs(10 * 60);
+
+/// Handle → Plex PIN id, for sign-ins this process started.
+///
+/// **This indirection is the security boundary.** `poll` used to take the Plex
+/// PIN id straight from the URL, which made it enumerable: PIN ids are
+/// sequential global integers, riven mints every PIN with the same
+/// instance-wide `X-Plex-Client-Identifier` (so any PIN this instance created
+/// can be polled through this endpoint), and a successful poll *sets a session
+/// cookie for the matched user*. An attacker could call `start` to learn the
+/// current id range, scan nearby ids, and collect the session of whichever real
+/// user approved their sign-in next. Polling is not destructive, so no race had
+/// to be won.
+///
+/// A 256-bit random handle is not guessable, so only the caller that ran `start`
+/// can poll the PIN it created.
+///
+/// In-memory on purpose: a restart mid-sign-in just means the user starts over,
+/// which is a better failure than persisting a bearer credential.
+static PENDING_PINS: LazyLock<Mutex<HashMap<String, PendingPin>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+struct PendingPin {
+    pin_id: i64,
+    created_at: Instant,
+}
+
+/// Mint a handle for `pin_id`, sweeping anything that has aged out.
+fn remember_pin(pin_id: i64) -> String {
+    let mut bytes = [0_u8; 32];
+    OsRng.fill_bytes(&mut bytes);
+    let handle = hex::encode(bytes);
+
+    let mut pending = PENDING_PINS.lock().unwrap_or_else(|e| e.into_inner());
+    pending.retain(|_, entry| entry.created_at.elapsed() < HANDLE_TTL);
+    pending.insert(
+        handle.clone(),
+        PendingPin {
+            pin_id,
+            created_at: Instant::now(),
+        },
+    );
+    handle
+}
+
+/// Resolve a handle back to its PIN id, or `None` if it is unknown or expired.
+///
+/// The entry is left in place: polling is expected to be repeated until the user
+/// approves, so consuming it on first use would break the flow.
+fn resolve_pin(handle: &str) -> Option<i64> {
+    let pending = PENDING_PINS.lock().unwrap_or_else(|e| e.into_inner());
+    pending
+        .get(handle)
+        .filter(|entry| entry.created_at.elapsed() < HANDLE_TTL)
+        .map(|entry| entry.pin_id)
+}
+
+/// Drop a handle once its sign-in has concluded, so a completed PIN cannot be
+/// replayed for a second session.
+fn forget_pin(handle: &str) {
+    PENDING_PINS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(handle);
 }
 
 fn error(status: StatusCode, message: &str) -> Response {
@@ -170,7 +244,7 @@ pub(super) async fn start(State(state): State<ApiState>) -> Response {
     );
 
     Json(PinResponse {
-        id: pin.id,
+        handle: remember_pin(pin.id),
         auth_url,
     })
     .into_response()
@@ -184,8 +258,14 @@ pub(super) async fn start(State(state): State<ApiState>) -> Response {
 pub(super) async fn poll(
     State(state): State<ApiState>,
     headers: HeaderMap,
-    Path(pin_id): Path<i64>,
+    Path(handle): Path<String>,
 ) -> Response {
+    // An unknown handle is indistinguishable from an expired one, and neither
+    // reveals whether a PIN with some id exists.
+    let Some(pin_id) = resolve_pin(&handle) else {
+        return error(StatusCode::NOT_FOUND, "Unknown or expired sign-in");
+    };
+
     let pin: PlexPin = match state
         .stream_client
         .get(format!("{PLEX_PINS_URL}/{pin_id}"))
@@ -224,6 +304,8 @@ pub(super) async fn poll(
 
     match link_and_start_session(&state.auth, &profile, &token, &headers).await {
         Ok(cookie) => {
+            // The sign-in is done; the handle must not mint a second session.
+            forget_pin(&handle);
             let body = Json(json!({ "pending": false }));
             match Response::builder()
                 .status(StatusCode::OK)
