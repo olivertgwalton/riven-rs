@@ -372,14 +372,21 @@
         </div>
     </div>
 
-    <!-- Drawn rather than fetched: the login page has to render on an instance
-         with no internet. -->
     <div
         class="from-primary/25 via-background to-background relative hidden overflow-hidden bg-gradient-to-br lg:block"
         aria-hidden="true">
         <div class="bg-primary/20 absolute -top-24 -right-24 size-[28rem] rounded-full blur-3xl">
         </div>
         <div class="bg-accent/20 absolute -bottom-32 -left-16 size-[24rem] rounded-full blur-3xl">
+        </div>
+        <img
+            src="/images/login-hero.webp"
+            alt=""
+            fetchpriority="high"
+            class="absolute inset-0 size-full object-cover" />
+        <div class="from-background absolute inset-0 bg-gradient-to-r to-transparent"></div>
+        <div
+            class="from-primary/25 absolute inset-0 bg-gradient-to-br to-transparent mix-blend-overlay">
         </div>
     </div>
 </div>

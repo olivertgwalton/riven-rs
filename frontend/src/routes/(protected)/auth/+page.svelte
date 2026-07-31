@@ -1,5 +1,5 @@
 <script lang="ts">
-    import { goto } from "$app/navigation";
+    import { goto, invalidateAll } from "$app/navigation";
     import { resolve } from "$app/paths";
     import { authClient } from "$lib/auth-client";
     import { Button } from "$lib/components/ui/button/index.js";
@@ -23,7 +23,7 @@
     let passwordBusy = $state(false);
     let passwordMessage = $state<{ ok: boolean; text: string } | null>(null);
 
-    let displayName = $state(data.user?.name ?? "");
+    let displayName = $derived(data.user?.name ?? "");
     let profileBusy = $state(false);
     let profileMessage = $state<{ ok: boolean; text: string } | null>(null);
 
@@ -63,9 +63,13 @@
         const { error } = await authClient.updateUser({ name: displayName });
         profileBusy = false;
 
-        profileMessage = error
-            ? { ok: false, text: error.message }
-            : { ok: true, text: "Profile updated." };
+        if (error) {
+            profileMessage = { ok: false, text: error.message };
+            return;
+        }
+
+        await invalidateAll();
+        profileMessage = { ok: true, text: "Profile updated." };
     }
 
     async function signOut() {
