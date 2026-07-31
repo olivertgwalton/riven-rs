@@ -223,7 +223,6 @@
         ? `${item.show_title}${item.season ? ` S${item.season}E${item.episode}` : ""}`
         : undefined}
     {#if href}
-        <!-- eslint-disable-next-line svelte/no-navigation-without-resolve -->
         <a {href} class={classes} {title}>
             {#if compact}
                 <span class={cn("size-1.5 shrink-0 rounded-full", s.dot)}></span>

@@ -346,7 +346,6 @@
 
             {#if fs?.id}
                 <div class="flex flex-wrap gap-2">
-                    <!-- eslint-disable-next-line svelte/no-navigation-without-resolve -->
                     <a
                         href={`/media/${fs.id}`}
                         download={fs.original_filename ?? ""}

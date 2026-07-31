@@ -691,7 +691,6 @@
     });
 </script>
 
-<!-- eslint-disable svelte/no-navigation-without-resolve -->
 
 {#snippet sectionHeading(title: string)}
     <div class="mb-4 flex items-center gap-3">
@@ -1578,7 +1577,6 @@
                                                     class="text-muted-foreground text-xs font-semibold tracking-wider uppercase"
                                                     >Download</span>
                                                 <div class="flex flex-wrap gap-2">
-                                                    <!-- eslint-disable-next-line svelte/no-navigation-without-resolve -->
                                                     <a
                                                         href={`/media/${fs.id}`}
                                                         download={fs.original_filename ?? ""}
@@ -1631,5 +1629,3 @@
         </div>
     </div>
 {/key}
-
-<!-- eslint-enable svelte/no-navigation-without-resolve -->

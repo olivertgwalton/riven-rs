@@ -1,5 +1,4 @@
 <script lang="ts">
-    /* eslint-disable svelte/no-navigation-without-resolve */
     import { tick, onDestroy } from "svelte";
     import { page } from "$app/state";
     import type { PageProps } from "./$types";

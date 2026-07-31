@@ -303,7 +303,6 @@
                                         {#if ratings[item.id]?.scores?.length}
                                             <div class="ml-2 flex items-center gap-4">
                                                 {#each ratings[item.id].scores as score (score.name)}
-                                                    <!-- eslint-disable-next-line svelte/no-navigation-without-resolve -->
                                                     <a
                                                         href={score.url}
                                                         target="_blank"

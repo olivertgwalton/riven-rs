@@ -1,5 +1,4 @@
 <script lang="ts">
-    /* eslint-disable svelte/no-navigation-without-resolve */
     import Menu from "@lucide/svelte/icons/menu";
     import { Button } from "$lib/components/ui/button/index.js";
     import NotificationCenter from "$lib/components/notification-center.svelte";

@@ -188,7 +188,6 @@ export function addDays(date: CalendarDate, days: number): CalendarDate {
 export function getCalendar(data: { [key: string]: number }, year: number) {
 	const base = getLastMonday(new CalendarDate(year, 1, 1));
 
-	// eslint-disable-next-line @typescript-eslint/no-explicit-any
 	const out: any = {};
 
 	out.max = 0;
