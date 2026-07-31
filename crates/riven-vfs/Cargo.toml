@@ -15,7 +15,6 @@ tracing = { workspace = true }
 dashmap = { workspace = true }
 parking_lot = { workspace = true }
 lru = { workspace = true }
-libc = { workspace = true }
 futures = { workspace = true }
 bytes = { workspace = true }
 async-trait = { workspace = true }

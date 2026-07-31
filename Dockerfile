@@ -55,7 +55,7 @@ COPY frontend/ .
 RUN pnpm run build
 
 # ── Runtime ───────────────────────────────────────────────────────────────────
-FROM alpine:3.21
+FROM alpine
 
 RUN apk add --no-cache fuse3 ca-certificates
 

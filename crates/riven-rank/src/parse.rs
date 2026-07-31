@@ -769,11 +769,11 @@ pub fn parse_with_options(raw_title: &str, options: ParseOptions) -> ParsedData 
 
     data.date = detect_date(raw);
 
-    if let Some(cap) = RE_YEAR_RANGE.captures(raw) {
-        if let Ok(y) = cap[1].parse::<i32>() {
-            data.year = Some(y);
-            data.complete = true;
-        }
+    if let Some(cap) = RE_YEAR_RANGE.captures(raw)
+        && let Ok(y) = cap[1].parse::<i32>()
+    {
+        data.year = Some(y);
+        data.complete = true;
     } else if let Some(cap) = RE_YEAR_RANGE_SHORT.captures(raw)
         && let Ok(y) = cap[1].parse::<i32>()
     {

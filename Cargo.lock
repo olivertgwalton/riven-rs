@@ -5050,7 +5050,6 @@ dependencies = [
  "dashmap",
  "fuser",
  "futures",
- "libc",
  "lru",
  "parking_lot",
  "reqwest 0.13.4",

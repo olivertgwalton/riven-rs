@@ -6,10 +6,6 @@ use riven_queue::JobQueue;
 use riven_queue::lifecycle::{LibraryOrchestrator, upsert_requested_movie, upsert_requested_show};
 use serde::Deserialize;
 
-/// GraphQL surface for Seerr's inbound webhook, merged into `MutationRoot`
-/// (`crates/riven-api/src/schema/mutations/mod.rs`). Replaces the previous
-/// hand-written `POST /webhook/seerr` REST route: this is the plugin-owned
-/// equivalent, reachable at `/graphql`.
 #[derive(Default)]
 pub struct SeerrMutations;
 

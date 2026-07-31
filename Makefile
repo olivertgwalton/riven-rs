@@ -1,4 +1,4 @@
-.PHONY: fmt fmt-check check lint test docs docs-check verify \
+.PHONY: fmt fmt-check check lint test docs docs-check verify audit \
         frontend-install frontend-build frontend-check frontend-lint \
         schema schema-check verify-all
 
@@ -58,4 +58,11 @@ schema-check: schema
 		exit 1; \
 	}
 
-verify-all: verify frontend-lint frontend-check frontend-build schema-check
+# ── Supply chain ──────────────────────────────────────────────────────────────
+
+# Same checks as CI's `audit` job. Needs `cargo install cargo-audit --locked`.
+audit:
+	cargo audit
+	cd frontend && pnpm audit --audit-level moderate
+
+verify-all: verify frontend-lint frontend-check frontend-build schema-check audit

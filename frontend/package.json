@@ -23,9 +23,9 @@
         "@fontsource/oxanium": "^5.2.8",
         "@graphql-codegen/cli": "^7.2.0",
         "@graphql-codegen/typescript": "^6.1.0",
-        "@lucide/svelte": "^1.18.0",
+        "@lucide/svelte": "^1.28.0",
         "@sveltejs/adapter-static": "^3.0.10",
-        "@sveltejs/kit": "^2.65.0",
+        "@sveltejs/kit": "^2.70.2",
         "@sveltejs/vite-plugin-svelte": "^7.1.2",
         "@tailwindcss/forms": "^0.5.11",
         "@tailwindcss/typography": "^0.5.20",
@@ -41,7 +41,7 @@
         "eslint-plugin-svelte": "^3.19.0",
         "formsnap": "^2.0.1",
         "globals": "^17.6.0",
-        "layerchart": "2.0.0-next.48",
+        "layerchart": "2.0.3",
         "prettier": "^3.8.4",
         "prettier-plugin-svelte": "^4.1.0",
         "prettier-plugin-tailwindcss": "^0.8.0",
@@ -50,7 +50,7 @@
         "svelte-check": "^4.6.0",
         "svelte-sonner": "^1.1.1",
         "svelte-toolbelt": "^0.10.6",
-        "sveltekit-superforms": "^2.30.1",
+        "sveltekit-superforms": "^2.30.2",
         "tailwind-merge": "^3.6.0",
         "tailwind-variants": "^3.2.2",
         "tailwindcss": "^4.3.0",
@@ -58,7 +58,7 @@
         "typescript": "^6.0.3",
         "typescript-eslint": "^8.61.0",
         "vaul-svelte": "1.0.0-next.7",
-        "vite": "^8.0.16"
+        "vite": "^8.1.5"
     },
     "dependencies": {
         "@internationalized/date": "^3.12.2",

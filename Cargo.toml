@@ -111,7 +111,6 @@ async-trait = "0.1"
 futures = "0.3"
 parking_lot = "0.12"
 dashmap = "6"
-libc = "0.2"
 bytes = "1"
 tokio-util = { version = "0.7", features = ["io"] }
 # Pinned to apalis-redis's ulid: riven-queue passes `Ulid` into apalis `Task`,
