@@ -11,7 +11,7 @@
     }: { state: string; size?: Size; class?: string } = $props();
 
     const sizeClasses = $derived(
-        size === "default" ? "px-2.5 py-1 text-xs" : "px-2 py-0.5 text-xs"
+        size === "default" ? "h-auto px-3.5 py-1 text-xs" : "h-auto px-3 py-0.5 text-xs"
     );
 </script>
 
