@@ -1,3 +1,2 @@
 allowBuilds:
-    "@tailwindcss/oxide": true
-    esbuild: true
+  "@tailwindcss/oxide": true
