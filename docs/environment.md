@@ -44,12 +44,12 @@ anything outside the markers survives regeneration. -->
 | --- | --- | --- |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | variable | `crates/riven-core/src/logging.rs:198` |
 | `OTEL_SERVICE_NAME` | variable | `crates/riven-core/src/logging.rs:202` |
-| `RIVEN_MEMORY_LIMIT_MB` | variable | `crates/riven-core/src/cache.rs:85` |
-| `RIVEN_READ_AHEAD_CACHE_BYTES` | variable | `crates/riven-core/src/cache.rs:34` |
+| `RIVEN_MEMORY_LIMIT_MB` | variable | `crates/riven-core/src/cache.rs:132` |
+| `RIVEN_READ_AHEAD_CACHE_BYTES` | variable | `crates/riven-core/src/cache.rs:56` |
 | `RIVEN_SETTING__` | prefix | `crates/riven-core/src/settings/app.rs:138` |
-| `RIVEN_USENET_CACHE_BYTES` | variable | `crates/riven-core/src/cache.rs:51` |
-| `RIVEN_USENET_META_CACHE_BYTES` | variable | `crates/riven-core/src/cache.rs:37` |
-| `RIVEN_USENET_NZB_CACHE_BYTES` | variable | `crates/riven-core/src/cache.rs:39` |
+| `RIVEN_USENET_CACHE_BYTES` | variable | `crates/riven-core/src/cache.rs:98` |
+| `RIVEN_USENET_META_CACHE_BYTES` | variable | `crates/riven-core/src/cache.rs:84` |
+| `RIVEN_USENET_NZB_CACHE_BYTES` | variable | `crates/riven-core/src/cache.rs:86` |
 | `SENTRY_DSN` | variable | `crates/riven-core/src/logging.rs:183` |
 | `SENTRY_ENVIRONMENT` | variable | `crates/riven-core/src/logging.rs:186` |
 
