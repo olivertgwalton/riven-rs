@@ -12,9 +12,15 @@ use lru::LruCache;
 use parking_lot::Mutex;
 
 const MIB: u64 = 1024 * 1024;
-/// Share of the process memory limit the caches may claim between them; the
-/// rest is in-flight decodes and the runtime.
-const LIMIT_DIVISOR: u64 = 2;
+/// Share of the process memory limit the caches may claim between them, as
+/// `NUM/DEN`; the rest is in-flight decodes, the buffer pools and the runtime.
+///
+/// Three quarters, because that is what the other quarter measured: ~25 MiB of
+/// idle runtime plus the two `BufPool` ceilings (32 MiB together). It was a
+/// flat half back when those pools could retain 256 MiB between them, which no
+/// longer describes anything.
+const CACHE_SHARE_NUM: u64 = 3;
+const CACHE_SHARE_DEN: u64 = 4;
 /// No pool shrinks past this fraction of its default. A cache scaled to nothing
 /// refetches everything, which costs more than the memory it saves.
 const FLOOR_DIVISOR: u64 = 8;
@@ -31,12 +37,53 @@ pub struct Pool {
 
 /// Decoded read-ahead units: every open file, both origins. Largest, because it
 /// is the only cache that decides whether a read reaches the network.
-pub const READ_AHEAD: Pool = Pool::new("read-ahead", "RIVEN_READ_AHEAD_CACHE_BYTES", 384 * MIB);
+///
+/// **This budget is a ceiling, not a reservation.** What a stream holds is
+/// [`READ_AHEAD_PER_STREAM`], because `riven-vfs` releases its own units once
+/// the cursor has passed them; this number only decides how many streams can
+/// hold a full cushion at once before they start taking each other's.
+///
+/// That split is the whole point. At 384 MiB with no per-stream trimming the
+/// cache measured 383.5 MiB across 561 entries at an 80 % hit rate — playback
+/// is sequential, so nearly all of it was consumed tail that no read would ever
+/// touch again, held only because an LRU sheds bytes under global pressure and
+/// there was none. A byte ceiling cannot express "one stream keeps its cushion
+/// and nothing else"; only the stream knows when it is done with a unit.
+///
+/// 64 MiB leaves room for six concurrent streams at [`READ_AHEAD_PER_STREAM`]
+/// before they begin taking each other's cushion — past anything this serves at
+/// once, and still a fifth of what it used to reserve.
+pub const READ_AHEAD: Pool = Pool::new("read-ahead", "RIVEN_READ_AHEAD_CACHE_BYTES", 64 * MIB);
+
+/// What one open file holds in [`READ_AHEAD`] once trimmed to its window:
+/// cushion plus retain-behind. The figure is the memory cost of a concurrent
+/// stream, so the process target is read as `base + streams × this`.
+///
+/// Set by the HTTP origin, whose unit riven chooses (8 + 2 units of 1 MiB, the
+/// chunk size riven-ts streams the same debrid origins at). An article origin
+/// is comparable at a typical 720 KiB segment — ~7 MiB — but the poster picks
+/// that size, so a 3.84 MB-segment post runs to ~38 MiB and is covered by
+/// [`READ_AHEAD`]'s ceiling rather than by this figure.
+///
+/// `riven-vfs` owns the window arithmetic and asserts its numbers against this
+/// one, so the two cannot drift apart.
+pub const READ_AHEAD_PER_STREAM: u64 = 10 * MIB;
 /// Deserialized `NzbMeta`. Every usenet read consults it before it can plan
 /// anything, and a miss costs a database round trip plus a deserialize.
-pub const NZB_META: Pool = Pool::new("nzb-meta", "RIVEN_USENET_META_CACHE_BYTES", 256 * MIB);
+///
+/// Was 256 MiB, and measured 240 MiB across *twelve* entries — a season-pack
+/// meta runs to tens of MiB, so this cache is a handful of very large values,
+/// not a population. Sizing it for the title in flight rather than for every
+/// title recently touched is what makes it affordable; a miss here costs a
+/// query and a deserialize, never a wire fetch.
+///
+/// Note what this does not fix: at ~20 MiB an entry, two large season packs
+/// read alternately evict each other whatever this number is short of holding
+/// both. The fix for that is a smaller `NzbMeta` — it is dominated by
+/// per-segment message-id strings — not a larger cache.
+pub const NZB_META: Pool = Pool::new("nzb-meta", "RIVEN_USENET_META_CACHE_BYTES", 24 * MIB);
 /// Raw NZB documents, as fetched from the indexer.
-pub const NZB_BODY: Pool = Pool::new("nzb-body", "RIVEN_USENET_NZB_CACHE_BYTES", 64 * MIB);
+pub const NZB_BODY: Pool = Pool::new("nzb-body", "RIVEN_USENET_NZB_CACHE_BYTES", 8 * MIB);
 /// Decoded article bodies: staging between a warm fetch landing and the walk
 /// that warmed it consuming the bytes, so bounded by in-flight work.
 ///
@@ -100,7 +147,7 @@ fn budget_for(pool: Pool, override_bytes: Option<u64>, limit_mb: Option<u64>) ->
     let Some(limit_mb) = limit_mb else {
         return pool.default_bytes;
     };
-    let allowed = limit_mb.saturating_mul(MIB) / LIMIT_DIVISOR;
+    let allowed = limit_mb.saturating_mul(MIB) / CACHE_SHARE_DEN * CACHE_SHARE_NUM;
     let total = total_default_bytes();
     if allowed >= total {
         return pool.default_bytes;
@@ -227,6 +274,24 @@ impl<K: Hash + Eq, V: Clone> ByteLru<K, V> {
         }
     }
 
+    /// Drop an entry and reclaim its bytes now, rather than waiting for it to
+    /// reach the cold end of the LRU.
+    ///
+    /// This is what lets a caller bound its *own* share of a shared cache: a
+    /// stream that has read past a unit knows it is done with it, and nothing
+    /// else does. Without it the only retention policy is global pressure,
+    /// which keeps every consumed unit of every stream until the budget fills.
+    pub fn remove<Q>(&self, key: &Q)
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        let mut state = self.state.lock();
+        if let Some((_, weight)) = state.lru.pop(key) {
+            state.bytes = state.bytes.saturating_sub(weight);
+        }
+    }
+
     /// Count a hit or miss the caller measured — see [`ByteLru::touch`].
     pub fn record(&self, hit: bool) {
         let counter = if hit { &self.hits } else { &self.misses };
@@ -338,14 +403,42 @@ mod tests {
 
         // A tight limit scales every pool by one fraction, so the split holds
         // and the total stays inside the share the caches may claim.
-        let tight = Some(512);
+        let tight = Some(128);
         let total: u64 = POOLS.iter().map(|p| budget_for(*p, None, tight)).sum();
         assert!(budget_for(READ_AHEAD, None, tight) < READ_AHEAD.default_bytes);
         assert_eq!(
             budget_for(READ_AHEAD, None, tight) / budget_for(SEGMENT, None, tight),
             READ_AHEAD.default_bytes / SEGMENT.default_bytes
         );
-        assert!(total <= 512 * MIB / LIMIT_DIVISOR);
+        assert!(total <= 128 * MIB / CACHE_SHARE_DEN * CACHE_SHARE_NUM);
+    }
+
+    /// The defaults have to fit the memory target they were chosen for, or the
+    /// only thing keeping the process inside it is an environment variable
+    /// nobody sets.
+    ///
+    /// Read-ahead enters as what a stream actually holds rather than as its
+    /// ceiling — that is what per-stream trimming buys, and asserting the
+    /// ceiling here instead would price a machine nobody is running.
+    #[test]
+    fn the_steady_state_fits_the_cache_share_of_a_200_mb_process() {
+        let share = 200 * MIB / CACHE_SHARE_DEN * CACHE_SHARE_NUM;
+        let steady = |streams: u64| {
+            NZB_META.default_bytes
+                + NZB_BODY.default_bytes
+                + SEGMENT.default_bytes
+                + streams * READ_AHEAD_PER_STREAM
+        };
+        assert!(
+            steady(2) <= share,
+            "two concurrent streams need {} MiB, over the {} MiB share",
+            steady(2) / MIB,
+            share / MIB
+        );
+        // And the ceiling has to leave room for more than one stream, or
+        // trimming would be the only thing standing between two players and
+        // evicting each other.
+        const { assert!(READ_AHEAD.default_bytes >= 3 * READ_AHEAD_PER_STREAM) };
     }
 
     /// The regression this sizing exists for. A staging cache that cannot hold

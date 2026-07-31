@@ -15,7 +15,7 @@
 //! positions at once: sharing the bytes makes a re-open warm, sharing a cursor
 //! would make those positions fight.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::sync::Arc;
 use std::sync::OnceLock;
@@ -30,9 +30,22 @@ use tokio::task::JoinHandle;
 use crate::source::ByteSource;
 
 const MIB: u64 = 1024 * 1024;
-const HTTP_CHUNK: u64 = 8 * MIB;
-/// Units of cushion on the HTTP origin, where a unit is one 8 MiB range
-/// request and the depth is already 64 MB of bytes.
+/// The range request we impose on a plain ranged HTTP origin, which has no
+/// fetch unit of its own.
+///
+/// 1 MiB, matching riven-ts's `chunkSize` (`vfs/config.ts`) against the same
+/// debrid origins. It was 8 MiB, which made the cushion below 64 MiB for a
+/// single open file — a sixth of the whole read-ahead cache per stream. riven
+/// picks this number, unlike an article's size, which the poster picks.
+const HTTP_CHUNK: u64 = MIB;
+/// Units of cushion on the HTTP origin, where a unit is one [`HTTP_CHUNK`]
+/// range request.
+///
+/// riven-ts holds no application-level cushion here at all — it keeps one
+/// open-ended response per handle and pulls chunks off it as the player asks,
+/// so its cushion is whatever the socket has buffered. riven fetches discrete
+/// ranges instead, so it has to hold its own; 8 units is 8 MiB of it, which is
+/// strictly more buffer than riven-ts runs on, at 8 MiB of memory per stream.
 const HTTP_READ_AHEAD_UNITS: usize = 8;
 /// Cushion held ahead of the cursor on an article origin, in **articles**.
 ///
@@ -45,6 +58,18 @@ const HTTP_READ_AHEAD_UNITS: usize = 8;
 /// one. The previous policy sized the cushion in bytes (96 MiB) for that reason.
 /// Matching streamnzb's count was chosen deliberately over matching its bytes.
 const ARTICLE_READ_AHEAD_UNITS: usize = 8;
+/// Range requests allowed on the wire at once for one HTTP handle.
+///
+/// Was 8 — the whole window, so depth equalled width. That is the arrangement
+/// the article path documents as the reason its wire went idle while a player's
+/// buffer drained: with every unit around a slow one cached-or-active, and
+/// nothing beyond the window schedulable, `dispatch` had nothing to pull
+/// forward. The HTTP path had the same defect and no test pinning it.
+///
+/// 4 keeps the same half-the-window margin the article path holds, and is still
+/// four times the parallelism riven-ts gets away with — it reads one open-ended
+/// response per handle, sequentially.
+const HTTP_MAX_IN_FLIGHT_UNITS: usize = 4;
 /// Article fetches allowed on the wire at once, independent of the cushion
 /// above.
 ///
@@ -58,6 +83,11 @@ const ARTICLE_READ_AHEAD_UNITS: usize = 8;
 /// hold a whole generation of these fetches at once.
 const ARTICLE_MAX_IN_FLIGHT_UNITS: usize = riven_core::cache::ARTICLE_MAX_IN_FLIGHT;
 const RETAIN_BEHIND_UNITS: u64 = 2;
+/// How many windows' worth of units one stream may hold — its own, plus the
+/// ones a seek stranded ahead of the cursor. Three, so a player can probe away
+/// and back without refetching, while a file's worth of abandoned windows can
+/// never accumulate behind one open handle.
+const ABANDONED_WINDOWS: usize = 3;
 const MIN_TAIL_PROBE: u64 = 16 * 1024;
 const MAX_TAIL_PROBE: u64 = 10 * MIB;
 /// The one read-ahead cache: every open file, both origins, one budget. Its hit
@@ -152,12 +182,12 @@ impl Config {
     /// schedulable, and the wire went idle at exactly the moment the player's
     /// buffer was draining.
     fn max_in_flight(&self) -> usize {
-        if !self.articles {
-            return HTTP_READ_AHEAD_UNITS;
-        }
-        ARTICLE_MAX_IN_FLIGHT_UNITS
-            .min(self.window_units() / 2)
-            .max(1)
+        let cap = if self.articles {
+            ARTICLE_MAX_IN_FLIGHT_UNITS
+        } else {
+            HTTP_MAX_IN_FLIGHT_UNITS
+        };
+        cap.min(self.window_units() / 2).max(1)
     }
 
     fn unit_start(&self, position: u64) -> u64 {
@@ -229,6 +259,7 @@ impl Prefetcher {
                 direct_active: BTreeMap::new(),
                 next_direct_id: 1,
                 pending: Vec::new(),
+                held: BTreeSet::new(),
             }
             .run(),
         );
@@ -278,11 +309,74 @@ struct Actor {
     direct_active: BTreeMap<u64, JoinHandle<()>>,
     next_direct_id: u64,
     pending: Vec<ReadRequest>,
+    /// Unit starts this actor has put into the shared cache and not yet
+    /// released. The actor evicts only its own keys, so trimming one stream
+    /// can never take another's cushion.
+    held: BTreeSet<u64>,
 }
 
 impl Actor {
     fn key(&self, start: u64) -> (FileKey, u64) {
         (self.file, start)
+    }
+
+    /// Release the units this stream is done with, so its footprint is what it
+    /// is reading rather than everything it has ever read.
+    ///
+    /// This is the per-stream half of the read-ahead budget. The shared cache's
+    /// byte ceiling is a backstop for many streams at once; on its own it is
+    /// the wrong instrument, because an LRU only sheds bytes under global
+    /// pressure — so a single stream would fill it with consumed tail and hold
+    /// that until some other file needed the room. Playback is sequential and
+    /// almost none of that tail is read twice: the cache measured 561 entries
+    /// at an 80 % hit rate, nearly all of it behind the cursor.
+    ///
+    /// Only the tail goes. Units *ahead* of the cursor are left alone even when
+    /// a seek has stranded them, because a player that probes backwards — for a
+    /// header, or a footer — and then resumes must find its playback bytes
+    /// still there; discarding them on the way past is the stall this window
+    /// was built to survive. What bounds them instead is
+    /// [`ABANDONED_WINDOWS`]: a couple of stranded windows are worth keeping,
+    /// a file's worth of them is not.
+    fn trim_to_window(&mut self) {
+        let unit = self.config.unit;
+        let behind = self.cursor.saturating_sub(unit * RETAIN_BEHIND_UNITS);
+        let consumed: Vec<u64> = self
+            .held
+            .range(..behind)
+            .copied()
+            .filter(|start| start.saturating_add(unit) <= behind)
+            .collect();
+        for start in consumed {
+            self.release(start);
+        }
+
+        // Whatever seeks have stranded ahead of the cursor, drop the furthest
+        // first — that is the one playback is least likely to return to.
+        while self.held.len() > self.held_unit_cap() {
+            let (Some(&first), Some(&last)) =
+                (self.held.iter().next(), self.held.iter().next_back())
+            else {
+                break;
+            };
+            let furthest = if self.cursor.abs_diff(first) >= self.cursor.abs_diff(last) {
+                first
+            } else {
+                last
+            };
+            self.release(furthest);
+        }
+    }
+
+    /// Units one stream may hold: its own window plus room for the windows a
+    /// recent seek left behind.
+    fn held_unit_cap(&self) -> usize {
+        (self.config.window_units() + RETAIN_BEHIND_UNITS as usize) * ABANDONED_WINDOWS
+    }
+
+    fn release(&mut self, start: u64) {
+        self.cache.remove(&self.key(start));
+        self.held.remove(&start);
     }
 
     async fn run(mut self) {
@@ -359,6 +453,7 @@ impl Actor {
             Ok(data) => {
                 let weight = data.len() as u64;
                 self.cache.put(self.key(fill.start), data, weight);
+                self.held.insert(fill.start);
                 self.serve_pending();
                 self.dispatch();
             }
@@ -407,6 +502,7 @@ impl Actor {
             self.spawn_direct(request);
         }
         self.cursor = position;
+        self.trim_to_window();
     }
 
     fn abort_active(&mut self) {
@@ -509,6 +605,7 @@ impl Actor {
 
     fn finish(&mut self, request: ReadRequest, data: Bytes) {
         self.cursor = self.cursor.max(request.start + data.len() as u64);
+        self.trim_to_window();
         request.respond(Ok(data));
     }
 
@@ -555,6 +652,7 @@ impl Actor {
             window: self.config.window_units(),
             cursor: self.cursor,
             active: self.active.len(),
+            held: self.held.len(),
         }
     }
 }
@@ -595,6 +693,9 @@ struct Snapshot {
     window: usize,
     cursor: u64,
     active: usize,
+    /// Units this stream is holding in the shared cache — its memory footprint,
+    /// in units.
+    held: usize,
 }
 
 #[cfg(test)]
@@ -735,16 +836,27 @@ mod tests {
     /// Depth must exceed the wire, or `dispatch` has nothing left to schedule
     /// once the units around a slow one are all cached-or-active — which is how
     /// the wire went idle at exactly the moment the player's buffer drained.
+    ///
+    /// Both origins, now. The HTTP path used to set width equal to depth and
+    /// had no test saying it should not, so it carried the same defect the
+    /// article path had already been fixed for.
     #[test]
     fn the_cushion_is_always_deeper_than_the_wire_is_wide() {
-        for unit in [1, 716 * 1024, 3_840_000, MIB, 32 * MIB] {
-            let config = Config {
+        let mut configs: Vec<Config> = [1, 716 * 1024, 3_840_000, MIB, 32 * MIB]
+            .into_iter()
+            .map(|unit| Config {
                 unit,
                 articles: true,
-            };
+            })
+            .collect();
+        configs.push(Config::from_layout(None));
+
+        for config in configs {
             assert!(
                 config.max_in_flight() < config.window_units(),
-                "unit {unit}: {} in flight against a {}-unit window",
+                "unit {} (articles={}): {} in flight against a {}-unit window",
+                config.unit,
+                config.articles,
                 config.max_in_flight(),
                 config.window_units()
             );
@@ -770,14 +882,86 @@ mod tests {
         }
     }
 
-    /// The HTTP origin is untouched by all of the above: one 8 MiB range request
-    /// per unit, 8 deep and the same 8 on the wire.
+    /// The HTTP origin keeps its own unit and depth, but no longer its own
+    /// answer on width — see [`HTTP_MAX_IN_FLIGHT_UNITS`].
     #[test]
     fn an_http_origin_keeps_its_own_numbers() {
         let config = Config::from_layout(None);
         assert_eq!(config.unit, HTTP_CHUNK);
         assert_eq!(config.window_units(), HTTP_READ_AHEAD_UNITS);
-        assert_eq!(config.max_in_flight(), HTTP_READ_AHEAD_UNITS);
+        assert_eq!(config.max_in_flight(), HTTP_MAX_IN_FLIGHT_UNITS);
+    }
+
+    /// The regression the per-stream trim exists for. A stream reading a long
+    /// file end to end used to leave every unit it had consumed in the shared
+    /// cache, because an LRU only sheds bytes under global pressure — so one
+    /// player filled a 384 MiB cache with tail that sequential playback would
+    /// never read again. What a stream holds must be its window, not its
+    /// history, however far it has read.
+    #[tokio::test]
+    async fn a_long_read_holds_its_window_not_its_history() {
+        let unit = 64 * 1024;
+        let source = Source::new(unit * 400, unit);
+        let prefetcher = reader(source.clone());
+
+        let mut position = 0;
+        for _ in 0..200 {
+            prefetcher.read(position, unit as usize).await.unwrap();
+            position += unit;
+        }
+        wait_until_settled(&source).await;
+
+        let snapshot = prefetcher.snapshot().await;
+        let ceiling = snapshot.window + RETAIN_BEHIND_UNITS as usize + 1;
+        assert!(
+            snapshot.held <= ceiling,
+            "held {} units after reading {} — the window is {}",
+            snapshot.held,
+            position / unit,
+            snapshot.window
+        );
+    }
+
+    /// Seeking around a file strands windows ahead of the cursor, which the
+    /// tail trim never looks at. They are deliberately kept — a probe that
+    /// returns must not refetch — but they are capped, so a player that seeks
+    /// all day cannot pin a file's worth of units behind one handle.
+    #[tokio::test]
+    async fn seeking_around_a_file_cannot_grow_a_stream_without_bound() {
+        let unit = 64 * 1024;
+        let source = Source::new(unit * 400, unit);
+        let prefetcher = reader(source.clone());
+
+        for target in [200u64, 10, 300, 40, 350, 90, 250, 5, 150, 320] {
+            prefetcher
+                .read(unit * target, unit as usize)
+                .await
+                .unwrap();
+            wait_until_settled(&source).await;
+        }
+
+        let snapshot = prefetcher.snapshot().await;
+        let cap = (snapshot.window + RETAIN_BEHIND_UNITS as usize) * ABANDONED_WINDOWS;
+        assert!(
+            snapshot.held <= cap,
+            "held {} units after ten seeks — the cap is {cap}",
+            snapshot.held
+        );
+    }
+
+    /// `riven-core` sizes the process against a per-stream figure it cannot
+    /// derive, because the window arithmetic lives here. If this window grows
+    /// past what that figure prices, the memory target silently stops holding —
+    /// so the two are pinned together rather than kept in step by hand.
+    #[test]
+    fn one_stream_costs_what_the_memory_budget_prices_it_at() {
+        let config = Config::from_layout(None);
+        let held = (config.window_units() as u64 + RETAIN_BEHIND_UNITS) * config.unit;
+        assert!(
+            held <= riven_core::cache::READ_AHEAD_PER_STREAM,
+            "an HTTP stream holds {held} bytes, over the {} it is budgeted",
+            riven_core::cache::READ_AHEAD_PER_STREAM
+        );
     }
 
     #[tokio::test]

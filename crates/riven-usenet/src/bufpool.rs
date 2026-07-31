@@ -15,6 +15,17 @@
 
 use parking_lot::Mutex;
 
+/// How much larger than the requested capacity a recycled buffer may be before
+/// [`BufPool::take`] trims it. Slack enough that same-sized segments always
+/// recycle untouched, tight enough that a cached segment's `len` still accounts
+/// for what it pins.
+const EXCESS_FACTOR: usize = 2;
+/// Slack below this is left alone whatever the ratio says. Without an absolute
+/// floor the ratio alone throws away a perfectly good buffer for a small
+/// request — `take(0)`, which every ratio exceeds — and the pool stops
+/// recycling at exactly the sizes it costs nothing to keep.
+const MIN_TRIM_SLACK: usize = 256 * 1024;
+
 /// A bounded free list of reusable `Vec<u8>` buffers. Construct as a
 /// `static` (the constructor is `const`); take a buffer with [`take`], and
 /// either return it explicitly with [`give`] or — preferred — hold it in a
@@ -43,12 +54,29 @@ impl BufPool {
 
     /// Take a cleared buffer with at least `min_capacity` capacity, reusing
     /// a pooled allocation when one is available.
+    ///
+    /// A buffer far larger than the caller asked for is trimmed rather than
+    /// handed over as-is. That matters because the decoded segment leaves here
+    /// inside a `Bytes::from_owner`, and the caches weigh it by `len()`: a
+    /// buffer that once held a 3.84 MB article would otherwise keep that
+    /// capacity forever and pin it behind every 720 KB segment cached after it,
+    /// so the segment cache's byte budget would run short of what it holds.
+    /// Trimming keeps `capacity` within `EXCESS_FACTOR` of `len`, which is what
+    /// makes the reported budget the real one.
+    ///
+    /// Recycling still does its job: a post's segments are near enough uniform
+    /// that the common path finds a buffer already the right size and never
+    /// reallocates.
     pub(crate) fn take(&self, min_capacity: usize) -> Vec<u8> {
         let reused = self.free.lock().pop();
         let mut buf = reused.unwrap_or_default();
         buf.clear();
         if buf.capacity() < min_capacity {
             buf.reserve(min_capacity);
+        } else if buf.capacity() > min_capacity.saturating_mul(EXCESS_FACTOR)
+            && buf.capacity() - min_capacity > MIN_TRIM_SLACK
+        {
+            buf.shrink_to(min_capacity);
         }
         buf
     }
@@ -137,6 +165,30 @@ mod tests {
         assert_eq!(reused.buf.capacity(), cap, "capacity preserved");
         assert_eq!(reused.buf.as_ptr() as usize, ptr, "same allocation");
         assert!(reused.is_empty(), "cleared on return");
+    }
+
+    static TRIM_POOL: BufPool = BufPool::new(2, 1 << 20);
+
+    #[test]
+    fn trims_a_buffer_far_larger_than_asked_for() {
+        // A big article leaves a big buffer behind...
+        TRIM_POOL.give(Vec::with_capacity(1 << 20));
+        // ...which a small one must not inherit whole, or the cache would
+        // charge itself the small length while pinning the big allocation.
+        let small = PooledBuf::take(&TRIM_POOL, 4096);
+        assert!(
+            small.buf.capacity() <= 4096 * EXCESS_FACTOR,
+            "capacity {} still pins the oversized allocation",
+            small.buf.capacity()
+        );
+    }
+
+    #[test]
+    fn reuses_a_buffer_within_the_excess_factor_untouched() {
+        let pool: BufPool = BufPool::new(2, 1 << 20);
+        pool.give(Vec::with_capacity(8192));
+        let buf = pool.take(6000);
+        assert_eq!(buf.capacity(), 8192, "same-sized work must not reallocate");
     }
 
     #[test]

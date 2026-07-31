@@ -33,9 +33,14 @@ use memchr::memchr3;
 
 use crate::bufpool::{BufPool, PooledBuf};
 
-/// Decoded-segment buffer pool. ~3× a typical 720 KB decoded segment cap,
-/// 64 retained — comfortably covers the in-flight + recently-evicted set.
-static DECODE_BUF_POOL: BufPool = BufPool::new(64, 2 * 1024 * 1024);
+/// Decoded-segment buffer pool. ~3× a typical 720 KB decoded segment cap, and
+/// 8 retained: `ARTICLE_MAX_IN_FLIGHT` is 4, so 8 covers the in-flight set
+/// twice over.
+///
+/// It retained 64, which is a 128 MiB ceiling that no cache stat reports and
+/// nothing in flight can justify — the pool exists to keep hot pages out of
+/// musl's `madvise` path, and 8 buffers do that as well as 64 do.
+static DECODE_BUF_POOL: BufPool = BufPool::new(8, 2 * 1024 * 1024);
 
 #[derive(Debug, Clone, Default)]
 pub struct YencInfo {
