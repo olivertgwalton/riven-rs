@@ -1,181 +1,162 @@
 <script lang="ts">
-    import { goto, invalidateAll } from "$app/navigation";
-    import { resolve } from "$app/paths";
+    import type { PageProps } from "./$types";
     import { authClient } from "$lib/auth-client";
+    import { goto } from "$app/navigation";
+    import { resolve } from "$app/paths";
     import { Button } from "$lib/components/ui/button/index.js";
+    import { Badge } from "$lib/components/ui/badge/index.js";
     import { Input } from "$lib/components/ui/input/index.js";
     import { Label } from "$lib/components/ui/label/index.js";
+    import * as AlertDialog from "$lib/components/ui/alert-dialog/index.js";
     import * as Avatar from "$lib/components/ui/avatar/index.js";
-    import * as Card from "$lib/components/ui/card/index.js";
-    import PageShell from "$lib/components/page-shell.svelte";
     import Passkeys from "$lib/components/auth/passkeys.svelte";
+    import PasswordChangeForm from "$lib/components/auth/password-change-form.svelte";
+    import EmailChangeForm from "$lib/components/auth/email-change-form.svelte";
+    import AccountLinks from "$lib/components/auth/account-links.svelte";
+    import UpdateUserForm from "$lib/components/auth/update-user-form.svelte";
+    import UserManagement from "$lib/components/auth/user-management.svelte";
+    import * as dateUtils from "$lib/utils/date";
     import { getInitials } from "$lib/utils";
-    import type { PageProps } from "./$types";
+    import { toast } from "svelte-sonner";
+    import PageShell from "$lib/components/page-shell.svelte";
 
-    // Everything here talks straight to the backend's /auth endpoints. The
-    // superforms + server-action versions of these forms are gone: there is no
-    // server in this bundle to run an action on.
     let { data }: PageProps = $props();
 
-    let currentPassword = $state("");
-    let newPassword = $state("");
-    let confirmPassword = $state("");
-    let passwordBusy = $state(false);
-    let passwordMessage = $state<{ ok: boolean; text: string } | null>(null);
+    const displayName = $derived(data.user?.name ?? data.user?.username ?? "");
 
-    let displayName = $derived(data.user?.name ?? "");
-    let profileBusy = $state(false);
-    let profileMessage = $state<{ ok: boolean; text: string } | null>(null);
+    /**
+     * Every riven account has a `credential` row unless it was created purely
+     * through Plex, and there is no `/set-password` endpoint to recover from
+     * that — so the password form is hidden rather than replaced.
+     */
+    const hasCredentialProvider = $derived(
+        data.accounts.some((account) => account.providerId === "credential")
+    );
 
-    async function changePassword(event: SubmitEvent) {
-        event.preventDefault();
-        passwordMessage = null;
-
-        if (newPassword !== confirmPassword) {
-            passwordMessage = { ok: false, text: "New password and confirmation do not match." };
-            return;
-        }
-
-        passwordBusy = true;
-        const { error } = await authClient.changePassword({
-            currentPassword,
-            newPassword,
-            // Signing other sessions out on a password change is the safe
-            // default: if the old password leaked, this is what evicts whoever
-            // used it.
-            revokeOtherSessions: true
-        });
-        passwordBusy = false;
-
-        if (error) {
-            passwordMessage = { ok: false, text: error.message };
-            return;
-        }
-        currentPassword = newPassword = confirmPassword = "";
-        passwordMessage = { ok: true, text: "Password updated." };
-    }
-
-    async function saveProfile(event: SubmitEvent) {
-        event.preventDefault();
-        profileBusy = true;
-        profileMessage = null;
-
-        const { error } = await authClient.updateUser({ name: displayName });
-        profileBusy = false;
-
-        if (error) {
-            profileMessage = { ok: false, text: error.message };
-            return;
-        }
-
-        await invalidateAll();
-        profileMessage = { ok: true, text: "Profile updated." };
-    }
+    let deleteOpen = $state(false);
+    let deletePassword = $state("");
+    let deleting = $state(false);
 
     async function signOut() {
         await authClient.signOut();
         await goto(resolve("/auth/login"));
     }
+
+    async function deleteAccount() {
+        deleting = true;
+        const { error } = await authClient.deleteUser({ password: deletePassword });
+        deleting = false;
+
+        if (error) {
+            toast.error(error.message);
+            return;
+        }
+        deleteOpen = false;
+        await goto(resolve("/auth/login"));
+    }
 </script>
 
-<svelte:head><title>Profile · Riven</title></svelte:head>
+<svelte:head>
+    <title>Profile - Riven</title>
+</svelte:head>
 
-<PageShell class="mx-auto w-full max-w-3xl">
-    <section class="border-border/60 flex items-start gap-4 border-b pb-6">
-        <Avatar.Root class="h-16 w-16 text-xl">
-            {#if data.user?.image}
-                <Avatar.Image src={data.user.image} alt={data.user?.name ?? ""} />
-            {/if}
-            <Avatar.Fallback class="bg-primary text-primary-foreground font-semibold">
-                {getInitials(data.user?.name ?? data.user?.username ?? "?")}
-            </Avatar.Fallback>
-        </Avatar.Root>
-        <div class="flex-1">
-            <h1 class="text-xl font-semibold">{data.user?.name ?? data.user?.username}</h1>
-            <p class="text-muted-foreground text-sm">{data.user?.email ?? ""}</p>
-            {#if data.user?.role}
-                <p class="text-muted-foreground mt-1 text-xs uppercase">{data.user.role}</p>
-            {/if}
+<PageShell class="mx-auto w-full max-w-5xl">
+    <section
+        class="border-border/60 flex flex-col gap-5 border-b pb-6 lg:flex-row lg:items-start lg:justify-between">
+        <div class="flex items-start gap-4">
+            <Avatar.Root class="h-16 w-16 text-xl">
+                {#if data.user?.image}
+                    <Avatar.Image src={data.user.image} alt={displayName} />
+                {/if}
+                <Avatar.Fallback class="bg-primary text-primary-foreground font-semibold">
+                    {getInitials(displayName)}
+                </Avatar.Fallback>
+            </Avatar.Root>
+
+            <div class="min-w-0">
+                <div class="flex flex-wrap items-center gap-2">
+                    <h1 class="text-3xl font-bold tracking-tight">{displayName}'s Profile</h1>
+                    {#if data.user?.role}
+                        <Badge variant="secondary" class="capitalize">
+                            Role: {data.user.role}
+                        </Badge>
+                    {/if}
+                </div>
+                <p class="text-muted-foreground mt-1 text-sm break-all">{data.user?.email ?? ""}</p>
+
+                <dl class="text-muted-foreground mt-3 grid gap-x-6 gap-y-1 text-sm sm:grid-cols-2">
+                    <div class="flex gap-2">
+                        <dt>Member since</dt>
+                        <dd class="text-foreground">
+                            {dateUtils.formatDate(data.user?.createdAt) ?? "Unknown"}
+                        </dd>
+                    </div>
+                    <div class="flex gap-2">
+                        <dt>Last updated</dt>
+                        <dd class="text-foreground">
+                            {dateUtils.formatDate(data.user?.updatedAt) ?? "Unknown"}
+                        </dd>
+                    </div>
+                </dl>
+            </div>
         </div>
-        <Button variant="outline" onclick={signOut}>Sign out</Button>
+
+        <div class="flex flex-col gap-2 sm:flex-row">
+            <Button variant="secondary" class="w-full sm:w-auto" onclick={signOut}>Logout</Button>
+
+            <AlertDialog.Root bind:open={deleteOpen}>
+                <AlertDialog.Trigger>
+                    {#snippet child({ props })}
+                        <Button variant="destructive" class="w-full sm:w-auto" {...props}>
+                            Delete Account
+                        </Button>
+                    {/snippet}
+                </AlertDialog.Trigger>
+                <AlertDialog.Content>
+                    <AlertDialog.Header>
+                        <AlertDialog.Title>Delete your account?</AlertDialog.Title>
+                        <AlertDialog.Description>
+                            This removes your user, its sessions and its passkeys. Library content
+                            is untouched. This cannot be undone.
+                        </AlertDialog.Description>
+                    </AlertDialog.Header>
+                    <div class="space-y-2">
+                        <Label for="deletePassword">Confirm with your password</Label>
+                        <Input
+                            id="deletePassword"
+                            type="password"
+                            autocomplete="current-password"
+                            bind:value={deletePassword} />
+                    </div>
+                    <AlertDialog.Footer>
+                        <AlertDialog.Cancel disabled={deleting}>Cancel</AlertDialog.Cancel>
+                        <AlertDialog.Action
+                            disabled={deleting || deletePassword.length === 0}
+                            onclick={deleteAccount}>
+                            {deleting ? "Deleting…" : "Delete account"}
+                        </AlertDialog.Action>
+                    </AlertDialog.Footer>
+                </AlertDialog.Content>
+            </AlertDialog.Root>
+        </div>
     </section>
 
-    <Card.Root class="mt-6">
-        <Card.Header>
-            <Card.Title>Profile</Card.Title>
-        </Card.Header>
-        <form onsubmit={saveProfile}>
-            <Card.Content class="space-y-2">
-                <Label for="displayName">Display name</Label>
-                <Input id="displayName" bind:value={displayName} required />
-                {#if profileMessage}
-                    <p
-                        class="text-sm {profileMessage.ok
-                            ? 'text-muted-foreground'
-                            : 'text-destructive'}">
-                        {profileMessage.text}
-                    </p>
-                {/if}
-            </Card.Content>
-            <Card.Footer>
-                <Button type="submit" disabled={profileBusy}>
-                    {profileBusy ? "Saving…" : "Save"}
-                </Button>
-            </Card.Footer>
-        </form>
-    </Card.Root>
+    <div>
+        {#if hasCredentialProvider}
+            <PasswordChangeForm data={data.passwordChangeForm} />
+        {/if}
+        <EmailChangeForm data={data.emailChangeForm} />
 
-    <Card.Root class="mt-6">
-        <Card.Header>
-            <Card.Title>Change password</Card.Title>
-            <Card.Description>Other sessions are signed out when you change it.</Card.Description>
-        </Card.Header>
-        <form onsubmit={changePassword}>
-            <Card.Content class="space-y-4">
-                <div class="space-y-2">
-                    <Label for="currentPassword">Current password</Label>
-                    <Input
-                        id="currentPassword"
-                        type="password"
-                        autocomplete="current-password"
-                        bind:value={currentPassword}
-                        required />
-                </div>
-                <div class="space-y-2">
-                    <Label for="newPassword">New password</Label>
-                    <Input
-                        id="newPassword"
-                        type="password"
-                        autocomplete="new-password"
-                        bind:value={newPassword}
-                        required />
-                </div>
-                <div class="space-y-2">
-                    <Label for="confirmPassword">Confirm new password</Label>
-                    <Input
-                        id="confirmPassword"
-                        type="password"
-                        autocomplete="new-password"
-                        bind:value={confirmPassword}
-                        required />
-                </div>
-                {#if passwordMessage}
-                    <p
-                        class="text-sm {passwordMessage.ok
-                            ? 'text-muted-foreground'
-                            : 'text-destructive'}"
-                        role="alert">
-                        {passwordMessage.text}
-                    </p>
-                {/if}
-            </Card.Content>
-            <Card.Footer>
-                <Button type="submit" disabled={passwordBusy}>
-                    {passwordBusy ? "Updating…" : "Update password"}
-                </Button>
-            </Card.Footer>
-        </form>
-    </Card.Root>
+        <UpdateUserForm data={data.changeUserDataForm} />
+    </div>
 
+    {#if data.canManageUsers}
+        <UserManagement
+            formData={data.createUserForm}
+            users={data.managedUsers}
+            currentUserId={data.user?.id ?? ""} />
+    {/if}
+
+    <AccountLinks accounts={data.accounts} />
     <Passkeys />
 </PageShell>

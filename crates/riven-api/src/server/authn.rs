@@ -113,7 +113,23 @@ pub async fn build(
         .plugin(SessionManagementPlugin::new())
         .plugin(PasswordManagementPlugin::new().password_hasher(hasher.clone()))
         .plugin(AccountManagementPlugin::new())
-        .plugin(UserManagementPlugin::new())
+        // Both halves default to off in better-auth-rs, and both were on in the
+        // frontend's better-auth before the cutover — the profile page's
+        // "Change Email" and "Delete Account" sections have no route otherwise.
+        //
+        // Verification is skipped in both cases because riven has no email
+        // provider configured: `send_email_or_log` would only write the
+        // confirmation link to the log, so requiring it would make the two
+        // features permanently unreachable rather than merely unverified. That
+        // matches what the TypeScript side did with the same empty mail config.
+        // Deletion still demands the account's password at the call site.
+        .plugin(
+            UserManagementPlugin::new()
+                .change_email_enabled(true)
+                .update_without_verification(true)
+                .delete_user_enabled(true)
+                .require_delete_verification(false),
+        )
         .plugin(EmailVerificationPlugin::new())
         .plugin(TwoFactorPlugin::new())
         .plugin(

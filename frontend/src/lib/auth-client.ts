@@ -34,6 +34,16 @@ export interface AuthSession {
     expiresAt: string;
 }
 
+/** A row from `/list-accounts`: one authentication method linked to the user. */
+export interface LinkedAccount {
+    id?: string;
+    providerId: string;
+    accountId: string;
+    createdAt?: string;
+    updatedAt?: string;
+    scopes?: string[];
+}
+
 export interface AuthResult<T> {
     data: T | null;
     error: { message: string; status: number } | null;
@@ -230,20 +240,40 @@ export const authClient = {
         return call<{ success: boolean }>("/change-password", { method: "POST", body });
     },
 
-    setPassword(body: { newPassword: string }) {
-        return call<{ success: boolean }>("/set-password", { method: "POST", body });
-    },
-
     changeEmail(body: { newEmail: string }) {
-        return call<{ success: boolean }>("/change-email", { method: "POST", body });
+        return call<{ status: boolean }>("/change-email", { method: "POST", body });
     },
 
-    updateUser(body: { name?: string; image?: string }) {
-        return call<{ user: AuthUser }>("/update-user", { method: "POST", body });
+    /**
+     * Partial update — omitted fields are left alone, and an all-empty body is
+     * rejected by the backend with "No fields to update". `email` is not
+     * accepted here; `changeEmail` owns that.
+     */
+    updateUser(body: { name?: string; image?: string; username?: string }) {
+        return call<{ status: boolean }>("/update-user", { method: "POST", body });
+    },
+
+    /**
+     * Deletes the *caller's own* account and clears the session cookie.
+     *
+     * The password is the confirmation step: riven runs with delete-user
+     * verification off (no mail provider), so without it the only thing standing
+     * between a borrowed session and a deleted account is a session-freshness
+     * check.
+     */
+    deleteUser(body: { password: string }) {
+        return call<{ success: boolean; message: string }>("/delete-user", {
+            method: "POST",
+            body
+        });
     },
 
     listAccounts() {
-        return call<{ providerId: string; accountId: string }[]>("/list-accounts");
+        return call<LinkedAccount[]>("/list-accounts");
+    },
+
+    unlinkAccount(body: { providerId: string; accountId?: string }) {
+        return call<{ status: boolean }>("/unlink-account", { method: "POST", body });
     },
 
     listSessions() {
@@ -252,10 +282,25 @@ export const authClient = {
 
     /** Admin plugin — requires the caller's session to carry the admin role. */
     admin: {
-        listUsers() {
-            return call<{ users: AuthUser[] }>("/admin/list-users");
+        listUsers(query?: { limit?: number; sortBy?: string; sortDirection?: string }) {
+            const params = new URLSearchParams();
+            for (const [key, value] of Object.entries(query ?? {})) {
+                if (value !== undefined) params.set(key, String(value));
+            }
+            const suffix = params.size ? `?${params}` : "";
+            return call<{ users: AuthUser[]; total: number }>(`/admin/list-users${suffix}`);
         },
-        createUser(body: { email: string; password: string; name?: string; role?: string }) {
+        /**
+         * `data` carries columns outside better-auth's core user shape —
+         * `username` among them, which riven signs in with.
+         */
+        createUser(body: {
+            email: string;
+            password: string;
+            name: string;
+            role?: string;
+            data?: Record<string, unknown>;
+        }) {
             return call<{ user: AuthUser }>("/admin/create-user", { method: "POST", body });
         },
         removeUser(body: { userId: string }) {
