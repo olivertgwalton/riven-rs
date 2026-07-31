@@ -133,7 +133,7 @@ export const load = (async ({ params, url }) => {
 			error(400, "Invalid media type");
 		}
 
-		if (!id || isNaN(Number(id))) {
+		if (!id || Number.isNaN(Number(id))) {
 			error(400, "Invalid ID");
 		}
 
@@ -300,8 +300,7 @@ export const load = (async ({ params, url }) => {
 			const languagesToCheck = ["jpn", "kor", "chi", "zho"];
 
 			if (
-				details?.data &&
-				details?.data.originalLanguage &&
+				details?.data?.originalLanguage &&
 				languagesToCheck.includes(details.data.originalLanguage)
 			) {
 				try {

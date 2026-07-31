@@ -1,7 +1,7 @@
 <script lang="ts">
     import { browser } from "$app/environment";
     import { page } from "$app/state";
-    import { type PageProps } from "./$types";
+    import type { PageProps } from "./$types";
     import type { ParsedShowDetails } from "$lib/metadata/parser";
     import { fade, fly } from "svelte/transition";
     import { cubicOut } from "svelte/easing";
@@ -1101,7 +1101,7 @@
                                 collectionName={movieDetails.collection.name}
                                 onRequested={handleRequestSuccess}>
                                 {#snippet trigger({ props })}
-                                    <button
+                                    <button type="button"
                                         {...props}
                                         class="group border-border/50 relative block min-h-24 w-full overflow-hidden rounded-xl border text-left shadow-lg transition-all duration-300 md:min-h-36">
                                         <!-- Background Layer -->
@@ -1592,14 +1592,16 @@
                                             <button
                                                 type="button"
                                                 class="text-destructive/70 hover:text-destructive border-destructive/30 hover:border-destructive/70 mt-2 rounded-md border px-3 py-1.5 text-xs transition-colors"
-                                                onclick={() =>
+                                                onclick={() => {
+                                                    if (fs.id == null) return;
                                                     deleteFilesystemEntry(
-                                                        fs!.id!,
+                                                        fs.id,
                                                         getFilesystemEntryLabel(
                                                             fs,
                                                             `Version ${selectedMovieVersionIdx + 1}`
                                                         )
-                                                    )}>
+                                                    );
+                                                }}>
                                                 Remove this version
                                             </button>
                                         {/if}

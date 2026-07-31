@@ -112,7 +112,9 @@
             const date = dateUtils.parseISODate(item.aired_at);
             if (!date) continue;
             const dateKey = dateUtils.toISODate(date);
-            (result[dateKey] ??= []).push(item);
+			const itemsForDate = result[dateKey] ?? [];
+			itemsForDate.push(item);
+			result[dateKey] = itemsForDate;
         }
         return result;
     });
@@ -249,7 +251,7 @@
             <Dialog.Root>
                 <Dialog.Trigger>
                     {#snippet child({ props })}
-                        <button
+                        <button type="button"
                             {...props}
                             class="text-muted-foreground hover:text-foreground w-full rounded-md px-2 py-1 text-left text-xs font-medium transition-colors hover:bg-white/5">
                             +{day.items.length - limit} more

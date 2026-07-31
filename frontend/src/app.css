@@ -1,9 +1,8 @@
 @import "tailwindcss";
 @import "tw-animate-css";
+@import "./themes/all.css";
 
 @custom-variant dark (&:is(.dark *));
-
-@import "./themes/all.css";
 
 @theme {
 	--font-sans: "Oxanium", sans-serif;

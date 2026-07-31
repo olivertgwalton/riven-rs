@@ -8,7 +8,7 @@
     import Loader2 from "@lucide/svelte/icons/loader-2";
     import SeasonSelector, { type SeasonInfo } from "./season-selector.svelte";
     import { createScopedLogger } from "$lib/logger";
-    import { type Snippet } from "svelte";
+    import type { Snippet } from "svelte";
     import { page } from "$app/state";
 
     const logger = createScopedLogger("item-request");

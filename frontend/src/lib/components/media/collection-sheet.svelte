@@ -8,7 +8,7 @@
     import { gqlClient } from "$lib/graphql-client";
     import { createScopedLogger } from "$lib/logger";
     import { isMobileStore } from "$lib/stores/global.svelte";
-    import { type Snippet } from "svelte";
+    import type { Snippet } from "svelte";
     import { resolve } from "$app/paths";
     import { page } from "$app/state";
 
@@ -64,6 +64,10 @@
     let requestLoading = $state(false);
     let collectionData = $state<CollectionDetails | null>(null);
     let error = $state<string | null>(null);
+
+    function closeOnMobile() {
+        if (isMobileStore.isMobile) open = false;
+    }
 
     async function fetchCollection() {
         if (collectionData) return; // Already fetched
@@ -237,7 +241,7 @@
                         <a
                             href={resolve(`/details/media/${part.id}/movie`)}
                             class="group block transition-all duration-300 hover:scale-[1.02]"
-                            onclick={() => isMobileStore.isMobile && (open = false)}>
+							onclick={closeOnMobile}>
                             <LandscapeCard
                                 title={part.title}
                                 image={part.backdrop_path}

@@ -31,7 +31,7 @@
             {@const completedCount =
                 rivenSeason?.episodes?.filter((e) => e.state === "Completed").length ?? 0}
             <Carousel.Item class="basis-auto">
-                <button
+                <button type="button"
                     onclick={() => onSelectSeason(season.number?.toString())}
                     class={cn(
                         "group relative block transition-all",

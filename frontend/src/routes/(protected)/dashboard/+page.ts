@@ -192,7 +192,7 @@ function mapDebridService(info: GqlDebridAccountInfo): DownloaderService {
 		? new Date(info.premiumUntil).getTime()
 		: null;
 	const daysLeft =
-		expiresMs !== null && !isNaN(expiresMs)
+		expiresMs !== null && !Number.isNaN(expiresMs)
 			? Math.ceil((expiresMs - now) / (1000 * 60 * 60 * 24))
 			: null;
 

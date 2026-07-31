@@ -9,7 +9,10 @@
 		"useIgnoreFile": true
 	},
 	"linter": {
-		"enabled": true
+		"enabled": true,
+		"rules": {
+			"preset": "recommended"
+		}
 	},
 	"css": {
 		"parser": {

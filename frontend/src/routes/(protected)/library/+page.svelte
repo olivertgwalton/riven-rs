@@ -127,12 +127,16 @@
 
         url.searchParams.delete("type");
         if ($formData.type?.length) {
-            $formData.type.forEach((t) => url.searchParams.append("type", t));
+			for (const type of $formData.type) {
+				url.searchParams.append("type", type);
+			}
         }
 
         url.searchParams.delete("states");
         if ($formData.states?.length) {
-            $formData.states.forEach((s) => url.searchParams.append("states", s));
+			for (const state of $formData.states) {
+				url.searchParams.append("states", state);
+			}
         }
 
         // Reset to page 1 on search/filter change

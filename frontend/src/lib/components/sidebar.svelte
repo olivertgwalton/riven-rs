@@ -140,17 +140,17 @@
 
 {#if SidebarStore.isOpen}
     <!-- Backdrop -->
-    <div
+    <button
+        type="button"
+        aria-label="Close sidebar"
         onclick={() => SidebarStore.toggle()}
-        role="button"
-        tabindex="0"
         onkeydown={(e) => {
             if (e.key === "Enter" || e.key === " ") {
                 SidebarStore.toggle();
             }
         }}
         class="fixed inset-0 z-40 cursor-default md:hidden">
-    </div>
+    </button>
 
     <!-- Pop-out Menu -->
     <div

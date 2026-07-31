@@ -18,7 +18,7 @@
     } from "$lib/components/ui/button/index.js";
     import Loader2 from "@lucide/svelte/icons/loader-2";
     import { page } from "$app/state";
-    import { type Snippet } from "svelte";
+    import type { Snippet } from "svelte";
 
     export type ItemActionKind = "reset" | "retry" | "delete" | "pause";
 

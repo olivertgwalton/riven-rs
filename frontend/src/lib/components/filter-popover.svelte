@@ -8,7 +8,7 @@
     import { Toggle } from "$lib/components/ui/toggle/index.js";
     import { Separator } from "$lib/components/ui/separator/index.js";
     import {
-        FilterStore,
+        type FilterStore,
         MOVIE_GENRES,
         TV_GENRES,
         CONTENT_RATINGS,
@@ -17,7 +17,7 @@
         VOTE_AVERAGE_CONFIG,
         VOTE_COUNT_CONFIG
     } from "$lib/services/filter-store.svelte";
-    import { SearchStore } from "$lib/services/search-store.svelte";
+    import type { SearchStore } from "$lib/services/search-store.svelte";
     import FilterIcon from "@lucide/svelte/icons/filter";
     import DatePicker from "$lib/components/date-picker.svelte";
 

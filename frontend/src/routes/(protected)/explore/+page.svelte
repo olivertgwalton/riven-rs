@@ -4,7 +4,7 @@
     import ListItem from "$lib/components/list-item.svelte";
     import { Button } from "$lib/components/ui/button/index.js";
     import PortraitCardSkeleton from "$lib/components/media/portrait-card-skeleton.svelte";
-    import { SearchStore } from "$lib/services/search-store.svelte";
+    import type { SearchStore } from "$lib/services/search-store.svelte";
     import AnimatedToggle from "$lib/components/animated-toggle.svelte";
     import SearchIcon from "@lucide/svelte/icons/search";
     import Sparkles from "@lucide/svelte/icons/sparkles";
@@ -349,7 +349,7 @@
                         {#key currentExampleIndex}
                             <div class="grid grid-cols-2 gap-4 sm:grid-cols-2 lg:grid-cols-3">
                                 {#each (data.searchExamples ?? []).slice(currentExampleIndex, currentExampleIndex + 6) as example, i (`${currentExampleIndex + i}-${example}`)}
-                                    <button
+                                    <button type="button"
                                         onclick={() => {
                                             window.dispatchEvent(
                                                 new CustomEvent("riven:search", {

@@ -270,7 +270,6 @@
                 placeholder="Search movies & shows..."
                 aria-label="Search"
                 autocomplete="off"
-                autofocus
                 enterkeyhint="search"
                 class="h-full flex-1 bg-transparent text-sm font-medium text-white outline-none placeholder:text-white/40" />
             <button

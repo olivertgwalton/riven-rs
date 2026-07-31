@@ -203,7 +203,7 @@ export function parseSearchQuery(query: string): ParsedSearchQuery {
 					shortcut.tvdb === "with_genres" ||
 					shortcut.tvdb === "without_genres";
 				// Resolve genre names to IDs if needed
-				if (isGenreParam && isNaN(Number(value))) {
+				if (isGenreParam && Number.isNaN(Number(value))) {
 					const genreIds: number[] = [];
 					const genreNames = value.split(/[,|]/);
 
@@ -232,7 +232,7 @@ export function parseSearchQuery(query: string): ParsedSearchQuery {
 						paramName.includes("vote_average") // decimals allowed
 					) {
 						const numValue = Number(value);
-						if (!isNaN(numValue)) {
+						if (!Number.isNaN(numValue)) {
 							tmdbParams[paramName] = numValue;
 						}
 					}
@@ -249,7 +249,7 @@ export function parseSearchQuery(query: string): ParsedSearchQuery {
 					// TVDB year is numeric
 					if (paramName === "year") {
 						const numValue = Number(value);
-						if (!isNaN(numValue)) {
+						if (!Number.isNaN(numValue)) {
 							tvdbParams[paramName] = numValue;
 						}
 					}

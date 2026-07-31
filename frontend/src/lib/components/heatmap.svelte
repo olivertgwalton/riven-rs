@@ -81,6 +81,7 @@
                             {onfocus}
                             {onblur}
                             {onclick}
+							onkeydown={() => undefined}
                             {onmouseout}
                             {onmouseover}></td>
                     {:else}

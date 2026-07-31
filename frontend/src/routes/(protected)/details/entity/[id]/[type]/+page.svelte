@@ -1,5 +1,5 @@
 <script lang="ts">
-    import { type PageProps } from "./$types";
+    import type { PageProps } from "./$types";
     import { fade, fly } from "svelte/transition";
     import { cubicOut } from "svelte/easing";
     import { Badge } from "$lib/components/ui/badge/index.js";

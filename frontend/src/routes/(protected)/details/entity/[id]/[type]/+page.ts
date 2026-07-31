@@ -24,7 +24,7 @@ export const load: PageLoad = async ({ params, url }) => {
 	const { id, type } = params;
 	const indexer = url.searchParams.get("indexer");
 
-	if (!id || isNaN(Number(id))) {
+	if (!id || Number.isNaN(Number(id))) {
 		error(400, "Invalid ID");
 	}
 
@@ -70,8 +70,8 @@ export const load: PageLoad = async ({ params, url }) => {
 		};
 	} else if (type === "company") {
 		let companyRes: Record<string, unknown>;
-		let moviesRes;
-		let showsRes;
+		let moviesRes: Awaited<ReturnType<typeof searchTmdb>>;
+		let showsRes: Awaited<ReturnType<typeof searchTmdb>>;
 		try {
 			[companyRes, moviesRes, showsRes] = await Promise.all([
 				fetchTmdbDetails<Record<string, unknown>>({

@@ -43,18 +43,18 @@
 
         // Enforce month/day validity on each keystroke
         if (raw.length >= 5) {
-            const m = parseInt(raw.slice(4, 6));
-            if (raw.length === 5 && parseInt(raw[4]) > 1) raw = raw.slice(0, 4);
+            const m = parseInt(raw.slice(4, 6), 10);
+            if (raw.length === 5 && parseInt(raw[4], 10) > 1) raw = raw.slice(0, 4);
             else if (m === 0 || m > 12) raw = raw.slice(0, 5);
         }
 
         if (raw.length >= 7) {
-            const y = parseInt(raw.slice(0, 4));
-            const m = parseInt(raw.slice(4, 6));
-            const d = parseInt(raw.slice(6, 8));
+            const y = parseInt(raw.slice(0, 4), 10);
+            const m = parseInt(raw.slice(4, 6), 10);
+            const d = parseInt(raw.slice(6, 8), 10);
             const maxD = getDaysInMonth(y, m);
 
-            if (raw.length === 7 && parseInt(raw[6]) > Math.floor(maxD / 10)) raw = raw.slice(0, 6);
+            if (raw.length === 7 && parseInt(raw[6], 10) > Math.floor(maxD / 10)) raw = raw.slice(0, 6);
             else if (d === 0 || d > maxD) raw = raw.slice(0, 7);
         }
 

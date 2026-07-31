@@ -229,7 +229,7 @@ export class SearchStore {
 	syncQuery(parsed: ParsedSearchQuery | null) {
 		const newQuery = parsed?.query || "";
 
-		if (!newQuery) {
+		if (!parsed || !newQuery) {
 			this.clear();
 			return;
 		}
@@ -239,7 +239,7 @@ export class SearchStore {
 			return;
 		}
 
-		this.setSearch(newQuery, parsed!);
+		this.setSearch(newQuery, parsed);
 		this.search();
 	}
 
@@ -387,7 +387,7 @@ export class SearchStore {
 	}
 
 	private buildSearchParams(
-		type: "movie" | "tv" | "person" | "company",
+		_type: "movie" | "tv" | "person" | "company",
 		page: number,
 	) {
 		const hasFilters = Object.keys(this.filterParams).length > 0;

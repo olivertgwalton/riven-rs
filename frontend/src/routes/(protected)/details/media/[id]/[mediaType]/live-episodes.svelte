@@ -371,8 +371,9 @@
                     type="button"
                     class="text-destructive/70 hover:text-destructive border-destructive/30 hover:border-destructive/70 mt-2 rounded-md border px-3 py-1.5 text-xs transition-colors"
                     onclick={() => {
+                        if (fs.id == null) return;
                         if (episodeNumber != null) selectedVersionIdxByEpisode[episodeNumber] = 0;
-                        onDeleteFilesystemEntry(fs.id!, getFsLabel(fs, episodeNumber));
+						onDeleteFilesystemEntry(fs.id, getFsLabel(fs, episodeNumber));
                     }}>
                     Remove this version
                 </button>

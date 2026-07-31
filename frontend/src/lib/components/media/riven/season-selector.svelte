@@ -26,7 +26,7 @@
     {#each seasons as season (season.id)}
         {@const locked = isSeasonLocked(season)}
         {@const selected = selectedSeasons.includes(season.season_number)}
-        <button
+        <button type="button"
             class="group hover:bg-muted/30 flex w-full items-center justify-between rounded-md px-3 py-1.5 text-sm transition-all {locked
                 ? 'cursor-not-allowed opacity-50'
                 : 'cursor-pointer'} {selected && !locked

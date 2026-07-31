@@ -33,7 +33,7 @@
 </script>
 
 {#if !isMainPage}
-    <button
+    <button type="button"
         transition:fly={{ y: -20, duration: 400, easing: cubicOut }}
         onclick={() => {
             if (history.length > 1) {
@@ -58,7 +58,7 @@
         <Search class="size-4 shrink-0 text-white/50" />
 
         <!-- Tap-to-search trigger -->
-        <button
+        <button type="button"
             onclick={() => (searchModalOpen = true)}
             aria-label="Open search"
             class="h-full flex-1 bg-transparent text-left text-sm font-medium text-white/40 outline-none">

@@ -62,7 +62,7 @@
 
     <!-- Selection Overlay -->
     {#if isSelectable}
-        <button
+        <button type="button"
             onclick={(e) => {
                 e.preventDefault();
                 e.stopPropagation();

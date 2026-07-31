@@ -226,7 +226,9 @@ export class MediaListStore<T = unknown> {
 				keysToRemove.push(key);
 			}
 		}
-		keysToRemove.forEach((key) => sessionStorage.removeItem(key));
+		for (const key of keysToRemove) {
+			sessionStorage.removeItem(key);
+		}
 	}
 
 	async changeTimeWindow(window: TimeWindow): Promise<void> {

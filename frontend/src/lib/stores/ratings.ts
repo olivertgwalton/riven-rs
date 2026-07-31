@@ -45,12 +45,12 @@ export function getRatings(
 	signal?: AbortSignal,
 ): Promise<RatingsData> {
 	const key = `${type}-${id}`;
-	if (ratingsCache.has(key)) {
+	const cached = ratingsCache.get(key);
+	if (cached) {
 		// LRU: Remove and re-add to mark as recently used
-		const promise = ratingsCache.get(key)!;
 		ratingsCache.delete(key);
-		ratingsCache.set(key, promise);
-		return promise;
+		ratingsCache.set(key, cached);
+		return cached;
 	}
 
 	pruneCache();

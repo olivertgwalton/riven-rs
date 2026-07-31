@@ -4,8 +4,8 @@
     import { Button } from "$lib/components/ui/button/index.js";
     import PortraitCardSkeleton from "$lib/components/media/portrait-card-skeleton.svelte";
     import { onMount } from "svelte";
-    import { SearchStore } from "$lib/services/search-store.svelte";
-    import { FilterStore, SORT_OPTIONS } from "$lib/services/filter-store.svelte";
+    import type { SearchStore } from "$lib/services/search-store.svelte";
+    import { type FilterStore, SORT_OPTIONS } from "$lib/services/filter-store.svelte";
     import FilterPopover from "$lib/components/filter-popover.svelte";
     import * as Select from "$lib/components/ui/select/index.js";
     import XIcon from "@lucide/svelte/icons/x";

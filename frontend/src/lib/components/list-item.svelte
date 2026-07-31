@@ -119,7 +119,7 @@
         {@render cardContent()}
     </a>
 {:else}
-    <div role="button" aria-disabled="true" tabindex="-1" class={containerClasses}>
+    <div class={containerClasses}>
         {@render cardContent()}
     </div>
 {/if}

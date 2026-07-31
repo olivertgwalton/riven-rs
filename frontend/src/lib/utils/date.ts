@@ -188,9 +188,11 @@ export function addDays(date: CalendarDate, days: number): CalendarDate {
 export function getCalendar(data: { [key: string]: number }, year: number) {
 	const base = getLastMonday(new CalendarDate(year, 1, 1));
 
-	const out: any = {};
+	const out: {
+		max: number;
+		calendar: Array<Array<{ date: string; value: number } | undefined>>;
+	} = { max: 0, calendar: [] };
 
-	out.max = 0;
 	out.calendar = Array.from({ length: 7 }, (_, i) => {
 		const start = addDays(base, i);
 		return Array.from({ length: 53 }, (_, j) => {

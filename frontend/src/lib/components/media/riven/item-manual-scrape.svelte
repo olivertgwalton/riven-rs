@@ -57,6 +57,10 @@
         return infoHash.startsWith("nzb-");
     }
 
+    function closeDialog() {
+        open = false;
+    }
+
     const DISCOVER_STREAMS_MUTATION = `mutation($itemType: MediaItemType!, $title: String!, $imdbId: String, $tmdbId: String, $tvdbId: String, $seasons: [Int!], $cachedOnly: Boolean) {
         discoverStreams(itemType: $itemType, title: $title, imdbId: $imdbId, tmdbId: $tmdbId, tvdbId: $tvdbId, seasons: $seasons, cachedOnly: $cachedOnly) {
             key
@@ -532,7 +536,7 @@
 
             <div
                 class="mt-5 flex shrink-0 items-center justify-between gap-3 border-t border-white/10 pt-4">
-                <Button variant="outline" onclick={() => (open = false)}>
+				<Button variant="outline" onclick={closeDialog}>
                     <ChevronLeft class="mr-2 h-4 w-4" />
                     Close
                 </Button>

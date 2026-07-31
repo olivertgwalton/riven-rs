@@ -94,7 +94,7 @@
 {/snippet}
 
 {#snippet logEntry(log: LogEntry)}
-    {@const levelColors: Record<string, string> = {
+    {@const levelColors = {
         error: "text-red-400",
         warn: "text-yellow-400",
         info: "text-green-400",
@@ -106,7 +106,7 @@
         <div
             class="text-foreground/90 grid grid-cols-[auto_auto_auto_1fr] gap-x-3 p-2 font-mono text-xs">
             <span class="text-muted-foreground shrink-0">{log.timestamp ?? ""}</span>
-            <span class="shrink-0 font-semibold uppercase {levelColors[level] ?? 'text-foreground'}"
+            <span class="shrink-0 font-semibold uppercase {levelColors[level as keyof typeof levelColors] ?? 'text-foreground'}"
                 >{level}</span>
             <span class="text-muted-foreground/70 shrink-0">{log.target ?? ""}</span>
             <span class="wrap-break-word whitespace-pre-wrap">{log.message ?? ""}</span>
@@ -132,7 +132,7 @@
         <h3 class="text-destructive mb-3 text-lg font-semibold">Error Loading Logs</h3>
         <pre
             class="text-destructive/80 bg-destructive/5 mb-4 overflow-x-auto rounded border p-3 font-mono text-sm">{errorMessage}</pre>
-        <button
+        <button type="button"
             class="bg-primary hover:bg-primary/90 text-primary-foreground rounded-lg px-4 py-2 font-medium transition-colors"
             onclick={retryAction}>
             {buttonText}
@@ -141,7 +141,7 @@
 {/snippet}
 
 {#snippet tabButton(name: string, isActive: boolean, onClickAction: () => void)}
-    <button
+    <button type="button"
         class="rounded px-3 py-1.5 text-sm font-medium transition-colors {isActive
             ? 'bg-primary/10 text-primary'
             : 'hover:bg-muted/50'}"
@@ -165,7 +165,7 @@
     <div class="flex h-full flex-col items-center justify-center p-8">
         <p class="text-muted-foreground text-sm">{message}</p>
         {#if actionText && actionFn}
-            <button
+            <button type="button"
                 class="bg-primary/10 hover:bg-primary/20 text-primary mt-4 rounded-lg px-4 py-2 text-sm font-medium transition-colors"
                 onclick={actionFn}>
                 {actionText}
@@ -180,7 +180,7 @@
             <h3 class="text-destructive mb-3 text-lg font-semibold">Connection Failed</h3>
             <pre
                 class="text-destructive/80 bg-destructive/5 mb-4 overflow-x-auto rounded border p-3 font-mono text-sm">{error}</pre>
-            <button
+            <button type="button"
                 class="bg-primary hover:bg-primary/90 text-primary-foreground rounded-lg px-4 py-2 font-medium transition-colors"
                 onclick={() => logStore.reconnect()}>
                 Try Again
@@ -217,14 +217,14 @@
                         {#if activeTab === "live"}
                             {@render statusIndicator()}
                             {#if connectionStatus === "error" && reconnectAttempts < maxReconnectAttempts}
-                                <button
+                                <button type="button"
                                     class="bg-primary/10 hover:bg-primary/20 text-primary border-primary/20 rounded border px-3 py-1 text-sm font-medium transition-colors"
                                     onclick={() => logStore.reconnect()}>
                                     Reconnect Now
                                 </button>
                             {/if}
                         {:else}
-                            <button
+                            <button type="button"
                                 class="bg-primary/10 hover:bg-primary/20 text-primary border-primary/20 rounded border px-3 py-1 text-sm font-medium transition-colors"
                                 onclick={() => logStore.fetchHistoricalLogs()}
                                 disabled={isLoadingHistorical}>

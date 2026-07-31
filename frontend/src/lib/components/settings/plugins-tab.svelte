@@ -85,10 +85,9 @@
 
         <div class="min-w-0 flex-1">
             {#if selected}
-                {@const status = pluginStatus(selected)}
-                <div class="mb-4 flex items-center gap-3">
-                    <h2 class="text-lg font-medium">{selected.title}</h2>
-                    <Badge variant={status.variant}>{status.label}</Badge>
+				<div class="mb-4 flex items-center gap-3">
+					<h2 class="text-lg font-medium">{selected.title}</h2>
+					<Badge variant={pluginStatus(selected).variant}>{pluginStatus(selected).label}</Badge>
                     {#if selected.version}
                         <span class="text-muted-foreground text-xs">v{selected.version}</span>
                     {/if}

@@ -282,7 +282,9 @@ class NotificationStore {
 	}
 
 	markAllAsRead() {
-		this.#notifications.forEach((n) => (n.read = true));
+		for (const notification of this.#notifications) {
+			notification.read = true;
+		}
 		this.#unreadCount = 0;
 	}
 
@@ -333,7 +335,9 @@ class NotificationStore {
 				this.#connectionStatus = "connected";
 				this.#reconnectAttempts = 0;
 				const event = payload.notifications;
-				this.#eventListeners.forEach((cb) => cb(event));
+				for (const listener of this.#eventListeners) {
+					listener(event);
+				}
 				const mapped = rivenNotificationToNotification(event);
 				if (mapped) {
 					this.add(mapped);

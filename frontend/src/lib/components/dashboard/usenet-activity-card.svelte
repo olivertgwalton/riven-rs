@@ -114,17 +114,22 @@
         const keyFor = new Map(hosts.map((h, i) => [h, `s${i}`]));
         const data = days.map((day, idx) => {
             const row: Record<string, number | string> = { idx, label: shortDay(day) };
-            for (const h of hosts) row[keyFor.get(h)!] = 0;
+            for (const h of hosts) {
+                const key = keyFor.get(h);
+                if (key) row[key] = 0;
+            }
             return row;
         });
         for (const r of rows) {
-            const row = data[dayIndex.get(r.day)!];
-            const key = keyFor.get(r.host)!;
+            const rowIndex = dayIndex.get(r.day);
+            const key = keyFor.get(r.host);
+            if (rowIndex === undefined || !key) continue;
+            const row = data[rowIndex];
             row[key] = (Number(row[key]) || 0) + r.bytesDownloaded / divisor;
         }
 
         const series = hosts.map((h, i) => ({
-            key: keyFor.get(h)!,
+            key: `s${i}`,
             label: h,
             color: PALETTE[i % PALETTE.length]
         }));

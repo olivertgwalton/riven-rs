@@ -2,7 +2,7 @@
     import * as Carousel from "$lib/components/ui/carousel/index.js";
     import { fly } from "svelte/transition";
     import { cubicOut } from "svelte/easing";
-    import { type CarouselAPI } from "$lib/components/ui/carousel/context.js";
+    import type { CarouselAPI } from "$lib/components/ui/carousel/context.js";
     import Autoplay from "embla-carousel-autoplay";
     import { TMDB_IMAGE_BASE_URL, TMDB_GENRES } from "$lib/indexer-constants";
     import { gqlClient } from "$lib/graphql-client";
@@ -65,7 +65,7 @@
         if (!api) return;
 
         const onSelect = () => {
-            currentIndex = api!.selectedScrollSnap();
+			currentIndex = api?.selectedScrollSnap() ?? 0;
         };
 
         // Initialize current index and register event handler
@@ -189,13 +189,12 @@
 </script>
 
 {#if Array.isArray(data) && data.length > 0}
-    <div class="border-border/50 relative overflow-hidden rounded-2xl border shadow-2xl">
+    <section class="border-border/50 relative overflow-hidden rounded-2xl border shadow-2xl">
         <Carousel.Root
             setApi={(emblaApi) => (api = emblaApi)}
             plugins={[autoplayPlugin]}
             opts={{ loop: true }}
             class="relative"
-            role="region"
             aria-label="Now playing movies carousel">
             <Carousel.Content>
                 {#each data as item, index (item.id)}
@@ -410,7 +409,7 @@
         <!-- Navigation Arrows (only align left/right correctly) -->
         <div
             class="pointer-events-none absolute inset-0 z-20 flex items-center justify-between px-4">
-            <button
+            <button type="button"
                 class="pointer-events-auto hidden h-12 w-12 items-center justify-center rounded-full border border-white/10 bg-black/20 text-white/70 backdrop-blur-md transition-all hover:scale-110 hover:bg-black/40 hover:text-white md:flex"
                 onclick={() => api?.scrollPrev()}
                 aria-label="Previous slide">
@@ -423,10 +422,11 @@
                     stroke-linecap="round"
                     stroke-linejoin="round"
                     class="h-6 w-6">
+					<title>Previous slide</title>
                     <polyline points="15 18 9 12 15 6"></polyline>
                 </svg>
             </button>
-            <button
+            <button type="button"
                 class="pointer-events-auto hidden h-12 w-12 items-center justify-center rounded-full border border-white/10 bg-black/20 text-white/70 backdrop-blur-md transition-all hover:scale-110 hover:bg-black/40 hover:text-white md:flex"
                 onclick={() => api?.scrollNext()}
                 aria-label="Next slide">
@@ -439,6 +439,7 @@
                     stroke-linecap="round"
                     stroke-linejoin="round"
                     class="h-6 w-6">
+					<title>Next slide</title>
                     <polyline points="9 18 15 12 9 6"></polyline>
                 </svg>
             </button>
@@ -453,7 +454,7 @@
             <!-- Desktop Segmented Progress (Hidden until Large screens) -->
             <div class="hidden gap-1.5 lg:flex">
                 {#each data.map((__, idx) => idx) as i (i)}
-                    <button
+                    <button type="button"
                         class="relative h-1 w-6 cursor-pointer overflow-hidden rounded-full transition-all duration-300 {i ===
                         currentIndex
                             ? 'bg-white/20'
@@ -476,7 +477,7 @@
                 </div>
             </div>
         </div>
-    </div>
+    </section>
 {:else}
     <div class="relative w-full overflow-hidden rounded-2xl {heightClass}">
         <div class="from-background to-muted absolute inset-0 animate-pulse bg-linear-to-t"></div>

@@ -20,6 +20,13 @@
             toast.error("Failed to reset library");
         }
     }
+
+    async function confirmResetLibrary() {
+        loading = true;
+        await resetLibrary();
+        loading = false;
+        open = false;
+    }
 </script>
 
 <div class="space-y-8">
@@ -64,12 +71,7 @@
                         <AlertDialog.Cancel disabled={loading}>Cancel</AlertDialog.Cancel>
                         <AlertDialog.Action
                             disabled={loading}
-                            onclick={async () => {
-                                loading = true;
-                                await resetLibrary();
-                                loading = false;
-                                open = false;
-                            }}>
+                            onclick={confirmResetLibrary}>
                             {#if loading}
                                 <Loader2 class="mr-1 inline-block animate-spin" />
                             {/if}
