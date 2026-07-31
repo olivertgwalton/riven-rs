@@ -10,7 +10,7 @@ help:
 	@echo "install : Install packages with pnpm"
 	@echo "build   : Build the static bundle into ./build (riven serves it)"
 	@echo "check   : Typecheck with svelte-check"
-	@echo "lint    : Prettier + eslint"
+	@echo "lint    : Biome checks"
 	@echo "format  : Format the code"
 	@echo "codegen : Regenerate src/lib/gql from ../schema.graphql"
 	@echo "clean   : Remove node_modules, .svelte-kit and build"

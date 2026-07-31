@@ -10,34 +10,34 @@ const logger = createScopedLogger("library-page-server");
 const LIBRARY_ITEMS_DEPENDENCY = "riven:library-items";
 
 interface FilterOption {
-    value: string;
-    label: string;
+	value: string;
+	label: string;
 }
 
 interface GqlMediaItem {
-    id: number;
-    itemType: string;
-    title: string;
-    tmdbId?: string | null;
-    tvdbId?: string | null;
-    parentId?: number | null;
-    posterPath?: string | null;
-    airedAt?: string | null;
-    seasonNumber?: number | null;
-    episodeNumber?: number | null;
-    showId?: number | null;
-    showTitle?: string | null;
-    showTmdbId?: string | null;
-    showTvdbId?: string | null;
-    showPosterPath?: string | null;
+	id: number;
+	itemType: string;
+	title: string;
+	tmdbId?: string | null;
+	tvdbId?: string | null;
+	parentId?: number | null;
+	posterPath?: string | null;
+	airedAt?: string | null;
+	seasonNumber?: number | null;
+	episodeNumber?: number | null;
+	showId?: number | null;
+	showTitle?: string | null;
+	showTmdbId?: string | null;
+	showTvdbId?: string | null;
+	showPosterPath?: string | null;
 }
 
 interface GqlItemsPage {
-    items: GqlMediaItem[];
-    page: number;
-    limit: number;
-    totalItems: number;
-    totalPages: number;
+	items: GqlMediaItem[];
+	page: number;
+	limit: number;
+	totalItems: number;
+	totalPages: number;
 }
 
 const ITEMS_QUERY = `
@@ -91,139 +91,155 @@ const FILTER_ENUMS_QUERY = `
 `;
 
 function labelFromEnum(value: string): string {
-    return value
-        .replace(/_/g, " ")
-        .replace(/([a-z])([A-Z])/g, "$1 $2")
-        .replace(/\w\S*/g, (word) => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase());
+	return value
+		.replace(/_/g, " ")
+		.replace(/([a-z])([A-Z])/g, "$1 $2")
+		.replace(
+			/\w\S*/g,
+			(word) => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase(),
+		);
 }
 
 function typeValueFromEnum(value: string): string {
-    return value.toLowerCase();
+	return value.toLowerCase();
 }
 
 function extractYear(airedAt: string | null | undefined): number | string {
-    if (!airedAt) return "N/A";
-    const year = dateUtils.getYearFromISO(airedAt);
-    return year ?? "N/A";
+	if (!airedAt) return "N/A";
+	const year = dateUtils.getYearFromISO(airedAt);
+	return year ?? "N/A";
 }
 
 function transformItems(items: GqlMediaItem[]) {
-    return items
-        .map((item) => {
-            const rawType = item.itemType.toLowerCase();
-            let id: string | number | null = null;
-            let indexer: "tmdb" | "tvdb" = "tmdb";
-            let mediaPageType = rawType === "show" ? "tv" : rawType;
-            let posterPath = item.posterPath;
-            const detailParams = new URLSearchParams();
+	return items
+		.map((item) => {
+			const rawType = item.itemType.toLowerCase();
+			let id: string | number | null = null;
+			let indexer: "tmdb" | "tvdb" = "tmdb";
+			let mediaPageType = rawType === "show" ? "tv" : rawType;
+			let posterPath = item.posterPath;
+			const detailParams = new URLSearchParams();
 
-            if (rawType === "movie") {
-                id = item.tmdbId ?? null;
-                indexer = "tmdb";
-            } else if (rawType === "show") {
-                id = item.tvdbId ?? null;
-                indexer = "tvdb";
-            } else if (rawType === "season" || rawType === "episode") {
-                id = item.showTvdbId ?? item.showTmdbId ?? null;
-                indexer = item.showTvdbId ? "tvdb" : "tmdb";
-                mediaPageType = "tv";
-                posterPath = item.showPosterPath ?? item.posterPath;
-                if (item.seasonNumber != null) {
-                    detailParams.set("season", item.seasonNumber.toString());
-                }
-                if (item.episodeNumber != null) {
-                    detailParams.set("episode", item.episodeNumber.toString());
-                }
-            }
+			if (rawType === "movie") {
+				id = item.tmdbId ?? null;
+				indexer = "tmdb";
+			} else if (rawType === "show") {
+				id = item.tvdbId ?? null;
+				indexer = "tvdb";
+			} else if (rawType === "season" || rawType === "episode") {
+				id = item.showTvdbId ?? item.showTmdbId ?? null;
+				indexer = item.showTvdbId ? "tvdb" : "tmdb";
+				mediaPageType = "tv";
+				posterPath = item.showPosterPath ?? item.posterPath;
+				if (item.seasonNumber != null) {
+					detailParams.set("season", item.seasonNumber.toString());
+				}
+				if (item.episodeNumber != null) {
+					detailParams.set("episode", item.episodeNumber.toString());
+				}
+			}
 
-            if (!id || id === "") {
-                logger.warn(
-                    `Rendering item "${item.title}" (id: ${item.id}, type: ${item.itemType}) without a details link: missing external ID`
-                );
-            }
+			if (!id || id === "") {
+				logger.warn(
+					`Rendering item "${item.title}" (id: ${item.id}, type: ${item.itemType}) without a details link: missing external ID`,
+				);
+			}
 
-            return {
-                id,
-                title: item.title,
-                poster_path: posterPath,
-                media_type: mediaPageType,
-                year: extractYear(item.airedAt),
-                indexer,
-                type: mediaPageType,
-                details_query: detailParams.toString(),
-                badge:
-                    rawType === "season"
-                        ? { text: "Season", variant: "default" }
-                        : rawType === "episode"
-                          ? { text: "Episode", variant: "default" }
-                          : undefined,
-                riven_id: item.id
-            };
-        })
-        .filter((item): item is NonNullable<typeof item> => item !== null);
+			return {
+				id,
+				title: item.title,
+				poster_path: posterPath,
+				media_type: mediaPageType,
+				year: extractYear(item.airedAt),
+				indexer,
+				type: mediaPageType,
+				details_query: detailParams.toString(),
+				badge:
+					rawType === "season"
+						? { text: "Season", variant: "default" }
+						: rawType === "episode"
+							? { text: "Episode", variant: "default" }
+							: undefined,
+				riven_id: item.id,
+			};
+		})
+		.filter((item): item is NonNullable<typeof item> => item !== null);
 }
 
 export const load: PageLoad = async (event) => {
-    // Auth gating lives in the protected layout.
-    event.depends(LIBRARY_ITEMS_DEPENDENCY);
+	// Auth gating lives in the protected layout.
+	event.depends(LIBRARY_ITEMS_DEPENDENCY);
 
-    const itemsSearchForm = await superValidate(event.url.searchParams, zod4(itemsSearchSchema));
-    const { page, limit, sort, type: types, search, states } = itemsSearchForm.data;
+	const itemsSearchForm = await superValidate(
+		event.url.searchParams,
+		zod4(itemsSearchSchema),
+	);
+	const {
+		page,
+		limit,
+		sort,
+		type: types,
+		search,
+		states,
+	} = itemsSearchForm.data;
 
-    // Apply defaults optimistically without waiting for schema introspection.
-    // The Select only ever emits valid values so this is safe.
-    const effectiveTypes = types?.length ? types : ["movie", "show"];
-    const effectiveStates = states?.filter((s) => s !== "All") ?? [];
-    itemsSearchForm.data.type = effectiveTypes;
-    itemsSearchForm.data.states = effectiveStates.length > 0 ? effectiveStates : ["All"];
+	// Apply defaults optimistically without waiting for schema introspection.
+	// The Select only ever emits valid values so this is safe.
+	const effectiveTypes = types?.length ? types : ["movie", "show"];
+	const effectiveStates = states?.filter((s) => s !== "All") ?? [];
+	itemsSearchForm.data.type = effectiveTypes;
+	itemsSearchForm.data.states =
+		effectiveStates.length > 0 ? effectiveStates : ["All"];
 
-    // Both queries start in parallel. Bundling into a single streaming Promise
-    // means navigation is instant — the page renders immediately and content fills in.
-    const filterEnumsTask = gqlClient<{
-        mediaItemType?: { enumValues?: { name: string }[] } | null;
-        mediaItemState?: { enumValues?: { name: string }[] } | null;
-    }>(FILTER_ENUMS_QUERY, undefined);
+	// Both queries start in parallel. Bundling into a single streaming Promise
+	// means navigation is instant — the page renders immediately and content fills in.
+	const filterEnumsTask = gqlClient<{
+		mediaItemType?: { enumValues?: { name: string }[] } | null;
+		mediaItemState?: { enumValues?: { name: string }[] } | null;
+	}>(FILTER_ENUMS_QUERY, undefined);
 
-    const itemsTask = gqlClient<{ items: GqlItemsPage }>(ITEMS_QUERY, {
-        page: page ?? 1,
-        limit: limit ?? 20,
-        sort: (Array.isArray(sort) ? sort[0] : sort) ?? "date_desc",
-        types: effectiveTypes.map((t) => t.toUpperCase()),
-        search: search ?? undefined,
-        states: effectiveStates.length > 0 ? effectiveStates : undefined
-    });
+	const itemsTask = gqlClient<{ items: GqlItemsPage }>(ITEMS_QUERY, {
+		page: page ?? 1,
+		limit: limit ?? 20,
+		sort: (Array.isArray(sort) ? sort[0] : sort) ?? "date_desc",
+		types: effectiveTypes.map((t) => t.toUpperCase()),
+		search: search ?? undefined,
+		states: effectiveStates.length > 0 ? effectiveStates : undefined,
+	});
 
-    const pageData = Promise.all([filterEnumsTask, itemsTask])
-        .then(([filterData, itemsData]) => {
-            const typeEnums = filterData.mediaItemType?.enumValues?.map((e) => e.name) ?? [];
-            const stateEnums = filterData.mediaItemState?.enumValues?.map((e) => e.name) ?? [];
+	const pageData = Promise.all([filterEnumsTask, itemsTask])
+		.then(([filterData, itemsData]) => {
+			const typeEnums =
+				filterData.mediaItemType?.enumValues?.map((e) => e.name) ?? [];
+			const stateEnums =
+				filterData.mediaItemState?.enumValues?.map((e) => e.name) ?? [];
 
-            const typeOptions: FilterOption[] = typeEnums.map((value) => ({
-                value: typeValueFromEnum(value),
-                label: labelFromEnum(value)
-            }));
-            const stateOptions: FilterOption[] = [
-                { value: "All", label: "All" },
-                ...stateEnums.map((value) => ({ value, label: labelFromEnum(value) }))
-            ];
+			const typeOptions: FilterOption[] = typeEnums.map((value) => ({
+				value: typeValueFromEnum(value),
+				label: labelFromEnum(value),
+			}));
+			const stateOptions: FilterOption[] = [
+				{ value: "All", label: "All" },
+				...stateEnums.map((value) => ({ value, label: labelFromEnum(value) })),
+			];
 
-            return {
-                items: transformItems(itemsData.items.items),
-                page: itemsData.items.page,
-                totalPages: itemsData.items.totalPages,
-                limit: itemsData.items.limit,
-                totalItems: itemsData.items.totalItems,
-                typeOptions,
-                stateOptions
-            };
-        })
-        .catch((err) => {
-            logger.error("Failed to fetch library data:", err);
-            return null;
-        });
+			return {
+				items: transformItems(itemsData.items.items),
+				page: itemsData.items.page,
+				totalPages: itemsData.items.totalPages,
+				limit: itemsData.items.limit,
+				totalItems: itemsData.items.totalItems,
+				typeOptions,
+				stateOptions,
+			};
+		})
+		.catch((err) => {
+			logger.error("Failed to fetch library data:", err);
+			return null;
+		});
 
-    return {
-        itemsSearchForm,
-        pageData
-    };
+	return {
+		itemsSearchForm,
+		pageData,
+	};
 };

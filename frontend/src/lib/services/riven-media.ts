@@ -11,13 +11,13 @@
 
 import type { RivenMediaItem } from "$lib/types/riven";
 import type {
-    EpisodeFull,
-    EpisodeState,
-    FileSystemEntry,
-    MediaItemFull,
-    MediaItemStateTree,
-    SeasonFull,
-    SeasonState
+	EpisodeFull,
+	EpisodeState,
+	FileSystemEntry,
+	MediaItemFull,
+	MediaItemStateTree,
+	SeasonFull,
+	SeasonState,
 } from "$lib/gql/schema";
 
 /**
@@ -29,48 +29,57 @@ import type {
  * `pnpm codegen` after changing the schema.
  */
 export type GqlFilesystemEntry = Pick<
-    FileSystemEntry,
-    | "id"
-    | "fileSize"
-    | "originalFilename"
-    | "downloadUrl"
-    | "provider"
-    | "providerDownloadId"
-    | "path"
-    | "plugin"
-    | "rankingProfileName"
-    | "mediaMetadata"
+	FileSystemEntry,
+	| "id"
+	| "fileSize"
+	| "originalFilename"
+	| "downloadUrl"
+	| "provider"
+	| "providerDownloadId"
+	| "path"
+	| "plugin"
+	| "rankingProfileName"
+	| "mediaMetadata"
 >;
 
 export type GqlEpisodeFull = Pick<EpisodeFull, "episodeNumber" | "state"> & {
-    filesystemEntry?: GqlFilesystemEntry | null;
-    filesystemEntries?: GqlFilesystemEntry[];
+	filesystemEntry?: GqlFilesystemEntry | null;
+	filesystemEntries?: GqlFilesystemEntry[];
 };
 
-export type GqlSeasonFull = Pick<SeasonFull, "seasonNumber" | "state" | "isRequested"> & {
-    episodes?: GqlEpisodeFull[];
+export type GqlSeasonFull = Pick<
+	SeasonFull,
+	"seasonNumber" | "state" | "isRequested"
+> & {
+	episodes?: GqlEpisodeFull[];
 };
 
 export type GqlMediaItemFull = Pick<
-    MediaItemFull,
-    "id" | "state" | "imdbId" | "tmdbId" | "tvdbId"
+	MediaItemFull,
+	"id" | "state" | "imdbId" | "tmdbId" | "tvdbId"
 > & {
-    filesystemEntry?: GqlFilesystemEntry | null;
-    filesystemEntries?: GqlFilesystemEntry[];
-    seasons?: GqlSeasonFull[];
+	filesystemEntry?: GqlFilesystemEntry | null;
+	filesystemEntries?: GqlFilesystemEntry[];
+	seasons?: GqlSeasonFull[];
 };
 
-export type GqlEpisodeState = Pick<EpisodeState, "id" | "episodeNumber" | "state">;
+export type GqlEpisodeState = Pick<
+	EpisodeState,
+	"id" | "episodeNumber" | "state"
+>;
 
-export type GqlSeasonState = Pick<SeasonState, "id" | "seasonNumber" | "state" | "isRequested"> & {
-    episodes?: GqlEpisodeState[];
+export type GqlSeasonState = Pick<
+	SeasonState,
+	"id" | "seasonNumber" | "state" | "isRequested"
+> & {
+	episodes?: GqlEpisodeState[];
 };
 
 export type GqlMediaItemStateTree = Pick<
-    MediaItemStateTree,
-    "id" | "state" | "imdbId" | "tmdbId" | "tvdbId"
+	MediaItemStateTree,
+	"id" | "state" | "imdbId" | "tmdbId" | "tvdbId"
 > & {
-    seasons?: GqlSeasonState[];
+	seasons?: GqlSeasonState[];
 };
 
 const MEDIA_ITEM_FULL_FIELDS = `
@@ -183,11 +192,11 @@ export const MEDIA_ITEM_STATE_UPDATES_BY_TVDB_SUBSCRIPTION = `subscription($tvdb
 // ── New pub-sub subscriptions ──
 
 export interface GqlIndexedShow {
-    id: number;
-    tvdbId?: string | null;
-    tmdbId?: string | null;
-    imdbId?: string | null;
-    state: string;
+	id: number;
+	tvdbId?: string | null;
+	tmdbId?: string | null;
+	imdbId?: string | null;
+	state: string;
 }
 
 /** Fires whenever a movie item request is created. */
@@ -231,79 +240,89 @@ export const MEDIA_ITEM_STATE_BY_TVDB_QUERY = `query($tvdbId: String!) {
 }`;
 
 function mapFsEntry(
-    entry: GqlFilesystemEntry
-): RivenMediaItem["filesystem_entry"] & { id?: number; ranking_profile_name?: string } {
-    return {
-        id: entry.id ?? undefined,
-        file_size: entry.fileSize ?? undefined,
-        original_filename: entry.originalFilename ?? undefined,
-        download_url: entry.downloadUrl ?? undefined,
-        provider: entry.provider ?? undefined,
-        provider_download_id: entry.providerDownloadId ?? undefined,
-        path: entry.path ?? undefined,
-        plugin: entry.plugin ?? undefined,
-        ranking_profile_name: entry.rankingProfileName ?? undefined,
-        media_metadata: entry.mediaMetadata as import("$lib/types/riven").MediaMetadata | undefined
-    };
+	entry: GqlFilesystemEntry,
+): RivenMediaItem["filesystem_entry"] & {
+	id?: number;
+	ranking_profile_name?: string;
+} {
+	return {
+		id: entry.id ?? undefined,
+		file_size: entry.fileSize ?? undefined,
+		original_filename: entry.originalFilename ?? undefined,
+		download_url: entry.downloadUrl ?? undefined,
+		provider: entry.provider ?? undefined,
+		provider_download_id: entry.providerDownloadId ?? undefined,
+		path: entry.path ?? undefined,
+		plugin: entry.plugin ?? undefined,
+		ranking_profile_name: entry.rankingProfileName ?? undefined,
+		media_metadata: entry.mediaMetadata as
+			| import("$lib/types/riven").MediaMetadata
+			| undefined,
+	};
 }
 
-export function mapMediaItemFull(raw: GqlMediaItemFull | null | undefined): RivenMediaItem | null {
-    if (!raw) {
-        return null;
-    }
+export function mapMediaItemFull(
+	raw: GqlMediaItemFull | null | undefined,
+): RivenMediaItem | null {
+	if (!raw) {
+		return null;
+	}
 
-    return {
-        id: raw.id,
-        state: raw.state,
-        imdb_id: raw.imdbId ?? undefined,
-        tmdb_id: raw.tmdbId ?? undefined,
-        tvdb_id: raw.tvdbId ?? undefined,
-        media_metadata: raw.filesystemEntry?.mediaMetadata as RivenMediaItem["media_metadata"],
-        filesystem_entry: raw.filesystemEntry ? mapFsEntry(raw.filesystemEntry) : undefined,
-        filesystem_entries: raw.filesystemEntries?.map(mapFsEntry) ?? [],
-        seasons: raw.seasons?.map((season) => ({
-            // Both numbers are nullable in the schema. `mapMediaItemStateTree`
-            // below has always coalesced them; this mapper did not, because the
-            // hand-written type it used claimed they were required. Same field,
-            // same fallback.
-            season_number: season.seasonNumber ?? 0,
-            state: season.state,
-            is_requested: season.isRequested,
-            episodes: season.episodes?.map((episode) => ({
-                episode_number: episode.episodeNumber ?? 0,
-                state: episode.state,
-                media_metadata: episode.filesystemEntry
-                    ?.mediaMetadata as RivenMediaItem["media_metadata"],
-                filesystem_entry: episode.filesystemEntry
-                    ? mapFsEntry(episode.filesystemEntry)
-                    : undefined,
-                filesystem_entries: episode.filesystemEntries?.map(mapFsEntry) ?? []
-            }))
-        }))
-    };
+	return {
+		id: raw.id,
+		state: raw.state,
+		imdb_id: raw.imdbId ?? undefined,
+		tmdb_id: raw.tmdbId ?? undefined,
+		tvdb_id: raw.tvdbId ?? undefined,
+		media_metadata: raw.filesystemEntry
+			?.mediaMetadata as RivenMediaItem["media_metadata"],
+		filesystem_entry: raw.filesystemEntry
+			? mapFsEntry(raw.filesystemEntry)
+			: undefined,
+		filesystem_entries: raw.filesystemEntries?.map(mapFsEntry) ?? [],
+		seasons: raw.seasons?.map((season) => ({
+			// Both numbers are nullable in the schema. `mapMediaItemStateTree`
+			// below has always coalesced them; this mapper did not, because the
+			// hand-written type it used claimed they were required. Same field,
+			// same fallback.
+			season_number: season.seasonNumber ?? 0,
+			state: season.state,
+			is_requested: season.isRequested,
+			episodes: season.episodes?.map((episode) => ({
+				episode_number: episode.episodeNumber ?? 0,
+				state: episode.state,
+				media_metadata: episode.filesystemEntry
+					?.mediaMetadata as RivenMediaItem["media_metadata"],
+				filesystem_entry: episode.filesystemEntry
+					? mapFsEntry(episode.filesystemEntry)
+					: undefined,
+				filesystem_entries: episode.filesystemEntries?.map(mapFsEntry) ?? [],
+			})),
+		})),
+	};
 }
 
 export function mapMediaItemStateTree(
-    raw: GqlMediaItemStateTree | null | undefined
+	raw: GqlMediaItemStateTree | null | undefined,
 ): RivenMediaItem | null {
-    if (!raw) {
-        return null;
-    }
+	if (!raw) {
+		return null;
+	}
 
-    return {
-        id: raw.id,
-        state: raw.state,
-        imdb_id: raw.imdbId ?? undefined,
-        tmdb_id: raw.tmdbId ?? undefined,
-        tvdb_id: raw.tvdbId ?? undefined,
-        seasons: raw.seasons?.map((season) => ({
-            season_number: season.seasonNumber ?? 0,
-            state: season.state,
-            is_requested: season.isRequested,
-            episodes: season.episodes?.map((episode) => ({
-                episode_number: episode.episodeNumber ?? 0,
-                state: episode.state
-            }))
-        }))
-    };
+	return {
+		id: raw.id,
+		state: raw.state,
+		imdb_id: raw.imdbId ?? undefined,
+		tmdb_id: raw.tmdbId ?? undefined,
+		tvdb_id: raw.tvdbId ?? undefined,
+		seasons: raw.seasons?.map((season) => ({
+			season_number: season.seasonNumber ?? 0,
+			state: season.state,
+			is_requested: season.isRequested,
+			episodes: season.episodes?.map((episode) => ({
+				episode_number: episode.episodeNumber ?? 0,
+				state: episode.state,
+			})),
+		})),
+	};
 }

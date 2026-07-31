@@ -22,13 +22,13 @@
 import { createClient, type Client as GraphQLWSClient } from "graphql-ws";
 
 interface GraphQLResponse<T> {
-    data?: T;
-    errors?: Array<{ message: string; locations?: unknown; path?: unknown }>;
+	data?: T;
+	errors?: Array<{ message: string; locations?: unknown; path?: unknown }>;
 }
 
 interface GraphQLSubscribeHandlers<T> {
-    onData: (data: T) => void;
-    onError?: (error: Error) => void;
+	onData: (data: T) => void;
+	onError?: (error: Error) => void;
 }
 
 /**
@@ -39,15 +39,15 @@ const GRAPHQL_URL = "/graphql";
 const JSON_CONTENT_TYPE = "application/json";
 
 function getGraphQLData<T>(result: GraphQLResponse<T>): T {
-    if (result.errors && result.errors.length > 0) {
-        throw new Error(result.errors.map((e) => e.message).join("; "));
-    }
+	if (result.errors && result.errors.length > 0) {
+		throw new Error(result.errors.map((e) => e.message).join("; "));
+	}
 
-    if (result.data === undefined) {
-        throw new Error("GraphQL response contained no data");
-    }
+	if (result.data === undefined) {
+		throw new Error("GraphQL response contained no data");
+	}
 
-    return result.data;
+	return result.data;
 }
 
 /// Lazily-constructed singleton `graphql-ws` client. All client-side
@@ -59,26 +59,30 @@ function getGraphQLData<T>(result: GraphQLResponse<T>): T {
 let wsClient: GraphQLWSClient | null = null;
 
 function getWsClient(): GraphQLWSClient {
-    if (wsClient) return wsClient;
-    if (typeof window === "undefined") {
-        throw new Error("gqlSubscribeClient called during SSR (WebSocket unavailable)");
-    }
-    const httpUrl = new URL(GRAPHQL_URL, window.location.origin);
-    httpUrl.protocol = httpUrl.protocol === "https:" ? "wss:" : "ws:";
-    wsClient = createClient({
-        url: httpUrl.toString(),
-        // The browser sends the better-auth session cookie on the upgrade
-        // request and the backend authorises the connection from it.
-        lazy: true,
-        // Reconnect with exponential backoff up to ~20s on transient
-        // network failures. graphql-ws handles this automatically once
-        // `shouldRetry` is truthy.
-        shouldRetry: () => true,
-        retryAttempts: Infinity,
-        retryWait: (retries) =>
-            new Promise((resolve) => setTimeout(resolve, Math.min(1000 * 2 ** retries, 20000)))
-    });
-    return wsClient;
+	if (wsClient) return wsClient;
+	if (typeof window === "undefined") {
+		throw new Error(
+			"gqlSubscribeClient called during SSR (WebSocket unavailable)",
+		);
+	}
+	const httpUrl = new URL(GRAPHQL_URL, window.location.origin);
+	httpUrl.protocol = httpUrl.protocol === "https:" ? "wss:" : "ws:";
+	wsClient = createClient({
+		url: httpUrl.toString(),
+		// The browser sends the better-auth session cookie on the upgrade
+		// request and the backend authorises the connection from it.
+		lazy: true,
+		// Reconnect with exponential backoff up to ~20s on transient
+		// network failures. graphql-ws handles this automatically once
+		// `shouldRetry` is truthy.
+		shouldRetry: () => true,
+		retryAttempts: Infinity,
+		retryWait: (retries) =>
+			new Promise((resolve) =>
+				setTimeout(resolve, Math.min(1000 * 2 ** retries, 20000)),
+			),
+	});
+	return wsClient;
 }
 
 /**
@@ -88,25 +92,27 @@ function getWsClient(): GraphQLWSClient {
  * credential.
  */
 export async function gqlClient<T>(
-    query: string,
-    variables?: Record<string, unknown>,
-    signal?: AbortSignal
+	query: string,
+	variables?: Record<string, unknown>,
+	signal?: AbortSignal,
 ): Promise<T> {
-    const response = await fetch(GRAPHQL_URL, {
-        method: "POST",
-        headers: { "Content-Type": JSON_CONTENT_TYPE },
-        credentials: "include",
-        body: JSON.stringify({ query, variables: variables ?? {} }),
-        signal
-    });
+	const response = await fetch(GRAPHQL_URL, {
+		method: "POST",
+		headers: { "Content-Type": JSON_CONTENT_TYPE },
+		credentials: "include",
+		body: JSON.stringify({ query, variables: variables ?? {} }),
+		signal,
+	});
 
-    if (!response.ok) {
-        throw new Error(`GraphQL request failed: ${response.status} ${response.statusText}`);
-    }
+	if (!response.ok) {
+		throw new Error(
+			`GraphQL request failed: ${response.status} ${response.statusText}`,
+		);
+	}
 
-    const result: GraphQLResponse<T> = await response.json();
+	const result: GraphQLResponse<T> = await response.json();
 
-    return getGraphQLData(result);
+	return getGraphQLData(result);
 }
 
 /**
@@ -117,36 +123,38 @@ export async function gqlClient<T>(
  * Auth is established at WebSocket upgrade time from the session cookie.
  */
 export function gqlSubscribeClient<T>(
-    query: string,
-    variables: Record<string, unknown> | undefined,
-    handlers: GraphQLSubscribeHandlers<T>
+	query: string,
+	variables: Record<string, unknown> | undefined,
+	handlers: GraphQLSubscribeHandlers<T>,
 ): () => void {
-    let active = true;
-    const unsubscribe = getWsClient().subscribe<T>(
-        { query, variables: variables ?? {} },
-        {
-            next: (result) => {
-                if (!active) return;
-                if (result.errors && result.errors.length > 0) {
-                    handlers.onError?.(new Error(result.errors.map((e) => e.message).join("; ")));
-                    return;
-                }
-                if (result.data !== undefined && result.data !== null) {
-                    handlers.onData(result.data as T);
-                }
-            },
-            error: (err) => {
-                if (!active) return;
-                handlers.onError?.(err instanceof Error ? err : new Error(String(err)));
-            },
-            complete: () => {
-                if (active) handlers.onError?.(new Error("Stream ended"));
-            }
-        }
-    );
+	let active = true;
+	const unsubscribe = getWsClient().subscribe<T>(
+		{ query, variables: variables ?? {} },
+		{
+			next: (result) => {
+				if (!active) return;
+				if (result.errors && result.errors.length > 0) {
+					handlers.onError?.(
+						new Error(result.errors.map((e) => e.message).join("; ")),
+					);
+					return;
+				}
+				if (result.data !== undefined && result.data !== null) {
+					handlers.onData(result.data as T);
+				}
+			},
+			error: (err) => {
+				if (!active) return;
+				handlers.onError?.(err instanceof Error ? err : new Error(String(err)));
+			},
+			complete: () => {
+				if (active) handlers.onError?.(new Error("Stream ended"));
+			},
+		},
+	);
 
-    return () => {
-        active = false;
-        unsubscribe();
-    };
+	return () => {
+		active = false;
+		unsubscribe();
+	};
 }

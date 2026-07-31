@@ -16,8 +16,11 @@ export type Permissions = readonly Capability[];
 /** Nothing granted. The empty list is the absence of an answer, not a policy. */
 export const NO_PERMISSIONS: Permissions = [];
 
-export function can(permissions: Permissions | undefined, capability: Capability): boolean {
-    return permissions?.includes(capability) ?? false;
+export function can(
+	permissions: Permissions | undefined,
+	capability: Capability,
+): boolean {
+	return permissions?.includes(capability) ?? false;
 }
 
 /**
@@ -26,8 +29,11 @@ export function can(permissions: Permissions | undefined, capability: Capability
  * A UX gate only. The backend authorises every GraphQL call from the session
  * cookie, so bypassing this shows an empty page rather than data.
  */
-export function requireCapability(permissions: Permissions | undefined, capability: Capability) {
-    if (!can(permissions, capability)) {
-        error(403, "Forbidden");
-    }
+export function requireCapability(
+	permissions: Permissions | undefined,
+	capability: Capability,
+) {
+	if (!can(permissions, capability)) {
+		error(403, "Forbidden");
+	}
 }

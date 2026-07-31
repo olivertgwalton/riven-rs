@@ -6,83 +6,106 @@ import { parseSearchQuery } from "$lib/search-parser";
 import { type TMDBTransformedListItem } from "$lib/metadata/parser";
 import { logger } from "$lib/logger";
 import {
-    fetchTmdbCategory,
-    fetchTmdbTrending,
-    mapGqlTmdbList
+	fetchTmdbCategory,
+	fetchTmdbTrending,
+	mapGqlTmdbList,
 } from "$lib/services/backend-metadata";
 
 export const load: PageLoad = async ({ url }) => {
-    // Parse and validate search params from the URL
-    const form = await superValidate(url.searchParams, zod4(searchSchema));
-    const parsed = parseSearchQuery(form.data.query || "");
+	// Parse and validate search params from the URL
+	const form = await superValidate(url.searchParams, zod4(searchSchema));
+	const parsed = parseSearchQuery(form.data.query || "");
 
-    // Fetch trending content for search examples and hero
-    let heroItems: TMDBTransformedListItem[] = [];
-    let feelingLuckyItems: TMDBTransformedListItem[] = [];
-    let searchExamples: string[] = [];
+	// Fetch trending content for search examples and hero
+	let heroItems: TMDBTransformedListItem[] = [];
+	let feelingLuckyItems: TMDBTransformedListItem[] = [];
+	let searchExamples: string[] = [];
 
-    try {
-        // Generate 4 distinct random pages to ensure variety
-        const randomPagePopMovie = Math.floor(Math.random() * 50) + 1;
-        const randomPagePopTV = Math.floor(Math.random() * 50) + 1;
-        const randomPageTopMovie = Math.floor(Math.random() * 50) + 1;
-        const randomPageTopTV = Math.floor(Math.random() * 50) + 1;
+	try {
+		// Generate 4 distinct random pages to ensure variety
+		const randomPagePopMovie = Math.floor(Math.random() * 50) + 1;
+		const randomPagePopTV = Math.floor(Math.random() * 50) + 1;
+		const randomPageTopMovie = Math.floor(Math.random() * 50) + 1;
+		const randomPageTopTV = Math.floor(Math.random() * 50) + 1;
 
-        const [trendingMovies, trendingTV, popularMovies, popularTV, topRatedMovies, topRatedTV] =
-            await Promise.all([
-                fetchTmdbTrending({ type: "movie", timeWindow: "week", page: 1 }),
-                fetchTmdbTrending({ type: "tv", timeWindow: "week", page: 1 }),
-                fetchTmdbCategory({ type: "movie", category: "popular", page: randomPagePopMovie }),
-                fetchTmdbCategory({ type: "tv", category: "popular", page: randomPagePopTV }),
-                fetchTmdbCategory({
-                    type: "movie",
-                    category: "top_rated",
-                    page: randomPageTopMovie
-                }),
-                fetchTmdbCategory({ type: "tv", category: "top_rated", page: randomPageTopTV })
-            ]);
+		const [
+			trendingMovies,
+			trendingTV,
+			popularMovies,
+			popularTV,
+			topRatedMovies,
+			topRatedTV,
+		] = await Promise.all([
+			fetchTmdbTrending({ type: "movie", timeWindow: "week", page: 1 }),
+			fetchTmdbTrending({ type: "tv", timeWindow: "week", page: 1 }),
+			fetchTmdbCategory({
+				type: "movie",
+				category: "popular",
+				page: randomPagePopMovie,
+			}),
+			fetchTmdbCategory({
+				type: "tv",
+				category: "popular",
+				page: randomPagePopTV,
+			}),
+			fetchTmdbCategory({
+				type: "movie",
+				category: "top_rated",
+				page: randomPageTopMovie,
+			}),
+			fetchTmdbCategory({
+				type: "tv",
+				category: "top_rated",
+				page: randomPageTopTV,
+			}),
+		]);
 
-        const heroMovieResults = mapGqlTmdbList(trendingMovies);
-        const heroTvResults = mapGqlTmdbList(trendingTV);
+		const heroMovieResults = mapGqlTmdbList(trendingMovies);
+		const heroTvResults = mapGqlTmdbList(trendingTV);
 
-        const popularMovieResults = mapGqlTmdbList(popularMovies);
-        const popularTvResults = mapGqlTmdbList(popularTV);
+		const popularMovieResults = mapGqlTmdbList(popularMovies);
+		const popularTvResults = mapGqlTmdbList(popularTV);
 
-        const topRatedMovieResults = mapGqlTmdbList(topRatedMovies);
-        const topRatedTvResults = mapGqlTmdbList(topRatedTV);
+		const topRatedMovieResults = mapGqlTmdbList(topRatedMovies);
+		const topRatedTvResults = mapGqlTmdbList(topRatedTV);
 
-        // Hero items: Top trending
-        heroItems = shuffleArray([...heroMovieResults.slice(0, 5), ...heroTvResults.slice(0, 5)]);
+		// Hero items: Top trending
+		heroItems = shuffleArray([
+			...heroMovieResults.slice(0, 5),
+			...heroTvResults.slice(0, 5),
+		]);
 
-        // Feeling Lucky: Massive pool of random high-quality content
-        feelingLuckyItems = shuffleArray([
-            ...heroItems,
-            ...popularMovieResults,
-            ...popularTvResults,
-            ...topRatedMovieResults,
-            ...topRatedTvResults
-        ]);
+		// Feeling Lucky: Massive pool of random high-quality content
+		feelingLuckyItems = shuffleArray([
+			...heroItems,
+			...popularMovieResults,
+			...popularTvResults,
+			...topRatedMovieResults,
+			...topRatedTvResults,
+		]);
 
-        // Extract titles for search examples from hero items
-        searchExamples = heroItems.slice(0, 6).map((item) => item.title?.toLowerCase() || "");
-    } catch (err) {
-        logger.error("Failed to fetch trending content", err);
-    }
+		// Extract titles for search examples from hero items
+		searchExamples = heroItems
+			.slice(0, 6)
+			.map((item) => item.title?.toLowerCase() || "");
+	} catch (err) {
+		logger.error("Failed to fetch trending content", err);
+	}
 
-    return {
-        form,
-        parsed,
-        searchExamples,
-        heroItems,
-        feelingLuckyItems
-    };
+	return {
+		form,
+		parsed,
+		searchExamples,
+		heroItems,
+		feelingLuckyItems,
+	};
 };
 
 function shuffleArray<T>(array: T[]): T[] {
-    const newArray = [...array];
-    for (let i = newArray.length - 1; i > 0; i--) {
-        const j = Math.floor(Math.random() * (i + 1));
-        [newArray[i], newArray[j]] = [newArray[j], newArray[i]];
-    }
-    return newArray;
+	const newArray = [...array];
+	for (let i = newArray.length - 1; i > 0; i--) {
+		const j = Math.floor(Math.random() * (i + 1));
+		[newArray[i], newArray[j]] = [newArray[j], newArray[i]];
+	}
+	return newArray;
 }

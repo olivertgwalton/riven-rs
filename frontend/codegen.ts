@@ -13,20 +13,20 @@ import type { CodegenConfig } from "@graphql-codegen/cli";
  * duplication worth removing is the hand-written mirrors of backend *types*.
  */
 const config: CodegenConfig = {
-    schema: process.env.RIVEN_SCHEMA ?? "../schema.graphql",
-    generates: {
-        "src/lib/gql/schema.ts": {
-            plugins: ["typescript"],
-            config: {
-                // String unions rather than TS enums: these are wire values, and
-                // a `const enum` would need importing at every comparison.
-                enumsAsTypes: true,
-                skipTypename: true,
-                useTypeImports: true,
-                scalars: { JSON: "unknown" }
-            }
-        }
-    }
+	schema: "../schema.graphql",
+	generates: {
+		"src/lib/gql/schema.ts": {
+			plugins: ["typescript"],
+			config: {
+				// String unions rather than TS enums: these are wire values, and
+				// a `const enum` would need importing at every comparison.
+				enumsAsTypes: true,
+				skipTypename: true,
+				useTypeImports: true,
+				scalars: { JSON: "unknown" },
+			},
+		},
+	},
 };
 
 export default config;

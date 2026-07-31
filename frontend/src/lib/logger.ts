@@ -17,11 +17,11 @@ const STORAGE_KEY = "riven:log-level";
 const DEFAULT_LEVEL = import.meta.env.DEV ? 4 : 3;
 
 function resolveLevel(): number {
-    if (typeof localStorage === "undefined") return DEFAULT_LEVEL;
-    const stored = localStorage.getItem(STORAGE_KEY);
-    if (stored === null) return DEFAULT_LEVEL;
-    const level = Number(stored);
-    return Number.isFinite(level) ? level : DEFAULT_LEVEL;
+	if (typeof localStorage === "undefined") return DEFAULT_LEVEL;
+	const stored = localStorage.getItem(STORAGE_KEY);
+	if (stored === null) return DEFAULT_LEVEL;
+	const level = Number(stored);
+	return Number.isFinite(level) ? level : DEFAULT_LEVEL;
 }
 
 export const logger = createConsola({ level: resolveLevel() });
@@ -35,7 +35,7 @@ export const logger = createConsola({ level: resolveLevel() });
  * authLogger.info('User logged in');
  */
 export function createScopedLogger(tag: string) {
-    return logger.withTag(tag);
+	return logger.withTag(tag);
 }
 
 export default logger;

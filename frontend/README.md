@@ -131,13 +131,13 @@ We welcome contributions from the community! To ensure a smooth collaboration, p
 
 ### Code Formatting
 
-- **Frontend**: We use [Prettier](https://prettier.io/) for code formatting. Run prettier on your code before submitting. You can use the following command:
+- **Frontend**: We use [Biome](https://biomejs.dev/) for formatting and linting. Run it before submitting:
 
 ```bash
 pnpm run format
 ```
 
-- **Line Endings**: Use CRLF line endings unless the file is a shell script or another format that requires LF line endings.
+- **Line Endings**: Use LF line endings.
 
 ---
 

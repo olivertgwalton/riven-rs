@@ -15,48 +15,48 @@ import { createPasskey, getPasskeyAssertion } from "$lib/passkeys";
 const AUTH_URL = "/auth";
 
 export interface AuthUser {
-    id: string;
-    email?: string | null;
-    name?: string | null;
-    image?: string | null;
-    username?: string | null;
-    displayUsername?: string | null;
-    role?: string | null;
-    emailVerified?: boolean;
-    twoFactorEnabled?: boolean;
-    createdAt?: string;
-    updatedAt?: string;
+	id: string;
+	email?: string | null;
+	name?: string | null;
+	image?: string | null;
+	username?: string | null;
+	displayUsername?: string | null;
+	role?: string | null;
+	emailVerified?: boolean;
+	twoFactorEnabled?: boolean;
+	createdAt?: string;
+	updatedAt?: string;
 }
 
 export interface AuthSession {
-    id: string;
-    userId: string;
-    expiresAt: string;
+	id: string;
+	userId: string;
+	expiresAt: string;
 }
 
 /** A row from `/list-accounts`: one authentication method linked to the user. */
 export interface LinkedAccount {
-    id?: string;
-    providerId: string;
-    accountId: string;
-    createdAt?: string;
-    updatedAt?: string;
-    scopes?: string[];
+	id?: string;
+	providerId: string;
+	accountId: string;
+	createdAt?: string;
+	updatedAt?: string;
+	scopes?: string[];
 }
 
 export interface AuthResult<T> {
-    data: T | null;
-    error: { message: string; status: number } | null;
+	data: T | null;
+	error: { message: string; status: number } | null;
 }
 
 /** `name` and `transports` are omitted rather than nulled when unset. */
 export interface Passkey {
-    id: string;
-    name?: string | null;
-    createdAt: string;
-    deviceType: string;
-    backedUp: boolean;
-    transports?: string;
+	id: string;
+	name?: string | null;
+	createdAt: string;
+	deviceType: string;
+	backedUp: boolean;
+	transports?: string;
 }
 
 /**
@@ -67,246 +67,288 @@ export interface Passkey {
  * that matches how the previous SDK behaved and keeps call sites unchanged.
  */
 async function call<T>(
-    path: string,
-    init?: { method?: string; body?: unknown }
+	path: string,
+	init?: { method?: string; body?: unknown },
 ): Promise<AuthResult<T>> {
-    let response: Response;
-    try {
-        response = await fetch(`${AUTH_URL}${path}`, {
-            method: init?.method ?? "GET",
-            credentials: "include",
-            headers: init?.body ? { "Content-Type": "application/json" } : undefined,
-            body: init?.body ? JSON.stringify(init.body) : undefined
-        });
-    } catch {
-        return { data: null, error: { message: "Could not reach the server", status: 0 } };
-    }
+	let response: Response;
+	try {
+		response = await fetch(`${AUTH_URL}${path}`, {
+			method: init?.method ?? "GET",
+			credentials: "include",
+			headers: init?.body ? { "Content-Type": "application/json" } : undefined,
+			body: init?.body ? JSON.stringify(init.body) : undefined,
+		});
+	} catch {
+		return {
+			data: null,
+			error: { message: "Could not reach the server", status: 0 },
+		};
+	}
 
-    const text = await response.text();
-    const payload = text ? safeParse(text) : null;
+	const text = await response.text();
+	const payload = text ? safeParse(text) : null;
 
-    if (!response.ok) {
-        const message =
-            (payload as { message?: string } | null)?.message ??
-            `Request failed (${response.status})`;
-        return { data: null, error: { message, status: response.status } };
-    }
+	if (!response.ok) {
+		const message =
+			(payload as { message?: string } | null)?.message ??
+			`Request failed (${response.status})`;
+		return { data: null, error: { message, status: response.status } };
+	}
 
-    return { data: payload as T, error: null };
+	return { data: payload as T, error: null };
 }
 
-const EMPTY_RESPONSE = { message: "Server returned an empty response", status: 0 };
+const EMPTY_RESPONSE = {
+	message: "Server returned an empty response",
+	status: 0,
+};
 
 function safeParse(text: string): unknown {
-    try {
-        return JSON.parse(text);
-    } catch {
-        return null;
-    }
+	try {
+		return JSON.parse(text);
+	} catch {
+		return null;
+	}
 }
 
 export const authClient = {
-    /** `null` when unauthenticated — a 401 here is expected, not an error. */
-    async getSession(): Promise<AuthResult<{ user: AuthUser; session: AuthSession } | null>> {
-        const result = await call<{ user: AuthUser; session: AuthSession }>("/get-session");
-        if (result.error?.status === 401) {
-            return { data: null, error: null };
-        }
-        return result;
-    },
+	/** `null` when unauthenticated — a 401 here is expected, not an error. */
+	async getSession(): Promise<
+		AuthResult<{ user: AuthUser; session: AuthSession } | null>
+	> {
+		const result = await call<{ user: AuthUser; session: AuthSession }>(
+			"/get-session",
+		);
+		if (result.error?.status === 401) {
+			return { data: null, error: null };
+		}
+		return result;
+	},
 
-    signIn: {
-        username(body: { username: string; password: string }) {
-            return call<{ user: AuthUser; token?: string }>("/sign-in/username", {
-                method: "POST",
-                body
-            });
-        },
-        email(body: { email: string; password: string }) {
-            return call<{ user: AuthUser; token?: string }>("/sign-in/email", {
-                method: "POST",
-                body
-            });
-        },
+	signIn: {
+		username(body: { username: string; password: string }) {
+			return call<{ user: AuthUser; token?: string }>("/sign-in/username", {
+				method: "POST",
+				body,
+			});
+		},
+		email(body: { email: string; password: string }) {
+			return call<{ user: AuthUser; token?: string }>("/sign-in/email", {
+				method: "POST",
+				body,
+			});
+		},
 
-        /**
-         * With no session the backend issues discoverable options — no
-         * `allowCredentials` — so the authenticator picks the account and the
-         * user never types a username.
-         */
-        async passkey(init?: { conditional?: boolean; signal?: AbortSignal }) {
-            const { data: options, error } = await authClient.passkey.generateAuthenticateOptions();
-            if (error || !options) {
-                return { data: null, error: error ?? EMPTY_RESPONSE };
-            }
-            const assertion = await getPasskeyAssertion(options, init);
-            return call<{ user: AuthUser; session: AuthSession }>(
-                "/passkey/verify-authentication",
-                { method: "POST", body: { response: assertion } }
-            );
-        }
-    },
+		/**
+		 * With no session the backend issues discoverable options — no
+		 * `allowCredentials` — so the authenticator picks the account and the
+		 * user never types a username.
+		 */
+		async passkey(init?: { conditional?: boolean; signal?: AbortSignal }) {
+			const { data: options, error } =
+				await authClient.passkey.generateAuthenticateOptions();
+			if (error || !options) {
+				return { data: null, error: error ?? EMPTY_RESPONSE };
+			}
+			const assertion = await getPasskeyAssertion(options, init);
+			return call<{ user: AuthUser; session: AuthSession }>(
+				"/passkey/verify-authentication",
+				{ method: "POST", body: { response: assertion } },
+			);
+		},
+	},
 
-    /**
-     * Only the first account can be created this way, and it becomes the admin.
-     * The backend refuses every later sign-up, so ask `firstUserAvailable()`
-     * before offering the form.
-     */
-    signUp: {
-        email(body: { name: string; username: string; email: string; password: string }) {
-            return call<{ user: AuthUser; token?: string }>("/sign-up/email", {
-                method: "POST",
-                body
-            });
-        }
-    },
+	/**
+	 * Only the first account can be created this way, and it becomes the admin.
+	 * The backend refuses every later sign-up, so ask `firstUserAvailable()`
+	 * before offering the form.
+	 */
+	signUp: {
+		email(body: {
+			name: string;
+			username: string;
+			email: string;
+			password: string;
+		}) {
+			return call<{ user: AuthUser; token?: string }>("/sign-up/email", {
+				method: "POST",
+				body,
+			});
+		},
+	},
 
-    firstUserAvailable() {
-        return call<{ available: boolean }>("/first-user");
-    },
+	firstUserAvailable() {
+		return call<{ available: boolean }>("/first-user");
+	},
 
-    /** `poll` answers `{ pending: true }` with a 202 until the user approves. */
-    plex: {
-        start() {
-            return call<{ id: number; auth_url: string }>("/plex/start", { method: "POST" });
-        },
-        poll(pinId: number) {
-            return call<{ pending: boolean }>(`/plex/poll/${pinId}`);
-        }
-    },
+	/** `poll` answers `{ pending: true }` with a 202 until the user approves. */
+	plex: {
+		start() {
+			return call<{ id: number; auth_url: string }>("/plex/start", {
+				method: "POST",
+			});
+		},
+		poll(pinId: number) {
+			return call<{ pending: boolean }>(`/plex/poll/${pinId}`);
+		},
+	},
 
-    passkey: {
-        /**
-         * `name` labels the credential in riven's own list; browsers ignore it
-         * and use their own naming in the OS keychain.
-         */
-        generateRegisterOptions(options?: {
-            name?: string;
-            authenticatorAttachment?: "platform" | "cross-platform";
-        }) {
-            const query = new URLSearchParams();
-            if (options?.name) query.set("name", options.name);
-            if (options?.authenticatorAttachment) {
-                query.set("authenticatorAttachment", options.authenticatorAttachment);
-            }
-            const suffix = query.size ? `?${query}` : "";
-            return call<PublicKeyCredentialCreationOptionsJSON>(
-                `/passkey/generate-register-options${suffix}`
-            );
-        },
+	passkey: {
+		/**
+		 * `name` labels the credential in riven's own list; browsers ignore it
+		 * and use their own naming in the OS keychain.
+		 */
+		generateRegisterOptions(options?: {
+			name?: string;
+			authenticatorAttachment?: "platform" | "cross-platform";
+		}) {
+			const query = new URLSearchParams();
+			if (options?.name) query.set("name", options.name);
+			if (options?.authenticatorAttachment) {
+				query.set("authenticatorAttachment", options.authenticatorAttachment);
+			}
+			const suffix = query.size ? `?${query}` : "";
+			return call<PublicKeyCredentialCreationOptionsJSON>(
+				`/passkey/generate-register-options${suffix}`,
+			);
+		},
 
-        generateAuthenticateOptions() {
-            return call<PublicKeyCredentialRequestOptionsJSON>(
-                "/passkey/generate-authenticate-options"
-            );
-        },
+		generateAuthenticateOptions() {
+			return call<PublicKeyCredentialRequestOptionsJSON>(
+				"/passkey/generate-authenticate-options",
+			);
+		},
 
-        /** Registers a passkey against the *current* session's user. */
-        async add(options?: { name?: string }) {
-            const { data: creationOptions, error } =
-                await authClient.passkey.generateRegisterOptions(options);
-            if (error || !creationOptions) {
-                return { data: null, error: error ?? EMPTY_RESPONSE };
-            }
-            const credential = await createPasskey(creationOptions);
-            return call<Passkey>("/passkey/verify-registration", {
-                method: "POST",
-                body: { response: credential, name: options?.name }
-            });
-        },
+		/** Registers a passkey against the *current* session's user. */
+		async add(options?: { name?: string }) {
+			const { data: creationOptions, error } =
+				await authClient.passkey.generateRegisterOptions(options);
+			if (error || !creationOptions) {
+				return { data: null, error: error ?? EMPTY_RESPONSE };
+			}
+			const credential = await createPasskey(creationOptions);
+			return call<Passkey>("/passkey/verify-registration", {
+				method: "POST",
+				body: { response: credential, name: options?.name },
+			});
+		},
 
-        list() {
-            return call<Passkey[]>("/passkey/list-user-passkeys");
-        },
+		list() {
+			return call<Passkey[]>("/passkey/list-user-passkeys");
+		},
 
-        remove(body: { id: string }) {
-            return call<{ status: boolean }>("/passkey/delete-passkey", { method: "POST", body });
-        },
+		remove(body: { id: string }) {
+			return call<{ status: boolean }>("/passkey/delete-passkey", {
+				method: "POST",
+				body,
+			});
+		},
 
-        rename(body: { id: string; name: string }) {
-            return call<{ passkey: Passkey }>("/passkey/update-passkey", { method: "POST", body });
-        }
-    },
+		rename(body: { id: string; name: string }) {
+			return call<{ passkey: Passkey }>("/passkey/update-passkey", {
+				method: "POST",
+				body,
+			});
+		},
+	},
 
-    signOut() {
-        return call<{ success: boolean }>("/sign-out", { method: "POST" });
-    },
+	signOut() {
+		return call<{ success: boolean }>("/sign-out", { method: "POST" });
+	},
 
-    changePassword(body: {
-        currentPassword: string;
-        newPassword: string;
-        revokeOtherSessions?: boolean;
-    }) {
-        return call<{ success: boolean }>("/change-password", { method: "POST", body });
-    },
+	changePassword(body: {
+		currentPassword: string;
+		newPassword: string;
+		revokeOtherSessions?: boolean;
+	}) {
+		return call<{ success: boolean }>("/change-password", {
+			method: "POST",
+			body,
+		});
+	},
 
-    changeEmail(body: { newEmail: string }) {
-        return call<{ status: boolean }>("/change-email", { method: "POST", body });
-    },
+	changeEmail(body: { newEmail: string }) {
+		return call<{ status: boolean }>("/change-email", { method: "POST", body });
+	},
 
-    /**
-     * Partial update — omitted fields are left alone, and an all-empty body is
-     * rejected by the backend with "No fields to update". `email` is not
-     * accepted here; `changeEmail` owns that.
-     */
-    updateUser(body: { name?: string; image?: string; username?: string }) {
-        return call<{ status: boolean }>("/update-user", { method: "POST", body });
-    },
+	/**
+	 * Partial update — omitted fields are left alone, and an all-empty body is
+	 * rejected by the backend with "No fields to update". `email` is not
+	 * accepted here; `changeEmail` owns that.
+	 */
+	updateUser(body: { name?: string; image?: string; username?: string }) {
+		return call<{ status: boolean }>("/update-user", { method: "POST", body });
+	},
 
-    /**
-     * Deletes the *caller's own* account and clears the session cookie.
-     *
-     * The password is the confirmation step: riven runs with delete-user
-     * verification off (no mail provider), so without it the only thing standing
-     * between a borrowed session and a deleted account is a session-freshness
-     * check.
-     */
-    deleteUser(body: { password: string }) {
-        return call<{ success: boolean; message: string }>("/delete-user", {
-            method: "POST",
-            body
-        });
-    },
+	/**
+	 * Deletes the *caller's own* account and clears the session cookie.
+	 *
+	 * The password is the confirmation step: riven runs with delete-user
+	 * verification off (no mail provider), so without it the only thing standing
+	 * between a borrowed session and a deleted account is a session-freshness
+	 * check.
+	 */
+	deleteUser(body: { password: string }) {
+		return call<{ success: boolean; message: string }>("/delete-user", {
+			method: "POST",
+			body,
+		});
+	},
 
-    listAccounts() {
-        return call<LinkedAccount[]>("/list-accounts");
-    },
+	listAccounts() {
+		return call<LinkedAccount[]>("/list-accounts");
+	},
 
-    unlinkAccount(body: { providerId: string; accountId?: string }) {
-        return call<{ status: boolean }>("/unlink-account", { method: "POST", body });
-    },
+	unlinkAccount(body: { providerId: string; accountId?: string }) {
+		return call<{ status: boolean }>("/unlink-account", {
+			method: "POST",
+			body,
+		});
+	},
 
-    listSessions() {
-        return call<AuthSession[]>("/list-sessions");
-    },
+	listSessions() {
+		return call<AuthSession[]>("/list-sessions");
+	},
 
-    /** Admin plugin — requires the caller's session to carry the admin role. */
-    admin: {
-        listUsers(query?: { limit?: number; sortBy?: string; sortDirection?: string }) {
-            const params = new URLSearchParams();
-            for (const [key, value] of Object.entries(query ?? {})) {
-                if (value !== undefined) params.set(key, String(value));
-            }
-            const suffix = params.size ? `?${params}` : "";
-            return call<{ users: AuthUser[]; total: number }>(`/admin/list-users${suffix}`);
-        },
-        /**
-         * `data` carries columns outside better-auth's core user shape —
-         * `username` among them, which riven signs in with.
-         */
-        createUser(body: {
-            email: string;
-            password: string;
-            name: string;
-            role?: string;
-            data?: Record<string, unknown>;
-        }) {
-            return call<{ user: AuthUser }>("/admin/create-user", { method: "POST", body });
-        },
-        removeUser(body: { userId: string }) {
-            return call<{ success: boolean }>("/admin/remove-user", { method: "POST", body });
-        }
-    }
+	/** Admin plugin — requires the caller's session to carry the admin role. */
+	admin: {
+		listUsers(query?: {
+			limit?: number;
+			sortBy?: string;
+			sortDirection?: string;
+		}) {
+			const params = new URLSearchParams();
+			for (const [key, value] of Object.entries(query ?? {})) {
+				if (value !== undefined) params.set(key, String(value));
+			}
+			const suffix = params.size ? `?${params}` : "";
+			return call<{ users: AuthUser[]; total: number }>(
+				`/admin/list-users${suffix}`,
+			);
+		},
+		/**
+		 * `data` carries columns outside better-auth's core user shape —
+		 * `username` among them, which riven signs in with.
+		 */
+		createUser(body: {
+			email: string;
+			password: string;
+			name: string;
+			role?: string;
+			data?: Record<string, unknown>;
+		}) {
+			return call<{ user: AuthUser }>("/admin/create-user", {
+				method: "POST",
+				body,
+			});
+		},
+		removeUser(body: { userId: string }) {
+			return call<{ success: boolean }>("/admin/remove-user", {
+				method: "POST",
+				body,
+			});
+		},
+	},
 };
 
 export const { signIn, signOut, getSession } = authClient;
