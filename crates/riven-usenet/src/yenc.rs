@@ -140,18 +140,9 @@ fn decode_payload(payload: &[u8], info: &mut YencInfo, out: &mut Vec<u8>) {
         let rel = memchr3(b'=', b'\r', b'\n', &payload[i..]).unwrap_or(payload.len() - i);
 
         if rel > 0 {
-            let src = &payload[i..i + rel];
-            let dst_start = out.len();
-            out.reserve(rel);
-            let spare = &mut out.spare_capacity_mut()[..rel];
-            for (slot, &b) in spare.iter_mut().zip(src) {
-                slot.write(b.wrapping_sub(42));
-            }
-            // SAFETY: the loop above initialised exactly `rel` bytes of
-            // spare capacity that we reserved on the previous line.
-            unsafe {
-                out.set_len(dst_start + rel);
-            }
+            // `Map` over a slice iterator is `TrustedLen`, so `extend`
+            // reserves once and writes straight into spare capacity.
+            out.extend(payload[i..i + rel].iter().map(|&b| b.wrapping_sub(42)));
             i += rel;
         }
 
