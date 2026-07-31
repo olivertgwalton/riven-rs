@@ -933,10 +933,7 @@ mod tests {
         let prefetcher = reader(source.clone());
 
         for target in [200u64, 10, 300, 40, 350, 90, 250, 5, 150, 320] {
-            prefetcher
-                .read(unit * target, unit as usize)
-                .await
-                .unwrap();
+            prefetcher.read(unit * target, unit as usize).await.unwrap();
             wait_until_settled(&source).await;
         }
 
