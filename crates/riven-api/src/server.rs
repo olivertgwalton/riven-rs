@@ -177,10 +177,19 @@ pub async fn start_server(config: StartServerConfig) -> Result<()> {
     // Routes reached by third-party players. Stremio and whatever player it
     // hands a stream URL to are origins we can't enumerate, and the instance
     // allowlist emits no `access-control-allow-origin` for anything outside it —
-    // which fails the fetch before a body is read. These authenticate by token
-    // in the URL rather than by cookie, so a wildcard origin grants no ambient
-    // authority and they carry their own permissive CORS. The allowlist stays in
-    // force for /graphql, /board and the frontend.
+    // which fails the fetch before a body is read. So these carry their own
+    // permissive CORS; the allowlist stays in force for /graphql, /board and the
+    // frontend.
+    //
+    // `/media` also accepts the session cookie, because the frontend's download
+    // button is an `<a download>` — a top-level navigation, which can carry no
+    // header. The wildcard origin still grants no ambient authority over it:
+    // `build_player_cors_layer` sends no `access-control-allow-credentials`, so
+    // a cross-origin `fetch` with `credentials: "include"` is refused outright
+    // and can never read the bytes, and the session cookie is `SameSite=Lax`, so
+    // a cross-site subresource (`<video src>`) never carries it either. What Lax
+    // does allow — a top-level GET the user clicks through to — delivers the
+    // file to that user's own disk, which is the feature.
     let player_routes = Router::new()
         .route(
             "/media/{entry_id}",
@@ -298,12 +307,24 @@ fn security_header_layer(
     )
 }
 
-/// CORS for the token-authenticated player routes. Origin is wildcarded because
-/// the set of clients is open-ended (Stremio, VLC-in-a-webview, Infuse), and
-/// `Range` has to be allowed or seeking fails. `Content-Range`/`Accept-Ranges`
-/// are exposed so a scripted player can read them back. Credentials are
-/// deliberately not allowed — the token in the URL is the only credential, so
-/// there is no cookie for a wildcard origin to leak.
+/// CORS for the player routes. Origin is wildcarded because the set of clients
+/// is open-ended (Stremio, VLC-in-a-webview, Infuse), and `Range` has to be
+/// allowed or seeking fails. `Content-Range`/`Accept-Ranges` are exposed so a
+/// scripted player can read them back.
+///
+/// **Credentials must stay disallowed, and this is now load-bearing.** `/media`
+/// accepts the session cookie (see `media::media_credential_ok`), so a wildcard
+/// origin here is what stops cross-origin script from reading a signed-in user's
+/// media: the Fetch spec makes a `credentials: "include"` request against
+/// `access-control-allow-origin: *` a network error, so the response is never
+/// readable. `allow_origin(Any)` emits a literal `*` — do not change it to
+/// `mirror_request()`, which echoes the caller's origin and, paired with
+/// credentials, would hand any site on the internet a read of the library.
+///
+/// The cookie itself is the second half: better-auth defaults it to
+/// `SameSite=Lax`, so a cross-site subresource (`<video src>`) never carries it
+/// at all. What Lax permits is a top-level navigation the user clicks, which
+/// delivers the file to that user's own disk — the download button.
 fn build_player_cors_layer() -> CorsLayer {
     CorsLayer::new()
         .allow_origin(tower_http::cors::Any)
@@ -389,4 +410,133 @@ fn build_cors_layer(allowed: Vec<String>) -> CorsLayer {
             Method::DELETE,
             Method::OPTIONS,
         ])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::Request;
+    use tower::ServiceExt;
+
+    /// `stamp_private_cache_headers` sets `Vary` on the handler's response, and
+    /// the CORS layer then merges its own headers over the top. Every other CORS
+    /// header overwrites — `response_headers.extend(headers.drain())` — but
+    /// `Vary` is deliberately special-cased to `append`, so a handler's value is
+    /// never lost. That is load-bearing: `Vary: Cookie` is half of what stops a
+    /// shared cache replaying one user's media to an anonymous caller, and it
+    /// would disappear in silence if the layer ever overwrote it.
+    ///
+    /// The layer contributes nothing of its own here, which is correct rather
+    /// than surprising: `update_vary_header` only lists a header if the response
+    /// actually varies by it, and this layer answers with constants —
+    /// `allow_origin(Any)` and `allow_headers(Any)` are both `Const` wildcards
+    /// and the method list is fixed, so all three `varies_with_*` predicates are
+    /// false. Hence the exact-value assertion; a stray `origin` appearing here
+    /// would mean someone swapped a constant for a mirrored request value, which
+    /// is precisely the change the credentials test above guards against.
+    #[tokio::test]
+    async fn the_cors_layer_preserves_the_handlers_vary_and_cache_control() {
+        let app = Router::new()
+            .route(
+                "/media/{id}",
+                get(|| async {
+                    let mut response = axum::response::Response::new(Body::from("bytes"));
+                    media::stamp_private_cache_headers(response.headers_mut());
+                    response
+                }),
+            )
+            .layer(build_player_cors_layer());
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/media/1")
+                    .header("origin", "https://player.example")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let headers = response.headers();
+        let vary = headers
+            .get_all("vary")
+            .iter()
+            .map(|value| value.to_str().unwrap().to_ascii_lowercase())
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        assert!(
+            vary.contains("cookie"),
+            "the CORS layer dropped the handler's `Vary`, leaving media cacheable \
+             by a key that ignores the credential: {vary:?}"
+        );
+        assert_eq!(vary, "cookie, authorization, range");
+        assert_eq!(headers.get("cache-control").unwrap(), "private, no-store");
+    }
+
+    /// The wildcard origin on the player routes is what stops cross-origin
+    /// script from reading a signed-in user's media, now that `/media` accepts
+    /// the session cookie — but it only holds while credentials stay
+    /// disallowed. The Fetch spec makes a `credentials: "include"` request
+    /// against `access-control-allow-origin: *` a network error; pair the two
+    /// and every site on the internet can read the library. Asserted rather
+    /// than trusted to a comment, because the failure is silent.
+    #[tokio::test]
+    async fn player_cors_wildcards_the_origin_and_never_allows_credentials() {
+        let app = Router::new()
+            .route("/media/{id}", get(|| async { "bytes" }))
+            .layer(build_player_cors_layer());
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/media/1")
+                    .header("origin", "https://evil.example")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let headers = response.headers();
+        assert_eq!(
+            headers.get("access-control-allow-origin").unwrap(),
+            "*",
+            "a mirrored origin here would be readable by the caller's script"
+        );
+        assert!(
+            headers.get("access-control-allow-credentials").is_none(),
+            "credentials must never be allowed alongside the wildcard origin"
+        );
+    }
+
+    /// The cookie-less fallback applies to `/graphql` and `/auth` when no
+    /// origins are configured, which is the default. Same invariant, different
+    /// layer: permissive must not quietly start allowing credentials.
+    #[tokio::test]
+    async fn the_permissive_fallback_is_also_credential_less() {
+        let app = Router::new()
+            .route("/graphql", get(|| async { "{}" }))
+            .layer(build_cors_layer(Vec::new()));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/graphql")
+                    .header("origin", "https://evil.example")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            response
+                .headers()
+                .get("access-control-allow-credentials")
+                .is_none()
+        );
+    }
 }

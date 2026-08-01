@@ -9,7 +9,7 @@ use axum::{
         HeaderMap, HeaderName, HeaderValue, Method, StatusCode,
         header::{
             ACCEPT_RANGES, CACHE_CONTROL, CONNECTION, CONTENT_DISPOSITION, CONTENT_LENGTH,
-            CONTENT_RANGE, CONTENT_TYPE, ETAG, IF_RANGE, LAST_MODIFIED, RANGE,
+            CONTENT_RANGE, CONTENT_TYPE, ETAG, IF_RANGE, LAST_MODIFIED, RANGE, VARY,
         },
     },
     response::{IntoResponse, Response},
@@ -20,7 +20,7 @@ use riven_vfs::prefetch::{FileKey, Prefetcher};
 use riven_vfs::source::{ByteSource, UsenetSource};
 
 use super::ApiState;
-use super::auth::{check_stremio_token, has_valid_api_key};
+use super::auth::{authorize_request, check_stremio_token, has_valid_api_key};
 
 const MEDIA_RESPONSE_HEADERS: [HeaderName; 7] = [
     ACCEPT_RANGES,
@@ -321,6 +321,32 @@ fn parse_usenet_url(url: &str) -> Option<(String, usize)> {
 
 /// Build a `Content-Disposition: attachment` header that names the saved file
 /// after the entry's original filename (sanitised to header-safe ASCII).
+/// Mark a media response as belonging to the caller who authenticated for it.
+///
+/// Whether these bytes may be served is now a function of the `Cookie` /
+/// `Authorization` header, but the URL — `/media/{id}` — is a small integer and
+/// entirely guessable. Without this, a shared cache in front of riven (nginx,
+/// Varnish, Cloudflare — routine for a publicly exposed instance) may store a
+/// `200` produced for a signed-in user under that bare URL and replay it to a
+/// caller who presented no credential at all.
+///
+/// It matters most on the debrid path, where `copy_response_headers` forwards
+/// the CDN's own `Cache-Control` verbatim. Those upstream URLs are signed and
+/// unguessable, so upstream marks them cacheable — and riven would otherwise
+/// re-emit that `public` on a URL that is neither. This has to overwrite, not
+/// fill in a default.
+///
+/// Both headers, because they fail independently: an operator who has set
+/// `proxy_ignore_headers Cache-Control` still gets the `Vary` protection, and a
+/// cache that mishandles `Vary` still sees `no-store`.
+pub(super) fn stamp_private_cache_headers(headers: &mut HeaderMap) {
+    headers.insert(CACHE_CONTROL, HeaderValue::from_static("private, no-store"));
+    headers.insert(
+        VARY,
+        HeaderValue::from_static("Cookie, Authorization, Range"),
+    );
+}
+
 fn attachment_disposition(entry: &riven_db::entities::FileSystemEntry) -> Option<HeaderValue> {
     let name = entry
         .original_filename
@@ -421,6 +447,7 @@ async fn serve_usenet_media(
         if want_download && let Some(disposition) = attachment_disposition(entry) {
             out.insert(CONTENT_DISPOSITION, disposition);
         }
+        stamp_private_cache_headers(out);
     }
 
     tracing::debug!(
@@ -511,22 +538,54 @@ async fn serve_usenet_media(
         .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
 }
 
-/// Accept the usual header credential, or either URL-borne credential a player
-/// can carry: the API key itself, or the derived Stremio addon token.
-fn media_credential_ok(state: &ApiState, headers: &HeaderMap, query: &MediaQuery) -> bool {
-    if has_valid_api_key(state, headers, None) {
-        return true;
-    }
-    if let Some(api_key) = query.api_key.as_deref() {
-        let encoded = format!("api_key={}", urlencoding_encode(api_key));
-        if has_valid_api_key(state, headers, Some(&encoded)) {
-            return true;
-        }
-    }
-    query
+/// Accept a signed-in session, the usual header credential, or either URL-borne
+/// credential a player can carry: the API key itself, or the derived Stremio
+/// addon token.
+///
+/// The session is what the *browser* has. A download is an `<a download>`, which
+/// is a plain top-level navigation — it carries cookies and nothing else, since
+/// no header can be attached to it. Checking only the API key here meant every
+/// download button wrote a 12-byte file reading `Unauthorized` to disk. The
+/// alternative — putting `?api_key=` in the href — would publish an admin-level
+/// credential into the DOM, browser history and the download manager, so the
+/// session is both the working answer and the safer one.
+///
+/// Any role suffices: the ladder governs mutations, and a user who can see an
+/// item in the library can already stream it.
+///
+/// Order is deliberate, and is about cost rather than trust — the two URL-borne
+/// credentials are constant-time string comparisons, while a session costs two
+/// database lookups. This route serves *range* requests, so a player streaming a
+/// file hits it continuously; putting the session first would put a pair of
+/// queries under every one of those. The cheap checks answer for every player,
+/// and the session is only reached by the browser, which is the one caller that
+/// has nothing else to present.
+async fn media_credential_ok(state: &ApiState, headers: &HeaderMap, query: &MediaQuery) -> bool {
+    if query
         .token
         .as_deref()
         .is_some_and(|token| check_stremio_token(state, token))
+    {
+        return true;
+    }
+
+    let encoded = query
+        .api_key
+        .as_deref()
+        .map(|api_key| format!("api_key={}", urlencoding_encode(api_key)));
+    if has_valid_api_key(state, headers, encoded.as_deref()) {
+        return true;
+    }
+
+    // Last, and only for a caller that presented neither: the session cookie.
+    // `authorize_request` verifies it against riven's own store — expiry and
+    // bans included — so this is a lookup, not a claim. Reaching it also means
+    // an anonymous request gets logged as a rejection exactly once, rather than
+    // every legitimate Stremio range request logging a spurious warning on its
+    // way to the token check.
+    authorize_request(state, headers, encoded.as_deref())
+        .await
+        .is_ok()
 }
 
 /// `has_valid_api_key` parses its `query` argument as a form-encoded string, so a
@@ -545,7 +604,7 @@ pub(super) async fn media_bridge_handler(
 ) -> Response {
     let request_started = Instant::now();
 
-    if !media_credential_ok(&state, &headers, &query) {
+    if !media_credential_ok(&state, &headers, &query).await {
         return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
     }
 
@@ -662,6 +721,9 @@ pub(super) async fn media_bridge_handler(
         if want_download && let Some(disposition) = attachment_disposition(&entry) {
             headers_out.insert(CONTENT_DISPOSITION, disposition);
         }
+        // After the copy, so the CDN's own `Cache-Control` is replaced rather
+        // than preserved.
+        stamp_private_cache_headers(headers_out);
     }
 
     tracing::debug!(
@@ -692,6 +754,31 @@ pub(super) async fn media_bridge_handler(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The debrid path copies the CDN's headers first and stamps afterwards. A
+    /// signed upstream URL is legitimately cacheable, so upstream really does
+    /// send `public` — and `/media/{id}` is not signed, so re-emitting it would
+    /// let a shared cache replay one user's bytes to an anonymous caller.
+    /// Filling in a default instead of overwriting would reintroduce exactly
+    /// that.
+    #[test]
+    fn private_cache_headers_overwrite_an_upstream_public_directive() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            CACHE_CONTROL,
+            HeaderValue::from_static("public, max-age=3600"),
+        );
+        headers.insert(VARY, HeaderValue::from_static("Accept-Encoding"));
+
+        stamp_private_cache_headers(&mut headers);
+
+        assert_eq!(headers.get(CACHE_CONTROL).unwrap(), "private, no-store");
+        assert_eq!(headers.get(VARY).unwrap(), "Cookie, Authorization, Range");
+        // `insert` replaces rather than appends — a lingering `public` in a
+        // second value would be honoured by some caches.
+        assert_eq!(headers.get_all(CACHE_CONTROL).iter().count(), 1);
+        assert_eq!(headers.get_all(VARY).iter().count(), 1);
+    }
 
     #[test]
     fn parses_open_ended_byte_range() {

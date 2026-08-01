@@ -42,5 +42,10 @@ argon2 = "0.5"
 async-trait = { workspace = true }
 url = "2"
 
+[dev-dependencies]
+# Drives a router through `oneshot` so the CORS invariants on the player routes
+# are asserted rather than commented. Already in the tree via axum.
+tower = { version = "0.5", features = ["util"] }
+
 [lints]
 workspace = true
