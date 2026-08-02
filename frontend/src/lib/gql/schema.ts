@@ -32,6 +32,10 @@ export type ActivePlaybackSession = {
   deviceName?: Maybe<Scalars['String']['output']>;
   durationSeconds?: Maybe<Scalars['Int']['output']>;
   episodeNumber?: Maybe<Scalars['Int']['output']>;
+  /**
+   * Artwork for the item, as a path on this riven instance — fetch it from
+   * here, not from the media server.
+   */
   imageUrl?: Maybe<Scalars['String']['output']>;
   itemTitle: Scalars['String']['output'];
   itemType?: Maybe<Scalars['String']['output']>;

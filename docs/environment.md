@@ -32,11 +32,11 @@ anything outside the markers survives regeneration. -->
 | `ORIGIN` | variable | `crates/riven-app/src/main.rs:340`<br>`crates/riven-app/src/main.rs:358` |
 | `RIVEN_SETTING__API_KEY` | variable | `crates/riven-app/src/main.rs:520` |
 | `RIVEN_SETTING__PUBLIC_URL` | variable | `crates/riven-app/src/main.rs:146` |
-| `RIVEN_USENET_AUTO_REPAIR` | variable | `crates/riven-app/src/usenet.rs:49` |
-| `RIVEN_USENET_HEALTH_SCAN_BATCH` | variable | `crates/riven-app/src/usenet.rs:46` |
-| `RIVEN_USENET_HEALTH_SCAN_INTERVAL_SECS` | variable | `crates/riven-app/src/usenet.rs:43` |
-| `RIVEN_USENET_REPAIR_BASE_INTERVAL_SECS` | variable | `crates/riven-app/src/usenet.rs:57` |
-| `RIVEN_USENET_REPAIR_MAX_COOLDOWN_SECS` | variable | `crates/riven-app/src/usenet.rs:60` |
+| `RIVEN_USENET_AUTO_REPAIR` | variable | `crates/riven-app/src/usenet.rs:92` |
+| `RIVEN_USENET_HEALTH_SCAN_BATCH` | variable | `crates/riven-app/src/usenet.rs:89` |
+| `RIVEN_USENET_HEALTH_SCAN_INTERVAL_SECS` | variable | `crates/riven-app/src/usenet.rs:86` |
+| `RIVEN_USENET_REPAIR_BASE_INTERVAL_SECS` | variable | `crates/riven-app/src/usenet.rs:93` |
+| `RIVEN_USENET_REPAIR_MAX_COOLDOWN_SECS` | variable | `crates/riven-app/src/usenet.rs:96` |
 
 ### `riven-core`
 

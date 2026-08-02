@@ -60,7 +60,7 @@ is not optional.
 | [aiostreams](aiostreams.md) | 3 | `url`, `uuid`, `password` |
 | [stremthru](stremthru.md) | 15 | — |
 | [newznab](newznab.md) | 1 | — |
-| [usenet](usenet.md) | 11 | `nntpproviders` |
+| [usenet](usenet.md) | 12 | `nntpproviders` |
 
 ### Media servers
 
