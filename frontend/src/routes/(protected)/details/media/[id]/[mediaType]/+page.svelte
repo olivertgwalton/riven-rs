@@ -1578,7 +1578,7 @@
                                                     >Download</span>
                                                 <div class="flex flex-wrap gap-2">
                                                     <a
-                                                        href={`/media/${fs.id}`}
+                                                        href={`/media/${fs.id}?download=1`}
                                                         download={fs.original_filename ?? ""}
                                                         rel="external"
                                                         class="text-foreground rounded-md border border-white/10 bg-white/5 px-3 py-1.5 text-xs font-medium transition-colors hover:bg-white/10"

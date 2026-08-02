@@ -347,18 +347,27 @@ pub(super) fn stamp_private_cache_headers(headers: &mut HeaderMap) {
     );
 }
 
+/// The last path segment of `value`, or `None` if there is nothing left.
+///
+/// A usenet `original_filename` stores the path *inside* the archive, so it
+/// routinely arrives as `Some.Release-GRP/Some.Release-GRP.mkv`. A `filename`
+/// parameter may not carry a directory component (RFC 6266), and a client that
+/// rejects the parameter falls back to naming the file after the URL — which is
+/// the entry id, the very failure this header exists to prevent.
+fn file_stem_of(value: &str) -> Option<&str> {
+    value
+        .rsplit(['/', '\\'])
+        .next()
+        .filter(|segment| !segment.is_empty())
+}
+
 fn attachment_disposition(entry: &riven_db::entities::FileSystemEntry) -> Option<HeaderValue> {
     let name = entry
         .original_filename
-        .clone()
-        .or_else(|| {
-            entry
-                .path
-                .rsplit('/')
-                .next()
-                .filter(|s| !s.is_empty())
-                .map(str::to_string)
-        })
+        .as_deref()
+        .and_then(file_stem_of)
+        .or_else(|| file_stem_of(&entry.path))
+        .map(str::to_string)
         .unwrap_or_else(|| format!("download-{}", entry.id));
     let sanitized: String = name
         .chars()
@@ -754,6 +763,22 @@ pub(super) async fn media_bridge_handler(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The name precedence is unchanged — `original_filename` first, so an
+    /// obfuscated post still downloads under its obfuscated name — but neither
+    /// source is reliably a bare filename, and a directory component in the
+    /// header is what sends a client back to naming the file after the URL.
+    #[test]
+    fn the_attachment_filename_never_contains_a_path_separator() {
+        assert_eq!(
+            file_stem_of("Some.Release-GRP/Some.Release-GRP.mkv"),
+            Some("Some.Release-GRP.mkv")
+        );
+        assert_eq!(file_stem_of(r"dir\file.mkv"), Some("file.mkv"));
+        assert_eq!(file_stem_of("BgZbaqpxb0zg.mkv"), Some("BgZbaqpxb0zg.mkv"));
+        assert_eq!(file_stem_of("trailing/"), None);
+        assert_eq!(file_stem_of(""), None);
+    }
 
     /// The debrid path copies the CDN's headers first and stamps afterwards. A
     /// signed upstream URL is legitimately cacheable, so upstream really does

@@ -346,8 +346,9 @@
 
             {#if fs?.id}
                 <div class="flex flex-wrap gap-2">
+                    <!-- `?download=1` for Content-Disposition; see the movie page. -->
                     <a
-                        href={`/media/${fs.id}`}
+                        href={`/media/${fs.id}?download=1`}
                         download={fs.original_filename ?? ""}
                         rel="external"
                         class="rounded-md border px-3 py-1.5 text-xs font-medium transition-colors hover:bg-white/10">
