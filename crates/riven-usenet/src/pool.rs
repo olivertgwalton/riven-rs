@@ -14,6 +14,7 @@ use lru::LruCache;
 use parking_lot::Mutex;
 use riven_core::cache::{ByteLru, SEGMENT};
 use tokio::sync::oneshot;
+use tokio::time::Instant;
 
 use crate::nntp::{ClientPool, NntpError, NntpProvider, ProviderHealth, ProviderTraffic};
 use crate::state::{FetchEntry, InFlight};
@@ -160,6 +161,12 @@ impl SegmentPool {
     /// Walk providers in order, stopping at the first one that serves the
     /// article. A provider that answers `430` is excluded and the next is
     /// tried; if every provider says `430` the id is permanently missing.
+    ///
+    /// A provider that stops answering is treated the same way — its budget
+    /// expires (see [`ClientPool::article_budget`]) and the walk moves on. That
+    /// failover, not a longer wait, is what rescues a stalled article: the
+    /// stall observed in practice was a socket the provider had silently
+    /// stopped serving, which no amount of patience on that socket recovers.
     async fn fetch_sequential(&self, message_id: &Arc<str>) -> Result<Bytes, NntpError> {
         let mut all_not_found = true;
         let mut attempted = false;
@@ -167,9 +174,10 @@ impl SegmentPool {
 
         for provider in self.attempt_order() {
             attempted = true;
+            let started = Instant::now();
             match self.fetch_from(provider, message_id).await {
                 Ok(bytes) => {
-                    provider.record_success();
+                    provider.record_success(started.elapsed());
                     return Ok(bytes);
                 }
                 Err(NntpError::ArticleNotFound(status)) => {
@@ -177,12 +185,24 @@ impl SegmentPool {
                     last_err = Some(NntpError::ArticleNotFound(status));
                 }
                 Err(error) => {
-                    tracing::debug!(
-                        host = provider.host(),
-                        message_id = %message_id,
-                        %error,
-                        "nntp provider failed; excluding and trying the next"
-                    );
+                    let stalled = matches!(error, NntpError::Timeout);
+                    provider.record_failure();
+                    if stalled {
+                        tracing::warn!(
+                            host = provider.host(),
+                            message_id = %message_id,
+                            waited_ms = started.elapsed().as_millis(),
+                            budget_ms = provider.article_budget().as_millis(),
+                            "nntp provider stopped answering; failing over to the next"
+                        );
+                    } else {
+                        tracing::debug!(
+                            host = provider.host(),
+                            message_id = %message_id,
+                            %error,
+                            "nntp provider failed; excluding and trying the next"
+                        );
+                    }
                     all_not_found = false;
                     last_err = Some(error);
                 }
@@ -203,7 +223,7 @@ impl SegmentPool {
         message_id: &Arc<str>,
     ) -> Result<Bytes, NntpError> {
         let mut lease = provider.acquire().await?;
-        let body = lease.body(message_id).await?;
+        let body = lease.body(message_id, provider.article_budget()).await?;
         drop(lease);
 
         let decoded = match tokio::task::spawn_blocking(move || yenc::decode(&body)).await {
@@ -353,7 +373,7 @@ mod tests {
                 pass: None,
                 use_tls: false,
                 max_connections,
-                timeout: Duration::from_secs(5),
+                article_timeout: Duration::from_millis(200),
             },
             priority,
             is_backup: false,
@@ -455,6 +475,72 @@ mod tests {
         assert_eq!(bytes.as_ref(), FAKE_SEGMENT_PAYLOAD);
         assert_eq!(pool.providers()[0].consecutive_not_found(), 1);
         assert!(!pool.missing().contains("a@test"));
+    }
+
+    /// The stall this crate's article budget exists for: a provider that
+    /// accepts `BODY`, answers `222`, and then never sends the body. No
+    /// timeout on the socket recovers it — only giving up and asking someone
+    /// else does. Before the budget, this fetch blocked for up to
+    /// `300 s x 3 attempts` and took the playback read with it.
+    ///
+    /// The test providers configure a 200 ms `article_timeout`, so the budget
+    /// elapses in real time without the test waiting out the 15 s default.
+    #[tokio::test]
+    async fn a_provider_that_stops_answering_fails_over_to_the_next() {
+        let (silent_addr, _silent) = spawn_silent_body_server().await;
+        let (ok_addr, _ok) = spawn_fake_nntp_server().await;
+        let pool = SegmentPool::new(vec![provider(silent_addr, 2, 0), provider(ok_addr, 2, 1)]);
+
+        let bytes = pool.fetch_segment("a@test").await.unwrap();
+        assert_eq!(bytes.as_ref(), FAKE_SEGMENT_PAYLOAD);
+        assert_eq!(
+            pool.providers()[0].consecutive_failure(),
+            1,
+            "the stall must count against the provider, not the article"
+        );
+        assert!(
+            !pool.missing().contains("a@test"),
+            "a stall is not evidence the article is gone"
+        );
+    }
+
+    /// Loopback listener that greets, accepts `BODY`, replies `222`, and then
+    /// sends nothing further — a socket the provider has stopped serving.
+    async fn spawn_silent_body_server() -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move {
+            loop {
+                let Ok((socket, _)) = listener.accept().await else {
+                    return;
+                };
+                tokio::spawn(async move {
+                    let (read_half, mut write_half) = socket.into_split();
+                    if write_half.write_all(b"200 fake\r\n").await.is_err() {
+                        return;
+                    }
+                    let mut lines = BufReader::new(read_half).lines();
+                    while let Ok(Some(line)) = lines.next_line().await {
+                        if line.starts_with("BODY") {
+                            drop(write_half.write_all(b"222 0 <a@test> body\r\n").await);
+                            std::future::pending::<()>().await;
+                        }
+                        let reply: &[u8] = if line.starts_with("QUIT") {
+                            return;
+                        } else {
+                            b"111 20260101000000\r\n"
+                        };
+                        if write_half.write_all(reply).await.is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        (addr, handle)
     }
 
     /// Loopback listener that answers `430` to everything article-shaped.

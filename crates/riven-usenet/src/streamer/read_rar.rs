@@ -2,7 +2,24 @@ use bytes::Bytes;
 
 use crate::rar;
 
+use super::salvage::ReadSalvage;
 use super::{NzbRarPart, NzbRarSlice, StreamerError, UsenetStreamer, concat_slices};
+
+/// Exact decoded length of one segment of `part`, or `0` when it is not known
+/// exactly — which forbids salvaging it.
+///
+/// This path addresses *decoded* bytes exactly, so an approximate hole length
+/// would shift every byte after it and move the contained file's container
+/// signatures. `part.offsets` is a table of **encoded** offsets and is ~3.7 %
+/// out, so it is deliberately not used here. Only a poster's uniform `=ypart`
+/// size qualifies, and only for segments that are not their part's last — the
+/// last one is whatever remains and the uniform size does not describe it.
+fn exact_segment_len(part: &NzbRarPart, index: usize) -> u64 {
+    match part.decoded_seg_size {
+        Some(size) if size > 0 && index + 1 < part.segments.len() => size,
+        _ => 0,
+    }
+}
 
 impl UsenetStreamer {
     /// Read a byte range from a `Rar` source. RAR slice offsets are exact
@@ -18,6 +35,7 @@ impl UsenetStreamer {
         password: Option<&str>,
         start: u64,
         end_inclusive: u64,
+        salvage: &mut ReadSalvage,
     ) -> Result<Bytes, StreamerError> {
         let mut out: Vec<Bytes> = Vec::new();
         let mut virtual_pos: u64 = 0;
@@ -44,6 +62,7 @@ impl UsenetStreamer {
                         part,
                         slice.start_in_part + requested_lo,
                         slice.start_in_part + requested_hi,
+                        salvage,
                     )
                     .await?
                 }
@@ -56,6 +75,7 @@ impl UsenetStreamer {
                         password,
                         requested_lo,
                         requested_hi,
+                        salvage,
                     )
                     .await?
                 }
@@ -77,6 +97,7 @@ impl UsenetStreamer {
         password: &str,
         plain_lo: u64,
         plain_hi: u64,
+        salvage: &mut ReadSalvage,
     ) -> Result<Bytes, StreamerError> {
         use crate::crypto::{AES_BLOCK, decrypt_blocks_in_place, derive_key};
 
@@ -95,7 +116,7 @@ impl UsenetStreamer {
         }
 
         let fetched = self
-            .read_decoded_range_within_part(part, cipher_lo, cipher_hi)
+            .read_decoded_range_within_part(part, cipher_lo, cipher_hi, salvage)
             .await?;
         if fetched.len() < AES_BLOCK {
             return Err(StreamerError::BadRange);
@@ -130,6 +151,7 @@ impl UsenetStreamer {
         part: &NzbRarPart,
         dec_start: u64,
         dec_end_inclusive: u64,
+        salvage: &mut ReadSalvage,
     ) -> Result<Bytes, StreamerError> {
         let total = part.segments.len();
         if total == 0 || dec_start > dec_end_inclusive {
@@ -181,8 +203,16 @@ impl UsenetStreamer {
             _ => anchor,
         };
 
-        self.assemble_decoded_forward(part, dec_start, dec_end_inclusive, anchor, horizon, skip)
-            .await
+        self.assemble_decoded_forward(
+            part,
+            dec_start,
+            dec_end_inclusive,
+            anchor,
+            horizon,
+            skip,
+            salvage,
+        )
+        .await
     }
 
     /// Assemble `[dec_start, dec_end_inclusive]` by walking a volume's
@@ -198,6 +228,7 @@ impl UsenetStreamer {
         anchor: usize,
         first_horizon: usize,
         mut skip: usize,
+        salvage: &mut ReadSalvage,
     ) -> Result<Bytes, StreamerError> {
         let want = (dec_end_inclusive - dec_start + 1) as usize;
         let total = part.segments.len();
@@ -226,8 +257,20 @@ impl UsenetStreamer {
         loop {
             // Bytes are still assembled in order: the walk consumes the fetches
             // started above rather than opening a new one per segment.
-            for segment in part.segments.iter().take(horizon + 1).skip(index) {
-                let decoded = self.fetch_article(&segment.message_id).await?;
+            for (position, segment) in part
+                .segments
+                .iter()
+                .enumerate()
+                .take(horizon + 1)
+                .skip(index)
+            {
+                let decoded = self
+                    .fetch_article_or_hole(
+                        &segment.message_id,
+                        exact_segment_len(part, position),
+                        salvage,
+                    )
+                    .await?;
                 if skip >= decoded.len() {
                     skip -= decoded.len();
                     continue;
@@ -247,5 +290,62 @@ impl UsenetStreamer {
             index = horizon + 1;
             horizon = (horizon + 1).min(total - 1);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::nzb::NzbSegment;
+
+    fn part(decoded_seg_size: Option<u64>, segments: usize) -> NzbRarPart {
+        NzbRarPart {
+            filename: "x.part01.rar".into(),
+            total_size: 0,
+            offsets: (0..=segments as u64).map(|i| i * 700_000).collect(),
+            segments: (0..segments)
+                .map(|i| NzbSegment {
+                    bytes: 700_000,
+                    number: i as u32 + 1,
+                    message_id: format!("s{i}@test"),
+                })
+                .collect(),
+            decoded_seg_size,
+        }
+    }
+
+    #[test]
+    fn a_uniform_post_yields_an_exact_length_for_every_segment_but_the_last() {
+        let part = part(Some(768_000), 4);
+        for index in 0..3 {
+            assert_eq!(exact_segment_len(&part, index), 768_000);
+        }
+        assert_eq!(
+            exact_segment_len(&part, 3),
+            0,
+            "the last segment is whatever remains; the uniform size does not describe it"
+        );
+    }
+
+    /// The invariant this rule protects: on the RAR path a hole of the wrong
+    /// length shifts the container signatures the player probes for. Without a
+    /// known-exact size there must be no hole at all.
+    #[test]
+    fn a_non_uniform_post_is_never_salvageable() {
+        let part = part(None, 4);
+        for index in 0..4 {
+            assert_eq!(exact_segment_len(&part, index), 0);
+        }
+    }
+
+    /// `part.offsets` is a table of *encoded* byte positions, ~3.7 % larger
+    /// than the decoded bytes this path addresses. Pinned so nobody reaches
+    /// for it as a hole size later.
+    #[test]
+    fn the_encoded_offset_table_is_not_used_as_a_hole_size() {
+        let part = part(None, 4);
+        let table_delta = part.offsets[1] - part.offsets[0];
+        assert_eq!(table_delta, 700_000);
+        assert_eq!(exact_segment_len(&part, 0), 0);
     }
 }

@@ -654,7 +654,12 @@ impl UsenetStreamer {
             };
             let probe_end = prev_data_end.saturating_add(1023);
             let probe = match self
-                .read_decoded_range_within_part(part, prev_data_end, probe_end)
+                .read_decoded_range_within_part(
+                    part,
+                    prev_data_end,
+                    probe_end,
+                    &mut super::salvage::ReadSalvage::refusing(),
+                )
                 .await
             {
                 Ok(p) => p,
@@ -868,7 +873,12 @@ impl UsenetStreamer {
             let start = idx as u64 * slice_size;
             let end_inclusive = start + slice_size - 1;
             let fetched = self
-                .read_decoded_range_within_part(part, start, end_inclusive)
+                .read_decoded_range_within_part(
+                    part,
+                    start,
+                    end_inclusive,
+                    &mut super::salvage::ReadSalvage::refusing(),
+                )
                 .await?;
             // PAR2 checksums the slice zero-padded to `slice_size`; a file's
             // final block is normally shorter than that on disk.

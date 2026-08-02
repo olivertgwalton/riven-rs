@@ -3,6 +3,7 @@ use bytes::Bytes;
 use crate::nntp::NntpError;
 use crate::nzb::NzbSegment;
 
+use super::salvage::ReadSalvage;
 use super::{NzbMetaSource, StreamerError, UsenetStreamer, concat_slices};
 
 impl UsenetStreamer {
@@ -50,9 +51,12 @@ impl UsenetStreamer {
             return Err(StreamerError::BadRange);
         }
 
+        // One budget for the whole read, so a range spanning several articles
+        // cannot quietly fake more of itself than a single article's worth.
+        let mut salvage = ReadSalvage::new();
         let result = match &file.source {
             NzbMetaSource::Direct { offsets, segments } => {
-                self.read_direct(offsets, segments, start, end_inclusive)
+                self.read_direct(offsets, segments, start, end_inclusive, &mut salvage)
                     .await
             }
             NzbMetaSource::Rar { parts, slices } => self
@@ -62,6 +66,7 @@ impl UsenetStreamer {
                     meta.password.as_deref(),
                     start,
                     end_inclusive,
+                    &mut salvage,
                 )
                 .await
                 .map(|buf| {
@@ -73,6 +78,25 @@ impl UsenetStreamer {
                 }),
         };
 
+        // Deliberately *not* reported as a dead segment. `report_dead_segment`
+        // drives read-time repair, which blacklists the release and re-grabs it
+        // there and then — on the title being watched, with no active-stream
+        // guard. Salvaging and then reporting would swap the file out from
+        // under the viewer, which is the exact outcome continuing to stream
+        // exists to avoid. The read succeeded; nothing failed.
+        //
+        // The release is not forgotten: the scheduled availability scanner
+        // finds it on its own tick and repairs it once nothing is streaming it.
+        if salvage.used() > 0 {
+            tracing::warn!(
+                info_hash,
+                file_index,
+                filename = %file.filename,
+                holes = salvage.used(),
+                start,
+                "serving a hole for a dead article; playback continues degraded"
+            );
+        }
         if let Err(StreamerError::Nntp(NntpError::ArticleNotFound(status))) = &result {
             crate::state::report_dead_segment(info_hash, file_index, &file.filename, status);
         }
@@ -98,6 +122,7 @@ impl UsenetStreamer {
         segments: &[NzbSegment],
         start: u64,
         end_inclusive: u64,
+        salvage: &mut ReadSalvage,
     ) -> Result<Vec<Bytes>, StreamerError> {
         let want = (end_inclusive - start + 1) as usize;
         if want == 0 || segments.is_empty() {
@@ -115,8 +140,19 @@ impl UsenetStreamer {
         // never where to stop. Segments are walked in order: parallelism is
         // owned by the unified VFS window, and fanning out here would nest a
         // second scheduler underneath it.
-        for segment in segments.iter().skip(anchor) {
-            let decoded = self.fetch_article(&segment.message_id).await?;
+        for (index, segment) in segments.iter().enumerate().skip(anchor) {
+            // The table's own span for this segment. Sizing a *present*
+            // segment from it would drift, which is why the walk below uses
+            // actual decoded lengths — but for a segment that will never
+            // arrive it is the best estimate there is, and this path already
+            // tolerates the table being approximate.
+            let hole_len = offsets
+                .get(index + 1)
+                .zip(offsets.get(index))
+                .map_or(0, |(end, begin)| end.saturating_sub(*begin));
+            let decoded = self
+                .fetch_article_or_hole(&segment.message_id, hole_len, salvage)
+                .await?;
             if skip >= decoded.len() {
                 skip -= decoded.len();
                 continue;
@@ -135,6 +171,38 @@ impl UsenetStreamer {
     /// Fetch one article through the shared segment path.
     pub(super) async fn fetch_article(&self, message_id: &str) -> Result<Bytes, StreamerError> {
         Ok(self.pool.fetch_segment(message_id).await?)
+    }
+
+    /// [`fetch_article`](Self::fetch_article), but on a **permanently dead**
+    /// article return `hole_len` zero bytes instead of an error, so playback
+    /// continues past it. See [`super::salvage`] for the rules.
+    ///
+    /// The permanence check is the pool's missing set rather than the error
+    /// itself. `fetch_sequential` returns whatever the last provider said, so
+    /// an `ArticleNotFound` can come back when an earlier provider merely
+    /// errored — the missing set is written only when every provider agreed,
+    /// which is the condition that makes a hole the right answer.
+    pub(super) async fn fetch_article_or_hole(
+        &self,
+        message_id: &str,
+        hole_len: u64,
+        salvage: &mut ReadSalvage,
+    ) -> Result<Bytes, StreamerError> {
+        match self.pool.fetch_segment(message_id).await {
+            Ok(bytes) => Ok(bytes),
+            Err(NntpError::ArticleNotFound(status)) => {
+                if !self.pool.missing().contains(message_id) || !salvage.claim(hole_len) {
+                    return Err(StreamerError::Nntp(NntpError::ArticleNotFound(status)));
+                }
+                tracing::debug!(
+                    message_id,
+                    hole_len,
+                    "article dead on every provider; substituting a hole"
+                );
+                Ok(Bytes::from(vec![0u8; hole_len as usize]))
+            }
+            Err(error) => Err(error.into()),
+        }
     }
 
     /// Start every article a range spans, without waiting for any of them.
@@ -166,6 +234,247 @@ pub(super) fn direct_anchor_segment(offsets: &[u64], n_segments: usize, start: u
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::nntp::{NntpConfig, NntpProvider, NntpServerConfig};
+    use std::time::Duration;
+
+    /// Decoded payload length of every article the fake server serves.
+    const PAYLOAD: &[u8] = crate::nntp::tests::FAKE_SEGMENT_PAYLOAD;
+
+    fn streamer(addrs: &[std::net::SocketAddr]) -> UsenetStreamer {
+        let providers = addrs
+            .iter()
+            .enumerate()
+            .map(|(index, addr)| NntpProvider {
+                config: NntpServerConfig {
+                    host: addr.ip().to_string(),
+                    port: addr.port(),
+                    user: None,
+                    pass: None,
+                    use_tls: false,
+                    max_connections: 4,
+                    article_timeout: Duration::from_millis(200),
+                },
+                priority: index as i32,
+                is_backup: false,
+            })
+            .collect();
+        // `read_direct` plans from the meta it is handed and fetches through
+        // the pool; it never touches the database.
+        UsenetStreamer::new(
+            NntpConfig { providers },
+            sea_orm::DatabaseConnection::default(),
+        )
+    }
+
+    fn segments(ids: &[&str]) -> Vec<NzbSegment> {
+        ids.iter()
+            .enumerate()
+            .map(|(index, id)| NzbSegment {
+                bytes: PAYLOAD.len() as u64,
+                number: index as u32 + 1,
+                message_id: (*id).to_string(),
+            })
+            .collect()
+    }
+
+    fn offsets(count: usize) -> Vec<u64> {
+        (0..=count as u64)
+            .map(|i| i * PAYLOAD.len() as u64)
+            .collect()
+    }
+
+    /// The regression this exists for: one article missing from every provider
+    /// used to fail the read, which stops the player. Now the read completes
+    /// with a hole where those bytes were.
+    #[tokio::test]
+    async fn a_dead_article_becomes_a_hole_instead_of_failing_the_read() {
+        let (addr, _server) = spawn_selective_server().await;
+        let streamer = streamer(&[addr]);
+        let segments = segments(&["a@test", "dead@test", "c@test"]);
+        let offsets = offsets(3);
+        let total = PAYLOAD.len() as u64 * 3;
+
+        let slices = streamer
+            .read_direct(
+                &offsets,
+                &segments,
+                0,
+                total - 1,
+                &mut super::ReadSalvage::allowing(),
+            )
+            .await
+            .expect("a single dead article must not fail the read");
+
+        let joined: Vec<u8> = slices.iter().flat_map(|s| s.to_vec()).collect();
+        assert_eq!(
+            joined.len(),
+            total as usize,
+            "a short read would make FUSE truncate the file"
+        );
+        assert_eq!(&joined[..PAYLOAD.len()], PAYLOAD);
+        assert!(
+            joined[PAYLOAD.len()..PAYLOAD.len() * 2]
+                .iter()
+                .all(|&b| b == 0),
+            "the dead article's span must be zero-filled"
+        );
+        assert_eq!(&joined[PAYLOAD.len() * 2..], PAYLOAD);
+    }
+
+    /// A couple of gaps is a title worth watching; a read that needs more than
+    /// that is a title worth re-grabbing, and must not be papered over.
+    #[tokio::test]
+    async fn a_read_past_its_hole_budget_still_fails() {
+        let (addr, _server) = spawn_selective_server().await;
+        let streamer = streamer(&[addr]);
+        let ids: Vec<String> = (0..super::super::salvage::MAX_HOLES_PER_READ + 1)
+            .map(|i| format!("dead{i}@test"))
+            .collect();
+        let segments = segments(&ids.iter().map(String::as_str).collect::<Vec<_>>());
+        let offsets = offsets(segments.len());
+        let total = PAYLOAD.len() as u64 * segments.len() as u64;
+
+        let result = streamer
+            .read_direct(
+                &offsets,
+                &segments,
+                0,
+                total - 1,
+                &mut super::ReadSalvage::allowing(),
+            )
+            .await;
+        assert!(
+            matches!(
+                result,
+                Err(StreamerError::Nntp(NntpError::ArticleNotFound(_)))
+            ),
+            "too many dead articles must surface, not be faked"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_dead_article_still_fails_the_read_when_skipping_is_off() {
+        let (addr, _server) = spawn_selective_server().await;
+        let streamer = streamer(&[addr]);
+        let segments = segments(&["a@test", "dead@test"]);
+        let offsets = offsets(2);
+
+        let result = streamer
+            .read_direct(
+                &offsets,
+                &segments,
+                0,
+                PAYLOAD.len() as u64 * 2 - 1,
+                &mut super::ReadSalvage::refusing(),
+            )
+            .await;
+        assert!(matches!(
+            result,
+            Err(StreamerError::Nntp(NntpError::ArticleNotFound(_)))
+        ));
+    }
+
+    /// A `430` from one provider while another never answered is not proof the
+    /// article is gone — the one that failed might have had it. Only the
+    /// pool's every-provider-agreed set makes a hole the right answer, and an
+    /// unreachable peer keeps an id out of that set.
+    #[tokio::test]
+    async fn a_miss_no_one_could_confirm_is_never_salvaged() {
+        let (serving, _server) = spawn_selective_server().await;
+        // Port 1 on loopback refuses connections, standing in for a provider
+        // that is down rather than one that answered `430`.
+        let unreachable: std::net::SocketAddr = "127.0.0.1:1".parse().unwrap();
+        let streamer = streamer(&[serving, unreachable]);
+
+        let result = streamer
+            .fetch_article_or_hole(
+                "dead@test",
+                PAYLOAD.len() as u64,
+                &mut super::ReadSalvage::allowing(),
+            )
+            .await;
+
+        assert!(
+            matches!(result, Err(StreamerError::Nntp(_))),
+            "an unconfirmed miss must surface as an error, not a hole"
+        );
+        assert!(
+            !streamer.pool.missing().contains("dead@test"),
+            "one provider failing means the article is not confirmed gone"
+        );
+    }
+
+    /// Conversely, once every provider has agreed, the hole is legitimate.
+    #[tokio::test]
+    async fn a_confirmed_miss_becomes_a_hole() {
+        let (serving, _server) = spawn_selective_server().await;
+        let streamer = streamer(&[serving]);
+
+        let bytes = streamer
+            .fetch_article_or_hole(
+                "dead@test",
+                PAYLOAD.len() as u64,
+                &mut super::ReadSalvage::allowing(),
+            )
+            .await
+            .expect("the only provider said 430, so the article is gone");
+        assert_eq!(bytes.len(), PAYLOAD.len());
+        assert!(bytes.iter().all(|&b| b == 0));
+        assert!(streamer.pool.missing().contains("dead@test"));
+    }
+
+    /// Loopback NNTP that serves any article except ones whose id contains
+    /// `dead`, which it reports `430` for.
+    async fn spawn_selective_server() -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        use tokio::net::TcpListener;
+
+        let article = crate::yenc::tests::encode_single(PAYLOAD, "fake.bin");
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move {
+            loop {
+                let Ok((socket, _)) = listener.accept().await else {
+                    return;
+                };
+                let article = article.clone();
+                tokio::spawn(async move {
+                    let (read_half, mut write_half) = socket.into_split();
+                    if write_half.write_all(b"200 fake\r\n").await.is_err() {
+                        return;
+                    }
+                    let mut lines = BufReader::new(read_half).lines();
+                    while let Ok(Some(line)) = lines.next_line().await {
+                        let dead = line.contains("dead");
+                        let reply: Vec<u8> = if line.starts_with("QUIT") {
+                            return;
+                        } else if line.starts_with("BODY") {
+                            if dead {
+                                b"430 no such article\r\n".to_vec()
+                            } else {
+                                let mut out = b"222 0 <exists>\r\n".to_vec();
+                                out.extend_from_slice(&article);
+                                out.extend_from_slice(b"\r\n.\r\n");
+                                out
+                            }
+                        } else if line.starts_with("STAT") {
+                            if dead {
+                                b"430 no such article\r\n".to_vec()
+                            } else {
+                                b"223 0 ok\r\n".to_vec()
+                            }
+                        } else {
+                            b"111 20260101000000\r\n".to_vec()
+                        };
+                        if write_half.write_all(&reply).await.is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        (addr, handle)
+    }
 
     #[test]
     fn direct_anchor_segment_locates_the_start() {

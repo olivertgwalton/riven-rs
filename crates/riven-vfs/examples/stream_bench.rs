@@ -188,7 +188,7 @@ async fn main() -> anyhow::Result<()> {
                 pass,
                 use_tls: true,
                 max_connections: args.max_connections,
-                timeout: Duration::from_secs(30),
+                article_timeout: riven_usenet::nntp::DEFAULT_ARTICLE_TIMEOUT,
             },
             priority: 0,
             is_backup: false,

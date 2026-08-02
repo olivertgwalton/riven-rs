@@ -223,6 +223,19 @@ pub struct ActiveStream {
     pub client: String,
 }
 
+/// How long after its last read a registered stream still counts as active.
+///
+/// Registration is RAII — the entry goes when the handle drops — so this bound
+/// only matters when that does not happen. Without it one orphaned entry would
+/// block its release's auto-repair for the lifetime of the process, silently
+/// and with nothing to point at.
+///
+/// Half an hour is chosen against the other side of the trade: a *paused*
+/// player issues no reads at all, so anything shorter would let a repair swap
+/// the file out from under someone who is coming back to it. Beyond half an
+/// hour the stream is treated as abandoned.
+const STREAM_ACTIVE_WINDOW_SECS: i64 = 30 * 60;
+
 #[derive(Default)]
 pub struct ActiveStreams {
     inner: Mutex<HashMap<String, ActiveStream>>,
@@ -231,6 +244,21 @@ pub struct ActiveStreams {
 impl ActiveStreams {
     pub fn register(&self, key: String, stream: ActiveStream) {
         self.inner.lock().insert(key, stream);
+    }
+
+    /// Whether any open handle is currently serving this release.
+    ///
+    /// Keyed on the release rather than the file: a repair blacklists and
+    /// re-grabs the whole release, so a season pack streaming episode 3 must
+    /// not be repaired because episode 7 scanned unhealthy.
+    pub fn is_streaming(&self, info_hash: &str) -> bool {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs() as i64);
+        self.inner.lock().values().any(|stream| {
+            stream.info_hash == info_hash
+                && now.saturating_sub(stream.last_active) <= STREAM_ACTIVE_WINDOW_SECS
+        })
     }
 
     pub fn touch(&self, key: &str, now: i64) {
@@ -292,6 +320,59 @@ mod tests {
         assert!(cache.get("b").is_none(), "LRU evicted");
         assert!(cache.get("c").is_some(), "newest survives");
         assert!(cache.stats().bytes_used <= one * 2 + one / 2);
+    }
+
+    fn now_secs() -> i64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs() as i64)
+    }
+
+    fn stream(info_hash: &str, last_active: i64) -> ActiveStream {
+        ActiveStream {
+            info_hash: info_hash.to_string(),
+            filename: "x.mkv".into(),
+            file_size: 1,
+            started_at: last_active,
+            last_active,
+            client: "test".into(),
+        }
+    }
+
+    /// The guard auto-repair uses: re-grabbing replaces the file a viewer is
+    /// reading from, so a release with an open handle must not be repaired.
+    #[test]
+    fn a_release_with_an_open_handle_reads_as_streaming() {
+        let streams = ActiveStreams::default();
+        assert!(!streams.is_streaming("abc"));
+
+        streams.register("abc:0:1".into(), stream("abc", now_secs()));
+        assert!(streams.is_streaming("abc"));
+        assert!(!streams.is_streaming("other"), "keyed on the release");
+
+        streams.unregister("abc:0:1");
+        assert!(!streams.is_streaming("abc"));
+    }
+
+    /// A season pack is one release across every episode, and a repair
+    /// blacklists the release — so streaming any file in it must protect all of
+    /// them, not just the file index being read.
+    #[test]
+    fn any_file_of_a_release_protects_the_whole_release() {
+        let streams = ActiveStreams::default();
+        streams.register("pack:7:1".into(), stream("pack", now_secs()));
+        assert!(streams.is_streaming("pack"));
+    }
+
+    /// Registration is RAII, but an entry that somehow outlives its handle
+    /// must not block that release's repair forever.
+    #[test]
+    fn an_entry_stale_past_the_window_stops_counting() {
+        let streams = ActiveStreams::default();
+        let stale = now_secs() - STREAM_ACTIVE_WINDOW_SECS - 1;
+        streams.register("ghost:0:1".into(), stream("ghost", stale));
+        assert!(!streams.is_streaming("ghost"));
+        assert_eq!(streams.count(), 1, "still listed, just not counted active");
     }
 
     #[test]

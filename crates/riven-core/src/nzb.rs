@@ -82,6 +82,115 @@ pub fn newznab_text_query(req: &ScrapeRequest<'_>) -> (&'static str, Vec<(&'stat
     }
 }
 
+/// What one indexer says it can be asked, from its `t=caps` document.
+///
+/// Newznab's `<searching>` block advertises, per search mode, whether the mode
+/// exists and which parameters it honours. Sending a parameter an indexer does
+/// not advertise is not an error it reports — it silently ignores the
+/// constraint and answers the *unconstrained* query, which is how a `tvdbid`
+/// search for one show comes back full of another. Asking first is the only way
+/// to tell "this indexer has nothing for the show" apart from "this indexer
+/// ignored the part of the query that named the show".
+#[derive(Debug, Default, Clone)]
+pub struct NewznabCaps {
+    /// Caps element name (`search`, `tv-search`, `movie-search`, ...) to the
+    /// parameters it lists in `supportedParams`. Absent key means the mode is
+    /// unavailable.
+    modes: std::collections::HashMap<String, std::collections::HashSet<String>>,
+}
+
+impl NewznabCaps {
+    /// Caps element name for a `t=` search value.
+    fn element_for(search_type: &str) -> &'static str {
+        match search_type {
+            "tvsearch" => "tv-search",
+            "movie" | "moviesearch" => "movie-search",
+            "music" => "audio-search",
+            "book" => "book-search",
+            _ => "search",
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.modes.is_empty()
+    }
+
+    /// Whether the indexer advertises this `t=` mode at all. An indexer that
+    /// served no usable caps document reports everything available, so a
+    /// caps fetch that fails degrades to asking anyway rather than to silence.
+    pub fn supports_search(&self, search_type: &str) -> bool {
+        self.is_empty() || self.modes.contains_key(Self::element_for(search_type))
+    }
+
+    /// Whether this mode honours `param`. Unknown caps means yes, for the same
+    /// reason as above.
+    pub fn supports_param(&self, search_type: &str, param: &str) -> bool {
+        if self.is_empty() {
+            return true;
+        }
+        match self.modes.get(Self::element_for(search_type)) {
+            // An advertised mode that lists no params at all tells us nothing
+            // useful; treat it as unconstrained rather than unusable.
+            Some(params) => params.is_empty() || params.contains(param),
+            None => false,
+        }
+    }
+}
+
+/// Parse the `<searching>` block of a Newznab `t=caps` document.
+///
+/// Anything unparseable yields empty caps, which every `NewznabCaps` query
+/// reads as "no constraints known" — a malformed caps document must never take
+/// an indexer out of rotation.
+pub fn parse_newznab_caps(body: &str) -> NewznabCaps {
+    use quick_xml::Reader;
+    use quick_xml::events::Event;
+
+    let mut reader = Reader::from_str(body);
+    reader.config_mut().trim_text(true);
+
+    let mut caps = NewznabCaps::default();
+    let mut in_searching = false;
+
+    while let Ok(event) = reader.read_event() {
+        match event {
+            Event::Eof => break,
+            Event::Start(e) if e.name().as_ref() == b"searching" => in_searching = true,
+            Event::End(e) if e.name().as_ref() == b"searching" => in_searching = false,
+            // Modes are usually empty elements, but a self-closing tag written
+            // as a start/end pair parses as `Start` — accept both.
+            Event::Empty(e) | Event::Start(e) if in_searching => {
+                let name = String::from_utf8_lossy(e.name().as_ref()).into_owned();
+                let mut available = true;
+                let mut params = std::collections::HashSet::new();
+                for attr in e.attributes().flatten() {
+                    let Ok(value) = attr.normalized_value(quick_xml::XmlVersion::Implicit1_0)
+                    else {
+                        continue;
+                    };
+                    match attr.key.as_ref() {
+                        b"available" => available = !value.eq_ignore_ascii_case("no"),
+                        b"supportedParams" => {
+                            params.extend(
+                                value
+                                    .split(',')
+                                    .map(|p| p.trim().to_ascii_lowercase())
+                                    .filter(|p| !p.is_empty()),
+                            );
+                        }
+                        _ => {}
+                    }
+                }
+                if available {
+                    caps.modes.insert(name, params);
+                }
+            }
+            _ => {}
+        }
+    }
+    caps
+}
+
 #[derive(Debug, Default)]
 pub struct NewznabItem {
     pub title: String,
@@ -204,6 +313,61 @@ pub fn parse_newznab_xml(body: &str) -> Vec<NewznabItem> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const CAPS: &str = r#"<?xml version="1.0"?>
+    <caps>
+      <searching>
+        <search available="yes" supportedParams="q,cat"/>
+        <tv-search available="yes" supportedParams="q,rid,tvdbid,season,ep"/>
+        <movie-search available="no" supportedParams="q,imdbid"/>
+      </searching>
+    </caps>"#;
+
+    #[test]
+    fn caps_report_advertised_modes_and_params() {
+        let caps = parse_newznab_caps(CAPS);
+        assert!(caps.supports_search("tvsearch"));
+        assert!(caps.supports_param("tvsearch", "tvdbid"));
+        assert!(caps.supports_param("tvsearch", "season"));
+        // Listed under tv-search's params but not offered by this indexer.
+        assert!(!caps.supports_param("tvsearch", "imdbid"));
+        assert!(caps.supports_search("search"));
+        assert!(!caps.supports_param("search", "tvdbid"));
+    }
+
+    /// `available="no"` is the case that matters: the mode is described in the
+    /// document but must not be used.
+    #[test]
+    fn caps_respect_an_unavailable_mode() {
+        let caps = parse_newznab_caps(CAPS);
+        assert!(!caps.supports_search("movie"));
+        assert!(!caps.supports_param("movie", "imdbid"));
+    }
+
+    /// An indexer that serves no usable caps must keep being searched exactly
+    /// as before, not fall silent.
+    #[test]
+    fn unparseable_caps_constrain_nothing() {
+        for body in ["", "not xml at all", "<caps><searching/></caps>"] {
+            let caps = parse_newznab_caps(body);
+            assert!(caps.is_empty(), "{body:?}");
+            assert!(caps.supports_search("tvsearch"), "{body:?}");
+            assert!(caps.supports_param("tvsearch", "tvdbid"), "{body:?}");
+            assert!(caps.supports_param("movie", "imdbid"), "{body:?}");
+        }
+    }
+
+    /// A mode advertised without a `supportedParams` list says nothing about
+    /// parameters, so it must not be read as "supports none of them".
+    #[test]
+    fn caps_without_a_param_list_are_unconstrained() {
+        let caps = parse_newznab_caps(
+            r#"<caps><searching><tv-search available="yes"/></searching></caps>"#,
+        );
+        assert!(!caps.is_empty());
+        assert!(caps.supports_param("tvsearch", "tvdbid"));
+        assert!(!caps.supports_search("movie"));
+    }
 
     #[test]
     fn parses_minimal_rss() {

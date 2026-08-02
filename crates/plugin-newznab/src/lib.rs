@@ -6,8 +6,8 @@ use reqwest::StatusCode;
 use riven_core::events::{EventType, HookResponse, ScrapeRequest};
 use riven_core::http::{HttpServiceProfile, RateLimitedError};
 use riven_core::nzb::{
-    NZB_URL_TTL_SECS, NewznabItem, newznab_text_query, nzb_info_hash, nzb_url_redis_key,
-    parse_newznab_xml,
+    NZB_URL_TTL_SECS, NewznabCaps, NewznabItem, newznab_text_query, nzb_info_hash,
+    nzb_url_redis_key, parse_newznab_caps, parse_newznab_xml,
 };
 use riven_core::plugin::{FieldType, Plugin, PluginContext, SettingField};
 use riven_core::settings::PluginSettings;
@@ -22,6 +22,122 @@ use riven_core::types::{MediaItemType, ScrapeEntry, ScrapeResponse};
 fn indexer_profile(indexer: &Indexer) -> HttpServiceProfile {
     HttpServiceProfile::new_owned(format!("newznab:{}", indexer.name))
         .with_rate_limit(60, Duration::from_secs(60))
+}
+
+/// Results asked for per request. Newznab's own default is 100 and most
+/// indexers cap a page there regardless of what is asked.
+const PAGE_SIZE: usize = 100;
+/// Results taken from one indexer for one query before paging stops.
+///
+/// A single page was the whole search until now, which quietly truncated every
+/// query with more than [`PAGE_SIZE`] matches — a long-running show's `tvsearch`
+/// routinely does, and the releases that fell off the end were never ranked.
+/// Five pages is deep enough to cover those without turning one scrape into an
+/// unbounded crawl of an indexer that reports thousands of loose matches.
+const MAX_RESULTS: usize = 5 * PAGE_SIZE;
+/// How long an indexer's `t=caps` document is trusted. Capabilities change when
+/// an indexer is reconfigured, which is rare; comet uses the same six hours.
+const CAPS_TTL: Duration = Duration::from_secs(6 * 60 * 60);
+
+/// Process-local `t=caps` cache, keyed by indexer URL.
+///
+/// Not in Redis on purpose: caps are cheap to refetch, and a cache that can
+/// fail is a cache that can take an indexer out of rotation for reasons that
+/// have nothing to do with the indexer.
+fn caps_cache() -> &'static std::sync::Mutex<
+    std::collections::HashMap<String, (std::time::Instant, std::sync::Arc<NewznabCaps>)>,
+> {
+    static CACHE: std::sync::OnceLock<
+        std::sync::Mutex<
+            std::collections::HashMap<String, (std::time::Instant, std::sync::Arc<NewznabCaps>)>,
+        >,
+    > = std::sync::OnceLock::new();
+    CACHE.get_or_init(Default::default)
+}
+
+/// Fetch (or reuse) what this indexer says it supports.
+///
+/// Never fails: a caps document that cannot be fetched or parsed becomes empty
+/// caps, which [`NewznabCaps`] reads as "no constraints known" and which
+/// therefore reproduces the previous unconditional behaviour exactly.
+async fn caps_for(
+    indexer: &Indexer,
+    http: &riven_core::http::HttpClient,
+) -> std::sync::Arc<NewznabCaps> {
+    if let Ok(cache) = caps_cache().lock()
+        && let Some((fetched, caps)) = cache.get(&indexer.url)
+        && fetched.elapsed() < CAPS_TTL
+    {
+        return caps.clone();
+    }
+
+    let url = format!("{}/api", indexer.url.trim_end_matches('/'));
+    let params = [
+        ("t", "caps".to_string()),
+        ("apikey", indexer.apikey.clone()),
+    ];
+    let body = match http
+        .send_data(indexer_profile(indexer), None, |client| {
+            client.get(&url).query(&params)
+        })
+        .await
+    {
+        Ok(response) if response.status().is_success() => response.text().unwrap_or_default(),
+        Ok(response) => {
+            tracing::debug!(
+                indexer = %indexer.name,
+                status = %response.status(),
+                "newznab caps unavailable; querying without capability constraints"
+            );
+            String::new()
+        }
+        Err(error) => {
+            tracing::debug!(
+                indexer = %indexer.name,
+                %error,
+                "newznab caps request failed; querying without capability constraints"
+            );
+            String::new()
+        }
+    };
+
+    let caps = std::sync::Arc::new(parse_newznab_caps(&body));
+    if let Ok(mut cache) = caps_cache().lock() {
+        cache.insert(
+            indexer.url.clone(),
+            (std::time::Instant::now(), caps.clone()),
+        );
+    }
+    caps
+}
+
+/// Narrow a query to what this indexer advertises.
+///
+/// Returns `None` when the mode itself is unavailable, so the caller can fall
+/// straight through to the text search instead of issuing a request the indexer
+/// will answer with an error or, worse, with the unconstrained result set.
+/// Parameters the indexer does not list are dropped rather than sent: an
+/// ignored `tvdbid` does not narrow anything, it just makes an unrelated
+/// answer look like a matched one.
+fn constrain_to_caps<'a>(
+    caps: &NewznabCaps,
+    search_type: &'a str,
+    params: &[(&'static str, String)],
+) -> Option<(&'a str, Vec<(&'static str, String)>)> {
+    if !caps.supports_search(search_type) {
+        return None;
+    }
+    let kept: Vec<(&'static str, String)> = params
+        .iter()
+        .filter(|(key, _)| caps.supports_param(search_type, key))
+        .cloned()
+        .collect();
+    // Every constraint dropped would turn a search for one title into a
+    // request for the indexer's entire category.
+    if kept.is_empty() && !params.is_empty() {
+        return None;
+    }
+    Some((search_type, kept))
 }
 
 #[derive(Default)]
@@ -139,16 +255,92 @@ enum ScrapeOutcome {
     Failed(anyhow::Error),
 }
 
-/// Issue one scrape against one indexer and return its items. Errors are
+/// Issue one scrape against one indexer and return its items, paging until the
+/// indexer runs out of matches or [`MAX_RESULTS`] is reached. Errors are
 /// returned to the caller so the fan-out can log per-indexer failures
 /// without poisoning the rest.
+///
+/// A short page ends the walk. Newznab reports a total in
+/// `<newznab:response total=…>`, but not every implementation does and the ones
+/// that do are not always honest about it, whereas "this page came back with
+/// fewer items than we asked for" is true on every implementation. The cost of
+/// not reading the total is one extra request per indexer on an exactly-full
+/// last page.
 async fn scrape_one(
     indexer: &Indexer,
     request: &ScrapeRequest<'_>,
-    search_type: &'static str,
+    search_type: &str,
     base_params: &[(&'static str, String)],
     http: &riven_core::http::HttpClient,
 ) -> ScrapeOutcome {
+    let mut collected: Vec<NewznabItem> = Vec::new();
+    let mut paging = Paging::default();
+    while let Some(page) = paging.next_page() {
+        match scrape_page(indexer, request, search_type, base_params, http, page).await {
+            ScrapeOutcome::Ok(items) => {
+                paging.absorb(items.len());
+                collected.extend(items);
+            }
+            // A page that fails mid-walk still yields what came before it: a
+            // truncated result set beats discarding pages that did arrive.
+            outcome if collected.is_empty() => return outcome,
+            _ => break,
+        }
+    }
+    ScrapeOutcome::Ok(collected)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Page {
+    offset: usize,
+    limit: usize,
+}
+
+/// Where the walk over one indexer's result set has got to.
+///
+/// Split out from the loop so the stopping rules are testable without an HTTP
+/// server: they are the whole substance of paging, and getting one wrong means
+/// either a truncated search or an unbounded crawl.
+#[derive(Debug, Default)]
+struct Paging {
+    taken: usize,
+    exhausted: bool,
+}
+
+impl Paging {
+    /// The next request to issue, or `None` once the indexer is out of matches
+    /// or [`MAX_RESULTS`] has been reached.
+    fn next_page(&self) -> Option<Page> {
+        if self.exhausted || self.taken >= MAX_RESULTS {
+            return None;
+        }
+        Some(Page {
+            offset: self.taken,
+            limit: PAGE_SIZE.min(MAX_RESULTS - self.taken),
+        })
+    }
+
+    /// Record what a page actually returned. A page shorter than the one asked
+    /// for is the last one — including an empty page, which also protects the
+    /// walk from spinning against an indexer that ignores `offset` entirely.
+    fn absorb(&mut self, received: usize) {
+        let asked = self.next_page().map_or(0, |page| page.limit);
+        self.taken += received;
+        if received < asked {
+            self.exhausted = true;
+        }
+    }
+}
+
+async fn scrape_page(
+    indexer: &Indexer,
+    request: &ScrapeRequest<'_>,
+    search_type: &str,
+    base_params: &[(&'static str, String)],
+    http: &riven_core::http::HttpClient,
+    page: Page,
+) -> ScrapeOutcome {
+    let Page { offset, limit } = page;
     let base_url = indexer.url.trim_end_matches('/');
     let url = format!("{base_url}/api");
 
@@ -156,7 +348,10 @@ async fn scrape_one(
     params.push(("t", search_type.to_string()));
     params.push(("apikey", indexer.apikey.clone()));
     params.push(("cat", indexer.categories.clone()));
-    params.push(("limit", "100".to_string()));
+    params.push(("limit", limit.to_string()));
+    if offset > 0 {
+        params.push(("offset", offset.to_string()));
+    }
 
     tracing::debug!(
         indexer = %indexer.name,
@@ -295,10 +490,27 @@ impl Plugin for NewznabPlugin {
             let base_params = base_params.clone();
             let fallback_query = fallback_query.clone();
             async move {
-                let mut result =
-                    scrape_one(indexer, request, search_type, &base_params, http).await;
+                // What this indexer will actually honour. The ID search is only
+                // worth issuing if it can be constrained; otherwise go straight
+                // to the text query rather than asking a question the indexer
+                // answers by ignoring half of it.
+                let caps = caps_for(indexer, http).await;
+                let mut result = match constrain_to_caps(&caps, search_type, &base_params) {
+                    Some((search_type, params)) => {
+                        scrape_one(indexer, request, search_type, &params, http).await
+                    }
+                    None => {
+                        tracing::debug!(
+                            indexer = %indexer.name,
+                            search_type,
+                            "indexer does not advertise this search; skipping to text query",
+                        );
+                        ScrapeOutcome::Ok(Vec::new())
+                    }
+                };
                 if let Some((fb_type, fb_params)) = &fallback_query
                     && matches!(&result, ScrapeOutcome::Ok(items) if items.is_empty())
+                    && let Some((fb_type, fb_params)) = constrain_to_caps(&caps, fb_type, fb_params)
                 {
                     tracing::debug!(
                         indexer = %indexer.name,
@@ -307,7 +519,7 @@ impl Plugin for NewznabPlugin {
                         q = %fb_params.first().map(|(_, v)| v.as_str()).unwrap_or_default(),
                         "ID search returned no items; retrying with text query",
                     );
-                    result = scrape_one(indexer, request, fb_type, fb_params, http).await;
+                    result = scrape_one(indexer, request, fb_type, &fb_params, http).await;
                 }
                 (indexer, result)
             }
@@ -400,6 +612,110 @@ impl Plugin for NewznabPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The regression paging exists for: a query with more matches than one
+    /// page must not stop at the first page, as every scrape did before.
+    #[test]
+    fn paging_walks_full_pages_until_a_short_one() {
+        let mut paging = Paging::default();
+        assert_eq!(
+            paging.next_page(),
+            Some(Page {
+                offset: 0,
+                limit: PAGE_SIZE
+            })
+        );
+        paging.absorb(PAGE_SIZE);
+        assert_eq!(
+            paging.next_page(),
+            Some(Page {
+                offset: PAGE_SIZE,
+                limit: PAGE_SIZE
+            })
+        );
+        paging.absorb(PAGE_SIZE - 1);
+        assert_eq!(paging.next_page(), None, "a short page is the last page");
+    }
+
+    #[test]
+    fn paging_stops_at_the_result_ceiling() {
+        let mut paging = Paging::default();
+        let mut requests = 0;
+        while let Some(page) = paging.next_page() {
+            requests += 1;
+            assert!(page.offset + page.limit <= MAX_RESULTS);
+            paging.absorb(page.limit);
+            assert!(requests <= 32, "paging failed to terminate");
+        }
+        assert_eq!(paging.taken, MAX_RESULTS);
+        assert_eq!(requests, MAX_RESULTS / PAGE_SIZE);
+    }
+
+    /// An indexer that ignores `offset` answers every request with the same
+    /// full page. The ceiling bounds that, but an empty page must stop the
+    /// walk immediately rather than burning the whole budget.
+    #[test]
+    fn paging_stops_on_an_empty_page() {
+        let mut paging = Paging::default();
+        paging.absorb(0);
+        assert_eq!(paging.next_page(), None);
+    }
+
+    fn caps(body: &str) -> NewznabCaps {
+        riven_core::nzb::parse_newznab_caps(body)
+    }
+
+    #[test]
+    fn caps_drop_parameters_an_indexer_does_not_advertise() {
+        let caps = caps(
+            r#"<caps><searching>
+                 <tv-search available="yes" supportedParams="q,tvdbid,season,ep"/>
+               </searching></caps>"#,
+        );
+        let params = vec![
+            ("imdbid", "1234567".to_string()),
+            ("season", "2".to_string()),
+        ];
+        let (search_type, kept) = constrain_to_caps(&caps, "tvsearch", &params).unwrap();
+        assert_eq!(search_type, "tvsearch");
+        assert_eq!(kept, vec![("season", "2".to_string())]);
+    }
+
+    /// Dropping every constraint would turn a search for one show into a
+    /// request for the indexer's whole TV category — the shape that returns
+    /// another series' episodes and makes them look like matches.
+    #[test]
+    fn caps_refuse_a_query_left_with_no_constraints() {
+        let caps = caps(
+            r#"<caps><searching>
+                 <tv-search available="yes" supportedParams="q"/>
+               </searching></caps>"#,
+        );
+        let params = vec![("tvdbid", "999".to_string())];
+        assert!(constrain_to_caps(&caps, "tvsearch", &params).is_none());
+    }
+
+    #[test]
+    fn caps_refuse_an_unavailable_search_mode() {
+        let caps = caps(r#"<caps><searching><search available="yes"/></searching></caps>"#);
+        let params = vec![("imdbid", "1234567".to_string())];
+        assert!(constrain_to_caps(&caps, "movie", &params).is_none());
+    }
+
+    /// Unknown caps must reproduce the previous behaviour exactly, or a caps
+    /// endpoint being down would stop scraping altogether.
+    #[test]
+    fn unknown_caps_pass_the_query_through_untouched() {
+        let caps = caps("");
+        let params = vec![
+            ("tvdbid", "999".to_string()),
+            ("season", "2".to_string()),
+            ("ep", "4".to_string()),
+        ];
+        let (search_type, kept) = constrain_to_caps(&caps, "tvsearch", &params).unwrap();
+        assert_eq!(search_type, "tvsearch");
+        assert_eq!(kept, params);
+    }
 
     #[test]
     fn parses_indexer_dictionary() {

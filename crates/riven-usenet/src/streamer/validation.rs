@@ -140,7 +140,7 @@ mod tests {
                 pass: None,
                 use_tls: false,
                 max_connections: 8,
-                timeout: Duration::from_secs(5),
+                article_timeout: Duration::from_millis(200),
             },
             priority: 0,
             is_backup: false,

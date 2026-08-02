@@ -128,7 +128,7 @@ impl ProviderJson {
                 pass: self.pass,
                 use_tls: self.tls,
                 max_connections: self.max_connections,
-                timeout: Duration::from_secs(30),
+                article_timeout: riven_usenet::nntp::DEFAULT_ARTICLE_TIMEOUT,
             },
             priority: self.priority,
             is_backup: self.backup,
@@ -282,6 +282,14 @@ impl Plugin for UsenetPlugin {
                      Catches a volume with the wrong content entirely, not just a missing one. Downloads \
                      real data to check (unlike the other options here), adding a few percent to every \
                      grab's bandwidth — off by default for that reason.",
+                ),
+            SettingField::new("degradedplayback", "Skip Dead Segments", FieldType::Boolean)
+                .with_default("true")
+                .with_description(
+                    "Keep playing past a file that is missing from every provider, instead of \
+                     stopping the stream. You lose a fraction of a second of picture where the \
+                     gap is, and the title is not re-grabbed mid-playback for it. Only a couple \
+                     of gaps per read are skipped — anything worse still stops the stream.",
                 ),
             SettingField::new(
                 "acceptablemissingpercent",

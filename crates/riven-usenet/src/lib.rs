@@ -31,5 +31,5 @@ pub use nzb::{
 pub use pool::SegmentPool;
 pub use streamer::{
     DEFAULT_AVAILABILITY_SAMPLE_PERCENT, NzbMeta, NzbMetaFile, NzbMetaSource, StreamerError,
-    UNKNOWN_FILE_LABEL, UsenetStreamer, active_streams,
+    UNKNOWN_FILE_LABEL, UsenetStreamer, active_streams, set_degraded_playback,
 };

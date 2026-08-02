@@ -18,7 +18,7 @@ mod client;
 mod pool;
 
 pub use client::{NntpClient, Traffic};
-pub use pool::{ClientPool, Lease, ProviderHealth, ProviderTraffic};
+pub use pool::{ClientPool, DEFAULT_ARTICLE_TIMEOUT, Lease, ProviderHealth, ProviderTraffic};
 
 #[derive(Clone)]
 pub struct NntpServerConfig {
@@ -28,7 +28,11 @@ pub struct NntpServerConfig {
     pub pass: Option<String>,
     pub use_tls: bool,
     pub max_connections: u32,
-    pub timeout: Duration,
+    /// Floor on how long one article may take against this provider before the
+    /// fetch is abandoned and the next provider tried. The effective budget
+    /// scales up from here with the provider's own measured latency — see
+    /// [`ClientPool::article_budget`].
+    pub article_timeout: Duration,
 }
 
 impl std::fmt::Debug for NntpServerConfig {
@@ -40,7 +44,7 @@ impl std::fmt::Debug for NntpServerConfig {
             .field("pass", &self.pass.as_deref().map(|_| "<redacted>"))
             .field("use_tls", &self.use_tls)
             .field("max_connections", &self.max_connections)
-            .field("timeout", &self.timeout)
+            .field("article_timeout", &self.article_timeout)
             .finish()
     }
 }

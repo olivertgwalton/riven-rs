@@ -23,6 +23,42 @@ fn setting_flag(json: &Option<serde_json::Value>, key: &str) -> bool {
     })
 }
 
+/// A settings flag whose default is on: only an explicit false turns it off.
+///
+/// The JSON equivalent of the `settings.get_or("key", "true") != "false"` idiom
+/// the plugins use at their own read sites (see `plugin-stremthru`'s
+/// `scrapenabled` and `checkdebridcache`). Schema defaults are not written into
+/// stored settings, so a default-on flag has to restate its default wherever it
+/// is read; [`setting_flag`] would read "absent" as off and silently disable it
+/// for every install that has never touched the setting.
+fn setting_flag_on_by_default(json: &Option<serde_json::Value>, key: &str) -> bool {
+    let Some(value) = json.as_ref().and_then(|j| j.get(key)) else {
+        return true;
+    };
+    if let Some(flag) = value.as_bool() {
+        return flag;
+    }
+    !matches!(
+        value
+            .as_str()
+            .map(|s| s.trim().to_ascii_lowercase())
+            .as_deref(),
+        Some("0" | "false" | "no" | "off")
+    )
+}
+
+/// Truthy env flag, in the same spelling the settings flags accept.
+fn env_flag(name: &str) -> bool {
+    std::env::var(name)
+        .map(|v| {
+            matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
 /// Parse an env var, treating unset/unparseable as `None`.
 fn env_parsed<T: std::str::FromStr>(name: &str) -> Option<T> {
     std::env::var(name).ok().and_then(|s| s.trim().parse().ok())
@@ -36,6 +72,13 @@ pub(crate) fn spawn_background_tasks(
 ) {
     if let Some(streamer) = usenet_streamer.clone() {
         let repair_queue = job_queue.clone();
+        // The read path has no plugin context, so this rides on a process-wide
+        // flag. Set here at startup and again on each scan tick below, so a
+        // change in the UI takes effect without a restart.
+        riven_usenet::set_degraded_playback(setting_flag_on_by_default(
+            &usenet_settings_json,
+            "degradedplayback",
+        ));
         let sample_percent = setting_u64(&usenet_settings_json, "availabilitysamplepercent")
             .map(|n| n as usize)
             .filter(|&n| (1..=100).contains(&n))
@@ -46,14 +89,7 @@ pub(crate) fn spawn_background_tasks(
         let batch = env_parsed::<i64>("RIVEN_USENET_HEALTH_SCAN_BATCH")
             .filter(|&n| n > 0)
             .unwrap_or(5);
-        let auto_repair_forced = std::env::var("RIVEN_USENET_AUTO_REPAIR")
-            .map(|v| {
-                matches!(
-                    v.trim().to_ascii_lowercase().as_str(),
-                    "1" | "true" | "yes" | "on"
-                )
-            })
-            .unwrap_or(false);
+        let auto_repair_forced = env_flag("RIVEN_USENET_AUTO_REPAIR");
         let repair_base_secs = env_parsed::<u64>("RIVEN_USENET_REPAIR_BASE_INTERVAL_SECS")
             .filter(|&n| n > 0)
             .unwrap_or(3600);
@@ -76,6 +112,10 @@ pub(crate) fn spawn_background_tasks(
                 }
 
                 let usenet_cfg = scanner_registry.get_plugin_settings_json("usenet").await;
+                riven_usenet::set_degraded_playback(setting_flag_on_by_default(
+                    &usenet_cfg,
+                    "degradedplayback",
+                ));
                 let auto_repair = auto_repair_forced || setting_flag(&usenet_cfg, "autorepair");
                 let repair_max_retries = setting_u64(&usenet_cfg, "repairmaxretries")
                     .filter(|&n| n > 0)
@@ -160,6 +200,22 @@ pub(crate) fn spawn_background_tasks(
                             let Some(media_item_id) = file.media_item_id else {
                                 continue;
                             };
+                            // Repairing blacklists the release and re-grabs it,
+                            // which replaces the file a viewer is reading from.
+                            // The health row above is already written, so the
+                            // title still shows as unhealthy; only the swap
+                            // waits. Checked before `usenet_repair_due` so a
+                            // deferral does not burn a repair attempt or
+                            // advance the backoff — the next tick retries.
+                            if riven_usenet::active_streams().is_streaming(&file.info_hash) {
+                                tracing::debug!(
+                                    info_hash = %file.info_hash,
+                                    file = %file.path,
+                                    status,
+                                    "usenet auto-repair: release is being streamed; deferring"
+                                );
+                                continue;
+                            }
                             match riven_db::repo::usenet_repair_due(
                                 &file.info_hash,
                                 file.file_index,
@@ -308,5 +364,55 @@ pub(crate) fn spawn_background_tasks(
                 }
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn json(raw: &str) -> Option<serde_json::Value> {
+        Some(serde_json::from_str(raw).unwrap())
+    }
+
+    /// The regression this reader exists for: `setting_flag` reads an absent
+    /// key as off, which would disable a default-on setting for every install
+    /// that has never opened it. Schema defaults are not written into stored
+    /// settings, so the default has to live here.
+    #[test]
+    fn a_default_on_flag_stays_on_until_explicitly_turned_off() {
+        assert!(setting_flag_on_by_default(&None, "degradedplayback"));
+        assert!(setting_flag_on_by_default(
+            &json(r#"{}"#),
+            "degradedplayback"
+        ));
+        assert!(setting_flag_on_by_default(
+            &json(r#"{"other": false}"#),
+            "degradedplayback"
+        ));
+        assert!(!setting_flag(&json(r#"{}"#), "degradedplayback"));
+    }
+
+    #[test]
+    fn a_default_on_flag_accepts_both_json_and_string_spellings() {
+        for raw in [r#"{"k": false}"#, r#"{"k": "false"}"#, r#"{"k": "OFF"}"#] {
+            assert!(!setting_flag_on_by_default(&json(raw), "k"), "{raw}");
+        }
+        for raw in [r#"{"k": true}"#, r#"{"k": "true"}"#, r#"{"k": "on"}"#] {
+            assert!(setting_flag_on_by_default(&json(raw), "k"), "{raw}");
+        }
+    }
+
+    #[test]
+    fn an_ordinary_flag_stays_off_until_explicitly_turned_on() {
+        assert!(!setting_flag(&None, "autorepair"));
+        assert!(!setting_flag(
+            &json(r#"{"autorepair": false}"#),
+            "autorepair"
+        ));
+        assert!(setting_flag(
+            &json(r#"{"autorepair": "yes"}"#),
+            "autorepair"
+        ));
     }
 }

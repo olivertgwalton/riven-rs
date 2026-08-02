@@ -26,9 +26,6 @@ const COMMAND_TIMEOUT: Duration = Duration::from_secs(60);
 /// STAT is a single-line request/reply on a warm socket; anything slower is a
 /// stall, and validation sweeps thousands of them.
 const STAT_TIMEOUT: Duration = Duration::from_secs(2);
-/// Inactivity deadline while draining a BODY. Generous because a legitimately
-/// slow provider trickling a 700 KB body is still making progress.
-const BODY_READ_TIMEOUT: Duration = Duration::from_secs(300);
 /// Initial attempt plus two retries, per command.
 const COMMAND_ATTEMPTS: usize = 3;
 
@@ -159,10 +156,32 @@ impl NntpClient {
     }
 
     /// Fetch an article body, yEnc-encoded and un-dot-stuffed.
-    pub(crate) async fn body(&mut self, message_id: &str) -> Result<PooledBuf, NntpError> {
+    ///
+    /// `budget` bounds the whole call — every attempt, every reconnect, and the
+    /// body read itself — rather than each read separately. That distinction is
+    /// the point: the body read used to carry a flat 300 s deadline and the
+    /// retry loop could spend it three times over, so one article could hold a
+    /// playback read for a quarter of an hour. Bounding the call instead lets
+    /// [`SegmentPool`](crate::pool::SegmentPool) treat an exhausted budget as
+    /// "this provider is not answering" and move to the next one, which is a
+    /// recovery a longer wait on the same socket can never be.
+    ///
+    /// Note this is not a hedge: no second request is issued while the first is
+    /// still running, so a stalled provider costs the budget once, not a
+    /// duplicate of every fetch.
+    pub(crate) async fn body(
+        &mut self,
+        message_id: &str,
+        budget: Duration,
+    ) -> Result<PooledBuf, NntpError> {
+        let deadline = Instant::now() + budget;
         let mut last_err = None;
         for attempt in 0..COMMAND_ATTEMPTS {
-            match self.body_once(message_id).await {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(last_err.unwrap_or(NntpError::Timeout));
+            }
+            match self.body_once(message_id, remaining).await {
                 Ok(buf) => return Ok(buf),
                 Err(error) => {
                     if !should_reconnect(&error) || attempt + 1 == COMMAND_ATTEMPTS {
@@ -176,6 +195,11 @@ impl NntpClient {
                         "nntp BODY failed; reconnecting"
                     );
                     last_err = Some(error);
+                    // A reconnect that would outlive the budget is not worth
+                    // dialing: the caller has a healthier provider to try.
+                    if deadline.saturating_duration_since(Instant::now()).is_zero() {
+                        return Err(last_err.unwrap_or(NntpError::Timeout));
+                    }
                     self.reconnect().await?;
                 }
             }
@@ -183,23 +207,39 @@ impl NntpClient {
         Err(last_err.unwrap_or(NntpError::Protocol("retry exhausted without error")))
     }
 
-    async fn body_once(&mut self, message_id: &str) -> Result<PooledBuf, NntpError> {
+    async fn body_once(
+        &mut self,
+        message_id: &str,
+        budget: Duration,
+    ) -> Result<PooledBuf, NntpError> {
         // A future can be cancelled at any await below. Poison before writing
         // so a socket with an unread status or body is never pooled.
         self.poisoned = true;
+        let deadline = Instant::now() + budget;
         self.send(&format!("BODY {}\r\n", wrap_id(message_id)))
             .await?;
-        let status = self.read_status(COMMAND_TIMEOUT).await?;
+        let status = self
+            .read_status(budget.min(COMMAND_TIMEOUT))
+            .await
+            .map_err(stalled_as_timeout)?;
         if let Err(error) = classify_article_status(&status, "222") {
             // Non-body responses end at the status line, so the wire is clean.
             self.poisoned = false;
             return Err(error);
         }
 
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            // The status arrived but there is no budget left to drain the body.
+            // Leaving `poisoned` set closes the socket rather than pooling one
+            // with an unread body on it.
+            return Err(NntpError::Timeout);
+        }
         let mut buf = PooledBuf::take(&ENCODED_BUF_POOL, 1 << 20);
         self.stream
-            .read_until_dot(buf.as_mut_vec(), BODY_READ_TIMEOUT)
-            .await?;
+            .read_until_dot(buf.as_mut_vec(), remaining)
+            .await
+            .map_err(stalled_as_timeout)?;
         self.poisoned = false;
 
         self.last_used = Instant::now();
@@ -367,6 +407,16 @@ fn classify_article_status(status: &str, ok_code: &str) -> Result<(), NntpError>
         return Err(NntpError::TooManyConnections(status.to_string()));
     }
     Err(NntpError::ServerError(status.to_string()))
+}
+
+/// Surface a read that ran out of time as [`NntpError::Timeout`] rather than a
+/// generic io error, so the pool can tell "this provider stopped answering"
+/// apart from "the socket broke" and demote on the former.
+fn stalled_as_timeout(error: impl Into<NntpError>) -> NntpError {
+    match error.into() {
+        NntpError::Io(io) if io.kind() == std::io::ErrorKind::TimedOut => NntpError::Timeout,
+        other => other,
+    }
 }
 
 /// Whether a failed command is worth retrying on a fresh socket. A missing

@@ -28,6 +28,7 @@ mod ingest;
 mod meta;
 mod read_direct;
 mod read_rar;
+mod salvage;
 mod store;
 #[cfg(test)]
 mod tests;
@@ -36,6 +37,7 @@ pub mod validation;
 pub use error::StreamerError;
 pub use ingest::DEFAULT_AVAILABILITY_SAMPLE_PERCENT;
 pub use meta::{NzbMeta, NzbMetaFile, NzbMetaSource, NzbRarPart, NzbRarSlice, UNKNOWN_FILE_LABEL};
+pub use salvage::set_degraded_playback;
 
 pub(crate) use meta::{concat_slices, select_validation_indices};
 

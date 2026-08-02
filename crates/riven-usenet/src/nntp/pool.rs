@@ -5,7 +5,7 @@
 //! reaped once they have been idle long enough that the provider would drop
 //! them anyway.
 
-use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
@@ -27,8 +27,36 @@ const MAX_IDLE: Duration = Duration::from_secs(30);
 const SLOW_ACQUIRE: Duration = Duration::from_millis(250);
 /// Consecutive `430`s before a provider is tried after its healthier peers.
 const NOT_FOUND_DEMOTE_THRESHOLD: u32 = 3;
+/// Consecutive transport failures — timeout, io, tls — before the same
+/// happens. Separate from the `430` count because they mean different things:
+/// a `430` says the provider never had the article, a timeout says it is not
+/// answering. Both are reasons to try someone else first.
+const FAILURE_DEMOTE_THRESHOLD: u32 = 3;
 /// Consecutive successes that clear a demotion.
 const SUCCESS_PROMOTE_THRESHOLD: u32 = 10;
+
+/// Default floor on the time one article gets against one provider, used
+/// wherever [`NntpServerConfig::article_timeout`] is not set to something else.
+///
+/// Sits above the worst article latency healthy providers have been measured
+/// at (p99 1.7 s normally, 11.7 s against an oversubscribed pool), so a
+/// legitimately slow fetch is never cut short — while still being an order of
+/// magnitude below the 175 s single-article stall this bound exists for.
+pub const DEFAULT_ARTICLE_TIMEOUT: Duration = Duration::from_secs(15);
+/// Multiple of the configured floor that a measured-slow provider may reach.
+/// Bounds the budget without pinning it to a wall-clock number that a genuinely
+/// slow provider would trip on: a playback read blocked past this has already
+/// cost the player its cushion, so waiting longer on one provider can only turn
+/// a stutter into a stall.
+const MAX_BUDGET_OVER_FLOOR: u32 = 3;
+/// Multiple of a provider's own measured article latency allowed before a
+/// fetch is treated as stalled rather than merely slow. Scaling off the
+/// provider rather than a flat number keeps the bound honest on a slow
+/// provider and tight on a fast one.
+const STALL_LATENCY_MULTIPLE: u32 = 8;
+/// Weight of the newest sample in the latency EWMA, as a right shift: the
+/// estimate moves an eighth of the way to each new observation.
+const LATENCY_EWMA_SHIFT: u32 = 3;
 
 pub struct ClientPool {
     config: Arc<NntpServerConfig>,
@@ -39,8 +67,64 @@ pub struct ClientPool {
     traffic: Arc<Traffic>,
     open: AtomicUsize,
     leased: AtomicUsize,
+    health: Health,
+}
+
+/// Rolling view of how well one provider is answering: what an article costs
+/// against it, and whether it has been failing often enough to be tried after
+/// its peers.
+///
+/// This is the whole of riven's provider-health policy, and it is deliberately
+/// softer than a circuit breaker. A breaker takes a provider out of rotation
+/// entirely, which is the right shape when there are dozens of interchangeable
+/// backends; an install here typically has two, so removing one is closer to an
+/// outage than a mitigation. Demotion reorders instead — a bad provider is
+/// still tried, just last.
+#[derive(Default)]
+struct Health {
+    /// EWMA of successful `BODY` durations in milliseconds. Zero until the
+    /// first article lands, which reads as "no estimate yet".
+    latency_ms: AtomicU64,
     consecutive_not_found: AtomicU32,
+    consecutive_failure: AtomicU32,
     consecutive_success: AtomicU32,
+}
+
+impl Health {
+    fn is_demoted(&self) -> bool {
+        self.consecutive_not_found.load(Ordering::Relaxed) >= NOT_FOUND_DEMOTE_THRESHOLD
+            || self.consecutive_failure.load(Ordering::Relaxed) >= FAILURE_DEMOTE_THRESHOLD
+    }
+
+    /// How long one article may take against this provider before the fetch is
+    /// abandoned and the next provider tried, given that provider's configured
+    /// floor.
+    fn article_budget(&self, floor: Duration) -> Duration {
+        let latency = self.latency_ms.load(Ordering::Relaxed);
+        if latency == 0 {
+            return floor;
+        }
+        Duration::from_millis(latency.saturating_mul(u64::from(STALL_LATENCY_MULTIPLE)))
+            .clamp(floor, floor.saturating_mul(MAX_BUDGET_OVER_FLOOR))
+    }
+
+    fn record_latency(&self, sample: Duration) {
+        let sample = sample.as_millis().min(u128::from(u64::MAX)) as u64;
+        let previous = self.latency_ms.load(Ordering::Relaxed);
+        let next = if previous == 0 {
+            sample
+        } else {
+            // previous + (sample - previous) / 2^shift, in integer arithmetic
+            // that cannot underflow when the sample is the smaller of the two.
+            let step = previous.abs_diff(sample) >> LATENCY_EWMA_SHIFT;
+            if sample >= previous {
+                previous.saturating_add(step)
+            } else {
+                previous.saturating_sub(step)
+            }
+        };
+        self.latency_ms.store(next.max(1), Ordering::Relaxed);
+    }
 }
 
 impl ClientPool {
@@ -65,8 +149,7 @@ impl ClientPool {
             traffic: Arc::new(Traffic::default()),
             open: AtomicUsize::new(0),
             leased: AtomicUsize::new(0),
-            consecutive_not_found: AtomicU32::new(0),
-            consecutive_success: AtomicU32::new(0),
+            health: Health::default(),
         })
     }
 
@@ -90,19 +173,32 @@ impl ClientPool {
         &self.traffic
     }
 
-    /// True while this provider is being skipped past healthier ones because
-    /// it keeps answering `430` for articles others can serve.
+    /// True while this provider is being skipped past healthier ones — because
+    /// it keeps answering `430` for articles others can serve, or because it
+    /// keeps failing to answer at all.
     pub fn is_demoted(&self) -> bool {
-        self.consecutive_not_found.load(Ordering::Relaxed) >= NOT_FOUND_DEMOTE_THRESHOLD
+        self.health.is_demoted()
     }
 
     pub fn consecutive_not_found(&self) -> u32 {
-        self.consecutive_not_found.load(Ordering::Relaxed)
+        self.health.consecutive_not_found.load(Ordering::Relaxed)
+    }
+
+    pub fn consecutive_failure(&self) -> u32 {
+        self.health.consecutive_failure.load(Ordering::Relaxed)
+    }
+
+    /// How long one article may take against this provider before the caller
+    /// should give up on it and try the next. Derived from this provider's own
+    /// measured latency — see [`Health::article_budget`].
+    pub fn article_budget(&self) -> Duration {
+        self.health.article_budget(self.config.article_timeout)
     }
 
     pub fn record_not_found(&self) {
-        self.consecutive_success.store(0, Ordering::Relaxed);
+        self.health.consecutive_success.store(0, Ordering::Relaxed);
         let count = self
+            .health
             .consecutive_not_found
             .fetch_add(1, Ordering::Relaxed)
             .saturating_add(1);
@@ -115,14 +211,42 @@ impl ClientPool {
         }
     }
 
-    pub fn record_success(&self) {
+    /// A fetch that failed for a reason that is about the provider rather than
+    /// the article: a timeout, a dropped socket, a TLS fault.
+    pub fn record_failure(&self) {
+        self.health.consecutive_success.store(0, Ordering::Relaxed);
         let count = self
+            .health
+            .consecutive_failure
+            .fetch_add(1, Ordering::Relaxed)
+            .saturating_add(1);
+        if count == FAILURE_DEMOTE_THRESHOLD {
+            tracing::info!(
+                host = %self.config.host,
+                consecutive_failure = count,
+                latency_ms = self.health.latency_ms.load(Ordering::Relaxed),
+                "nntp provider demoted behind healthier providers"
+            );
+        }
+    }
+
+    /// A served article. `latency` folds into the estimate that sizes this
+    /// provider's [`ClientPool::article_budget`].
+    pub fn record_success(&self, latency: Duration) {
+        self.health.record_latency(latency);
+        let count = self
+            .health
             .consecutive_success
             .fetch_add(1, Ordering::Relaxed)
             .saturating_add(1);
         if count >= SUCCESS_PROMOTE_THRESHOLD {
-            self.consecutive_success.store(0, Ordering::Relaxed);
-            if self.consecutive_not_found.swap(0, Ordering::Relaxed) >= NOT_FOUND_DEMOTE_THRESHOLD {
+            self.health.consecutive_success.store(0, Ordering::Relaxed);
+            let was_demoted = self.health.is_demoted();
+            self.health
+                .consecutive_not_found
+                .store(0, Ordering::Relaxed);
+            self.health.consecutive_failure.store(0, Ordering::Relaxed);
+            if was_demoted {
                 tracing::info!(host = %self.config.host, "nntp provider promoted after sustained success");
             }
         }
@@ -326,7 +450,7 @@ mod tests {
                 pass: None,
                 use_tls: false,
                 max_connections,
-                timeout: Duration::from_secs(5),
+                article_timeout: Duration::from_millis(200),
             },
             priority: 0,
             is_backup: false,
@@ -400,7 +524,7 @@ mod tests {
         let task_pool = pool.clone();
         let command = tokio::spawn(async move {
             let mut lease = task_pool.acquire().await.unwrap();
-            lease.body("cancel@test").await
+            lease.body("cancel@test", Duration::from_secs(30)).await
         });
         command_seen_rx.await.unwrap();
         command.abort();
@@ -469,20 +593,79 @@ mod tests {
         assert_eq!(health.idle_connections, 0);
     }
 
-    #[tokio::test]
-    async fn demotion_follows_not_found_history() {
-        let pool = ClientPool::new(test_provider(
+    fn unreachable_pool() -> Arc<ClientPool> {
+        ClientPool::new(test_provider(
             "127.0.0.1:1".parse::<std::net::SocketAddr>().unwrap(),
             1,
-        ));
+        ))
+    }
+
+    #[tokio::test]
+    async fn demotion_follows_not_found_history() {
+        let pool = unreachable_pool();
         assert!(!pool.is_demoted());
         for _ in 0..NOT_FOUND_DEMOTE_THRESHOLD {
             pool.record_not_found();
         }
         assert!(pool.is_demoted());
         for _ in 0..SUCCESS_PROMOTE_THRESHOLD {
-            pool.record_success();
+            pool.record_success(Duration::from_millis(200));
         }
         assert!(!pool.is_demoted());
+    }
+
+    /// A provider that answers `430` is one kind of unhealthy; one that stops
+    /// answering at all is another, and used to be invisible to the ordering —
+    /// so a stalling provider stayed first in line indefinitely.
+    #[tokio::test]
+    async fn demotion_follows_failure_history_too() {
+        let pool = unreachable_pool();
+        assert!(!pool.is_demoted());
+        for _ in 0..FAILURE_DEMOTE_THRESHOLD {
+            pool.record_failure();
+        }
+        assert!(pool.is_demoted());
+        assert_eq!(pool.consecutive_not_found(), 0, "not a spool problem");
+
+        for _ in 0..SUCCESS_PROMOTE_THRESHOLD {
+            pool.record_success(Duration::from_millis(200));
+        }
+        assert!(!pool.is_demoted());
+    }
+
+    #[tokio::test]
+    async fn the_article_budget_tracks_measured_latency_within_bounds() {
+        let pool = unreachable_pool();
+        let floor = pool.config.article_timeout;
+        assert_eq!(
+            pool.article_budget(),
+            floor,
+            "no samples yet means the floor, not zero"
+        );
+
+        // A fast provider still gets the floor: 8x a 5 ms article is well under
+        // it, and cutting a fetch off at 40 ms would fail over on ordinary
+        // variance.
+        for _ in 0..64 {
+            pool.record_success(Duration::from_millis(5));
+        }
+        assert_eq!(pool.article_budget(), floor);
+
+        // A genuinely slow provider earns more room, up to the ceiling.
+        for _ in 0..256 {
+            pool.record_success(Duration::from_secs(20));
+        }
+        assert_eq!(pool.article_budget(), floor * MAX_BUDGET_OVER_FLOOR);
+    }
+
+    /// The default has to leave room for an article that is slow rather than
+    /// stalled, and has to sit far below the stall it exists to cut short.
+    #[test]
+    fn the_default_article_timeout_brackets_observed_latency() {
+        assert!(
+            DEFAULT_ARTICLE_TIMEOUT > Duration::from_secs(11),
+            "p99 11.7s"
+        );
+        assert!(DEFAULT_ARTICLE_TIMEOUT * MAX_BUDGET_OVER_FLOOR < Duration::from_secs(175));
     }
 }
