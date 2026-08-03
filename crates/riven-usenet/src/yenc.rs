@@ -13,34 +13,21 @@
 //! x86-64). CRC32 is computed incrementally during decode rather than as a
 //! second pass.
 //!
-//! The decoded buffer is borrowed from a process-wide free list and the
-//! resulting [`Bytes`] owns it via [`Bytes::from_owner`]: when the segment
-//! cache evicts the entry, the buffer's `Drop` returns the underlying
-//! allocation to the pool instead of releasing pages back to the kernel.
-//! musl serves ~700 KB allocations via `mmap` + `madvise(MADV_DONTNEED)`,
-//! so fresh-page first-touch faults were ~6 % of CPU during 4K HDR
-//! streaming (see `scripts/profile/captures/baseline-s6e1.svg`); reusing
-//! the same pages eliminates that path.
+//! The decoded buffer is allocated at exactly the encoded payload's length,
+//! which is the tightest upper bound on the decoded size (yEnc only ever
+//! shrinks: escapes are two bytes in, one out, and the CRLFs are dropped). So
+//! the buffer never grows mid-decode, and the `Bytes` handed to the segment
+//! cache pins a capacity within ~3 % of the `len` the cache charges itself.
 //!
-//! The pool is process-wide rather than thread-local because the two
-//! sides of the lifecycle run on different runtimes: yEnc decode happens
-//! on Tokio's blocking pool (via `spawn_blocking`), while cache eviction
-//! — and therefore buffer `Drop` — happens on whichever Tokio worker is
-//! holding the `SegmentCache` mutex when a `put` runs over budget.
+//! This used to draw from a process-wide free list, because musl serves
+//! ~700 KB allocations via `mmap` + `madvise(MADV_DONTNEED)` and the
+//! fresh-page first-touch faults were ~6 % of CPU during 4K HDR streaming.
+//! The binary now sets mimalloc as its global allocator, which keeps those
+//! pages on a thread-local free list for every allocation in the process
+//! rather than the two that module covered.
 
 use bytes::Bytes;
 use memchr::memchr3;
-
-use crate::bufpool::{BufPool, PooledBuf};
-
-/// Decoded-segment buffer pool. ~3× a typical 720 KB decoded segment cap, and
-/// 8 retained: `ARTICLE_MAX_IN_FLIGHT` is 4, so 8 covers the in-flight set
-/// twice over.
-///
-/// It retained 64, which is a 128 MiB ceiling that no cache stat reports and
-/// nothing in flight can justify — the pool exists to keep hot pages out of
-/// musl's `madvise` path, and 8 buffers do that as well as 64 do.
-static DECODE_BUF_POOL: BufPool = BufPool::new(8, 2 * 1024 * 1024);
 
 #[derive(Debug, Clone, Default)]
 pub struct YencInfo {
@@ -109,8 +96,10 @@ pub fn decode(body: &[u8]) -> Result<(Bytes, YencInfo), YencError> {
     });
 
     let payload = &body[payload_start..yend_idx];
-    let mut out = PooledBuf::take(&DECODE_BUF_POOL, payload.len());
-    decode_payload(payload, &mut info, out.as_mut_vec());
+    // Decoding only ever shrinks, so the encoded length is an upper bound the
+    // decode loop can never outgrow — one allocation, no realloc mid-decode.
+    let mut out = Vec::with_capacity(payload.len());
+    decode_payload(payload, &mut info, &mut out);
 
     if let (Some(declared), Some(computed)) = (info.declared_pcrc32, info.computed_pcrc32)
         && declared != computed
@@ -118,7 +107,7 @@ pub fn decode(body: &[u8]) -> Result<(Bytes, YencInfo), YencError> {
         tracing::warn!(declared, computed, "yEnc pcrc32 mismatch");
     }
 
-    Ok((Bytes::from_owner(out), info))
+    Ok((Bytes::from(out), info))
 }
 
 /// Decode the yEnc payload bytes (everything between `=ybegin`/`=ypart` and

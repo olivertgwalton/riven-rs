@@ -15,9 +15,7 @@ use tokio::io::BufReader;
 use tokio::net::TcpStream;
 use tokio_rustls::rustls::pki_types::ServerName;
 
-use crate::bufpool::PooledBuf;
-
-use super::{ENCODED_BUF_POOL, NntpError, NntpServerConfig, NntpStream, build_tls_connector};
+use super::{NntpError, NntpServerConfig, NntpStream, NntpTransport, build_tls_connector};
 
 /// Dial + greeting + authentication budget.
 const DIAL_TIMEOUT: Duration = Duration::from_secs(30);
@@ -28,6 +26,10 @@ const COMMAND_TIMEOUT: Duration = Duration::from_secs(60);
 const STAT_TIMEOUT: Duration = Duration::from_secs(2);
 /// Initial attempt plus two retries, per command.
 const COMMAND_ATTEMPTS: usize = 3;
+/// Capacity an encoded-body buffer starts at. Comfortably above the ~720 KB
+/// article most posters cut, so the common case never reallocates mid-body;
+/// a larger post grows the buffer once and the allocator keeps the pages.
+const BODY_BUF_CAPACITY: usize = 1 << 20;
 
 /// Per-provider byte/article counters, shared by every client of that provider.
 #[derive(Debug, Default)]
@@ -173,7 +175,7 @@ impl NntpClient {
         &mut self,
         message_id: &str,
         budget: Duration,
-    ) -> Result<PooledBuf, NntpError> {
+    ) -> Result<Vec<u8>, NntpError> {
         let deadline = Instant::now() + budget;
         let mut last_err = None;
         for attempt in 0..COMMAND_ATTEMPTS {
@@ -211,7 +213,7 @@ impl NntpClient {
         &mut self,
         message_id: &str,
         budget: Duration,
-    ) -> Result<PooledBuf, NntpError> {
+    ) -> Result<Vec<u8>, NntpError> {
         // A future can be cancelled at any await below. Poison before writing
         // so a socket with an unread status or body is never pooled.
         self.poisoned = true;
@@ -235,9 +237,9 @@ impl NntpClient {
             // with an unread body on it.
             return Err(NntpError::Timeout);
         }
-        let mut buf = PooledBuf::take(&ENCODED_BUF_POOL, 1 << 20);
+        let mut buf = Vec::with_capacity(BODY_BUF_CAPACITY);
         self.stream
-            .read_until_dot(buf.as_mut_vec(), remaining)
+            .read_until_dot(&mut buf, remaining)
             .await
             .map_err(stalled_as_timeout)?;
         self.poisoned = false;
@@ -248,6 +250,83 @@ impl NntpClient {
             .fetch_add(buf.len() as u64, Ordering::Relaxed);
         self.traffic.articles_read.fetch_add(1, Ordering::Relaxed);
         Ok(buf)
+    }
+
+    /// `BODY` a batch of message-ids over this one connection, writing every
+    /// command before reading any reply — [`stat_many`](Self::stat_many)'s
+    /// shape, applied to article bodies. A batch of `n` costs one round trip
+    /// instead of `n`, and one connection instead of `n`.
+    ///
+    /// The connection, not the round trip, is usually the reason to reach for
+    /// this. Bodies are large, so a batch on one connection is bounded by that
+    /// connection's share of provider bandwidth where `n` parallel fetches are
+    /// not — this is a win for a scan that would otherwise hold `n` slots the
+    /// streaming path wants, and a loss for anything latency-critical. Playback
+    /// deliberately does not use it.
+    ///
+    /// Results are positional. A `430` is a status line and nothing else, so
+    /// the wire stays in sync and the rest of the batch is still readable —
+    /// hence the per-article `Err`. Anything else leaves unread bodies on the
+    /// socket with no way to resynchronise, so the connection is poisoned and
+    /// the whole batch fails.
+    ///
+    /// `budget` bounds the entire batch, the way [`body`](Self::body)'s bounds
+    /// one article. Unlike `body` there is no retry: a reconnect would lose the
+    /// replies still queued behind the failure.
+    pub async fn body_many(
+        &mut self,
+        message_ids: &[String],
+        budget: Duration,
+    ) -> Result<Vec<Result<Vec<u8>, NntpError>>, NntpError> {
+        if message_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let deadline = Instant::now() + budget;
+
+        let mut pipeline = String::new();
+        for id in message_ids {
+            pipeline.push_str("BODY ");
+            pipeline.push_str(&wrap_id(id));
+            pipeline.push_str("\r\n");
+        }
+        self.poisoned = true;
+        self.send(&pipeline).await?;
+
+        let mut out = Vec::with_capacity(message_ids.len());
+        for _ in message_ids {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(NntpError::Timeout);
+            }
+            let status = self
+                .read_status(remaining.min(COMMAND_TIMEOUT))
+                .await
+                .map_err(stalled_as_timeout)?;
+            match classify_article_status(&status, "222") {
+                Ok(()) => {
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    if remaining.is_zero() {
+                        return Err(NntpError::Timeout);
+                    }
+                    let mut buf = Vec::with_capacity(BODY_BUF_CAPACITY);
+                    self.stream
+                        .read_until_dot(&mut buf, remaining)
+                        .await
+                        .map_err(stalled_as_timeout)?;
+                    self.traffic
+                        .bytes_read
+                        .fetch_add(buf.len() as u64, Ordering::Relaxed);
+                    self.traffic.articles_read.fetch_add(1, Ordering::Relaxed);
+                    out.push(Ok(buf));
+                }
+                Err(error @ NntpError::ArticleNotFound(_)) => out.push(Err(error)),
+                Err(error) => return Err(error),
+            }
+        }
+
+        self.poisoned = false;
+        self.last_used = Instant::now();
+        Ok(out)
     }
 
     /// `STAT <message-id>`: `Ok(true)` when the article exists, `Ok(false)`
@@ -351,7 +430,11 @@ impl NntpClient {
 }
 
 async fn dial(config: &NntpServerConfig) -> Result<NntpStream, NntpError> {
-    const NNTP_READ_BUF: usize = 512 * 1024;
+    /// Read buffer per connection. `fill_into` asks for 64 KiB at a time, so a
+    /// larger one batches nothing it was not already batching — see
+    /// [`NntpTransport`] for what was measured. Was 512 KiB, times the 100
+    /// connections a provider allows.
+    const READ_BUF: usize = 64 * 1024;
 
     let addrs = resolve(&config.host, config.port).await?;
     let tcp = match connect_first(&addrs).await {
@@ -365,9 +448,8 @@ async fn dial(config: &NntpServerConfig) -> Result<NntpStream, NntpError> {
     };
     drop(tcp.set_nodelay(true));
     if !config.use_tls {
-        return Ok(NntpStream::Plain(BufReader::with_capacity(
-            NNTP_READ_BUF,
-            tcp,
+        return Ok(NntpStream::new(NntpTransport::Plain(
+            BufReader::with_capacity(READ_BUF, tcp),
         )));
     }
     let connector = build_tls_connector()?;
@@ -377,9 +459,8 @@ async fn dial(config: &NntpServerConfig) -> Result<NntpStream, NntpError> {
         .connect(server_name, tcp)
         .await
         .map_err(|e| NntpError::Tls(e.to_string()))?;
-    Ok(NntpStream::Tls(Box::new(BufReader::with_capacity(
-        NNTP_READ_BUF,
-        tls,
+    Ok(NntpStream::new(NntpTransport::Tls(Box::new(
+        BufReader::with_capacity(READ_BUF, tls),
     ))))
 }
 

@@ -452,7 +452,6 @@ impl Plugin for UsenetPlugin {
         };
 
         let files: Vec<DownloadFile> = meta
-            .files
             .iter()
             .enumerate()
             .map(|(idx, f)| {

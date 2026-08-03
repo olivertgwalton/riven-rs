@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use bytes::Bytes;
-use riven_core::local_source::{LocalByteSource, SourceLayout};
+use riven_core::local_source::{LocalByteSource, LocalOpenFile, SourceLayout};
 
 /// Fetches byte ranges of one open file.
 ///
@@ -39,8 +39,10 @@ pub trait ByteSource: Send + Sync {
 /// Usenet-backed range source.
 pub struct UsenetSource {
     inner: Arc<dyn LocalByteSource>,
-    info_hash: Arc<str>,
-    file_index: usize,
+    /// The origin's handle on this file, held for the life of the FUSE handle.
+    /// Resolving the segment map is per-open now rather than per-read; see
+    /// [`LocalByteSource`] for why that replaced a cache.
+    file: Arc<dyn LocalOpenFile>,
     size: u64,
     /// Active-streams registry key, powering the dashboard's "now playing".
     /// Registered for the life of the handle and released on drop, so the
@@ -60,10 +62,10 @@ impl UsenetSource {
         let stream_id = NEXT_STREAM_ID.fetch_add(1, Ordering::Relaxed);
         let stream_key = format!("{info_hash}:{file_index}:{stream_id}");
         inner.stream_register(&stream_key, &info_hash, filename, size);
+        let file = inner.open_file(&info_hash, file_index);
         Self {
             inner,
-            info_hash,
-            file_index,
+            file,
             size,
             stream_key,
         }
@@ -79,14 +81,14 @@ impl Drop for UsenetSource {
 #[async_trait]
 impl ByteSource for UsenetSource {
     async fn read_range(&self, start: u64, end: u64) -> io::Result<Bytes> {
-        self.inner
-            .read_range(&self.info_hash, self.file_index, start, end)
+        self.file
+            .read_range(start, end)
             .await
             .map_err(io::Error::other)
     }
 
     async fn layout(&self) -> Option<SourceLayout> {
-        self.inner.layout(&self.info_hash, self.file_index).await
+        self.file.layout().await
     }
 
     fn size(&self) -> u64 {

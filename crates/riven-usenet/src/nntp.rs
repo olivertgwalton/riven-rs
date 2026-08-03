@@ -73,25 +73,90 @@ pub enum NntpError {
     Timeout,
 }
 
-pub(crate) enum NntpStream {
+/// One buffer, above the record layer, and a small one.
+///
+/// A buffer *below* rustls was tried and measured: the theory was that rustls
+/// reads ciphertext a TLS record at a time (≤16 KiB) and so pays a `recv` per
+/// record. It does not. Under a real 4K stream the socket already has far more
+/// than a record waiting, so `read()` returns a large chunk either way —
+/// profiling the two builds against the same title at the same position put
+/// `recv_with_flags` at *exactly* 170 samples both times. The inner buffer
+/// removed no syscall and added a memcpy, showing up as ~3.5 % of CPU in
+/// `poll_fill_buf` frames that were not there before.
+///
+/// What is worth keeping is the size. This only has to serve status lines and
+/// hand [`fill_into`]-sized (64 KiB) chunks up, so 512 KiB bought nothing —
+/// and it is per connection, of which a provider allows 100.
+pub(crate) enum NntpTransport {
     Plain(BufReader<TcpStream>),
     Tls(Box<BufReader<tokio_rustls::client::TlsStream<TcpStream>>>),
 }
 
+/// One NNTP connection's read/write half, plus the bytes a bulk read pulled in
+/// past the end of the reply it was reading.
+///
+/// That carry is what makes pipelining possible. [`read_until_dot`] reads in
+/// 64 KiB chunks, so the chunk that completes one reply routinely contains the
+/// start of the next one; with a single command outstanding there is never a
+/// next one and the excess was simply truncated away. Under pipelining that
+/// excess is the following reply's status line, and dropping it desynchronises
+/// the connection — the reader then waits for a status line the server already
+/// sent, until the budget expires.
+///
+/// [`read_until_dot`]: NntpStream::read_until_dot
+pub(crate) struct NntpStream {
+    inner: NntpTransport,
+    carry: Vec<u8>,
+}
+
 impl NntpStream {
+    pub(crate) fn new(inner: NntpTransport) -> Self {
+        Self {
+            inner,
+            carry: Vec::new(),
+        }
+    }
+
     /// Read a single line, failing with `TimedOut` if no data arrives within
     /// `timeout`. The deadline is per call, so it acts as an inactivity timeout
     /// (matching nntppool's `SetReadDeadline`): a slow-but-progressing transfer
     /// keeps resetting it, while a half-dead socket trips it.
+    ///
+    /// Carried-over bytes are consumed before the socket is touched, so a
+    /// status line already pulled in by the previous body read is seen here
+    /// rather than waited for.
     pub(crate) async fn read_line(
         &mut self,
         buf: &mut String,
         timeout: Duration,
     ) -> io::Result<usize> {
+        if !self.carry.is_empty() {
+            // Status lines are ASCII, and every byte here is one this
+            // connection already read, so a lossy decode cannot invent one.
+            if let Some(end) = memchr::memchr(b'\n', &self.carry) {
+                let line: Vec<u8> = self.carry.drain(..=end).collect();
+                buf.push_str(&String::from_utf8_lossy(&line));
+                return Ok(line.len());
+            }
+            // A partial line: hand over what there is and let the socket
+            // supply the rest of it.
+            let partial = std::mem::take(&mut self.carry);
+            buf.push_str(&String::from_utf8_lossy(&partial));
+            let rest = self.read_line_from_socket(buf, timeout).await?;
+            return Ok(partial.len() + rest);
+        }
+        self.read_line_from_socket(buf, timeout).await
+    }
+
+    async fn read_line_from_socket(
+        &mut self,
+        buf: &mut String,
+        timeout: Duration,
+    ) -> io::Result<usize> {
         tokio::time::timeout(timeout, async {
-            match self {
-                NntpStream::Plain(s) => s.read_line(buf).await,
-                NntpStream::Tls(s) => s.read_line(buf).await,
+            match &mut self.inner {
+                NntpTransport::Plain(s) => s.read_line(buf).await,
+                NntpTransport::Tls(s) => s.read_line(buf).await,
             }
         })
         .await
@@ -109,9 +174,9 @@ impl NntpStream {
     /// than wrapping each read in a fresh `tokio::time::timeout()` future —
     /// profile showed ~0.5 % of CPU in `Timeout::poll`'s memset.
     ///
-    /// `out` is cleared on entry; the caller threads it from the encoded
-    /// buffer pool (a `crate::bufpool::PooledBuf`) so the next BODY fetch
-    /// reuses its hot pages.
+    /// `out` is cleared on entry and reused across the articles of one
+    /// pipelined batch, so a batch pays one allocation rather than one per
+    /// article.
     ///
     /// Reads bulk chunks and scans for the `\r\n.\r\n` terminator with
     /// `memmem` (replaces a previous per-line `read_until(b'\n', ...)`
@@ -127,6 +192,9 @@ impl NntpStream {
         const TERMINATOR: &[u8] = b"\r\n.\r\n";
 
         out.clear();
+        // Whatever the previous reply's last read over-pulled is the front of
+        // this one, and may already contain the whole body.
+        out.append(&mut self.carry);
         let mut scanned: usize = 0;
 
         let sleep = tokio::time::sleep(timeout);
@@ -145,9 +213,9 @@ impl NntpStream {
             scanned = out.len();
 
             let read_fut = async {
-                match self {
-                    NntpStream::Plain(s) => fill_into(s, out).await,
-                    NntpStream::Tls(s) => fill_into(s, out).await,
+                match &mut self.inner {
+                    NntpTransport::Plain(s) => fill_into(s, out).await,
+                    NntpTransport::Tls(s) => fill_into(s, out).await,
                 }
             };
             tokio::pin!(read_fut);
@@ -163,22 +231,27 @@ impl NntpStream {
             };
         };
 
+        // Bytes past the terminator belong to the next reply, not this body.
+        // Captured before the truncate that would otherwise discard them.
+        if term_end < out.len() {
+            self.carry.extend_from_slice(&out[term_end..]);
+        }
         out.truncate(term_end - 3);
         undot_stuff(out);
         Ok(())
     }
 
     pub(crate) async fn write_all(&mut self, buf: &[u8]) -> io::Result<()> {
-        match self {
-            NntpStream::Plain(s) => s.get_mut().write_all(buf).await,
-            NntpStream::Tls(s) => s.get_mut().write_all(buf).await,
+        match &mut self.inner {
+            NntpTransport::Plain(s) => s.get_mut().write_all(buf).await,
+            NntpTransport::Tls(s) => s.get_mut().write_all(buf).await,
         }
     }
 
     pub(crate) async fn flush(&mut self) -> io::Result<()> {
-        match self {
-            NntpStream::Plain(s) => s.get_mut().flush().await,
-            NntpStream::Tls(s) => s.get_mut().flush().await,
+        match &mut self.inner {
+            NntpTransport::Plain(s) => s.get_mut().flush().await,
+            NntpTransport::Tls(s) => s.get_mut().flush().await,
         }
     }
 }
@@ -301,13 +374,6 @@ pub const DEFAULT_DOWNLOAD_WORKERS: usize = 4;
 pub(crate) fn init_crypto() {
     drop(rustls::crypto::aws_lc_rs::default_provider().install_default());
 }
-
-/// Pool for encoded NNTP article bodies (input to the yEnc decoder).
-/// Encoded bodies run slightly larger than decoded ones (yEnc adds ~3 %
-/// plus CRLFs), so the same 2 MB cap covers them; 8 retained matches the
-/// decoded-side pool. The buffer recycles when `yenc::decode`'s
-/// `spawn_blocking` closure drops the `PooledBuf` it was handed.
-static ENCODED_BUF_POOL: crate::bufpool::BufPool = crate::bufpool::BufPool::new(8, 2 * 1024 * 1024);
 
 #[cfg(test)]
 pub(crate) mod tests {

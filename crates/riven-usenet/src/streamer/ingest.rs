@@ -4,17 +4,18 @@ use futures::StreamExt;
 use futures::stream;
 
 use crate::nzb::{
-    NzbFile, NzbSegment, detect_rar_volume_groups, filename_from_subject, looks_like_media,
-    looks_obfuscated, parse_nzb_document,
+    NzbFile, detect_rar_volume_groups, filename_from_subject, looks_like_media, looks_obfuscated,
+    parse_nzb_document,
 };
 use crate::par2::{Par2Block, Par2FileDesc, looks_like_par2, parse_file_descriptors, parse_set};
 use crate::rar::{self, RarEncryption, RarVolumeFileEntry};
+use crate::segments::SegmentList;
 
 use super::meta::{UNKNOWN_FILE_LABEL, is_media_filename};
 use super::store;
 use super::{
-    NzbMeta, NzbMetaFile, NzbMetaSource, NzbRarPart, NzbRarSlice, StreamerError, UsenetStreamer,
-    select_validation_indices,
+    IngestedFile, NzbMeta, NzbMetaFile, NzbMetaSource, NzbRarPart, NzbRarSlice, StreamerError,
+    UsenetStreamer, select_validation_indices,
 };
 
 /// In-progress per-inner-file accumulator during multi-file RAR reconstruction.
@@ -110,6 +111,12 @@ const AVAILABILITY_ERROR_LIMIT: f64 = 0.5;
 /// RAR archive header. One typical NNTP segment is ~750 KB encoded, which
 /// after yEnc decode is more than enough to cover MAIN_HEAD + FILE_HEAD.
 const RAR_HEADER_PROBE_BYTES: u64 = 32 * 1024;
+/// Articles the PAR2 blob walk may fetch at once for whatever its pipelined
+/// pass did not resolve. Only a fallback path: the walk itself costs one
+/// connection whatever the blob's segment count. Above the 1 the serial walk
+/// effectively ran at, low enough that a provider refusing pipelined `BODY`
+/// does not turn ingest into a connection storm.
+const PAR2_BLOB_CONCURRENCY: usize = 4;
 
 impl UsenetStreamer {
     /// Probe a sample of `segments` for article availability on the
@@ -120,7 +127,7 @@ impl UsenetStreamer {
     /// round-trips and a green light.
     async fn probe_availability(
         &self,
-        segments: &[NzbSegment],
+        segments: &SegmentList,
         sample_percent: usize,
         file: &str,
     ) -> Result<(), StreamerError> {
@@ -129,7 +136,7 @@ impl UsenetStreamer {
         }
         let mids: Vec<String> = select_validation_indices(segments.len(), sample_percent)
             .into_iter()
-            .map(|i| segments[i].message_id.clone())
+            .filter_map(|i| segments.id(i).map(str::to_string))
             .collect();
         let n = mids.len();
         if n == 0 {
@@ -176,18 +183,17 @@ impl UsenetStreamer {
         password: Option<&str>,
         sample_percent: usize,
         verify_par2: bool,
-    ) -> Result<NzbMeta, StreamerError> {
-        if let Some(existing) = store::load(&self.db, info_hash).await? {
+    ) -> Result<Vec<IngestedFile>, StreamerError> {
+        // A projection, not the document: the caller wants the file list, and
+        // the segment maps behind it run to 145 MB on this library against
+        // ~56 KB of answer. Nothing is warmed into `meta_cache` here either —
+        // reads resolve through the open handle now, so there is no read to
+        // warm for.
+        if let Some(existing) = store::load_file_index(&self.db, info_hash).await? {
             tracing::debug!(
                 info_hash,
-                release = %existing.label(),
-                file_count = existing.files.len(),
+                file_count = existing.len(),
                 "usenet ingest: reusing persisted NZB meta (idempotent hit)"
-            );
-            crate::state::cache_meta(
-                &self.state.meta_cache,
-                info_hash.to_string(),
-                Arc::new(existing.clone()),
             );
             return Ok(existing);
         }
@@ -231,10 +237,8 @@ impl UsenetStreamer {
                 if let Some(first) = virtual_files.first()
                     && let NzbMetaSource::Rar { parts, .. } = &first.source
                 {
-                    let probe_segments: Vec<NzbSegment> = parts
-                        .iter()
-                        .flat_map(|p| p.segments.iter().cloned())
-                        .collect();
+                    let probe_segments: SegmentList =
+                        parts.iter().flat_map(|p| p.segments.iter()).collect();
                     self.probe_availability(&probe_segments, sample_percent, &first.filename)
                         .await?;
                 }
@@ -343,21 +347,36 @@ impl UsenetStreamer {
         })
         .await;
 
+        // The distinct sets the files ended up sharing, by allocation.
+        let mut rar_sets: Vec<Arc<Vec<NzbRarPart>>> = Vec::new();
+        for f in &meta_files {
+            if let NzbMetaSource::Rar { parts, .. } = &f.source
+                && !rar_sets.iter().any(|s| Arc::ptr_eq(s, parts))
+            {
+                rar_sets.push(Arc::clone(parts));
+            }
+        }
         let meta = NzbMeta {
             info_hash: info_hash.to_string(),
             files: meta_files,
+            rar_sets,
             password: file_password,
         };
 
         store::store(&self.db, info_hash, &meta).await?;
 
+        let files: Vec<IngestedFile> = meta.files.iter().map(IngestedFile::from).collect();
+        // Moved into the `Arc` rather than cloned. A just-built season-pack
+        // meta is hundreds of MB in memory, and cloning it to cache it doubled
+        // that at the peak — on the path whose transient allocations caused an
+        // OOM before.
         crate::state::cache_meta(
             &self.state.meta_cache,
             info_hash.to_string(),
-            Arc::new(meta.clone()),
+            Arc::new(meta),
         );
 
-        Ok(meta)
+        Ok(files)
     }
 
     /// If `files` contains one or more stored multi-volume RAR archives,
@@ -499,7 +518,7 @@ impl UsenetStreamer {
 
         for (vol_idx, (part, header)) in parts.iter_mut().zip(header_bytes).enumerate() {
             if let Some(first_seg) = part.segments.first()
-                && let Some(size) = self.pool.decoded_size(&first_seg.message_id)
+                && let Some(size) = self.pool.decoded_size(first_seg.message_id)
             {
                 part.decoded_seg_size = Some(size);
             }
@@ -712,6 +731,9 @@ impl UsenetStreamer {
             g.plaintext_sum = g.plaintext_sum.saturating_add(synth_len);
         }
 
+        // Built once for the whole archive. Every inner file below shares this
+        // allocation rather than copying it — see `NzbMeta::rar_sets`.
+        let shared_parts = Arc::new(parts);
         let mut out: Vec<NzbMetaFile> = Vec::new();
         for name in group_order {
             let Some(g) = groups.remove(&name) else {
@@ -759,7 +781,10 @@ impl UsenetStreamer {
                 filename: g.name,
                 total_size: g.unpacked_size,
                 source: NzbMetaSource::Rar {
-                    parts: parts.clone(),
+                    // One allocation for the whole set: every inner file of
+                    // this archive is served by the same volumes, and copying
+                    // them per file is what made a season pack's meta 145 MB.
+                    parts: Arc::clone(&shared_parts),
                     slices: g.slices,
                 },
             });
@@ -782,7 +807,7 @@ impl UsenetStreamer {
     ) -> Result<Vec<u8>, StreamerError> {
         let mut buf: Vec<u8> = Vec::with_capacity(wanted as usize + 4096);
         for seg in &part.segments {
-            let decoded = self.fetch_article(&seg.message_id).await?;
+            let decoded = self.fetch_article(seg.message_id).await?;
             buf.extend_from_slice(&decoded);
             if (buf.len() as u64) >= wanted {
                 break;
@@ -812,9 +837,26 @@ impl UsenetStreamer {
         }
         let par2_name = filename_from_subject(&smallest.subject);
         let total_bytes: u64 = smallest.segments.iter().map(|s| s.bytes).sum();
+
+        // Every segment of the blob is known up front and all of them are
+        // needed, so this is pipelined over one connection rather than paying a
+        // round trip and a connection slot per segment. The batch is fetched
+        // whole, where the serial walk it replaces stopped at the first
+        // failure; this is the *smallest* par2 file in the set and the trade is
+        // a few wasted segments on a broken release against holding one slot
+        // instead of one per segment on every healthy one.
+        let ids: Vec<String> = smallest
+            .segments
+            .iter()
+            .map(|seg| seg.message_id.to_string())
+            .collect();
         let mut buf: Vec<u8> = Vec::with_capacity(total_bytes as usize);
-        for seg in &smallest.segments {
-            match self.fetch_article(&seg.message_id).await {
+        for (seg, fetched) in smallest
+            .segments
+            .iter()
+            .zip(self.pool.fetch_batch(&ids, PAR2_BLOB_CONCURRENCY).await)
+        {
+            match fetched {
                 Ok(decoded) => buf.extend_from_slice(&decoded),
                 Err(error) => {
                     tracing::debug!(
@@ -916,21 +958,31 @@ impl UsenetStreamer {
         if first.bytes == 0 {
             return Ok(());
         }
-        let dec_first = self.fetch_article(&first.message_id).await?.len() as u64;
+        let n = segments.len();
+        // Both ends in one pipelined pass. The two probes are independent and
+        // this paid a round trip and a connection slot for each of them.
+        let mut ids = vec![first.message_id.to_string()];
+        if let Some(last) = segments.get(n - 1)
+            && n > 1
+            && last.bytes != 0
+        {
+            ids.push(last.message_id.to_string());
+        }
+        let mut probed = self.pool.fetch_batch(&ids, ids.len()).await.into_iter();
+
+        let Some(first_probe) = probed.next() else {
+            return Ok(());
+        };
+        let dec_first = first_probe?.len() as u64;
         if dec_first == 0 {
             return Ok(());
         }
-        let n = segments.len();
-        let dec_last = if n <= 1 {
-            dec_first
-        } else {
-            let last = &segments[n - 1];
-            let measured = if last.bytes == 0 {
-                dec_first
-            } else {
-                self.fetch_article(&last.message_id).await?.len() as u64
-            };
-            if measured == 0 { dec_first } else { measured }
+        let dec_last = match probed.next() {
+            Some(last_probe) => match last_probe?.len() as u64 {
+                0 => dec_first,
+                measured => measured,
+            },
+            None => dec_first,
         };
         let mut new_offsets = Vec::with_capacity(n + 1);
         let mut acc: u64 = 0;
@@ -996,7 +1048,7 @@ impl UsenetStreamer {
 
 /// Cumulative byte offsets of a file's segments: `offsets[i]` is where
 /// segment `i` starts; the final entry is the total size.
-fn segment_offsets(segments: &[NzbSegment]) -> Vec<u64> {
+fn segment_offsets(segments: &SegmentList) -> Vec<u64> {
     let mut offsets = Vec::with_capacity(segments.len() + 1);
     let mut acc: u64 = 0;
     offsets.push(0);

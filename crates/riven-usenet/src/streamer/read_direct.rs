@@ -1,10 +1,19 @@
 use bytes::Bytes;
 
 use crate::nntp::NntpError;
-use crate::nzb::NzbSegment;
+use crate::segments::SegmentList;
 
 use super::salvage::ReadSalvage;
 use super::{NzbMetaSource, StreamerError, UsenetStreamer, concat_slices};
+
+/// Articles past the anchor that one read may start up front.
+///
+/// A bound on *tasks spawned*, not on concurrency — the per-provider semaphore
+/// already caps what reaches the wire, and anything queued behind it is work
+/// this read was going to do anyway. 16 covers the largest tail probe
+/// (10 MiB) at a typical segment size while keeping a pathological range from
+/// spawning a task per article of a whole file.
+const WARM_SPAN_MAX: usize = 16;
 
 impl UsenetStreamer {
     /// Read `[start, end_inclusive]` from `file_index` as a single contiguous
@@ -42,11 +51,24 @@ impl UsenetStreamer {
         start: u64,
         end_inclusive: u64,
     ) -> Result<Vec<Bytes>, StreamerError> {
-        let meta = self.load_meta(info_hash).await?;
-        let file = meta
-            .files
-            .get(file_index)
-            .ok_or(StreamerError::BadFileIndex(file_index))?;
+        let loaded = self.load_file(info_hash, file_index).await?;
+        self.read_range_slices_of(&loaded, info_hash, file_index, start, end_inclusive)
+            .await
+    }
+
+    /// The read itself, against an already-resolved file map.
+    ///
+    /// Split out so the FUSE handle can resolve the map once at open and hand
+    /// it in on every read — see [`LocalByteSource`](riven_core::local_source::LocalByteSource).
+    pub(crate) async fn read_range_slices_of(
+        &self,
+        loaded: &super::FileMeta,
+        info_hash: &str,
+        file_index: usize,
+        start: u64,
+        end_inclusive: u64,
+    ) -> Result<Vec<Bytes>, StreamerError> {
+        let file = &loaded.file;
         if start > end_inclusive || end_inclusive >= file.total_size {
             return Err(StreamerError::BadRange);
         }
@@ -63,7 +85,7 @@ impl UsenetStreamer {
                 .read_rar(
                     parts,
                     slices,
-                    meta.password.as_deref(),
+                    loaded.password.as_deref(),
                     start,
                     end_inclusive,
                     &mut salvage,
@@ -119,7 +141,7 @@ impl UsenetStreamer {
     async fn read_direct(
         &self,
         offsets: &[u64],
-        segments: &[NzbSegment],
+        segments: &SegmentList,
         start: u64,
         end_inclusive: u64,
         salvage: &mut ReadSalvage,
@@ -132,14 +154,34 @@ impl UsenetStreamer {
         let anchor = direct_anchor_segment(offsets, segments.len(), start);
         let mut skip = start.saturating_sub(offsets[anchor]) as usize;
 
+        // Start every article the range spans before walking any of them, the
+        // way the RAR path already does. A read covering one article is
+        // unaffected — the steady-state playback case, since a read-ahead unit
+        // *is* an article here. What this is for is the reads that span many:
+        // the tail probe a player issues at open runs to 10 MiB (~15 articles
+        // at a typical segment size) and the HTTP bridge asks for whole ranges,
+        // and walking those serially paid every round trip end to end.
+        //
+        // The offsets table is approximate, so it picks the horizon and never
+        // sizes a slice; over- or under-shooting by an article costs one
+        // speculative fetch or one unwarmed hop, not correctness.
+        let horizon = direct_anchor_segment(offsets, segments.len(), end_inclusive)
+            .min(anchor.saturating_add(WARM_SPAN_MAX));
+        self.warm_articles(
+            segments
+                .range(anchor, horizon)
+                .map(|segment| segment.message_id),
+        );
+
         let mut slices: Vec<Bytes> = Vec::new();
         let mut produced: usize = 0;
 
         // Walk forward from the anchor until the requested byte count is
         // satisfied or the file ends — the offset table says where to start,
-        // never where to stop. Segments are walked in order: parallelism is
-        // owned by the unified VFS window, and fanning out here would nest a
-        // second scheduler underneath it.
+        // never where to stop. Bytes are still assembled in order; the walk
+        // collects the fetches started above rather than opening one per
+        // segment. Beyond the warmed horizon it falls back to fetching as it
+        // goes, so a range longer than the cap still completes.
         for (index, segment) in segments.iter().enumerate().skip(anchor) {
             // The table's own span for this segment. Sizing a *present*
             // segment from it would drift, which is why the walk below uses
@@ -151,7 +193,7 @@ impl UsenetStreamer {
                 .zip(offsets.get(index))
                 .map_or(0, |(end, begin)| end.saturating_sub(*begin));
             let decoded = self
-                .fetch_article_or_hole(&segment.message_id, hole_len, salvage)
+                .fetch_article_or_hole(segment.message_id, hole_len, salvage)
                 .await?;
             if skip >= decoded.len() {
                 skip -= decoded.len();
@@ -266,12 +308,12 @@ mod tests {
         )
     }
 
-    fn segments(ids: &[&str]) -> Vec<NzbSegment> {
+    fn segments(ids: &[&str]) -> SegmentList {
+        use crate::segments::NzbSegment;
+
         ids.iter()
-            .enumerate()
-            .map(|(index, id)| NzbSegment {
+            .map(|id| NzbSegment {
                 bytes: PAYLOAD.len() as u64,
-                number: index as u32 + 1,
                 message_id: (*id).to_string(),
             })
             .collect()

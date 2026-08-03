@@ -6,7 +6,7 @@ use std::time::Duration;
 use anyhow::Result;
 use redis::AsyncCommands;
 use riven_core::settings::PluginSettings;
-use riven_usenet::nzb::NzbSegment;
+use riven_usenet::segments::SegmentList;
 use riven_usenet::streamer::{NzbMeta, NzbMetaSource};
 use riven_usenet::{SegmentPool, UsenetStreamer};
 use sea_orm::{DbBackend, FromQueryResult, Statement};
@@ -246,19 +246,16 @@ async fn set_state(
 /// by altmount's strategic sample: the head catches DMCA takedowns that
 /// start at the release's first segment, the tail catches truncated
 /// uploads, and the middle catches generic retention loss.
-fn sample_segments(meta: &NzbMeta) -> Vec<NzbSegment> {
+fn sample_segments(meta: &NzbMeta) -> SegmentList {
     let Some(first) = meta.files.first() else {
-        return Vec::new();
+        return SegmentList::default();
     };
-    let all: Vec<NzbSegment> = match &first.source {
+    let all: SegmentList = match &first.source {
         NzbMetaSource::Direct { segments, .. } => segments.clone(),
-        NzbMetaSource::Rar { parts, .. } => parts
-            .iter()
-            .flat_map(|p| p.segments.iter().cloned())
-            .collect(),
+        NzbMetaSource::Rar { parts, .. } => parts.iter().flat_map(|p| p.segments.iter()).collect(),
     };
     if all.is_empty() {
-        return Vec::new();
+        return SegmentList::default();
     }
     let total = all.len();
     if total <= VERIFY_FIRST_N + VERIFY_LAST_N + MIDDLE_SAMPLE {
@@ -279,15 +276,15 @@ fn sample_segments(meta: &NzbMeta) -> Vec<NzbSegment> {
     }
     indices.sort_unstable();
     indices.dedup();
-    indices.into_iter().map(|i| all[i].clone()).collect()
+    indices.into_iter().filter_map(|i| all.get(i)).collect()
 }
 
-async fn stat_sample(pool: &SegmentPool, segments: &[NzbSegment]) -> (usize, usize) {
+async fn stat_sample(pool: &SegmentPool, segments: &SegmentList) -> (usize, usize) {
     let mut alive = 0usize;
     let mut total = 0usize;
     for seg in segments {
         total += 1;
-        match pool.stat_segment(&seg.message_id).await {
+        match pool.stat_segment(seg.message_id).await {
             Ok(true) => alive += 1,
             Ok(false) => {}
             Err(error) => {

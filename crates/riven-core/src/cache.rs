@@ -13,12 +13,14 @@ use parking_lot::Mutex;
 
 const MIB: u64 = 1024 * 1024;
 /// Share of the process memory limit the caches may claim between them, as
-/// `NUM/DEN`; the rest is in-flight decodes, the buffer pools and the runtime.
+/// `NUM/DEN`; the rest is in-flight decodes, allocator slack and the runtime.
 ///
 /// Three quarters, because that is what the other quarter measured: ~25 MiB of
-/// idle runtime plus the two `BufPool` ceilings (32 MiB together). It was a
-/// flat half back when those pools could retain 256 MiB between them, which no
-/// longer describes anything.
+/// idle runtime plus what the encoded and decoded article buffers hold in
+/// flight (~32 MiB together at the current in-flight cap). Those buffers used
+/// to be two explicit free lists with that ceiling written down; they are now
+/// ordinary allocations that mimalloc retains, so the figure is the allocator's
+/// working set rather than a declared cap — the same order, not a guarantee.
 const CACHE_SHARE_NUM: u64 = 3;
 const CACHE_SHARE_DEN: u64 = 4;
 /// No pool shrinks past this fraction of its default. A cache scaled to nothing
@@ -77,11 +79,33 @@ pub const READ_AHEAD_PER_STREAM: u64 = 10 * MIB;
 /// title recently touched is what makes it affordable; a miss here costs a
 /// query and a deserialize, never a wire fetch.
 ///
-/// Note what this does not fix: at ~20 MiB an entry, two large season packs
-/// read alternately evict each other whatever this number is short of holding
-/// both. The fix for that is a smaller `NzbMeta` — it is dominated by
-/// per-segment message-id strings — not a larger cache.
-pub const NZB_META: Pool = Pool::new("nzb-meta", "RIVEN_USENET_META_CACHE_BYTES", 24 * MIB);
+/// **No longer on the read path.** Reads resolve through [`NZB_FILE`], which
+/// holds the one file being played rather than the pack containing it, so what
+/// is left here is ingest, backfill and the health scanner — none of them
+/// latency-critical, and a miss costs them a query and a deserialise.
+///
+/// Sized accordingly. It was 24 MiB while reads depended on it; leaving it
+/// there once `NZB_FILE` existed simply added the two budgets together, and
+/// measuring that is what caught it: the same title at the same position went
+/// from 250 MB allocated to 314 MB, because a 32 MiB cache had been added and
+/// nothing taken away.
+pub const NZB_META: Pool = Pool::new("nzb-meta", "RIVEN_USENET_META_CACHE_BYTES", 8 * MIB);
+/// One *file's* segment map, which is what a read actually needs.
+///
+/// [`NZB_META`] caches whole releases, and a release is the wrong unit: this
+/// library's largest row holds 520 files in 90 MB, so playing one episode of a
+/// season pack pulled in all of them, and 15 rows are individually larger than
+/// the whole `nzb-meta` budget. Keyed per `(info_hash, file_index)`, the entries
+/// are the size of the file being played rather than the pack containing it, so
+/// the same budget holds far more of what is actually being read.
+///
+/// 16 MiB with `NZB_META` at 8 is the 24 MiB `NZB_META` used to hold on its
+/// own — deliberately, because adding a cache without taking the superseded
+/// budget away is exactly what regressed this: measured at the same title and
+/// position, allocated memory went 250 MB → 314 MB. One packed file of a
+/// 100 GB title is ~6 MB, so this holds two or three concurrent streams where
+/// the old budget held a single season-pack meta.
+pub const NZB_FILE: Pool = Pool::new("nzb-file", "RIVEN_USENET_FILE_CACHE_BYTES", 16 * MIB);
 /// Raw NZB documents, as fetched from the indexer.
 pub const NZB_BODY: Pool = Pool::new("nzb-body", "RIVEN_USENET_NZB_CACHE_BYTES", 8 * MIB);
 /// Decoded article bodies: staging between a warm fetch landing and the walk
@@ -97,6 +121,25 @@ pub const SEGMENT: Pool = Pool::new(
     "segment",
     "RIVEN_USENET_CACHE_BYTES",
     MAX_ARTICLE_BYTES * ARTICLE_MAX_IN_FLIGHT as u64 * STAGING_GENERATIONS,
+);
+
+/// Decoded length per segment, memoised so seeking into a RAR volume does not
+/// have to refetch what has already been decoded once.
+///
+/// Bounded here rather than by entry count, which is what it used to be: a
+/// 500 000-entry cap on `(Arc<str>, u64)` is ~75 MB at ~150 bytes an entry, and
+/// counting entries put it outside `RIVEN_MEMORY_LIMIT_MB` and out of the
+/// health query — memory nothing could see or scale. One 100 GB title
+/// contributes ~146 000 segments, so the old cap was three titles deep.
+///
+/// Small, because both readers degrade gracefully: a miss makes `read_rar`
+/// anchor its walk earlier and makes ingest leave `decoded_seg_size` unset.
+/// Neither is a wrong answer, and the ingest reader wants a segment it has just
+/// fetched, which recency alone satisfies.
+pub const SEGMENT_SIZES: Pool = Pool::new(
+    "segment-sizes",
+    "RIVEN_USENET_SEGMENT_SIZE_CACHE_BYTES",
+    8 * MIB,
 );
 
 /// Article fetches riven runs at once. Lives here, beside the cache it sizes,
@@ -116,7 +159,7 @@ const MAX_ARTICLE_BYTES: u64 = 4 * MIB;
 /// and not yet consumed, one whose reader went away and will be back.
 const STAGING_GENERATIONS: u64 = 3;
 
-const POOLS: [Pool; 4] = [READ_AHEAD, NZB_META, NZB_BODY, SEGMENT];
+const POOLS: [Pool; 5] = [READ_AHEAD, NZB_META, NZB_BODY, SEGMENT, SEGMENT_SIZES];
 
 impl Pool {
     const fn new(label: &'static str, env: &'static str, default_bytes: u64) -> Self {

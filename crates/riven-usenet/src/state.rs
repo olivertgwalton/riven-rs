@@ -20,6 +20,9 @@ pub struct StreamerState {
     /// otherwise run 24 simultaneous loads and deserializes of the same
     /// document.
     pub meta_loads: InFlight,
+    /// Releases whose full meta has already been walked for healing/backfill,
+    /// so the per-file read path triggers that at most once each.
+    pub maintained: MigratedMetas,
     pub migrated: MigratedMetas,
 }
 
@@ -28,6 +31,7 @@ impl StreamerState {
         Self {
             meta_cache: MetaCache::with_budget(NZB_META),
             meta_loads: InFlight::default(),
+            maintained: MigratedMetas::default(),
             migrated: MigratedMetas::default(),
         }
     }
@@ -58,27 +62,30 @@ pub fn cache_meta(cache: &MetaCache, info_hash: String, meta: Arc<crate::streame
 /// Estimate the heap footprint of a deserialized `NzbMeta`, dominated by the
 /// per-segment message-id strings.
 fn estimate_meta_bytes(meta: &crate::streamer::NzbMeta) -> u64 {
-    use crate::streamer::NzbMetaSource;
-    let segment = std::mem::size_of::<crate::nzb::NzbSegment>();
     let mut bytes = 0u64;
     for file in &meta.files {
-        match &file.source {
-            NzbMetaSource::Direct { offsets, segments } => {
-                bytes += (offsets.len() * 8) as u64;
-                for s in segments {
-                    bytes += (segment + s.message_id.len()) as u64;
-                }
+        bytes += estimate_file_bytes(file);
+    }
+    bytes.max(1)
+}
+
+/// Heap footprint of one file's segment map — the same accounting as
+/// [`estimate_meta_bytes`], which is now defined as the sum over its files.
+fn estimate_file_bytes(file: &crate::streamer::NzbMetaFile) -> u64 {
+    use crate::streamer::NzbMetaSource;
+    let mut bytes = 0u64;
+    match &file.source {
+        NzbMetaSource::Direct { offsets, segments } => {
+            bytes += (offsets.len() * 8) as u64;
+            // Exact rather than estimated: a packed list knows its own size.
+            bytes += segments.heap_bytes() as u64;
+        }
+        NzbMetaSource::Rar { parts, slices } => {
+            for part in parts.iter() {
+                bytes += (part.offsets.len() * 8) as u64;
+                bytes += part.segments.heap_bytes() as u64;
             }
-            NzbMetaSource::Rar { parts, slices } => {
-                for part in parts {
-                    bytes += (part.offsets.len() * 8) as u64;
-                    for s in &part.segments {
-                        bytes += (segment + s.message_id.len()) as u64;
-                    }
-                }
-                bytes +=
-                    (slices.len() * std::mem::size_of::<crate::streamer::NzbRarSlice>()) as u64;
-            }
+            bytes += (slices.len() * std::mem::size_of::<crate::streamer::NzbRarSlice>()) as u64;
         }
     }
     bytes.max(1)
@@ -283,20 +290,20 @@ impl ActiveStreams {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::nzb::NzbSegment;
+    use crate::segments::{NzbSegment, SegmentList};
     use crate::streamer::{NzbMeta, NzbMetaFile, NzbMetaSource};
 
     fn meta_with_segments(info_hash: &str, n: usize) -> Arc<NzbMeta> {
-        let segments: Vec<NzbSegment> = (0..n)
+        let segments: SegmentList = (0..n)
             .map(|i| NzbSegment {
                 bytes: 700_000,
-                number: i as u32 + 1,
                 message_id: format!("{i:08}@news.example.invalid.padding.xx"),
             })
             .collect();
         let offsets: Vec<u64> = (0..=n as u64).map(|i| i * 700_000).collect();
         Arc::new(NzbMeta {
             info_hash: info_hash.to_string(),
+            rar_sets: Vec::new(),
             password: None,
             files: vec![NzbMetaFile {
                 filename: format!("{info_hash}.mkv"),

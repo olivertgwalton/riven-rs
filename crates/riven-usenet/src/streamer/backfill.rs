@@ -5,14 +5,22 @@
 
 use std::sync::Arc;
 
-use futures::StreamExt;
-use futures::stream;
-
 use super::meta::{NzbMeta, NzbMetaSource};
 use super::store;
 use super::{StreamerError, UsenetStreamer};
 
-const BACKFILL_CONCURRENCY: usize = 8;
+/// Probes written to one connection before its replies are read.
+///
+/// This used to be a fan-out of 8 concurrent single-article fetches, which is 8
+/// connection slots held by a background migration — the same slots playback
+/// competes for. One connection per batch costs the migration wall-clock time
+/// it has no deadline for, and gives those slots back.
+const BACKFILL_BATCH: usize = 8;
+/// Articles fetched at once for whatever a batch's pipelined pass did not
+/// resolve. Deliberately below [`BACKFILL_BATCH`]: the fallback path is the one
+/// that takes a connection per article, so it should not reach the footprint
+/// this change exists to remove.
+const BACKFILL_FALLBACK_CONCURRENCY: usize = 2;
 
 impl UsenetStreamer {
     pub(super) fn maybe_kick_backfill(&self, meta: &Arc<NzbMeta>) {
@@ -44,15 +52,16 @@ impl UsenetStreamer {
         // The probe carries the volume's own filename: each probe is a real
         // article fetch, and its failure logs deep in the fetch path have no
         // other way to say which volume of which release went bad.
+        // Per *volume set*, not per file. A season pack's episodes all share
+        // one set, so walking files probed the same volume once per episode —
+        // twenty real article fetches for one answer on the worst release here.
         let mut to_probe: Vec<(usize, usize, String, String)> = Vec::new();
-        for (fi, f) in meta.files.iter().enumerate() {
-            if let NzbMetaSource::Rar { parts, .. } = &f.source {
-                for (pi, p) in parts.iter().enumerate() {
-                    if p.decoded_seg_size.is_none()
-                        && let Some(seg) = p.segments.first()
-                    {
-                        to_probe.push((fi, pi, seg.message_id.clone(), p.filename.clone()));
-                    }
+        for (si, set) in meta.rar_sets.iter().enumerate() {
+            for (pi, p) in set.iter().enumerate() {
+                if p.decoded_seg_size.is_none()
+                    && let Some(seg) = p.segments.first()
+                {
+                    to_probe.push((si, pi, seg.message_id.to_string(), p.filename.clone()));
                 }
             }
         }
@@ -61,42 +70,67 @@ impl UsenetStreamer {
         }
         let total = to_probe.len();
 
-        let streamer = self.clone();
-        let mut probes = stream::iter(to_probe)
-            .map(move |(fi, pi, mid, _volume)| {
-                let s = streamer.clone();
-                async move {
-                    let r = s.fetch_article(&mid).await.map(|bytes| bytes.len() as u64);
-                    (fi, pi, r)
-                }
-            })
-            .buffer_unordered(BACKFILL_CONCURRENCY);
-
         let mut filled = 0usize;
-        while let Some((fi, pi, result)) = probes.next().await {
-            match result {
-                Ok(size) if size > 0 => {
-                    if let NzbMetaSource::Rar { parts, .. } = &mut meta.files[fi].source {
-                        parts[pi].decoded_seg_size = Some(size);
+        let mut sized: Vec<(usize, usize, u64)> = Vec::new();
+        for batch in to_probe.chunks(BACKFILL_BATCH) {
+            let ids: Vec<String> = batch.iter().map(|(_, _, mid, _)| mid.clone()).collect();
+            let probed = self
+                .pool
+                .fetch_batch(&ids, BACKFILL_FALLBACK_CONCURRENCY)
+                .await;
+
+            for ((si, pi, _, name), result) in batch.iter().zip(probed) {
+                let (si, pi) = (*si, *pi);
+                match result {
+                    Ok(bytes) if !bytes.is_empty() => {
+                        sized.push((si, pi, bytes.len() as u64));
                         filled += 1;
                     }
-                }
-                Ok(_) => {}
-                Err(e) => {
-                    tracing::debug!(
-                        info_hash,
-                        file = %meta.file_label(fi),
-                        fi,
-                        pi,
-                        error = %e,
-                        "backfill probe failed"
-                    );
+                    Ok(_) => {}
+                    Err(e) => {
+                        tracing::debug!(
+                            info_hash,
+                            volume = %name,
+                            si,
+                            pi,
+                            error = %e,
+                            "backfill probe failed"
+                        );
+                    }
                 }
             }
         }
 
         if filled == 0 {
             return Ok(());
+        }
+
+        // Apply to the sets, then re-point the files that shared each old
+        // allocation at the new one so the sharing survives the update.
+        let mut by_set: std::collections::BTreeMap<usize, Vec<(usize, u64)>> =
+            std::collections::BTreeMap::new();
+        for (si, pi, size) in sized {
+            by_set.entry(si).or_default().push((pi, size));
+        }
+        for (si, updates) in by_set {
+            let Some(old) = meta.rar_sets.get(si).cloned() else {
+                continue;
+            };
+            let mut parts = (*old).clone();
+            for (pi, size) in updates {
+                if let Some(part) = parts.get_mut(pi) {
+                    part.decoded_seg_size = Some(size);
+                }
+            }
+            let new = Arc::new(parts);
+            for f in &mut meta.files {
+                if let NzbMetaSource::Rar { parts, .. } = &mut f.source
+                    && Arc::ptr_eq(parts, &old)
+                {
+                    *parts = Arc::clone(&new);
+                }
+            }
+            meta.rar_sets[si] = new;
         }
 
         store::store(&self.db, info_hash, &meta).await?;

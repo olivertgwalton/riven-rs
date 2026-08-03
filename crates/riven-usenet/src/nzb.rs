@@ -16,7 +16,7 @@ pub struct NzbFile {
     pub subject: String,
     pub poster: String,
     pub groups: Vec<String>,
-    pub segments: Vec<NzbSegment>,
+    pub segments: crate::segments::SegmentList,
 }
 
 /// Parsed NZB document: the head metadata (`<meta type="...">` entries) plus
@@ -62,15 +62,21 @@ impl NzbDocument {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NzbSegment {
-    /// Per-NZB-spec, the encoded article size in bytes (yEnc payload + a few
-    /// bytes of header overhead). Decoded size is ~2% smaller; we use this
-    /// as an offset proxy until we've actually fetched a segment.
-    pub bytes: u64,
-    pub number: u32,
-    /// Article message-id, without surrounding `<>`.
-    pub message_id: String,
+/// A segment as it appears in the NZB, before ordering.
+///
+/// `number` lives only here. It is load-bearing exactly once — sorting a file's
+/// segments into order — after which it is the index and nothing reads it. Kept
+/// out of [`NzbSegment`] because that is the form stored for every segment of
+/// every release: 2 510 rows and 4 489 MB of it in this library, where the
+/// field costs 8 bytes of struct (with padding) and its own JSON key.
+///
+/// Old rows still carry `"number"`. serde ignores unknown fields, so they
+/// deserialise unchanged and simply stop paying for it when next written.
+#[derive(Debug, Clone)]
+struct ParsedSegment {
+    number: u32,
+    bytes: u64,
+    message_id: String,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -171,7 +177,9 @@ pub fn parse_nzb_document(xml: &str) -> Result<NzbDocument, NzbError> {
     let mut cur_meta_type: Option<String> = None;
     let mut files: Vec<NzbFile> = Vec::new();
     let mut cur_file: Option<NzbFile> = None;
-    let mut cur_segment: Option<NzbSegment> = None;
+    let mut cur_segment: Option<ParsedSegment> = None;
+    // Ordered on `</file>`, then converted to the stored form.
+    let mut cur_segments: Vec<ParsedSegment> = Vec::new();
     let mut in_group = false;
     let mut text_target: Option<&'static str> = None;
 
@@ -184,7 +192,7 @@ pub fn parse_nzb_document(xml: &str) -> Result<NzbDocument, NzbError> {
                         subject: String::new(),
                         poster: String::new(),
                         groups: Vec::new(),
-                        segments: Vec::new(),
+                        segments: crate::segments::SegmentList::default(),
                     };
                     for attr in e.attributes().flatten() {
                         let val = attr
@@ -200,9 +208,9 @@ pub fn parse_nzb_document(xml: &str) -> Result<NzbDocument, NzbError> {
                     cur_file = Some(f);
                 }
                 b"segment" => {
-                    let mut s = NzbSegment {
-                        bytes: 0,
+                    let mut s = ParsedSegment {
                         number: 0,
+                        bytes: 0,
                         message_id: String::new(),
                     };
                     for attr in e.attributes().flatten() {
@@ -293,10 +301,10 @@ pub fn parse_nzb_document(xml: &str) -> Result<NzbDocument, NzbError> {
             }
             Event::End(e) => match e.name().as_ref() {
                 b"segment" => {
-                    if let (Some(file), Some(seg)) = (cur_file.as_mut(), cur_segment.take())
+                    if let (Some(_), Some(seg)) = (cur_file.as_ref(), cur_segment.take())
                         && !seg.message_id.is_empty()
                     {
-                        file.segments.push(seg);
+                        cur_segments.push(seg);
                     }
                     text_target = None;
                 }
@@ -310,10 +318,21 @@ pub fn parse_nzb_document(xml: &str) -> Result<NzbDocument, NzbError> {
                 }
                 b"file" => {
                     if let Some(mut file) = cur_file.take() {
-                        file.segments.sort_by_key(|s| s.number);
+                        // Sort while `number` still exists, then drop it.
+                        cur_segments.sort_by_key(|s| s.number);
+                        let mut builder = crate::segments::SegmentListBuilder::with_capacity(
+                            cur_segments.len(),
+                            cur_segments.len() * 48,
+                        );
+                        for seg in cur_segments.drain(..) {
+                            builder.push(&seg.message_id, seg.bytes);
+                        }
+                        file.segments = builder.build();
                         if !file.segments.is_empty() {
                             files.push(file);
                         }
+                    } else {
+                        cur_segments.clear();
                     }
                 }
                 _ => {}
@@ -453,7 +472,7 @@ mod tests {
         let files = parse_nzb(xml).unwrap();
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].segments.len(), 2);
-        assert_eq!(files[0].segments[0].message_id, "abc@host");
+        assert_eq!(files[0].segments.id(0), Some("abc@host"));
         assert_eq!(files[0].groups, vec!["alt.binaries.movies"]);
     }
 
@@ -467,8 +486,10 @@ mod tests {
             </segments>
         </file></nzb>"#;
         let files = parse_nzb(xml).unwrap();
-        assert_eq!(files[0].segments[0].number, 1);
-        assert_eq!(files[0].segments[1].number, 2);
+        // `number` is gone from the stored form; ordering is what it bought,
+        // so ordering is what this asserts. The document lists them 2 then 1.
+        assert_eq!(files[0].segments.id(0), Some("a@h"));
+        assert_eq!(files[0].segments.id(1), Some("b@h"));
     }
 
     #[test]
@@ -477,7 +498,7 @@ mod tests {
             subject: "Some.Movie.2024.1080p.mkv".into(),
             poster: String::new(),
             groups: vec![],
-            segments: vec![],
+            segments: crate::segments::SegmentList::default(),
         };
         assert!(looks_like_media(&f));
         f.subject = "movie.par2".into();
@@ -516,7 +537,7 @@ mod tests {
             subject: format!(r#""{s}" yEnc"#),
             poster: String::new(),
             groups: vec![],
-            segments: vec![],
+            segments: crate::segments::SegmentList::default(),
         };
         let files = vec![
             mk("Show.S01E01.part01.rar"),

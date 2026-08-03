@@ -123,6 +123,17 @@ pbkdf2 = { version = "0.13", default-features = false, features = ["hmac"] }
 aes = "0.9"
 cbc = "0.2"
 
+# Global allocator for the binary. The default on this target is musl's, which
+# returns large freed allocations to the kernel (`mmap` + `madvise`) and so
+# charges per-page first-touch faults on every re-allocation — measured at ~6 %
+# of CPU during 4K HDR streaming, against the ~700 KB article buffers the
+# streaming path churns through. `riven-usenet` used to carry its own free list
+# (`bufpool`) to route around that; mimalloc's thread-local free lists do the
+# same job for every allocation in the process rather than the two that module
+# covered, so the free list is gone.
+mimalloc = { version = "0.1", default-features = false }
+
+
 [profile.release]
 strip = true
 lto = "fat"

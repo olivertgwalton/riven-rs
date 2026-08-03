@@ -6,6 +6,8 @@
 //! HTTP, no duplicate read-ahead. The trait lives in `riven-core` so
 //! `riven-vfs` depends only on the abstraction, not on `riven-usenet`.
 
+use std::sync::Arc;
+
 use bytes::Bytes;
 
 /// How an origin is physically chunked, so read-ahead fetches whole units of
@@ -20,26 +22,25 @@ pub struct SourceLayout {
     pub chunk_size: u64,
 }
 
-/// A read-by-range byte source addressed by `(info_hash, file_index)`,
-/// implemented in-process by the usenet streamer.
-#[async_trait::async_trait]
+/// A source of open files, implemented in-process by the usenet streamer.
+///
+/// The unit here is deliberately the **open file**, not `(info_hash,
+/// file_index)` per read. An origin generally has to resolve something before
+/// it can serve a byte — for usenet, the file's segment map — and resolving it
+/// per read means either paying for it every time or keeping a cache with an
+/// eviction policy that is a guess about which files will be read again.
+///
+/// There is nothing to guess. The kernel says exactly which files are being
+/// read, by holding them open, and it says when it is done via `release`. So
+/// the origin resolves once per handle and holds it for that handle's life:
+/// no budget to size, no eviction to tune, no lock on the read path, and
+/// memory that scales with concurrent streams rather than with a number
+/// someone picked.
 pub trait LocalByteSource: Send + Sync {
-    /// Chunking of one file, when the origin has a natural one.
-    async fn layout(&self, _info_hash: &str, _file_index: usize) -> Option<SourceLayout> {
-        None
-    }
-
-    /// Read the inclusive byte range `[start, end]` of the file. Returns the
-    /// decoded bytes (which may be slightly shorter than requested at the
-    /// tail of a segment — callers must tolerate a short read, as they
-    /// already do for HTTP origins that cap their window).
-    async fn read_range(
-        &self,
-        info_hash: &str,
-        file_index: usize,
-        start: u64,
-        end_inclusive: u64,
-    ) -> anyhow::Result<Bytes>;
+    /// Begin serving one file. Returns immediately — `fuser`'s `open` is
+    /// synchronous — and the returned handle resolves what it needs on first
+    /// use, keeping it until dropped.
+    fn open_file(&self, info_hash: &str, file_index: usize) -> Arc<dyn LocalOpenFile>;
 
     /// Active-stream registry hooks, driving the dashboard's "now playing"
     /// view. The VFS calls these as it serves a usenet handle. `key`
@@ -47,6 +48,21 @@ pub trait LocalByteSource: Send + Sync {
     fn stream_register(&self, key: &str, info_hash: &str, filename: &str, file_size: u64);
     fn stream_touch(&self, key: &str);
     fn stream_unregister(&self, key: &str);
+}
+
+/// One open file, for as long as the handle above it lives.
+#[async_trait::async_trait]
+pub trait LocalOpenFile: Send + Sync {
+    /// Chunking of this file, when the origin has a natural one.
+    async fn layout(&self) -> Option<SourceLayout> {
+        None
+    }
+
+    /// Read the inclusive byte range `[start, end]`. Returns the decoded bytes
+    /// (which may be slightly shorter than requested at the tail of a segment —
+    /// callers must tolerate a short read, as they already do for HTTP origins
+    /// that cap their window).
+    async fn read_range(&self, start: u64, end_inclusive: u64) -> anyhow::Result<Bytes>;
 }
 
 /// Parse a `usenet://{info_hash}/{file_index}` stream marker into

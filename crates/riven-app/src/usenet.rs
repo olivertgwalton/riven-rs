@@ -64,6 +64,74 @@ fn env_parsed<T: std::str::FromStr>(name: &str) -> Option<T> {
     std::env::var(name).ok().and_then(|s| s.trim().parse().ok())
 }
 
+/// Converge stored NZB metadata onto the current format, a few releases at a
+/// time.
+///
+/// Releases posted as one RAR archive containing several media files used to
+/// store a full copy of every volume's segment list per file — 46 % of the
+/// stored volume data on the library this was measured against, and 12.5× on
+/// its worst row. Reading collapses those copies; this rewrites them so the
+/// saving reaches disk.
+///
+/// Incremental and idempotent by design. It rewrites every row it touches, and
+/// doing that to a whole library at boot competes with playback for exactly no
+/// benefit — a release nobody watches can wait. Largest first, so an instance
+/// restarted before it finishes has still dealt with the rows that matter.
+///
+/// The old format stays readable regardless: this is how a deployment stops
+/// *carrying* it, not a licence to delete the reader. Anyone downgrading needs
+/// it, and other people's databases are full of rows this has never seen.
+fn spawn_meta_compaction(streamer: riven_usenet::UsenetStreamer) {
+    /// Releases per tick. Small: each is a read, a re-serialise and a write of
+    /// a document that can run to tens of MB.
+    const BATCH: u32 = 8;
+    /// Long enough that this is background work rather than a second workload.
+    const INTERVAL_SECS: u64 = 300;
+    /// Let the instance finish starting before touching the database.
+    const INITIAL_DELAY_SECS: u64 = 120;
+
+    if env_flag("RIVEN_USENET_DISABLE_META_COMPACTION") {
+        tracing::debug!("usenet meta compaction disabled by environment");
+        return;
+    }
+
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(INITIAL_DELAY_SECS)).await;
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(INTERVAL_SECS));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut total = 0usize;
+        let mut reclaimed = 0i64;
+        loop {
+            tick.tick().await;
+            match streamer.compact_outdated_meta(BATCH).await {
+                Ok((0, _)) => {
+                    if total > 0 {
+                        tracing::info!(
+                            releases = total,
+                            reclaimed_mib = reclaimed / (1024 * 1024),
+                            "usenet meta compaction complete"
+                        );
+                    }
+                    return;
+                }
+                Ok((n, bytes)) => {
+                    total += n;
+                    reclaimed += bytes;
+                    tracing::debug!(
+                        releases = n,
+                        total,
+                        reclaimed_mib = reclaimed / (1024 * 1024),
+                        "usenet meta compaction progress"
+                    );
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "usenet meta compaction tick failed");
+                }
+            }
+        }
+    });
+}
+
 pub(crate) fn spawn_background_tasks(
     usenet_streamer: Option<riven_usenet::UsenetStreamer>,
     usenet_settings_json: Option<serde_json::Value>,
@@ -96,6 +164,8 @@ pub(crate) fn spawn_background_tasks(
         let repair_max_cooldown_secs = env_parsed::<u64>("RIVEN_USENET_REPAIR_MAX_COOLDOWN_SECS")
             .filter(|&n| n > 0)
             .unwrap_or(86_400);
+        spawn_meta_compaction(streamer.clone());
+
         let scanner_registry = registry.clone();
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(std::time::Duration::from_secs(interval_secs));

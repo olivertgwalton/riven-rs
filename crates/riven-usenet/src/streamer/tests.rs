@@ -1,6 +1,7 @@
 use super::NzbRarSlice;
 use super::ingest::{first_slice_gap, par2_sample_block_indices, pick_primary_media_index};
-use crate::nzb::{NzbFile, NzbSegment};
+use crate::nzb::NzbFile;
+use crate::segments::NzbSegment;
 
 fn mk_slice(part_index: usize) -> NzbRarSlice {
     NzbRarSlice {
@@ -18,11 +19,12 @@ fn primary_media_index_picks_largest_media() {
         subject: subject.into(),
         poster: String::new(),
         groups: vec![],
-        segments: vec![NzbSegment {
+        segments: [NzbSegment {
             bytes: total,
-            number: 1,
             message_id: "x".into(),
-        }],
+        }]
+        .into_iter()
+        .collect(),
     };
     let files = vec![
         mk(r#""sample.mkv" yEnc"#, 10),

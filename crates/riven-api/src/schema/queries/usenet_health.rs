@@ -7,7 +7,7 @@
 //! usenet isn't configured) without spinning up a pool.
 
 use async_graphql::{Context, Object, Result, SimpleObject};
-use riven_core::cache::{CacheStats, NZB_META, Pool, READ_AHEAD, SEGMENT};
+use riven_core::cache::{CacheStats, NZB_META, Pool, READ_AHEAD, SEGMENT, SEGMENT_SIZES};
 use riven_db::orm;
 use riven_usenet::UsenetStreamer;
 use sea_orm::{DbBackend, FromQueryResult, Statement};
@@ -40,7 +40,7 @@ pub struct NntpProviderHealth {
 /// One cache's live figures.
 #[derive(SimpleObject)]
 pub struct CacheHealth {
-    /// `read-ahead`, `nzb-meta` or `segment`.
+    /// `read-ahead`, `nzb-meta`, `segment` or `segment-sizes`.
     pub name: String,
     pub bytes_used: i64,
     pub bytes_max: i64,
@@ -416,6 +416,7 @@ impl UsenetHealthQuery {
                 CacheHealth::new(READ_AHEAD, read_ahead),
                 CacheHealth::new(NZB_META, h.meta_cache),
                 CacheHealth::new(SEGMENT, h.segment_cache),
+                CacheHealth::new(SEGMENT_SIZES, h.segment_sizes_cache),
             ],
             cache_hit_rate: read_ahead.hit_rate(),
             fetches_ok: h.fetches_ok as i64,

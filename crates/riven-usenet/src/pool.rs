@@ -5,14 +5,12 @@
 //! single-flight coalescing, then providers in priority order until one
 //! answers.
 
-use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use bytes::Bytes;
-use lru::LruCache;
-use parking_lot::Mutex;
-use riven_core::cache::{ByteLru, SEGMENT};
+use futures::StreamExt;
+use riven_core::cache::{ByteLru, SEGMENT, SEGMENT_SIZES};
 use tokio::sync::oneshot;
 use tokio::time::Instant;
 
@@ -34,9 +32,14 @@ pub use missing::MissingCache;
 /// would inflate that provider's usage figures.
 pub type SegmentCache = ByteLru<Arc<str>, Bytes>;
 
-/// Cap on the decoded-size memo. One `(message_id, u64)` entry per segment
-/// ever fetched, ~80 bytes each.
-const DECODED_SIZES_ENTRIES: usize = 500_000;
+/// Articles written to one connection before its replies are read.
+///
+/// This is a **memory** bound, not a throughput one. A pipelined batch holds
+/// every reply it has read until the batch completes, so the depth times the
+/// article size is resident at once — 16 MiB at the 4 MiB worst-case article,
+/// ~3 MiB on a typical post. Deeper buys almost nothing: 4 already removes
+/// three quarters of the round trips, and the curve flattens from there.
+const PIPELINE_DEPTH: usize = 4;
 
 pub struct SegmentPool {
     /// Primaries first (by priority), then backups. Demoted providers are
@@ -61,7 +64,7 @@ impl SegmentPool {
             cache: SegmentCache::with_budget(SEGMENT),
             missing: MissingCache::default(),
             inflight: InFlight::default(),
-            decoded_sizes: DecodedSizes::new(DECODED_SIZES_ENTRIES),
+            decoded_sizes: DecodedSizes::new(),
             metrics: FetchMetrics::default(),
         })
     }
@@ -86,6 +89,11 @@ impl SegmentPool {
     /// it. Needed to seek into the middle of a RAR volume.
     pub fn decoded_size(&self, message_id: &str) -> Option<u64> {
         self.decoded_sizes.get(message_id)
+    }
+
+    /// Live figures for the decoded-size memo, for the health query.
+    pub fn segment_sizes_stats(&self) -> riven_core::cache::CacheStats {
+        self.decoded_sizes.stats()
     }
 
     pub fn in_flight(&self) -> usize {
@@ -225,7 +233,16 @@ impl SegmentPool {
         let mut lease = provider.acquire().await?;
         let body = lease.body(message_id, provider.article_budget()).await?;
         drop(lease);
+        self.decode_and_cache(message_id, body).await
+    }
 
+    /// yEnc-decode one fetched body off the runtime and publish it: metrics,
+    /// the decoded-size memo, and the staging cache.
+    async fn decode_and_cache(
+        &self,
+        message_id: &Arc<str>,
+        body: Vec<u8>,
+    ) -> Result<Bytes, NntpError> {
         let decoded = match tokio::task::spawn_blocking(move || yenc::decode(&body)).await {
             Ok(Ok((decoded, _info))) => decoded,
             Ok(Err(error)) => {
@@ -244,6 +261,133 @@ impl SegmentPool {
         self.cache
             .put(message_id.clone(), decoded.clone(), decoded.len() as u64);
         Ok(decoded)
+    }
+
+    /// Fetch a batch of articles, pipelining the wire work over **one**
+    /// connection instead of taking one per article. Results are positional.
+    ///
+    /// For batch consumers — ingest probes, backfill, the PAR2 blob walk —
+    /// which know every id up front and care about their connection footprint,
+    /// because the slots they hold are the ones playback is competing for. The
+    /// streaming path deliberately does not use this: it wants `n` articles
+    /// arriving in parallel, which is the opposite trade.
+    ///
+    /// `fallback_concurrency` bounds only the articles priming did not resolve.
+    pub async fn fetch_batch(
+        self: &Arc<Self>,
+        message_ids: &[String],
+        fallback_concurrency: usize,
+    ) -> Vec<Result<Bytes, NntpError>> {
+        self.prime_batch(message_ids).await;
+
+        // Everything primed is a cache hit that never reaches the wire. What
+        // priming missed goes through the per-article path, which is where
+        // failover, single-flight and the permanent-missing rule live — so
+        // pipelining stays a pure optimisation and cannot change an outcome.
+        // Each future owns its id and its own handle on the pool. Borrowing
+        // them across `buffer_unordered` instead leaves the returned futures
+        // with anonymous lifetimes that defeat `Send` inference at the
+        // `LocalByteSource` impls above this.
+        let owned: Vec<(usize, String)> = message_ids.iter().cloned().enumerate().collect();
+        let mut results: Vec<(usize, Result<Bytes, NntpError>)> = futures::stream::iter(owned)
+            .map(|(index, id)| {
+                let pool = Arc::clone(self);
+                async move { (index, pool.fetch_segment(&id).await) }
+            })
+            .buffer_unordered(fallback_concurrency.max(1))
+            .collect()
+            .await;
+        results.sort_by_key(|(index, _)| *index);
+        results.into_iter().map(|(_, result)| result).collect()
+    }
+
+    /// Best-effort: pipeline every id not already staged over one connection
+    /// from the healthiest provider and stage whatever comes back.
+    ///
+    /// Every failure path here is a silent `return` on purpose. This only ever
+    /// saves the caller a round trip; [`fetch_batch`](Self::fetch_batch)
+    /// re-checks every id afterwards, so a provider that mishandles pipelined
+    /// `BODY` costs one wasted attempt and nothing else.
+    ///
+    /// Two things it deliberately does not do. It does not feed the provider's
+    /// latency EWMA — a batch's duration is `n` articles' worth and would make
+    /// [`ClientPool::article_budget`] nonsense — nor its failure counters,
+    /// which the per-article retry underneath records properly. And it does not
+    /// consult the single-flight table, so an id already in flight elsewhere
+    /// may be fetched twice; that is wasted bytes on a background path, not a
+    /// wrong answer, and checking would need a lock this path has no other
+    /// reason to take.
+    async fn prime_batch(self: &Arc<Self>, message_ids: &[String]) {
+        // `contains`, not `get`: this is a scheduling probe over candidates, and
+        // `get` both counts a lookup and promotes what it finds. Counting here
+        // booked a second miss for every id that then missed again in
+        // `fetch_segment`, which is why the segment cache reported a 33.9 % hit
+        // rate under playback against exactly half as many wire fetches as
+        // misses — the real figure was 50.7 %. Promoting is wrong for the same
+        // reason: a look-ahead candidate no reader has asked for should not
+        // outrank a segment one did.
+        let wanted: Vec<String> = message_ids
+            .iter()
+            .filter(|id| !self.cache.contains(id.as_str()) && !self.missing.contains(id))
+            .cloned()
+            .collect();
+        if wanted.is_empty() {
+            return;
+        }
+        let Some(provider) = self.attempt_order().into_iter().next() else {
+            return;
+        };
+
+        // Chunked here rather than trusted to callers, because the cost of an
+        // unbounded batch is paid in memory, not time: `body_many` holds every
+        // reply it has read until the batch finishes, so an `n`-article batch
+        // is `n` article buffers resident at once. One caller
+        // (`fetch_par2_blob`) passes a whole file's segment list, which made
+        // that unbounded. Peak is now PIPELINE_DEPTH buffers whatever the
+        // caller asks for, and the round-trip saving is barely touched — a
+        // chunk of 4 still eliminates three quarters of the round trips.
+        for chunk in wanted.chunks(PIPELINE_DEPTH) {
+            if !self.prime_chunk(provider, chunk).await {
+                return;
+            }
+        }
+    }
+
+    /// One pipelined chunk. `false` means stop — the connection failed, and the
+    /// remaining chunks would only repeat the failure.
+    async fn prime_chunk(self: &Arc<Self>, provider: &Arc<ClientPool>, chunk: &[String]) -> bool {
+        // One article's budget per article in the chunk: the replies arrive
+        // back to back, so the chunk is allowed the sum of what its members
+        // would each have been allowed alone.
+        let budget = provider
+            .article_budget()
+            .saturating_mul(u32::try_from(chunk.len()).unwrap_or(u32::MAX));
+
+        let Ok(mut lease) = provider.acquire().await else {
+            return false;
+        };
+        let bodies = match lease.body_many(chunk, budget).await {
+            Ok(bodies) => bodies,
+            Err(error) => {
+                tracing::debug!(
+                    host = provider.host(),
+                    batch = chunk.len(),
+                    %error,
+                    "pipelined body batch failed; falling back to per-article fetches"
+                );
+                return false;
+            }
+        };
+        drop(lease);
+
+        for (id, body) in chunk.iter().zip(bodies) {
+            // A `430` here says only that *this* provider lacks the article.
+            // Whether every provider agrees — the thing that makes an id
+            // permanently missing — is not this path's call to make.
+            let Ok(body) = body else { continue };
+            drop(self.decode_and_cache(&Arc::from(id.as_str()), body).await);
+        }
+        true
     }
 
     /// STAT a batch over **one** connection from the healthiest provider, with
@@ -304,23 +448,43 @@ impl SegmentPool {
 /// Memoized decoded sizes keyed by message-id. An evicted entry only costs a
 /// fallback to walking segments, never correctness.
 struct DecodedSizes {
-    inner: Mutex<LruCache<Arc<str>, u64>>,
+    inner: ByteLru<Arc<str>, u64>,
 }
 
 impl DecodedSizes {
-    fn new(max_entries: usize) -> Self {
-        let capacity = NonZeroUsize::new(max_entries).unwrap_or(NonZeroUsize::MIN);
+    fn new() -> Self {
         Self {
-            inner: Mutex::new(LruCache::new(capacity)),
+            inner: ByteLru::with_budget(SEGMENT_SIZES),
         }
     }
 
+    /// What one entry costs, so the byte budget means something.
+    ///
+    /// The `lru` crate boxes a node holding key, value and two links, the table
+    /// keeps a slot, and the message-id's own bytes sit behind the `Arc`. None
+    /// of that is measurable at runtime without walking the allocator, so it is
+    /// counted rather than measured — the point is that the budget tracks the
+    /// real cost within a small factor, not that it is exact.
+    fn weight(message_id: &str) -> u64 {
+        /// `Arc` header + `Arc<str>` fat pointer + `u64` + two LRU links +
+        /// the hashmap slot, rounded up for allocator overhead.
+        const PER_ENTRY_OVERHEAD: u64 = 96;
+        PER_ENTRY_OVERHEAD + message_id.len() as u64
+    }
+
     fn get(&self, message_id: &str) -> Option<u64> {
-        self.inner.lock().get(message_id).copied()
+        // `touch`, not `get`: this memo is consulted opportunistically while
+        // walking a RAR volume, and its hit rate is not the segment cache's.
+        self.inner.touch(message_id)
     }
 
     fn put(&self, message_id: Arc<str>, size: u64) {
-        self.inner.lock().put(message_id, size);
+        let weight = Self::weight(&message_id);
+        self.inner.put(message_id, size, weight);
+    }
+
+    fn stats(&self) -> riven_core::cache::CacheStats {
+        self.inner.stats()
     }
 }
 
@@ -502,6 +666,182 @@ mod tests {
             !pool.missing().contains("a@test"),
             "a stall is not evidence the article is gone"
         );
+    }
+
+    /// The point of [`SegmentPool::fetch_batch`]: a batch consumer holds one
+    /// connection, not one per article. Those slots are what the streaming path
+    /// is competing for, so this is the property worth pinning — not the
+    /// round-trip count, which is the same saving expressed less usefully.
+    #[tokio::test]
+    async fn a_batch_fetch_pipelines_instead_of_taking_a_connection_per_article() {
+        let (addr, _server) = spawn_fake_nntp_server().await;
+        let pool = SegmentPool::new(vec![provider(addr, 8, 0)]);
+        let ids: Vec<String> = (0..8).map(|i| format!("seg-{i}@test")).collect();
+
+        let fetched = pool.fetch_batch(&ids, 4).await;
+        assert_eq!(fetched.len(), 8);
+        for result in &fetched {
+            assert_eq!(result.as_ref().unwrap().as_ref(), FAKE_SEGMENT_PAYLOAD);
+        }
+        assert_eq!(
+            pool.health()[0].open_connections,
+            1,
+            "an 8-article batch must not open a connection per article"
+        );
+    }
+
+    /// The batch path probes the cache to decide what to fetch. That probe must
+    /// not be counted, because the same ids are looked up again for real on the
+    /// way through `fetch_segment`: counting both booked two misses per article
+    /// and halved the reported hit rate. Under playback that showed as a 33.9 %
+    /// segment hit rate against exactly half as many wire fetches as misses.
+    ///
+    /// Pinned on the number of *accounted lookups* rather than on how they are
+    /// classified: what the probe must not do is add a lookup at all, and that
+    /// stays true however the batch path later decides hit or miss.
+    #[tokio::test]
+    async fn a_batch_probe_does_not_count_as_a_cache_lookup() {
+        let (addr, _server) = spawn_fake_nntp_server().await;
+        let pool = SegmentPool::new(vec![provider(addr, 8, 0)]);
+        let ids: Vec<String> = (0..4).map(|i| format!("seg-{i}@test")).collect();
+
+        let fetched = pool.fetch_batch(&ids, 4).await;
+        assert_eq!(fetched.len(), 4);
+
+        let stats = pool.cache().stats();
+        assert_eq!(
+            stats.hits + stats.misses,
+            4,
+            "one accounted lookup per article; the probe must not add its own: {stats:?}"
+        );
+
+        // A second pass over the same ids is all cache, and must add exactly one
+        // accounted lookup per article again.
+        let before = pool.cache().stats();
+        for id in &ids {
+            assert!(pool.fetch_segment(id).await.is_ok());
+        }
+        let after = pool.cache().stats();
+        assert_eq!(after.misses, before.misses, "a cached id must not miss");
+        assert_eq!(after.hits, before.hits + 4, "one hit per fetch");
+    }
+
+    /// A `430` mid-pipeline is a status line with no body behind it. Reading it
+    /// as though it had one would consume the *next* article's body as this
+    /// one's and hand back garbage for every article after it — so this asserts
+    /// the survivors decode, not merely that the call returned.
+    #[tokio::test]
+    async fn a_missing_article_mid_batch_leaves_the_rest_of_the_batch_readable() {
+        let (addr, _server) = spawn_selective_body_server().await;
+        let pool = SegmentPool::new(vec![provider(addr, 4, 0)]);
+        let ids: Vec<String> = vec![
+            "a@test".into(),
+            "dead@test".into(),
+            "c@test".into(),
+            "d@test".into(),
+        ];
+
+        let fetched = pool.fetch_batch(&ids, 2).await;
+        assert_eq!(fetched.len(), 4);
+        assert!(
+            fetched[1].is_err(),
+            "the missing article must report missing"
+        );
+        for index in [0, 2, 3] {
+            assert_eq!(
+                fetched[index].as_ref().unwrap().as_ref(),
+                FAKE_SEGMENT_PAYLOAD,
+                "article {index} decoded wrong; the pipeline lost sync on the 430"
+            );
+        }
+    }
+
+    /// A pipelined batch holds every reply it has read until the batch ends, so
+    /// batch size is a memory multiplier. `fetch_par2_blob` passes a whole
+    /// file's segment list, which made that unbounded — the depth cap has to
+    /// live here rather than in each caller.
+    #[tokio::test]
+    async fn a_large_batch_is_chunked_rather_than_pipelined_whole() {
+        let (addr, _server) = spawn_fake_nntp_server().await;
+        let pool = SegmentPool::new(vec![provider(addr, 8, 0)]);
+        let ids: Vec<String> = (0..64).map(|i| format!("big-{i}@test")).collect();
+
+        let fetched = pool.fetch_batch(&ids, 2).await;
+        assert_eq!(fetched.len(), 64);
+        for result in &fetched {
+            assert_eq!(result.as_ref().unwrap().as_ref(), FAKE_SEGMENT_PAYLOAD);
+        }
+        // A 64-article batch must not put 64 article buffers in memory at once.
+        const { assert!(PIPELINE_DEPTH <= 8) };
+        assert_eq!(
+            pool.health()[0].open_connections,
+            1,
+            "chunking must reuse the one connection, not open one per chunk"
+        );
+    }
+
+    /// Results are positional, and the fallback path resolves them out of
+    /// order. An index mix-up here would give one article's bytes another's
+    /// message-id — silent corruption of whatever the caller keys on them.
+    #[tokio::test]
+    async fn batch_results_stay_in_the_order_they_were_asked_for() {
+        let (addr, _server) = spawn_selective_body_server().await;
+        let pool = SegmentPool::new(vec![provider(addr, 4, 0)]);
+        let ids: Vec<String> = vec!["dead@test".into(), "b@test".into(), "dead2@test".into()];
+
+        let fetched = pool.fetch_batch(&ids, 3).await;
+        assert!(fetched[0].is_err());
+        assert!(fetched[1].is_ok());
+        assert!(fetched[2].is_err());
+    }
+
+    /// Loopback listener that serves a yEnc article to `BODY`, except for
+    /// message-ids containing `dead`, which get a `430` and no body.
+    async fn spawn_selective_body_server() -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        use tokio::net::TcpListener;
+
+        let article = crate::yenc::tests::encode_single(FAKE_SEGMENT_PAYLOAD, "fake.bin");
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move {
+            loop {
+                let Ok((socket, _)) = listener.accept().await else {
+                    return;
+                };
+                let article = article.clone();
+                tokio::spawn(async move {
+                    let (read_half, mut write_half) = socket.into_split();
+                    if write_half.write_all(b"200 fake\r\n").await.is_err() {
+                        return;
+                    }
+                    let mut lines = BufReader::new(read_half).lines();
+                    while let Ok(Some(line)) = lines.next_line().await {
+                        let dead = line.contains("dead");
+                        let reply: Vec<u8> = if line.starts_with("QUIT") {
+                            return;
+                        } else if line.starts_with("BODY") || line.starts_with("STAT") {
+                            if dead {
+                                b"430 no such article\r\n".to_vec()
+                            } else if line.starts_with("STAT") {
+                                b"223 0 ok\r\n".to_vec()
+                            } else {
+                                let mut out = b"222 0 <exists>\r\n".to_vec();
+                                out.extend_from_slice(&article);
+                                out.extend_from_slice(b"\r\n.\r\n");
+                                out
+                            }
+                        } else {
+                            b"111 20260101000000\r\n".to_vec()
+                        };
+                        if write_half.write_all(&reply).await.is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        (addr, handle)
     }
 
     /// Loopback listener that greets, accepts `BODY`, replies `222`, and then

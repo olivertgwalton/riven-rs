@@ -48,7 +48,7 @@ One cache's live figures.
 """
 type CacheHealth {
 	"""
-	`read-ahead`, `nzb-meta` or `segment`.
+	`read-ahead`, `nzb-meta`, `segment` or `segment-sizes`.
 	"""
 	name: String!
 	bytesUsed: Int!

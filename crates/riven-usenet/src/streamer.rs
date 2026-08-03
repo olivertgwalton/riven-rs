@@ -36,7 +36,10 @@ pub mod validation;
 
 pub use error::StreamerError;
 pub use ingest::DEFAULT_AVAILABILITY_SAMPLE_PERCENT;
-pub use meta::{NzbMeta, NzbMetaFile, NzbMetaSource, NzbRarPart, NzbRarSlice, UNKNOWN_FILE_LABEL};
+pub use meta::{
+    FileMeta, IngestedFile, NzbMeta, NzbMetaFile, NzbMetaSource, NzbRarPart, NzbRarSlice,
+    UNKNOWN_FILE_LABEL,
+};
 pub use salvage::set_degraded_playback;
 
 pub(crate) use meta::{concat_slices, select_validation_indices};
@@ -249,6 +252,126 @@ impl UsenetStreamer {
         Ok(arc)
     }
 
+    /// Rewrite one stored release in the deduplicated form.
+    ///
+    /// Loading collapses a legacy row's repeated volume sets onto one
+    /// allocation and storing writes them once, so this is a load-and-store
+    /// with no transformation of its own. Returns the before/after JSON sizes
+    /// so a caller can report what it reclaimed.
+    ///
+    /// Idempotent: a row already in the new form re-serialises to the same
+    /// bytes, so re-running costs a rewrite and changes nothing.
+    pub async fn compact_stored_meta(
+        &self,
+        info_hash: &str,
+    ) -> Result<Option<(i64, i64)>, StreamerError> {
+        let Some(before) = store::stored_size(&self.db, info_hash).await? else {
+            return Ok(None);
+        };
+        let Some(meta) = store::load(&self.db, info_hash).await? else {
+            return Ok(None);
+        };
+        store::store(&self.db, info_hash, &meta).await?;
+        let after = store::stored_size(&self.db, info_hash)
+            .await?
+            .unwrap_or(before);
+        Ok(Some((before, after)))
+    }
+
+    /// Rewrite up to `limit` releases still stored in an older format.
+    ///
+    /// Returns `(rewritten, bytes_reclaimed)`. Largest first, so an instance
+    /// that is restarted repeatedly still converges on the rows that matter,
+    /// and idempotent, so running it again costs a rewrite and changes nothing.
+    ///
+    /// Deliberately incremental rather than one pass at boot: this rewrites
+    /// every row it touches, and doing 4.5 GB of that while the process is also
+    /// trying to serve playback is not a trade anyone asked for.
+    pub async fn compact_outdated_meta(&self, limit: u32) -> Result<(usize, i64), StreamerError> {
+        let hashes = store::outdated_info_hashes(&self.db, limit).await?;
+        let mut rewritten = 0usize;
+        let mut reclaimed = 0i64;
+        for info_hash in hashes {
+            match self.compact_stored_meta(&info_hash).await {
+                Ok(Some((before, after))) => {
+                    rewritten += 1;
+                    reclaimed += before - after;
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::warn!(info_hash, error = %error, "meta compaction failed");
+                }
+            }
+        }
+        Ok((rewritten, reclaimed))
+    }
+
+    /// One file's segment map, straight from Postgres.
+    ///
+    /// Deliberately uncached. It used to sit behind a byte-budgeted LRU, which
+    /// was the wrong shape: a read's need for the map lasts exactly as long as
+    /// the FUSE handle, and the kernel already tracks that. The handle holds it
+    /// now (see `UsenetOpenFile`), so this is called once per open rather than
+    /// once per read, and there is no budget to size or lock to take.
+    ///
+    /// `load_meta` owns two side effects this must not lose — the `Direct`
+    /// offset auto-heal that keeps `filesystem_entries.file_size` honest, and
+    /// the `decoded_seg_size` backfill. Both need the whole release, so neither
+    /// belongs on a read. Instead a file that looks like it needs either kicks
+    /// one background `load_meta`, claimed once per release.
+    pub async fn load_file(
+        &self,
+        info_hash: &str,
+        file_index: usize,
+    ) -> Result<Arc<FileMeta>, StreamerError> {
+        let meta = self.fetch_file_meta(info_hash, file_index).await?;
+        Ok(meta)
+    }
+
+    async fn fetch_file_meta(
+        &self,
+        info_hash: &str,
+        file_index: usize,
+    ) -> Result<Arc<FileMeta>, StreamerError> {
+        // A release already resident from ingest or backfill answers without
+        // touching the database.
+        if let Some(meta) = self.state.meta_cache.touch(info_hash) {
+            let file = meta
+                .files
+                .get(file_index)
+                .ok_or(StreamerError::BadFileIndex(file_index))?;
+            return Ok(Arc::new(FileMeta {
+                file: file.clone(),
+                password: meta.password.clone(),
+            }));
+        }
+        let loaded = store::load_file(&self.db, info_hash, file_index).await?;
+        let file = loaded.ok_or(StreamerError::BadFileIndex(file_index))?;
+        let arc = Arc::new(file);
+        self.maybe_kick_maintenance(info_hash, &arc);
+        Ok(arc)
+    }
+
+    /// Kick the release-wide heal/backfill walk if this file shows either of
+    /// the two symptoms `load_meta` looks for. Claimed once per release, so a
+    /// season pack pays it once however many episodes are opened.
+    fn maybe_kick_maintenance(&self, info_hash: &str, file: &FileMeta) {
+        let needs = match &file.source {
+            NzbMetaSource::Direct { offsets, .. } => direct_offsets_look_approximate(offsets),
+            NzbMetaSource::Rar { parts, .. } => parts.iter().any(|p| p.decoded_seg_size.is_none()),
+        };
+        if !needs || !self.state.maintained.claim(info_hash) {
+            return;
+        }
+        let streamer = self.clone();
+        let info_hash = info_hash.to_string();
+        tokio::spawn(async move {
+            if let Err(e) = streamer.load_meta(&info_hash).await {
+                tracing::debug!(info_hash, error = %e, "background meta maintenance failed");
+            }
+        });
+    }
+
     /// STAT-sample a file's segments across providers to gauge availability,
     /// returning counts (not a verdict). Mirrors the ingest probe's sampling
     /// but reports missing/error counts so the health view can show *how*
@@ -260,20 +383,16 @@ impl UsenetStreamer {
         file_index: usize,
         sample_percent: usize,
     ) -> Result<AvailabilityScan, StreamerError> {
-        let meta = self.load_meta(info_hash).await?;
-        let file = meta
-            .files
-            .get(file_index)
-            .ok_or(StreamerError::BadFileIndex(file_index))?;
+        let file = self.load_file(info_hash, file_index).await?;
 
         let message_ids: Vec<String> = match &file.source {
             NzbMetaSource::Direct { segments, .. } => {
-                segments.iter().map(|s| s.message_id.clone()).collect()
+                segments.iter().map(|s| s.message_id.to_string()).collect()
             }
             NzbMetaSource::Rar { parts, .. } => parts
                 .iter()
                 .flat_map(|p| p.segments.iter())
-                .map(|s| s.message_id.clone())
+                .map(|s| s.message_id.to_string())
                 .collect(),
         };
 
@@ -324,11 +443,11 @@ impl UsenetStreamer {
         for file in &meta.files {
             match &file.source {
                 NzbMetaSource::Direct { segments, .. } => {
-                    message_ids.extend(segments.iter().map(|s| s.message_id.clone()));
+                    message_ids.extend(segments.iter().map(|s| s.message_id.to_string()));
                 }
                 NzbMetaSource::Rar { parts, .. } => {
-                    for p in parts {
-                        message_ids.extend(p.segments.iter().map(|s| s.message_id.clone()));
+                    for p in parts.iter() {
+                        message_ids.extend(p.segments.iter().map(|s| s.message_id.to_string()));
                     }
                 }
             }
@@ -374,6 +493,64 @@ struct MetaLoadGuard {
 impl Drop for MetaLoadGuard {
     fn drop(&mut self) {
         self.state.meta_loads.finish(&self.key, &self.slot);
+    }
+}
+
+/// One open usenet file: the segment map, resolved once and held until the
+/// FUSE handle above it is released.
+///
+/// This is what replaced a byte-budgeted LRU of segment maps. The map is
+/// resolved on first read rather than at `open` because `fuser`'s `open` is
+/// synchronous; after that every read is a field access rather than a hash
+/// probe and an LRU promote under a process-wide mutex.
+struct UsenetOpenFile {
+    streamer: UsenetStreamer,
+    info_hash: Arc<str>,
+    file_index: usize,
+    meta: tokio::sync::OnceCell<Arc<FileMeta>>,
+}
+
+impl UsenetOpenFile {
+    async fn meta(&self) -> Result<&Arc<FileMeta>, StreamerError> {
+        self.meta
+            .get_or_try_init(|| {
+                self.streamer
+                    .fetch_file_meta(&self.info_hash, self.file_index)
+            })
+            .await
+    }
+}
+
+#[async_trait::async_trait]
+impl riven_core::local_source::LocalOpenFile for UsenetOpenFile {
+    async fn layout(&self) -> Option<riven_core::local_source::SourceLayout> {
+        let file = self.meta().await.ok()?;
+        // Both arms report the article size and nothing else. Read-ahead sizes
+        // its cushion in bytes from it; whether the post is a RAR set says
+        // nothing about how fast its articles arrive.
+        let chunk_size = match &file.source {
+            NzbMetaSource::Direct { offsets, .. } => {
+                offsets.windows(2).next().map(|w| w[1] - w[0])?
+            }
+            NzbMetaSource::Rar { parts, .. } => parts
+                .iter()
+                .find_map(|part| part.decoded_seg_size.filter(|size| *size > 0))?,
+        };
+        (chunk_size > 0).then_some(riven_core::local_source::SourceLayout { chunk_size })
+    }
+
+    async fn read_range(&self, start: u64, end_inclusive: u64) -> anyhow::Result<bytes::Bytes> {
+        let meta = self.meta().await?;
+        let slices = self
+            .streamer
+            .read_range_slices_of(meta, &self.info_hash, self.file_index, start, end_inclusive)
+            .await?;
+        let mut buf = concat_slices(slices, start, end_inclusive);
+        let want = (end_inclusive - start + 1) as usize;
+        if buf.len() > want {
+            buf.truncate(want);
+        }
+        Ok(buf)
     }
 }
 
@@ -470,6 +647,10 @@ fn shared_cell() -> &'static Mutex<Option<(u64, UsenetStreamer)>> {
 pub struct StreamingHealth {
     pub segment_cache: CacheStats,
     pub meta_cache: CacheStats,
+    /// The decoded-size memo. Counted in bytes and reported here so it is
+    /// visible to `RIVEN_MEMORY_LIMIT_MB` and the dashboard; it used to be
+    /// capped by entry count and therefore invisible to both.
+    pub segment_sizes_cache: CacheStats,
     pub fetches_ok: u64,
     pub fetches_failed: u64,
     pub bytes_decoded: u64,
@@ -492,6 +673,7 @@ pub fn streaming_health() -> StreamingHealth {
     StreamingHealth {
         segment_cache: pool.cache().stats(),
         meta_cache: crate::state::StreamerState::global().meta_cache.stats(),
+        segment_sizes_cache: pool.segment_sizes_stats(),
         fetches_ok: pool.metrics().ok(),
         fetches_failed: pool.metrics().failed(),
         bytes_decoded: pool.metrics().bytes_decoded(),
@@ -524,35 +706,17 @@ fn nntp_config_fingerprint(cfg: &NntpConfig) -> u64 {
 
 #[async_trait::async_trait]
 impl riven_core::local_source::LocalByteSource for UsenetStreamer {
-    async fn layout(
+    fn open_file(
         &self,
         info_hash: &str,
         file_index: usize,
-    ) -> Option<riven_core::local_source::SourceLayout> {
-        let meta = self.load_meta(info_hash).await.ok()?;
-        let file = meta.files.get(file_index)?;
-        // Both arms report the article size and nothing else. Read-ahead sizes
-        // its cushion in bytes from it; whether the post is a RAR set says
-        // nothing about how fast its articles arrive.
-        let chunk_size = match &file.source {
-            NzbMetaSource::Direct { offsets, .. } => {
-                offsets.windows(2).next().map(|w| w[1] - w[0])?
-            }
-            NzbMetaSource::Rar { parts, .. } => parts
-                .iter()
-                .find_map(|part| part.decoded_seg_size.filter(|size| *size > 0))?,
-        };
-        (chunk_size > 0).then_some(riven_core::local_source::SourceLayout { chunk_size })
-    }
-
-    async fn read_range(
-        &self,
-        info_hash: &str,
-        file_index: usize,
-        start: u64,
-        end_inclusive: u64,
-    ) -> anyhow::Result<bytes::Bytes> {
-        Ok(UsenetStreamer::read_range(self, info_hash, file_index, start, end_inclusive).await?)
+    ) -> Arc<dyn riven_core::local_source::LocalOpenFile> {
+        Arc::new(UsenetOpenFile {
+            streamer: self.clone(),
+            info_hash: Arc::from(info_hash),
+            file_index,
+            meta: tokio::sync::OnceCell::new(),
+        })
     }
 
     fn stream_register(&self, key: &str, info_hash: &str, filename: &str, file_size: u64) {

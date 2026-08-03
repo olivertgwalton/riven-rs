@@ -29,14 +29,15 @@ anything outside the markers survives regeneration. -->
 
 | Variable | Kind | Read at |
 | --- | --- | --- |
-| `ORIGIN` | variable | `crates/riven-app/src/main.rs:340`<br>`crates/riven-app/src/main.rs:358` |
-| `RIVEN_SETTING__API_KEY` | variable | `crates/riven-app/src/main.rs:520` |
-| `RIVEN_SETTING__PUBLIC_URL` | variable | `crates/riven-app/src/main.rs:146` |
-| `RIVEN_USENET_AUTO_REPAIR` | variable | `crates/riven-app/src/usenet.rs:92` |
-| `RIVEN_USENET_HEALTH_SCAN_BATCH` | variable | `crates/riven-app/src/usenet.rs:89` |
-| `RIVEN_USENET_HEALTH_SCAN_INTERVAL_SECS` | variable | `crates/riven-app/src/usenet.rs:86` |
-| `RIVEN_USENET_REPAIR_BASE_INTERVAL_SECS` | variable | `crates/riven-app/src/usenet.rs:93` |
-| `RIVEN_USENET_REPAIR_MAX_COOLDOWN_SECS` | variable | `crates/riven-app/src/usenet.rs:96` |
+| `ORIGIN` | variable | `crates/riven-app/src/main.rs:353`<br>`crates/riven-app/src/main.rs:371` |
+| `RIVEN_SETTING__API_KEY` | variable | `crates/riven-app/src/main.rs:533` |
+| `RIVEN_SETTING__PUBLIC_URL` | variable | `crates/riven-app/src/main.rs:159` |
+| `RIVEN_USENET_AUTO_REPAIR` | variable | `crates/riven-app/src/usenet.rs:160` |
+| `RIVEN_USENET_DISABLE_META_COMPACTION` | variable | `crates/riven-app/src/usenet.rs:93` |
+| `RIVEN_USENET_HEALTH_SCAN_BATCH` | variable | `crates/riven-app/src/usenet.rs:157` |
+| `RIVEN_USENET_HEALTH_SCAN_INTERVAL_SECS` | variable | `crates/riven-app/src/usenet.rs:154` |
+| `RIVEN_USENET_REPAIR_BASE_INTERVAL_SECS` | variable | `crates/riven-app/src/usenet.rs:161` |
+| `RIVEN_USENET_REPAIR_MAX_COOLDOWN_SECS` | variable | `crates/riven-app/src/usenet.rs:164` |
 
 ### `riven-core`
 
@@ -44,12 +45,14 @@ anything outside the markers survives regeneration. -->
 | --- | --- | --- |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | variable | `crates/riven-core/src/logging.rs:198` |
 | `OTEL_SERVICE_NAME` | variable | `crates/riven-core/src/logging.rs:202` |
-| `RIVEN_MEMORY_LIMIT_MB` | variable | `crates/riven-core/src/cache.rs:132` |
-| `RIVEN_READ_AHEAD_CACHE_BYTES` | variable | `crates/riven-core/src/cache.rs:56` |
+| `RIVEN_MEMORY_LIMIT_MB` | variable | `crates/riven-core/src/cache.rs:175` |
+| `RIVEN_READ_AHEAD_CACHE_BYTES` | variable | `crates/riven-core/src/cache.rs:58` |
 | `RIVEN_SETTING__` | prefix | `crates/riven-core/src/settings/app.rs:138` |
-| `RIVEN_USENET_CACHE_BYTES` | variable | `crates/riven-core/src/cache.rs:98` |
-| `RIVEN_USENET_META_CACHE_BYTES` | variable | `crates/riven-core/src/cache.rs:84` |
-| `RIVEN_USENET_NZB_CACHE_BYTES` | variable | `crates/riven-core/src/cache.rs:86` |
+| `RIVEN_USENET_CACHE_BYTES` | variable | `crates/riven-core/src/cache.rs:122` |
+| `RIVEN_USENET_FILE_CACHE_BYTES` | variable | `crates/riven-core/src/cache.rs:108` |
+| `RIVEN_USENET_META_CACHE_BYTES` | variable | `crates/riven-core/src/cache.rs:92` |
+| `RIVEN_USENET_NZB_CACHE_BYTES` | variable | `crates/riven-core/src/cache.rs:110` |
+| `RIVEN_USENET_SEGMENT_SIZE_CACHE_BYTES` | variable | `crates/riven-core/src/cache.rs:141` |
 | `SENTRY_DSN` | variable | `crates/riven-core/src/logging.rs:183` |
 | `SENTRY_ENVIRONMENT` | variable | `crates/riven-core/src/logging.rs:186` |
 

@@ -14,20 +14,19 @@
 
 pub mod nntp;
 pub mod nzb;
+pub mod segments;
+
 pub mod pool;
 pub mod state;
 pub mod streamer;
 
-pub(crate) mod bufpool;
 pub(crate) mod crypto;
 pub(crate) mod par2;
 pub(crate) mod rar;
 pub(crate) mod yenc;
 
 pub use nntp::{DEFAULT_DOWNLOAD_WORKERS, NntpConfig};
-pub use nzb::{
-    NzbDocument, NzbFile, NzbSegment, parse_nzb, parse_nzb_document, peek_release_title,
-};
+pub use nzb::{NzbDocument, NzbFile, parse_nzb, parse_nzb_document, peek_release_title};
 pub use pool::SegmentPool;
 pub use streamer::{
     DEFAULT_AVAILABILITY_SAMPLE_PERCENT, NzbMeta, NzbMetaFile, NzbMetaSource, StreamerError,

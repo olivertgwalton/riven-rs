@@ -16,6 +16,19 @@ mod usenet;
 
 use usenet::setting_u64;
 
+/// The streaming path allocates and frees a ~700 KB buffer per article, on the
+/// order of a hundred a second under 4K playback. musl's allocator serves those
+/// through `mmap` and returns them with `madvise(MADV_DONTNEED)`, so every
+/// re-allocation re-faults its pages in — ~6 % of CPU on the streaming profile,
+/// none of it doing work. mimalloc keeps the pages on a thread-local free list
+/// instead.
+///
+/// Set here rather than in a library crate because a `#[global_allocator]` is a
+/// property of the final binary: a library that declared one would force it on
+/// every consumer, including the test harnesses.
+#[global_allocator]
+static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 const USER_AGENT: &str = concat!("riven-rs/", env!("CARGO_PKG_VERSION"));
 
 /// Client for outbound API calls — metadata providers, scrapers, notification

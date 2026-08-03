@@ -176,7 +176,10 @@ impl UsenetStreamer {
                 let mut cursor = 0u64;
                 let mut anchor = 0usize;
                 while anchor < total {
-                    let Some(size) = self.pool.decoded_size(&part.segments[anchor].message_id)
+                    let Some(size) = part
+                        .segments
+                        .id(anchor)
+                        .and_then(|id| self.pool.decoded_size(id))
                     else {
                         break;
                     };
@@ -249,9 +252,9 @@ impl UsenetStreamer {
         // streamnzb's read-ahead does, so the walk below collects what is
         // already in flight.
         self.warm_articles(
-            part.segments[anchor..=horizon]
-                .iter()
-                .map(|segment| segment.message_id.as_str()),
+            part.segments
+                .range(anchor, horizon)
+                .map(|segment| segment.message_id),
         );
 
         loop {
@@ -266,7 +269,7 @@ impl UsenetStreamer {
             {
                 let decoded = self
                     .fetch_article_or_hole(
-                        &segment.message_id,
+                        segment.message_id,
                         exact_segment_len(part, position),
                         salvage,
                     )
@@ -296,7 +299,7 @@ impl UsenetStreamer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::nzb::NzbSegment;
+    use crate::segments::NzbSegment;
 
     fn part(decoded_seg_size: Option<u64>, segments: usize) -> NzbRarPart {
         NzbRarPart {
@@ -306,7 +309,6 @@ mod tests {
             segments: (0..segments)
                 .map(|i| NzbSegment {
                     bytes: 700_000,
-                    number: i as u32 + 1,
                     message_id: format!("s{i}@test"),
                 })
                 .collect(),
