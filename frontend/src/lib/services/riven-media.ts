@@ -86,27 +86,44 @@ export type GqlMediaItemStateTree = Pick<
 	seasons?: GqlSeasonState[];
 };
 
+/// `mediaMetadata` is an object type, not a JSON scalar — selecting it as a
+/// leaf makes the whole document fail validation, and the resulting error is
+/// swallowed by the callers' non-critical catch, so the file details silently
+/// never arrive. Keep this selection set in sync with `MediaMetadata`.
+const MEDIA_METADATA_FIELDS = `
+    mediaMetadata {
+        filename originalFilename parsedTitle year
+        qualitySource containerFormat bitrate duration
+        isRemux isProper isRepack dataSource
+        video { codec resolutionWidth resolutionHeight bitDepth hdrType frameRate }
+        audioTracks { codec channels language }
+        subtitleTracks { codec language }
+    }
+`;
+
+const FILESYSTEM_ENTRY_FIELDS = `
+    id fileSize originalFilename downloadUrl
+    provider providerDownloadId path plugin rankingProfileName
+    ${MEDIA_METADATA_FIELDS}
+`;
+
 const MEDIA_ITEM_FULL_FIELDS = `
     id state imdbId tmdbId tvdbId
     filesystemEntry {
-        id fileSize originalFilename downloadUrl
-        provider providerDownloadId path plugin rankingProfileName mediaMetadata
+        ${FILESYSTEM_ENTRY_FIELDS}
     }
     filesystemEntries {
-        id fileSize originalFilename downloadUrl
-        provider providerDownloadId path plugin rankingProfileName mediaMetadata
+        ${FILESYSTEM_ENTRY_FIELDS}
     }
     seasons {
         seasonNumber state isRequested
         episodes {
             episodeNumber state
             filesystemEntry {
-                id fileSize originalFilename downloadUrl
-                provider providerDownloadId path plugin rankingProfileName mediaMetadata
+                ${FILESYSTEM_ENTRY_FIELDS}
             }
             filesystemEntries {
-                id fileSize originalFilename downloadUrl
-                provider providerDownloadId path plugin rankingProfileName mediaMetadata
+                ${FILESYSTEM_ENTRY_FIELDS}
             }
         }
     }
@@ -115,8 +132,9 @@ const MEDIA_ITEM_FULL_FIELDS = `
 const RAW_FILESYSTEM_ENTRY_FIELDS = `
     id fileSize createdAt updatedAt mediaItemId entryType path
     originalFilename downloadUrl plugin provider providerDownloadId
-    libraryProfiles mediaMetadata language parentOriginalFilename subtitleContent
+    libraryProfiles language parentOriginalFilename subtitleContent
     fileHash videoFileSize opensubtitlesId streamId resolution rankingProfileName
+    ${MEDIA_METADATA_FIELDS}
 `;
 
 const RAW_MEDIA_ITEM_FULL_FIELDS = `
