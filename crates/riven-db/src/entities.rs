@@ -33,6 +33,7 @@ pub struct MediaItemHierarchy {
 #[derive(
     Debug, Clone, Serialize, Deserialize, async_graphql::SimpleObject, sea_orm::FromQueryResult,
 )]
+#[graphql(complex)]
 pub struct MediaItemListRow {
     #[graphql(flatten)]
     #[sea_orm(nested)]
@@ -41,7 +42,21 @@ pub struct MediaItemListRow {
     pub show_title: Option<String>,
     pub show_tmdb_id: Option<String>,
     pub show_tvdb_id: Option<String>,
+    /// As stored; read it through the `showPosterPath` GraphQL field.
+    #[graphql(skip)]
     pub show_poster_path: Option<String>,
+}
+
+#[async_graphql::ComplexObject]
+impl MediaItemListRow {
+    /// Absolute artwork URL for the parent show, resolved the same way as the
+    /// row's own poster.
+    async fn show_poster_path(&self) -> Option<String> {
+        riven_core::entities::helpers::artwork_url(
+            self.show_poster_path.as_deref(),
+            riven_core::entities::helpers::Artwork::Poster,
+        )
+    }
 }
 
 /// Lightweight projection used by the calendar GraphQL query.

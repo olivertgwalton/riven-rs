@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::str::FromStr;
 use std::time::{Duration, Instant};
 
+use riven_core::entities::helpers::{Artwork, artwork_url};
 use riven_core::events::{EventType, HookResponse, IndexRequest};
 use riven_core::http::HttpServiceProfile;
 use riven_core::plugin::{Plugin, PluginContext};
@@ -223,7 +224,7 @@ async fn fetch_series(
             aired_at: aired,
             aired_at_utc,
             runtime: ep.runtime,
-            poster_path: ep.image.clone(),
+            poster_path: artwork_url(ep.image.as_deref(), Artwork::Poster),
             content_rating: None,
         };
 
@@ -278,7 +279,7 @@ async fn fetch_series(
         title: Some(title),
         tvdb_id: Some(tvdb_id.to_string()),
         imdb_id,
-        poster_path: series.image,
+        poster_path: artwork_url(series.image.as_deref(), Artwork::Poster),
         year,
         genres,
         country,

@@ -72,6 +72,12 @@ export type AnilistRating = {
   score?: Maybe<Scalars['Float']['output']>;
 };
 
+export type AudioTrack = {
+  channels?: Maybe<Scalars['Int']['output']>;
+  codec?: Maybe<Scalars['String']['output']>;
+  language?: Maybe<Scalars['String']['output']>;
+};
+
 /** One cache's live figures. */
 export type CacheHealth = {
   bytesMax: Scalars['Int']['output'];
@@ -81,7 +87,7 @@ export type CacheHealth = {
   hitRate: Scalars['Float']['output'];
   hits: Scalars['Int']['output'];
   misses: Scalars['Int']['output'];
-  /** `read-ahead`, `nzb-meta` or `segment`. */
+  /** `read-ahead`, `nzb-meta`, `segment` or `segment-sizes`. */
   name: Scalars['String']['output'];
 };
 
@@ -132,6 +138,15 @@ export type Capability =
    * download that commits the chosen one.
    */
   | 'SCRAPE_ITEMS';
+
+export type CastMember = {
+  character?: Maybe<Scalars['String']['output']>;
+  /** `tmdb` or `tvdb` — which indexer this person can be looked up in. */
+  externalSource: Scalars['String']['output'];
+  id: Scalars['Int']['output'];
+  name: Scalars['String']['output'];
+  profilePath?: Maybe<Scalars['String']['output']>;
+};
 
 export type ContentRating =
   | 'G'
@@ -213,6 +228,11 @@ export type Episode = {
   network?: Maybe<Scalars['String']['output']>;
   networkTimezone?: Maybe<Scalars['String']['output']>;
   parentId?: Maybe<Scalars['Int']['output']>;
+  /**
+   * Absolute artwork URL. The column holds a bare path for anything indexed
+   * before the plugins normalised what they wrote, so it is resolved here
+   * rather than in each client.
+   */
   posterPath?: Maybe<Scalars['String']['output']>;
   rating?: Maybe<Scalars['Float']['output']>;
   runtime?: Maybe<Scalars['Int']['output']>;
@@ -265,6 +285,11 @@ export type EpisodeFull = {
   network?: Maybe<Scalars['String']['output']>;
   networkTimezone?: Maybe<Scalars['String']['output']>;
   parentId?: Maybe<Scalars['Int']['output']>;
+  /**
+   * Absolute artwork URL. The column holds a bare path for anything indexed
+   * before the plugins normalised what they wrote, so it is resolved here
+   * rather than in each client.
+   */
   posterPath?: Maybe<Scalars['String']['output']>;
   rating?: Maybe<Scalars['Float']['output']>;
   runtime?: Maybe<Scalars['Int']['output']>;
@@ -287,6 +312,23 @@ export type EpisodeState = {
   state: MediaItemState;
 };
 
+export type EpisodeSummary = {
+  absoluteNumber?: Maybe<Scalars['Int']['output']>;
+  aired?: Maybe<Scalars['String']['output']>;
+  id: Scalars['Int']['output'];
+  image?: Maybe<Scalars['String']['output']>;
+  name?: Maybe<Scalars['String']['output']>;
+  number?: Maybe<Scalars['Int']['output']>;
+  overview?: Maybe<Scalars['String']['output']>;
+  runtime?: Maybe<Scalars['Int']['output']>;
+  seasonNumber?: Maybe<Scalars['Int']['output']>;
+};
+
+export type ExternalId = {
+  id: Scalars['String']['output'];
+  source: Scalars['String']['output'];
+};
+
 export type FileSystemEntry = {
   createdAt: Scalars['DateTime']['output'];
   downloadUrl?: Maybe<Scalars['String']['output']>;
@@ -297,7 +339,11 @@ export type FileSystemEntry = {
   language?: Maybe<Scalars['String']['output']>;
   libraryProfiles?: Maybe<Scalars['JSON']['output']>;
   mediaItemId: Scalars['Int']['output'];
-  mediaMetadata?: Maybe<Scalars['JSON']['output']>;
+  /**
+   * The stored document, typed. A row written by an older build that is
+   * missing fields still reads — every field defaults.
+   */
+  mediaMetadata?: Maybe<MediaMetadata>;
   opensubtitlesId?: Maybe<Scalars['String']['output']>;
   originalFilename?: Maybe<Scalars['String']['output']>;
   parentOriginalFilename?: Maybe<Scalars['String']['output']>;
@@ -321,6 +367,13 @@ export type FileSystemEntry = {
 export type FileSystemEntryType =
   | 'MEDIA'
   | 'SUBTITLE';
+
+export type Genre = {
+  id: Scalars['Int']['output'];
+  name: Scalars['String']['output'];
+  /** TVDB only. */
+  slug?: Maybe<Scalars['String']['output']>;
+};
 
 export type IdResolution = {
   id: Scalars['String']['output'];
@@ -481,6 +534,59 @@ export type LogEntry = {
   timestamp?: Maybe<Scalars['String']['output']>;
 };
 
+/**
+ * A TMDB `/3/movie/{id}` payload (appended with `external_ids,images,
+ * recommendations,similar,videos,credits,release_dates`) or a TVDB
+ * `/series/{id}/extended` payload unwrapped from its `data` envelope.
+ */
+export type MediaDetails = {
+  backdropPath?: Maybe<Scalars['String']['output']>;
+  budget?: Maybe<Scalars['Int']['output']>;
+  cast: Array<CastMember>;
+  certification: Scalars['String']['output'];
+  collection?: Maybe<MovieCollection>;
+  crew: Array<CastMember>;
+  episodeCount: Scalars['Int']['output'];
+  episodes: Array<EpisodeSummary>;
+  externalIds: Array<ExternalId>;
+  formattedRuntime?: Maybe<Scalars['String']['output']>;
+  genres: Array<Genre>;
+  homepage?: Maybe<Scalars['String']['output']>;
+  id: Scalars['Int']['output'];
+  imdbId?: Maybe<Scalars['String']['output']>;
+  logo?: Maybe<Scalars['String']['output']>;
+  originCountry: Array<Scalars['String']['output']>;
+  originalLanguage?: Maybe<Scalars['String']['output']>;
+  overview?: Maybe<Scalars['String']['output']>;
+  posterPath?: Maybe<Scalars['String']['output']>;
+  productionCompanies: Array<ProductionCompany>;
+  /**
+   * TVDB has no recommendation feed; the fields exist so the UI reads movies
+   * and shows through one shape.
+   */
+  recommendations: Array<TmdbListItem>;
+  releaseDate?: Maybe<Scalars['String']['output']>;
+  revenue?: Maybe<Scalars['Int']['output']>;
+  runtime?: Maybe<Scalars['Int']['output']>;
+  seasons: Array<SeasonSummary>;
+  similar: Array<TmdbListItem>;
+  spokenLanguages: Array<SpokenLanguage>;
+  status?: Maybe<Scalars['String']['output']>;
+  /**
+   * TMDB calls it `title`, TVDB `name`; the resolver has already replaced
+   * TVDB's with the English translation, so neither needs choosing here.
+   */
+  title?: Maybe<Scalars['String']['output']>;
+  /** A show carries TMDB's id among its remote ids; a movie is one. */
+  tmdbId?: Maybe<Scalars['Int']['output']>;
+  trailer?: Maybe<Trailer>;
+  traktRecommendations: Array<TmdbListItem>;
+  type: Scalars['String']['output'];
+  /** TMDB scores out of 10; TVDB's `score` is its own scale. */
+  voteAverage?: Maybe<Scalars['Float']['output']>;
+  year?: Maybe<Scalars['Int']['output']>;
+};
+
 export type MediaItem = {
   absoluteNumber?: Maybe<Scalars['Int']['output']>;
   activeStreamId?: Maybe<Scalars['Int']['output']>;
@@ -507,6 +613,11 @@ export type MediaItem = {
   network?: Maybe<Scalars['String']['output']>;
   networkTimezone?: Maybe<Scalars['String']['output']>;
   parentId?: Maybe<Scalars['Int']['output']>;
+  /**
+   * Absolute artwork URL. The column holds a bare path for anything indexed
+   * before the plugins normalised what they wrote, so it is resolved here
+   * rather than in each client.
+   */
   posterPath?: Maybe<Scalars['String']['output']>;
   rating?: Maybe<Scalars['Float']['output']>;
   runtime?: Maybe<Scalars['Int']['output']>;
@@ -551,6 +662,11 @@ export type MediaItemFull = {
   network?: Maybe<Scalars['String']['output']>;
   networkTimezone?: Maybe<Scalars['String']['output']>;
   parentId?: Maybe<Scalars['Int']['output']>;
+  /**
+   * Absolute artwork URL. The column holds a bare path for anything indexed
+   * before the plugins normalised what they wrote, so it is resolved here
+   * rather than in each client.
+   */
   posterPath?: Maybe<Scalars['String']['output']>;
   rating?: Maybe<Scalars['Float']['output']>;
   runtime?: Maybe<Scalars['Int']['output']>;
@@ -593,6 +709,11 @@ export type MediaItemListRow = {
   network?: Maybe<Scalars['String']['output']>;
   networkTimezone?: Maybe<Scalars['String']['output']>;
   parentId?: Maybe<Scalars['Int']['output']>;
+  /**
+   * Absolute artwork URL. The column holds a bare path for anything indexed
+   * before the plugins normalised what they wrote, so it is resolved here
+   * rather than in each client.
+   */
   posterPath?: Maybe<Scalars['String']['output']>;
   rating?: Maybe<Scalars['Float']['output']>;
   runtime?: Maybe<Scalars['Int']['output']>;
@@ -600,6 +721,10 @@ export type MediaItemListRow = {
   scrapedTimes: Scalars['Int']['output'];
   seasonNumber?: Maybe<Scalars['Int']['output']>;
   showId?: Maybe<Scalars['Int']['output']>;
+  /**
+   * Absolute artwork URL for the parent show, resolved the same way as the
+   * row's own poster.
+   */
   showPosterPath?: Maybe<Scalars['String']['output']>;
   showStatus?: Maybe<ShowStatus>;
   showTitle?: Maybe<Scalars['String']['output']>;
@@ -643,6 +768,34 @@ export type MediaItemType =
 /** Discriminated union of all concrete media item types. */
 export type MediaItemUnion = Episode | Movie | Season | Show;
 
+/**
+ * The `media_metadata` document, derived from a release filename by
+ * `riven_rank::derive_media_metadata` and stored as JSON on the entry.
+ *
+ * It is typed here rather than handed over as a `JSON` scalar because both
+ * clients used to re-parse the blob — the Swift app in `FileDetailsView` and
+ * the web frontend in `lib/types/riven.ts` — each maintaining its own copy of
+ * a shape only this repo defines.
+ */
+export type MediaMetadata = {
+  audioTracks: Array<AudioTrack>;
+  bitrate?: Maybe<Scalars['Int']['output']>;
+  containerFormat: Array<Scalars['String']['output']>;
+  /** `parsed` when derived from the filename; set by whoever wrote the row. */
+  dataSource?: Maybe<Scalars['String']['output']>;
+  duration?: Maybe<Scalars['Float']['output']>;
+  filename?: Maybe<Scalars['String']['output']>;
+  isProper: Scalars['Boolean']['output'];
+  isRemux: Scalars['Boolean']['output'];
+  isRepack: Scalars['Boolean']['output'];
+  originalFilename?: Maybe<Scalars['String']['output']>;
+  parsedTitle?: Maybe<Scalars['String']['output']>;
+  qualitySource?: Maybe<Scalars['String']['output']>;
+  subtitleTracks: Array<SubtitleTrack>;
+  video?: Maybe<VideoMetadata>;
+  year?: Maybe<Scalars['Int']['output']>;
+};
+
 export type Movie = {
   absoluteNumber?: Maybe<Scalars['Int']['output']>;
   activeStreamId?: Maybe<Scalars['Int']['output']>;
@@ -671,6 +824,11 @@ export type Movie = {
   network?: Maybe<Scalars['String']['output']>;
   networkTimezone?: Maybe<Scalars['String']['output']>;
   parentId?: Maybe<Scalars['Int']['output']>;
+  /**
+   * Absolute artwork URL. The column holds a bare path for anything indexed
+   * before the plugins normalised what they wrote, so it is resolved here
+   * rather than in each client.
+   */
   posterPath?: Maybe<Scalars['String']['output']>;
   rating?: Maybe<Scalars['Float']['output']>;
   runtime?: Maybe<Scalars['Int']['output']>;
@@ -690,6 +848,14 @@ export type Movie = {
 
 export type MovieStreamsArgs = {
   infoHashes?: InputMaybe<Array<Scalars['String']['input']>>;
+};
+
+/** The franchise a movie belongs to, when TMDB says it belongs to one. */
+export type MovieCollection = {
+  backdropPath?: Maybe<Scalars['String']['output']>;
+  id: Scalars['Int']['output'];
+  name: Scalars['String']['output'];
+  posterPath?: Maybe<Scalars['String']['output']>;
 };
 
 /** Input for requesting a movie to be tracked. */
@@ -1076,6 +1242,49 @@ export type NntpProviderHealth = {
   priority: Scalars['Int']['output'];
 };
 
+export type PersonCredit = {
+  backdropPath?: Maybe<Scalars['String']['output']>;
+  character?: Maybe<Scalars['String']['output']>;
+  department?: Maybe<Scalars['String']['output']>;
+  id: Scalars['Int']['output'];
+  indexer: Scalars['String']['output'];
+  job?: Maybe<Scalars['String']['output']>;
+  mediaType: Scalars['String']['output'];
+  originalTitle: Scalars['String']['output'];
+  popularity?: Maybe<Scalars['Float']['output']>;
+  posterPath?: Maybe<Scalars['String']['output']>;
+  releaseDate?: Maybe<Scalars['String']['output']>;
+  title: Scalars['String']['output'];
+  voteAverage?: Maybe<Scalars['Float']['output']>;
+  voteCount?: Maybe<Scalars['Int']['output']>;
+  year?: Maybe<Scalars['Int']['output']>;
+};
+
+export type PersonDetails = {
+  alsoKnownAs: Array<Scalars['String']['output']>;
+  biography?: Maybe<Scalars['String']['output']>;
+  birthday?: Maybe<Scalars['String']['output']>;
+  castCredits: Array<PersonCredit>;
+  crewCredits: Array<PersonCredit>;
+  deathday?: Maybe<Scalars['String']['output']>;
+  externalIds: Array<ExternalId>;
+  gender?: Maybe<Scalars['String']['output']>;
+  homepage?: Maybe<Scalars['String']['output']>;
+  id: Scalars['Int']['output'];
+  imdbId?: Maybe<Scalars['String']['output']>;
+  indexer: Scalars['String']['output'];
+  knownForDepartment?: Maybe<Scalars['String']['output']>;
+  name: Scalars['String']['output'];
+  placeOfBirth?: Maybe<Scalars['String']['output']>;
+  profilePath?: Maybe<Scalars['String']['output']>;
+  /**
+   * Surfaced beside `externalIds` so the UI can link to TMDB without
+   * searching the list for it.
+   */
+  tmdbId?: Maybe<Scalars['Int']['output']>;
+  tvdbUrl?: Maybe<Scalars['String']['output']>;
+};
+
 export type PlaybackMethod =
   | 'DIRECT_PLAY'
   | 'DIRECT_STREAM'
@@ -1088,6 +1297,13 @@ export type PlaybackState =
   | 'PAUSED'
   | 'PLAYING'
   | 'UNKNOWN';
+
+export type ProductionCompany = {
+  id: Scalars['Int']['output'];
+  logoPath?: Maybe<Scalars['String']['output']>;
+  name: Scalars['String']['output'];
+  originCountry?: Maybe<Scalars['String']['output']>;
+};
 
 export type QueryRoot = {
   /** Get active playback sessions from configured media-server plugins. */
@@ -1103,6 +1319,7 @@ export type QueryRoot = {
   anilistRating: AnilistRating;
   /** Get upcoming unreleased items (calendar feed), with show title resolved in a single query. */
   calendar: Array<CalendarEntry>;
+  companyDetails: PersonDetails;
   /** Return all ranking profiles (built-in + custom) with their enabled status. */
   customProfiles: Scalars['JSON']['output'];
   /** Get debrid account information for all configured stores. */
@@ -1141,12 +1358,19 @@ export type QueryRoot = {
   mediaItemStateByTmdb?: Maybe<MediaItemStateTree>;
   mediaItemStateByTvdb?: Maybe<MediaItemStateTree>;
   mediaItems: Array<MediaItemUnion>;
+  /**
+   * Everything the movie detail page renders, in one shape shared with
+   * `showDetails`.
+   */
+  movieDetails: MediaDetails;
   movies: Array<MediaItem>;
   /**
    * Per-provider NNTP health (connections + demotion state). Empty when
    * usenet isn't configured.
    */
   nntpProviders: Array<NntpProviderHealth>;
+  /** A cast/crew member or a company, both rendered through one shape. */
+  personDetails: PersonDetails;
   /**
    * Return all quality profiles as an ordered array of
    * `{ id, label, description, settings }` objects.
@@ -1172,21 +1396,20 @@ export type QueryRoot = {
    * This is the single source of truth for setup-step grouping, labels, and order.
    */
   setupGroups: Array<SetupGroup>;
+  /**
+   * Everything the show detail page renders, in one shape shared with
+   * `movieDetails`. `id` is a TVDB series id; `tmdbId` is only used to ask
+   * Trakt for related titles when the page was reached from a TMDB id.
+   */
+  showDetails: MediaDetails;
   shows: Array<MediaItem>;
   stats: LibraryStats;
   tmdbCategory: TmdbPage;
-  tmdbCollection: Scalars['JSON']['output'];
   tmdbCollectionDetails: TmdbCollectionDetails;
-  tmdbDetails: Scalars['JSON']['output'];
   tmdbLogoAndCert: TmdbLogoAndCert;
-  traktRecommendations: Array<TraktListItem>;
+  traktRecommendations: Array<TmdbListItem>;
   trendingAnilist: AnilistPage;
   trendingTmdb: TmdbPage;
-  tvdbEpisodes: Scalars['JSON']['output'];
-  tvdbPersonExtended: Scalars['JSON']['output'];
-  tvdbSearchRemoteId: Scalars['JSON']['output'];
-  tvdbSeries: Scalars['JSON']['output'];
-  tvdbSeriesExtended: Scalars['JSON']['output'];
   /** Cache + fetch metrics for the in-process usenet streaming engine. */
   usenetStreamingHealth: UsenetStreamingHealth;
   /**
@@ -1228,6 +1451,11 @@ export type QueryRootAnilistRatingArgs = {
 
 export type QueryRootCalendarArgs = {
   limit?: InputMaybe<Scalars['Int']['input']>;
+};
+
+
+export type QueryRootCompanyDetailsArgs = {
+  id: Scalars['Int']['input'];
 };
 
 
@@ -1325,6 +1553,17 @@ export type QueryRootMediaItemStateByTvdbArgs = {
 };
 
 
+export type QueryRootMovieDetailsArgs = {
+  id: Scalars['Int']['input'];
+};
+
+
+export type QueryRootPersonDetailsArgs = {
+  id: Scalars['Int']['input'];
+  indexer?: InputMaybe<Scalars['String']['input']>;
+};
+
+
 export type QueryRootRatingsArgs = {
   id: Scalars['String']['input'];
   indexer: Scalars['String']['input'];
@@ -1358,6 +1597,12 @@ export type QueryRootSeasonsArgs = {
 };
 
 
+export type QueryRootShowDetailsArgs = {
+  id: Scalars['Int']['input'];
+  tmdbId?: InputMaybe<Scalars['String']['input']>;
+};
+
+
 export type QueryRootTmdbCategoryArgs = {
   category: Scalars['String']['input'];
   page?: InputMaybe<Scalars['Int']['input']>;
@@ -1365,20 +1610,8 @@ export type QueryRootTmdbCategoryArgs = {
 };
 
 
-export type QueryRootTmdbCollectionArgs = {
-  id: Scalars['Int']['input'];
-};
-
-
 export type QueryRootTmdbCollectionDetailsArgs = {
   id: Scalars['Int']['input'];
-};
-
-
-export type QueryRootTmdbDetailsArgs = {
-  appendToResponse?: InputMaybe<Scalars['String']['input']>;
-  id: Scalars['Int']['input'];
-  type: Scalars['String']['input'];
 };
 
 
@@ -1405,36 +1638,6 @@ export type QueryRootTrendingTmdbArgs = {
   page?: InputMaybe<Scalars['Int']['input']>;
   timeWindow: Scalars['String']['input'];
   type: Scalars['String']['input'];
-};
-
-
-export type QueryRootTvdbEpisodesArgs = {
-  id: Scalars['Int']['input'];
-  lang: Scalars['String']['input'];
-  page?: InputMaybe<Scalars['Int']['input']>;
-  seasonType: Scalars['String']['input'];
-};
-
-
-export type QueryRootTvdbPersonExtendedArgs = {
-  id: Scalars['Int']['input'];
-  meta?: InputMaybe<Scalars['String']['input']>;
-};
-
-
-export type QueryRootTvdbSearchRemoteIdArgs = {
-  remoteId: Scalars['String']['input'];
-};
-
-
-export type QueryRootTvdbSeriesArgs = {
-  id: Scalars['Int']['input'];
-};
-
-
-export type QueryRootTvdbSeriesExtendedArgs = {
-  id: Scalars['Int']['input'];
-  meta?: InputMaybe<Scalars['String']['input']>;
 };
 
 
@@ -1565,6 +1768,11 @@ export type Season = {
   network?: Maybe<Scalars['String']['output']>;
   networkTimezone?: Maybe<Scalars['String']['output']>;
   parentId?: Maybe<Scalars['Int']['output']>;
+  /**
+   * Absolute artwork URL. The column holds a bare path for anything indexed
+   * before the plugins normalised what they wrote, so it is resolved here
+   * rather than in each client.
+   */
   posterPath?: Maybe<Scalars['String']['output']>;
   rating?: Maybe<Scalars['Float']['output']>;
   runtime?: Maybe<Scalars['Int']['output']>;
@@ -1618,6 +1826,11 @@ export type SeasonFull = {
   network?: Maybe<Scalars['String']['output']>;
   networkTimezone?: Maybe<Scalars['String']['output']>;
   parentId?: Maybe<Scalars['Int']['output']>;
+  /**
+   * Absolute artwork URL. The column holds a bare path for anything indexed
+   * before the plugins normalised what they wrote, so it is resolved here
+   * rather than in each client.
+   */
   posterPath?: Maybe<Scalars['String']['output']>;
   rating?: Maybe<Scalars['Float']['output']>;
   runtime?: Maybe<Scalars['Int']['output']>;
@@ -1641,6 +1854,17 @@ export type SeasonState = {
   isRequested: Scalars['Boolean']['output'];
   seasonNumber?: Maybe<Scalars['Int']['output']>;
   state: MediaItemState;
+};
+
+export type SeasonSummary = {
+  airDate?: Maybe<Scalars['String']['output']>;
+  /** Derived from the episode list rather than carried by TVDB. */
+  episodeCount: Scalars['Int']['output'];
+  id: Scalars['Int']['output'];
+  image?: Maybe<Scalars['String']['output']>;
+  name?: Maybe<Scalars['String']['output']>;
+  number?: Maybe<Scalars['Int']['output']>;
+  overview?: Maybe<Scalars['String']['output']>;
 };
 
 /**
@@ -1704,6 +1928,11 @@ export type Show = {
   network?: Maybe<Scalars['String']['output']>;
   networkTimezone?: Maybe<Scalars['String']['output']>;
   parentId?: Maybe<Scalars['Int']['output']>;
+  /**
+   * Absolute artwork URL. The column holds a bare path for anything indexed
+   * before the plugins normalised what they wrote, so it is resolved here
+   * rather than in each client.
+   */
   posterPath?: Maybe<Scalars['String']['output']>;
   rating?: Maybe<Scalars['Float']['output']>;
   runtime?: Maybe<Scalars['Int']['output']>;
@@ -1749,6 +1978,12 @@ export type ShowRequestInput = {
 export type ShowStatus =
   | 'CONTINUING'
   | 'ENDED';
+
+export type SpokenLanguage = {
+  englishName?: Maybe<Scalars['String']['output']>;
+  iso6391?: Maybe<Scalars['String']['output']>;
+  name?: Maybe<Scalars['String']['output']>;
+};
 
 export type Stream = {
   createdAt: Scalars['DateTime']['output'];
@@ -1799,6 +2034,11 @@ export type SubscriptionRootMediaItemStateUpdatesByTvdbArgs = {
   tvdbId: Scalars['String']['input'];
 };
 
+export type SubtitleTrack = {
+  codec?: Maybe<Scalars['String']['output']>;
+  language?: Maybe<Scalars['String']['output']>;
+};
+
 export type TmdbCollectionDetails = {
   backdropPath?: Maybe<Scalars['String']['output']>;
   id: Scalars['Int']['output'];
@@ -1823,6 +2063,11 @@ export type TmdbListItem = {
   backdropPath?: Maybe<Scalars['String']['output']>;
   firstAirDate?: Maybe<Scalars['String']['output']>;
   genreIds: Array<Scalars['Int']['output']>;
+  /**
+   * Names for `genre_ids`, resolved against TMDB's own genre lists. Empty
+   * when the lists could not be fetched — the ids are still there.
+   */
+  genres: Array<Scalars['String']['output']>;
   id: Scalars['Int']['output'];
   indexer: Scalars['String']['output'];
   mediaType: Scalars['String']['output'];
@@ -1850,13 +2095,12 @@ export type TmdbPage = {
   totalResults: Scalars['Int']['output'];
 };
 
-export type TraktListItem = {
-  id: Scalars['Int']['output'];
-  indexer: Scalars['String']['output'];
-  mediaType: Scalars['String']['output'];
-  posterPath?: Maybe<Scalars['String']['output']>;
-  title: Scalars['String']['output'];
-  year: Scalars['String']['output'];
+export type Trailer = {
+  id?: Maybe<Scalars['String']['output']>;
+  key?: Maybe<Scalars['String']['output']>;
+  name: Scalars['String']['output'];
+  site?: Maybe<Scalars['String']['output']>;
+  url?: Maybe<Scalars['String']['output']>;
 };
 
 /** One provider's traffic on one day (for the usage-trend chart). */
@@ -1972,6 +2216,15 @@ export type VfsEntryStat = {
   /** File size in bytes (0 for directories). */
   size: Scalars['Int']['output'];
   uid: Scalars['Int']['output'];
+};
+
+export type VideoMetadata = {
+  bitDepth?: Maybe<Scalars['Int']['output']>;
+  codec?: Maybe<Scalars['String']['output']>;
+  frameRate?: Maybe<Scalars['Float']['output']>;
+  hdrType?: Maybe<Scalars['String']['output']>;
+  resolutionHeight?: Maybe<Scalars['Int']['output']>;
+  resolutionWidth?: Maybe<Scalars['Int']['output']>;
 };
 
 /**

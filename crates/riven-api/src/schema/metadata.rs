@@ -1,10 +1,12 @@
 use async_graphql::{Error, Result, SimpleObject};
+use riven_core::entities::helpers::{Artwork, artwork_url};
 use riven_core::plugin::PluginRegistry;
 
-pub const TMDB_API_BASE: &str = "https://api.themoviedb.org";
-pub const TMDB_IMAGE_BASE: &str = "https://image.tmdb.org/t/p";
+pub mod details;
 
-#[derive(SimpleObject)]
+pub const TMDB_API_BASE: &str = "https://api.themoviedb.org";
+
+#[derive(SimpleObject, Clone)]
 pub struct TmdbListItem {
     pub id: i64,
     pub title: String,
@@ -17,6 +19,9 @@ pub struct TmdbListItem {
     pub overview: Option<String>,
     pub backdrop_path: Option<String>,
     pub genre_ids: Vec<i64>,
+    /// Names for `genre_ids`, resolved against TMDB's own genre lists. Empty
+    /// when the lists could not be fetched — the ids are still there.
+    pub genres: Vec<String>,
     pub release_date: Option<String>,
     pub first_air_date: Option<String>,
     pub original_title: Option<String>,
@@ -98,12 +103,12 @@ pub fn transform_item(item: &serde_json::Value, default_type: &str) -> TmdbListI
         .or_else(|| item.get("profile_path"))
         .or_else(|| item.get("logo_path"))
         .and_then(|v| v.as_str())
-        .map(|p| format!("{TMDB_IMAGE_BASE}/w500{p}"));
+        .and_then(|p| artwork_url(Some(p), Artwork::Poster));
 
     let backdrop_path = item
         .get("backdrop_path")
         .and_then(|v| v.as_str())
-        .map(|p| format!("{TMDB_IMAGE_BASE}/w1280{p}"));
+        .and_then(|p| artwork_url(Some(p), Artwork::Backdrop));
 
     let genre_ids = item
         .get("genre_ids")
@@ -128,6 +133,7 @@ pub fn transform_item(item: &serde_json::Value, default_type: &str) -> TmdbListI
             .and_then(|v| v.as_str())
             .map(str::to_owned),
         backdrop_path,
+        genres: Vec::new(),
         genre_ids,
         release_date,
         first_air_date,
@@ -172,13 +178,13 @@ pub fn transform_collection(data: &serde_json::Value) -> TmdbCollectionDetails {
                             .get("overview")
                             .and_then(|v| v.as_str())
                             .map(str::to_owned),
-                        poster_path: image_path(
+                        poster_path: artwork_url(
                             movie.get("poster_path").and_then(|v| v.as_str()),
-                            "w500",
+                            Artwork::Poster,
                         ),
-                        backdrop_path: image_path(
+                        backdrop_path: artwork_url(
                             movie.get("backdrop_path").and_then(|v| v.as_str()),
-                            "w1920",
+                            Artwork::Backdrop,
                         ),
                         year: release_date
                             .as_deref()
@@ -209,20 +215,16 @@ pub fn transform_collection(data: &serde_json::Value) -> TmdbCollectionDetails {
             .get("overview")
             .and_then(|v| v.as_str())
             .map(str::to_owned),
-        poster_path: image_path(data.get("poster_path").and_then(|v| v.as_str()), "w500"),
-        backdrop_path: image_path(data.get("backdrop_path").and_then(|v| v.as_str()), "w1920"),
+        poster_path: artwork_url(
+            data.get("poster_path").and_then(|v| v.as_str()),
+            Artwork::Poster,
+        ),
+        backdrop_path: artwork_url(
+            data.get("backdrop_path").and_then(|v| v.as_str()),
+            Artwork::Backdrop,
+        ),
         parts,
     }
-}
-
-fn image_path(path: Option<&str>, size: &str) -> Option<String> {
-    path.map(|path| {
-        if path.starts_with("http") {
-            path.to_owned()
-        } else {
-            format!("{TMDB_IMAGE_BASE}/{size}{path}")
-        }
-    })
 }
 
 pub async fn get_tmdb_api_key(registry: &PluginRegistry) -> Result<String> {

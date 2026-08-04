@@ -4,25 +4,21 @@ import { SvelteSet } from "svelte/reactivity";
 
 import { createScopedLogger } from "$lib/logger";
 import { gqlClient } from "$lib/graphql-client";
-import type { TMDBTransformedListItem } from "$lib/metadata/parser";
-import {
-	mapGqlTmdbList,
-	SEARCH_TMDB_PAGE_QUERY,
-	type GqlTmdbListItem,
-} from "$lib/services/backend-metadata";
+import type { TmdbListItem } from "$lib/gql/schema";
+import { SEARCH_TMDB_PAGE_QUERY } from "$lib/services/backend-metadata";
 
 const logger = createScopedLogger("search");
 
 // Redefine SearchResult here to avoid importing server code
 export interface SearchResult {
-	results: TMDBTransformedListItem[];
+	results: TmdbListItem[];
 	page: number;
 	total_pages: number;
 	total_results: number;
 }
 
 interface GqlTmdbPage {
-	results: GqlTmdbListItem[];
+	results: TmdbListItem[];
 	page: number;
 	totalPages: number;
 	totalResults: number;
@@ -30,7 +26,7 @@ interface GqlTmdbPage {
 
 function mapTmdbPage(gql: GqlTmdbPage): SearchResult {
 	return {
-		results: mapGqlTmdbList(gql.results),
+		results: gql.results,
 		page: gql.page,
 		total_pages: gql.totalPages,
 		total_results: gql.totalResults,
@@ -68,10 +64,10 @@ export class SearchStore {
 	searchQuery = $state<string>("");
 	rawSearchString = $state<string>("");
 	parsedSearch = $state<ParsedSearchQuery | null>(null);
-	movieResults = $state<TMDBTransformedListItem[]>([]);
-	tvResults = $state<TMDBTransformedListItem[]>([]);
-	personResults = $state<TMDBTransformedListItem[]>([]);
-	companyResults = $state<TMDBTransformedListItem[]>([]);
+	movieResults = $state<TmdbListItem[]>([]);
+	tvResults = $state<TmdbListItem[]>([]);
+	personResults = $state<TmdbListItem[]>([]);
+	companyResults = $state<TmdbListItem[]>([]);
 	loading = $state<boolean>(false);
 	error = $state<string | null>(null);
 	moviePage = $state<number>(1);
@@ -334,11 +330,11 @@ export class SearchStore {
 	}
 
 	private deduplicateItems(
-		newItems: TMDBTransformedListItem[],
-		existingItems: TMDBTransformedListItem[] = [],
-	): TMDBTransformedListItem[] {
+		newItems: TmdbListItem[],
+		existingItems: TmdbListItem[] = [],
+	): TmdbListItem[] {
 		const seenIds = new SvelteSet(existingItems.map((i) => i.id));
-		const uniqueItems: TMDBTransformedListItem[] = [];
+		const uniqueItems: TmdbListItem[] = [];
 
 		for (const item of newItems) {
 			if (
@@ -449,7 +445,7 @@ export class SearchStore {
 
 		if (signal?.aborted) return;
 
-		const items = (result.results || []) as TMDBTransformedListItem[];
+		const items = (result.results || []) as TmdbListItem[];
 
 		if (page === 1) {
 			const uniqueItems = this.deduplicateItems(items);
@@ -549,7 +545,7 @@ export class SearchStore {
 
 			if (signal?.aborted) return;
 
-			const newItems = (result.results || []) as TMDBTransformedListItem[];
+			const newItems = (result.results || []) as TmdbListItem[];
 
 			if (newItems.length > 0) {
 				const currentResults =

@@ -8,12 +8,10 @@
     import PortraitCardSkeleton from "$lib/components/media/portrait-card-skeleton.svelte";
     import { fly, fade } from "svelte/transition";
     import { cubicOut } from "svelte/easing";
-    import type { TMDBTransformedListItem } from "$lib/metadata/parser";
+    import type { TmdbListItem } from "$lib/gql/schema";
     import { gqlClient } from "$lib/graphql-client";
     import {
-        mapGqlTmdbList,
-        SEARCH_TMDB_PAGE_QUERY,
-        type GqlTmdbListItem
+        SEARCH_TMDB_PAGE_QUERY
     } from "$lib/services/backend-metadata";
 
     interface Props {
@@ -31,7 +29,7 @@
     let inputRef = $state<HTMLInputElement | null>(null);
     let scrollContainer = $state<HTMLElement | null>(null);
     let query = $state("");
-    let results = $state<TMDBTransformedListItem[]>([]);
+    let results = $state<TmdbListItem[]>([]);
     let loading = $state(false);
     let loadingMore = $state(false);
     let debounceTimer: ReturnType<typeof setTimeout> | null = null;
@@ -42,7 +40,7 @@
 
     type SearchTmdbResponse = {
         searchTmdb: {
-            results: GqlTmdbListItem[];
+            results: TmdbListItem[];
             page: number;
             totalPages: number;
             totalResults: number;
@@ -56,7 +54,7 @@
 
     // Persist search state across navigation
     let savedQuery = "";
-    let savedResults: TMDBTransformedListItem[] = [];
+    let savedResults: TmdbListItem[] = [];
     let navigatedFromModal = false;
     // When true, skip transitions (instant hide/show for navigation)
     let skipTransition = $state(false);
@@ -131,7 +129,7 @@
             if (signal.aborted) return;
 
             const mapResults = (data: SearchTmdbResponse | null) =>
-                mapGqlTmdbList(data?.searchTmdb.results ?? []);
+                data?.searchTmdb.results ?? [];
 
             const maxTotalPages = Math.max(
                 movieData?.searchTmdb.totalPages ?? 0,
@@ -139,7 +137,7 @@
             );
             hasMorePages = currentPage < maxTotalPages;
 
-            const merged: TMDBTransformedListItem[] = [
+            const merged: TmdbListItem[] = [
                 ...mapResults(movieData),
                 ...mapResults(tvData)
             ].sort((a, b) => (b.popularity ?? 0) - (a.popularity ?? 0));
@@ -148,10 +146,10 @@
                 results = merged;
             } else {
                 // Deduplicate by id+media_type
-                const seen = new Set(results.map((r) => `${r.media_type}-${r.id}`));
+                const seen = new Set(results.map((r) => `${r.mediaType}-${r.id}`));
                 results = [
                     ...results,
-                    ...merged.filter((r) => !seen.has(`${r.media_type}-${r.id}`))
+                    ...merged.filter((r) => !seen.has(`${r.mediaType}-${r.id}`))
                 ];
             }
             currentPage++;
@@ -177,13 +175,13 @@
 
     let pendingNavigation = false;
 
-    function handleResultClick(item: TMDBTransformedListItem) {
+    function handleResultClick(item: TmdbListItem) {
         savedQuery = query;
         savedResults = results;
         navigatedFromModal = true;
         pendingNavigation = true;
         // Keep modal open — it will be hidden after the new page loads
-        goto(resolve(`/details/media/${item.id}/${item.media_type}`));
+        goto(resolve(`/details/media/${item.id}/${item.mediaType}`));
     }
 
     afterNavigate((navigation) => {
@@ -230,10 +228,10 @@
         onclose();
     }
 
-    function getSubtitle(item: TMDBTransformedListItem): string {
+    function getSubtitle(item: TmdbListItem): string {
         const parts: string[] = [];
-        if (item.media_type === "movie") parts.push("Movie");
-        else if (item.media_type === "tv") parts.push("TV");
+        if (item.mediaType === "movie") parts.push("Movie");
+        else if (item.mediaType === "tv") parts.push("TV");
         if (item.year && item.year !== "N/A") parts.push(String(item.year));
         return parts.join(" • ");
     }
@@ -291,7 +289,7 @@
                 </div>
             {:else if results.length > 0}
                 <div class="grid grid-cols-2 gap-3 px-4 pt-4 pb-24">
-                    {#each results as item (`${item.media_type}-${item.id}`)}
+                    {#each results as item (`${item.mediaType}-${item.id}`)}
                         <button
                             type="button"
                             onclick={() => handleResultClick(item)}
@@ -299,7 +297,7 @@
                             <PortraitCard
                                 title={item.title}
                                 subtitle={getSubtitle(item)}
-                                image={item.poster_path} />
+                                image={item.posterPath} />
                         </button>
                     {/each}
                     {#if loadingMore}

@@ -4,7 +4,7 @@
     import { cubicOut } from "svelte/easing";
     import type { CarouselAPI } from "$lib/components/ui/carousel/context.js";
     import Autoplay from "embla-carousel-autoplay";
-    import { TMDB_IMAGE_BASE_URL, TMDB_GENRES } from "$lib/indexer-constants";
+    import type { TmdbListItem } from "$lib/gql/schema";
     import { gqlClient } from "$lib/graphql-client";
     import { getSeasonAndYear } from "$lib/utils/date";
     import { Button } from "$lib/components/ui/button/index.js";
@@ -12,23 +12,9 @@
     import { getRatings } from "$lib/stores/ratings";
     import { Star } from "@lucide/svelte";
 
-    export interface TMDBNowPlayingItem {
-        id: number;
-        media_type?: "movie" | "tv" | "person" | "company";
-        title?: string;
-        name?: string;
-        backdrop_path?: string | null;
-        release_date?: string;
-        first_air_date?: string;
-        vote_average?: number | null;
-        original_language?: string;
-        overview?: string;
-        genre_ids?: number[];
-        certification?: string;
-    }
 
     interface Props {
-        data?: TMDBNowPlayingItem[];
+        data?: TmdbListItem[];
         showRequestButton?: boolean;
         alignment?: "left" | "center" | "right";
         heightClass?: string;
@@ -78,10 +64,10 @@
         };
     });
 
-    async function loadItemData(item: TMDBNowPlayingItem) {
+    async function loadItemData(item: TmdbListItem) {
         // Fetch Ratings (independent of logo)
         if (ratings[item.id] === undefined) {
-            const mediaType = item.media_type === "tv" ? "tv" : "movie";
+            const mediaType = item.mediaType === "tv" ? "tv" : "movie";
             getRatings(item.id, mediaType)
                 .then((data) => {
                     ratings[item.id] = data;
@@ -94,7 +80,7 @@
         // Fetch Logo & Certification
         if (logos[item.id] !== undefined) return;
 
-        const mediaType = item.media_type === "tv" ? "tv" : "movie";
+        const mediaType = item.mediaType === "tv" ? "tv" : "movie";
         try {
             const result = await gqlClient<{
                 tmdbLogoAndCert: { logo: string | null; certification: string | null };
@@ -198,15 +184,13 @@
             aria-label="Now playing movies carousel">
             <Carousel.Content>
                 {#each data as item, index (item.id)}
-                    {@const isTV = item.media_type === "tv"}
+                    {@const isTV = item.mediaType === "tv"}
                     {@const mediaType = isTV ? "tv" : "movie"}
-                    {@const displayTitle = item.title ?? item.name ?? "Untitled"}
+                    {@const displayTitle = item.title || "Untitled"}
                     <Carousel.Item class="relative w-full {heightClass}">
                         <!-- Backdrop Image -->
                         <img
-                            src={item.backdrop_path?.startsWith("http")
-                                ? item.backdrop_path
-                                : `${TMDB_IMAGE_BASE_URL}/original${item.backdrop_path}`}
+                            src={item.backdropPath}
                             alt={displayTitle}
                             class="h-full w-full object-cover object-top select-none"
                             loading="lazy" />
@@ -282,22 +266,22 @@
                                             class="flex items-center justify-center rounded-md border border-white/20 bg-white/10 px-2 py-1 text-[10px] leading-none font-bold tracking-wider uppercase backdrop-blur-md md:text-xs">
                                             {isTV ? "Series" : "Movie"}
                                         </span>
-                                        {#if certifications[item.id] || (item.certification && item.certification !== "N/A")}
+                                        {#if certifications[item.id]}
                                             <span class="text-white/40">|</span>
                                             <span
                                                 class="flex items-center justify-center rounded-sm border border-white/40 px-1.5 py-1 text-[10px] leading-none font-bold tracking-wider uppercase md:text-xs">
-                                                {certifications[item.id] || item.certification}
+                                                {certifications[item.id]}
                                             </span>
                                         {/if}
                                         <span class="text-white/40">|</span>
                                         <span class="text-white drop-shadow-md"
                                             >{getSeasonAndYear(
-                                                item.release_date || item.first_air_date || ""
+                                                item.releaseDate || item.firstAirDate || ""
                                             )}</span>
-                                        {#if item.original_language}
+                                        {#if item.originalLanguage}
                                             <span class="text-white/40">|</span>
                                             <span class="text-white uppercase drop-shadow-md"
-                                                >{item.original_language}</span>
+                                                >{item.originalLanguage}</span>
                                         {/if}
                                         {#if ratings[item.id]?.scores?.length}
                                             <div class="ml-2 flex items-center gap-4">
@@ -320,13 +304,13 @@
                                                     </a>
                                                 {/each}
                                             </div>
-                                        {:else if item.vote_average}
+                                        {:else if item.voteAverage}
                                             <span class="text-white/40">|</span>
                                             <span
                                                 class="flex items-center font-bold text-white drop-shadow-md">
                                                 <Star
                                                     class="mr-1 h-3.5 w-3.5 fill-current text-yellow-500" />
-                                                {item.vote_average.toFixed(1)}
+                                                {item.voteAverage.toFixed(1)}
                                             </span>
                                         {/if}
                                     </div>
@@ -346,7 +330,7 @@
                                     {/if}
 
                                     <!-- Genres -->
-                                    {#if item.genre_ids?.length}
+                                    {#if item.genres?.length}
                                         <div
                                             in:fly|global={{
                                                 y: 20,
@@ -358,13 +342,11 @@
                                                 alignment,
                                                 'flex'
                                             )}">
-                                            {#each item.genre_ids.slice(0, 4) as genreId (genreId)}
-                                                {#if TMDB_GENRES[genreId]}
-                                                    <div
-                                                        class="rounded-full border border-white/20 bg-white/10 px-3 py-1 text-xs font-medium text-white backdrop-blur-md transition-colors hover:bg-white/20">
-                                                        {TMDB_GENRES[genreId]}
-                                                    </div>
-                                                {/if}
+                                            {#each item.genres.slice(0, 4) as genre (genre)}
+                                                <div
+                                                    class="rounded-full border border-white/20 bg-white/10 px-3 py-1 text-xs font-medium text-white backdrop-blur-md transition-colors hover:bg-white/20">
+                                                    {genre}
+                                                </div>
                                             {/each}
                                         </div>
                                     {/if}

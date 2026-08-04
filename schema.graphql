@@ -43,6 +43,12 @@ type AnilistRating {
 	score: Float
 }
 
+type AudioTrack {
+	codec: String
+	channels: Int
+	language: String
+}
+
 """
 One cache's live figures.
 """
@@ -115,6 +121,17 @@ enum Capability {
 	MANAGE_SETTINGS
 }
 
+type CastMember {
+	id: Int!
+	name: String!
+	character: String
+	profilePath: String
+	"""
+	`tmdb` or `tvdb` — which indexer this person can be looked up in.
+	"""
+	externalSource: String!
+}
+
 enum ContentRating {
 	G
 	PG
@@ -180,7 +197,6 @@ type Episode {
 	imdbId: String
 	tvdbId: String
 	tmdbId: String
-	posterPath: String
 	createdAt: DateTime!
 	updatedAt: DateTime
 	indexedAt: DateTime
@@ -212,6 +228,12 @@ type Episode {
 	networkTimezone: String
 	airedAtUtc: DateTime
 	lastScrapeAttemptAt: DateTime
+	"""
+	Absolute artwork URL. The column holds a bare path for anything indexed
+	before the plugins normalised what they wrote, so it is resolved here
+	rather than in each client.
+	"""
+	posterPath: String
 	streams(infoHashes: [String!]): [Stream!]!
 	"""
 	The parent season for this episode.
@@ -237,7 +259,6 @@ type EpisodeFull {
 	imdbId: String
 	tvdbId: String
 	tmdbId: String
-	posterPath: String
 	createdAt: DateTime!
 	updatedAt: DateTime
 	indexedAt: DateTime
@@ -269,6 +290,12 @@ type EpisodeFull {
 	networkTimezone: String
 	airedAtUtc: DateTime
 	lastScrapeAttemptAt: DateTime
+	"""
+	Absolute artwork URL. The column holds a bare path for anything indexed
+	before the plugins normalised what they wrote, so it is resolved here
+	rather than in each client.
+	"""
+	posterPath: String
 	filesystemEntry: FileSystemEntry
 	filesystemEntries: [FileSystemEntry!]!
 }
@@ -280,6 +307,23 @@ type EpisodeState {
 	id: Int!
 	episodeNumber: Int
 	state: MediaItemState!
+}
+
+type EpisodeSummary {
+	id: Int!
+	name: String
+	overview: String
+	aired: String
+	runtime: Int
+	image: String
+	number: Int
+	absoluteNumber: Int
+	seasonNumber: Int
+}
+
+type ExternalId {
+	source: String!
+	id: String!
 }
 
 type FileSystemEntry {
@@ -295,7 +339,6 @@ type FileSystemEntry {
 	provider: String
 	providerDownloadId: String
 	libraryProfiles: JSON
-	mediaMetadata: JSON
 	language: String
 	parentOriginalFilename: String
 	subtitleContent: String
@@ -311,11 +354,25 @@ type FileSystemEntry {
 	usenetFileIndex: Int
 	downloadUrl: String
 	streamUrl: String
+	"""
+	The stored document, typed. A row written by an older build that is
+	missing fields still reads — every field defaults.
+	"""
+	mediaMetadata: MediaMetadata
 }
 
 enum FileSystemEntryType {
 	MEDIA
 	SUBTITLE
+}
+
+type Genre {
+	id: Int!
+	name: String!
+	"""
+	TVDB only.
+	"""
+	slug: String
 }
 
 type IdResolution {
@@ -508,6 +565,63 @@ type LogEntry {
 	fields: String
 }
 
+"""
+A TMDB `/3/movie/{id}` payload (appended with `external_ids,images,
+recommendations,similar,videos,credits,release_dates`) or a TVDB
+`/series/{id}/extended` payload unwrapped from its `data` envelope.
+"""
+type MediaDetails {
+	id: Int!
+	"""
+	TMDB calls it `title`, TVDB `name`; the resolver has already replaced
+	TVDB's with the English translation, so neither needs choosing here.
+	"""
+	title: String
+	overview: String
+	budget: Int
+	revenue: Int
+	genres: [Genre!]!
+	spokenLanguages: [SpokenLanguage!]!
+	productionCompanies: [ProductionCompany!]!
+	originalLanguage: String
+	releaseDate: String
+	collection: MovieCollection
+	runtime: Int
+	"""
+	TMDB scores out of 10; TVDB's `score` is its own scale.
+	"""
+	voteAverage: Float
+	type: String!
+	status: String
+	year: Int
+	formattedRuntime: String
+	homepage: String
+	posterPath: String
+	backdropPath: String
+	logo: String
+	trailer: Trailer
+	certification: String!
+	cast: [CastMember!]!
+	crew: [CastMember!]!
+	originCountry: [String!]!
+	imdbId: String
+	"""
+	A show carries TMDB's id among its remote ids; a movie is one.
+	"""
+	tmdbId: Int
+	externalIds: [ExternalId!]!
+	seasons: [SeasonSummary!]!
+	episodes: [EpisodeSummary!]!
+	episodeCount: Int!
+	"""
+	TVDB has no recommendation feed; the fields exist so the UI reads movies
+	and shows through one shape.
+	"""
+	recommendations: [TmdbListItem!]!
+	similar: [TmdbListItem!]!
+	traktRecommendations: [TmdbListItem!]!
+}
+
 type MediaItem {
 	id: Int!
 	title: String!
@@ -515,7 +629,6 @@ type MediaItem {
 	imdbId: String
 	tvdbId: String
 	tmdbId: String
-	posterPath: String
 	createdAt: DateTime!
 	updatedAt: DateTime
 	indexedAt: DateTime
@@ -547,6 +660,12 @@ type MediaItem {
 	networkTimezone: String
 	airedAtUtc: DateTime
 	lastScrapeAttemptAt: DateTime
+	"""
+	Absolute artwork URL. The column holds a bare path for anything indexed
+	before the plugins normalised what they wrote, so it is resolved here
+	rather than in each client.
+	"""
+	posterPath: String
 }
 
 """
@@ -559,7 +678,6 @@ type MediaItemFull {
 	imdbId: String
 	tvdbId: String
 	tmdbId: String
-	posterPath: String
 	createdAt: DateTime!
 	updatedAt: DateTime
 	indexedAt: DateTime
@@ -591,6 +709,12 @@ type MediaItemFull {
 	networkTimezone: String
 	airedAtUtc: DateTime
 	lastScrapeAttemptAt: DateTime
+	"""
+	Absolute artwork URL. The column holds a bare path for anything indexed
+	before the plugins normalised what they wrote, so it is resolved here
+	rather than in each client.
+	"""
+	posterPath: String
 	filesystemEntry: FileSystemEntry
 	filesystemEntries: [FileSystemEntry!]!
 	seasons: [SeasonFull!]!
@@ -603,7 +727,6 @@ type MediaItemListRow {
 	imdbId: String
 	tvdbId: String
 	tmdbId: String
-	posterPath: String
 	createdAt: DateTime!
 	updatedAt: DateTime
 	indexedAt: DateTime
@@ -635,10 +758,20 @@ type MediaItemListRow {
 	networkTimezone: String
 	airedAtUtc: DateTime
 	lastScrapeAttemptAt: DateTime
+	"""
+	Absolute artwork URL. The column holds a bare path for anything indexed
+	before the plugins normalised what they wrote, so it is resolved here
+	rather than in each client.
+	"""
+	posterPath: String
 	showId: Int
 	showTitle: String
 	showTmdbId: String
 	showTvdbId: String
+	"""
+	Absolute artwork URL for the parent show, resolved the same way as the
+	row's own poster.
+	"""
 	showPosterPath: String
 }
 
@@ -678,6 +811,36 @@ Discriminated union of all concrete media item types.
 """
 union MediaItemUnion = Movie | Show | Season | Episode
 
+"""
+The `media_metadata` document, derived from a release filename by
+`riven_rank::derive_media_metadata` and stored as JSON on the entry.
+
+It is typed here rather than handed over as a `JSON` scalar because both
+clients used to re-parse the blob — the Swift app in `FileDetailsView` and
+the web frontend in `lib/types/riven.ts` — each maintaining its own copy of
+a shape only this repo defines.
+"""
+type MediaMetadata {
+	filename: String
+	originalFilename: String
+	parsedTitle: String
+	year: Int
+	video: VideoMetadata
+	audioTracks: [AudioTrack!]!
+	subtitleTracks: [SubtitleTrack!]!
+	qualitySource: String
+	containerFormat: [String!]!
+	bitrate: Int
+	duration: Float
+	isRemux: Boolean!
+	isProper: Boolean!
+	isRepack: Boolean!
+	"""
+	`parsed` when derived from the filename; set by whoever wrote the row.
+	"""
+	dataSource: String
+}
+
 type Movie {
 	id: Int!
 	title: String!
@@ -685,7 +848,6 @@ type Movie {
 	imdbId: String
 	tvdbId: String
 	tmdbId: String
-	posterPath: String
 	createdAt: DateTime!
 	updatedAt: DateTime
 	indexedAt: DateTime
@@ -717,11 +879,27 @@ type Movie {
 	networkTimezone: String
 	airedAtUtc: DateTime
 	lastScrapeAttemptAt: DateTime
+	"""
+	Absolute artwork URL. The column holds a bare path for anything indexed
+	before the plugins normalised what they wrote, so it is resolved here
+	rather than in each client.
+	"""
+	posterPath: String
 	streams(infoHashes: [String!]): [Stream!]!
 	"""
 	Always 1 — a movie has exactly one expected media file.
 	"""
 	expectedFileCount: Int!
+}
+
+"""
+The franchise a movie belongs to, when TMDB says it belongs to one.
+"""
+type MovieCollection {
+	id: Int!
+	name: String!
+	posterPath: String
+	backdropPath: String
 }
 
 """
@@ -985,6 +1163,49 @@ type NntpProviderHealth {
 	consecutiveNotFound: Int!
 }
 
+type PersonCredit {
+	id: Int!
+	title: String!
+	originalTitle: String!
+	character: String
+	job: String
+	department: String
+	posterPath: String
+	backdropPath: String
+	releaseDate: String
+	mediaType: String!
+	voteAverage: Float
+	voteCount: Int
+	popularity: Float
+	year: Int
+	indexer: String!
+}
+
+type PersonDetails {
+	id: Int!
+	indexer: String!
+	name: String!
+	biography: String
+	birthday: String
+	deathday: String
+	placeOfBirth: String
+	profilePath: String
+	knownForDepartment: String
+	gender: String
+	homepage: String
+	imdbId: String
+	"""
+	Surfaced beside `externalIds` so the UI can link to TMDB without
+	searching the list for it.
+	"""
+	tmdbId: Int
+	tvdbUrl: String
+	externalIds: [ExternalId!]!
+	alsoKnownAs: [String!]!
+	castCredits: [PersonCredit!]!
+	crewCredits: [PersonCredit!]!
+}
+
 enum PlaybackMethod {
 	DIRECT_PLAY
 	DIRECT_STREAM
@@ -998,6 +1219,13 @@ enum PlaybackState {
 	BUFFERING
 	IDLE
 	UNKNOWN
+}
+
+type ProductionCompany {
+	id: Int!
+	name: String!
+	logoPath: String
+	originCountry: String
 }
 
 type QueryRoot {
@@ -1066,8 +1294,16 @@ type QueryRoot {
 	and its typed values. This is the single read the settings/setup UIs use.
 	"""
 	settingsSections: [SettingsSection!]!
-	tmdbDetails(type: String!, id: Int!, appendToResponse: String): JSON!
-	tmdbCollection(id: Int!): JSON!
+	"""
+	Everything the movie detail page renders, in one shape shared with
+	`showDetails`.
+	"""
+	movieDetails(id: Int!): MediaDetails!
+	"""
+	A cast/crew member or a company, both rendered through one shape.
+	"""
+	personDetails(id: Int!, indexer: String): PersonDetails!
+	companyDetails(id: Int!): PersonDetails!
 	tmdbCollectionDetails(id: Int!): TmdbCollectionDetails!
 	tmdbCategory(type: String!, category: String!, page: Int): TmdbPage!
 	searchTmdb(type: String!, params: JSON, searchMode: String): TmdbPage!
@@ -1078,12 +1314,13 @@ type QueryRoot {
 	anilistMappings(id: Int!): AnilistMappings!
 	resolveExternalId(from: String!, to: String!, id: String!, mediaType: String): IdResolution!
 	ratings(indexer: String!, id: String!, mediaType: String): RatingsResponse!
-	traktRecommendations(id: String!, idType: String!, mediaType: String!): [TraktListItem!]!
-	tvdbSeries(id: Int!): JSON!
-	tvdbSeriesExtended(id: Int!, meta: String): JSON!
-	tvdbSearchRemoteId(remoteId: String!): JSON!
-	tvdbPersonExtended(id: Int!, meta: String): JSON!
-	tvdbEpisodes(id: Int!, seasonType: String!, lang: String!, page: Int): JSON!
+	traktRecommendations(id: String!, idType: String!, mediaType: String!): [TmdbListItem!]!
+	"""
+	Everything the show detail page renders, in one shape shared with
+	`movieDetails`. `id` is a TVDB series id; `tmdbId` is only used to ask
+	Trakt for related titles when the page was reached from a TMDB id.
+	"""
+	showDetails(id: Int!, tmdbId: String): MediaDetails!
 	resolveTmdbToTvdb(tmdbId: String!): Int
 	logs(limit: Int, level: String): [LogEntry!]!
 	"""
@@ -1252,7 +1489,6 @@ type Season {
 	imdbId: String
 	tvdbId: String
 	tmdbId: String
-	posterPath: String
 	createdAt: DateTime!
 	updatedAt: DateTime
 	indexedAt: DateTime
@@ -1284,6 +1520,12 @@ type Season {
 	networkTimezone: String
 	airedAtUtc: DateTime
 	lastScrapeAttemptAt: DateTime
+	"""
+	Absolute artwork URL. The column holds a bare path for anything indexed
+	before the plugins normalised what they wrote, so it is resolved here
+	rather than in each client.
+	"""
+	posterPath: String
 	streams(infoHashes: [String!]): [Stream!]!
 	"""
 	The parent show for this season.
@@ -1313,7 +1555,6 @@ type SeasonFull {
 	imdbId: String
 	tvdbId: String
 	tmdbId: String
-	posterPath: String
 	createdAt: DateTime!
 	updatedAt: DateTime
 	indexedAt: DateTime
@@ -1345,6 +1586,12 @@ type SeasonFull {
 	networkTimezone: String
 	airedAtUtc: DateTime
 	lastScrapeAttemptAt: DateTime
+	"""
+	Absolute artwork URL. The column holds a bare path for anything indexed
+	before the plugins normalised what they wrote, so it is resolved here
+	rather than in each client.
+	"""
+	posterPath: String
 	episodes: [EpisodeFull!]!
 }
 
@@ -1358,6 +1605,19 @@ type SeasonState {
 	isRequested: Boolean!
 	expectedFileCount: Int!
 	episodes: [EpisodeState!]!
+}
+
+type SeasonSummary {
+	id: Int!
+	number: Int
+	name: String
+	image: String
+	overview: String
+	"""
+	Derived from the episode list rather than carried by TVDB.
+	"""
+	episodeCount: Int!
+	airDate: String
 }
 
 """
@@ -1407,7 +1667,6 @@ type Show {
 	imdbId: String
 	tvdbId: String
 	tmdbId: String
-	posterPath: String
 	createdAt: DateTime!
 	updatedAt: DateTime
 	indexedAt: DateTime
@@ -1439,6 +1698,12 @@ type Show {
 	networkTimezone: String
 	airedAtUtc: DateTime
 	lastScrapeAttemptAt: DateTime
+	"""
+	Absolute artwork URL. The column holds a bare path for anything indexed
+	before the plugins normalised what they wrote, so it is resolved here
+	rather than in each client.
+	"""
+	posterPath: String
 	streams(infoHashes: [String!]): [Stream!]!
 	"""
 	Seasons for this show. Excludes season 0 (specials) by default.
@@ -1478,6 +1743,12 @@ input ShowRequestInput {
 enum ShowStatus {
 	CONTINUING
 	ENDED
+}
+
+type SpokenLanguage {
+	englishName: String
+	iso6391: String
+	name: String
 }
 
 type Stream {
@@ -1537,6 +1808,11 @@ type SubscriptionRoot {
 	mediaItemStateUpdatesByTvdb(tvdbId: String!): MediaItemStateTree
 }
 
+type SubtitleTrack {
+	codec: String
+	language: String
+}
+
 type TmdbCollectionDetails {
 	id: Int!
 	name: String!
@@ -1569,6 +1845,11 @@ type TmdbListItem {
 	overview: String
 	backdropPath: String
 	genreIds: [Int!]!
+	"""
+	Names for `genre_ids`, resolved against TMDB's own genre lists. Empty
+	when the lists could not be fetched — the ids are still there.
+	"""
+	genres: [String!]!
 	releaseDate: String
 	firstAirDate: String
 	originalTitle: String
@@ -1588,13 +1869,12 @@ type TmdbPage {
 	totalResults: Int!
 }
 
-type TraktListItem {
-	id: Int!
-	title: String!
-	posterPath: String
-	mediaType: String!
-	year: String!
-	indexer: String!
+type Trailer {
+	id: String
+	name: String!
+	site: String
+	key: String
+	url: String
 }
 
 """
@@ -1769,6 +2049,15 @@ type VfsEntryStat {
 	size: Int!
 	uid: Int!
 	gid: Int!
+}
+
+type VideoMetadata {
+	codec: String
+	resolutionWidth: Int
+	resolutionHeight: Int
+	bitDepth: Int
+	hdrType: String
+	frameRate: Float
 }
 
 """

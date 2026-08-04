@@ -2,7 +2,7 @@
     import { browser } from "$app/environment";
     import { page } from "$app/state";
     import type { PageProps } from "./$types";
-    import type { ParsedShowDetails } from "$lib/metadata/parser";
+    import type { Maybe, MediaDetails, TmdbListItem } from "$lib/gql/schema";
     import { fade, fly } from "svelte/transition";
     import { cubicOut } from "svelte/easing";
     import * as Carousel from "$lib/components/ui/carousel/index.js";
@@ -29,7 +29,7 @@
     import { toast } from "svelte-sonner";
     import X from "@lucide/svelte/icons/x";
     import { gqlClient, gqlSubscribeClient } from "$lib/graphql-client";
-    import type { RivenMediaItem } from "$lib/types/riven";
+    import type { RivenMediaItem } from "$lib/services/riven-media";
     import {
         MEDIA_ITEM_FULL_BY_TMDB_QUERY,
         MEDIA_ITEM_FULL_BY_TVDB_QUERY,
@@ -101,7 +101,7 @@
     const episodeCountBySeasonNumber = $derived.by(() => {
         if (data.mediaDetails?.type !== "tv") return undefined;
 
-        const details = data.mediaDetails.details as ParsedShowDetails;
+        const details = data.mediaDetails.details as MediaDetails;
         const counts = new SvelteMap<number, number>();
 
         for (const episode of details.episodes ?? []) {
@@ -132,8 +132,8 @@
             return 1;
         }
 
-        const details = data.mediaDetails?.details as ParsedShowDetails | undefined;
-        return details?.episode_count ?? 0;
+        const details = data.mediaDetails?.details as MediaDetails | undefined;
+        return details?.episodeCount ?? 0;
     });
 
     function getInitialSeason() {
@@ -142,7 +142,7 @@
         if (requestedSeason && !Number.isNaN(Number(requestedSeason))) {
             return requestedSeason;
         }
-        const details = data.mediaDetails?.details as ParsedShowDetails;
+        const details = data.mediaDetails?.details as MediaDetails;
         if (!details?.seasons?.length) return "1";
 
         const hasSeason1 = details.seasons.some((s) => s.number === 1);
@@ -164,14 +164,14 @@
     function getMovieEntries() {
         const item = hydratedRiven ?? riven;
 
-        return item?.filesystem_entries?.length
-            ? item.filesystem_entries
-            : item?.filesystem_entry
-              ? [item.filesystem_entry]
+        return item?.filesystemEntries?.length
+            ? item.filesystemEntries
+            : item?.filesystemEntry
+              ? [item.filesystemEntry]
               : [];
     }
 
-    function humanizeProfileName(name: string | undefined) {
+    function humanizeProfileName(name: Maybe<string> | undefined) {
         if (!name) return null;
         return name
             .split(/[_-]+/)
@@ -181,9 +181,9 @@
     }
 
     function getMetadataResolutionLabel(
-        metadata: RivenMediaItem["media_metadata"] | undefined
+        metadata: NonNullable<RivenMediaItem['filesystemEntry']>['mediaMetadata'] | undefined
     ): string | null {
-        const height = metadata?.video?.resolution_height;
+        const height = metadata?.video?.resolutionHeight;
         if (!height) return null;
         if (height >= 2160) return "4K";
         if (height >= 1440) return "1440p";
@@ -194,16 +194,11 @@
     }
 
     function getFilesystemEntryLabel(
-        entry:
-            | (NonNullable<RivenMediaItem["filesystem_entry"]> & {
-                  id?: number;
-                  ranking_profile_name?: string;
-              })
-            | undefined,
+        entry: NonNullable<RivenMediaItem['filesystemEntry']> | undefined,
         fallback: string
     ) {
-        const resolutionLabel = getMetadataResolutionLabel(entry?.media_metadata);
-        const profileLabel = humanizeProfileName(entry?.ranking_profile_name);
+        const resolutionLabel = getMetadataResolutionLabel(entry?.mediaMetadata);
+        const profileLabel = humanizeProfileName(entry?.rankingProfileName);
 
         if (resolutionLabel && profileLabel) {
             return `${resolutionLabel} (${profileLabel})`;
@@ -261,7 +256,7 @@
     // For ratings, we need TMDB ID. For TV shows, check external_ids.tmdb first (in case URL has TVDB ID)
     let ratingsId = $derived(
         data.mediaDetails?.type === "tv"
-            ? (data.mediaDetails?.details.external_ids?.tmdb ?? Number(page.params.id))
+            ? (data.mediaDetails?.details.tmdbId ?? Number(page.params.id))
             : Number(page.params.id)
     );
     let mediaType = $derived(data.mediaDetails?.type);
@@ -310,10 +305,9 @@
 
     const seasonData = $derived.by(() => {
         if (data.mediaDetails?.type !== "tv" || !data.mediaDetails?.details?.seasons) return [];
-        const details = data.mediaDetails.details as ParsedShowDetails;
+        const details = data.mediaDetails.details as MediaDetails;
         const episodeCountBySeason = new SvelteMap<number, number>();
-        const seasonsByNumber = new SvelteMap(
-            (liveRiven?.seasons ?? []).map((season) => [season.season_number, season])
+        const seasonsByNumber = new SvelteMap((liveRiven?.seasons ?? []).map((season) => [season.seasonNumber ?? 0, season])
         );
 
         for (const episode of details.episodes ?? []) {
@@ -343,8 +337,7 @@
 
     const rivenSeasonsByNumber = $derived.by(
         () =>
-            new SvelteMap(
-                (liveRiven?.seasons ?? []).map((season) => [season.season_number, season])
+            new SvelteMap((liveRiven?.seasons ?? []).map((season) => [season.seasonNumber ?? 0, season])
             )
     );
 
@@ -354,9 +347,7 @@
 
     const selectedRivenEpisodesByNumber = $derived.by(
         () =>
-            new SvelteMap(
-                (selectedRivenSeason?.episodes ?? []).map((episode) => [
-                    episode.episode_number,
+            new SvelteMap((selectedRivenSeason?.episodes ?? []).map((episode) => [episode.episodeNumber ?? 0,
                     episode
                 ])
             )
@@ -365,16 +356,14 @@
     const selectedHydratedSeason = $derived.by(() =>
         selectedSeason
             ? hydratedRiven?.seasons?.find(
-                  (season) => season.season_number === Number(selectedSeason)
+                  (season) => season.seasonNumber === Number(selectedSeason)
               )
             : undefined
     );
 
     const selectedHydratedEpisodesByNumber = $derived.by(
         () =>
-            new SvelteMap(
-                (selectedHydratedSeason?.episodes ?? []).map((episode) => [
-                    episode.episode_number,
+            new SvelteMap((selectedHydratedSeason?.episodes ?? []).map((episode) => [episode.episodeNumber ?? 0,
                     episode
                 ])
             )
@@ -391,8 +380,8 @@
     const details = $derived(
         [
             data.mediaDetails?.details.year,
-            data.mediaDetails?.details.formatted_runtime,
-            data.mediaDetails?.details.original_language?.toUpperCase(),
+            data.mediaDetails?.details.formattedRuntime,
+            data.mediaDetails?.details.originalLanguage?.toUpperCase(),
             data.mediaDetails?.details.certification,
             data.mediaDetails?.details.status
         ].filter(Boolean)
@@ -497,7 +486,7 @@
         for (const season of item.seasons ?? []) {
             for (const episode of season.episodes ?? []) {
                 if (episode.state === "Completed") {
-                    keys.push(`${season.season_number}.${episode.episode_number}`);
+                    keys.push(`${season.seasonNumber}.${episode.episodeNumber}`);
                 }
             }
         }
@@ -703,13 +692,7 @@
 {/snippet}
 
 {#snippet mediaCarousel(
-    items: Array<{
-        id: number;
-        title: string;
-        poster_path: string | null;
-        media_type: string;
-        year?: number | string | null;
-    }>,
+    items: TmdbListItem[],
     title: string,
     delay: number = 600
 )}
@@ -719,15 +702,15 @@
         {@render sectionHeading(title)}
         <Carousel.Root opts={{ dragFree: true, slidesToScroll: "auto" }}>
             <Carousel.Content class="-ml-3">
-                {#each items as item (`${item.media_type}-${item.id}`)}
+                {#each items as item (`${item.mediaType}-${item.id}`)}
                     <Carousel.Item class="basis-auto pl-3">
                         <a
-                            href={mediaHref(item.id, item.media_type)}
+                            href={mediaHref(item.id, item.mediaType)}
                             class="group relative block opacity-80 transition-all duration-300 hover:opacity-100">
                             <PortraitCard
                                 title={item.title}
-                                subtitle={`${item.media_type === "tv" ? "TV" : "Movie"}${item.year ? ` • ${item.year}` : ""}`}
-                                image={item.poster_path}
+                                subtitle={`${item.mediaType === "tv" ? "TV" : "Movie"}${item.year ? ` • ${item.year}` : ""}`}
+                                image={item.posterPath}
                                 class="w-36 md:w-44 lg:w-48" />
                         </a>
                     </Carousel.Item>
@@ -743,13 +726,13 @@
 
 {#key data.mediaDetails?.details.id}
     <div class="relative flex min-h-screen flex-col overflow-x-hidden">
-        {#if data.mediaDetails?.details.backdrop_path}
+        {#if data.mediaDetails?.details.backdropPath}
             <div class="fixed top-0 left-0 z-0 h-screen w-full">
                 <img
                     alt=""
                     in:fade={{ duration: 1000, easing: cubicOut }}
                     class="h-full w-full object-cover opacity-30 blur-3xl transition-opacity duration-1000"
-                    src={data.mediaDetails?.details.backdrop_path}
+                    src={data.mediaDetails?.details.backdropPath}
                     loading="lazy" />
                 <div class="bg-background/80 absolute inset-0 mix-blend-multiply"></div>
                 <div
@@ -763,7 +746,7 @@
 
         <div class="z-10 mx-auto flex h-full w-full max-w-600 flex-col">
             <!-- Hero Banner - extends behind search bar -->
-            {#if data.mediaDetails?.details.backdrop_path || data.mediaDetails?.details.trailer}
+            {#if data.mediaDetails?.details.backdropPath || data.mediaDetails?.details.trailer}
                 <div class="px-2 md:px-4">
                     <div
                         class={cn(
@@ -771,7 +754,7 @@
                             !showTrailer && "p-6 md:p-12"
                         )}
                         style="background-image: url('{data.mediaDetails?.details
-                            .backdrop_path}');">
+                            .backdropPath}');">
                         <div
                             class="absolute inset-0 bg-linear-to-t from-black/90 via-black/40 to-transparent">
                         </div>
@@ -832,7 +815,7 @@
                         in:fly|global={{ y: 20, duration: 400, delay: 50, easing: cubicOut }}>
                         <PortraitCard
                             title={data.mediaDetails?.details.title ?? ""}
-                            image={data.mediaDetails?.details.poster_path ||
+                            image={data.mediaDetails?.details.posterPath ||
                                 "https://s4.anilist.co/file/anilistcdn/media/anime/cover/medium/default.jpg"}
                             class="group w-48 rounded-xl shadow-2xl lg:w-64"
                             showContent={false} />
@@ -1109,7 +1092,7 @@
                                             <img
                                                 alt={movieDetails.collection?.name}
                                                 class="h-full w-full object-cover transition-transform duration-500 group-hover:scale-105"
-                                                src={movieDetails.collection?.backdrop_path}
+                                                src={movieDetails.collection?.backdropPath}
                                                 loading="lazy" />
                                             <div
                                                 class="from-background/90 via-background/40 absolute inset-0 bg-linear-to-r to-transparent">
@@ -1180,7 +1163,7 @@
                                             href={entityHref(
                                                 member.id,
                                                 "person",
-                                                member.external_source === "tvdb"
+                                                member.externalSource === "tvdb"
                                                     ? "indexer=tvdb"
                                                     : undefined
                                             )}
@@ -1188,7 +1171,7 @@
                                             <PortraitCard
                                                 title={member.name}
                                                 subtitle={member.character}
-                                                image={member.profile_path}
+                                                image={member.profilePath}
                                                 class="w-32 md:w-36 lg:w-40" />
                                         </a>
                                     </Carousel.Item>
@@ -1236,27 +1219,27 @@
                                 {/if}
 
                                 <!-- Region & Language Row -->
-                                {#if data.mediaDetails?.details.origin_country?.length || data.mediaDetails?.details.spoken_languages?.length}
+                                {#if data.mediaDetails?.details.originCountry?.length || data.mediaDetails?.details.spokenLanguages?.length}
                                     <div class="flex flex-wrap gap-12">
-                                        {#if data.mediaDetails?.details.origin_country?.length}
+                                        {#if data.mediaDetails?.details.originCountry?.length}
                                             <div class="flex min-w-30 flex-col gap-1">
                                                 <span
                                                     class="text-muted-foreground text-xs font-semibold tracking-wider uppercase"
                                                     >Origin</span>
                                                 <span class="text-foreground"
-                                                    >{data.mediaDetails.details.origin_country.join(
+                                                    >{data.mediaDetails.details.originCountry.join(
                                                         ", "
                                                     )}</span>
                                             </div>
                                         {/if}
-                                        {#if data.mediaDetails?.details.spoken_languages?.length}
+                                        {#if data.mediaDetails?.details.spokenLanguages?.length}
                                             <div class="flex min-w-30 flex-col gap-1">
                                                 <span
                                                     class="text-muted-foreground text-xs font-semibold tracking-wider uppercase"
                                                     >Languages</span>
                                                 <span class="text-foreground"
-                                                    >{data.mediaDetails.details.spoken_languages
-                                                        .map((l) => l.english_name)
+                                                    >{data.mediaDetails.details.spokenLanguages
+                                                        .map((l) => l.englishName)
                                                         .join(", ")}</span>
                                             </div>
                                         {/if}
@@ -1264,13 +1247,13 @@
                                 {/if}
 
                                 <!-- Production Companies -->
-                                {#if data.mediaDetails?.details.production_companies?.length}
+                                {#if data.mediaDetails?.details.productionCompanies?.length}
                                     <div class="flex flex-col gap-2">
                                         <span
                                             class="text-muted-foreground text-xs font-semibold tracking-wider uppercase"
                                             >Production</span>
                                         <div class="flex flex-wrap gap-2">
-                                            {#each data.mediaDetails.details.production_companies as company, i (i)}
+                                            {#each data.mediaDetails.details.productionCompanies as company, i (i)}
                                                 <span
                                                     class="text-muted-foreground rounded border border-white/10 bg-white/5 px-2 py-1 text-xs">
                                                     {company.name}
@@ -1281,7 +1264,7 @@
                                 {/if}
 
                                 <!-- External Links -->
-                                {#if data.mediaDetails?.details.homepage || data.mediaDetails?.details.imdb_id || data.mediaDetails?.details.external_ids}
+                                {#if data.mediaDetails?.details.homepage || data.mediaDetails?.details.imdbId || data.mediaDetails?.details.externalIds}
                                     <div class="flex flex-col gap-2">
                                         <span
                                             class="text-muted-foreground text-xs font-semibold tracking-wider uppercase"
@@ -1299,19 +1282,19 @@
                                                     class="text-foreground rounded-md border border-white/10 bg-white/5 px-3 py-1.5 text-xs font-medium transition-colors hover:bg-white/10"
                                                     >Website</a>
                                             {/if}
-                                            {#if data.mediaDetails?.details.imdb_id}
+                                            {#if data.mediaDetails?.details.imdbId}
                                                 <a
                                                     href="https://www.imdb.com/title/{data
                                                         .mediaDetails.details
-                                                        .imdb_id}/parentalguide/"
+                                                        .imdbId}/parentalguide/"
                                                     target="_blank"
                                                     rel="noopener noreferrer"
                                                     class="text-foreground rounded-md border border-white/10 bg-white/5 px-3 py-1.5 text-xs font-medium transition-colors hover:bg-white/10"
                                                     >Parental Guide</a>
                                             {/if}
-                                            {#if data.mediaDetails?.details.external_ids}
+                                            {#if data.mediaDetails?.details.externalIds}
                                                 {@const validLinks = Object.entries(
-                                                    data.mediaDetails.details.external_ids
+                                                    data.mediaDetails.details.externalIds
                                                 ).filter(
                                                     ([key, value]) => value && getExternal(key)
                                                 )}
@@ -1363,11 +1346,11 @@
                                                 ? selectedMovieVersionIdx
                                                 : 0
                                         ] ?? allEntries[0]}
-                                    {@const meta = fs?.media_metadata ?? riven?.media_metadata}
+                                    {@const meta = fs?.mediaMetadata ?? riven?.filesystemEntry?.mediaMetadata}
                                     {@const video = meta?.video}
                                     <div class="flex flex-col gap-6 text-sm">
                                         <!-- Filename -->
-                                        {#if meta?.filename || fs?.original_filename}
+                                        {#if meta?.filename || fs?.originalFilename}
                                             <div class="flex flex-col gap-1">
                                                 <p
                                                     class="text-muted-foreground text-xs font-semibold tracking-wider uppercase">
@@ -1375,7 +1358,7 @@
                                                 </p>
                                                 <p
                                                     class="text-foreground font-mono text-xs break-all">
-                                                    {meta?.filename ?? fs?.original_filename}
+                                                    {meta?.filename ?? fs?.originalFilename}
                                                 </p>
                                             </div>
                                         {/if}
@@ -1387,43 +1370,43 @@
                                                     class="text-muted-foreground text-xs font-semibold tracking-wider uppercase"
                                                     >Video</span>
                                                 <div class="flex flex-wrap gap-2">
-                                                    {#if video.resolution_width && video.resolution_height}<Badge
+                                                    {#if video.resolutionWidth && video.resolutionHeight}<Badge
                                                             variant="secondary"
                                                             class="text-muted-foreground border border-white/10 bg-white/5 font-mono text-xs backdrop-blur-sm"
-                                                            >{video.resolution_width}x{video.resolution_height}</Badge
+                                                            >{video.resolutionWidth}x{video.resolutionHeight}</Badge
                                                         >{/if}
                                                     {#if video.codec}<Badge
                                                             variant="secondary"
                                                             class="text-muted-foreground border border-white/10 bg-white/5 font-mono text-xs backdrop-blur-sm"
                                                             >{video.codec}</Badge
                                                         >{/if}
-                                                    {#if video.bit_depth}<Badge
+                                                    {#if video.bitDepth}<Badge
                                                             variant="secondary"
                                                             class="text-muted-foreground border border-white/10 bg-white/5 font-mono text-xs backdrop-blur-sm"
-                                                            >{video.bit_depth}-bit</Badge
+                                                            >{video.bitDepth}-bit</Badge
                                                         >{/if}
-                                                    {#if video.hdr_type}<Badge
+                                                    {#if video.hdrType}<Badge
                                                             variant="secondary"
                                                             class="border border-purple-500/20 bg-purple-500/10 font-mono text-xs text-purple-200 backdrop-blur-sm"
-                                                            >{video.hdr_type}</Badge
+                                                            >{video.hdrType}</Badge
                                                         >{/if}
-                                                    {#if video.frame_rate}<Badge
+                                                    {#if video.frameRate}<Badge
                                                             variant="secondary"
                                                             class="text-muted-foreground border border-white/10 bg-white/5 font-mono text-xs backdrop-blur-sm"
-                                                            >{video.frame_rate} FPS</Badge
+                                                            >{video.frameRate} FPS</Badge
                                                         >{/if}
                                                 </div>
                                             </div>
                                         {/if}
 
                                         <!-- Audio -->
-                                        {#if meta?.audio_tracks?.length}
+                                        {#if meta?.audioTracks?.length}
                                             <div class="flex flex-col gap-2">
                                                 <span
                                                     class="text-muted-foreground text-xs font-semibold tracking-wider uppercase"
                                                     >Audio</span>
                                                 <div class="flex flex-wrap gap-2">
-                                                    {#each meta.audio_tracks as track, i (i)}
+                                                    {#each meta.audioTracks as track, i (i)}
                                                         <Badge
                                                             variant="secondary"
                                                             class="text-muted-foreground border border-white/10 bg-white/5 font-mono text-xs backdrop-blur-sm"
@@ -1442,13 +1425,13 @@
                                         {/if}
 
                                         <!-- Subtitles -->
-                                        {#if meta?.subtitle_tracks?.length}
+                                        {#if meta?.subtitleTracks?.length}
                                             <div class="flex flex-col gap-2">
                                                 <span
                                                     class="text-muted-foreground text-xs font-semibold tracking-wider uppercase"
                                                     >Subtitles</span>
                                                 <div class="flex flex-wrap gap-2">
-                                                    {#each meta.subtitle_tracks as track, i (i)}
+                                                    {#each meta.subtitleTracks as track, i (i)}
                                                         <Badge
                                                             variant="secondary"
                                                             class="text-muted-foreground border border-white/10 bg-white/5 text-[10px] backdrop-blur-sm"
@@ -1461,28 +1444,28 @@
                                         {/if}
 
                                         <!-- Source -->
-                                        {#if meta?.quality_source || meta?.is_remux || meta?.is_proper || meta?.is_repack}
+                                        {#if meta?.qualitySource || meta?.isRemux || meta?.isProper || meta?.isRepack}
                                             <div class="flex flex-col gap-2">
                                                 <span
                                                     class="text-muted-foreground text-xs font-semibold tracking-wider uppercase"
                                                     >Source</span>
                                                 <div class="flex flex-wrap gap-2">
-                                                    {#if meta?.quality_source}<Badge
+                                                    {#if meta?.qualitySource}<Badge
                                                             variant="secondary"
                                                             class="border border-blue-500/20 bg-blue-500/10 text-xs font-bold text-blue-200 backdrop-blur-sm"
-                                                            >{meta.quality_source}</Badge
+                                                            >{meta.qualitySource}</Badge
                                                         >{/if}
-                                                    {#if meta?.is_remux}<Badge
+                                                    {#if meta?.isRemux}<Badge
                                                             variant="secondary"
                                                             class="border border-amber-500/20 bg-amber-500/10 text-xs font-bold text-amber-200 backdrop-blur-sm"
                                                             >REMUX</Badge
                                                         >{/if}
-                                                    {#if meta?.is_proper}<Badge
+                                                    {#if meta?.isProper}<Badge
                                                             variant="secondary"
                                                             class="border border-green-500/20 bg-green-500/10 text-xs font-bold text-green-200 backdrop-blur-sm"
                                                             >PROPER</Badge
                                                         >{/if}
-                                                    {#if meta?.is_repack}<Badge
+                                                    {#if meta?.isRepack}<Badge
                                                             variant="secondary"
                                                             class="border border-green-500/20 bg-green-500/10 text-xs font-bold text-green-200 backdrop-blur-sm"
                                                             >REPACK</Badge
@@ -1492,19 +1475,19 @@
                                         {/if}
 
                                         <!-- Metrics -->
-                                        {#if fs?.file_size || meta?.bitrate || meta?.duration}
+                                        {#if fs?.fileSize || meta?.bitrate || meta?.duration}
                                             <div class="flex flex-col gap-2">
                                                 <span
                                                     class="text-muted-foreground text-xs font-semibold tracking-wider uppercase"
                                                     >Metrics</span>
                                                 <div class="flex flex-wrap gap-4">
-                                                    {#if fs?.file_size}
+                                                    {#if fs?.fileSize}
                                                         <div class="flex items-center gap-2">
                                                             <span
                                                                 class="text-muted-foreground text-xs"
                                                                 >Size</span>
                                                             <span class="text-foreground font-mono"
-                                                                >{formatSize(fs.file_size)}</span>
+                                                                >{formatSize(fs.fileSize)}</span>
                                                         </div>
                                                     {/if}
                                                     {#if meta?.bitrate}
@@ -1533,13 +1516,13 @@
                                         {/if}
 
                                         <!-- Container -->
-                                        {#if meta?.container_format?.length}
+                                        {#if meta?.containerFormat?.length}
                                             <div class="flex flex-col gap-2">
                                                 <span
                                                     class="text-muted-foreground text-xs font-semibold tracking-wider uppercase"
                                                     >Container</span>
                                                 <div class="flex flex-wrap gap-2">
-                                                    {#each meta.container_format as fmt (fmt)}
+                                                    {#each meta.containerFormat as fmt (fmt)}
                                                         <Badge
                                                             variant="secondary"
                                                             class="text-muted-foreground border border-white/10 bg-white/5 font-mono text-xs backdrop-blur-sm"
@@ -1579,7 +1562,7 @@
                                                 <div class="flex flex-wrap gap-2">
                                                     <a
                                                         href={`/media/${fs.id}?download=1`}
-                                                        download={fs.original_filename ?? ""}
+                                                        download={fs.originalFilename ?? ""}
                                                         rel="external"
                                                         class="text-foreground rounded-md border border-white/10 bg-white/5 px-3 py-1.5 text-xs font-medium transition-colors hover:bg-white/10"
                                                         >Download</a>
@@ -1622,8 +1605,8 @@
                         "Similar",
                         650
                     )}{/if}
-                {#if data.mediaDetails?.details.trakt_recommendations?.length}{@render mediaCarousel(
-                        data.mediaDetails.details.trakt_recommendations,
+                {#if data.mediaDetails?.details.traktRecommendations?.length}{@render mediaCarousel(
+                        data.mediaDetails.details.traktRecommendations,
                         "More Like This",
                         700
                     )}{/if}

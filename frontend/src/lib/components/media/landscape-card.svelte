@@ -8,8 +8,8 @@
     import { getRatings, type RatingsData } from "$lib/stores/ratings";
 
     interface Props {
-        title: string;
-        image: string | null;
+        title?: string | null;
+        image?: string | null;
         overview?: string | null;
         topRight?: Snippet; // For badges like "Completed" or "Year"
         meta?: Snippet; // For secondary info line (ratings, runtime, etc)

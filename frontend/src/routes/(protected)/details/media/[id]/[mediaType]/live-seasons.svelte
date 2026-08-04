@@ -3,13 +3,13 @@
     import PortraitCard from "$lib/components/media/portrait-card.svelte";
     import StatusBadge from "$lib/components/media/status-badge.svelte";
     import { cn } from "$lib/utils";
-    import type { ParsedShowDetails } from "$lib/metadata/parser";
-    import type { RivenSeason } from "$lib/types/riven";
+    import type { SeasonSummary } from "$lib/gql/schema";
+    import type { GqlSeasonFull } from "$lib/services/riven-media";
 
     interface Props {
-        seasons: ParsedShowDetails["seasons"];
+        seasons: SeasonSummary[];
         selectedSeason?: string;
-        stateBySeasonNumber: Map<number, RivenSeason>;
+        stateBySeasonNumber: Map<number, GqlSeasonFull>;
         episodeCountBySeasonNumber?: Map<number, number>;
         onSelectSeason: (season: string | undefined) => void;
     }

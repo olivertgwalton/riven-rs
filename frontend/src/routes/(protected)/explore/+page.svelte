@@ -35,7 +35,7 @@
         const item = heroItem;
         if (!item) return null;
 
-        const ratings = await getRatings(item.id, item.media_type);
+        const ratings = await getRatings(item.id, item.mediaType);
 
         // Race condition check: If the hero item has rotated while fetching, ignore this result
         if (heroItem?.id !== item.id) return null;
@@ -46,9 +46,9 @@
     // Derived background image: Use hero item for empty state, first result for active search
     let backgroundImage = $derived(
         hasResults && searchStore.results[0]
-            ? (searchStore.results[0].backdrop_path ?? searchStore.results[0].poster_path)
+            ? (searchStore.results[0].backdropPath ?? searchStore.results[0].posterPath)
             : !hasResults && heroItem
-              ? (heroItem.backdrop_path ?? heroItem.poster_path)
+              ? (heroItem.backdropPath ?? heroItem.posterPath)
               : null
     );
 
@@ -56,7 +56,7 @@
         if (!data.feelingLuckyItems?.length) return;
         const randomItem =
             data.feelingLuckyItems[Math.floor(Math.random() * data.feelingLuckyItems.length)];
-        const route = resolve(`/details/media/${randomItem.id}/${randomItem.media_type}`);
+        const route = resolve(`/details/media/${randomItem.id}/${randomItem.mediaType}`);
         goto(route);
     }
 
@@ -275,24 +275,24 @@
                                                         </div>
                                                     {/each}
                                                 </div>
-                                            {:else if heroItem.vote_average}
+                                            {:else if heroItem.voteAverage}
                                                 <div
                                                     class="bg-background/50 flex items-center gap-1.5 rounded-xl border border-white/10 px-2.5 py-1 backdrop-blur-md">
                                                     <span class="font-black text-[#01b4e4]"
                                                         >TMDB</span>
                                                     <span class="text-sm font-bold text-white">
-                                                        {heroItem.vote_average.toFixed(1)}
+                                                        {heroItem.voteAverage.toFixed(1)}
                                                     </span>
                                                 </div>
                                             {/if}
                                         {:catch}
-                                            {#if heroItem.vote_average}
+                                            {#if heroItem.voteAverage}
                                                 <div
                                                     class="bg-background/50 flex items-center gap-1.5 rounded-xl border border-white/10 px-2.5 py-1 backdrop-blur-md">
                                                     <span class="font-black text-[#01b4e4]"
                                                         >TMDB</span>
                                                     <span class="text-sm font-bold text-white">
-                                                        {heroItem.vote_average.toFixed(1)}
+                                                        {heroItem.voteAverage.toFixed(1)}
                                                     </span>
                                                 </div>
                                             {/if}
@@ -310,7 +310,7 @@
                                         <Button
                                             size="lg"
                                             class="border-primary/50 text-primary hover:bg-primary/10 hover:text-primary hover:border-primary rounded-xl border bg-transparent font-bold shadow-xl backdrop-blur-md"
-                                            href={`/details/media/${heroItem.id}/${heroItem.media_type}`}>
+                                            href={`/details/media/${heroItem.id}/${heroItem.mediaType}`}>
                                             <Info class="mr-2 h-5 w-5" />
                                             View Details
                                         </Button>
@@ -372,8 +372,8 @@
             {:else if hasResults}
                 <div
                     class="grid grid-cols-2 gap-6 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-7 2xl:grid-cols-9">
-                    {#each searchStore.results as item (`${item.indexer}-${item.media_type}-${item.id}`)}
-                        <ListItem data={item} indexer={item.indexer} type={item.media_type} />
+                    {#each searchStore.results as item (`${item.indexer}-${item.mediaType}-${item.id}`)}
+                        <ListItem data={item} indexer={item.indexer} type={item.mediaType} />
                     {/each}
                     {#if searchStore.loading}
                         {#each Array.from({ length: 6 }, (_, i) => i) as i (i)}

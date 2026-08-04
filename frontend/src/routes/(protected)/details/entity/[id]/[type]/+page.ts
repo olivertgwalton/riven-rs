@@ -1,107 +1,38 @@
 import type { PageLoad } from "./$types";
-import {
-	parsePersonDetails,
-	parseCompanyDetails,
-	parseTVDBPersonDetails,
-} from "$lib/metadata/parser";
 import { error } from "@sveltejs/kit";
 import {
-	fetchTmdbDetails,
-	fetchTvdbPersonExtended,
-	mapGqlTmdbList,
-	searchTmdb,
-} from "$lib/services/backend-metadata";
+	fetchCompanyDetails,
+	fetchPersonDetails,
+} from "$lib/services/media-details";
 
-function isTmdbNotFoundError(err: unknown) {
-	return (
-		err instanceof Error &&
-		err.message.includes("TMDB request failed") &&
-		err.message.includes("status 404 Not Found")
-	);
+function isNotFound(err: unknown) {
+	return err instanceof Error && err.message.includes("status 404 Not Found");
 }
 
 export const load: PageLoad = async ({ params, url }) => {
 	const { id, type } = params;
-	const indexer = url.searchParams.get("indexer");
 
 	if (!id || Number.isNaN(Number(id))) {
 		error(400, "Invalid ID");
 	}
-
-	if (type === "person") {
-		if (indexer === "tvdb") {
-			try {
-				const data = await fetchTvdbPersonExtended<Record<string, unknown>>(
-					Number(id),
-					"translations",
-				);
-
-				return {
-					entity: parseTVDBPersonDetails(data),
-				};
-			} catch (err) {
-				if (
-					err instanceof Error &&
-					err.message.includes("TVDB request failed") &&
-					err.message.includes("status 404 Not Found")
-				) {
-					error(404, "Person not found");
-				}
-				throw err;
-			}
-		}
-
-		let data: Record<string, unknown>;
-		try {
-			data = await fetchTmdbDetails<Record<string, unknown>>({
-				type: "person",
-				id: Number(id),
-				appendToResponse: "combined_credits,external_ids",
-			});
-		} catch (err) {
-			if (isTmdbNotFoundError(err)) {
-				error(404, "Person not found");
-			}
-			throw err;
-		}
-
-		return {
-			entity: parsePersonDetails(data),
-		};
-	} else if (type === "company") {
-		let companyRes: Record<string, unknown>;
-		let moviesRes: Awaited<ReturnType<typeof searchTmdb>>;
-		let showsRes: Awaited<ReturnType<typeof searchTmdb>>;
-		try {
-			[companyRes, moviesRes, showsRes] = await Promise.all([
-				fetchTmdbDetails<Record<string, unknown>>({
-					type: "company",
-					id: Number(id),
-				}),
-				searchTmdb({
-					type: "movie",
-					params: { with_companies: String(id), sort_by: "popularity.desc" },
-					searchMode: "discover",
-				}),
-				searchTmdb({
-					type: "tv",
-					params: { with_companies: String(id), sort_by: "popularity.desc" },
-					searchMode: "discover",
-				}),
-			]);
-		} catch (err) {
-			if (isTmdbNotFoundError(err)) {
-				error(404, "Company not found");
-			}
-			throw err;
-		}
-		const movies = mapGqlTmdbList(moviesRes);
-		const shows = mapGqlTmdbList(showsRes);
-
-		return {
-			entity: parseCompanyDetails(companyRes, movies, shows),
-		};
-	} else {
+	if (type !== "person" && type !== "company") {
 		error(404, "Invalid entity type");
+	}
+
+	try {
+		const entity =
+			type === "person"
+				? await fetchPersonDetails(
+						Number(id),
+						url.searchParams.get("indexer") ?? undefined,
+					)
+				: await fetchCompanyDetails(Number(id));
+
+		return { entity };
+	} catch (err) {
+		if (isNotFound(err)) {
+			error(404, type === "person" ? "Person not found" : "Company not found");
+		}
+		throw err;
 	}
 };

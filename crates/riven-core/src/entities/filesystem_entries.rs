@@ -45,6 +45,8 @@ pub struct Model {
     #[sea_orm(column_type = "JsonBinary", nullable)]
     pub library_profiles: Option<Json>,
     #[sea_orm(column_type = "JsonBinary", nullable)]
+    /// The stored document. Read it through the typed `mediaMetadata` field.
+    #[graphql(skip)]
     pub media_metadata: Option<Json>,
     #[sea_orm(column_type = "Text", nullable)]
     pub language: Option<String>,
@@ -79,6 +81,12 @@ impl Model {
 
     async fn stream_url(&self, ctx: &async_graphql::Context<'_>) -> Option<&str> {
         self.credential(ctx, self.stream_url.as_deref())
+    }
+
+    /// The stored document, typed. A row written by an older build that is
+    /// missing fields still reads — every field defaults.
+    async fn media_metadata(&self) -> Option<MediaMetadata> {
+        serde_json::from_value(self.media_metadata.clone()?).ok()
     }
 }
 
@@ -150,4 +158,58 @@ impl Model {
             .unwrap_or("mkv");
         format!("{pretty_name}.{ext}")
     }
+}
+
+/// The `media_metadata` document, derived from a release filename by
+/// `riven_rank::derive_media_metadata` and stored as JSON on the entry.
+///
+/// It is typed here rather than handed over as a `JSON` scalar because both
+/// clients used to re-parse the blob — the Swift app in `FileDetailsView` and
+/// the web frontend in `lib/types/riven.ts` — each maintaining its own copy of
+/// a shape only this repo defines.
+#[derive(serde::Deserialize, async_graphql::SimpleObject, Default, Clone, Debug, PartialEq)]
+#[serde(default)]
+pub struct MediaMetadata {
+    pub filename: Option<String>,
+    pub original_filename: Option<String>,
+    pub parsed_title: Option<String>,
+    pub year: Option<i64>,
+    pub video: Option<VideoMetadata>,
+    pub audio_tracks: Vec<AudioTrack>,
+    pub subtitle_tracks: Vec<SubtitleTrack>,
+    pub quality_source: Option<String>,
+    pub container_format: Vec<String>,
+    pub bitrate: Option<i64>,
+    pub duration: Option<f64>,
+    pub is_remux: bool,
+    pub is_proper: bool,
+    pub is_repack: bool,
+    /// `parsed` when derived from the filename; set by whoever wrote the row.
+    pub data_source: Option<String>,
+}
+
+#[derive(serde::Deserialize, async_graphql::SimpleObject, Default, Clone, Debug, PartialEq)]
+#[serde(default)]
+pub struct VideoMetadata {
+    pub codec: Option<String>,
+    pub resolution_width: Option<i64>,
+    pub resolution_height: Option<i64>,
+    pub bit_depth: Option<i64>,
+    pub hdr_type: Option<String>,
+    pub frame_rate: Option<f64>,
+}
+
+#[derive(serde::Deserialize, async_graphql::SimpleObject, Default, Clone, Debug, PartialEq)]
+#[serde(default)]
+pub struct AudioTrack {
+    pub codec: Option<String>,
+    pub channels: Option<i64>,
+    pub language: Option<String>,
+}
+
+#[derive(serde::Deserialize, async_graphql::SimpleObject, Default, Clone, Debug, PartialEq)]
+#[serde(default)]
+pub struct SubtitleTrack {
+    pub codec: Option<String>,
+    pub language: Option<String>,
 }

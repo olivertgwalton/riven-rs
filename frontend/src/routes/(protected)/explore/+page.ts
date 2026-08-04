@@ -3,12 +3,11 @@ import { zod4 } from "sveltekit-superforms/adapters";
 import { searchSchema } from "$lib/schemas/search";
 import type { PageLoad } from "./$types";
 import { parseSearchQuery } from "$lib/search-parser";
-import type { TMDBTransformedListItem } from "$lib/metadata/parser";
+import type { TmdbListItem } from "$lib/gql/schema";
 import { logger } from "$lib/logger";
 import {
 	fetchTmdbCategory,
 	fetchTmdbTrending,
-	mapGqlTmdbList,
 } from "$lib/services/backend-metadata";
 
 export const load: PageLoad = async ({ url }) => {
@@ -17,8 +16,8 @@ export const load: PageLoad = async ({ url }) => {
 	const parsed = parseSearchQuery(form.data.query || "");
 
 	// Fetch trending content for search examples and hero
-	let heroItems: TMDBTransformedListItem[] = [];
-	let feelingLuckyItems: TMDBTransformedListItem[] = [];
+	let heroItems: TmdbListItem[] = [];
+	let feelingLuckyItems: TmdbListItem[] = [];
 	let searchExamples: string[] = [];
 
 	try {
@@ -60,14 +59,14 @@ export const load: PageLoad = async ({ url }) => {
 			}),
 		]);
 
-		const heroMovieResults = mapGqlTmdbList(trendingMovies);
-		const heroTvResults = mapGqlTmdbList(trendingTV);
+		const heroMovieResults = trendingMovies;
+		const heroTvResults = trendingTV;
 
-		const popularMovieResults = mapGqlTmdbList(popularMovies);
-		const popularTvResults = mapGqlTmdbList(popularTV);
+		const popularMovieResults = popularMovies;
+		const popularTvResults = popularTV;
 
-		const topRatedMovieResults = mapGqlTmdbList(topRatedMovies);
-		const topRatedTvResults = mapGqlTmdbList(topRatedTV);
+		const topRatedMovieResults = topRatedMovies;
+		const topRatedTvResults = topRatedTV;
 
 		// Hero items: Top trending
 		heroItems = shuffleArray([

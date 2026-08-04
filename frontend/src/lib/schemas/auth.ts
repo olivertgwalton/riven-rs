@@ -6,7 +6,6 @@ import { z } from "zod";
  * the GraphQL `UserRole` enum is the screaming-case view of the same ladder.
  */
 export const userRoleSchema = z.enum(["user", "manager", "admin"]);
-export type UserRoleValue = z.infer<typeof userRoleSchema>;
 
 export const passwordChangeSchema = z
 	.object({

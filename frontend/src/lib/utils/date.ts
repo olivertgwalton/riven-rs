@@ -249,28 +249,3 @@ export function getDayOfWeek(date: CalendarDate): number {
 	const nativeDate = new Date(date.year, date.month - 1, date.day);
 	return nativeDate.getDay();
 }
-
-/**
- * Compare two date strings by their timestamp
- * Returns negative if a is before b, positive if a is after b, 0 if equal
- */
-export function compareDateStrings(
-	dateA: string | null | undefined,
-	dateB: string | null | undefined,
-): number {
-	if (!dateA && !dateB) return 0;
-	if (!dateA) return 1;
-	if (!dateB) return -1;
-
-	const a = parseISODate(dateA);
-	const b = parseISODate(dateB);
-
-	if (!a && !b) return 0;
-	if (!a) return 1;
-	if (!b) return -1;
-
-	// Compare year, then month, then day
-	if (a.year !== b.year) return a.year - b.year;
-	if (a.month !== b.month) return a.month - b.month;
-	return a.day - b.day;
-}

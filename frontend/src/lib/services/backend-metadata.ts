@@ -1,24 +1,7 @@
 import { gqlClient } from "$lib/graphql-client";
-import type { TMDBTransformedListItem } from "$lib/metadata/parser";
+import type { TmdbListItem } from "$lib/gql/schema";
 
-export interface GqlTmdbListItem {
-	id: number;
-	title: string;
-	posterPath: string | null;
-	mediaType: "movie" | "tv" | "person" | "company";
-	year: string;
-	voteAverage: number | null;
-	voteCount: number | null;
-	popularity?: number | null;
-	overview?: string | null;
-	backdropPath?: string | null;
-	genreIds?: number[] | null;
-	releaseDate?: string | null;
-	firstAirDate?: string | null;
-	originalTitle?: string | null;
-	originalLanguage?: string | null;
-	indexer: "tmdb" | "tvdb";
-}
+export type { TmdbListItem };
 
 const TMDB_LIST_FIELDS = `
     id
@@ -38,10 +21,6 @@ const TMDB_LIST_FIELDS = `
     originalLanguage
     indexer
 `;
-
-const TMDB_DETAILS_QUERY = `query($type: String!, $id: Int!, $appendToResponse: String) {
-    tmdbDetails(type: $type, id: $id, appendToResponse: $appendToResponse)
-}`;
 
 const RESOLVE_EXTERNAL_ID_QUERY = `query($from: String!, $to: String!, $id: String!, $mediaType: String) {
     resolveExternalId(from: $from, to: $to, id: $id, mediaType: $mediaType) {
@@ -79,54 +58,6 @@ export const SEARCH_TMDB_PAGE_QUERY = `query SearchTmdb($type: String!, $params:
     }
 }`;
 
-const TVDB_SERIES_EXTENDED_QUERY = `query($id: Int!, $meta: String) {
-    tvdbSeriesExtended(id: $id, meta: $meta)
-}`;
-
-const TVDB_PERSON_EXTENDED_QUERY = `query($id: Int!, $meta: String) {
-    tvdbPersonExtended(id: $id, meta: $meta)
-}`;
-
-const TVDB_EPISODES_QUERY = `query($id: Int!, $seasonType: String!, $lang: String!, $page: Int) {
-    tvdbEpisodes(id: $id, seasonType: $seasonType, lang: $lang, page: $page)
-}`;
-
-function mapGqlTmdbListItem(item: GqlTmdbListItem): TMDBTransformedListItem {
-	return {
-		id: item.id,
-		title: item.title,
-		poster_path: item.posterPath,
-		media_type: item.mediaType,
-		year: item.year,
-		vote_average: item.voteAverage,
-		vote_count: item.voteCount,
-		popularity: item.popularity ?? undefined,
-		overview: item.overview ?? undefined,
-		backdrop_path: item.backdropPath ?? undefined,
-		genre_ids: item.genreIds ?? undefined,
-		release_date: item.releaseDate ?? undefined,
-		first_air_date: item.firstAirDate ?? undefined,
-		original_title: item.originalTitle ?? undefined,
-		original_language: item.originalLanguage ?? undefined,
-		indexer: item.indexer,
-	};
-}
-
-export function mapGqlTmdbList(
-	items: GqlTmdbListItem[],
-): TMDBTransformedListItem[] {
-	return items.map(mapGqlTmdbListItem);
-}
-
-export async function fetchTmdbDetails<T>(options: {
-	type: "movie" | "tv" | "person" | "company";
-	id: number;
-	appendToResponse?: string;
-}) {
-	const data = await gqlClient<{ tmdbDetails: T }>(TMDB_DETAILS_QUERY, options);
-	return data.tmdbDetails;
-}
-
 export async function resolveExternalId(options: {
 	from: "tmdb" | "tvdb" | "imdb" | "anilist" | "riven";
 	to: "tmdb" | "tvdb" | "imdb" | "anilist" | "riven";
@@ -145,7 +76,7 @@ export async function fetchTmdbTrending(options: {
 	page?: number;
 }) {
 	const data = await gqlClient<{
-		trendingTmdb: { results: GqlTmdbListItem[] };
+		trendingTmdb: { results: TmdbListItem[] };
 	}>(TMDB_TRENDING_QUERY, options);
 	return data.trendingTmdb.results;
 }
@@ -156,7 +87,7 @@ export async function fetchTmdbCategory(options: {
 	page?: number;
 }) {
 	const data = await gqlClient<{
-		tmdbCategory: { results: GqlTmdbListItem[] };
+		tmdbCategory: { results: TmdbListItem[] };
 	}>(TMDB_CATEGORY_QUERY, options);
 	return data.tmdbCategory.results;
 }
@@ -166,44 +97,9 @@ export async function searchTmdb(options: {
 	params?: Record<string, unknown>;
 	searchMode?: "search" | "discover" | "hybrid";
 }) {
-	const data = await gqlClient<{ searchTmdb: { results: GqlTmdbListItem[] } }>(
+	const data = await gqlClient<{ searchTmdb: { results: TmdbListItem[] } }>(
 		SEARCH_TMDB_QUERY,
 		options,
 	);
 	return data.searchTmdb.results;
-}
-
-export async function fetchTvdbSeriesExtended<T>(id: number, meta?: string) {
-	const data = await gqlClient<{ tvdbSeriesExtended: T }>(
-		TVDB_SERIES_EXTENDED_QUERY,
-		{
-			id,
-			meta,
-		},
-	);
-	return data.tvdbSeriesExtended;
-}
-
-export async function fetchTvdbPersonExtended<T>(id: number, meta?: string) {
-	const data = await gqlClient<{ tvdbPersonExtended: T }>(
-		TVDB_PERSON_EXTENDED_QUERY,
-		{
-			id,
-			meta,
-		},
-	);
-	return data.tvdbPersonExtended;
-}
-
-export async function fetchTvdbEpisodes<T>(options: {
-	id: number;
-	seasonType: string;
-	lang: string;
-	page?: number;
-}) {
-	const data = await gqlClient<{ tvdbEpisodes: T }>(
-		TVDB_EPISODES_QUERY,
-		options,
-	);
-	return data.tvdbEpisodes;
 }

@@ -5,17 +5,18 @@
     import LandscapeCard from "$lib/components/media/landscape-card.svelte";
     import StatusBadge from "$lib/components/media/status-badge.svelte";
     import { IsMobile } from "$lib/hooks/is-mobile.svelte";
-    import type { ParsedShowDetails } from "$lib/metadata/parser";
-    import type { FilesystemEntry, MediaMetadata, RivenEpisode } from "$lib/types/riven";
+    import type { EpisodeSummary } from "$lib/gql/schema";
+    import type { MediaMetadata, Maybe } from "$lib/gql/schema";
+    import type { GqlEpisodeFull, GqlFilesystemEntry } from "$lib/services/riven-media";
     import { untrack } from "svelte";
 
     interface Props {
-        episodes: ParsedShowDetails["episodes"];
+        episodes: EpisodeSummary[];
         selectedSeason?: string;
         selectedEpisode?: string;
         showTitle?: string | null;
-        stateByEpisodeNumber: Map<number, Pick<RivenEpisode, "episode_number" | "state">>;
-        detailsByEpisodeNumber: Map<number, RivenEpisode>;
+        stateByEpisodeNumber: Map<number, Pick<GqlEpisodeFull, "episodeNumber" | "state">>;
+        detailsByEpisodeNumber: Map<number, GqlEpisodeFull>;
         formatSize: (bytes: number) => string;
         onDeleteFilesystemEntry: (id: number, label: string) => void | Promise<void>;
     }
@@ -44,11 +45,11 @@
 
     let selectedVersionIdxByEpisode = $state<Record<number, number>>({});
 
-    function getEpisodeEntries(rivenEpisode: RivenEpisode | undefined): FilesystemEntry[] {
-        return rivenEpisode?.filesystem_entries?.length
-            ? rivenEpisode.filesystem_entries
-            : rivenEpisode?.filesystem_entry
-              ? [rivenEpisode.filesystem_entry]
+    function getEpisodeEntries(rivenEpisode: GqlEpisodeFull | undefined): GqlFilesystemEntry[] {
+        return rivenEpisode?.filesystemEntries?.length
+            ? rivenEpisode.filesystemEntries
+            : rivenEpisode?.filesystemEntry
+              ? [rivenEpisode.filesystemEntry]
               : [];
     }
 
@@ -57,7 +58,7 @@
         openEpisodeOverride = open ? episodeNumber : null;
     }
 
-    function humanizeProfileName(name: string | undefined) {
+    function humanizeProfileName(name: Maybe<string> | undefined) {
         if (!name) return null;
         return name
             .split(/[_-]+/)
@@ -66,8 +67,8 @@
             .join(" ");
     }
 
-    function getMetadataResolutionLabel(metadata: MediaMetadata | undefined): string | null {
-        const height = metadata?.video?.resolution_height;
+    function getMetadataResolutionLabel(metadata: Maybe<MediaMetadata> | undefined): string | null {
+        const height = metadata?.video?.resolutionHeight;
         if (!height) return null;
         if (height >= 2160) return "4K";
         if (height >= 1440) return "1440p";
@@ -78,11 +79,11 @@
     }
 
     function getFsLabel(
-        entry: FilesystemEntry | undefined,
+        entry: GqlFilesystemEntry | undefined,
         episodeNumber: number | null | undefined
     ) {
-        const resolutionLabel = getMetadataResolutionLabel(entry?.media_metadata);
-        const profileLabel = humanizeProfileName(entry?.ranking_profile_name);
+        const resolutionLabel = getMetadataResolutionLabel(entry?.mediaMetadata);
+        const profileLabel = humanizeProfileName(entry?.rankingProfileName);
         const fallback = episodeNumber ? `Episode ${episodeNumber}` : "Episode";
 
         if (resolutionLabel && profileLabel) {
@@ -94,8 +95,8 @@
 </script>
 
 {#snippet episodeTrigger(
-    episode: ParsedShowDetails["episodes"][number],
-    rivenEpisode: RivenEpisode | undefined
+    episode: EpisodeSummary[][number],
+    rivenEpisode: GqlEpisodeFull | undefined
 )}
     <LandscapeCard
         title={episode.name}
@@ -122,8 +123,8 @@
 {/snippet}
 
 {#snippet episodeMetadata(
-    episode: ParsedShowDetails["episodes"][number],
-    rivenEpisode: RivenEpisode | undefined
+    episode: EpisodeSummary[][number],
+    rivenEpisode: GqlEpisodeFull | undefined
 )}
     <div class="mt-2 flex flex-wrap items-center gap-2">
         <span class="text-muted-foreground font-serif text-sm">{showTitle}</span>
@@ -141,14 +142,14 @@
 {/snippet}
 
 {#snippet fileDetails(
-    allEntries: FilesystemEntry[],
+    allEntries: GqlFilesystemEntry[],
     selectedIdx: number,
-    fallbackMeta: MediaMetadata | undefined,
+    fallbackMeta: Maybe<MediaMetadata> | undefined,
     episodeNumber: number | null | undefined,
     onSelectIdx: (idx: number) => void
 )}
     {@const fs = allEntries[selectedIdx] ?? allEntries[0]}
-    {@const meta = fs?.media_metadata ?? fallbackMeta}
+    {@const meta = fs?.mediaMetadata ?? fallbackMeta}
     <div class="flex flex-col gap-6">
         <div class="mb-4 flex items-center justify-between gap-3">
             <div class="flex items-center gap-3">
@@ -171,14 +172,14 @@
             {/if}
         </div>
         <div class="flex flex-col gap-4 text-sm">
-            {#if meta?.filename || fs?.original_filename}
+            {#if meta?.filename || fs?.originalFilename}
                 <div>
                     <p
                         class="text-primary font-mono text-xs font-semibold tracking-wider uppercase">
                         Filename
                     </p>
                     <p class="text-muted-foreground mt-1 font-mono text-xs break-all">
-                        {meta?.filename ?? fs?.original_filename}
+                        {meta?.filename ?? fs?.originalFilename}
                     </p>
                 </div>
             {/if}
@@ -190,41 +191,41 @@
                         Video
                     </span>
                     <div class="flex flex-wrap gap-2">
-                        {#if meta.video.resolution_width && meta.video.resolution_height}
+                        {#if meta.video.resolutionWidth && meta.video.resolutionHeight}
                             <Badge variant="outline" class="font-mono text-xs">
-                                {meta.video.resolution_width}x{meta.video.resolution_height}
+                                {meta.video.resolutionWidth}x{meta.video.resolutionHeight}
                             </Badge>
                         {/if}
                         {#if meta.video.codec}
                             <Badge variant="outline" class="font-mono text-xs"
                                 >{meta.video.codec}</Badge>
                         {/if}
-                        {#if meta.video.bit_depth}
+                        {#if meta.video.bitDepth}
                             <Badge variant="outline" class="font-mono text-xs">
-                                {meta.video.bit_depth}-bit
+                                {meta.video.bitDepth}-bit
                             </Badge>
                         {/if}
-                        {#if meta.video.hdr_type}
+                        {#if meta.video.hdrType}
                             <Badge variant="outline" class="font-mono text-xs"
-                                >{meta.video.hdr_type}</Badge>
+                                >{meta.video.hdrType}</Badge>
                         {/if}
-                        {#if meta.video.frame_rate}
+                        {#if meta.video.frameRate}
                             <Badge variant="outline" class="font-mono text-xs">
-                                {meta.video.frame_rate} FPS
+                                {meta.video.frameRate} FPS
                             </Badge>
                         {/if}
                     </div>
                 </div>
             {/if}
 
-            {#if meta?.audio_tracks?.length}
+            {#if meta?.audioTracks?.length}
                 <div class="flex flex-col gap-2">
                     <span
                         class="text-primary font-mono text-xs font-semibold tracking-wider uppercase">
                         Audio
                     </span>
                     <div class="flex flex-wrap gap-2">
-                        {#each meta.audio_tracks as track, i (i)}
+                        {#each meta.audioTracks as track, i (i)}
                             <Badge variant="outline" class="font-mono text-xs">
                                 {track.codec}{track.channels
                                     ? track.channels === 8
@@ -241,14 +242,14 @@
                 </div>
             {/if}
 
-            {#if meta?.subtitle_tracks?.length}
+            {#if meta?.subtitleTracks?.length}
                 <div class="flex flex-col gap-2">
                     <span
                         class="text-primary font-mono text-xs font-semibold tracking-wider uppercase">
                         Subtitles
                     </span>
                     <div class="flex flex-wrap gap-2">
-                        {#each meta.subtitle_tracks as track, i (i)}
+                        {#each meta.subtitleTracks as track, i (i)}
                             <Badge variant="outline" class="font-mono text-xs">
                                 {track.language ? track.language.toUpperCase() : "Unknown"}
                             </Badge>
@@ -257,41 +258,41 @@
                 </div>
             {/if}
 
-            {#if meta?.quality_source || meta?.is_remux || meta?.is_proper || meta?.is_repack}
+            {#if meta?.qualitySource || meta?.isRemux || meta?.isProper || meta?.isRepack}
                 <div class="flex flex-col gap-2">
                     <span
                         class="text-primary font-mono text-xs font-semibold tracking-wider uppercase">
                         Source
                     </span>
                     <div class="flex flex-wrap gap-2">
-                        {#if meta?.quality_source}
+                        {#if meta?.qualitySource}
                             <Badge variant="outline" class="font-mono text-xs"
-                                >{meta.quality_source}</Badge>
+                                >{meta.qualitySource}</Badge>
                         {/if}
-                        {#if meta?.is_remux}
+                        {#if meta?.isRemux}
                             <Badge variant="outline" class="font-mono text-xs">REMUX</Badge>
                         {/if}
-                        {#if meta?.is_proper}
+                        {#if meta?.isProper}
                             <Badge variant="outline" class="font-mono text-xs">PROPER</Badge>
                         {/if}
-                        {#if meta?.is_repack}
+                        {#if meta?.isRepack}
                             <Badge variant="outline" class="font-mono text-xs">REPACK</Badge>
                         {/if}
                     </div>
                 </div>
             {/if}
 
-            {#if fs?.file_size || meta?.bitrate || meta?.duration}
+            {#if fs?.fileSize || meta?.bitrate || meta?.duration}
                 <div class="flex flex-col gap-2">
                     <span
                         class="text-primary font-mono text-xs font-semibold tracking-wider uppercase">
                         Metrics
                     </span>
                     <div class="flex flex-wrap gap-4">
-                        {#if fs?.file_size}
+                        {#if fs?.fileSize}
                             <div class="flex items-center gap-2">
                                 <span class="text-muted-foreground text-xs">Size</span>
-                                <span class="font-mono text-xs">{formatSize(fs.file_size)}</span>
+                                <span class="font-mono text-xs">{formatSize(fs.fileSize)}</span>
                             </div>
                         {/if}
                         {#if meta?.bitrate}
@@ -313,14 +314,14 @@
                 </div>
             {/if}
 
-            {#if meta?.container_format?.length}
+            {#if meta?.containerFormat?.length}
                 <div class="flex flex-col gap-2">
                     <span
                         class="text-primary font-mono text-xs font-semibold tracking-wider uppercase">
                         Container
                     </span>
                     <div class="flex flex-wrap gap-2">
-                        {#each meta.container_format as fmt (fmt)}
+                        {#each meta.containerFormat as fmt (fmt)}
                             <Badge variant="outline" class="font-mono text-xs">{fmt}</Badge>
                         {/each}
                     </div>
@@ -349,7 +350,7 @@
                     <!-- `?download=1` for Content-Disposition; see the movie page. -->
                     <a
                         href={`/media/${fs.id}?download=1`}
-                        download={fs.original_filename ?? ""}
+                        download={fs.originalFilename ?? ""}
                         rel="external"
                         class="rounded-md border px-3 py-1.5 text-xs font-medium transition-colors hover:bg-white/10">
                         Download
@@ -384,8 +385,8 @@
 {/snippet}
 
 {#snippet episodeBody(
-    episode: ParsedShowDetails["episodes"][number],
-    rivenEpisode: RivenEpisode | undefined
+    episode: EpisodeSummary[][number],
+    rivenEpisode: GqlEpisodeFull | undefined
 )}
     <div class="mt-6 flex flex-1 flex-col gap-8 overflow-y-auto px-6 pb-36">
         {#if episode.overview}
@@ -403,7 +404,7 @@
             </div>
         {/if}
 
-        {#if getEpisodeEntries(rivenEpisode).length > 0 || rivenEpisode?.media_metadata}
+        {#if getEpisodeEntries(rivenEpisode).length > 0 || rivenEpisode?.filesystemEntry?.mediaMetadata}
             {@const allEntries = getEpisodeEntries(rivenEpisode)}
             {@const selectedIdx = Math.min(
                 selectedVersionIdxByEpisode[episode.number ?? -1] ?? 0,
@@ -412,7 +413,7 @@
             {@render fileDetails(
                 allEntries,
                 selectedIdx,
-                rivenEpisode?.media_metadata,
+                rivenEpisode?.filesystemEntry?.mediaMetadata,
                 episode.number,
                 (idx) => {
                     if (episode.number != null) selectedVersionIdxByEpisode[episode.number] = idx;

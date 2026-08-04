@@ -1,8 +1,9 @@
-use async_graphql::{Context, Error, Object, Result, SimpleObject};
+use async_graphql::{Context, Error, Object, Result};
 use riven_core::http::HttpClient;
 use riven_core::plugin::PluginRegistry;
 
 use crate::profiles::TRAKT;
+use crate::schema::metadata::TmdbListItem;
 use serde::Deserialize;
 use std::sync::Arc;
 
@@ -10,16 +11,6 @@ const TRAKT_BASE_URL: &str = "https://api.trakt.tv";
 
 #[derive(Default)]
 pub struct CoreTraktQuery;
-
-#[derive(SimpleObject)]
-pub struct TraktListItem {
-    pub id: i64,
-    pub title: String,
-    pub poster_path: Option<String>,
-    pub media_type: String,
-    pub year: String,
-    pub indexer: String,
-}
 
 #[Object]
 impl CoreTraktQuery {
@@ -29,12 +20,25 @@ impl CoreTraktQuery {
         id: String,
         id_type: String,
         media_type: String,
-    ) -> Result<Vec<TraktListItem>> {
-        if !matches!(id_type.as_str(), "tmdb" | "tvdb") {
+    ) -> Result<Vec<TmdbListItem>> {
+        recommendations(ctx, &id, &id_type, &media_type).await
+    }
+}
+
+/// Related titles for one item, as list items shaped like every other list in
+/// the schema — the detail resolvers fold these into their own payload.
+pub(crate) async fn recommendations(
+    ctx: &Context<'_>,
+    id: &str,
+    id_type: &str,
+    media_type: &str,
+) -> Result<Vec<TmdbListItem>> {
+    {
+        if !matches!(id_type, "tmdb" | "tvdb") {
             return Err(Error::new(format!("Invalid Trakt id type: {id_type}")));
         }
 
-        let (query_type, endpoint_prefix, normalized_media_type) = match media_type.as_str() {
+        let (query_type, endpoint_prefix, normalized_media_type) = match media_type {
             "movie" => ("movie", "movies", "movie"),
             "show" | "tv" => ("show", "shows", "tv"),
             _ => {
@@ -83,7 +87,7 @@ impl CoreTraktQuery {
             .into_iter()
             .filter_map(|item| {
                 let tmdb_id = item.ids.tmdb?;
-                Some(TraktListItem {
+                Some(TmdbListItem {
                     id: tmdb_id,
                     title: item.title.unwrap_or_default(),
                     poster_path: item
@@ -96,6 +100,18 @@ impl CoreTraktQuery {
                         .year
                         .map_or_else(|| "N/A".to_string(), |year| year.to_string()),
                     indexer: "tmdb".to_string(),
+                    // Trakt's related feed carries none of the scoring fields.
+                    vote_average: None,
+                    vote_count: None,
+                    popularity: None,
+                    overview: None,
+                    backdrop_path: None,
+                    genre_ids: vec![],
+                    genres: vec![],
+                    release_date: None,
+                    first_air_date: None,
+                    original_title: None,
+                    original_language: None,
                 })
             })
             .collect())

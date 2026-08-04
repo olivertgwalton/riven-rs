@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use chrono::NaiveDate;
+use riven_core::entities::helpers::{Artwork, artwork_url};
 use serde::Deserialize;
 use std::time::Duration;
 
@@ -136,9 +137,7 @@ async fn fetch_movie_by_tmdb_id(
         title: Some(movie.title),
         tmdb_id: Some(tmdb_id.to_string()),
         imdb_id,
-        poster_path: movie
-            .poster_path
-            .map(|p| format!("https://image.tmdb.org/t/p/w500{p}")),
+        poster_path: artwork_url(movie.poster_path.as_deref(), Artwork::Poster),
         year,
         genres,
         country: movie

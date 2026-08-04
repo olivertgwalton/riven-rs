@@ -9,7 +9,6 @@
  * wrappers; a single wrapper cannot serve all three transports.
  */
 
-import type { RivenMediaItem } from "$lib/types/riven";
 import type {
 	EpisodeFull,
 	EpisodeState,
@@ -28,6 +27,11 @@ import type {
  * compile here instead of arriving as `undefined` at runtime. Regenerate with
  * `pnpm codegen` after changing the schema.
  */
+/// The unified view both queries produce: `mediaItemFull` carries filesystem
+/// entries, `mediaItemState*` carries only states, and the richer type covers
+/// both because the extra fields are optional.
+export type RivenMediaItem = GqlMediaItemFull;
+
 export type GqlFilesystemEntry = Pick<
 	FileSystemEntry,
 	| "id"
@@ -239,90 +243,17 @@ export const MEDIA_ITEM_STATE_BY_TVDB_QUERY = `query($tvdbId: String!) {
     }
 }`;
 
-function mapFsEntry(
-	entry: GqlFilesystemEntry,
-): RivenMediaItem["filesystem_entry"] & {
-	id?: number;
-	ranking_profile_name?: string;
-} {
-	return {
-		id: entry.id ?? undefined,
-		file_size: entry.fileSize ?? undefined,
-		original_filename: entry.originalFilename ?? undefined,
-		download_url: entry.downloadUrl ?? undefined,
-		provider: entry.provider ?? undefined,
-		provider_download_id: entry.providerDownloadId ?? undefined,
-		path: entry.path ?? undefined,
-		plugin: entry.plugin ?? undefined,
-		ranking_profile_name: entry.rankingProfileName ?? undefined,
-		media_metadata: entry.mediaMetadata as
-			| import("$lib/types/riven").MediaMetadata
-			| undefined,
-	};
-}
-
+/// Both queries already return the shape the page reads — these exist so the
+/// call sites can keep saying what they mean, and so a null response becomes a
+/// null item rather than `undefined`.
 export function mapMediaItemFull(
 	raw: GqlMediaItemFull | null | undefined,
 ): RivenMediaItem | null {
-	if (!raw) {
-		return null;
-	}
-
-	return {
-		id: raw.id,
-		state: raw.state,
-		imdb_id: raw.imdbId ?? undefined,
-		tmdb_id: raw.tmdbId ?? undefined,
-		tvdb_id: raw.tvdbId ?? undefined,
-		media_metadata: raw.filesystemEntry
-			?.mediaMetadata as RivenMediaItem["media_metadata"],
-		filesystem_entry: raw.filesystemEntry
-			? mapFsEntry(raw.filesystemEntry)
-			: undefined,
-		filesystem_entries: raw.filesystemEntries?.map(mapFsEntry) ?? [],
-		seasons: raw.seasons?.map((season) => ({
-			// Both numbers are nullable in the schema. `mapMediaItemStateTree`
-			// below has always coalesced them; this mapper did not, because the
-			// hand-written type it used claimed they were required. Same field,
-			// same fallback.
-			season_number: season.seasonNumber ?? 0,
-			state: season.state,
-			is_requested: season.isRequested,
-			episodes: season.episodes?.map((episode) => ({
-				episode_number: episode.episodeNumber ?? 0,
-				state: episode.state,
-				media_metadata: episode.filesystemEntry
-					?.mediaMetadata as RivenMediaItem["media_metadata"],
-				filesystem_entry: episode.filesystemEntry
-					? mapFsEntry(episode.filesystemEntry)
-					: undefined,
-				filesystem_entries: episode.filesystemEntries?.map(mapFsEntry) ?? [],
-			})),
-		})),
-	};
+	return raw ?? null;
 }
 
 export function mapMediaItemStateTree(
 	raw: GqlMediaItemStateTree | null | undefined,
 ): RivenMediaItem | null {
-	if (!raw) {
-		return null;
-	}
-
-	return {
-		id: raw.id,
-		state: raw.state,
-		imdb_id: raw.imdbId ?? undefined,
-		tmdb_id: raw.tmdbId ?? undefined,
-		tvdb_id: raw.tvdbId ?? undefined,
-		seasons: raw.seasons?.map((season) => ({
-			season_number: season.seasonNumber ?? 0,
-			state: season.state,
-			is_requested: season.isRequested,
-			episodes: season.episodes?.map((episode) => ({
-				episode_number: episode.episodeNumber ?? 0,
-				state: episode.state,
-			})),
-		})),
-	};
+	return raw ?? null;
 }

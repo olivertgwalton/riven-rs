@@ -1,7 +1,6 @@
 <script lang="ts">
     import { Badge } from "$lib/components/ui/badge/index.js";
     import { gqlClient } from "$lib/graphql-client";
-    import { TMDB_IMAGE_BASE_URL } from "$lib/indexer-constants";
     import type { UsenetTitleHealth, UsenetTitleHealthSummary } from "./types";
 
     let { titles, summary }: { titles: UsenetTitleHealth[]; summary: UsenetTitleHealthSummary } =
@@ -34,9 +33,6 @@
     // (the backend already orders them).
     const problems = $derived(titles.filter((t) => t.status !== "healthy"));
 
-    function poster(path: string | null) {
-        return path ? `${TMDB_IMAGE_BASE_URL}/w92${path}` : null;
-    }
 
     function relativeTime(unixSeconds: number | null) {
         if (!unixSeconds) return "never checked";
@@ -131,9 +127,9 @@
                 <div class="border-border/60 flex items-center gap-3 border-b py-2.5">
                     <div
                         class="h-14 w-10 shrink-0 overflow-hidden rounded border border-white/8 bg-white/[0.04]">
-                        {#if poster(t.posterPath)}
+                        {#if t.posterPath}
                             <img
-                                src={poster(t.posterPath)}
+                                src={t.posterPath}
                                 alt={t.title ?? "poster"}
                                 class="h-full w-full object-cover"
                                 loading="lazy" />

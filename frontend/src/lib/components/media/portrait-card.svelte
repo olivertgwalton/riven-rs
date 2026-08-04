@@ -5,9 +5,9 @@
     import type { Snippet } from "svelte";
 
     interface Props {
-        title: string;
+        title?: string | null;
         subtitle?: string | null;
-        image: string | null;
+        image?: string | null;
         isSelectable?: boolean;
         isSelected?: boolean;
         onSelectToggle?: () => void;

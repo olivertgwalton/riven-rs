@@ -1,5 +1,3 @@
-const TMDB_IMAGE_BASE_URL = "https://image.tmdb.org/t/p";
-
 export const RECENT_ITEMS_QUERY = `
     query RecentItems($page: Int, $limit: Int, $sort: String, $types: [MediaItemType!]) {
         items(page: $page, limit: $limit, sort: $sort, types: $types) {
@@ -69,8 +67,6 @@ export function getRecentItemsVariables(page = 1) {
 
 export function mapRecentItemsPage(data: RecentItemsResponse): RecentItemsPage {
 	const items = data.items.items.map((item) => {
-		const hasAbsolutePoster = item.posterPath?.startsWith("http");
-
 		let id: string | number;
 		let indexer: string;
 
@@ -89,11 +85,7 @@ export function mapRecentItemsPage(data: RecentItemsResponse): RecentItemsPage {
 			id,
 			indexer,
 			title: item.title,
-			poster_path: item.posterPath
-				? hasAbsolutePoster
-					? item.posterPath
-					: `${TMDB_IMAGE_BASE_URL}/w500${item.posterPath}`
-				: null,
+			poster_path: item.posterPath ?? null,
 			media_type:
 				item.itemType.toLowerCase() === "show"
 					? "tv"

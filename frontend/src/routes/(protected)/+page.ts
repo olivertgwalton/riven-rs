@@ -1,10 +1,7 @@
 import type { PageLoad } from "./$types";
 import { createScopedLogger } from "$lib/logger";
 import { gqlClient } from "$lib/graphql-client";
-import {
-	fetchTmdbTrending,
-	mapGqlTmdbList,
-} from "$lib/services/backend-metadata";
+import { fetchTmdbTrending } from "$lib/services/backend-metadata";
 import {
 	getRecentItemsVariables,
 	mapRecentItemsPage,
@@ -37,11 +34,11 @@ export const load: PageLoad = async () => {
 		}
 
 		// Filter to only movies and TV shows with backdrops
-		const tmdbResults = mapGqlTmdbList(trendingResults);
+		const tmdbResults = trendingResults;
 		const filtered = tmdbResults.filter(
 			(item) =>
-				(item.media_type === "movie" || item.media_type === "tv") &&
-				item.backdrop_path,
+				(item.mediaType === "movie" || item.mediaType === "tv") &&
+				item.backdropPath,
 		);
 
 		return { nowPlaying: filtered, recentlyAdded };

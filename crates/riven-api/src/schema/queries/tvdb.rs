@@ -1,4 +1,4 @@
-use async_graphql::{Context, Error, Json, Object, Result};
+use async_graphql::{Context, Error, Object, Result};
 use riven_core::http::HttpClient;
 use riven_core::plugin::PluginRegistry;
 
@@ -7,7 +7,9 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+use crate::schema::metadata::details::{MediaDetails, PersonDetails, Source, TvdbPerson};
 use crate::schema::metadata::{TMDB_API_BASE, get_tmdb_api_key, get_tvdb_api_key};
+use crate::schema::queries::trakt;
 
 const TVDB_API_BASE: &str = "https://api4.thetvdb.com/v4";
 const TVDB_TOKEN_EXPIRY: Duration = Duration::from_secs(25 * 24 * 60 * 60);
@@ -19,68 +21,65 @@ pub struct CoreTvdbQuery;
 
 #[Object]
 impl CoreTvdbQuery {
-    async fn tvdb_series(&self, ctx: &Context<'_>, id: i64) -> Result<Json<serde_json::Value>> {
-        let token = get_tvdb_token(ctx).await?;
-        tvdb_get_json(ctx, &token, &format!("/series/{id}"), None).await
-    }
-
-    async fn tvdb_series_extended(
+    /// Everything the show detail page renders, in one shape shared with
+    /// `movieDetails`. `id` is a TVDB series id; `tmdbId` is only used to ask
+    /// Trakt for related titles when the page was reached from a TMDB id.
+    async fn show_details(
         &self,
         ctx: &Context<'_>,
         id: i64,
-        meta: Option<String>,
-    ) -> Result<Json<serde_json::Value>> {
+        tmdb_id: Option<String>,
+    ) -> Result<MediaDetails> {
         let token = get_tvdb_token(ctx).await?;
-        let query = meta.map(|value| HashMap::from([("meta".to_string(), value)]));
-        tvdb_get_json(
-            ctx,
-            &token,
-            &format!("/series/{id}/extended"),
-            query.as_ref(),
-        )
-        .await
-    }
+        let page = HashMap::from([("page".to_string(), "0".to_string())]);
 
-    async fn tvdb_search_remote_id(
-        &self,
-        ctx: &Context<'_>,
-        remote_id: String,
-    ) -> Result<Json<serde_json::Value>> {
-        let token = get_tvdb_token(ctx).await?;
-        tvdb_get_json(ctx, &token, &format!("/search/remoteid/{remote_id}"), None).await
-    }
+        // Ask TVDB for the English record rather than for every translation and
+        // picking one here — `/translations/eng` and `/episodes/official/eng`
+        // are already localised, so nothing downstream has to choose.
+        let extended = format!("/series/{id}/extended");
+        let translations = format!("/series/{id}/translations/eng");
+        let english_episodes = format!("/series/{id}/episodes/official/eng");
+        let (series, translation, episodes) = futures::join!(
+            tvdb_get_value(ctx, &token, &extended, None),
+            tvdb_get_value(ctx, &token, &translations, None),
+            tvdb_get_value(ctx, &token, &english_episodes, Some(&page)),
+        );
 
-    async fn tvdb_person_extended(
-        &self,
-        ctx: &Context<'_>,
-        id: i64,
-        meta: Option<String>,
-    ) -> Result<Json<serde_json::Value>> {
-        let token = get_tvdb_token(ctx).await?;
-        let mut query = HashMap::from([("short".to_string(), "false".to_string())]);
-        if let Some(meta) = meta {
-            query.insert("meta".to_string(), meta);
+        let mut data = series?
+            .get_mut("data")
+            .map(serde_json::Value::take)
+            .ok_or_else(|| Error::new("TVDB series response missing data"))?;
+
+        // A failed lookup costs the English wording or the episode list, not
+        // the page — the series record carries its own name and overview.
+        if let Ok(translation) = translation {
+            for field in ["name", "overview"] {
+                if let Some(value) = translation.pointer(&format!("/data/{field}"))
+                    && value.as_str().is_some_and(|text| !text.is_empty())
+                {
+                    data[field] = value.clone();
+                }
+            }
         }
-        tvdb_get_json(ctx, &token, &format!("/people/{id}/extended"), Some(&query)).await
-    }
+        if let Ok(episodes) = episodes
+            && let Some(episodes) = episodes.pointer("/data/episodes")
+            && episodes.as_array().is_some_and(|list| !list.is_empty())
+        {
+            data["episodes"] = episodes.clone();
+        }
 
-    async fn tvdb_episodes(
-        &self,
-        ctx: &Context<'_>,
-        id: i64,
-        season_type: String,
-        lang: String,
-        page: Option<i64>,
-    ) -> Result<Json<serde_json::Value>> {
-        let token = get_tvdb_token(ctx).await?;
-        let query = HashMap::from([("page".to_string(), page.unwrap_or(0).to_string())]);
-        tvdb_get_json(
-            ctx,
-            &token,
-            &format!("/series/{id}/episodes/{season_type}/{lang}"),
-            Some(&query),
-        )
-        .await
+        let mut details: MediaDetails = serde_json::from_value(data)
+            .map_err(|e| Error::new(format!("unexpected TVDB series payload: {e}")))?;
+        details.source = Source::Tvdb;
+
+        let (trakt_id, id_type) = match tmdb_id {
+            Some(tmdb_id) => (tmdb_id, "tmdb"),
+            None => (id.to_string(), "tvdb"),
+        };
+        details.trakt = trakt::recommendations(ctx, &trakt_id, id_type, "show")
+            .await
+            .unwrap_or_default();
+        Ok(details)
     }
 
     async fn resolve_tmdb_to_tvdb(
@@ -199,13 +198,33 @@ async fn get_tvdb_token(ctx: &Context<'_>) -> Result<String> {
     Ok(token)
 }
 
-async fn tvdb_get_json(
-    ctx: &Context<'_>,
-    token: &str,
-    path: &str,
-    query: Option<&HashMap<String, String>>,
-) -> Result<Json<serde_json::Value>> {
-    tvdb_get_value(ctx, token, path, query).await.map(Json)
+/// A TVDB person, for the shared `personDetails` resolver in `tmdb.rs`.
+pub(super) async fn person_details(ctx: &Context<'_>, id: i64) -> Result<PersonDetails> {
+    let token = get_tvdb_token(ctx).await?;
+    let short = HashMap::from([("short".to_string(), "false".to_string())]);
+
+    let extended = format!("/people/{id}/extended");
+    let translations = format!("/people/{id}/translations/eng");
+    let (person, translation) = futures::join!(
+        tvdb_get_value(ctx, &token, &extended, Some(&short)),
+        tvdb_get_value(ctx, &token, &translations, None),
+    );
+
+    let mut data = person?
+        .get_mut("data")
+        .map(serde_json::Value::take)
+        .ok_or_else(|| Error::new("TVDB person response missing data"))?;
+
+    // As with a series, TVDB is asked for the English record rather than for
+    // every translation.
+    if let Ok(translation) = translation
+        && let Some(overview) = translation.pointer("/data/overview")
+        && overview.as_str().is_some_and(|text| !text.is_empty())
+    {
+        data["biography"] = overview.clone();
+    }
+
+    Ok(TvdbPerson(data).into())
 }
 
 async fn tvdb_get_value(

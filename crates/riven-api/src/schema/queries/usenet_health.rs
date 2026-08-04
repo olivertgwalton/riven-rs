@@ -317,6 +317,10 @@ impl UsenetHealthQuery {
                     0.0
                 };
                 let (title, subtitle, poster_path) = display_for(&r);
+                let poster_path = riven_core::entities::helpers::artwork_url(
+                    poster_path.as_deref(),
+                    riven_core::entities::helpers::Artwork::Poster,
+                );
                 UsenetTitleHealth {
                     info_hash: r.info_hash,
                     file_index: r.file_index,

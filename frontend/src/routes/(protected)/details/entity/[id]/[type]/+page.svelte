@@ -8,9 +8,8 @@
     import ArrowRight from "@lucide/svelte/icons/arrow-right";
     import { cn, deduplicateById } from "$lib/utils";
     import { resolve } from "$app/paths";
-    import TmdbNowPlaying, {
-        type TMDBNowPlayingItem
-    } from "$lib/components/tmdb-now-playing.svelte";
+    import TmdbNowPlaying from "$lib/components/tmdb-now-playing.svelte";
+    import type { TmdbListItem } from "$lib/gql/schema";
 
     let { data }: PageProps = $props();
 
@@ -51,25 +50,13 @@
 
     // Combine Cast and Crew for carousel
     const combinedCredits = $derived([
-        ...data.entity.cast_credits.map((c) => ({
-            id: c.id,
-            title: c.title,
-            backdrop_path: c.backdrop_path,
-            vote_count: c.vote_count,
-            release_date: c.release_date,
-            vote_average: c.vote_average,
-            media_type: c.media_type,
+        ...data.entity.castCredits.map((c) => ({
+            ...c,
             role: "Acting" as const,
             character: c.character
         })),
-        ...data.entity.crew_credits.map((c) => ({
-            id: c.id,
-            title: c.title,
-            backdrop_path: c.backdrop_path,
-            vote_count: c.vote_count,
-            release_date: c.release_date,
-            vote_average: c.vote_average,
-            media_type: c.media_type,
+        ...data.entity.crewCredits.map((c) => ({
+            ...c,
             role: c.job ?? "Crew",
             character: null as string | null
         }))
@@ -78,11 +65,11 @@
     const uniqueCredits = $derived(deduplicateById(combinedCredits));
 
     // Filter credits by type
-    const movieCredits = $derived(data.entity.cast_credits.filter((c) => c.media_type === "movie"));
-    const showCredits = $derived(data.entity.cast_credits.filter((c) => c.media_type === "tv"));
+    const movieCredits = $derived(data.entity.castCredits.filter((c) => c.mediaType === "movie"));
+    const showCredits = $derived(data.entity.castCredits.filter((c) => c.mediaType === "tv"));
     const crewCredits = $derived(
         deduplicateById(
-            data.entity.crew_credits.map((c) => ({
+            data.entity.crewCredits.map((c) => ({
                 ...c,
                 role: c.job ?? "Crew",
                 character: null
@@ -93,34 +80,38 @@
     // Select Top 5 for carousel (matching Seerr's logic)
     const backdropCandidates = $derived(
         uniqueCredits
-            .filter((c: (typeof uniqueCredits)[number]) => c.backdrop_path && c.vote_count != null)
+            .filter((c: (typeof uniqueCredits)[number]) => c.backdropPath && c.voteCount != null)
             .sort(
                 (a: (typeof uniqueCredits)[number], b: (typeof uniqueCredits)[number]) =>
-                    (b.vote_count ?? 0) - (a.vote_count ?? 0)
+                    (b.voteCount ?? 0) - (a.voteCount ?? 0)
             )
             .slice(0, 5)
     );
 
     // Map to carousel format
-    const carouselItems: TMDBNowPlayingItem[] = $derived(
+    const carouselItems: TmdbListItem[] = $derived(
         backdropCandidates.map((c: (typeof backdropCandidates)[number]) => ({
             id: c.id,
-            media_type: c.media_type as "movie" | "tv",
+            mediaType: c.mediaType,
             title: c.title,
-            backdrop_path: c.backdrop_path,
-            release_date: c.release_date ?? undefined,
-            vote_average: c.vote_average ?? 0,
+            year: c.year ? String(c.year) : "N/A",
+            backdropPath: c.backdropPath,
+            posterPath: c.posterPath,
+            releaseDate: c.releaseDate ?? null,
+            voteAverage: c.voteAverage ?? 0,
             overview: c.character ? `as ${c.character}` : c.role,
-            genre_ids: []
+            genreIds: [],
+            genres: [],
+            indexer: "tmdb"
         }))
     );
 
     const currentBackdrop = $derived(carouselItems[0]);
     const hasExternalLinks = $derived(
         !!(
-            data.entity.tvdb_url ||
-            data.entity.imdb_id ||
-            data.entity.external_ids?.tmdb ||
+            data.entity.tvdbUrl ||
+            data.entity.imdbId ||
+            data.entity.tmdbId ||
             data.entity.homepage
         )
     );
@@ -237,13 +228,13 @@
         {/if}
 
         <!-- Background -->
-        {#if currentBackdrop?.backdrop_path}
+        {#if currentBackdrop?.backdropPath}
             <div class="fixed top-0 left-0 z-0 h-screen w-full">
                 <img
                     alt=""
                     in:fade|global={{ duration: 1000, easing: cubicOut }}
                     class="h-full w-full object-cover opacity-30 blur-3xl transition-opacity duration-1000"
-                    src={currentBackdrop.backdrop_path} />
+                    src={currentBackdrop.backdropPath} />
                 <div class="bg-background/80 absolute inset-0 mix-blend-multiply"></div>
                 <div
                     class="from-background via-background/50 absolute inset-0 bg-linear-to-t to-transparent">
@@ -252,12 +243,12 @@
                     class="from-background/20 absolute inset-0 bg-linear-to-b via-transparent to-transparent">
                 </div>
             </div>
-        {:else if data.entity.profile_path}
+        {:else if data.entity.profilePath}
             <div class="fixed top-0 left-0 z-0 h-screen w-full">
                 <img
                     alt=""
                     class="h-full w-full object-cover opacity-10 blur-3xl transition-opacity duration-1000"
-                    src={data.entity.profile_path} />
+                    src={data.entity.profilePath} />
                 <div class="bg-background/50 absolute inset-0"></div>
             </div>
         {:else}
@@ -296,7 +287,7 @@
                         in:fly|global={{ y: 20, duration: 400, delay: 50, easing: cubicOut }}>
                         <PortraitCard
                             title={data.entity.name}
-                            image={data.entity.profile_path}
+                            image={data.entity.profilePath}
                             class="group w-64 rounded-xl shadow-2xl ring-1 ring-white/10 transition-transform duration-500 hover:scale-105"
                             showContent={false} />
 
@@ -323,7 +314,7 @@
                                 }}>
                                 <PortraitCard
                                     title={data.entity.name}
-                                    image={data.entity.profile_path}
+                                    image={data.entity.profilePath}
                                     class="group w-32 rounded-xl shadow-xl ring-1 ring-white/10 sm:w-40"
                                     showContent={false} />
                                 {#if birthdayToday && !data.entity.deathday}
@@ -381,9 +372,9 @@
                                         class="line-clamp-4 font-serif text-lg leading-relaxed text-zinc-300 lg:text-xl">
                                         {data.entity.biography}
                                     </p>
-                                    {#if data.entity.biography.length > 300 && data.entity.imdb_id}
+                                    {#if data.entity.biography.length > 300 && data.entity.imdbId}
                                         <a
-                                            href="https://www.imdb.com/name/{data.entity.imdb_id}"
+                                            href="https://www.imdb.com/name/{data.entity.imdbId}"
                                             target="_blank"
                                             rel="noopener noreferrer"
                                             class="text-primary hover:text-primary/80 mt-1 flex items-center gap-1 text-xs font-bold">
@@ -409,7 +400,7 @@
                     class="mx-auto w-full max-w-600 px-8 pb-12 md:px-20 lg:px-24"
                     in:fly|global={{ y: 20, duration: 400, delay: 180, easing: cubicOut }}>
                     <div class="flex flex-wrap gap-2">
-                        {#if data.entity.tvdb_url}
+                        {#if data.entity.tvdbUrl}
                             <a
                                 href={`https://thetvdb.com/people/${data.entity.id}`}
                                 target="_blank"
@@ -417,23 +408,23 @@
                                 <Badge variant="outline" class={badgeClass}>TVDB</Badge>
                             </a>
                         {/if}
-                        {#if data.entity.imdb_id}
+                        {#if data.entity.imdbId}
                             <a
-                                href={`https://www.imdb.com/name/${data.entity.imdb_id}`}
+                                href={`https://www.imdb.com/name/${data.entity.imdbId}`}
                                 target="_blank"
                                 rel="noopener noreferrer">
                                 <Badge variant="outline" class={badgeClass}>IMDb</Badge>
                             </a>
                         {/if}
-                        {#if data.entity.external_ids?.tmdb}
+                        {#if data.entity.tmdbId}
                             <a
-                                href={`https://www.themoviedb.org/person/${data.entity.external_ids.tmdb}`}
+                                href={`https://www.themoviedb.org/person/${data.entity.tmdbId}`}
                                 target="_blank"
                                 rel="noopener noreferrer">
                                 <Badge variant="outline" class={badgeClass}>TMDB</Badge>
                             </a>
                         {/if}
-                        {#if data.entity.homepage && data.entity.homepage !== data.entity.tvdb_url}
+                        {#if data.entity.homepage && data.entity.homepage !== data.entity.tvdbUrl}
                             <a
                                 href={`https://${data.entity.homepage.replace(/^https?:\/\//, "")}`}
                                 target="_blank"
@@ -475,13 +466,13 @@
     {#each credits as credit, index (`${credit.id}-${index}`)}
         <a
             href={resolve(
-                `/details/media/${credit.id}/${credit.media_type}${credit.indexer === "tvdb" ? "?indexer=tvdb" : ""}`
+                `/details/media/${credit.id}/${credit.mediaType}${credit.indexer === "tvdb" ? "?indexer=tvdb" : ""}`
             )}
             class="group relative block opacity-80 transition-all duration-300 hover:scale-105 hover:opacity-100">
             <PortraitCard
                 title={credit.title}
                 subtitle={formatCreditSubtitle(credit)}
-                image={credit.poster_path ?? null}
+                image={credit.posterPath ?? null}
                 class="w-full" />
         </a>
     {/each}
@@ -491,9 +482,9 @@
     <Badge variant="outline" class={badgeClass}>
         {sourceLabel}
     </Badge>
-    {#if data.entity.known_for_department}
+    {#if data.entity.knownForDepartment}
         <Badge variant="outline" class={badgeClass}>
-            {data.entity.known_for_department}
+            {data.entity.knownForDepartment}
         </Badge>
     {/if}
     {#if data.entity.gender}
@@ -508,21 +499,21 @@
                 • {calculateAge(data.entity.birthday)} y/o{/if}
         </Badge>
     {/if}
-    {#if data.entity.place_of_birth}
+    {#if data.entity.placeOfBirth}
         <Badge variant="outline" class={badgeClass}>
-            {data.entity.place_of_birth}
+            {data.entity.placeOfBirth}
         </Badge>
     {/if}
 {/snippet}
 
 {#snippet alsoKnownAs(titleClass = "text-sm font-semibold", colonClass = "")}
-    {#if data.entity.also_known_as.length > 0}
+    {#if data.entity.alsoKnownAs.length > 0}
         <div class="space-y-1">
             <h3 class={titleClass}>
                 Also known as<span class={colonClass}>:</span>
             </h3>
             <div class="flex flex-wrap gap-2">
-                {#each data.entity.also_known_as as alias (alias)}
+                {#each data.entity.alsoKnownAs as alias (alias)}
                     <Badge variant="outline" class={badgeClass}>
                         {alias}
                     </Badge>

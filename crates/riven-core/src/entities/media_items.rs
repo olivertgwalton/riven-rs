@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 #[derive(
     Clone, Debug, PartialEq, DeriveEntityModel, Serialize, Deserialize, async_graphql::SimpleObject,
 )]
-#[graphql(name = "MediaItem")]
+#[graphql(name = "MediaItem", complex)]
 #[sea_orm(table_name = "media_items")]
 pub struct Model {
     #[sea_orm(primary_key)]
@@ -28,6 +28,9 @@ pub struct Model {
     pub tvdb_id: Option<String>,
     #[sea_orm(column_type = "Text", nullable, unique)]
     pub tmdb_id: Option<String>,
+    /// As the indexer stored it. Read it through the `posterPath` GraphQL
+    /// field, which resolves it to a URL.
+    #[graphql(skip)]
     #[sea_orm(column_type = "Text", nullable)]
     pub poster_path: Option<String>,
     pub created_at: DateTimeUtc,
@@ -173,5 +176,18 @@ impl Model {
                 .unwrap_or_default(),
         };
         format!("{}{year_str}{id_str}", self.title)
+    }
+}
+
+#[async_graphql::ComplexObject]
+impl Model {
+    /// Absolute artwork URL. The column holds a bare path for anything indexed
+    /// before the plugins normalised what they wrote, so it is resolved here
+    /// rather than in each client.
+    async fn poster_path(&self) -> Option<String> {
+        crate::entities::helpers::artwork_url(
+            self.poster_path.as_deref(),
+            crate::entities::helpers::Artwork::Poster,
+        )
     }
 }
