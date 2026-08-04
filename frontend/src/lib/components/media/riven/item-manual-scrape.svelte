@@ -294,7 +294,7 @@
             {/snippet}
         </Dialog.Trigger>
         <Dialog.Content
-            class="flex max-h-[85vh] w-full max-w-4xl flex-col overflow-hidden border-white/10 bg-zinc-950/95 backdrop-blur-xl sm:max-h-[80vh]">
+            class="flex max-h-[85vh] w-full flex-col overflow-hidden border-white/10 bg-zinc-950/95 backdrop-blur-xl sm:max-h-[80vh] sm:max-w-4xl">
             <Dialog.Header>
                 <Dialog.Title>Manual Scrape</Dialog.Title>
                 <Dialog.Description>
@@ -486,7 +486,8 @@
                                                                 >Rank {stream.rank}</Badge>
                                                         {/if}
                                                     </div>
-                                                    <p class="truncate text-sm text-zinc-200">
+                                                    <p
+                                                        class="text-sm break-all text-zinc-200">
                                                         {stream.title}
                                                     </p>
                                                     <p class="truncate text-xs text-zinc-400">
