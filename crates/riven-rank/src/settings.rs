@@ -44,6 +44,25 @@ impl QualityProfile {
         }
     }
 
+    /// Short label for contexts that already state the resolution (e.g. the
+    /// version picker renders `4K (Ultra HD)`), so the full [`Self::label`]
+    /// would repeat it.
+    #[must_use]
+    pub const fn short_label(self) -> &'static str {
+        match self {
+            Self::UltraHd => "Ultra HD",
+            Self::Hd => "Full HD",
+            Self::Standard => "Standard",
+        }
+    }
+
+    /// Resolve a stored profile id (as persisted on downloads and ranking
+    /// profile rows) back to its built-in preset.
+    #[must_use]
+    pub fn from_id(id: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|p| p.id() == id)
+    }
+
     #[must_use]
     pub const fn description(self) -> &'static str {
         match self {

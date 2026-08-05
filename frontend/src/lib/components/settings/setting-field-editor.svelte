@@ -502,7 +502,7 @@
     {:else if field.type === "boolean"}
         <div class="flex items-center justify-between gap-4">
             <div class="space-y-0.5">
-                <Label class="text-base">{field.label}</Label>
+                <Label>{field.label}</Label>
                 {#if field.description}
                     <p class="text-muted-foreground text-sm">{field.description}</p>
                 {/if}

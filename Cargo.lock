@@ -4931,6 +4931,7 @@ dependencies = [
  "quick-xml",
  "redis",
  "reqwest 0.13.4",
+ "riven-rank",
  "sea-orm",
  "sentry",
  "serde",

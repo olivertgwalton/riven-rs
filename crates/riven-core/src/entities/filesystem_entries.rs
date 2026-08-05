@@ -63,6 +63,9 @@ pub struct Model {
     #[sea_orm(column_type = "Text", nullable)]
     pub resolution: Option<String>,
     #[sea_orm(column_type = "Text", nullable)]
+    /// The stored profile id. Read it through the `rankingProfileName` field,
+    /// which resolves built-in ids to their display label.
+    #[graphql(skip)]
     pub ranking_profile_name: Option<String>,
     #[sea_orm(column_type = "Text", nullable)]
     pub source_provider: Option<String>,
@@ -87,6 +90,17 @@ impl Model {
     /// missing fields still reads — every field defaults.
     async fn media_metadata(&self) -> Option<MediaMetadata> {
         serde_json::from_value(self.media_metadata.clone()?).ok()
+    }
+
+    /// The profile this version was downloaded under, ready to display.
+    /// Built-in presets resolve to their label (`ultra_hd` → `Ultra HD`);
+    /// custom profiles keep the name the user gave them.
+    async fn ranking_profile_name(&self) -> Option<&str> {
+        let stored = self.ranking_profile_name.as_deref()?;
+        Some(match riven_rank::QualityProfile::from_id(stored) {
+            Some(profile) => profile.short_label(),
+            None => stored,
+        })
     }
 }
 

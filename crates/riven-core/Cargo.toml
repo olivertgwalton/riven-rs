@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+riven-rank = { path = "../riven-rank" }
 tokio = { workspace = true }
 futures = { workspace = true }
 serde = { workspace = true }

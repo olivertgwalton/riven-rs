@@ -351,6 +351,11 @@ export type FileSystemEntry = {
   plugin?: Maybe<Scalars['String']['output']>;
   provider?: Maybe<Scalars['String']['output']>;
   providerDownloadId?: Maybe<Scalars['String']['output']>;
+  /**
+   * The profile this version was downloaded under, ready to display.
+   * Built-in presets resolve to their label (`ultra_hd` → `Ultra HD`);
+   * custom profiles keep the name the user gave them.
+   */
   rankingProfileName?: Maybe<Scalars['String']['output']>;
   resolution?: Maybe<Scalars['String']['output']>;
   sourceId?: Maybe<Scalars['String']['output']>;
