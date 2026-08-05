@@ -91,16 +91,7 @@ pub async fn build(
 
     warn_if_session_cookie_will_not_be_secure(base_url);
 
-    // An OIDC sign-in whose email matches an existing account only auto-links
-    // when either the provider is "trusted" or the provider reports the email
-    // verified — otherwise a stranger could self-register on any public OAuth
-    // provider using someone else's address and take over their account. That
-    // threat model doesn't apply here: every entry in `oidc_providers` was
-    // wired up by the operator (client id/secret came from their own config),
-    // not by a user picking a random provider, so each one is trusted
-    // regardless of what it reports for `email_verified` — which self-hosted
-    // IdPs like PocketID often leave unset anyway.
-    let trusted_oidc_providers: Vec<String> = oidc_providers.iter().map(|p| p.id.clone()).collect();
+    let trusted_oidc_providers = trusted_oidc_provider_ids(oidc_providers);
 
     let config = AuthConfig::new(secret)
         .app_name("Riven")
@@ -211,6 +202,25 @@ pub async fn build(
     Ok((Arc::new(auth), summaries))
 }
 
+/// The ids of every configured provider that opted into
+/// `trust_unverified_email`.
+///
+/// An OIDC sign-in whose email matches an existing account only auto-links
+/// when either the provider is "trusted" or the provider itself reports the
+/// email verified — otherwise a stranger who gets an *unconfirmed* address to
+/// match an existing account could take it over. Trusting a provider
+/// regardless of its `email_verified` claim is therefore only as safe as the
+/// operator's confidence that every account on it is one they vetted, which is
+/// why it's an explicit per-provider opt-in rather than implied by being
+/// configured at all — see `OidcProviderSettings::trust_unverified_email`.
+fn trusted_oidc_provider_ids(configured: &[OidcProviderSettings]) -> Vec<String> {
+    configured
+        .iter()
+        .filter(|settings| settings.trust_unverified_email)
+        .map(|settings| settings.id.clone())
+        .collect()
+}
+
 /// Pairs each successfully-resolved provider with the display name from its
 /// original settings entry — `resolved` only carries `(id, OAuthProvider)`,
 /// which has no name field, so this looks it back up by id. Falls back to the
@@ -294,6 +304,7 @@ mod tests {
             client_secret: "client-secret".to_string(),
             scopes: Vec::new(),
             disable_sign_up: false,
+            trust_unverified_email: false,
         }
     }
 
@@ -343,6 +354,22 @@ mod tests {
 
         assert_eq!(summaries.len(), 1);
         assert_eq!(summaries[0].id, "pocketid");
+    }
+
+    #[test]
+    fn trusted_oidc_provider_ids_excludes_providers_by_default() {
+        let configured = vec![oidc_settings("pocketid", "PocketID")];
+
+        assert!(trusted_oidc_provider_ids(&configured).is_empty());
+    }
+
+    #[test]
+    fn trusted_oidc_provider_ids_includes_only_opted_in_providers() {
+        let mut trusted = oidc_settings("pocketid", "PocketID");
+        trusted.trust_unverified_email = true;
+        let configured = vec![trusted, oidc_settings("authelia", "Authelia")];
+
+        assert_eq!(trusted_oidc_provider_ids(&configured), vec!["pocketid"]);
     }
 
     /// End-to-end sign-in against a real Postgres, exercising migrations, the

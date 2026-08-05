@@ -19,8 +19,11 @@ pub struct OidcProviderSettings {
     /// empty.
     #[serde(default)]
     pub name: String,
-    /// The provider's issuer origin, e.g. `https://pocketid.example.com`
-    /// (no trailing slash or path).
+    /// Must exactly match the provider's advertised issuer. Usually just an
+    /// origin (`https://pocketid.example.com`), but providers that host
+    /// multiple issuers under one domain put a path on it too — a Keycloak
+    /// realm, for instance, is `https://keycloak.example.com/realms/<realm>`.
+    /// A trailing slash is trimmed before use either way.
     pub issuer: String,
     pub client_id: String,
     pub client_secret: String,
@@ -39,6 +42,22 @@ pub struct OidcProviderSettings {
     /// issuer gets in."
     #[serde(default)]
     pub disable_sign_up: bool,
+    /// **Read this before setting `true`.** Lets a sign-in from this provider
+    /// auto-link to an existing riven account by email match even when the
+    /// provider does not report `email_verified: true` — the default
+    /// (`false`) refuses that link, matching what a spec-compliant OIDC
+    /// client is expected to do, so that a stranger cannot take over an
+    /// account just by getting an *unconfirmed* address to match it (a
+    /// provider that lets users self-serve an unverified email change would
+    /// otherwise let them do exactly that). Turn this on only for a provider
+    /// where you, the operator, already trust every account on it — e.g. a
+    /// self-hosted IdP with no self-registration, where every user was
+    /// created by you — and where you have confirmed it does not set
+    /// `email_verified` (PocketID is a common example: it has no email
+    /// confirmation flow, so it never reports the claim as true, and linking
+    /// would otherwise permanently fail with `account_not_linked`).
+    #[serde(default)]
+    pub trust_unverified_email: bool,
 }
 
 impl OidcProviderSettings {
@@ -103,6 +122,7 @@ mod tests {
             client_secret: "client-secret".to_string(),
             scopes: Vec::new(),
             disable_sign_up: false,
+            trust_unverified_email: false,
         }
     }
 

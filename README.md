@@ -109,10 +109,11 @@ RIVEN_SETTING__OIDC_PROVIDERS='[{"id":"pocketid","name":"PocketID","issuer":"htt
 | --- | --- | --- |
 | `id` | yes | Becomes both the callback path segment and the linked account's `provider_id`. Changing it after users have signed in orphans their existing links. |
 | `name` | no | Shown on the login button, e.g. "PocketID". Falls back to `id` when empty. |
-| `issuer` | yes | The provider's issuer origin, e.g. `https://pocketid.example.com` — no trailing slash or path. |
+| `issuer` | yes | Must exactly match the provider's advertised issuer. Usually just an origin (`https://pocketid.example.com`), but a provider hosting multiple issuers under one domain puts a path on it too — a Keycloak realm is `https://keycloak.example.com/realms/<realm>`. A trailing slash is trimmed either way. |
 | `client_id` / `client_secret` | yes | From the OAuth client you register on the provider. |
 | `scopes` | no | Defaults to `["openid", "profile", "email"]`, which is all riven reads (`sub`, `email`, `name`, `picture`, `email_verified`). |
 | `disable_sign_up` | no | Default `false`: a first-time sign-in from this provider registers a new account, same as password/Plex sign-in always has. Set `true` to require an admin-created account (Admin → Users → Create User) with a matching email first — the OIDC sign-in only links to it, it never creates one. Use this when the provider's own user base is broader than who should have riven access. |
+| `trust_unverified_email` | no | **Read the warning below before setting `true`.** Default `false`. |
 
 On the provider side, register this exact redirect URI (riven never varies it):
 
@@ -125,10 +126,20 @@ e.g. `https://riven.example.com/auth/callback/pocketid`.
 A provider that fails discovery at startup (unreachable, not actually OIDC) is
 logged and simply omitted from the login page rather than failing the whole
 instance — these are optional sign-in methods layered on top of the built-in
-password/passkey/Plex ones. A sign-in whose email matches an existing account
-auto-links to it: every configured provider is implicitly trusted for this,
-regardless of whether it reports `email_verified`, since its client
-credentials were wired up by the operator, not chosen by the signing-in user.
+password/passkey/Plex ones.
+
+**Account linking and `trust_unverified_email`.** A sign-in whose email
+matches an existing account auto-links to it — but only when the provider
+reports `email_verified: true`, or when the provider is listed with
+`trust_unverified_email: true`. This default is what a spec-compliant OIDC
+client is expected to do: without it, a stranger who could get an
+*unconfirmed* address on some provider to match an existing riven account
+could take that account over. Turning it on for a provider is only as safe as
+your confidence that every account on it is one you vetted yourself — e.g. a
+self-hosted IdP with no self-registration, where you created every user by
+hand. **PocketID is a common case that needs it**: it has no email
+confirmation flow, so it never reports `email_verified: true`, and without
+this flag linking permanently fails with `account_not_linked`.
 
 Plugin settings use:
 

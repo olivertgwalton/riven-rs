@@ -12,6 +12,7 @@ use better_auth::plugins::oauth::{OAuthProvider, OAuthUserInfo};
 use riven_core::settings::OidcProviderSettings;
 use serde::Deserialize;
 use serde_json::Value;
+use url::Url;
 
 /// The subset of an OIDC discovery document riven actually needs.
 #[derive(Debug, Deserialize)]
@@ -21,7 +22,15 @@ struct DiscoveryDocument {
     userinfo_endpoint: String,
 }
 
-/// Fetches and parses `{issuer}/.well-known/openid-configuration`.
+/// Fetches and parses `{issuer}/.well-known/openid-configuration`, rejecting
+/// a document whose `authorization_endpoint`, `token_endpoint` or
+/// `userinfo_endpoint` isn't `https://` — `client_secret` and access tokens
+/// go out to those endpoints, so a cleartext one (a misconfigured issuer, or
+/// discovery served over plain HTTP by an on-path attacker) would send
+/// credentials over the wire in the open. Plain `http://` is accepted only to
+/// a loopback address, since that traffic never leaves the machine — this
+/// module's own tests run discovery against a local mock server with no
+/// certificate.
 async fn discover(issuer: &str) -> anyhow::Result<DiscoveryDocument> {
     let issuer = issuer.trim_end_matches('/');
     let url = format!("{issuer}/.well-known/openid-configuration");
@@ -30,7 +39,34 @@ async fn discover(issuer: &str) -> anyhow::Result<DiscoveryDocument> {
         .timeout(std::time::Duration::from_secs(10))
         .build()?;
     let response = client.get(&url).send().await?.error_for_status()?;
-    Ok(response.json::<DiscoveryDocument>().await?)
+    let doc = response.json::<DiscoveryDocument>().await?;
+
+    for endpoint in [
+        &doc.authorization_endpoint,
+        &doc.token_endpoint,
+        &doc.userinfo_endpoint,
+    ] {
+        anyhow::ensure!(
+            is_https_or_loopback(endpoint),
+            "discovery document endpoint is not https and not a loopback address: {endpoint}"
+        );
+    }
+    Ok(doc)
+}
+
+/// True for `https://` URLs, and for `http://` URLs to a loopback address —
+/// the one case a cleartext endpoint is acceptable, since that traffic never
+/// leaves the machine.
+fn is_https_or_loopback(url: &str) -> bool {
+    let Ok(parsed) = Url::parse(url) else {
+        return false;
+    };
+    match parsed.scheme() {
+        "https" => true,
+        // `Url::host_str` keeps the brackets on an IPv6 literal.
+        "http" => matches!(parsed.host_str(), Some("localhost" | "127.0.0.1" | "[::1]")),
+        _ => false,
+    }
 }
 
 /// Resolves every configured provider via OIDC discovery and returns the
@@ -130,6 +166,7 @@ mod tests {
             client_secret: "secret".to_string(),
             scopes: Vec::new(),
             disable_sign_up: false,
+            trust_unverified_email: false,
         }];
 
         let resolved = resolve_providers(&configured).await;
@@ -188,6 +225,7 @@ mod tests {
             client_secret: "client-secret".to_string(),
             scopes: Vec::new(),
             disable_sign_up: true,
+            trust_unverified_email: false,
         }];
 
         let resolved = resolve_providers(&configured).await;
@@ -206,6 +244,51 @@ mod tests {
             provider.disable_sign_up,
             "settings.disable_sign_up must carry through to the resolved OAuthProvider"
         );
+    }
+
+    #[tokio::test]
+    async fn resolve_providers_skips_a_discovery_document_with_a_cleartext_endpoint() {
+        // A non-loopback `http://` endpoint would send `client_secret` and
+        // access tokens over the wire in the open — same outcome as an
+        // unreachable issuer: log it and don't offer the provider, rather
+        // than fail the whole auth stack over one bad/compromised discovery
+        // document.
+        let issuer = start_discovery_mock(serde_json::json!({
+            "authorization_endpoint": "https://idp.example.com/authorize",
+            "token_endpoint": "http://idp.example.com/api/oidc/token",
+            "userinfo_endpoint": "https://idp.example.com/api/oidc/userinfo",
+        }))
+        .await;
+
+        let configured = vec![OidcProviderSettings {
+            id: "insecure".to_string(),
+            name: "Insecure".to_string(),
+            issuer,
+            client_id: "client-id".to_string(),
+            client_secret: "client-secret".to_string(),
+            scopes: Vec::new(),
+            disable_sign_up: false,
+            trust_unverified_email: false,
+        }];
+
+        let resolved = resolve_providers(&configured).await;
+
+        assert!(resolved.is_empty());
+    }
+
+    #[test]
+    fn is_https_or_loopback_accepts_https_and_loopback_http() {
+        assert!(is_https_or_loopback("https://idp.example.com/token"));
+        assert!(is_https_or_loopback("http://127.0.0.1:8080/token"));
+        assert!(is_https_or_loopback("http://localhost:8080/token"));
+        assert!(is_https_or_loopback("http://[::1]:8080/token"));
+    }
+
+    #[test]
+    fn is_https_or_loopback_rejects_cleartext_non_loopback_and_other_schemes() {
+        assert!(!is_https_or_loopback("http://idp.example.com/token"));
+        assert!(!is_https_or_loopback("ftp://idp.example.com/token"));
+        assert!(!is_https_or_loopback("not a url"));
     }
 
     #[test]
