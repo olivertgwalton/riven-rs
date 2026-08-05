@@ -21,7 +21,7 @@ anything outside the markers survives regeneration. -->
 
 | Variable | Kind | Read at |
 | --- | --- | --- |
-| `MIGRATION_TEST_DATABASE_URL` | variable | `crates/riven-api/src/server/authn.rs:370`<br>`crates/riven-db/examples/run_migrations.rs:22` |
+| `MIGRATION_TEST_DATABASE_URL` | variable | `crates/riven-api/src/server/authn.rs:397`<br>`crates/riven-db/examples/run_migrations.rs:22` |
 | `RIVEN_SETTING__SETUP_COMPLETED` | variable | `crates/riven-api/src/schema/queries/settings.rs:117` |
 | `RIVEN_STATIC_DIR` | variable | `crates/riven-api/src/server.rs:173` |
 
