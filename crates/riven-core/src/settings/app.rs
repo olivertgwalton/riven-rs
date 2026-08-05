@@ -4,7 +4,7 @@ use figment::{
 };
 use serde::{Deserialize, Serialize};
 
-use super::FilesystemSettings;
+use super::{FilesystemSettings, OidcProviderSettings};
 
 /// Core application settings, loaded from environment variables.
 /// Prefix: RIVEN_SETTING__
@@ -81,6 +81,17 @@ pub struct RivenSettings {
     /// (plus `tmdb` and `tvdb`, which are permanently enabled) default to
     /// enabled. Per-plugin DB overrides still win in either mode.
     pub enabled_plugins: Option<Vec<String>>,
+
+    /// Sign-in providers for any OIDC-compliant identity provider (PocketID,
+    /// Authelia, Keycloak, Authentik, Zitadel, ...). A JSON array, e.g.
+    /// `[{"id":"pocketid","name":"PocketID","issuer":"https://pocketid.example.com","client_id":"...","client_secret":"..."}]`.
+    /// Each entry's endpoints are resolved via OIDC discovery at startup — a
+    /// provider that fails discovery (unreachable, not actually OIDC) is
+    /// logged and skipped rather than failing the whole instance, since these
+    /// are all optional sign-in methods layered on top of the built-in
+    /// password/passkey/Plex ones.
+    #[serde(deserialize_with = "super::oidc::deserialize_providers")]
+    pub oidc_providers: Vec<OidcProviderSettings>,
 }
 
 impl Default for RivenSettings {
@@ -110,6 +121,7 @@ impl Default for RivenSettings {
             public_url: String::new(),
             cors_allowed_origins: String::new(),
             enabled_plugins: None,
+            oidc_providers: Vec::new(),
         }
     }
 }

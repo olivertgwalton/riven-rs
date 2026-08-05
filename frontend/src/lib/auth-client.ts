@@ -51,6 +51,13 @@ export interface LinkedAccount {
 	scopes?: string[];
 }
 
+/** One entry from `/oidc-providers`: a configured provider whose issuer
+ * resolved via OIDC discovery, so it is actually usable right now. */
+export interface OidcProviderSummary {
+	id: string;
+	name: string;
+}
+
 export interface AuthResult<T> {
 	data: T | null;
 	error: { message: string; status: number } | null;
@@ -163,6 +170,20 @@ export const authClient = {
 				{ method: "POST", body: { response: assertion } },
 			);
 		},
+
+		/**
+		 * Starts an OIDC sign-in: the backend returns the provider's
+		 * authorization URL rather than a redirect response — `disableRedirect`
+		 * is what asks for that, since a `fetch()` call cannot hand a 302 back to
+		 * the browser for a top-level navigation. The caller navigates
+		 * `window.location` to the returned `url` itself.
+		 */
+		social(body: { provider: string; callbackURL: string }) {
+			return call<{ url: string }>("/sign-in/social", {
+				method: "POST",
+				body: { ...body, disableRedirect: true },
+			});
+		},
 	},
 
 	/**
@@ -181,6 +202,12 @@ export const authClient = {
 
 	firstUserAvailable() {
 		return call<{ available: boolean }>("/first-user");
+	},
+
+	/** Only providers that resolved via OIDC discovery at startup — see
+	 * `oidc::resolve_providers` on the backend. */
+	oidcProviders() {
+		return call<OidcProviderSummary[]>("/oidc-providers");
 	},
 
 	/**

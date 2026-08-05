@@ -90,6 +90,45 @@ Common settings:
 | `RIVEN_SETTING__FILESYSTEM__MOUNT_PATH` | empty | Preferred VFS mount path. |
 | `RIVEN_SETTING__VFS_CACHE_MAX_SIZE_MB` | `0` | VFS chunk cache size. `0` uses the default. |
 | `RIVEN_SETTING__CORS_ALLOWED_ORIGINS` | empty | Comma-separated list of CORS origins. If empty, falls back to `ORIGIN`; if both are unset, CORS is permissive (warns on startup). |
+| `RIVEN_SETTING__OIDC_PROVIDERS` | `[]` | Sign in via PocketID, Authelia, Keycloak, or any other OIDC-compliant identity provider. See [OIDC sign-in](#oidc-sign-in) below. |
+
+### OIDC sign-in
+
+`RIVEN_SETTING__OIDC_PROVIDERS` is a JSON array, one entry per identity
+provider. Riven never hardcodes a provider's endpoint layout: `issuer` is
+resolved to `authorization_endpoint`/`token_endpoint`/`userinfo_endpoint` via
+`{issuer}/.well-known/openid-configuration` at startup, so any spec-compliant
+issuer works — PocketID, Authelia, Keycloak, Authentik, Zitadel, and so on.
+Configure as many providers as you like; each needs a unique `id`.
+
+```sh
+RIVEN_SETTING__OIDC_PROVIDERS='[{"id":"pocketid","name":"PocketID","issuer":"https://pocketid.example.com","client_id":"<client-id>","client_secret":"<client-secret>"}]'
+```
+
+| Field | Required | Description |
+| --- | --- | --- |
+| `id` | yes | Becomes both the callback path segment and the linked account's `provider_id`. Changing it after users have signed in orphans their existing links. |
+| `name` | no | Shown on the login button, e.g. "PocketID". Falls back to `id` when empty. |
+| `issuer` | yes | The provider's issuer origin, e.g. `https://pocketid.example.com` — no trailing slash or path. |
+| `client_id` / `client_secret` | yes | From the OAuth client you register on the provider. |
+| `scopes` | no | Defaults to `["openid", "profile", "email"]`, which is all riven reads (`sub`, `email`, `name`, `picture`, `email_verified`). |
+| `disable_sign_up` | no | Default `false`: a first-time sign-in from this provider registers a new account, same as password/Plex sign-in always has. Set `true` to require an admin-created account (Admin → Users → Create User) with a matching email first — the OIDC sign-in only links to it, it never creates one. Use this when the provider's own user base is broader than who should have riven access. |
+
+On the provider side, register this exact redirect URI (riven never varies it):
+
+```text
+{RIVEN_SETTING__PUBLIC_URL}/auth/callback/{id}
+```
+
+e.g. `https://riven.example.com/auth/callback/pocketid`.
+
+A provider that fails discovery at startup (unreachable, not actually OIDC) is
+logged and simply omitted from the login page rather than failing the whole
+instance — these are optional sign-in methods layered on top of the built-in
+password/passkey/Plex ones. A sign-in whose email matches an existing account
+auto-links to it: every configured provider is implicitly trusted for this,
+regardless of whether it reports `email_verified`, since its client
+credentials were wired up by the operator, not chosen by the signing-in user.
 
 Plugin settings use:
 

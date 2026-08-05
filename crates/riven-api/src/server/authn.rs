@@ -18,16 +18,26 @@ use chrono::TimeDelta;
 
 use better_auth::plugins::{
     AccountManagementPlugin, AdminPlugin, ApiKeyPlugin, EmailPasswordPlugin,
-    EmailVerificationPlugin, PasskeyPlugin, PasswordManagementPlugin, SessionManagementPlugin,
-    TwoFactorPlugin, UserManagementPlugin,
+    EmailVerificationPlugin, OAuthPlugin, PasskeyPlugin, PasswordManagementPlugin,
+    SessionManagementPlugin, TwoFactorPlugin, UserManagementPlugin,
 };
 use better_auth::seaorm::SeaOrmStore;
 use better_auth::{AuthConfig, BetterAuth};
-use better_auth_core::PasswordHasher;
+use better_auth_core::{AccountConfig, AccountLinkingConfig, PasswordHasher};
 use riven_core::entities::auth::RivenAuthSchema;
+use riven_core::settings::OidcProviderSettings;
 
 use super::first_user::FirstUserIsAdmin;
 use super::legacy_password::DualFormatHasher;
+use super::oidc;
+
+/// An OIDC provider that resolved successfully, for the login page to render
+/// a button for. Carries no secrets.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct OidcProviderSummary {
+    pub id: String,
+    pub name: String,
+}
 
 /// Sessions last a week, refreshed daily. Matches what the frontend's
 /// better-auth was configured with, so migrated sessions don't all expire at
@@ -55,7 +65,8 @@ pub async fn build(
     secret: &str,
     base_url: &str,
     trusted_origins: Vec<String>,
-) -> anyhow::Result<Arc<RivenAuth>> {
+    oidc_providers: &[OidcProviderSettings],
+) -> anyhow::Result<(Arc<RivenAuth>, Vec<OidcProviderSummary>)> {
     anyhow::ensure!(
         secret.len() >= 32,
         "auth secret must be at least 32 characters (got {})",
@@ -80,6 +91,17 @@ pub async fn build(
 
     warn_if_session_cookie_will_not_be_secure(base_url);
 
+    // An OIDC sign-in whose email matches an existing account only auto-links
+    // when either the provider is "trusted" or the provider reports the email
+    // verified — otherwise a stranger could self-register on any public OAuth
+    // provider using someone else's address and take over their account. That
+    // threat model doesn't apply here: every entry in `oidc_providers` was
+    // wired up by the operator (client id/secret came from their own config),
+    // not by a user picking a random provider, so each one is trusted
+    // regardless of what it reports for `email_verified` — which self-hosted
+    // IdPs like PocketID often leave unset anyway.
+    let trusted_oidc_providers: Vec<String> = oidc_providers.iter().map(|p| p.id.clone()).collect();
+
     let config = AuthConfig::new(secret)
         .app_name("Riven")
         .base_url(base_url)
@@ -87,7 +109,14 @@ pub async fn build(
         .trusted_origins(trusted_origins)
         .session_expires_in(TimeDelta::days(SESSION_EXPIRES_IN_DAYS))
         .session_update_age(TimeDelta::days(SESSION_UPDATE_AGE_DAYS))
-        .password_min_length(8);
+        .password_min_length(8)
+        .account(AccountConfig {
+            account_linking: AccountLinkingConfig {
+                trusted_providers: trusted_oidc_providers,
+                ..Default::default()
+            },
+            ..Default::default()
+        });
 
     // Shares riven's existing pool rather than opening a second one — the whole
     // reason for the sea-orm 2 upgrade, which put better-auth's entities and
@@ -154,11 +183,54 @@ pub async fn build(
         // `ApiKeyPlugin` carries a `bon` builder rather than the plain `new()`
         // the other plugins get from the `PluginConfig` derive.
         .plugin(ApiKeyPlugin::builder().build())
-        .plugin(AdminPlugin::new())
-        .build()
-        .await?;
+        .plugin(AdminPlugin::new());
 
-    Ok(Arc::new(auth))
+    // Every configured OIDC provider whose issuer resolved via discovery —
+    // see `oidc::resolve_providers`. A provider that fails discovery is
+    // logged there and simply absent here, so it gets neither a plugin
+    // registration nor a login button.
+    let resolved = oidc::resolve_providers(oidc_providers).await;
+    let summaries = oidc_provider_summaries(&resolved, oidc_providers);
+
+    // Skipped entirely rather than registered empty when nothing resolved —
+    // most deployments configure no OIDC provider at all, and there is no
+    // reason for `/sign-in/social` and friends to exist on the router just to
+    // 404 everything.
+    let auth = if resolved.is_empty() {
+        auth
+    } else {
+        let mut oauth_plugin = OAuthPlugin::new();
+        for (id, provider) in resolved {
+            oauth_plugin = oauth_plugin.add_provider(&id, provider);
+        }
+        auth.plugin(oauth_plugin)
+    };
+
+    let auth = auth.build().await?;
+
+    Ok((Arc::new(auth), summaries))
+}
+
+/// Pairs each successfully-resolved provider with the display name from its
+/// original settings entry — `resolved` only carries `(id, OAuthProvider)`,
+/// which has no name field, so this looks it back up by id. Falls back to the
+/// id itself in the (unreachable in practice) case a resolved id has no
+/// matching settings entry.
+fn oidc_provider_summaries(
+    resolved: &[(String, better_auth::plugins::oauth::OAuthProvider)],
+    configured: &[OidcProviderSettings],
+) -> Vec<OidcProviderSummary> {
+    resolved
+        .iter()
+        .map(|(id, _)| OidcProviderSummary {
+            id: id.clone(),
+            name: configured
+                .iter()
+                .find(|settings| &settings.id == id)
+                .map(|settings| settings.display_name().to_string())
+                .unwrap_or_else(|| id.clone()),
+        })
+        .collect()
 }
 
 /// Warn when the session cookie will go out without `Secure`.
@@ -213,6 +285,66 @@ fn passkey_rp_id(base_url: &str) -> Option<String> {
 mod tests {
     use super::*;
 
+    fn oidc_settings(id: &str, name: &str) -> OidcProviderSettings {
+        OidcProviderSettings {
+            id: id.to_string(),
+            name: name.to_string(),
+            issuer: "https://idp.example.com".to_string(),
+            client_id: "client-id".to_string(),
+            client_secret: "client-secret".to_string(),
+            scopes: Vec::new(),
+            disable_sign_up: false,
+        }
+    }
+
+    fn fake_provider() -> better_auth::plugins::oauth::OAuthProvider {
+        better_auth::plugins::oauth::OAuthProvider {
+            client_id: String::new(),
+            client_secret: String::new(),
+            auth_url: String::new(),
+            token_url: String::new(),
+            user_info_url: None,
+            scopes: Vec::new(),
+            authorization_params: Vec::new(),
+            map_user_info: None,
+            get_user_info: None,
+            refresh_access_token: None,
+            verify_id_token: None,
+            disable_implicit_sign_up: false,
+            disable_sign_up: false,
+            override_user_info_on_sign_in: false,
+        }
+    }
+
+    #[test]
+    fn oidc_provider_summaries_uses_the_configured_display_name() {
+        let configured = vec![oidc_settings("pocketid", "PocketID")];
+        let resolved = vec![("pocketid".to_string(), fake_provider())];
+
+        let summaries = oidc_provider_summaries(&resolved, &configured);
+
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].id, "pocketid");
+        assert_eq!(summaries[0].name, "PocketID");
+    }
+
+    #[test]
+    fn oidc_provider_summaries_only_includes_resolved_providers() {
+        // Two configured, only one resolved (the other presumably failed
+        // discovery in `oidc::resolve_providers`) — the unresolved one must
+        // not appear, or its login button would 404 every click.
+        let configured = vec![
+            oidc_settings("pocketid", "PocketID"),
+            oidc_settings("broken", "Broken"),
+        ];
+        let resolved = vec![("pocketid".to_string(), fake_provider())];
+
+        let summaries = oidc_provider_summaries(&resolved, &configured);
+
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].id, "pocketid");
+    }
+
     /// End-to-end sign-in against a real Postgres, exercising migrations, the
     /// `SeaOrmStore`, [`DualFormatHasher`] and session creation together.
     ///
@@ -266,10 +398,11 @@ mod tests {
                 .expect("seed");
         }
 
-        let auth = build(
+        let (auth, _) = build(
             "a-test-secret-that-is-at-least-32-bytes-long",
             "http://localhost:8080",
             Vec::new(),
+            &[],
         )
         .await
         .expect("build auth");
@@ -312,7 +445,7 @@ mod tests {
     async fn a_short_secret_is_rejected_before_any_database_work() {
         // `BetterAuth` is not `Debug`, so the Ok side can't be unwrapped for a
         // message — match instead.
-        match build("too-short", "http://localhost:8080", Vec::new()).await {
+        match build("too-short", "http://localhost:8080", Vec::new(), &[]).await {
             Ok(_) => panic!("a 9-character secret must not be accepted"),
             Err(error) => assert!(
                 error.to_string().contains("at least 32 characters"),

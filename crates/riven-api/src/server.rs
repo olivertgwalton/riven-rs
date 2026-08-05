@@ -6,6 +6,7 @@ mod first_user;
 mod graphql;
 mod legacy_password;
 mod media;
+mod oidc;
 mod plex;
 mod stremio;
 
@@ -60,6 +61,9 @@ pub struct StartServerConfig {
     /// cookie scope and trusted redirect targets, so a wrong value is a login
     /// loop rather than a loud failure.
     pub public_url: String,
+    /// OIDC sign-in providers (PocketID, Authelia, Keycloak, ...). Endpoints
+    /// are resolved via discovery in `authn::build` — see `oidc::resolve_providers`.
+    pub oidc_providers: Vec<riven_core::settings::OidcProviderSettings>,
 }
 
 mod state {
@@ -71,7 +75,7 @@ mod state {
     use tokio::sync::broadcast;
 
     use crate::schema::AppSchema;
-    use crate::server::authn::RivenAuth;
+    use crate::server::authn::{OidcProviderSummary, RivenAuth};
 
     #[derive(Clone)]
     pub struct ApiState {
@@ -87,6 +91,10 @@ mod state {
         /// Held here as well as in the schema so the artwork proxy can dispatch
         /// to media-server plugins without going through GraphQL.
         pub registry: Arc<riven_core::plugin::PluginRegistry>,
+        /// OIDC providers that resolved at startup — read by the public
+        /// `/auth/oidc-providers` route so the login page knows which buttons
+        /// to render. No secrets in here, just `id`/`name`.
+        pub oidc_providers: Arc<Vec<OidcProviderSummary>>,
     }
 
     /// Lets `better-auth`'s router and its `CurrentSession` / `OptionalSession`
@@ -118,11 +126,19 @@ pub async fn start_server(config: StartServerConfig) -> Result<()> {
         cancel,
         auth_secret,
         public_url,
+        oidc_providers,
     } = config;
 
     // Built before the router so a bad secret fails startup loudly rather than
     // at the first login attempt.
-    let auth = authn::build(&auth_secret, &public_url, cors_allowed_origins.clone()).await?;
+    let (auth, oidc_provider_summaries) = authn::build(
+        &auth_secret,
+        &public_url,
+        cors_allowed_origins.clone(),
+        &oidc_providers,
+    )
+    .await?;
+    let oidc_provider_summaries = Arc::new(oidc_provider_summaries);
 
     let schema = build_schema(
         registry.clone(),
@@ -169,6 +185,7 @@ pub async fn start_server(config: StartServerConfig) -> Result<()> {
         runtime: tokio::runtime::Handle::current(),
         auth: auth.clone(),
         registry,
+        oidc_providers: oidc_provider_summaries,
     };
 
     let board_guard =
@@ -229,6 +246,10 @@ pub async fn start_server(config: StartServerConfig) -> Result<()> {
         // Whether better-auth's own `/auth/sign-up/email` will accept a caller.
         // See `first_user.rs`: it does exactly once, for the first account.
         .route("/auth/first-user", get(first_user::availability))
+        // Which OIDC providers resolved at startup, for the login page to
+        // render buttons for. Unauthenticated by necessity, like `first-user`
+        // above — read by the login page itself, which has no session yet.
+        .route("/auth/oidc-providers", get(oidc_providers_handler))
         // better-auth's own endpoints: sign-in/out, sessions, password, 2FA,
         // passkeys, API keys, admin.
         //
@@ -266,6 +287,14 @@ pub async fn start_server(config: StartServerConfig) -> Result<()> {
         .await?;
 
     Ok(())
+}
+
+/// Lists the OIDC providers that resolved at startup, for the login page to
+/// render a button per entry. No secrets — just `id`/`name`.
+async fn oidc_providers_handler(
+    axum::extract::State(state): axum::extract::State<ApiState>,
+) -> axum::Json<Vec<authn::OidcProviderSummary>> {
+    axum::Json((*state.oidc_providers).clone())
 }
 
 /// Response headers applied to everything riven serves.

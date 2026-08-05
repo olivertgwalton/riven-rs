@@ -380,6 +380,7 @@ async fn main() -> Result<()> {
         // prefer explicit config, then the same ORIGIN the CORS allowlist uses,
         // then the bind address for local runs.
         let public_url = public_url.clone();
+        let oidc_providers = settings.oidc_providers.clone();
         let log_tx = log_tx.clone();
         let notif_tx = notification_tx.clone();
         let log_control = log_control.clone();
@@ -405,6 +406,7 @@ async fn main() -> Result<()> {
                 cancel,
                 auth_secret,
                 public_url,
+                oidc_providers,
             })
             .await
             {
