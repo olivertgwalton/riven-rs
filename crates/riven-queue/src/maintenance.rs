@@ -174,7 +174,15 @@ async fn rescue_workers(
         };
         let candidates: HashSet<String> = worker_jobs.into_iter().flatten().collect();
         let candidate_ids: Vec<String> = candidates.into_iter().collect();
-        let exists: Vec<bool> = {
+        // A stale worker with no jobs currently assigned to it (idle, just
+        // past the heartbeat threshold) leaves `candidate_ids` empty. Redis
+        // rejects a pipeline with zero queued commands ("empty command"), so
+        // this has to be skipped rather than sent — otherwise that one idle
+        // stale worker aborts recovery for every queue this pass, since the
+        // error propagates out of the whole function via `?`.
+        let exists: Vec<bool> = if candidate_ids.is_empty() {
+            Vec::new()
+        } else {
             let mut pipe = redis::pipe();
             for id in &candidate_ids {
                 pipe.cmd("HEXISTS").arg(config.job_data_hash()).arg(id);
