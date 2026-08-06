@@ -1,8 +1,5 @@
 use axum::http::HeaderMap;
-use chrono::Utc;
 use subtle::ConstantTimeEq;
-
-use better_auth::prelude::{AuthSession, AuthUser};
 
 use crate::schema::auth::{RequestAuth, UserRole};
 
@@ -84,16 +81,13 @@ fn stremio_token_matches(configured: Option<&str>, token: &str) -> bool {
     riven_core::stremio::verify_addon_token(api_key, token)
 }
 
-pub(super) enum AuthError {
-    Unauthorized,
-    Forbidden,
-}
+pub(super) struct Unauthorized;
 
 /// Resolve the caller's role.
 ///
-/// Order matters. A `better-auth` session is the primary credential: it is
-/// verified here, against this process's own store, so the role it yields is one
-/// riven established rather than one it was told. A configured API key is the
+/// Order matters. A session is the primary credential: it is verified here,
+/// against this process's own store, so the role it yields is one riven
+/// established rather than one it was told. A configured API key is the
 /// fallback, for machine callers that have no session.
 ///
 /// There is no third case. An anonymous caller is rejected — including on an
@@ -109,7 +103,7 @@ pub(super) async fn authorize_request(
     state: &ApiState,
     headers: &HeaderMap,
     query: Option<&str>,
-) -> Result<RequestAuth, AuthError> {
+) -> Result<RequestAuth, Unauthorized> {
     if let Some(role) = session_role(state, headers).await? {
         return Ok(RequestAuth { role });
     }
@@ -119,32 +113,7 @@ pub(super) async fn authorize_request(
     }
 
     tracing::warn!("auth rejected: no valid session and no matching api key");
-    Err(AuthError::Unauthorized)
-}
-
-/// The session token, from `Authorization: Bearer` or the session cookie —
-/// matching what better-auth's own extractors accept, so a caller authenticates
-/// the same way whether it hits riven's routes or better-auth's.
-fn session_token(headers: &HeaderMap, cookie_name: &str) -> Option<String> {
-    if let Some(token) = headers
-        .get(axum::http::header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "))
-        .filter(|token| !token.is_empty())
-    {
-        return Some(token.to_string());
-    }
-
-    let cookies = headers
-        .get(axum::http::header::COOKIE)
-        .and_then(|value| value.to_str().ok())?;
-    let prefix = format!("{cookie_name}=");
-    cookies
-        .split(';')
-        .map(str::trim)
-        .find_map(|part| part.strip_prefix(&prefix))
-        .filter(|token| !token.is_empty())
-        .map(str::to_string)
+    Err(Unauthorized)
 }
 
 /// `Ok(None)` means "no session was established from what was presented" — the
@@ -157,57 +126,37 @@ fn session_token(headers: &HeaderMap, cookie_name: &str) -> Option<String> {
 /// call the API — impossible: it was read as a session token, found nothing, and
 /// returned 401 without ever reaching `has_valid_api_key`.
 ///
-/// A session that *exists* but is unusable (expired, or its user banned) still
-/// returns `Err`. That is what the escalation guard is for, and it is intact:
-/// falling through only offers the value to `api_key_matches`, which grants
-/// nothing unless it equals the configured key.
+/// A session that *exists* but is unusable (expired or revoked) still returns
+/// `Err`. Falling through only offers the value to `api_key_matches`, which
+/// grants nothing unless it equals the configured key.
 async fn session_role(
     state: &ApiState,
     headers: &HeaderMap,
-) -> Result<Option<UserRole>, AuthError> {
-    let cookie_name = &state.auth.config().session.cookie_name;
-    let Some(token) = session_token(headers, cookie_name) else {
-        return Ok(None);
-    };
+) -> Result<Option<UserRole>, Unauthorized> {
+    use super::authn::SessionState;
 
-    let store = state.auth.store();
-    let Some(session) = store.get_session(&token).await.map_err(|error| {
-        tracing::warn!(%error, "session lookup failed");
-        AuthError::Unauthorized
-    })?
-    else {
-        return Ok(None);
-    };
-
-    if session.expires_at() <= Utc::now() {
-        tracing::debug!("auth rejected: session expired");
-        return Err(AuthError::Unauthorized);
-    }
-
-    let user = store
-        .get_user_by_id(&session.user_id())
+    let session_state = super::authn::authenticate(&state.auth, headers)
         .await
         .map_err(|error| {
-            tracing::warn!(%error, "user lookup failed");
-            AuthError::Unauthorized
-        })?
-        .ok_or(AuthError::Unauthorized)?;
+            tracing::warn!(%error, "session lookup failed");
+            Unauthorized
+        })?;
 
-    // A ban with no expiry is permanent; one in the past has lapsed.
-    let banned = user.banned() && user.ban_expires().is_none_or(|until| until > Utc::now());
-    if banned {
-        tracing::warn!(user_id = %user.id(), "auth rejected: user is banned");
-        return Err(AuthError::Forbidden);
+    match session_state {
+        SessionState::Anonymous => Ok(None),
+        SessionState::Unauthorized => {
+            tracing::debug!("auth rejected: session expired or revoked");
+            Err(Unauthorized)
+        }
+        SessionState::Valid { user, .. } => Ok(Some(role_from_user(user.role.as_deref()))),
     }
-
-    Ok(Some(role_from_user(user.role())))
 }
 
-/// Map better-auth's free-text admin-plugin role onto riven's ladder.
+/// Map the free-text role column onto riven's ladder.
 ///
 /// Unrecognised and absent roles both land on `User`, the least privilege —
 /// a typo in the column must not become an escalation.
-fn role_from_user(role: Option<&str>) -> UserRole {
+pub(super) fn role_from_user(role: Option<&str>) -> UserRole {
     match role.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
         Some("admin") => UserRole::Admin,
         Some("manager") => UserRole::Manager,
@@ -298,52 +247,8 @@ mod tests {
         assert!(!api_key_matches(Some(KEY), &HeaderMap::new(), None));
     }
 
-    #[test]
-    fn a_bearer_token_wins_over_the_cookie() {
-        let mut headers = headers_with("authorization", "Bearer from-header");
-        headers.insert(
-            axum::http::header::COOKIE,
-            "riven.session_token=from-cookie".parse().unwrap(),
-        );
-        assert_eq!(
-            session_token(&headers, "riven.session_token").as_deref(),
-            Some("from-header")
-        );
-    }
-
-    #[test]
-    fn the_session_cookie_is_found_among_others() {
-        let headers = headers_with("cookie", "theme=dark; riven.session_token=abc123; other=1");
-        assert_eq!(
-            session_token(&headers, "riven.session_token").as_deref(),
-            Some("abc123")
-        );
-    }
-
-    #[test]
-    fn a_differently_named_cookie_is_not_mistaken_for_the_session() {
-        let headers = headers_with("cookie", "not_riven.session_token=abc123");
-        assert_eq!(session_token(&headers, "riven.session_token"), None);
-        assert_eq!(
-            session_token(&HeaderMap::new(), "riven.session_token"),
-            None
-        );
-    }
-
-    #[test]
-    fn empty_credentials_are_treated_as_absent() {
-        assert_eq!(
-            session_token(&headers_with("authorization", "Bearer "), "sess"),
-            None
-        );
-        assert_eq!(
-            session_token(&headers_with("cookie", "sess="), "sess"),
-            None
-        );
-    }
-
-    /// An unknown role must not inherit privilege — the escalation this guards
-    /// against is a typo or a role added by a future better-auth plugin.
+    /// An unknown role must not inherit privilege — the escalation this
+    /// guards against is a typo in the role column.
     #[test]
     fn roles_map_to_the_ladder_and_default_to_least_privilege() {
         assert_eq!(role_from_user(Some("admin")), UserRole::Admin);

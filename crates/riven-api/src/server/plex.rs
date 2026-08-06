@@ -28,13 +28,14 @@ use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode, header::USER_AGENT};
 use axum::response::{IntoResponse, Response};
 use axum::{Json, http::header::SET_COOKIE};
-use better_auth::prelude::{AuthSession, AuthUser};
-use better_auth_core::types::CreateAccount;
+use chrono::Utc;
+use riven_core::entities::auth::{account, user};
+use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use super::ApiState;
-use super::authn::RivenAuth;
+use super::authn::AuthService;
 
 const PLEX_PINS_URL: &str = "https://plex.tv/api/v2/pins";
 const PLEX_USER_URL: &str = "https://plex.tv/api/v2/user";
@@ -331,13 +332,23 @@ pub(super) async fn poll(
 /// able to sign in just because the instance is reachable. Accounts are created
 /// by an admin; Plex only attaches to one that already exists.
 async fn link_and_start_session(
-    auth: &Arc<RivenAuth>,
+    auth: &Arc<AuthService>,
     profile: &PlexProfile,
     token: &str,
     headers: &HeaderMap,
 ) -> Result<String, String> {
-    let store = auth.store();
+    let db = &auth.db;
     let plex_id = profile.id.to_string();
+
+    let linked_account = account::Entity::find()
+        .filter(account::Column::ProviderId.eq(PROVIDER_ID))
+        .filter(account::Column::AccountId.eq(&plex_id))
+        .one(db)
+        .await
+        .map_err(|error| {
+            tracing::warn!(%error, "could not look up the plex account link");
+            "Could not look up the account".to_string()
+        })?;
 
     // Prefer an existing link; fall back to matching the Plex email, but only
     // when Plex says it has confirmed that address.
@@ -349,24 +360,23 @@ async fn link_and_start_session(
     // link below, making it durable. Note the match is keyed on the *incoming*
     // `plex_id` being unknown, so it fires even for a user who already linked
     // their real Plex account.
-    //
-    // The store's error is logged rather than folded into the caller's message:
-    // the user gets a generic failure, the operator gets the cause.
-    let user = match store.get_account(&plex_id, PROVIDER_ID).await {
-        Ok(Some(account)) => store
-            .get_user_by_id(&better_auth_core::entity::AuthAccount::user_id(&account))
+    let user = match &linked_account {
+        Some(account) => user::Entity::find_by_id(&account.user_id)
+            .one(db)
             .await
             .map_err(|error| {
                 tracing::warn!(%error, "could not load the user behind a linked plex account");
                 "Could not load the linked account".to_string()
             })?,
-        _ => match profile.email.as_deref() {
-            Some(email) if profile.confirmed => {
-                store.get_user_by_email(email).await.map_err(|error| {
+        None => match profile.email.as_deref() {
+            Some(email) if profile.confirmed => user::Entity::find()
+                .filter(user::Column::Email.eq(email.to_ascii_lowercase()))
+                .one(db)
+                .await
+                .map_err(|error| {
                     tracing::warn!(%error, "could not look up a user by plex email");
                     "Could not look up the account".to_string()
-                })?
-            }
+                })?,
             Some(_) => {
                 tracing::warn!(
                     plex_id = %plex_id,
@@ -387,59 +397,51 @@ async fn link_and_start_session(
         return Err("No Riven account is linked to this Plex user".to_string());
     };
 
-    // Record the link so subsequent sign-ins skip the email match, and keep the
-    // freshest Plex token on the row.
-    if matches!(store.get_account(&plex_id, PROVIDER_ID).await, Ok(None)) {
-        let create = CreateAccount {
-            user_id: user.id().to_string(),
-            account_id: plex_id.clone(),
-            provider_id: PROVIDER_ID.to_string(),
-            access_token: Some(token.to_string()),
-            refresh_token: None,
-            id_token: None,
-            access_token_expires_at: None,
-            refresh_token_expires_at: None,
-            scope: None,
+    // Record the link so subsequent sign-ins skip the email match.
+    if linked_account.is_none() {
+        let now = Utc::now();
+        let create = account::ActiveModel {
+            id: Set(uuid::Uuid::new_v4().to_string()),
+            account_id: Set(plex_id.clone()),
+            provider_id: Set(PROVIDER_ID.to_string()),
+            user_id: Set(user.id.clone()),
+            access_token: Set(Some(token.to_string())),
+            refresh_token: Set(None),
+            id_token: Set(None),
+            access_token_expires_at: Set(None),
+            refresh_token_expires_at: Set(None),
+            scope: Set(None),
             // No password: this account authenticates through Plex, not a
             // credential. A NULL here is what keeps it out of the password flow.
-            password: None,
+            password: Set(None),
+            created_at: Set(now),
+            updated_at: Set(now),
         };
-        if let Err(error) = store.create_account(create).await {
+        if let Err(error) = create.insert(db).await {
             // Non-fatal: the sign-in still stands, the next one just re-matches
             // by email.
             tracing::warn!(%error, "could not persist the plex account link");
         }
     }
 
-    let session = auth
-        .session_manager()
-        .create_session(
-            &user,
-            None,
-            headers
-                .get(USER_AGENT)
-                .and_then(|value| value.to_str().ok())
-                .map(str::to_string),
-        )
-        .await
-        .map_err(|error| {
-            tracing::warn!(%error, "could not create a session for a plex sign-in");
-            "Could not start a session".to_string()
-        })?;
-
-    // better-auth's own helper, not a hand-rolled string. The string this
-    // replaced omitted `Secure`, which better-auth derives from the scheme of
-    // `base_url` — so on the documented HTTPS deployment a Plex sign-in handed
-    // out a session cookie that a plaintext request to the same host would leak,
-    // while every other sign-in path on the same instance set the flag.
-    // Deferring to the helper also means future changes to the session cookie
-    // policy reach this path instead of silently skipping it.
-    Ok(
-        better_auth_core::utils::cookie_utils::create_session_cookie(
-            session.token(),
-            auth.config(),
-        ),
+    let token = super::authn::create_session(
+        db,
+        &user.id,
+        headers
+            .get(USER_AGENT)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string),
     )
+    .await
+    .map_err(|error| {
+        tracing::warn!(%error, "could not create a session for a plex sign-in");
+        "Could not start a session".to_string()
+    })?;
+
+    // The shared cookie helper, so a Plex sign-in gets the same attributes —
+    // `Secure` and the `__Host-` prefix included — as every other sign-in
+    // path on the instance.
+    Ok(super::authn::session_cookie(auth.cookie_secure, &token))
 }
 
 fn urlencoding_encode(value: &str) -> String {

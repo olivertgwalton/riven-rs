@@ -22,12 +22,12 @@
     let busy = $state<string | null>(null);
 
     function linked(providerId: string) {
-        return accounts.find((account) => account.providerId === providerId);
+        return accounts.find((account) => account.provider_id === providerId);
     }
 
     async function unlink(providerId: string) {
         busy = providerId;
-        const { error } = await authClient.unlinkAccount({ providerId });
+        const { error } = await authClient.unlinkAccount({ provider_id: providerId });
         busy = null;
 
         if (error) {

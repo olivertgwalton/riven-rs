@@ -56,14 +56,9 @@ pub struct RivenSettings {
     /// Bearer token / API key required on the GraphQL endpoint.
     /// Empty string means no authentication is enforced.
     pub api_key: String,
-    /// Signing key for `better-auth` sessions, minimum 32 bytes. Required —
-    /// there is no fallback, because the only other secret that could have
-    /// served as one was the frontend's HMAC key, and that scheme is gone.
-    /// Rotating it logs everyone out.
-    pub auth_secret: String,
     /// Public origin browsers reach riven at, e.g. `https://riven.example.com`.
     ///
-    /// `better-auth` derives cookie scope, trusted redirect targets and the
+    /// Auth derives cookie security, trusted redirect targets and the
     /// passkey relying-party ID from it, so it must be a hostname a browser can
     /// resolve. When unset, `resolve_public_url` in `riven-app` falls back to
     /// `ORIGIN` and then to the bind address — substituting loopback when that
@@ -117,7 +112,6 @@ impl Default for RivenSettings {
             schedule_offset_minutes: 30,
             unknown_air_date_offset_days: 7,
             api_key: String::new(),
-            auth_secret: String::new(),
             public_url: String::new(),
             cors_allowed_origins: String::new(),
             enabled_plugins: None,

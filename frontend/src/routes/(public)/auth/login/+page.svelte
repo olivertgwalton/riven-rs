@@ -211,7 +211,7 @@
 
         const { data, error } = await authClient.signIn.social({
             provider: id,
-            callbackURL: window.location.origin + resolve("/")
+            callback_url: window.location.origin + resolve("/")
         });
         if (error || !data?.url) {
             oidcBusyId = null;

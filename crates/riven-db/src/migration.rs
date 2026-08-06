@@ -38,6 +38,7 @@ macro_rules! sql_migrations {
                 migrations.push(Box::new(auth::M036Auth));
                 // …and anything touching the tables it creates has to follow it.
                 migrations.push(Box::new(M037AuthUsernameIsName));
+                migrations.push(Box::new(M038DropBetterAuthPluginTables));
                 migrations
             }
         }
@@ -50,21 +51,23 @@ sql_migration!(
     "037_auth_username_is_name.sql"
 );
 
-/// Authentication tables, generated from entities rather than hand-written SQL.
+sql_migration!(
+    M038DropBetterAuthPluginTables,
+    "m038_drop_better_auth_plugin_tables",
+    "038_drop_better_auth_plugin_tables.sql"
+);
+
+/// Authentication tables, generated from riven's own entities.
 ///
-/// The four app-owned tables (`auth_users`, `auth_sessions`, `auth_accounts`,
-/// `auth_verifications`) come from riven's own entities; the remaining tables are
-/// `better-auth`'s, generated from *its* entities. That matters because
-/// `better-auth` is pinned to an alpha branch whose schema may change between
-/// releases, and because its own `AuthMigrator` is not public API — so hand-written
-/// SQL here would be a second copy of a moving target, free to drift silently.
-/// Generating from the entities makes a schema change a compile-or-migrate event
-/// instead of a runtime column-not-found.
+/// Keeps its original name — it already ran on existing databases, where it
+/// also created `better-auth`'s plugin tables; those are dropped by `m038` now
+/// that auth is implemented natively. On a fresh database this creates only
+/// the five tables the native implementation uses, and `m038`'s
+/// `DROP IF EXISTS` is a no-op.
 mod auth {
     use sea_orm::{ConnectionTrait, Schema};
     use sea_orm_migration::{MigrationName, MigrationTrait, SchemaManager};
 
-    use better_auth_seaorm::store::entities as ba;
     use riven_core::entities::auth as app;
 
     pub struct M036Auth;
@@ -93,7 +96,6 @@ mod auth {
             let backend = manager.get_connection().get_database_backend();
             let schema = Schema::new(backend);
 
-            // App-owned: the four AuthSchema slots.
             create_tables!(
                 manager,
                 schema,
@@ -101,21 +103,7 @@ mod auth {
                 app::session::Entity,
                 app::account::Entity,
                 app::verification::Entity,
-            );
-
-            // Library-owned: the plugin tables. Names are fixed by better-auth
-            // (`api_keys`, `passkeys`, `two_factor`, `organization`, `member`,
-            // `invitation`, `device_code`) and are not ours to choose.
-            create_tables!(
-                manager,
-                schema,
-                ba::api_key::Entity,
-                ba::passkey::Entity,
-                ba::two_factor::Entity,
-                ba::organization::Entity,
-                ba::member::Entity,
-                ba::invitation::Entity,
-                ba::device_code::Entity,
+                app::passkey::Entity,
             );
 
             Ok(())
@@ -124,13 +112,7 @@ mod auth {
         async fn down(&self, manager: &SchemaManager) -> Result<(), sea_orm::DbErr> {
             // Dropped children-first: accounts/sessions reference users.
             for table in [
-                "device_code",
-                "invitation",
-                "member",
-                "organization",
-                "two_factor",
                 "passkeys",
-                "api_keys",
                 "auth_verifications",
                 "auth_accounts",
                 "auth_sessions",

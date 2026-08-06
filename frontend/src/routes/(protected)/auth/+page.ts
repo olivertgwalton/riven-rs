@@ -49,7 +49,7 @@ export const load: PageLoad = async ({ parent }) => {
 	// the call anyway — so it is not even made.
 	const managedUsersTask = canManageUsers
 		? authClient.admin
-				.listUsers({ limit: 100, sortBy: "createdAt", sortDirection: "desc" })
+				.listUsers({ limit: 100, sort_by: "created_at", sort_direction: "desc" })
 				.then(({ data, error }) => {
 					if (error) logger.error("failed to list users", error.message);
 					return data?.users ?? ([] as AuthUser[]);

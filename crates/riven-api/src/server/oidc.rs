@@ -8,11 +8,38 @@
 //! (PocketID's token endpoint is `/api/oidc/token`; others use `/oauth2/token`,
 //! `/token`, ...) but discovery always points at the right one.
 
-use better_auth::plugins::oauth::{OAuthProvider, OAuthUserInfo};
 use riven_core::settings::OidcProviderSettings;
 use serde::Deserialize;
 use serde_json::Value;
 use url::Url;
+
+/// A configured provider whose issuer resolved via discovery — everything the
+/// authorization-code flow in `authn::oauth` needs.
+#[derive(Debug, Clone)]
+pub struct ResolvedProvider {
+    pub id: String,
+    /// Display name for the login page's button.
+    pub name: String,
+    pub client_id: String,
+    pub client_secret: String,
+    pub auth_url: String,
+    pub token_url: String,
+    pub userinfo_url: String,
+    pub scopes: Vec<String>,
+    pub disable_sign_up: bool,
+    pub trust_unverified_email: bool,
+}
+
+/// The identity a provider asserted, mapped from its userinfo claims.
+#[derive(Debug)]
+pub struct OAuthUserInfo {
+    /// The OIDC `sub` — stable per provider, stored as the account id.
+    pub id: String,
+    pub email: String,
+    pub name: Option<String>,
+    pub image: Option<String>,
+    pub email_verified: bool,
+}
 
 /// The subset of an OIDC discovery document riven actually needs.
 #[derive(Debug, Deserialize)]
@@ -69,39 +96,29 @@ fn is_https_or_loopback(url: &str) -> bool {
     }
 }
 
-/// Resolves every configured provider via OIDC discovery and returns the
-/// `(id, OAuthProvider)` pairs that succeeded.
+/// Resolves every configured provider via OIDC discovery.
 ///
 /// A provider that fails discovery — unreachable, wrong issuer, not actually
 /// OIDC-compliant — is logged and skipped rather than failing the whole auth
 /// stack: these are optional sign-in methods layered on top of the built-in
 /// password/passkey/Plex ones, not something a typo should be able to take
 /// riven's login page down over.
-pub async fn resolve_providers(
-    configured: &[OidcProviderSettings],
-) -> Vec<(String, OAuthProvider)> {
+pub async fn resolve_providers(configured: &[OidcProviderSettings]) -> Vec<ResolvedProvider> {
     let mut resolved = Vec::with_capacity(configured.len());
     for settings in configured {
         match discover(&settings.issuer).await {
-            Ok(doc) => resolved.push((
-                settings.id.clone(),
-                OAuthProvider {
-                    client_id: settings.client_id.clone(),
-                    client_secret: settings.client_secret.clone(),
-                    auth_url: doc.authorization_endpoint,
-                    token_url: doc.token_endpoint,
-                    user_info_url: Some(doc.userinfo_endpoint),
-                    scopes: settings.effective_scopes(),
-                    authorization_params: Vec::new(),
-                    map_user_info: Some(map_user_info),
-                    get_user_info: None,
-                    refresh_access_token: None,
-                    verify_id_token: None,
-                    disable_implicit_sign_up: false,
-                    disable_sign_up: settings.disable_sign_up,
-                    override_user_info_on_sign_in: false,
-                },
-            )),
+            Ok(doc) => resolved.push(ResolvedProvider {
+                id: settings.id.clone(),
+                name: settings.display_name().to_string(),
+                client_id: settings.client_id.clone(),
+                client_secret: settings.client_secret.clone(),
+                auth_url: doc.authorization_endpoint,
+                token_url: doc.token_endpoint,
+                userinfo_url: doc.userinfo_endpoint,
+                scopes: settings.effective_scopes(),
+                disable_sign_up: settings.disable_sign_up,
+                trust_unverified_email: settings.trust_unverified_email,
+            }),
             Err(error) => tracing::warn!(
                 provider = %settings.id,
                 issuer = %settings.issuer,
@@ -113,12 +130,12 @@ pub async fn resolve_providers(
     resolved
 }
 
-/// Maps an OIDC provider's standard userinfo claims to better-auth's
-/// provider-agnostic shape. Works for any spec-compliant issuer — `sub`,
-/// `email` and `email_verified` are defined by the OIDC core spec, and `name`
-/// falls back to `preferred_username` for providers (PocketID included) whose
-/// account setup only guarantees the latter is non-empty.
-fn map_user_info(claims: Value) -> Result<OAuthUserInfo, String> {
+/// Maps an OIDC provider's standard userinfo claims onto riven's shape.
+/// Works for any spec-compliant issuer — `sub`, `email` and `email_verified`
+/// are defined by the OIDC core spec, and `name` falls back to
+/// `preferred_username` for providers (PocketID included) whose account setup
+/// only guarantees the latter is non-empty.
+pub fn map_user_info(claims: Value) -> Result<OAuthUserInfo, String> {
     let id = claims
         .get("sub")
         .and_then(Value::as_str)
@@ -231,18 +248,18 @@ mod tests {
         let resolved = resolve_providers(&configured).await;
 
         assert_eq!(resolved.len(), 1);
-        let (id, provider) = &resolved[0];
-        assert_eq!(id, "pocketid");
+        let provider = &resolved[0];
+        assert_eq!(provider.id, "pocketid");
         assert_eq!(provider.auth_url, "https://idp.example.com/authorize");
         assert_eq!(provider.token_url, "https://idp.example.com/api/oidc/token");
         assert_eq!(
-            provider.user_info_url.as_deref(),
-            Some("https://idp.example.com/api/oidc/userinfo")
+            provider.userinfo_url,
+            "https://idp.example.com/api/oidc/userinfo"
         );
         assert_eq!(provider.scopes, vec!["openid", "profile", "email"]);
         assert!(
             provider.disable_sign_up,
-            "settings.disable_sign_up must carry through to the resolved OAuthProvider"
+            "settings.disable_sign_up must carry through to the resolved provider"
         );
     }
 

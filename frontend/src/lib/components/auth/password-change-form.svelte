@@ -38,9 +38,9 @@
             }
 
             const { error } = await authClient.changePassword({
-                currentPassword: form.data.oldPassword,
-                newPassword: form.data.newPassword,
-                revokeOtherSessions: form.data.revokeSessions
+                current_password: form.data.oldPassword,
+                new_password: form.data.newPassword,
+                revoke_other_sessions: form.data.revokeSessions
             });
 
             if (error) {

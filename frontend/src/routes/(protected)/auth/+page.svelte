@@ -22,7 +22,7 @@
 
     let { data }: PageProps = $props();
 
-    const displayName = $derived(data.user?.displayUsername ?? data.user?.username ?? "");
+    const displayName = $derived(data.user?.display_username ?? data.user?.username ?? "");
 
     /**
      * Every riven account has a `credential` row unless it was created purely
@@ -30,7 +30,7 @@
      * that — so the password form is hidden rather than replaced.
      */
     const hasCredentialProvider = $derived(
-        data.accounts.some((account) => account.providerId === "credential")
+        data.accounts.some((account) => account.provider_id === "credential")
     );
 
     let deleteOpen = $state(false);
@@ -88,13 +88,13 @@
                     <div class="flex gap-2">
                         <dt>Member since</dt>
                         <dd class="text-foreground">
-                            {dateUtils.formatDate(data.user?.createdAt) ?? "Unknown"}
+                            {dateUtils.formatDate(data.user?.created_at) ?? "Unknown"}
                         </dd>
                     </div>
                     <div class="flex gap-2">
                         <dt>Last updated</dt>
                         <dd class="text-foreground">
-                            {dateUtils.formatDate(data.user?.updatedAt) ?? "Unknown"}
+                            {dateUtils.formatDate(data.user?.updated_at) ?? "Unknown"}
                         </dd>
                     </div>
                 </dl>

@@ -15,18 +15,25 @@ Two consequences worth knowing before you start:
 
 ## Required configuration
 
-Riven refuses to start without these two, and the error names them:
+Riven refuses to start without this, and the error names it:
 
 | Variable | Why |
 | --- | --- |
 | `RIVEN_SETTING__API_KEY` | Authenticates machine callers (Overseerr/Jellyseerr webhooks) and seeds the Stremio addon token. |
-| `RIVEN_SETTING__AUTH_SECRET` | Signs session tokens. Minimum 32 characters; rotating it signs everyone out. |
 
-Generate both with `openssl rand -hex 32`.
+Generate it with `openssl rand -hex 32`.
 
 `RIVEN_SETTING__PUBLIC_URL` is not required but matters: it is the origin
 passkeys are bound to, and changing it later invalidates every registered
-passkey.
+passkey. Its scheme also decides cookie security — an `https` value gets
+`Secure` cookies with the `__Host-` prefix, so set it to the URL browsers
+actually use rather than an internal address.
+
+`/auth` is rate limited to 100 requests/minute per client, tightened to 3 per
+10 seconds on sign-in, sign-up and password reset. Callers are identified by
+socket address only — no forwarded-IP header is trusted, since a client could
+set one and hand itself a fresh budget — so behind a reverse proxy every
+request looks like the proxy and all users share one bucket.
 
 The first account created through the UI becomes the admin, and sign-up closes
 permanently after it. Every later account is created by that admin.
@@ -37,7 +44,7 @@ This is what CI builds and what production runs.
 
 ```sh
 cp .env.example .env
-# set RIVEN_SETTING__API_KEY, RIVEN_SETTING__AUTH_SECRET, RIVEN_STORAGE_PATH
+# set RIVEN_SETTING__API_KEY, RIVEN_STORAGE_PATH
 docker compose up --build
 ```
 

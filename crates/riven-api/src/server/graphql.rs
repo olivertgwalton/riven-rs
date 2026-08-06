@@ -16,7 +16,7 @@ use std::pin::Pin;
 use std::time::Duration;
 
 use super::ApiState;
-use super::auth::{AuthError, authorize_request};
+use super::auth::{self, authorize_request};
 
 pub(super) async fn graphql_handler(
     State(state): State<ApiState>,
@@ -25,10 +25,9 @@ pub(super) async fn graphql_handler(
 ) -> Response {
     let auth = match authorize_request(&state, &headers, req.uri().query()).await {
         Ok(auth) => auth,
-        Err(AuthError::Unauthorized) => {
+        Err(auth::Unauthorized) => {
             return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
         }
-        Err(AuthError::Forbidden) => return (StatusCode::FORBIDDEN, "Forbidden").into_response(),
     };
 
     let accepts_multipart = headers
@@ -86,11 +85,8 @@ pub(super) async fn graphql_get_handler(
     if is_ws {
         let auth = match authorize_request(&state, req.headers(), req.uri().query()).await {
             Ok(auth) => auth,
-            Err(AuthError::Unauthorized) => {
+            Err(auth::Unauthorized) => {
                 return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
-            }
-            Err(AuthError::Forbidden) => {
-                return (StatusCode::FORBIDDEN, "Forbidden").into_response();
             }
         };
         let (mut parts, _body) = req.into_parts();

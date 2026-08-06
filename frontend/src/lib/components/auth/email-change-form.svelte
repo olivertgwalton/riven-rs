@@ -24,7 +24,7 @@
         onUpdate: async ({ form }) => {
             if (!form.valid) return;
 
-            const { error } = await authClient.changeEmail({ newEmail: form.data.newEmail });
+            const { error } = await authClient.changeEmail({ new_email: form.data.newEmail });
 
             if (error) {
                 form.valid = false;

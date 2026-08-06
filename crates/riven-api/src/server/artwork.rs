@@ -32,7 +32,7 @@ use riven_core::plugin::PluginRegistry;
 use serde::Deserialize;
 
 use super::ApiState;
-use super::auth::{AuthError, authorize_request};
+use super::auth::authorize_request;
 
 #[derive(Deserialize)]
 pub(super) struct ArtworkQuery {
@@ -58,11 +58,8 @@ pub(super) async fn artwork_handler(
     // that the *credential* stays server-side, not that the picture is secret.
     // Anonymous is still refused — the fetch it triggers is made with the media
     // server's admin token, so it must not be reachable without a session.
-    if let Err(error) = authorize_request(&state, &headers, None).await {
-        return match error {
-            AuthError::Unauthorized => (StatusCode::UNAUTHORIZED, "Unauthorized").into_response(),
-            AuthError::Forbidden => (StatusCode::FORBIDDEN, "Forbidden").into_response(),
-        };
+    if authorize_request(&state, &headers, None).await.is_err() {
+        return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
     }
 
     fetch(&state.registry, &server, &query.reference).await

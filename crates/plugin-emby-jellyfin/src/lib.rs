@@ -45,8 +45,8 @@ struct PathUpdate<'a> {
 }
 
 /// Builds an authenticated request for a media server.
-/// Jellyfin 12.0 disabled the legacy headers i.e. X-Emby-Token by default. 
-/// Jellyfin reimplementation uses `ApiKey` which supports >=10.8 
+/// Jellyfin 12.0 disabled the legacy headers i.e. X-Emby-Token by default.
+/// Jellyfin reimplementation uses `ApiKey` which supports >=10.8
 /// Emby has not made this change continues to use `X-Emby-Token` header.
 fn media_server_request(
     client: &reqwest::Client,

@@ -110,7 +110,7 @@ pnpm run build
 Everything the UI renders comes from the backend's GraphQL API:
 
 - [`src/lib/graphql-client.ts`](./src/lib/graphql-client.ts) — queries and mutations over HTTP, subscriptions over a single shared WebSocket.
-- [`src/lib/auth-client.ts`](./src/lib/auth-client.ts) — a thin HTTP client for the backend's `better-auth` routes. Deliberately no `better-auth` package dependency.
+- [`src/lib/auth-client.ts`](./src/lib/auth-client.ts) — a thin HTTP client for the backend's native `/auth` routes (sessions, passwords, passkeys, OIDC, Plex).
 - [`src/lib/metadata/parser.ts`](./src/lib/metadata/parser.ts) — local parsing/mapping helpers for TMDB/TVDB detail payloads the backend proxies. Third-party metadata integrations themselves live in the backend.
 
 There is no database, no ORM and no server-side code in this repository. Route
