@@ -3,10 +3,11 @@
     import { goto } from "$app/navigation";
     import { resolve } from "$app/paths";
     import Fingerprint from "@lucide/svelte/icons/fingerprint";
+    import KeyRound from "@lucide/svelte/icons/key-round";
     import Mountain from "@lucide/svelte/icons/mountain";
     import { toast } from "svelte-sonner";
 
-    import { authClient } from "$lib/auth-client";
+    import { authClient, type OidcProviderSummary } from "$lib/auth-client";
     import { createScopedLogger } from "$lib/logger";
     import {
         browserSupportsPasskeys,
@@ -39,6 +40,8 @@
     let passkeysAvailable = $state(false);
     let passkeyBusy = $state(false);
     let plexBusy = $state(false);
+    let oidcProviders = $state<OidcProviderSummary[]>([]);
+    let oidcBusyId = $state<string | null>(null);
 
     // Only one `credentials.get()` may be outstanding, so the autofill request
     // has to be cancelled before the button opens a modal one.
@@ -96,6 +99,10 @@
         void authClient.firstUserAvailable().then(({ data }) => {
             signUpAvailable = data?.available === true;
             if (signUpAvailable) activeTab = "signup";
+        });
+
+        void authClient.oidcProviders().then(({ data }) => {
+            oidcProviders = data ?? [];
         });
 
         if (!passkeysAvailable) return;
@@ -196,6 +203,24 @@
 
         plexBusy = false;
         errorMessage = "Plex sign-in timed out";
+    }
+
+    async function signInWithOidc(id: string) {
+        oidcBusyId = id;
+        errorMessage = null;
+
+        const { data, error } = await authClient.signIn.social({
+            provider: id,
+            callbackURL: window.location.origin + resolve("/")
+        });
+        if (error || !data?.url) {
+            oidcBusyId = null;
+            errorMessage = error?.message ?? "Could not start sign-in";
+            return;
+        }
+        // Navigates away — no need to reset oidcBusyId, the provider's
+        // authorization page replaces this one.
+        window.location.href = data.url;
     }
 </script>
 
@@ -301,6 +326,19 @@
                                     </svg>
                                     {plexBusy ? "Waiting for Plex…" : "Sign in with Plex"}
                                 </Button>
+                                {#each oidcProviders as provider (provider.id)}
+                                    <Button
+                                        variant="outline"
+                                        class="w-full"
+                                        type="button"
+                                        disabled={oidcBusyId !== null}
+                                        onclick={() => signInWithOidc(provider.id)}>
+                                        <KeyRound class="mr-2 size-4" />
+                                        {oidcBusyId === provider.id
+                                            ? "Redirecting…"
+                                            : `Sign in with ${provider.name}`}
+                                    </Button>
+                                {/each}
                             </div>
                         </Card.Content>
                     </Card.Root>
