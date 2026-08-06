@@ -23,20 +23,28 @@ struct DiscoveryDocument {
 }
 
 /// Fetches and parses `{issuer}/.well-known/openid-configuration`, rejecting
-/// a document whose `authorization_endpoint`, `token_endpoint` or
-/// `userinfo_endpoint` isn't `https://` — `client_secret` and access tokens
-/// go out to those endpoints, so a cleartext one (a misconfigured issuer, or
-/// discovery served over plain HTTP by an on-path attacker) would send
-/// credentials over the wire in the open. Plain `http://` is accepted only to
-/// a loopback address, since that traffic never leaves the machine — this
-/// module's own tests run discovery against a local mock server with no
-/// certificate.
+/// a cleartext issuer or a document whose `authorization_endpoint`,
+/// `token_endpoint` or `userinfo_endpoint` isn't `https://` —
+/// `client_secret` and access tokens go out to those endpoints, so any of
+/// this over plain HTTP (a misconfigured issuer, or a request or redirect
+/// intercepted by an on-path attacker) would send credentials over the wire
+/// in the open, or hand discovery itself to a document the attacker
+/// controls. Plain `http://` is accepted only to a loopback address, since
+/// that traffic never leaves the machine — this module's own tests run
+/// discovery against a local mock server with no certificate. Redirects are
+/// refused outright rather than validated one by one: a discovery document
+/// has no legitimate reason to live behind one.
 async fn discover(issuer: &str) -> anyhow::Result<DiscoveryDocument> {
     let issuer = issuer.trim_end_matches('/');
+    anyhow::ensure!(
+        is_https_or_loopback(issuer),
+        "issuer is not https and not a loopback address: {issuer}"
+    );
     let url = format!("{issuer}/.well-known/openid-configuration");
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
+        .redirect(reqwest::redirect::Policy::none())
         .build()?;
     let response = client.get(&url).send().await?.error_for_status()?;
     let doc = response.json::<DiscoveryDocument>().await?;
@@ -162,6 +170,29 @@ mod tests {
             id: "broken".to_string(),
             name: "Broken".to_string(),
             issuer: "http://127.0.0.1:1".to_string(), // nothing listens on port 1
+            client_id: "id".to_string(),
+            client_secret: "secret".to_string(),
+            scopes: Vec::new(),
+            disable_sign_up: false,
+            trust_unverified_email: false,
+        }];
+
+        let resolved = resolve_providers(&configured).await;
+
+        assert!(resolved.is_empty());
+    }
+
+    #[tokio::test]
+    async fn resolve_providers_skips_a_non_loopback_cleartext_issuer() {
+        // Never sends a request — a cleartext, non-loopback issuer is refused
+        // before the fetch, since an on-path attacker intercepting that
+        // request could substitute their own discovery document (whose
+        // endpoints could themselves be `https://`, so validating only the
+        // returned endpoints isn't enough).
+        let configured = vec![OidcProviderSettings {
+            id: "insecure-issuer".to_string(),
+            name: "Insecure Issuer".to_string(),
+            issuer: "http://idp.example.com".to_string(),
             client_id: "id".to_string(),
             client_secret: "secret".to_string(),
             scopes: Vec::new(),
