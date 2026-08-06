@@ -40,6 +40,11 @@ pub async fn start(job: &IndexJob, queue: &JobQueue) {
             "index: no metadata provider is enabled, so this item cannot be indexed"
         );
     }
+    // Every provider erroring or rate-limiting is an infrastructure problem,
+    // not "nothing recognises this item": it must not cost a failed attempt or
+    // a 24h deferral.
+    let all_unavailable = !outcomes.is_empty()
+        && crate::dispatch::count_infrastructure_failures(&outcomes) == outcomes.len();
     let responses: Vec<IndexedMediaItem> = crate::dispatch::decode_hook_responses(outcomes);
 
     // Reload: the indexers took wall-clock time and the item may have moved.
@@ -49,6 +54,27 @@ pub async fn start(job: &IndexJob, queue: &JobQueue) {
     let requested_seasons = load_requested_seasons(&item).await;
 
     if responses.is_empty() {
+        if all_unavailable {
+            tracing::warn!(
+                id,
+                title = %item.title,
+                "index: every metadata provider errored or was rate-limited, so nothing is known about this item yet; retrying in 15m"
+            );
+            queue
+                .notify(RivenEvent::MediaItemIndexError {
+                    id,
+                    error: "every indexer plugin failed or was rate limited".into(),
+                })
+                .await;
+            queue
+                .schedule_index_at(
+                    IndexJob::from_item(&item),
+                    Utc::now() + Duration::minutes(15),
+                )
+                .await;
+            return;
+        }
+
         tracing::warn!(
             id,
             title = %item.title,

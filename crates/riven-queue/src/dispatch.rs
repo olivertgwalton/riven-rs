@@ -23,11 +23,15 @@ impl JobQueue {
             tracing::error!(error = %e, "failed to push delayed ScrapeJob");
         }
     }
+    /// Bypasses `push_deduped`: this job carries the only copy of a scrape
+    /// run's collected responses, so a dedup miss (a second scrape finishing
+    /// while the first item's parse is still in flight, or a stale key left by
+    /// a hard kill) would silently discard them. Duplicate parses are harmless
+    /// — `upsert_stream`/`link_stream_to_item` are idempotent.
     pub async fn push_parse_scrape_results(&self, job: ParseScrapeResultsJob) {
-        self.push_deduped("parse", job.id, "ParseScrapeResultsJob", || async {
-            self.parse_storage.clone().push(job).await
-        })
-        .await;
+        if let Err(e) = self.parse_storage.clone().push(job).await {
+            tracing::error!(error = %e, "failed to push ParseScrapeResultsJob");
+        }
     }
     pub async fn push_download(&self, job: DownloadJob) {
         self.push_deduped("download", job.id, "DownloadJob", || async {
@@ -328,6 +332,17 @@ async fn wait_for_hook_outcome(
             HookOutcome::Failed
         }
     }
+}
+
+/// Count the outcomes where the plugin never gave an answer — it errored, or
+/// deferred with a rate limit. These are infrastructure failures, not a
+/// negative domain result, so callers must not record them as one (no streams
+/// found, no metadata, content removed upstream).
+pub(crate) fn count_infrastructure_failures(outcomes: &[(String, HookOutcome)]) -> usize {
+    outcomes
+        .iter()
+        .filter(|(_, outcome)| matches!(outcome, HookOutcome::Failed | HookOutcome::RateLimited))
+        .count()
 }
 
 /// Deserialize the `Response` payloads out of collected fan-in outcomes,

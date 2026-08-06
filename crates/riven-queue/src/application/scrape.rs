@@ -114,10 +114,9 @@ pub async fn start(id: i64, job: &ScrapeJob, queue: &JobQueue) {
             "scrape: no scraper plugins are enabled, so nothing can be found"
         );
     }
-    let rate_limited_count = outcomes
-        .iter()
-        .filter(|(_, outcome)| matches!(outcome, crate::HookOutcome::RateLimited))
-        .count();
+    // Errored and rate-limited scrapers both mean "this scraper never
+    // answered" — an infrastructure failure, not "this item has no streams".
+    let unavailable_count = crate::dispatch::count_infrastructure_failures(&outcomes);
     let responses: Vec<ScrapeResponse> = crate::dispatch::decode_hook_responses(outcomes);
 
     // Reload: the scrapers took wall-clock time and the item may have moved.
@@ -142,7 +141,7 @@ pub async fn start(id: i64, job: &ScrapeJob, queue: &JobQueue) {
     }
 
     if responses.is_empty() {
-        if rate_limited_count > 0 {
+        if unavailable_count > 0 {
             let max = queue.maximum_scrape_attempts.load(Ordering::Relaxed);
             let budget = rate_limit_retry_budget(max, item.failed_attempts);
             let next_attempt = job.rate_limit_retries + 1;
@@ -151,11 +150,11 @@ pub async fn start(id: i64, job: &ScrapeJob, queue: &JobQueue) {
                 tracing::warn!(
                     id,
                     title = %item.title,
-                    rate_limited_scrapers = rate_limited_count,
+                    unavailable_scrapers = unavailable_count,
                     attempt = next_attempt,
                     budget,
                     retry_in_secs = backoff.as_secs(),
-                    "scrape: every scraper is rate-limited right now; retrying later"
+                    "scrape: every scraper that answered is rate-limited or failing right now; retrying later"
                 );
                 queue
                     .push_scrape_after(
@@ -171,10 +170,10 @@ pub async fn start(id: i64, job: &ScrapeJob, queue: &JobQueue) {
             tracing::warn!(
                 id,
                 title = %item.title,
-                rate_limited_scrapers = rate_limited_count,
+                unavailable_scrapers = unavailable_count,
                 attempts = job.rate_limit_retries + 1,
                 budget,
-                "scrape: giving up on rate-limited retries for now; the item keeps its current state and waits for the next library pass"
+                "scrape: giving up on retries for now; the item keeps its current state and waits for the next library pass"
             );
             return;
         }

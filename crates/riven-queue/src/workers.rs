@@ -31,7 +31,6 @@ async fn handle_parse_scrape_results_job(
     job: ParseScrapeResultsJob,
     q: Data<Arc<JobQueue>>,
 ) -> Result<(), BoxDynError> {
-    let _guard = DedupGuard::new("parse", job.id, q.redis.clone());
     crate::application::scrape::parse_results(job.id, &job, &q).await;
     Ok(())
 }

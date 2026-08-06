@@ -17,6 +17,10 @@ pub async fn run(queue: &JobQueue) {
         tracing::debug!("content-service flow has no subscribers");
         return;
     }
+    // A service that errored or was rate-limited reports nothing, which is
+    // indistinguishable from "it dropped all its requests" once the responses
+    // are merged — so the prune below has to be skipped entirely.
+    let unavailable = crate::dispatch::count_infrastructure_failures(&outcomes);
     let responses: Vec<ContentServiceResponse> = crate::dispatch::decode_hook_responses(outcomes);
 
     let mut content = ContentCollection::default();
@@ -99,7 +103,12 @@ pub async fn run(queue: &JobQueue) {
         )
         .collect();
 
-    if !active_external_ids.is_empty() {
+    if unavailable > 0 {
+        tracing::warn!(
+            unavailable,
+            "content service: some services did not answer, skipping the removed-content cleanup so their items are not deleted"
+        );
+    } else if !active_external_ids.is_empty() {
         match repo::delete_items_removed_from_content_services(&active_external_ids).await {
             Ok(count) if count > 0 => {
                 tracing::info!(count, "deleted items removed from content services")
