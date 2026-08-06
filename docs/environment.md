@@ -21,17 +21,16 @@ anything outside the markers survives regeneration. -->
 
 | Variable | Kind | Read at |
 | --- | --- | --- |
-| `MIGRATION_TEST_DATABASE_URL` | variable | `crates/riven-api/src/server/authn.rs:397`<br>`crates/riven-db/examples/run_migrations.rs:22` |
 | `RIVEN_SETTING__SETUP_COMPLETED` | variable | `crates/riven-api/src/schema/queries/settings.rs:117` |
-| `RIVEN_STATIC_DIR` | variable | `crates/riven-api/src/server.rs:173` |
+| `RIVEN_STATIC_DIR` | variable | `crates/riven-api/src/server.rs:145` |
 
 ### `riven-app`
 
 | Variable | Kind | Read at |
 | --- | --- | --- |
-| `ORIGIN` | variable | `crates/riven-app/src/main.rs:353`<br>`crates/riven-app/src/main.rs:371` |
-| `RIVEN_SETTING__API_KEY` | variable | `crates/riven-app/src/main.rs:535` |
-| `RIVEN_SETTING__PUBLIC_URL` | variable | `crates/riven-app/src/main.rs:159` |
+| `ORIGIN` | variable | `crates/riven-app/src/main.rs:346`<br>`crates/riven-app/src/main.rs:364` |
+| `RIVEN_SETTING__API_KEY` | variable | `crates/riven-app/src/main.rs:522` |
+| `RIVEN_SETTING__PUBLIC_URL` | variable | `crates/riven-app/src/main.rs:152` |
 | `RIVEN_USENET_AUTO_REPAIR` | variable | `crates/riven-app/src/usenet.rs:160` |
 | `RIVEN_USENET_DISABLE_META_COMPACTION` | variable | `crates/riven-app/src/usenet.rs:93` |
 | `RIVEN_USENET_HEALTH_SCAN_BATCH` | variable | `crates/riven-app/src/usenet.rs:157` |
@@ -47,7 +46,7 @@ anything outside the markers survives regeneration. -->
 | `OTEL_SERVICE_NAME` | variable | `crates/riven-core/src/logging.rs:202` |
 | `RIVEN_MEMORY_LIMIT_MB` | variable | `crates/riven-core/src/cache.rs:175` |
 | `RIVEN_READ_AHEAD_CACHE_BYTES` | variable | `crates/riven-core/src/cache.rs:58` |
-| `RIVEN_SETTING__` | prefix | `crates/riven-core/src/settings/app.rs:150` |
+| `RIVEN_SETTING__` | prefix | `crates/riven-core/src/settings/app.rs:144` |
 | `RIVEN_USENET_CACHE_BYTES` | variable | `crates/riven-core/src/cache.rs:122` |
 | `RIVEN_USENET_FILE_CACHE_BYTES` | variable | `crates/riven-core/src/cache.rs:108` |
 | `RIVEN_USENET_META_CACHE_BYTES` | variable | `crates/riven-core/src/cache.rs:92` |
@@ -55,6 +54,12 @@ anything outside the markers survives regeneration. -->
 | `RIVEN_USENET_SEGMENT_SIZE_CACHE_BYTES` | variable | `crates/riven-core/src/cache.rs:141` |
 | `SENTRY_DSN` | variable | `crates/riven-core/src/logging.rs:183` |
 | `SENTRY_ENVIRONMENT` | variable | `crates/riven-core/src/logging.rs:186` |
+
+### `riven-db`
+
+| Variable | Kind | Read at |
+| --- | --- | --- |
+| `MIGRATION_TEST_DATABASE_URL` | variable | `crates/riven-db/examples/run_migrations.rs:22` |
 
 ### `riven-vfs`
 

@@ -2,7 +2,19 @@
 
 Date: 2026-07-31 · Commit: `e8887e7` · Scope: `crates/` (axum/GraphQL API, auth, plugins) and `frontend/` (SvelteKit SPA), plus packaging.
 
-> **Status: eleven of twelve findings fixed in the working tree. Finding 3
+> **Partly superseded (2026-08-06).** This is a point-in-time record and is
+> left as written. Everything below about `better-auth-rs` describes a
+> dependency riven no longer has: authentication was rewritten natively in
+> `crates/riven-api/src/server/authn/`, so the specific mechanisms named here —
+> better-auth's `CsrfMiddleware`, its `X-Forwarded-For` rate limiter, its
+> `AuthConfig::base_url` cookie handling, the admin plugin's ban routes — no
+> longer exist. The *findings* still stand as history; do not read the
+> implementation details as current. Notably, finding 3 (auth rate limiting) is
+> now addressed by riven's own limiter in `authn/ratelimit.rs`, keyed on the
+> peer address rather than a forgeable header.
+
+> **Status at the time of writing: eleven of twelve findings fixed in the
+> working tree. Finding 3
 > (auth rate limiting) was deliberately left unfixed — see the note on it
 > below.** Finding 1 was confirmed against the running instance before the fix
 > (`GET /api/v1/queues` answered `200` with no credential; `/graphql` correctly

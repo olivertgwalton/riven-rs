@@ -50,12 +50,11 @@ THIS IS AN ALTERNATIVE, RIVEN-TS IS THE MAIN DEVELOPMENT EFFORT
    ORIGIN=https://riven.example.com
    RIVEN_SETTING__PUBLIC_URL=https://riven.example.com
    RIVEN_SETTING__API_KEY=<openssl rand -hex 32>
-   RIVEN_SETTING__AUTH_SECRET=<openssl rand -hex 32>
    ```
 
-   Riven refuses to start without `API_KEY` and `AUTH_SECRET`. `PUBLIC_URL` is
-   the origin passkeys are bound to — changing it later invalidates every
-   registered passkey.
+   Riven refuses to start without `API_KEY`. `PUBLIC_URL` is the origin
+   passkeys are bound to — changing it later invalidates every registered
+   passkey.
 
    Open the UI once it is up: the first account you create becomes the admin,
    and sign-up closes permanently after it.
@@ -83,7 +82,6 @@ Common settings:
 | `RIVEN_SETTING__REDIS_URL` | `redis://localhost:6379` | Redis connection string. |
 | `RIVEN_SETTING__GQL_PORT` | `8080` | API server port. |
 | `RIVEN_SETTING__API_KEY` | — | **Required.** Bearer/API key for machine callers; also seeds the Stremio addon token. Riven will not start without it. |
-| `RIVEN_SETTING__AUTH_SECRET` | — | **Required**, minimum 32 characters. Signs session tokens; rotating it signs everyone out. |
 | `RIVEN_SETTING__PUBLIC_URL` | bind address | Public origin browsers reach riven at. Sets cookie scope and the passkey relying-party ID. |
 | `RIVEN_SETTING__LOG_DIRECTORY` | `./logs` | Directory for log output. |
 | `RIVEN_SETTING__VFS_MOUNT_PATH` | empty | VFS mount path. |
@@ -139,7 +137,16 @@ your confidence that every account on it is one you vetted yourself — e.g. a
 self-hosted IdP with no self-registration, where you created every user by
 hand. **PocketID is a common case that needs it**: it has no email
 confirmation flow, so it never reports `email_verified: true`, and without
-this flag linking permanently fails with `account_not_linked`.
+this flag linking fails every time.
+
+The failure is quiet, so know what to look for: riven redirects the browser to
+`/?error=sign-in-failed` and the login page shows no message, because the
+reason is deliberately not handed to the client. The server log carries it:
+
+```
+OIDC sign-in failed … you@example.com is unverified at the provider;
+refusing to link it to an existing account
+```
 
 Plugin settings use:
 

@@ -174,9 +174,15 @@ pub(super) async fn sign_up(
         ));
     }
 
-    let user =
-        create_user_with_password(auth, &tx, &body.username, &body.email, &body.password, "admin")
-            .await?;
+    let user = create_user_with_password(
+        auth,
+        &tx,
+        &body.username,
+        &body.email,
+        &body.password,
+        "admin",
+    )
+    .await?;
     tx.commit().await?;
     tracing::info!(user_id = %user.id, "first user created as admin");
     signed_in_response(auth, &user, &headers).await

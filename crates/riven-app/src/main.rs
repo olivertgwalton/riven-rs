@@ -136,7 +136,7 @@ fn url_host(url: &str) -> Option<&str> {
 ///
 /// The bind address is the interesting case: `gql_host` defaults to `0.0.0.0`,
 /// which is meaningful to `bind()` and meaningless to a browser. Used verbatim
-/// it became better-auth's `base_url`, which sets the cookie scope and — because
+/// it becomes `AuthService::base_url`, which sets the cookie scope and — because
 /// the passkey relying-party ID is that URL's host — produced an RP ID of
 /// `0.0.0.0`, which every browser rejects. Passkeys then failed at registration
 /// with nothing in the logs pointing here. A wildcard bind is normal, so it is
