@@ -34,9 +34,6 @@ pub mod user {
         /// Riven's `UserRole` ladder is derived from this free-text column;
         /// unknown values map to the least privilege.
         pub role: Option<String>,
-        pub banned: bool,
-        pub ban_reason: Option<String>,
-        pub ban_expires: Option<DateTimeUtc>,
     }
 
     #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

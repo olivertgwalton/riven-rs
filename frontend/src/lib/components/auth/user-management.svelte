@@ -22,7 +22,6 @@
         username?: string | null;
         display_username?: string | null;
         role?: string | null;
-        banned?: boolean | null;
         created_at?: string | null;
     };
 

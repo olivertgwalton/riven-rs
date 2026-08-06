@@ -39,6 +39,7 @@ macro_rules! sql_migrations {
                 // …and anything touching the tables it creates has to follow it.
                 migrations.push(Box::new(M037AuthUsernameIsName));
                 migrations.push(Box::new(M038DropBetterAuthPluginTables));
+                migrations.push(Box::new(M039DropUserBanColumns));
                 migrations
             }
         }
@@ -55,6 +56,12 @@ sql_migration!(
     M038DropBetterAuthPluginTables,
     "m038_drop_better_auth_plugin_tables",
     "038_drop_better_auth_plugin_tables.sql"
+);
+
+sql_migration!(
+    M039DropUserBanColumns,
+    "m039_drop_user_ban_columns",
+    "039_drop_user_ban_columns.sql"
 );
 
 /// Authentication tables, generated from riven's own entities.

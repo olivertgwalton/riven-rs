@@ -37,13 +37,11 @@ BEGIN;
 INSERT INTO auth_users (
     id, name, email, email_verified, image,
     created_at, updated_at,
-    username, display_username, role,
-    banned, ban_reason, ban_expires
+    username, display_username, role
 ) VALUES (
     '<user-id>', '<display name>', '<email>', false, NULL,
     '<created-at>', '<updated-at>',
-    '<username>', NULL, 'admin',
-    false, NULL, NULL
+    '<username>', NULL, 'admin'
 ) ON CONFLICT (id) DO NOTHING;
 
 INSERT INTO auth_accounts (

@@ -11,8 +11,8 @@ use chrono::Utc;
 use riven_core::auth::UserRole;
 use riven_core::entities::auth::{account, passkey, session, user, verification};
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, PaginatorTrait, QueryFilter,
-    QueryOrder, QuerySelect, Set,
+    ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait, PaginatorTrait, QueryFilter,
+    QueryOrder, QuerySelect, Set, TransactionTrait,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -102,13 +102,46 @@ pub(super) async fn update_user(
     Ok(Json(json!({ "status": true })))
 }
 
+/// Confirms whoever is holding the session also knows the password.
+///
+/// `Ok(false)` means there is nothing to confirm against: the account signs in
+/// through OAuth or a passkey and has no credential row, so the session itself
+/// is the only proof available. Callers decide whether that is good enough.
+async fn confirm_password(
+    auth: &super::AuthService,
+    user_id: &str,
+    password: Option<&str>,
+) -> ApiResult<bool> {
+    let Some(hash) = credential_account(&auth.db, user_id)
+        .await?
+        .and_then(|account| account.password)
+    else {
+        return Ok(false);
+    };
+    let password =
+        password.ok_or_else(|| ApiError::bad_request("Your current password is required"))?;
+    let verified = auth
+        .hasher
+        .verify(&hash, password)
+        .await
+        .map_err(|error| ApiError::internal("Password verification failed", error))?;
+    if !verified {
+        return Err(ApiError::bad_request("Invalid password"));
+    }
+    Ok(true)
+}
+
 #[derive(Deserialize)]
 pub(super) struct ChangeEmail {
     new_email: String,
+    /// Absent only for accounts that have no password at all.
+    current_password: Option<String>,
 }
 
 /// Direct update, no confirmation mail — riven has no mail provider, and a
-/// gate that can never be passed is worse than no gate.
+/// gate that can never be passed is worse than no gate. The password is the
+/// gate instead: the address is the handle a password reset is sent to, so
+/// letting a borrowed session move it hands over the account.
 pub(super) async fn change_email(
     State(state): State<ApiState>,
     headers: HeaderMap,
@@ -116,6 +149,7 @@ pub(super) async fn change_email(
 ) -> ApiResult<Json<serde_json::Value>> {
     let auth = &state.auth;
     let (user, _) = require_user(auth, &headers).await?;
+    confirm_password(auth, &user.id, body.current_password.as_deref()).await?;
     let email = normalize_email(&body.new_email)?;
 
     let taken = user::Entity::find()
@@ -155,22 +189,15 @@ pub(super) async fn delete_user(
     let auth = &state.auth;
     let (user, _) = require_user(auth, &headers).await?;
 
-    let hash = credential_account(&auth.db, &user.id)
-        .await?
-        .and_then(|account| account.password)
-        .ok_or_else(|| {
-            ApiError::bad_request("No password is set on this account; ask an admin to remove it")
-        })?;
-    let verified = auth
-        .hasher
-        .verify(&hash, &body.password)
-        .await
-        .map_err(|error| ApiError::internal("Password verification failed", error))?;
-    if !verified {
-        return Err(ApiError::bad_request("Invalid password"));
+    if !confirm_password(auth, &user.id, Some(&body.password)).await? {
+        return Err(ApiError::bad_request(
+            "No password is set on this account; ask an admin to remove it",
+        ));
     }
 
-    delete_user_rows(&auth.db, &user.id).await?;
+    let tx = auth.db.begin().await?;
+    delete_user_rows(&tx, &user.id).await?;
+    tx.commit().await?;
     tracing::info!(user_id = %user.id, "account self-deleted");
     Ok((
         [(SET_COOKIE, clear_session_cookie(auth.cookie_secure))],
@@ -179,8 +206,10 @@ pub(super) async fn delete_user(
         .into_response())
 }
 
-/// Everything hanging off a user, children first.
-async fn delete_user_rows(db: &DatabaseConnection, user_id: &str) -> Result<(), sea_orm::DbErr> {
+/// Everything hanging off a user, children first. Runs inside the caller's
+/// transaction: a failure partway through would otherwise strand a user with
+/// no credential, or credentials with no user.
+async fn delete_user_rows(db: &impl ConnectionTrait, user_id: &str) -> Result<(), sea_orm::DbErr> {
     session::Entity::delete_many()
         .filter(session::Column::UserId.eq(user_id))
         .exec(db)
@@ -388,7 +417,9 @@ pub(super) async fn remove_user(
         }
     }
 
-    delete_user_rows(db, &target.id).await?;
+    let tx = db.begin().await?;
+    delete_user_rows(&tx, &target.id).await?;
+    tx.commit().await?;
     tracing::info!(user_id = %target.id, by = %caller.id, "user removed by admin");
     Ok(Json(json!({ "success": true })))
 }

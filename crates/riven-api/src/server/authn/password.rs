@@ -202,9 +202,6 @@ pub(super) async fn create_user_with_password(
         username: Set(Some(normalized)),
         display_username: Set(Some(username.trim().to_string())),
         role: Set(Some(role.to_string())),
-        banned: Set(false),
-        ban_reason: Set(None),
-        ban_expires: Set(None),
         created_at: Set(now),
         updated_at: Set(now),
     }

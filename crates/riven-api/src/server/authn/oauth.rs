@@ -77,10 +77,16 @@ pub(super) async fn sign_in_social(
 
     // The callback lands a signed-in browser here, so anything not clearly
     // riven's own falls back to `/` rather than becoming an open redirect.
+    // Browsers read both `//host` and `/\host` as protocol-relative, and a
+    // control character in the value splits the `Location` header, so neither
+    // shape counts as root-relative.
     let callback_url = body
         .callback_url
         .filter(|url| {
-            (url.starts_with('/') && !url.starts_with("//"))
+            let root_relative = url.starts_with('/')
+                && !matches!(url.as_bytes().get(1), Some(b'/' | b'\\'))
+                && !url.chars().any(char::is_control);
+            root_relative
                 || url.trim_end_matches('/') == auth.base_url.trim_end_matches('/')
                 || url.starts_with(&format!("{}/", auth.base_url.trim_end_matches('/')))
         })
@@ -310,9 +316,6 @@ async fn link_or_create_user(
                         username: Set(None),
                         display_username: Set(None),
                         role: Set(Some(if first { "admin" } else { "user" }.to_string())),
-                        banned: Set(false),
-                        ban_reason: Set(None),
-                        ban_expires: Set(None),
                         created_at: Set(now),
                         updated_at: Set(now),
                     }

@@ -266,7 +266,8 @@ export const authClient = {
 		});
 	},
 
-	changeEmail(body: { new_email: string }) {
+	/** `current_password` may be omitted only by accounts that have none. */
+	changeEmail(body: { new_email: string; current_password?: string }) {
 		return call<{ status: boolean }>("/change-email", { method: "POST", body });
 	},
 
