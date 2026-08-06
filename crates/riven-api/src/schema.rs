@@ -132,6 +132,7 @@ mod tests {
         ("resetItems", "ResetItems"),
         ("removeItems", "DeleteItems"),
         ("deleteFilesystemEntry", "DeleteItems"),
+        ("blacklistFilesystemEntry", "DeleteItems"),
         // Finding and committing a release.
         ("scrapeItem", "ScrapeItems"),
         ("scrapeMediaItem", "ScrapeItems"),

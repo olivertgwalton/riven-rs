@@ -173,6 +173,7 @@ export type DebridUserInfo = {
 };
 
 export type DiscoveredStream = {
+  episodeNumber?: Maybe<Scalars['Int']['output']>;
   fileSizeBytes?: Maybe<Scalars['Int']['output']>;
   infoHash: Scalars['String']['output'];
   isCached: Scalars['Boolean']['output'];
@@ -900,6 +901,14 @@ export type MutationRoot = {
    * If omitted, all non-special seasons are requested.
    */
   addItem: MediaItem;
+  /**
+   * Reject a downloaded file: permanently blacklist the release behind it
+   * and remove its tracked entry, then clear the owning item's retry
+   * backoff so a replacement is searched for on the next scheduler pass.
+   * Use when a download turned out wrong — mismatched title, bad quality,
+   * wrong language, etc.
+   */
+  blacklistFilesystemEntry: Scalars['Boolean']['output'];
   /** Mark the instance-wide first-run setup flow as completed. */
   completeInitialSetup: Scalars['Boolean']['output'];
   /** Delete a custom ranking profile by ID. Built-in profiles cannot be deleted. */
@@ -1062,6 +1071,11 @@ export type MutationRootAddItemArgs = {
 };
 
 
+export type MutationRootBlacklistFilesystemEntryArgs = {
+  id: Scalars['Int']['input'];
+};
+
+
 export type MutationRootDeleteCustomProfileArgs = {
   id: Scalars['Int']['input'];
 };
@@ -1084,6 +1098,7 @@ export type MutationRootDiscoverItemArgs = {
 
 export type MutationRootDiscoverStreamsArgs = {
   cachedOnly?: InputMaybe<Scalars['Boolean']['input']>;
+  episodeNumber?: InputMaybe<Scalars['Int']['input']>;
   imdbId?: InputMaybe<Scalars['String']['input']>;
   itemType: MediaItemType;
   seasons?: InputMaybe<Array<Scalars['Int']['input']>>;
@@ -1094,6 +1109,7 @@ export type MutationRootDiscoverStreamsArgs = {
 
 
 export type MutationRootDownloadDiscoveredStreamArgs = {
+  episodeNumber?: InputMaybe<Scalars['Int']['input']>;
   imdbId?: InputMaybe<Scalars['String']['input']>;
   infoHash: Scalars['String']['input'];
   itemType: MediaItemType;

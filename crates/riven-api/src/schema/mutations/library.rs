@@ -23,6 +23,16 @@ impl LibraryMutations {
         Ok(deleted)
     }
 
+    /// Reject a downloaded file: permanently blacklist the release behind it
+    /// and remove its tracked entry, then clear the owning item's retry
+    /// backoff so a replacement is searched for on the next scheduler pass.
+    /// Use when a download turned out wrong — mismatched title, bad quality,
+    /// wrong language, etc.
+    async fn blacklist_filesystem_entry(&self, ctx: &Context<'_>, id: i64) -> Result<bool> {
+        require(ctx, Capability::DeleteItems)?;
+        Ok(repo::blacklist_and_remove_filesystem_entry(id).await?)
+    }
+
     async fn reset_library(&self, ctx: &Context<'_>) -> Result<i64> {
         require_settings_access(ctx)?;
         Ok(repo::reset_library().await? as i64)

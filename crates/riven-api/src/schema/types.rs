@@ -122,4 +122,5 @@ pub struct DiscoveredStream {
     pub is_cached: bool,
     pub item_type: MediaItemType,
     pub season_number: Option<i32>,
+    pub episode_number: Option<i32>,
 }

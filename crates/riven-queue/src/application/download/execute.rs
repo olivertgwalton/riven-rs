@@ -16,6 +16,14 @@ use crate::context::DownloadHierarchyContext;
 pub enum DownloadAttemptOutcome {
     Failed,
     Succeeded,
+    /// Season/Show only: this stream filled in at least one still-missing
+    /// episode, but the item isn't fully complete yet — unlike
+    /// `TerminalHandled`, the caller should keep trying further candidates
+    /// for the same profile instead of stopping, so a single download pass
+    /// can fill every episode a good release exists for rather than one per
+    /// retry cycle (which, for an item with a large `failed_attempts`
+    /// count, can be a day apart under the escalating backoff).
+    Progressed,
     TerminalHandled,
 }
 
@@ -262,14 +270,23 @@ pub async fn attempt_download(
             )
             .await
             {
-                SeasonPersistOutcome::Complete | SeasonPersistOutcome::Partial => {
+                SeasonPersistOutcome::Complete => {
                     tracing::debug!(
                         id,
                         info_hash,
                         raw_title,
-                        "download: season pack processed, matching episodes saved"
+                        "download: season pack processed, season fully complete"
                     );
                     DownloadAttemptOutcome::TerminalHandled
+                }
+                SeasonPersistOutcome::Partial => {
+                    tracing::debug!(
+                        id,
+                        info_hash,
+                        raw_title,
+                        "download: season pack processed, matching episodes saved (season still incomplete)"
+                    );
+                    DownloadAttemptOutcome::Progressed
                 }
                 SeasonPersistOutcome::Failed => {
                     tracing::debug!(

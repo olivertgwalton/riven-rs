@@ -1,7 +1,7 @@
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use riven_core::entities::{
-    filesystem_entries, media_item_blacklisted_streams, media_item_streams, streams,
+    filesystem_entries, media_item_blacklisted_streams, media_item_streams, media_items, streams,
 };
 use riven_core::types::FileSystemEntryType;
 use sea_orm::ActiveValue::{Set, Unchanged};
@@ -712,21 +712,108 @@ pub async fn get_downloaded_profile_names(media_item_id: i64) -> Result<Vec<Stri
     Ok(rows.into_iter().flatten().collect())
 }
 
-/// For a Season item, return profile names that have been downloaded for at
-/// least one episode in that season.
+/// For a Season item, return profile names that every *expected* episode
+/// (requested, and not still `unreleased`) already has a downloaded entry
+/// for — i.e. a profile genuinely has nothing left to grab for this season,
+/// not just "at least one episode happens to have it".
+///
+/// The distinction matters because the season-level download loop treats a
+/// profile in this list as fully satisfied and skips it entirely on every
+/// future pass. Reporting a profile "done" as soon as *any* episode has it
+/// (the previous behavior) meant a season that downloaded its first couple
+/// of episodes at a given quality would never be revisited for the rest —
+/// every later episode's matching stream sat unblacklisted and unused
+/// forever, since the profile that would have driven the download attempt
+/// toward it was already considered finished.
+///
+/// Raw SQL: the "every expected episode has this profile" comparison is a
+/// `HAVING count(...) >= (subquery)` the query builder can't express.
 pub async fn get_downloaded_profile_names_for_season(season_id: i64) -> Result<Vec<String>> {
-    let rows: Vec<Option<String>> = filesystem_entries::Entity::find()
-        .inner_join(riven_core::entities::media_items::Entity)
-        .filter(riven_core::entities::media_items::Column::ParentId.eq(season_id))
-        .filter(filesystem_entries::Column::EntryType.eq(FileSystemEntryType::Media))
-        .filter(filesystem_entries::Column::RankingProfileName.is_not_null())
-        .select_only()
-        .column(filesystem_entries::Column::RankingProfileName)
-        .distinct()
-        .into_tuple()
-        .all(orm())
+    let rows = orm()
+        .query_all_raw(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT fe.ranking_profile_name AS profile_name
+             FROM filesystem_entries fe
+             JOIN media_items ep ON ep.id = fe.media_item_id
+             WHERE ep.parent_id = $1
+               AND fe.entry_type = 'media'
+               AND fe.ranking_profile_name IS NOT NULL
+             GROUP BY fe.ranking_profile_name
+             HAVING COUNT(DISTINCT fe.media_item_id) >= (
+                 SELECT COUNT(*) FROM media_items expected
+                 WHERE expected.parent_id = $1
+                   AND expected.is_requested = true
+                   AND expected.state <> 'unreleased'
+             )",
+            [season_id.into()],
+        ))
         .await?;
-    Ok(rows.into_iter().flatten().collect())
+    Ok(rows
+        .into_iter()
+        .filter_map(|row| row.try_get::<String>("", "profile_name").ok())
+        .collect())
+}
+
+/// Episode ids under a season that already have an entry for the given
+/// ranking profile.
+///
+/// A season-pack (or single-episode) stream frequently covers a mix of
+/// already-satisfied and still-missing episodes — e.g. the same release
+/// group posts one file per episode, and the top-ranked one by tie-break
+/// happens to be an episode already downloaded. Persisting into an
+/// already-satisfied episode is harmless on its own (it just upserts the
+/// same row), but if the caller counts that as "this stream made progress"
+/// it stops trying further candidates — permanently starving every other
+/// missing episode, since the same top-ranked-but-already-done stream wins
+/// the tie-break on every future retry too. Callers use this set to skip
+/// persisting into episodes that don't need it, so a stream that only
+/// touches already-done episodes is correctly reported as making no
+/// progress.
+pub async fn get_episode_ids_with_profile_for_season(
+    season_id: i64,
+    profile_name: &str,
+) -> Result<HashSet<i64>> {
+    let rows = orm()
+        .query_all_raw(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT DISTINCT fe.media_item_id AS episode_id
+             FROM filesystem_entries fe
+             JOIN media_items ep ON ep.id = fe.media_item_id
+             WHERE ep.parent_id = $1
+               AND fe.entry_type = 'media'
+               AND fe.ranking_profile_name = $2",
+            [season_id.into(), profile_name.into()],
+        ))
+        .await?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|row| row.try_get::<i64>("", "episode_id").ok())
+        .collect())
+}
+
+/// Same as [`get_episode_ids_with_profile_for_season`], but for a multi-season
+/// pack matched against a whole show.
+pub async fn get_episode_ids_with_profile_for_show(
+    show_id: i64,
+    profile_name: &str,
+) -> Result<HashSet<i64>> {
+    let rows = orm()
+        .query_all_raw(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT DISTINCT fe.media_item_id AS episode_id
+             FROM filesystem_entries fe
+             JOIN media_items ep ON ep.id = fe.media_item_id
+             JOIN media_items season ON season.id = ep.parent_id
+             WHERE season.parent_id = $1
+               AND fe.entry_type = 'media'
+               AND fe.ranking_profile_name = $2",
+            [show_id.into(), profile_name.into()],
+        ))
+        .await?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|row| row.try_get::<i64>("", "episode_id").ok())
+        .collect())
 }
 
 /// Upsert a media filesystem entry, replacing the former SELECT + INSERT/UPDATE
@@ -959,6 +1046,42 @@ pub async fn delete_orphaned_usenet_metas(info_hashes: &[String]) -> Result<u64>
 pub async fn delete_filesystem_entry(entry_id: i64) -> Result<(bool, Option<i64>)> {
     let media_item_id = delete_filesystem_entries(&[entry_id]).await?.pop();
     Ok((media_item_id.is_some(), media_item_id))
+}
+
+/// Reject a downloaded file outright: permanently blacklist the release
+/// behind it (so the next retry can't re-select the exact same wrong-title or
+/// bad-quality stream) and remove its tracked entry, then clear the owning
+/// item's retry backoff so the search for a replacement runs on the next
+/// scheduler pass instead of waiting out whatever cooldown it had
+/// accumulated.
+///
+/// Returns `false` if the entry didn't exist; blacklisting a stream that
+/// somehow has no linked `streams` row (shouldn't happen, but not fatal) is
+/// skipped rather than failing the whole removal.
+pub async fn blacklist_and_remove_filesystem_entry(entry_id: i64) -> Result<bool> {
+    let Some(entry) = get_media_entry_by_id(entry_id).await? else {
+        return Ok(false);
+    };
+
+    if let Some(stream_id) = entry.stream_id
+        && let Some(stream) = streams::Entity::find_by_id(stream_id).one(orm()).await?
+    {
+        blacklist_stream_permanent_by_hash(entry.media_item_id, &stream.info_hash).await?;
+    }
+
+    let (deleted, media_item_id) = delete_filesystem_entry(entry_id).await?;
+    if let Some(media_item_id) = media_item_id {
+        media_items::Entity::update_many()
+            .col_expr(media_items::Column::FailedAttempts, Expr::value(0))
+            .col_expr(media_items::Column::LastScrapeAttemptAt, Expr::cust("NULL"))
+            .col_expr(media_items::Column::UpdatedAt, Expr::cust("NOW()"))
+            .filter(media_items::Column::Id.eq(media_item_id))
+            .exec(orm())
+            .await?;
+        super::state::recompute(&[media_item_id]).await?;
+    }
+
+    Ok(deleted)
 }
 
 /// Batch form of [`delete_filesystem_entry`] — one DELETE for the whole set

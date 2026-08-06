@@ -194,6 +194,15 @@ pub async fn start(id: i64, job: &ScrapeJob, queue: &JobQueue) {
                 id,
                 title: item_title,
                 item_type: item.item_type,
+                tmdb_id: item.tmdb_id.clone(),
+                // `job.tvdb_id` is already the resolved show's id for
+                // Episode/Season (set by `ScrapeJob::for_episode_or_season`);
+                // `item.tvdb_id` would be the episode's own TVDB record
+                // instead, which the frontend's show-details link can't use.
+                tvdb_id: match item.item_type {
+                    MediaItemType::Episode | MediaItemType::Season => job.tvdb_id.clone(),
+                    _ => item.tvdb_id.clone(),
+                },
             })
             .await;
         return;
@@ -318,17 +327,42 @@ pub async fn parse_results(id: i64, job: &ParseScrapeResultsJob, queue: &JobQueu
     }
 
     if new_stream_count == 0 {
-        tracing::info!(
-            id,
-            title = %item_title,
-            "parse: no new streams, everything the scrapers returned was already known or rejected"
-        );
-        record_scrape_failure(&item).await;
+        // "No new streams" isn't the same as "nothing to download": the item
+        // may already be holding a perfectly good, unblacklisted candidate
+        // from an earlier scrape that never got a download attempt (or one
+        // that failed without moving the item forward). Retrying forever
+        // only on the appearance of something new would leave that candidate
+        // untouched — and since providers keep re-surfacing the same known
+        // releases, "new" may never happen again for this item at all.
+        // `push_download_from_best_stream` both checks for and enqueues a
+        // candidate, so a `true` here means one exists and a download attempt
+        // is now in flight — don't count that as a failure.
+        if queue.push_download_from_best_stream(id).await {
+            tracing::info!(
+                id,
+                title = %item_title,
+                "parse: no new streams, but a usable candidate already exists — attempting download instead of recording a failure"
+            );
+        } else {
+            tracing::info!(
+                id,
+                title = %item_title,
+                "parse: no new streams, everything the scrapers returned was already known or rejected"
+            );
+            record_scrape_failure(&item).await;
+        }
         queue
             .notify(RivenEvent::MediaItemScrapeErrorNoNewStreams {
                 id,
                 title: item_title,
                 item_type,
+                tmdb_id: item.tmdb_id.clone(),
+                tvdb_id: match item_type {
+                    MediaItemType::Episode | MediaItemType::Season => hierarchy
+                        .as_ref()
+                        .and_then(|h| h.resolved_show_tvdb_id.clone()),
+                    _ => item.tvdb_id.clone(),
+                },
             })
             .await;
     } else {
@@ -351,6 +385,13 @@ pub async fn parse_results(id: i64, job: &ParseScrapeResultsJob, queue: &JobQueu
                 title: item_title,
                 item_type,
                 stream_count: new_stream_count,
+                tmdb_id: item.tmdb_id.clone(),
+                tvdb_id: match item_type {
+                    MediaItemType::Episode | MediaItemType::Season => hierarchy
+                        .as_ref()
+                        .and_then(|h| h.resolved_show_tvdb_id.clone()),
+                    _ => item.tvdb_id.clone(),
+                },
             })
             .await;
     }

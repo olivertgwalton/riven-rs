@@ -14,6 +14,14 @@ export type Notification = {
 	year?: number;
 	duration?: number;
 	imdb_id?: string;
+	// TMDB's own id namespace has no separate "episode" root — an
+	// episode/season row's tmdbId is the id of the show it belongs to, so
+	// this is always safe to use for a `/details/media/{tmdbId}/{mediaType}`
+	// link regardless of `type`. Shows/seasons/episodes are frequently
+	// TVDB-only (no TMDB match at all) — tvdbId is the fallback for those,
+	// linked via `?indexer=tvdb`.
+	tmdbId?: string;
+	tvdbId?: string;
 	read: boolean;
 	count: number;
 	dedupeKey: string | null;
@@ -92,6 +100,8 @@ function rivenNotificationToNotification(
 					? Math.round(event.durationSeconds / 60)
 					: undefined,
 				imdb_id: event.imdbId ?? undefined,
+				tmdbId: event.tmdbId ?? undefined,
+				tvdbId: event.tvdbId ?? undefined,
 				dedupeKey,
 			};
 
@@ -102,6 +112,8 @@ function rivenNotificationToNotification(
 				severity: "success",
 				timestamp: ts,
 				type: mapItemType(event.itemType),
+				tmdbId: event.tmdbId ?? undefined,
+				tvdbId: event.tvdbId ?? undefined,
 				dedupeKey,
 			};
 
@@ -112,6 +124,8 @@ function rivenNotificationToNotification(
 				severity: "success",
 				timestamp: ts,
 				type: mapItemType(event.itemType),
+				tmdbId: event.tmdbId ?? undefined,
+				tvdbId: event.tvdbId ?? undefined,
 				dedupeKey,
 			};
 
@@ -131,7 +145,9 @@ function rivenNotificationToNotification(
 				message: event.error ?? "An error occurred",
 				severity: "error",
 				timestamp: ts,
-				type: "movie",
+				type: mapItemType(event.itemType),
+				tmdbId: event.tmdbId ?? undefined,
+				tvdbId: event.tvdbId ?? undefined,
 				dedupeKey: null,
 			};
 
@@ -141,7 +157,9 @@ function rivenNotificationToNotification(
 				message: event.error ?? "An error occurred",
 				severity: "error",
 				timestamp: ts,
-				type: "movie",
+				type: mapItemType(event.itemType),
+				tmdbId: event.tmdbId ?? undefined,
+				tvdbId: event.tvdbId ?? undefined,
 				dedupeKey: null,
 			};
 
@@ -152,6 +170,8 @@ function rivenNotificationToNotification(
 				severity: "warning",
 				timestamp: ts,
 				type: mapItemType(event.itemType),
+				tmdbId: event.tmdbId ?? undefined,
+				tvdbId: event.tvdbId ?? undefined,
 				dedupeKey,
 			};
 

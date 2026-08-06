@@ -33,6 +33,7 @@ pub async fn persist_supplied_download(
                 start_time,
                 download.provider.clone(),
                 Some(download.plugin_name.clone()),
+                None,
             )
             .await;
         }
@@ -63,6 +64,7 @@ pub async fn persist_supplied_download(
                 start_time,
                 download.provider.clone(),
                 Some(download.plugin_name.clone()),
+                Some(&hierarchy),
             )
             .await;
         }
@@ -231,6 +233,7 @@ async fn persist_supplied_show_download(
             start_time,
             download.provider.clone(),
             Some(download.plugin_name.clone()),
+            None,
         )
         .await;
     } else {
