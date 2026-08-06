@@ -8,8 +8,8 @@ use axum::response::Response;
 use chrono::{TimeDelta, Utc};
 use riven_core::entities::auth::{account, session, user, verification};
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseConnection, EntityTrait,
-    PaginatorTrait, QueryFilter, Set,
+    ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseConnection, DatabaseTransaction,
+    EntityTrait, PaginatorTrait, QueryFilter, Set, TransactionTrait,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -28,6 +28,25 @@ const MIN_PASSWORD_LENGTH: usize = 8;
 /// are hashed: a reset token is a bearer credential that mints a password,
 /// so a database read must not hand out working ones.
 const RESET_PREFIX: &str = "reset-password:";
+
+/// Key for the Postgres advisory lock that serialises the first-user decision.
+/// Arbitrary but fixed; it only has to be unique within this database.
+const FIRST_USER_LOCK: i64 = 0x7269_7665_6e5f_7531;
+
+/// Serialises "is this account the first one?" across every path that can
+/// answer it — password sign-up and OIDC sign-in both make a new user an admin
+/// when the table is empty.
+///
+/// A plain `COUNT` under READ COMMITTED lets two concurrent callers both see an
+/// empty table and both insert themselves as admin. The lock is
+/// transaction-scoped, so the count and the insert commit together and it
+/// releases on commit or rollback — which is why this takes a transaction and
+/// not a pooled connection.
+pub(super) async fn lock_first_user(tx: &DatabaseTransaction) -> Result<(), sea_orm::DbErr> {
+    tx.execute_unprepared(&format!("SELECT pg_advisory_xact_lock({FIRST_USER_LOCK})"))
+        .await?;
+    Ok(())
+}
 
 #[derive(Deserialize)]
 pub(super) struct SignIn {
@@ -147,22 +166,28 @@ pub(super) async fn sign_up(
     Json(body): Json<SignUp>,
 ) -> ApiResult<Response> {
     let auth = &state.auth;
-    if user::Entity::find().count(&auth.db).await? > 0 {
+    let tx = auth.db.begin().await?;
+    lock_first_user(&tx).await?;
+    if user::Entity::find().count(&tx).await? > 0 {
         return Err(ApiError::forbidden(
             "Sign-up is closed: this instance already has an account",
         ));
     }
 
     let user =
-        create_user_with_password(auth, &body.username, &body.email, &body.password, "admin")
+        create_user_with_password(auth, &tx, &body.username, &body.email, &body.password, "admin")
             .await?;
+    tx.commit().await?;
     tracing::info!(user_id = %user.id, "first user created as admin");
     signed_in_response(auth, &user, &headers).await
 }
 
-/// Shared by sign-up and `/admin/create-user`.
+/// Shared by sign-up and `/admin/create-user`. Takes the connection rather than
+/// reaching for `auth.db`, so sign-up can run it inside the transaction holding
+/// the first-user lock.
 pub(super) async fn create_user_with_password(
     auth: &super::AuthService,
+    db: &impl ConnectionTrait,
     username: &str,
     email: &str,
     password: &str,
@@ -178,7 +203,7 @@ pub(super) async fn create_user_with_password(
                 .add(user::Column::Email.eq(&email))
                 .add(user::Column::Username.eq(&normalized)),
         )
-        .one(&auth.db)
+        .one(db)
         .await?
         .is_some();
     if taken {
@@ -205,10 +230,10 @@ pub(super) async fn create_user_with_password(
         created_at: Set(now),
         updated_at: Set(now),
     }
-    .insert(&auth.db)
+    .insert(db)
     .await?;
 
-    insert_credential_account(&auth.db, &user.id, hash).await?;
+    insert_credential_account(db, &user.id, hash).await?;
     Ok(user)
 }
 

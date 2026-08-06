@@ -35,7 +35,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use super::ApiState;
-use super::authn::AuthService;
+use super::authn::{AuthService, cookie, cookie_name, cookie_value};
 
 const PLEX_PINS_URL: &str = "https://plex.tv/api/v2/pins";
 const PLEX_USER_URL: &str = "https://plex.tv/api/v2/user";
@@ -141,6 +141,18 @@ pub(super) struct PinResponse {
 /// shorter of the two and bounds how long a stolen handle is worth anything.
 const HANDLE_TTL: Duration = Duration::from_secs(10 * 60);
 
+/// Ties a sign-in to the browser that began it.
+///
+/// The handle travels in the URL, so on its own it proves only that the caller
+/// knows it — and whoever called `start` always does. Without this cookie, a
+/// link to `/auth/plex/poll/{handle}` is login CSRF: the attacker approves a PIN
+/// with their own Plex account, sends the URL to a victim, and the victim's
+/// browser accepts a session cookie for the attacker's account. `SameSite=Lax`
+/// does not help, because a top-level navigation is exactly what it permits.
+///
+/// Same shape as the OIDC state cookie in `authn::oauth`, for the same reason.
+const HANDLE_COOKIE: &str = "riven.plex_handle";
+
 /// Handle → Plex PIN id, for sign-ins this process started.
 ///
 /// **This indirection is the security boundary.** `poll` used to take the Plex
@@ -244,11 +256,21 @@ pub(super) async fn start(State(state): State<ApiState>) -> Response {
         code = urlencoding_encode(&pin.code),
     );
 
-    Json(PinResponse {
-        handle: remember_pin(pin.id),
-        auth_url,
-    })
-    .into_response()
+    let secure = state.auth.cookie_secure;
+    let handle = remember_pin(pin.id);
+    (
+        [(
+            SET_COOKIE,
+            cookie(
+                &cookie_name(HANDLE_COOKIE, secure),
+                &handle,
+                HANDLE_TTL.as_secs() as i64,
+                secure,
+            ),
+        )],
+        Json(PinResponse { handle, auth_url }),
+    )
+        .into_response()
 }
 
 /// Step 3+4: poll the PIN; when Plex has a token, resolve the profile, link it
@@ -261,6 +283,13 @@ pub(super) async fn poll(
     headers: HeaderMap,
     Path(handle): Path<String>,
 ) -> Response {
+    // Checked before anything else, so a caller that did not start this sign-in
+    // cannot even learn whether the handle exists.
+    let secure = state.auth.cookie_secure;
+    if cookie_value(&headers, &cookie_name(HANDLE_COOKIE, secure)).as_deref() != Some(&*handle) {
+        return error(StatusCode::NOT_FOUND, "Unknown or expired sign-in");
+    }
+
     // An unknown handle is indistinguishable from an expired one, and neither
     // reveals whether a PIN with some id exists.
     let Some(pin_id) = resolve_pin(&handle) else {
@@ -304,13 +333,19 @@ pub(super) async fn poll(
     };
 
     match link_and_start_session(&state.auth, &profile, &token, &headers).await {
-        Ok(cookie) => {
+        Ok(session_cookie) => {
             // The sign-in is done; the handle must not mint a second session.
             forget_pin(&handle);
             let body = Json(json!({ "pending": false }));
             match Response::builder()
                 .status(StatusCode::OK)
-                .header(SET_COOKIE, cookie)
+                .header(SET_COOKIE, session_cookie)
+                // Spent along with the handle — `header` appends, so this rides
+                // alongside the session cookie rather than replacing it.
+                .header(
+                    SET_COOKIE,
+                    cookie(&cookie_name(HANDLE_COOKIE, secure), "", 0, secure),
+                )
                 .header("content-type", "application/json")
                 .body(body.into_response().into_body())
             {

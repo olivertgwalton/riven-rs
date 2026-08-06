@@ -19,7 +19,9 @@ use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use chrono::{TimeDelta, Utc};
 use riven_core::entities::auth::{account, user};
-use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter, Set};
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter, Set, TransactionTrait,
+};
 use serde::Deserialize;
 use serde_json::json;
 use sha2::Digest;
@@ -272,7 +274,10 @@ async fn link_or_create_user(
     info: &crate::server::oidc::OAuthUserInfo,
     token: &TokenResponse,
 ) -> anyhow::Result<user::Model> {
-    let db = &state.auth.db;
+    // One transaction for the whole decision: the "is the table empty" check
+    // below has to commit together with the user it creates.
+    let tx = state.auth.db.begin().await?;
+    let db = &tx;
     let now = Utc::now();
     let email = info.email.trim().to_ascii_lowercase();
 
@@ -306,6 +311,10 @@ async fn link_or_create_user(
                         !provider.disable_sign_up,
                         "no riven account matches {email} and sign-up is disabled"
                     );
+                    // Held until this transaction ends, so a second sign-in
+                    // racing into an empty instance cannot also read zero and
+                    // make itself an admin too.
+                    super::password::lock_first_user(&tx).await?;
                     let first = user::Entity::find().count(db).await? == 0;
                     user::ActiveModel {
                         id: Set(uuid::Uuid::new_v4().to_string()),
@@ -353,5 +362,6 @@ async fn link_or_create_user(
         create.insert(db).await?;
     }
 
+    tx.commit().await?;
     Ok(user)
 }

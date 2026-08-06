@@ -18,7 +18,8 @@ use serde::Deserialize;
 use serde_json::json;
 
 use super::password::{
-    create_user_with_password, credential_account, normalize_email, normalize_username,
+    CREDENTIAL_PROVIDER, create_user_with_password, credential_account, normalize_email,
+    normalize_username,
 };
 use super::session::{
     SessionState, authenticate, clear_session_cookie, require_user, revoke_session,
@@ -269,6 +270,17 @@ pub(super) async fn unlink_account(
     let auth = &state.auth;
     let (user, _) = require_user(auth, &headers).await?;
 
+    // The credential row is where the password hash lives, and the password is
+    // what `/change-email` and `/delete-user` confirm against. Deleting it here
+    // would disarm both gates without ever proving the password — a borrowed
+    // session could unlink, then move the email it holds. Passwords are managed
+    // through `/change-password`, which does prove it.
+    if body.provider_id == CREDENTIAL_PROVIDER {
+        return Err(ApiError::bad_request(
+            "The password sign-in can't be unlinked; change your password instead",
+        ));
+    }
+
     let accounts = account::Entity::find()
         .filter(account::Column::UserId.eq(&user.id))
         .all(&auth.db)
@@ -374,6 +386,7 @@ pub(super) async fn create_user(
     };
     let user = create_user_with_password(
         &state.auth,
+        &state.auth.db,
         &body.username,
         &body.email,
         &body.password,

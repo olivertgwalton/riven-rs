@@ -123,13 +123,13 @@ export const authClient = {
 
 	signIn: {
 		username(body: { username: string; password: string }) {
-			return call<{ user: AuthUser; token?: string }>("/sign-in/username", {
+			return call<{ user: AuthUser }>("/sign-in/username", {
 				method: "POST",
 				body,
 			});
 		},
 		email(body: { email: string; password: string }) {
-			return call<{ user: AuthUser; token?: string }>("/sign-in/email", {
+			return call<{ user: AuthUser }>("/sign-in/email", {
 				method: "POST",
 				body,
 			});
@@ -147,7 +147,7 @@ export const authClient = {
 				return { data: null, error: error ?? EMPTY_RESPONSE };
 			}
 			const assertion = await getPasskeyAssertion(options, init);
-			return call<{ user: AuthUser; token?: string }>(
+			return call<{ user: AuthUser }>(
 				"/passkey/verify-authentication",
 				{ method: "POST", body: { response: assertion } },
 			);
@@ -173,7 +173,7 @@ export const authClient = {
 	 */
 	signUp: {
 		email(body: { username: string; email: string; password: string }) {
-			return call<{ user: AuthUser; token?: string }>("/sign-up/email", {
+			return call<{ user: AuthUser }>("/sign-up/email", {
 				method: "POST",
 				body,
 			});

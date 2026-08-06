@@ -34,7 +34,9 @@ use super::ApiState;
 use super::legacy_password::DualFormatHasher;
 use super::oidc::{self, ResolvedProvider};
 
-pub use session::{SessionState, authenticate, create_session, session_cookie};
+pub use session::{
+    SessionState, authenticate, cookie, cookie_name, cookie_value, create_session, session_cookie,
+};
 
 /// The instance's auth handle: database, password hasher, WebAuthn relying
 /// party and the OIDC providers that resolved at startup.
@@ -155,8 +157,13 @@ async fn oidc_providers(State(state): State<ApiState>) -> Json<serde_json::Value
     )
 }
 
-/// The shared tail of every successful sign-in: a session row, the cookie,
-/// and a `{ token, user }` body.
+/// The shared tail of every successful sign-in: a session row, the cookie, and
+/// a `{ user }` body.
+///
+/// The raw token goes into the `HttpOnly` cookie and nowhere else. It used to
+/// be echoed in the body as well, which handed page scripts a 30-day bearer
+/// credential that keeps working off-origin — exactly what `HttpOnly` is there
+/// to prevent. Nothing read it: `auth-client.ts` authenticates with the cookie.
 pub(super) async fn signed_in_response(
     auth: &AuthService,
     user: &user::Model,
@@ -172,7 +179,7 @@ pub(super) async fn signed_in_response(
             header::SET_COOKIE,
             session_cookie(auth.cookie_secure, &token),
         )],
-        Json(json!({ "token": token, "user": user })),
+        Json(json!({ "user": user })),
     )
         .into_response())
 }
