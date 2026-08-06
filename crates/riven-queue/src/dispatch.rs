@@ -23,11 +23,15 @@ impl JobQueue {
             tracing::error!(error = %e, "failed to push delayed ScrapeJob");
         }
     }
+    /// Bypasses `push_deduped`: this job carries the only copy of a scrape
+    /// run's collected responses, so a dedup miss (a second scrape finishing
+    /// while the first item's parse is still in flight, or a stale key left by
+    /// a hard kill) would silently discard them. Duplicate parses are harmless
+    /// — `upsert_stream`/`link_stream_to_item` are idempotent.
     pub async fn push_parse_scrape_results(&self, job: ParseScrapeResultsJob) {
-        self.push_deduped("parse", job.id, "ParseScrapeResultsJob", || async {
-            self.parse_storage.clone().push(job).await
-        })
-        .await;
+        if let Err(e) = self.parse_storage.clone().push(job).await {
+            tracing::error!(error = %e, "failed to push ParseScrapeResultsJob");
+        }
     }
     pub async fn push_download(&self, job: DownloadJob) {
         self.push_deduped("download", job.id, "DownloadJob", || async {
@@ -46,42 +50,49 @@ impl JobQueue {
         .await;
     }
 
-    /// Resolve subscribers for `event`, initialise its fan-in flow, and push a
-    /// plugin-hook child job to each subscriber's queue. Returns the number of
-    /// children enqueued — `0` means no plugin subscribed, which the caller
-    /// usually treats as "skip straight to finalize".
-    ///
-    /// Caller-provided `scope` namespaces the flow's Redis keys
-    /// (`riven:flow:<prefix>:<scope>:...`); for per-item events use the media
-    /// item id, for singletons use a fixed value.
-    pub async fn fan_out_plugin_hook(&self, event: RivenEvent, scope: i64) -> usize {
+    /// Fan out `event` to every subscribed plugin's hook queue and await each
+    /// child's [`HookOutcome`] through apalis's task-result storage. Returns
+    /// one `(plugin, outcome)` per subscriber — empty means no plugin
+    /// subscribed. A child that times out, is purged, or crashes reports
+    /// `HookOutcome::Failed`, so the wait is always bounded.
+    pub async fn fan_out_and_collect(&self, event: &RivenEvent) -> Vec<(String, HookOutcome)> {
         let event_type = event.event_type();
-        let DispatchStrategy::FanIn { prefix } = event_type.dispatch_strategy() else {
-            tracing::error!(
-                ?event_type,
-                "fan_out_plugin_hook called for non-FanIn event"
-            );
-            return 0;
-        };
-        let subscribers = self.registry.subscriber_names(event_type).await;
-        if subscribers.is_empty() {
-            return 0;
+        if event_type.dispatch_strategy() != DispatchStrategy::FanIn {
+            tracing::error!(?event_type, "fan_out_and_collect called for non-FanIn event");
+            return Vec::new();
         }
-        self.init_flow(prefix, scope, subscribers.len()).await;
-        future::join_all(subscribers.iter().map(|plugin| {
-            let event = event.clone();
-            async move { self.push_plugin_hook(plugin, event, Some(scope)).await }
+        let subscribers = self.registry.subscriber_names(event_type).await;
+        future::join_all(subscribers.into_iter().filter_map(|plugin| {
+            let storage = self
+                .plugin_hook_storages
+                .get(&(plugin.clone(), event_type))?
+                .clone();
+            let job = PluginHookJob {
+                plugin_name: plugin.clone(),
+                event: event.clone(),
+            };
+            Some(async move {
+                // Explicit task id: apalis's sink invents one otherwise and
+                // never reports it back, and the id is the wait handle.
+                let task_id = Ulid::new();
+                let task = TaskBuilder::new(job)
+                    .with_task_id(TaskId::new(task_id))
+                    .build();
+                if let Err(e) = storage.clone().push_task(task).await {
+                    tracing::error!(plugin = %plugin, ?event_type, error = %e, "failed to push plugin-hook job");
+                    return (plugin, HookOutcome::Failed);
+                }
+                let outcome = wait_for_hook_outcome(&storage, task_id, &plugin).await;
+                (plugin, outcome)
+            })
         }))
-        .await;
-        subscribers.len()
+        .await
     }
 
     /// Push a per-plugin hook job onto the queue dedicated to
-    /// `(plugin_name, event.event_type())`. The plugin-hook worker dispatches
-    /// the event to that single plugin and — for fan-in events — stores the
-    /// response under the `scope` flow keys, then triggers finalize / signals
-    /// the awaiting caller when the last sibling completes.
-    pub async fn push_plugin_hook(&self, plugin_name: &str, event: RivenEvent, scope: Option<i64>) {
+    /// `(plugin_name, event.event_type())` without awaiting its result.
+    /// Used for broadcast (notification) events.
+    pub async fn push_plugin_hook(&self, plugin_name: &str, event: RivenEvent) {
         let event_type = event.event_type();
         let key = (plugin_name.to_string(), event_type);
         let Some(storage) = self.plugin_hook_storages.get(&key) else {
@@ -95,7 +106,6 @@ impl JobQueue {
         let job = PluginHookJob {
             plugin_name: plugin_name.to_string(),
             event,
-            scope,
         };
         if let Err(e) = storage.clone().push(job).await {
             tracing::error!(
@@ -276,8 +286,81 @@ impl JobQueue {
         future::join_all(
             subscribers
                 .iter()
-                .map(|plugin| self.push_plugin_hook(plugin, event.clone(), None)),
+                .map(|plugin| self.push_plugin_hook(plugin, event.clone())),
         )
         .await;
     }
+}
+
+/// Await a single plugin-hook child's stored task result. Bounded by
+/// [`HOOK_COLLECT_TIMEOUT_SECS`] so a child that will never complete (purged
+/// by `cancel_items`, lost to a crash mid-rescue) cannot hang the
+/// orchestrator; apalis's `wait_for` itself polls forever.
+async fn wait_for_hook_outcome(
+    storage: &RedisStorage<PluginHookJob>,
+    task_id: Ulid,
+    plugin: &str,
+) -> HookOutcome {
+    use futures::StreamExt;
+    let mut results =
+        WaitForCompletion::<HookOutcome>::wait_for_single(storage, TaskId::new(task_id));
+    let timeout = std::time::Duration::from_secs(HOOK_COLLECT_TIMEOUT_SECS);
+    match tokio::time::timeout(timeout, results.next()).await {
+        Ok(Some(Ok(result))) => match result.take() {
+            Ok(outcome) => outcome,
+            // The task itself errored (panic, worker timeout): RedisAck stores
+            // the raw error string, surfaced here as the Err arm.
+            Err(error) => {
+                tracing::warn!(plugin, %error, "plugin-hook task failed");
+                HookOutcome::Failed
+            }
+        },
+        Ok(Some(Err(error))) => {
+            tracing::warn!(plugin, %error, "failed to read plugin-hook task result");
+            HookOutcome::Failed
+        }
+        Ok(None) => {
+            tracing::warn!(plugin, "plugin-hook result stream ended without a result");
+            HookOutcome::Failed
+        }
+        Err(_) => {
+            tracing::warn!(
+                plugin,
+                timeout_secs = HOOK_COLLECT_TIMEOUT_SECS,
+                "timed out waiting for plugin-hook result"
+            );
+            HookOutcome::Failed
+        }
+    }
+}
+
+/// Count the outcomes where the plugin never gave an answer — it errored, or
+/// deferred with a rate limit. These are infrastructure failures, not a
+/// negative domain result, so callers must not record them as one (no streams
+/// found, no metadata, content removed upstream).
+pub(crate) fn count_infrastructure_failures(outcomes: &[(String, HookOutcome)]) -> usize {
+    outcomes
+        .iter()
+        .filter(|(_, outcome)| matches!(outcome, HookOutcome::Failed | HookOutcome::RateLimited))
+        .count()
+}
+
+/// Deserialize the `Response` payloads out of collected fan-in outcomes,
+/// dropping everything else. Logs and skips payloads that fail to decode.
+pub(crate) fn decode_hook_responses<T: DeserializeOwned>(
+    outcomes: Vec<(String, HookOutcome)>,
+) -> Vec<T> {
+    outcomes
+        .into_iter()
+        .filter_map(|(plugin, outcome)| match outcome {
+            HookOutcome::Response(Some(value)) => match serde_json::from_value(value) {
+                Ok(decoded) => Some(decoded),
+                Err(error) => {
+                    tracing::error!(%plugin, %error, "failed to deserialize plugin-hook response");
+                    None
+                }
+            },
+            _ => None,
+        })
+        .collect()
 }

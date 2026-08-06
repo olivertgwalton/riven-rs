@@ -106,45 +106,21 @@ pub async fn start(id: i64, job: &ScrapeJob, queue: &JobQueue) {
         );
     }
 
-    queue.flow_set_context("scrape", id, job).await;
-
-    let scrapers = queue.fan_out_plugin_hook(scrape_event(job), id).await;
-    if scrapers == 0 {
+    let outcomes = queue.fan_out_and_collect(&scrape_event(job)).await;
+    if outcomes.is_empty() {
         tracing::warn!(
             id,
             title = %item.title,
             "scrape: no scraper plugins are enabled, so nothing can be found"
         );
-        finalize(id, queue).await;
-        return;
     }
+    // Errored and rate-limited scrapers both mean "this scraper never
+    // answered" — an infrastructure failure, not "this item has no streams".
+    let unavailable_count = crate::dispatch::count_infrastructure_failures(&outcomes);
+    let responses: Vec<ScrapeResponse> = crate::dispatch::decode_hook_responses(outcomes);
 
-    tracing::debug!(
-        id,
-        title = %item.title,
-        scrapers,
-        "scrape: request sent to the scrapers, waiting for all of them to answer"
-    );
-}
-
-pub async fn finalize(id: i64, queue: &JobQueue) {
-    let Some(job) = queue.flow_get_context::<ScrapeJob>("scrape", id).await else {
-        tracing::warn!(
-            id,
-            "scrape: results arrived after the run was already cleaned up (duplicate or expired scrape); discarding them"
-        );
-        queue.clear_flow_all("scrape", id).await;
-        return;
-    };
-
-    let result_count = queue.flow_result_count("scrape", id).await;
-    let rate_limited_count = queue.flow_rate_limited_count("scrape", id).await;
-    queue.clear_flow("scrape", id).await;
-    queue.clear_flow_rate_limited("scrape", id).await;
-    queue.flow_clear_context("scrape", id).await;
-
+    // Reload: the scrapers took wall-clock time and the item may have moved.
     let Some(item) = load_media_item_or_log(id, "scrape finalize").await else {
-        queue.clear_flow_all("scrape", id).await;
         return;
     };
 
@@ -158,17 +134,14 @@ pub async fn finalize(id: i64, queue: &JobQueue) {
             state = ?item.state,
             "scrape: discarding results, the item reached a final state while the scrapers were running"
         );
-        queue.clear_flow_all("scrape", id).await;
         queue
             .notify(RivenEvent::MediaItemScrapeErrorIncorrectState { id })
             .await;
         return;
     }
 
-    if result_count == 0 {
-        queue.clear_flow_all("scrape", id).await;
-
-        if rate_limited_count > 0 {
+    if responses.is_empty() {
+        if unavailable_count > 0 {
             let max = queue.maximum_scrape_attempts.load(Ordering::Relaxed);
             let budget = rate_limit_retry_budget(max, item.failed_attempts);
             let next_attempt = job.rate_limit_retries + 1;
@@ -177,11 +150,11 @@ pub async fn finalize(id: i64, queue: &JobQueue) {
                 tracing::warn!(
                     id,
                     title = %item.title,
-                    rate_limited_scrapers = rate_limited_count,
+                    unavailable_scrapers = unavailable_count,
                     attempt = next_attempt,
                     budget,
                     retry_in_secs = backoff.as_secs(),
-                    "scrape: every scraper is rate-limited right now; retrying later"
+                    "scrape: every scraper that answered is rate-limited or failing right now; retrying later"
                 );
                 queue
                     .push_scrape_after(
@@ -197,10 +170,10 @@ pub async fn finalize(id: i64, queue: &JobQueue) {
             tracing::warn!(
                 id,
                 title = %item.title,
-                rate_limited_scrapers = rate_limited_count,
+                unavailable_scrapers = unavailable_count,
                 attempts = job.rate_limit_retries + 1,
                 budget,
-                "scrape: giving up on rate-limited retries for now; the item keeps its current state and waits for the next library pass"
+                "scrape: giving up on retries for now; the item keeps its current state and waits for the next library pass"
             );
             return;
         }
@@ -229,16 +202,16 @@ pub async fn finalize(id: i64, queue: &JobQueue) {
     tracing::debug!(
         id,
         title = %item.title,
-        scrapers_with_results = result_count,
+        scrapers_with_results = responses.len(),
         "scrape: got results, queueing them for parsing and ranking"
     );
     queue
-        .push_parse_scrape_results(ParseScrapeResultsJob { id })
+        .push_parse_scrape_results(ParseScrapeResultsJob { id, responses })
         .await;
 }
 
-pub async fn parse_results(id: i64, _job: &ParseScrapeResultsJob, queue: &JobQueue) {
-    let responses: Vec<ScrapeResponse> = queue.drain_flow_results("scrape", id).await;
+pub async fn parse_results(id: i64, job: &ParseScrapeResultsJob, queue: &JobQueue) {
+    let responses = job.responses.clone();
 
     let Some(item) = load_media_item_or_log(id, "parse-scrape-results").await else {
         return;

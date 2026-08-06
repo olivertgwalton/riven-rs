@@ -414,10 +414,13 @@ async fn prune_set(
         .iter()
         .map(|id| format!("{job_meta_hash}:{id}"))
         .collect();
+    // `{meta}:result` holds each task's stored result (every plugin-hook
+    // outcome lands there); without this HDEL the hash grows forever.
     let _result: Result<(), _> = redis::pipe()
         .atomic()
         .zrem(set_key, &ids)
         .hdel(job_data_hash, &ids)
+        .hdel(format!("{job_meta_hash}:result"), &ids)
         .del(meta_keys)
         .query_async(redis)
         .await;

@@ -10,10 +10,9 @@ pub enum DispatchStrategy {
     /// Notification: every subscriber gets a fire-and-forget plugin-hook job.
     /// Producer calls `JobQueue::notify`.
     Broadcast,
-    /// Orchestrator fans out per-plugin children, each plugin-hook job stores
-    /// its result under the flow's `<prefix>` keys, and the last completion
-    /// runs `finalize` inline. `prefix` namespaces the Redis flow keys.
-    FanIn { prefix: &'static str },
+    /// Orchestrator fans out per-plugin children and awaits their apalis task
+    /// results (`fan_out_and_collect`), then aggregates them inline.
+    FanIn,
     /// Caller invokes `registry.dispatch` / `dispatch_to_plugin` synchronously
     /// — no queue. Used when the caller needs the result in-process and the
     /// extra Redis round-trip would dominate the actual hook cost.
@@ -179,9 +178,8 @@ impl EventType {
             // it cannot be queued.
             | Self::ArtworkRequested => Inline,
 
-            Self::MediaItemScrapeRequested => FanIn { prefix: "scrape" },
-            Self::MediaItemIndexRequested => FanIn { prefix: "index" },
-            Self::ContentServiceRequested => FanIn { prefix: "content" },
+            Self::MediaItemScrapeRequested | Self::MediaItemIndexRequested
+            | Self::ContentServiceRequested => FanIn,
 
             Self::CoreStarted
             | Self::CoreShutdown

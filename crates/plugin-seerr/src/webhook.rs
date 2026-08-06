@@ -33,7 +33,12 @@ impl SeerrMutations {
             Ok(p) => p,
             Err(e) => {
                 tracing::warn!(error = %e, "seerr webhook payload failed to parse, falling back to full refresh");
-                riven_queue::application::request_content::enqueue(job_queue).await;
+                // Spawned: `run` awaits every content plugin's response and a
+                // webhook reply must not block on that.
+                let job_queue = Arc::clone(job_queue);
+                tokio::spawn(async move {
+                    riven_queue::application::request_content::run(&job_queue).await;
+                });
                 return Ok(true);
             }
         };

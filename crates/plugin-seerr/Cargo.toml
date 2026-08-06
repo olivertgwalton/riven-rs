@@ -13,6 +13,7 @@ tracing = { workspace = true }
 async-trait = { workspace = true }
 async-graphql = { workspace = true }
 anyhow = { workspace = true }
+tokio = { workspace = true }
 
 [lints]
 workspace = true
