@@ -250,11 +250,30 @@ fn leaf_paused_is_sticky() {
     );
 }
 
+/// `Failed` is sticky only in the absence of a real media entry — resetting
+/// `failed_attempts` alone must not revive the item; that is what
+/// `resetItems`/`Reset` is for.
 #[test]
-fn leaf_failed_is_sticky() {
+fn leaf_failed_is_sticky_without_a_media_entry() {
+    assert_eq!(
+        leaf(MediaItemType::Movie, Failed, false, 0, false, false, 0),
+        Failed
+    );
+}
+
+/// A season-pack download matches files by season+episode number regardless
+/// of the target episode's own state, so a media entry can land on an item
+/// that was marked `Failed` long before. Without this, the item stays stuck
+/// showing `Failed` forever despite having a real downloaded file.
+#[test]
+fn leaf_media_entry_overrides_failed() {
     assert_eq!(
         leaf(MediaItemType::Movie, Failed, false, 0, true, false, 0),
-        Failed
+        Completed
+    );
+    assert_eq!(
+        leaf(MediaItemType::Episode, Failed, false, 999, true, false, 5),
+        Completed
     );
 }
 
