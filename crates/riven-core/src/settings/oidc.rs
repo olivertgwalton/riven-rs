@@ -55,7 +55,9 @@ pub struct OidcProviderSettings {
     /// created by you — and where you have confirmed it does not set
     /// `email_verified` (PocketID is a common example: it has no email
     /// confirmation flow, so it never reports the claim as true, and linking
-    /// would otherwise permanently fail with `account_not_linked`).
+    /// would otherwise fail every time — quietly, since the callback redirects
+    /// to `/?error=sign-in-failed` and logs the reason server-side rather than
+    /// telling the browser which account it declined to link).
     #[serde(default)]
     pub trust_unverified_email: bool,
 }

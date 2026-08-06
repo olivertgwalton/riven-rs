@@ -23,8 +23,10 @@ export const passwordChangeSchema = z
 
 export type PasswordChangeSchema = z.infer<typeof passwordChangeSchema>;
 
+/** The password confirms the change; accounts without one leave it blank. */
 export const emailChangeSchema = z.object({
 	newEmail: z.email("Invalid email address"),
+	currentPassword: z.string(),
 });
 
 export type EmailChangeSchema = z.infer<typeof emailChangeSchema>;

@@ -51,9 +51,9 @@
 
     let { user } = $props();
 
-    // An account has one handle. `displayUsername` is the same string with the
+    // An account has one handle. `display_username` is the same string with the
     // casing its owner typed; `username` is the lower-cased form sign-in uses.
-    const handle = $derived(user?.displayUsername ?? user?.username ?? "");
+    const handle = $derived(user?.display_username ?? user?.username ?? "");
 
     const visibleNavItems = $derived(
         navItems.filter((item) => !item.adminOnly || can(page.data.permissions, "MANAGE_SETTINGS"))

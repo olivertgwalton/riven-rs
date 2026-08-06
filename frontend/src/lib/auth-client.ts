@@ -1,54 +1,39 @@
 import { createPasskey, getPasskeyAssertion } from "$lib/passkeys";
 
 /**
- * Thin client for the backend's authentication endpoints.
- *
- * The backend mounts `better-auth` at `/auth` and owns sessions, password
- * verification, 2FA, passkeys and API keys. This file is only an HTTP client for
- * that surface — there is deliberately no `better-auth` package dependency, so
- * the frontend cannot drift out of wire-compatibility with an alpha Rust
- * reimplementation of the protocol. The routes below are the stable REST surface
- * (`/auth/sign-in/username`, `/auth/get-session`, …), not SDK internals.
+ * Thin client for the backend's authentication endpoints (`riven-api`'s
+ * `server/authn`). Field names are snake_case end to end — the backend
+ * serializes its Rust structs directly, with no rename layer on either side.
  *
  * Always same-origin: riven serves this bundle itself.
  */
 const AUTH_URL = "/auth";
 
-/**
- * There is no `name` here on purpose. An account is a username and an email;
- * `name` is only a field better-auth's own request shapes insist on, and the
- * database keeps it equal to the username (migration
- * `037_auth_username_is_name.sql`), so it is never a second identity. The
- * wrappers below fill it in where the wire demands it, so no call site has to
- * think about it.
- */
 export interface AuthUser {
 	id: string;
+	name?: string | null;
 	email?: string | null;
+	email_verified?: boolean;
 	image?: string | null;
 	username?: string | null;
-	displayUsername?: string | null;
+	display_username?: string | null;
 	role?: string | null;
-	emailVerified?: boolean;
-	twoFactorEnabled?: boolean;
-	createdAt?: string;
-	updatedAt?: string;
+	created_at?: string;
+	updated_at?: string;
 }
 
 export interface AuthSession {
 	id: string;
-	userId: string;
-	expiresAt: string;
+	user_id: string;
+	expires_at: string;
 }
 
 /** A row from `/list-accounts`: one authentication method linked to the user. */
 export interface LinkedAccount {
-	id?: string;
-	providerId: string;
-	accountId: string;
-	createdAt?: string;
-	updatedAt?: string;
-	scopes?: string[];
+	id: string;
+	provider_id: string;
+	account_id: string;
+	created_at?: string;
 }
 
 /** One entry from `/oidc-providers`: a configured provider whose issuer
@@ -63,22 +48,19 @@ export interface AuthResult<T> {
 	error: { message: string; status: number } | null;
 }
 
-/** `name` and `transports` are omitted rather than nulled when unset. */
 export interface Passkey {
 	id: string;
 	name?: string | null;
-	createdAt: string;
-	deviceType: string;
-	backedUp: boolean;
-	transports?: string;
+	created_at: string;
+	device_type: string;
+	backed_up: boolean;
+	transports?: string | null;
 }
 
 /**
- * Every call carries the session cookie — it is the only credential, and a
- * cross-origin request drops it without `credentials: "include"`.
+ * Every call carries the session cookie — it is the only credential.
  *
- * Errors are returned rather than thrown so callers can render them inline;
- * that matches how the previous SDK behaved and keeps call sites unchanged.
+ * Errors are returned rather than thrown so callers can render them inline.
  */
 async function call<T>(
 	path: string,
@@ -141,13 +123,13 @@ export const authClient = {
 
 	signIn: {
 		username(body: { username: string; password: string }) {
-			return call<{ user: AuthUser; token?: string }>("/sign-in/username", {
+			return call<{ user: AuthUser }>("/sign-in/username", {
 				method: "POST",
 				body,
 			});
 		},
 		email(body: { email: string; password: string }) {
-			return call<{ user: AuthUser; token?: string }>("/sign-in/email", {
+			return call<{ user: AuthUser }>("/sign-in/email", {
 				method: "POST",
 				body,
 			});
@@ -165,7 +147,7 @@ export const authClient = {
 				return { data: null, error: error ?? EMPTY_RESPONSE };
 			}
 			const assertion = await getPasskeyAssertion(options, init);
-			return call<{ user: AuthUser; session: AuthSession }>(
+			return call<{ user: AuthUser }>(
 				"/passkey/verify-authentication",
 				{ method: "POST", body: { response: assertion } },
 			);
@@ -173,15 +155,13 @@ export const authClient = {
 
 		/**
 		 * Starts an OIDC sign-in: the backend returns the provider's
-		 * authorization URL rather than a redirect response — `disableRedirect`
-		 * is what asks for that, since a `fetch()` call cannot hand a 302 back to
-		 * the browser for a top-level navigation. The caller navigates
-		 * `window.location` to the returned `url` itself.
+		 * authorization URL (a `fetch()` cannot hand a 302 to the browser for a
+		 * top-level navigation), and the caller navigates to it itself.
 		 */
-		social(body: { provider: string; callbackURL: string }) {
+		social(body: { provider: string; callback_url: string }) {
 			return call<{ url: string }>("/sign-in/social", {
 				method: "POST",
-				body: { ...body, disableRedirect: true },
+				body,
 			});
 		},
 	},
@@ -193,9 +173,9 @@ export const authClient = {
 	 */
 	signUp: {
 		email(body: { username: string; email: string; password: string }) {
-			return call<{ user: AuthUser; token?: string }>("/sign-up/email", {
+			return call<{ user: AuthUser }>("/sign-up/email", {
 				method: "POST",
-				body: { ...body, name: body.username },
+				body,
 			});
 		},
 	},
@@ -204,19 +184,13 @@ export const authClient = {
 		return call<{ available: boolean }>("/first-user");
 	},
 
-	/** Only providers that resolved via OIDC discovery at startup — see
-	 * `oidc::resolve_providers` on the backend. */
 	oidcProviders() {
 		return call<OidcProviderSummary[]>("/oidc-providers");
 	},
 
 	/**
 	 * `poll` answers `{ pending: true }` with a 202 until the user approves.
-	 *
 	 * `handle` is an opaque token for this sign-in attempt, not the Plex PIN id.
-	 * The id used to be the path parameter, which made polling enumerable — PIN
-	 * ids are sequential, and a poll that finds an approved PIN sets a session
-	 * cookie. Only the caller that ran `start` holds the handle.
 	 */
 	plex: {
 		start() {
@@ -232,22 +206,9 @@ export const authClient = {
 	},
 
 	passkey: {
-		/**
-		 * `name` labels the credential in riven's own list; browsers ignore it
-		 * and use their own naming in the OS keychain.
-		 */
-		generateRegisterOptions(options?: {
-			name?: string;
-			authenticatorAttachment?: "platform" | "cross-platform";
-		}) {
-			const query = new URLSearchParams();
-			if (options?.name) query.set("name", options.name);
-			if (options?.authenticatorAttachment) {
-				query.set("authenticatorAttachment", options.authenticatorAttachment);
-			}
-			const suffix = query.size ? `?${query}` : "";
+		generateRegisterOptions() {
 			return call<PublicKeyCredentialCreationOptionsJSON>(
-				`/passkey/generate-register-options${suffix}`,
+				"/passkey/generate-register-options",
 			);
 		},
 
@@ -260,7 +221,7 @@ export const authClient = {
 		/** Registers a passkey against the *current* session's user. */
 		async add(options?: { name?: string }) {
 			const { data: creationOptions, error } =
-				await authClient.passkey.generateRegisterOptions(options);
+				await authClient.passkey.generateRegisterOptions();
 			if (error || !creationOptions) {
 				return { data: null, error: error ?? EMPTY_RESPONSE };
 			}
@@ -295,9 +256,9 @@ export const authClient = {
 	},
 
 	changePassword(body: {
-		currentPassword: string;
-		newPassword: string;
-		revokeOtherSessions?: boolean;
+		current_password: string;
+		new_password: string;
+		revoke_other_sessions?: boolean;
 	}) {
 		return call<{ success: boolean }>("/change-password", {
 			method: "POST",
@@ -305,29 +266,23 @@ export const authClient = {
 		});
 	},
 
-	changeEmail(body: { newEmail: string }) {
+	/** `current_password` may be omitted only by accounts that have none. */
+	changeEmail(body: { new_email: string; current_password?: string }) {
 		return call<{ status: boolean }>("/change-email", { method: "POST", body });
 	},
 
-	/**
-	 * Partial update — omitted fields are left alone, and an all-empty body is
-	 * rejected by the backend with "No fields to update". `email` is not
-	 * accepted here; `changeEmail` owns that.
-	 */
+	/** Partial update — omitted fields are left alone. `email` is not accepted
+	 * here; `changeEmail` owns that. */
 	updateUser(body: { username?: string; image?: string }) {
 		return call<{ status: boolean }>("/update-user", { method: "POST", body });
 	},
 
 	/**
-	 * Deletes the *caller's own* account and clears the session cookie.
-	 *
-	 * The password is the confirmation step: riven runs with delete-user
-	 * verification off (no mail provider), so without it the only thing standing
-	 * between a borrowed session and a deleted account is a session-freshness
-	 * check.
+	 * Deletes the *caller's own* account and clears the session cookie. The
+	 * password is the confirmation step.
 	 */
 	deleteUser(body: { password: string }) {
-		return call<{ success: boolean; message: string }>("/delete-user", {
+		return call<{ success: boolean }>("/delete-user", {
 			method: "POST",
 			body,
 		});
@@ -337,7 +292,7 @@ export const authClient = {
 		return call<LinkedAccount[]>("/list-accounts");
 	},
 
-	unlinkAccount(body: { providerId: string; accountId?: string }) {
+	unlinkAccount(body: { provider_id: string }) {
 		return call<{ status: boolean }>("/unlink-account", {
 			method: "POST",
 			body,
@@ -348,12 +303,12 @@ export const authClient = {
 		return call<AuthSession[]>("/list-sessions");
 	},
 
-	/** Admin plugin — requires the caller's session to carry the admin role. */
+	/** Admin — requires the caller's session to carry the admin role. */
 	admin: {
 		listUsers(query?: {
 			limit?: number;
-			sortBy?: string;
-			sortDirection?: string;
+			sort_by?: string;
+			sort_direction?: string;
 		}) {
 			const params = new URLSearchParams();
 			for (const [key, value] of Object.entries(query ?? {})) {
@@ -372,10 +327,10 @@ export const authClient = {
 		}) {
 			return call<{ user: AuthUser }>("/admin/create-user", {
 				method: "POST",
-				body: { ...body, name: body.username },
+				body,
 			});
 		},
-		removeUser(body: { userId: string }) {
+		removeUser(body: { user_id: string }) {
 			return call<{ success: boolean }>("/admin/remove-user", {
 				method: "POST",
 				body,

@@ -5,8 +5,9 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-better-auth = { workspace = true }
-better-auth-core = { workspace = true }
+webauthn-rs = { workspace = true }
+base64 = { workspace = true }
+uuid = { workspace = true }
 riven-core = { path = "../riven-core" }
 riven-db = { path = "../riven-db" }
 riven-rank = { path = "../riven-rank" }
@@ -36,6 +37,10 @@ hmac = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
 scrypt = { version = "0.12", default-features = false }
+# argon2's password-hash re-exports rand_core without the `getrandom` feature;
+# this direct dep turns it on (same 0.6.x crate, so pure feature unification)
+# for the `OsRng` behind salts, session tokens and challenge handles.
+rand_core = { version = "0.6", features = ["getrandom"] }
 subtle = "2"
 unicode-normalization = "0.1"
 argon2 = "0.5"

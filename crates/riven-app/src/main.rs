@@ -100,13 +100,6 @@ fn validate_auth_settings(settings: &riven_core::settings::RivenSettings) -> Res
          (Overseerr/Jellyseerr webhooks) and derives the Stremio addon token. \
          Generate one with `openssl rand -hex 32`."
     );
-    anyhow::ensure!(
-        settings.auth_secret.len() >= 32,
-        "RIVEN_SETTING__AUTH_SECRET must be at least 32 characters (got {}). \
-         It signs session tokens, so rotating it signs everyone out. \
-         Generate one with `openssl rand -hex 32`.",
-        settings.auth_secret.len()
-    );
     Ok(())
 }
 
@@ -143,7 +136,7 @@ fn url_host(url: &str) -> Option<&str> {
 ///
 /// The bind address is the interesting case: `gql_host` defaults to `0.0.0.0`,
 /// which is meaningful to `bind()` and meaningless to a browser. Used verbatim
-/// it became better-auth's `base_url`, which sets the cookie scope and — because
+/// it becomes `AuthService::base_url`, which sets the cookie scope and — because
 /// the passkey relying-party ID is that URL's host — produced an RP ID of
 /// `0.0.0.0`, which every browser rejects. Passkeys then failed at registration
 /// with nothing in the logs pointing here. A wildcard bind is normal, so it is
@@ -374,8 +367,6 @@ async fn main() -> Result<()> {
             tracing::info!(origin, "CORS allowlist falling back to ORIGIN");
             cors_allowed_origins.push(origin);
         }
-        // better-auth signs sessions with this.
-        let auth_secret = settings.auth_secret.clone();
         // Cookie scope and trusted redirect targets are derived from this, so
         // prefer explicit config, then the same ORIGIN the CORS allowlist uses,
         // then the bind address for local runs.
@@ -404,7 +395,6 @@ async fn main() -> Result<()> {
                 cors_allowed_origins,
                 vfs_mount_manager,
                 cancel,
-                auth_secret,
                 public_url,
                 oidc_providers,
             })
@@ -441,17 +431,14 @@ mod tests {
     use super::{resolve_public_url, url_host, validate_auth_settings};
     use riven_core::settings::RivenSettings;
 
-    fn settings(api_key: &str, auth_secret: &str) -> RivenSettings {
+    fn settings(api_key: &str) -> RivenSettings {
         RivenSettings {
             api_key: api_key.to_string(),
-            auth_secret: auth_secret.to_string(),
             ..RivenSettings::default()
         }
     }
 
-    const GOOD_SECRET: &str = "0123456789abcdef0123456789abcdef";
-
-    /// The bug this guards: `0.0.0.0` reaching better-auth as `base_url` makes
+    /// The bug this guards: `0.0.0.0` reaching auth as `base_url` makes
     /// the passkey relying-party ID `0.0.0.0`, which browsers reject.
     #[test]
     fn a_wildcard_bind_host_resolves_to_loopback() {
@@ -516,10 +503,10 @@ mod tests {
 
     #[test]
     fn a_complete_configuration_is_accepted() {
-        assert!(validate_auth_settings(&settings("a-key", GOOD_SECRET)).is_ok());
+        assert!(validate_auth_settings(&settings("a-key")).is_ok());
     }
 
-    /// The default settings carry empty strings for both, so a bare `docker run`
+    /// The default settings carry an empty API key, so a bare `docker run`
     /// with no env must fail here rather than come up unauthenticated.
     #[test]
     fn the_defaults_do_not_boot() {
@@ -529,23 +516,10 @@ mod tests {
     #[test]
     fn a_missing_or_blank_api_key_is_rejected() {
         for key in ["", "   "] {
-            let error = validate_auth_settings(&settings(key, GOOD_SECRET))
+            let error = validate_auth_settings(&settings(key))
                 .expect_err("a blank api key must not boot")
                 .to_string();
             assert!(error.contains("RIVEN_SETTING__API_KEY"), "{error}");
         }
-    }
-
-    /// Matches `authn::build`'s own floor, so the failure lands at startup
-    /// rather than inside the spawned GraphQL task where it only got logged.
-    #[test]
-    fn a_short_auth_secret_is_rejected() {
-        for secret in ["", "too-short"] {
-            let error = validate_auth_settings(&settings("a-key", secret))
-                .expect_err("a short secret must not boot")
-                .to_string();
-            assert!(error.contains("at least 32 characters"), "{error}");
-        }
-        assert!(validate_auth_settings(&settings("a-key", &"x".repeat(32))).is_ok());
     }
 }

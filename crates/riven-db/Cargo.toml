@@ -6,8 +6,6 @@ rust-version.workspace = true
 
 [dependencies]
 riven-core = { path = "../riven-core" }
-better-auth = { workspace = true }
-better-auth-seaorm = { workspace = true }
 riven-rank = { path = "../riven-rank" }
 sea-orm = { workspace = true }
 sea-orm-migration = { version = "2.0", default-features = false, features = ["sqlx-postgres", "runtime-tokio-rustls", "with-chrono", "with-json"] }

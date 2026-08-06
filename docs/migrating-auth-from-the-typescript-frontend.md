@@ -2,8 +2,8 @@
 
 Riven used to keep its users in the SvelteKit frontend's own SQLite database,
 managed by the TypeScript `better-auth` package. Authentication now lives in the
-backend (`crates/riven-api/src/server/authn.rs`), with the tables created by
-migration `m036`.
+backend (`crates/riven-api/src/server/authn/`), implemented natively with no
+auth dependency, and the tables are created by migration `m036`.
 
 Existing users port across by copying rows — no re-registration, and everyone
 keeps their password. **Password hashes carry over as-is**: they are scrypt in
@@ -37,13 +37,11 @@ BEGIN;
 INSERT INTO auth_users (
     id, name, email, email_verified, image,
     created_at, updated_at,
-    username, display_username, role,
-    banned, ban_reason, ban_expires
+    username, display_username, role
 ) VALUES (
     '<user-id>', '<display name>', '<email>', false, NULL,
     '<created-at>', '<updated-at>',
-    '<username>', NULL, 'admin',
-    false, NULL, NULL
+    '<username>', NULL, 'admin'
 ) ON CONFLICT (id) DO NOTHING;
 
 INSERT INTO auth_accounts (

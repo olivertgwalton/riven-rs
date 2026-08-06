@@ -136,7 +136,7 @@
                                         {passkey.name || "Unnamed passkey"}
                                     </p>
                                     <p class="text-muted-foreground text-xs">
-                                        Added {new Date(passkey.createdAt).toLocaleDateString()}
+                                        Added {new Date(passkey.created_at).toLocaleDateString()}
                                     </p>
                                 {/if}
                             </div>

@@ -2,7 +2,6 @@ mod artwork;
 mod auth;
 mod authn;
 mod board;
-mod first_user;
 mod graphql;
 mod legacy_password;
 mod media;
@@ -18,7 +17,6 @@ use axum::http::{
     header::{ACCEPT_RANGES, AUTHORIZATION, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE},
 };
 use axum::{Router, routing::get};
-use better_auth::integrations::axum::AxumIntegration;
 use riven_core::http::HttpClient;
 use riven_core::logging::LogControl;
 use riven_core::plugin::PluginRegistry;
@@ -54,12 +52,9 @@ pub struct StartServerConfig {
     pub cors_allowed_origins: Vec<String>,
     pub vfs_mount_manager: Arc<VfsMountManager>,
     pub cancel: tokio_util::sync::CancellationToken,
-    /// Signing key for `better-auth` sessions. Must be at least 32 bytes;
-    /// rotating it invalidates every session.
-    pub auth_secret: String,
-    /// Public origin the browser reaches riven at. `better-auth` uses it for
-    /// cookie scope and trusted redirect targets, so a wrong value is a login
-    /// loop rather than a loud failure.
+    /// Public origin the browser reaches riven at. Cookie security, the
+    /// passkey relying party and OAuth redirect URIs derive from it, so a
+    /// wrong value is a login loop rather than a loud failure.
     pub public_url: String,
     /// OIDC sign-in providers (PocketID, Authelia, Keycloak, ...). Endpoints
     /// are resolved via discovery in `authn::build` — see `oidc::resolve_providers`.
@@ -69,13 +64,12 @@ pub struct StartServerConfig {
 mod state {
     use std::sync::Arc;
 
-    use axum::extract::FromRef;
     use riven_core::stream_link::LinkRequest;
     use riven_queue::JobQueue;
     use tokio::sync::broadcast;
 
     use crate::schema::AppSchema;
-    use crate::server::authn::{OidcProviderSummary, RivenAuth};
+    use crate::server::authn::AuthService;
 
     #[derive(Clone)]
     pub struct ApiState {
@@ -87,22 +81,10 @@ mod state {
         pub stream_client: reqwest::Client,
         pub link_request_tx: tokio::sync::mpsc::Sender<LinkRequest>,
         pub runtime: tokio::runtime::Handle,
-        pub auth: Arc<RivenAuth>,
+        pub auth: Arc<AuthService>,
         /// Held here as well as in the schema so the artwork proxy can dispatch
         /// to media-server plugins without going through GraphQL.
         pub registry: Arc<riven_core::plugin::PluginRegistry>,
-        /// OIDC providers that resolved at startup — read by the public
-        /// `/auth/oidc-providers` route so the login page knows which buttons
-        /// to render. No secrets in here, just `id`/`name`.
-        pub oidc_providers: Arc<Vec<OidcProviderSummary>>,
-    }
-
-    /// Lets `better-auth`'s router and its `CurrentSession` / `OptionalSession`
-    /// extractors pull the auth handle out of riven's own state.
-    impl FromRef<ApiState> for Arc<RivenAuth> {
-        fn from_ref(state: &ApiState) -> Self {
-            state.auth.clone()
-        }
     }
 }
 
@@ -124,21 +106,11 @@ pub async fn start_server(config: StartServerConfig) -> Result<()> {
         cors_allowed_origins,
         vfs_mount_manager,
         cancel,
-        auth_secret,
         public_url,
         oidc_providers,
     } = config;
 
-    // Built before the router so a bad secret fails startup loudly rather than
-    // at the first login attempt.
-    let (auth, oidc_provider_summaries) = authn::build(
-        &auth_secret,
-        &public_url,
-        cors_allowed_origins.clone(),
-        &oidc_providers,
-    )
-    .await?;
-    let oidc_provider_summaries = Arc::new(oidc_provider_summaries);
+    let auth = authn::build(&public_url, &oidc_providers).await?;
 
     let schema = build_schema(
         registry.clone(),
@@ -185,7 +157,6 @@ pub async fn start_server(config: StartServerConfig) -> Result<()> {
         runtime: tokio::runtime::Handle::current(),
         auth: auth.clone(),
         registry,
-        oidc_providers: oidc_provider_summaries,
     };
 
     let board_guard =
@@ -239,27 +210,10 @@ pub async fn start_server(config: StartServerConfig) -> Result<()> {
         // Proxies media-server artwork so the browser never receives the Plex
         // token / Emby API key that fetching it requires. See `artwork.rs`.
         .route("/artwork/{server}", get(artwork::artwork_handler))
-        // Plex sign-in. Not under better-auth's router because Plex is a
-        // PIN-and-poll flow, not OAuth2 — see `plex.rs`.
-        .route("/auth/plex/start", axum::routing::post(plex::start))
-        .route("/auth/plex/poll/{handle}", get(plex::poll))
-        // Whether better-auth's own `/auth/sign-up/email` will accept a caller.
-        // See `first_user.rs`: it does exactly once, for the first account.
-        .route("/auth/first-user", get(first_user::availability))
-        // Which OIDC providers resolved at startup, for the login page to
-        // render buttons for. Unauthenticated by necessity, like `first-user`
-        // above — read by the login page itself, which has no session yet.
-        .route("/auth/oidc-providers", get(oidc_providers_handler))
-        // better-auth's own endpoints: sign-in/out, sessions, password, 2FA,
-        // passkeys, API keys, admin.
-        //
-        // `axum_router_with_state` yields *unprefixed* routes (`/sign-in/email`,
-        // `/get-session`, …) — `AuthConfig::base_path` governs cookie scope and
-        // generated URLs, not where the router mounts. So this must be nested,
-        // not merged: merging put every endpoint at the root, where `/auth/*`
-        // then fell through to the SPA fallback and answered POSTs with 405.
-        // The prefix here and `base_path` in `authn::build` must stay in step.
-        .nest("/auth", auth.clone().axum_router_with_state::<ApiState>())
+        // Everything auth: sign-in/out, sign-up, sessions, password, Plex,
+        // passkeys, OIDC, admin — see `authn::router`. It carries its own
+        // rate-limit middleware, which needs the state to resolve a caller.
+        .nest("/auth", authn::router())
         // The board crate authenticates nothing itself, and `push_task` on
         // `/api/v1` enqueues whatever it is handed. Both halves are admin-only.
         .nest("/api/v1", board_api.with_state(()).layer(board_guard.clone()))
@@ -282,19 +236,17 @@ pub async fn start_server(config: StartServerConfig) -> Result<()> {
     let listener = tokio::net::TcpListener::bind(format!("{host}:{port}")).await?;
     tracing::info!(host = %host, port = port, "GraphQL server listening");
 
-    axum::serve(listener, app.into_make_service())
-        .with_graceful_shutdown(async move { cancel.cancelled().await })
-        .await?;
+    // `with_connect_info` rather than the plain service so the auth rate
+    // limiter can key on the peer address — the only client identity that
+    // cannot be forged by a header.
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(async move { cancel.cancelled().await })
+    .await?;
 
     Ok(())
-}
-
-/// Lists the OIDC providers that resolved at startup, for the login page to
-/// render a button per entry. No secrets — just `id`/`name`.
-async fn oidc_providers_handler(
-    axum::extract::State(state): axum::extract::State<ApiState>,
-) -> axum::Json<Vec<authn::OidcProviderSummary>> {
-    axum::Json((*state.oidc_providers).clone())
 }
 
 /// Response headers applied to everything riven serves.

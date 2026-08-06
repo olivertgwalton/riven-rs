@@ -9,7 +9,7 @@ use apalis_board_api::ui::ServeUI;
 use riven_core::auth::Capability;
 
 use super::ApiState;
-use super::auth::{AuthError, authorize_request};
+use super::auth::{self, authorize_request};
 
 /// Admin gate for the apalis board.
 ///
@@ -37,10 +37,9 @@ pub(super) async fn require_board_admin(
 
     let auth = match authorize_request(&state, &parts.headers, parts.uri.query()).await {
         Ok(auth) => auth,
-        Err(AuthError::Unauthorized) => {
+        Err(auth::Unauthorized) => {
             return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
         }
-        Err(AuthError::Forbidden) => return (StatusCode::FORBIDDEN, "Forbidden").into_response(),
     };
 
     if !Capability::ManageSettings.granted_to(auth.role) {

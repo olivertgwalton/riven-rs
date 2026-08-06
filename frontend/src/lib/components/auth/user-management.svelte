@@ -20,10 +20,9 @@
         id: string;
         email?: string | null;
         username?: string | null;
-        displayUsername?: string | null;
+        display_username?: string | null;
         role?: string | null;
-        banned?: boolean | null;
-        createdAt?: string | null;
+        created_at?: string | null;
     };
 
     let {
@@ -66,17 +65,17 @@
     const { form: formData, enhance, delayed } = form;
     let deletingId = $state<string | null>(null);
 
-    function formatCreatedAt(value: ManagedUser["createdAt"]) {
+    function formatCreatedAt(value: ManagedUser["created_at"]) {
         if (!value) return "Unknown";
         return dateUtils.formatDate(value) ?? "Unknown";
     }
 
     async function deleteUser(user: ManagedUser) {
-        const label = user.displayUsername ?? user.username ?? user.email ?? user.id;
+        const label = user.display_username ?? user.username ?? user.email ?? user.id;
         if (!confirm(`Delete ${label}? This cannot be undone.`)) return;
 
         deletingId = user.id;
-        const { error } = await authClient.admin.removeUser({ userId: user.id });
+        const { error } = await authClient.admin.removeUser({ user_id: user.id });
         deletingId = null;
 
         if (error) {
@@ -182,7 +181,7 @@
                     {#each users as user (user.id)}
                         <Table.Row>
                             <Table.Cell>
-                                <div class="font-medium">{user.displayUsername ?? user.username}</div>
+                                <div class="font-medium">{user.display_username ?? user.username}</div>
                                 <div class="text-muted-foreground text-xs">{user.email}</div>
                             </Table.Cell>
                             <Table.Cell>
@@ -191,7 +190,7 @@
                                 </Badge>
                             </Table.Cell>
                             <Table.Cell class="text-muted-foreground text-sm">
-                                {formatCreatedAt(user.createdAt)}
+                                {formatCreatedAt(user.created_at)}
                             </Table.Cell>
                             <Table.Cell class="text-right">
                                 <Button

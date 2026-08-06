@@ -24,7 +24,10 @@
         onUpdate: async ({ form }) => {
             if (!form.valid) return;
 
-            const { error } = await authClient.changeEmail({ newEmail: form.data.newEmail });
+            const { error } = await authClient.changeEmail({
+                new_email: form.data.newEmail,
+                current_password: form.data.currentPassword || undefined
+            });
 
             if (error) {
                 form.valid = false;
@@ -56,6 +59,19 @@
                             placeholder="Your new email address"
                             {...props}
                             bind:value={$formData.newEmail} />
+                    {/snippet}
+                </Form.Control>
+                <Form.FieldErrors />
+            </Form.Field>
+            <Form.Field {form} name="currentPassword">
+                <Form.Control>
+                    {#snippet children({ props })}
+                        <Form.Label for="currentPassword">Current Password</Form.Label>
+                        <Input
+                            type="password"
+                            placeholder="Leave blank if you sign in without a password"
+                            {...props}
+                            bind:value={$formData.currentPassword} />
                     {/snippet}
                 </Form.Control>
                 <Form.FieldErrors />
