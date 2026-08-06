@@ -2,24 +2,42 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use riven_core::events::RivenEvent;
-use riven_core::types::MediaItemType;
+use riven_core::types::{MediaItemType, ScrapeResponse};
 use riven_db::entities::MediaItem;
 
-/// One per-plugin invocation of a hook event. For fan-in events the
-/// `scope` discriminator names the orchestrator's flow keys
-/// (`riven:flow:<prefix>:<scope>:results` etc). For broadcast events
-/// (notifications) `scope` is unused.
+/// One per-plugin invocation of a hook event. For fan-in events the awaiting
+/// orchestrator reads the handler's [`HookOutcome`] back through apalis's
+/// task-result storage; broadcast events (notifications) ignore the result.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluginHookJob {
     pub plugin_name: String,
     pub event: RivenEvent,
-    /// Fan-in scope. Required for fan-in events; ignored for broadcast.
-    /// For orchestrator-driven flows (scrape/index) this is the media item id.
-    /// For caller-await flows (content, cache-check, etc.) the caller picks
-    /// a unique value so concurrent calls don't share flow keys.
-    #[serde(default)]
-    pub scope: Option<i64>,
 }
+
+/// What a plugin-hook child reports back to the orchestrator awaiting it.
+///
+/// This is the task's stored result, so it must be (de)serializable with the
+/// queue's JSON codec. The orchestrator aggregates `Response` payloads,
+/// counts `RateLimited` for backoff, and ignores the rest.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HookOutcome {
+    /// The plugin answered; `None` means the response carried nothing worth
+    /// aggregating (e.g. a scraper that found no streams).
+    Response(Option<serde_json::Value>),
+    /// The plugin deferred with a rate-limit/retry-later error.
+    RateLimited,
+    /// The plugin failed; the error was already logged in the hook worker.
+    Failed,
+    /// Nothing to report: broadcast events, stale children, missing plugins.
+    Skipped,
+}
+
+/// Handler return type for plugin-hook workers. The outer `Result` layer is
+/// required by apalis-redis's wire format: `RedisAck` stores the handler's
+/// Ok-value JSON verbatim while `check_status` decodes it as
+/// `Result<Res, String>` — so the Ok value must itself be that `Result`.
+pub type HookAck = Result<HookOutcome, String>;
 
 /// Per-item state-machine job.
 ///
@@ -108,7 +126,7 @@ pub struct ScrapeJob {
     pub season: Option<i32>,
     pub episode: Option<i32>,
     /// Number of times this job has been re-pushed because every scraper
-    /// plugin was temporarily deferred. Incremented in `finalize` before re-pushing;
+    /// plugin was temporarily deferred. Incremented before re-pushing;
     /// existing jobs in Redis deserialise to 0 via the `default`.
     #[serde(default)]
     pub rate_limit_retries: u32,
@@ -170,4 +188,11 @@ pub struct RankStreamsJob {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ParseScrapeResultsJob {
     pub id: i64,
+    /// Per-scraper stream maps collected by the scrape orchestrator. Carried
+    /// in the job payload (Redis task data) — the same bytes the old fan-in
+    /// design parked in a flow-results hash between the two workers.
+    /// `default` so a pre-upgrade job still queued in Redis decodes (to an
+    /// empty run) instead of killing the parse worker's poll stream.
+    #[serde(default)]
+    pub responses: Vec<ScrapeResponse>,
 }

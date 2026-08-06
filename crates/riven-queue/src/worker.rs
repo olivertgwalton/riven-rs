@@ -35,7 +35,9 @@ impl Scheduler {
                     return;
                 }
                 _ = content_tick.tick() => {
-                    crate::application::request_content::enqueue(&self.job_queue).await;
+                    // Awaits the whole fan-in (bounded by the hook-collect
+                    // timeout); a slow content sync just delays the next tick.
+                    crate::application::request_content::run(&self.job_queue).await;
                     self.transition_newly_aired().await;
                 }
                 _ = &mut retry_sleep           => {

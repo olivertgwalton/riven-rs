@@ -19,39 +19,34 @@ fn index_event(job: &IndexJob) -> RivenEvent {
 }
 
 pub async fn start(job: &IndexJob, queue: &JobQueue) {
-    let Some(item) = load_media_item_or_log(job.id, "indexing").await else {
+    let id = job.id;
+    let Some(item) = load_media_item_or_log(id, "indexing").await else {
         return;
     };
 
-    let indexers = queue.fan_out_plugin_hook(index_event(job), job.id).await;
     tracing::debug!(
-        id = job.id,
+        id,
         title = %item.title,
         item_type = ?job.item_type,
         imdb_id = job.imdb_id.as_deref().unwrap_or("-"),
         tmdb_id = job.tmdb_id.as_deref().unwrap_or("-"),
-        indexers,
         "index: asking the metadata providers to describe this item"
     );
-    if indexers == 0 {
+    let outcomes = queue.fan_out_and_collect(&index_event(job)).await;
+    if outcomes.is_empty() {
         tracing::warn!(
-            id = job.id,
+            id,
             title = %item.title,
             "index: no metadata provider is enabled, so this item cannot be indexed"
         );
-        finalize(job.id, queue).await;
     }
-}
+    let responses: Vec<IndexedMediaItem> = crate::dispatch::decode_hook_responses(outcomes);
 
-pub async fn finalize(id: i64, queue: &JobQueue) {
+    // Reload: the indexers took wall-clock time and the item may have moved.
     let Some(item) = load_media_item_or_log(id, "index finalize").await else {
-        queue.clear_flow_all("index", id).await;
         return;
     };
-
     let requested_seasons = load_requested_seasons(&item).await;
-    let responses: Vec<IndexedMediaItem> = queue.drain_flow_results("index", id).await;
-    queue.clear_flow("index", id).await;
 
     if responses.is_empty() {
         tracing::warn!(

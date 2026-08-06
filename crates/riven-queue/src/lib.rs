@@ -12,7 +12,6 @@ pub mod workers;
 
 mod cancellation;
 mod dispatch;
-mod flow;
 mod scheduling;
 mod storage;
 
@@ -22,7 +21,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64};
 
 use anyhow::Result;
-use apalis::prelude::{TaskBuilder, TaskId, TaskSink};
+use apalis::prelude::{TaskBuilder, TaskId, TaskSink, WaitForCompletion};
 use apalis_redis::{RedisConfig, RedisStorage};
 use chrono::{DateTime, Utc};
 use futures::future;
@@ -42,8 +41,8 @@ use riven_rank::ResolutionRanks;
 
 pub use dedup::DedupGuard;
 pub use jobs::{
-    DownloadJob, IndexJob, ParseScrapeResultsJob, PluginHookJob, ProcessMediaItemJob, ProcessStep,
-    RankStreamsJob, ScrapeJob,
+    DownloadJob, HookAck, HookOutcome, IndexJob, ParseScrapeResultsJob, PluginHookJob,
+    ProcessMediaItemJob, ProcessStep, RankStreamsJob, ScrapeJob,
 };
 pub use maintenance::{
     RecoveryReport, clear_worker_registrations, prune_queue_history, purge_orphaned_active_jobs,
@@ -98,49 +97,11 @@ pub struct JobQueue {
     pub resolution_ranks: Arc<RwLock<ResolutionRanks>>,
 }
 
-#[inline]
-fn flow_pending_key(prefix: &str, id: i64) -> String {
-    format!("riven:flow:{prefix}:{id}:pending")
-}
-
-#[inline]
-fn flow_results_key(prefix: &str, id: i64) -> String {
-    format!("riven:flow:{prefix}:{id}:results")
-}
-
-/// Set of children (plugin names) that have completed this flow. Replaces the
-/// old decrementing counter so completion is idempotent under apalis's
-/// at-least-once redelivery — see [`JobQueue::flow_complete_child`].
-#[inline]
-fn flow_done_key(prefix: &str, id: i64) -> String {
-    format!("riven:flow:{prefix}:{id}:done")
-}
-
-#[inline]
-fn flow_rate_limited_key(prefix: &str, id: i64) -> String {
-    format!("riven:flow:{prefix}:{id}:rate_limited")
-}
-
-#[inline]
-fn flow_context_key(prefix: &str, id: i64) -> String {
-    format!("riven:flow:{prefix}:{id}:context")
-}
-
-fn deserialize_flow_results<T: DeserializeOwned>(
-    prefix: &str,
-    id: i64,
-    raw: Vec<String>,
-) -> Vec<T> {
-    raw.into_iter()
-        .filter_map(|s| match serde_json::from_str(&s) {
-            Ok(v) => Some(v),
-            Err(e) => {
-                tracing::error!(prefix, id, error = %e, "failed to deserialize flow result");
-                None
-            }
-        })
-        .collect()
-}
+/// Upper bound on how long a fan-in orchestrator waits for one plugin-hook
+/// child's result. Must comfortably exceed the hook workers' own 180s job
+/// timeout (plus queue wait); the scrape/index worker timeouts are derived
+/// from it so the awaiting orchestrator always outlives its children.
+pub(crate) const HOOK_COLLECT_TIMEOUT_SECS: u64 = 300;
 
 const CANCELLED_ITEMS_SET: &str = "riven:cancelled-items";
 

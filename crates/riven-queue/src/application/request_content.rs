@@ -6,32 +6,18 @@ use riven_db::repo;
 use crate::JobQueue;
 use crate::lifecycle::{upsert_requested_movie, upsert_requested_show};
 
-/// Singleton flow scope for content-service polling. Only one content-service
-/// fan-in runs at a time (the scheduler's 120s tick is the sole producer plus
-/// the seerr webhook), so a fixed scope is safe.
-const CONTENT_SCOPE: i64 = 0;
-
-/// Kick off the content-service flow: fan out a `ContentServiceRequested`
-/// hook job to every subscribed plugin's queue. The orchestrator's `finalize`
-/// runs in whichever plugin-hook worker drains the last child.
-pub async fn enqueue(queue: &JobQueue) {
-    if queue
-        .fan_out_plugin_hook(RivenEvent::ContentServiceRequested, CONTENT_SCOPE)
-        .await
-        == 0
-    {
+/// Run the content-service flow end to end: fan out a
+/// `ContentServiceRequested` hook job to every subscribed plugin, await their
+/// responses, persist new items, and prune content removed from upstream.
+pub async fn run(queue: &JobQueue) {
+    let outcomes = queue
+        .fan_out_and_collect(&RivenEvent::ContentServiceRequested)
+        .await;
+    if outcomes.is_empty() {
         tracing::debug!("content-service flow has no subscribers");
+        return;
     }
-}
-
-/// Run the content service request flow's tail: aggregate every plugin's
-/// `ContentServiceResponse`, persist new items, and prune content removed
-/// from upstream. Invoked from the plugin-hook worker on last-child completion.
-pub async fn finalize(scope: i64, queue: &JobQueue) {
-    tracing::debug!("running content service finalize");
-
-    let responses: Vec<ContentServiceResponse> = queue.drain_flow_results("content", scope).await;
-    queue.clear_flow("content", scope).await;
+    let responses: Vec<ContentServiceResponse> = crate::dispatch::decode_hook_responses(outcomes);
 
     let mut content = ContentCollection::default();
 

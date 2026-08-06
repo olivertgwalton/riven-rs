@@ -9,9 +9,10 @@ use riven_core::http::{RateLimitedError, RetryLaterError};
 
 use crate::context::{is_scrapeable, load_media_item_or_log};
 use crate::dedup::DedupGuard;
+use crate::jobs::{HookAck, HookOutcome};
 use crate::{
-    DownloadJob, IndexJob, JobQueue, ParseScrapeResultsJob, PluginHookJob, ProcessMediaItemJob,
-    RankStreamsJob, ScrapeJob,
+    DownloadJob, HOOK_COLLECT_TIMEOUT_SECS, IndexJob, JobQueue, ParseScrapeResultsJob,
+    PluginHookJob, ProcessMediaItemJob, RankStreamsJob, ScrapeJob,
 };
 
 async fn handle_index_job(job: IndexJob, q: Data<Arc<JobQueue>>) -> Result<(), BoxDynError> {
@@ -62,17 +63,21 @@ async fn handle_process_media_item_job(
 /// event, each running this handler.
 ///
 /// `Inline` events never reach this handler — `JobQueue::new` skips creating
-/// their queues. Broadcast events just dispatch and return. Fan-in events
-/// also store the response in the flow's results hash and, on the last
-/// child's completion, run the orchestrator's `finalize` inline.
+/// their queues. Broadcast events just dispatch; nobody reads their result.
+/// Fan-in events return a [`HookOutcome`] which apalis stores as the task
+/// result for the awaiting orchestrator (`fan_out_and_collect`) to read.
+///
+/// Fan-in outcomes are always `Ok` at the apalis layer — a failed plugin is
+/// reported as `HookOutcome::Failed`, not a task error — so children are
+/// never retried and the orchestrator's wait resolves on first completion.
 async fn handle_plugin_hook_job(
     job: PluginHookJob,
     q: Data<Arc<JobQueue>>,
-) -> Result<(), BoxDynError> {
+) -> Result<HookAck, BoxDynError> {
     let event_type = job.event.event_type();
     match event_type.dispatch_strategy() {
         DispatchStrategy::Broadcast => handle_broadcast(&job, &q).await,
-        DispatchStrategy::FanIn { prefix } => handle_fan_in(&job, &q, prefix).await,
+        DispatchStrategy::FanIn => Ok(Ok(handle_fan_in(&job, &q).await)),
         DispatchStrategy::Inline => {
             tracing::error!(?event_type, "Inline event reached plugin-hook worker");
             handle_broadcast(&job, &q).await
@@ -80,32 +85,24 @@ async fn handle_plugin_hook_job(
     }
 }
 
-async fn handle_broadcast(job: &PluginHookJob, q: &JobQueue) -> Result<(), BoxDynError> {
+async fn handle_broadcast(job: &PluginHookJob, q: &JobQueue) -> Result<HookAck, BoxDynError> {
     match q
         .registry
         .dispatch_to_plugin(&job.plugin_name, &job.event)
         .await
     {
         Some(Err(error)) => Err(error.into()),
-        Some(Ok(_)) | None => Ok(()),
+        Some(Ok(_)) | None => Ok(Ok(HookOutcome::Skipped)),
     }
 }
 
-async fn handle_fan_in(
-    job: &PluginHookJob,
-    q: &JobQueue,
-    prefix: &'static str,
-) -> Result<(), BoxDynError> {
+async fn handle_fan_in(job: &PluginHookJob, q: &JobQueue) -> HookOutcome {
     let event_type = job.event.event_type();
-    let Some(scope) = job.scope else {
-        tracing::error!(?event_type, "fan-in plugin-hook job missing scope");
-        return Ok(());
-    };
 
     if let Some(id) = job.event.media_item_id() {
         let maybe_item = load_media_item_or_log(id, "plugin-hook").await;
-        let drop_child = match (&job.event, &maybe_item) {
-            (_, None) => true,
+        match (&job.event, &maybe_item) {
+            (_, None) => return HookOutcome::Skipped,
             (RivenEvent::MediaItemScrapeRequested { .. }, Some(item))
                 if !is_scrapeable(item.state) =>
             {
@@ -115,16 +112,9 @@ async fn handle_fan_in(
                     plugin = %job.plugin_name,
                     "skipping stale scrape plugin-hook job; item no longer processable"
                 );
-                true
+                return HookOutcome::Skipped;
             }
-            _ => false,
-        };
-        if drop_child {
-            if q.flow_complete_child(prefix, scope, &job.plugin_name).await {
-                q.clear_flow_all(prefix, scope).await;
-                finalize_event(q, &job.event, scope).await;
-            }
-            return Ok(());
+            _ => {}
         }
     }
 
@@ -133,39 +123,29 @@ async fn handle_fan_in(
         .dispatch_to_plugin(&job.plugin_name, &job.event)
         .await
     {
-        Some(Ok(response)) => {
-            if let Some(payload) = extract_fan_in_response(event_type, response) {
-                q.flow_store_result(prefix, scope, &job.plugin_name, &payload)
-                    .await;
-            }
-        }
+        Some(Ok(response)) => HookOutcome::Response(extract_fan_in_response(event_type, response)),
         Some(Err(ref error)) if error.is::<RateLimitedError>() || error.is::<RetryLaterError>() => {
-            q.flow_increment_rate_limited(prefix, scope).await;
             tracing::warn!(
                 plugin = %job.plugin_name,
                 ?event_type,
-                scope,
                 "plugin hook deferred (rate limited)"
             );
+            HookOutcome::RateLimited
         }
         Some(Err(error)) => {
             tracing::error!(
                 plugin = %job.plugin_name,
                 ?event_type,
-                scope,
                 error = %error,
                 "plugin hook failed"
             );
+            HookOutcome::Failed
         }
         None => {
             tracing::warn!(plugin = %job.plugin_name, ?event_type, "plugin not found at dispatch time");
+            HookOutcome::Skipped
         }
     }
-
-    if q.flow_complete_child(prefix, scope, &job.plugin_name).await {
-        finalize_event(q, &job.event, scope).await;
-    }
-    Ok(())
 }
 
 /// Return the JSON value that should be stored under the per-plugin slot of
@@ -187,26 +167,6 @@ fn extract_fan_in_response(
             serde_json::to_value(*response).ok()
         }
         _ => None,
-    }
-}
-
-/// Last-child completion handoff for orchestrator-driven fan-in flows. The
-/// matching `finalize` runs inline here in whichever plugin-hook worker
-/// drained the last child.
-async fn finalize_event(queue: &JobQueue, event: &RivenEvent, scope: i64) {
-    match event {
-        RivenEvent::MediaItemScrapeRequested { .. } => {
-            crate::application::scrape::finalize(scope, queue).await;
-        }
-        RivenEvent::MediaItemIndexRequested { .. } => {
-            crate::application::index::finalize(scope, queue).await;
-        }
-        RivenEvent::ContentServiceRequested => {
-            crate::application::request_content::finalize(scope, queue).await;
-        }
-        _ => {
-            tracing::error!(?event, "finalize_event called for non-fan-in event");
-        }
     }
 }
 
@@ -257,23 +217,28 @@ pub fn start_workers(queue: Arc<JobQueue>, usenet_download_workers: Option<usize
     let download_n = usenet_download_workers.unwrap_or_else(|| cpu_n.max(10));
 
     let m = Monitor::new();
+    // Index/scrape orchestrators await their plugin-hook children in-handler
+    // (`fan_out_and_collect`), so a slot is held for the whole fan-in: the
+    // timeout must exceed the child-wait budget, and concurrency matches the
+    // hook workers' width — a waiting orchestrator is just an idle future, and
+    // anything narrower would gate scrape throughput below the plugin queues'.
     let m = register_worker!(
         m,
         queue,
         "riven-index",
         index_storage,
-        orchestrator_n,
+        plugin_n,
         handle_index_job,
-        60
+        HOOK_COLLECT_TIMEOUT_SECS + 60
     );
     let m = register_worker!(
         m,
         queue,
         "riven-scrape",
         scrape_storage,
-        orchestrator_n,
+        plugin_n,
         handle_scrape_job,
-        60
+        HOOK_COLLECT_TIMEOUT_SECS + 60
     );
     let m = register_worker!(
         m,

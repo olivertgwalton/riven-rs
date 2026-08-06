@@ -65,19 +65,6 @@ impl JobQueue {
                     .query_async(&mut conn)
                     .await;
             }
-            for prefix in ["scrape", "parse", "index"] {
-                let _result: Result<(), _> = redis::pipe()
-                    .cmd("DEL")
-                    .arg(flow_pending_key(prefix, *id))
-                    .cmd("DEL")
-                    .arg(flow_done_key(prefix, *id))
-                    .cmd("DEL")
-                    .arg(flow_results_key(prefix, *id))
-                    .cmd("DEL")
-                    .arg(flow_rate_limited_key(prefix, *id))
-                    .query_async(&mut conn)
-                    .await;
-            }
         }
     }
 
@@ -185,6 +172,10 @@ impl JobQueue {
             pipe.cmd("ZREM").arg(&failed_set).arg(task_id).ignore();
             pipe.cmd("DEL")
                 .arg(format!("{meta_hash_prefix}:{task_id}"))
+                .ignore();
+            pipe.cmd("HDEL")
+                .arg(format!("{meta_hash_prefix}:result"))
+                .arg(task_id)
                 .ignore();
         }
         let _: () = pipe.query_async(&mut conn).await?;
