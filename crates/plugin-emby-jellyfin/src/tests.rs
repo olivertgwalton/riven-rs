@@ -21,13 +21,14 @@ fn rewrite_media_path_handles_slashes_once() {
 }
 
 #[test]
-fn media_server_request_uses_header_auth_without_query_token() {
+fn media_server_request_uses_header_auth_emby() {
     let client = reqwest::Client::new();
     let request = media_server_request(
         &client,
         reqwest::Method::POST,
         "https://emby.example.test/Library/Media/Updated",
         "secret-token",
+        "emby",
     )
     .build()
     .expect("request should build");
@@ -35,11 +36,34 @@ fn media_server_request_uses_header_auth_without_query_token() {
     assert_eq!(
         request
             .headers()
-            .get(MEDIA_SERVER_TOKEN_HEADER)
+            .get(EMBY_TOKEN_HEADER)
             .and_then(|value| value.to_str().ok()),
         Some("secret-token")
     );
     assert_eq!(request.url().query(), None);
+}
+
+#[test]
+fn media_server_request_uses_query_auth_jellyfin() {
+    let client = reqwest::Client::new();
+    let request = media_server_request(
+        &client,
+        reqwest::Method::POST,
+        "https://jellyfin.example.test/Library/Media/Updated",
+        "secret-token",
+        "jellyfin",
+    )
+    .build()
+    .expect("request should build");
+    assert_eq!(request.headers().get(EMBY_TOKEN_HEADER), None);
+    assert_eq!(
+        request
+            .url()
+            .query_pairs()
+            .find(|(key, _)| key == "ApiKey")
+            .map(|(_, value)| value.into_owned()),
+        Some("secret-token".to_string())
+    );
 }
 
 #[test]

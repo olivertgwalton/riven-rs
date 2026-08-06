@@ -26,7 +26,9 @@ pub struct EmbyPlugin;
 #[derive(Default)]
 pub struct JellyfinPlugin;
 
-const MEDIA_SERVER_TOKEN_HEADER: &str = "X-Emby-Token";
+/// Legacy header understood by Emby, and by Jellyfin servers older than 12.0
+/// (as a fallback, when legacy auth hasn't been disabled).
+const EMBY_TOKEN_HEADER: &str = "X-Emby-Token";
 
 #[derive(Serialize)]
 struct LibraryUpdate<'a> {
@@ -42,15 +44,23 @@ struct PathUpdate<'a> {
     update_type: &'a str,
 }
 
+/// Builds an authenticated request for a media server.
+/// Jellyfin 12.0 disabled the legacy headers i.e. X-Emby-Token by default. 
+/// Jellyfin reimplementation uses `ApiKey` which supports >=10.8 
+/// Emby has not made this change continues to use `X-Emby-Token` header.
 fn media_server_request(
     client: &reqwest::Client,
     method: Method,
     url: &str,
     api_key: &str,
+    plugin: &str,
 ) -> reqwest::RequestBuilder {
-    client
-        .request(method, url)
-        .header(MEDIA_SERVER_TOKEN_HEADER, api_key)
+    let req = client.request(method, url);
+    if plugin == "jellyfin" {
+        req.query(&[("ApiKey", api_key)])
+    } else {
+        req.header(EMBY_TOKEN_HEADER, api_key)
+    }
 }
 
 /// Notify a Jellyfin/Emby server that the given VFS paths were created.
@@ -76,7 +86,7 @@ pub(crate) async fn notify_paths(
     let body = LibraryUpdate { updates };
     let resp = http
         .send(server_profile(plugin), |client| {
-            media_server_request(client, Method::POST, &url, api_key).json(&body)
+            media_server_request(client, Method::POST, &url, api_key, plugin).json(&body)
         })
         .await?;
 
@@ -98,7 +108,7 @@ async fn refresh_library(
     tracing::debug!(plugin, target_url = %url, "requesting media server library refresh");
     let resp = http
         .send(server_profile(plugin), |client| {
-            media_server_request(client, Method::POST, &url, api_key)
+            media_server_request(client, Method::POST, &url, api_key, plugin)
         })
         .await?;
 
@@ -311,7 +321,8 @@ async fn get_artwork(
     );
     let response = http
         .send(server_profile(server), |client| {
-            media_server_request(client, Method::GET, &url, api_key).header("accept", "image/*")
+            media_server_request(client, Method::GET, &url, api_key, server)
+                .header("accept", "image/*")
         })
         .await?
         .error_for_status()?;
@@ -352,7 +363,7 @@ async fn get_active_sessions(
     tracing::debug!(server, target_url = %url, "fetching active playback sessions from media server");
     let resp: Vec<MediaServerSession> = http
         .get_json(server_profile(server), url.clone(), |client| {
-            media_server_request(client, Method::GET, &url, api_key)
+            media_server_request(client, Method::GET, &url, api_key, server)
         })
         .await?;
 
