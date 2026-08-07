@@ -48,7 +48,7 @@ pub async fn attempt_download(
         raw_title,
         resolution,
         profile = profile_name,
-        "download: asking the debrid services for this release"
+        "download: offering this release to the download plugins"
     );
 
     let event = RivenEvent::MediaItemDownloadRequested {
@@ -75,7 +75,7 @@ pub async fn attempt_download(
                         info_hash,
                         raw_title,
                         files = download.files.len(),
-                        "download: debrid service returned the torrent's file list"
+                        "download: plugin accepted the release and returned its file list"
                     );
                     download_result = Some(download);
                     break;
@@ -86,7 +86,7 @@ pub async fn attempt_download(
                         plugin = plugin_name,
                         info_hash,
                         raw_title,
-                        "download: the debrid service reported this torrent as cached earlier but no longer has it"
+                        "download: plugin reported this release as available earlier but can no longer provide it"
                     );
                 }
                 Ok(_) => {}
@@ -96,7 +96,7 @@ pub async fn attempt_download(
                         info_hash,
                         raw_title,
                         error = %error,
-                        "download: debrid service errored on this release; moving on to the next service or stream"
+                        "download: plugin errored on this release; moving on to the next provider or stream"
                     );
                 }
             }
@@ -121,7 +121,7 @@ pub async fn attempt_download(
                 id,
                 info_hash,
                 raw_title,
-                "download: cleared the stale cached-availability entry, asking the debrid services again"
+                "download: cleared the stale availability entry, offering the release again"
             );
             let retry_event = RivenEvent::MediaItemDownloadRequested {
                 id,
@@ -152,7 +152,7 @@ pub async fn attempt_download(
             id,
             info_hash,
             raw_title,
-            "download: no debrid service could provide this release"
+            "download: no download plugin could provide this release"
         );
         return DownloadAttemptOutcome::Failed;
     };

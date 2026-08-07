@@ -132,7 +132,7 @@ pub struct RecoveryReport {
 /// registration and claim in Redis belongs to a previous incarnation of the
 /// process (a hard kill, an OOM, a `docker restart`) and is safe to sweep
 /// wholesale. While the process is alive, per-worker recovery happens at
-/// worker-restart time instead — see [`requeue_stranded_inflight`].
+/// worker-restart time instead — see [`clear_dead_incarnation`].
 pub async fn clear_worker_registrations(
     redis: &mut redis::aio::ConnectionManager,
     queues: &[String],
@@ -140,38 +140,38 @@ pub async fn clear_worker_registrations(
     rescue_workers(redis, queues).await
 }
 
-/// Requeue every task a dead worker incarnation was still holding.
+/// Clear a dead worker incarnation out of the way of its replacement:
+/// requeue everything it was holding and remove its registration.
 ///
 /// Called from the worker factory when apalis restarts a worker
-/// (`Monitor::should_restart` → factory closure with `runs > 0`). The previous
-/// incarnation's task stream died — a Redis timeout, a blip, a failed
-/// `get_jobs.lua` — which ends `CallAllUnordered` and drops any handler
-/// futures mid-run; everything it had claimed is still in its inflight set,
-/// owned by a worker that no longer exists. The replacement registers under
-/// the same name and the same inflight set, but apalis never re-reads that
-/// set, so without this the entries sit there forever. (apalis ships
-/// `reenqueue_orphaned_jobs.lua` for exactly this case and nothing in
-/// apalis-redis 1.0.0-rc.8 invokes it — the config knob
-/// `reenqueue_orphaned_after` has accessors and no callers.)
+/// (`Monitor::should_restart` → factory closure with `runs > 0`), and it must
+/// complete *before* the replacement is built, because both halves are
+/// ordering-sensitive in opposite directions:
 ///
-/// One atomic Lua script: per id, `SREM` from the inflight set and only on
-/// success `RPUSH` to the active list, then pulse the signal list. The SREM
-/// gate means an id the new incarnation has already acked cannot be requeued,
-/// and atomicity means its claims cannot interleave. The one residual window —
-/// the new worker claiming a task in the instant between the factory firing
-/// and this script running — resolves as a single sequential re-run of that
-/// task, which every handler already tolerates (it is the same outcome as a
-/// process restart mid-job).
+/// - The registration must go. `register_worker.lua` refuses to register a
+///   name whose existing entry has heartbeated within the last keep-alive
+///   ("worker is still active within threshold") — and the dead incarnation
+///   heartbeated seconds ago. Left in place, the replacement's first register
+///   errors, which is itself a stream error, which triggers another restart:
+///   a hot loop measured at ~200k attempts while the stale entry aged out.
+/// - The removal must not run *after* the replacement registers, or it would
+///   delete the replacement's own registration and fail its next
+///   `get_jobs.lua` zscore check — the same loop from the other side.
 ///
-/// Deliberately never touches the workers zset: the replacement has already
-/// registered, and deregistering it would fail its next `get_jobs.lua` zscore
-/// check — the exact way workers die.
-pub async fn requeue_stranded_inflight(
+/// Synchronous-before-build is the only ordering that satisfies both, which
+/// is why the caller blocks on this rather than spawning it.
+///
+/// The task requeue rides in the same atomic script: per id, `SREM` from the
+/// inflight set and only on success `RPUSH` to the active list, so an id the
+/// old incarnation managed to ack can never be double-queued. (apalis ships
+/// `reenqueue_orphaned_jobs.lua` for this and nothing in apalis-redis
+/// 1.0.0-rc.8 invokes it.)
+pub async fn clear_dead_incarnation(
     redis: &mut redis::aio::ConnectionManager,
     queue_name: &str,
     worker_name: &str,
 ) -> redis::RedisResult<u64> {
-    const REQUEUE_STRANDED: &str = r#"
+    const CLEAR_DEAD_INCARNATION: &str = r#"
         local moved = 0
         for _, id in ipairs(redis.call("SMEMBERS", KEYS[1])) do
             if redis.call("SREM", KEYS[1], id) == 1 then
@@ -179,6 +179,8 @@ pub async fn requeue_stranded_inflight(
                 moved = moved + 1
             end
         end
+        redis.call("ZREM", KEYS[4], KEYS[1])
+        redis.call("DEL", KEYS[5])
         if moved > 0 then
             redis.call("DEL", KEYS[3])
             redis.call("LPUSH", KEYS[3], 1)
@@ -187,11 +189,17 @@ pub async fn requeue_stranded_inflight(
     "#;
 
     let config = queue_config(queue_name);
+    // The workers-zset member IS the inflight-set name, and the metadata key
+    // is that member appended to `{ns}:workers:metadata` — both per
+    // apalis-redis's own registration (lib.rs heartbeat + register_worker.lua).
     let inflight_set = format!("{}:{}", config.inflight_jobs_set(), worker_name);
-    let moved: u64 = redis::Script::new(REQUEUE_STRANDED)
+    let metadata_key = format!("{queue_name}:workers:metadata{inflight_set}");
+    let moved: u64 = redis::Script::new(CLEAR_DEAD_INCARNATION)
         .key(&inflight_set)
         .key(config.active_jobs_list())
         .key(config.signal_list())
+        .key(config.workers_set())
+        .key(&metadata_key)
         .invoke_async(redis)
         .await?;
     if moved > 0 {
@@ -210,80 +218,105 @@ async fn rescue_workers(
     queues: &[String],
 ) -> redis::RedisResult<RecoveryReport> {
     let mut report = RecoveryReport::default();
+    // Per-queue isolation: one queue failing must not abandon the sweep for
+    // the rest. An abandoned sweep leaves stale registrations behind, and
+    // every worker whose registration survives fails its first register
+    // ("worker is still active within threshold") — one error here used to
+    // cascade into a restart wave across every queue.
     for queue_name in queues {
-        let config = queue_config(queue_name);
-        let workers: Vec<String> = redis::cmd("ZRANGE")
-            .arg(config.workers_set())
-            .arg(0i64)
-            .arg(-1i64)
-            .query_async(redis)
-            .await?;
-        if workers.is_empty() {
-            continue;
-        }
-
-        let worker_jobs: Vec<Vec<String>> = {
-            let mut pipe = redis::pipe();
-            for worker in &workers {
-                pipe.cmd("SMEMBERS").arg(worker);
+        match rescue_queue(redis, queue_name).await {
+            Ok((workers, jobs)) => {
+                report.workers += workers;
+                report.jobs += jobs;
             }
-            pipe.query_async(redis).await?
-        };
-        let candidates: HashSet<String> = worker_jobs.into_iter().flatten().collect();
-        let candidate_ids: Vec<String> = candidates.into_iter().collect();
-        let exists: Vec<bool> = {
-            let mut pipe = redis::pipe();
-            for id in &candidate_ids {
-                pipe.cmd("HEXISTS").arg(config.job_data_hash()).arg(id);
-            }
-            pipe.query_async(redis).await?
-        };
-        let rescued: Vec<String> = candidate_ids
-            .into_iter()
-            .zip(exists)
-            .filter_map(|(id, exists)| exists.then_some(id))
-            .collect();
-
-        // Redis executes an atomic pipeline as MULTI/EXEC. Requeueing and
-        // registration cleanup therefore commit together, so a connection
-        // failure cannot leave jobs detached from both locations.
-        let workers_set = config.workers_set();
-        let mut transaction = redis::pipe();
-        transaction.atomic();
-        if !rescued.is_empty() {
-            transaction
-                .rpush(config.active_jobs_list(), &rescued)
-                .ignore()
-                .del(config.signal_list())
-                .ignore()
-                .lpush(config.signal_list(), 1u8)
-                .ignore();
-        }
-        for worker in &workers {
-            transaction
-                .del(worker_metadata_key(&workers_set, worker))
-                .ignore()
-                .del(worker)
-                .ignore()
-                .zrem(&workers_set, worker)
-                .ignore();
-        }
-        transaction.query_async::<()>(redis).await?;
-
-        let worker_count = workers.len() as u64;
-        let job_count = rescued.len() as u64;
-        report.workers += worker_count;
-        report.jobs += job_count;
-        if worker_count > 0 {
-            tracing::info!(
+            Err(error) => tracing::error!(
                 queue = queue_name,
-                workers = worker_count,
-                jobs = job_count,
-                "recovered previous incarnation's workers"
-            );
+                %error,
+                "could not sweep the previous incarnation's workers; replacements on this queue will each recover individually"
+            ),
         }
     }
     Ok(report)
+}
+
+async fn rescue_queue(
+    redis: &mut redis::aio::ConnectionManager,
+    queue_name: &str,
+) -> redis::RedisResult<(u64, u64)> {
+    let config = queue_config(queue_name);
+    let workers: Vec<String> = redis::cmd("ZRANGE")
+        .arg(config.workers_set())
+        .arg(0i64)
+        .arg(-1i64)
+        .query_async(redis)
+        .await?;
+    if workers.is_empty() {
+        return Ok((0, 0));
+    }
+
+    let worker_jobs: Vec<Vec<String>> = {
+        let mut pipe = redis::pipe();
+        for worker in &workers {
+            pipe.cmd("SMEMBERS").arg(worker);
+        }
+        pipe.query_async(redis).await?
+    };
+    let candidates: HashSet<String> = worker_jobs.into_iter().flatten().collect();
+    let candidate_ids: Vec<String> = candidates.into_iter().collect();
+    // Guarded because an empty pipeline is a client error ("empty command"),
+    // not a no-op — and idle workers with empty inflight sets are the NORMAL
+    // restart case. This exact unguarded pipe aborted the whole startup sweep
+    // on every healthy reboot.
+    let exists: Vec<bool> = if candidate_ids.is_empty() {
+        Vec::new()
+    } else {
+        let mut pipe = redis::pipe();
+        for id in &candidate_ids {
+            pipe.cmd("HEXISTS").arg(config.job_data_hash()).arg(id);
+        }
+        pipe.query_async(redis).await?
+    };
+    let rescued: Vec<String> = candidate_ids
+        .into_iter()
+        .zip(exists)
+        .filter_map(|(id, exists)| exists.then_some(id))
+        .collect();
+
+    // Redis executes an atomic pipeline as MULTI/EXEC. Requeueing and
+    // registration cleanup therefore commit together, so a connection
+    // failure cannot leave jobs detached from both locations.
+    let workers_set = config.workers_set();
+    let mut transaction = redis::pipe();
+    transaction.atomic();
+    if !rescued.is_empty() {
+        transaction
+            .rpush(config.active_jobs_list(), &rescued)
+            .ignore()
+            .del(config.signal_list())
+            .ignore()
+            .lpush(config.signal_list(), 1u8)
+            .ignore();
+    }
+    for worker in &workers {
+        transaction
+            .del(worker_metadata_key(&workers_set, worker))
+            .ignore()
+            .del(worker)
+            .ignore()
+            .zrem(&workers_set, worker)
+            .ignore();
+    }
+    transaction.query_async::<()>(redis).await?;
+
+    let worker_count = workers.len() as u64;
+    let job_count = rescued.len() as u64;
+    tracing::info!(
+        queue = queue_name,
+        workers = worker_count,
+        jobs = job_count,
+        "recovered previous incarnation's workers"
+    );
+    Ok((worker_count, job_count))
 }
 
 /// Remove job IDs from each queue's active list that have no corresponding
@@ -393,6 +426,11 @@ pub async fn purge_stale_dedup_keys(redis: &mut redis::aio::ConnectionManager) {
 /// cutoff, does it via `HGETALL` of the entire data hash (which blocks Redis
 /// for the duration on a large one), and exposes no public way to call it
 /// anyway.
+/// Hand-rolled history retention, kept deliberately: apalis-redis rc.8 ships
+/// `vacuum.lua`, but it deletes *every* terminal task with no age or count
+/// cutoff, does it via `HGETALL` of the entire data hash (which blocks Redis
+/// for the duration on a large one), and exposes no public way to call it
+/// anyway.
 pub async fn prune_queue_history(redis: &mut redis::aio::ConnectionManager, queues: &[String]) {
     for queue in queues {
         let config = queue_config(queue);
@@ -494,15 +532,23 @@ async fn prune_set(
 mod tests {
     use super::queue_config;
 
-    /// The per-restart requeue and the worker registration must address the
-    /// same inflight set, or restarts would silently rescue nothing. apalis
-    /// derives the set as `{queue}:inflight:{worker_name}` (fetcher.rs); this
-    /// pins riven's reconstruction of that shape.
+    /// The restart cleanup and apalis's registration must address the same
+    /// keys, or restarts would silently clear nothing — or worse, leave the
+    /// stale registration that hot-loops the replacement. apalis derives the
+    /// inflight set as `{queue}:inflight:{worker}` (fetcher.rs), registers it
+    /// as the workers-zset *member*, and keys metadata as
+    /// `{ns}:workers:metadata{member}` (lib.rs heartbeat); this pins riven's
+    /// reconstruction of all three.
     #[test]
-    fn stranded_inflight_key_matches_apalis_layout() {
+    fn dead_incarnation_keys_match_apalis_layout() {
         let config = queue_config("riven:download");
-        let key = format!("{}:{}", config.inflight_jobs_set(), "riven-download");
-        assert_eq!(key, "riven:download:inflight:riven-download");
+        let inflight = format!("{}:{}", config.inflight_jobs_set(), "riven-download");
+        assert_eq!(inflight, "riven:download:inflight:riven-download");
+        let metadata = format!("{}:workers:metadata{inflight}", "riven:download");
+        assert_eq!(
+            metadata,
+            "riven:download:workers:metadatariven:download:inflight:riven-download"
+        );
     }
 
     /// Maintenance must read the same config the workers registered with —

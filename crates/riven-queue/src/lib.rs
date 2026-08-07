@@ -46,9 +46,9 @@ pub use jobs::{
 };
 pub(crate) use maintenance::queue_config;
 pub use maintenance::{
-    RecoveryReport, clear_worker_registrations, prune_queue_history, purge_orphaned_active_jobs,
-    purge_orphaned_worker_sets, purge_stale_dedup_keys, reconcile_library_profiles,
-    requeue_stranded_inflight,
+    RecoveryReport, clear_dead_incarnation, clear_worker_registrations, prune_queue_history,
+    purge_orphaned_active_jobs, purge_orphaned_worker_sets, purge_stale_dedup_keys,
+    reconcile_library_profiles,
 };
 pub use workers::start_workers;
 

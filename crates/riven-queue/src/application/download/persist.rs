@@ -38,7 +38,7 @@ pub use supplied::persist_supplied_download;
 /// the provider's link-resolver to mint a fresh `stream_url` on demand. Without
 /// either, the row produces a phantom entry in the VFS — `ls` shows the file
 /// but `read()` fails, which surfaces as Plex seeing the title without ever
-/// scanning media or opening a debrid connection.
+/// scanning media or opening a connection to a download provider.
 ///
 /// The `matched:{id}` sentinel used by show-supplied downloads carries a real
 /// `download_url`, so it passes this check.

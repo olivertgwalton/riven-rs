@@ -176,29 +176,41 @@ fn extract_fan_in_response(
     }
 }
 
-/// Requeue whatever the previous incarnation of `worker_name` was holding.
+/// Clear the previous incarnation of `worker_name` out of the replacement's
+/// way, blocking until it is done.
 ///
-/// Fired from the worker factory on every restart (`runs > 0`). The dead
-/// incarnation's claims are still in its inflight set — same set the
-/// replacement registers under, and apalis never re-reads it — so they are
-/// invisible to everything except this. Spawned rather than awaited because
-/// the factory is synchronous; the requeue script is atomic, so the
-/// replacement's own claims cannot be caught in it (see
-/// [`crate::maintenance::requeue_stranded_inflight`]).
-fn rescue_previous_incarnation(q: &Arc<JobQueue>, queue_name: String, worker_name: String) {
+/// Runs inside the synchronous worker factory, which is the only point that
+/// is guaranteed to sit between the old worker dying and the new one
+/// registering — the ordering [`crate::maintenance::clear_dead_incarnation`]
+/// requires from both directions. `block_in_place` is sound here because the
+/// monitor always runs on the multi-thread runtime (`tokio::spawn` in
+/// riven-app), and this is the failure path, not the hot path.
+///
+/// The short pause before the cleanup is a circuit-breaker: if restarts are
+/// failing for a reason cleanup cannot fix (Redis hard down), the factory loop
+/// must not spin — the original incident retried ~200k times in under a
+/// minute. Capped low because the common case is a single transient error
+/// where a long wait would just prolong the outage.
+fn clear_previous_incarnation(q: &Arc<JobQueue>, queue_name: &str, worker_name: &str, runs: usize) {
+    const BACKOFF_STEP: Duration = Duration::from_millis(250);
+    const BACKOFF_CAP: Duration = Duration::from_secs(5);
+
     let mut redis = q.redis.clone();
-    tokio::spawn(async move {
-        if let Err(error) =
-            crate::maintenance::requeue_stranded_inflight(&mut redis, &queue_name, &worker_name)
-                .await
-        {
-            tracing::error!(
-                worker = %worker_name,
-                queue = %queue_name,
-                %error,
-                "could not requeue the dead incarnation's tasks; they stay stranded until the next restart"
-            );
-        }
+    tokio::task::block_in_place(|| {
+        tokio::runtime::Handle::current().block_on(async {
+            tokio::time::sleep(BACKOFF_STEP.saturating_mul(runs as u32).min(BACKOFF_CAP)).await;
+            if let Err(error) =
+                crate::maintenance::clear_dead_incarnation(&mut redis, queue_name, worker_name)
+                    .await
+            {
+                tracing::error!(
+                    worker = worker_name,
+                    queue = queue_name,
+                    %error,
+                    "could not clear the dead incarnation; its registration may block the replacement until it ages out"
+                );
+            }
+        });
     });
 }
 
@@ -208,7 +220,7 @@ macro_rules! register_worker {
         let queue_name = q.$storage.get_config().get_namespace().as_ref().to_owned();
         $monitor.register(move |runs| {
             if runs > 0 {
-                rescue_previous_incarnation(&q, queue_name.clone(), $name.to_owned());
+                clear_previous_incarnation(&q, &queue_name, $name, runs);
             }
             WorkerBuilder::new($name)
                 .backend(q.$storage.clone())
@@ -228,7 +240,7 @@ macro_rules! register_worker {
         let queue_name = q.$storage.get_config().get_namespace().as_ref().to_owned();
         $monitor.register(move |runs| {
             if runs > 0 {
-                rescue_previous_incarnation(&q, queue_name.clone(), $name.to_owned());
+                clear_previous_incarnation(&q, &queue_name, $name, runs);
             }
             WorkerBuilder::new($name)
                 .backend(q.$storage.clone())
@@ -332,7 +344,7 @@ pub fn start_workers(queue: Arc<JobQueue>, usenet_download_workers: Option<usize
         let worker_name = format!("hook-{plugin_name}-{}", event_type.slug());
         m = m.register(move |runs| {
             if runs > 0 {
-                rescue_previous_incarnation(&q, queue_name.clone(), worker_name.clone());
+                clear_previous_incarnation(&q, &queue_name, &worker_name, runs);
             }
             WorkerBuilder::new(worker_name.clone())
                 .backend(storage.clone())

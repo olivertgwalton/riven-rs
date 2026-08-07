@@ -35,7 +35,7 @@ pub async fn load_item_or_err(id: i64, queue: &JobQueue, error_msg: &str) -> Opt
 }
 
 /// Log a bitrate failure and store the file size so the next download attempt can
-/// pre-filter this stream before touching the debrid service. Does not blacklist
+/// pre-filter this stream before handing it to a download plugin. Does not blacklist
 /// and does not emit any events — the caller's loop continues to the next stream.
 pub async fn handle_bitrate_failure(
     id: i64,

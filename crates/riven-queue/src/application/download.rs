@@ -312,7 +312,7 @@ pub async fn run(id: i64, job: &DownloadJob, queue: &JobQueue) {
         title = %item.title,
         candidate_streams = all_streams.len(),
         profiles = active_profiles.len(),
-        debrid_providers = plugin_providers.len(),
+        providers = plugin_providers.len(),
         "download: trying candidate streams best-first until one is cached and matches"
     );
 
@@ -452,7 +452,7 @@ async fn fetch_provider_cache(
                 provider,
                 hashes = hashes.len(),
                 error = %error,
-                "download: could not ask this debrid service which torrents it has cached; treating them all as uncached"
+                "download: could not ask this provider which releases it has available; treating them all as unavailable"
             );
         }
     }
@@ -591,7 +591,7 @@ async fn run_preferred_stream(
         title = %item.title,
         info_hash = preferred_info_hash,
         providers = plugin_providers.len(),
-        "download: the manually chosen stream could not be downloaded from any configured debrid service"
+        "download: the manually chosen stream could not be downloaded from any configured provider"
     );
     queue
         .notify(RivenEvent::MediaItemDownloadError {
@@ -746,7 +746,7 @@ async fn run_downloads(
             title = %item.title,
             candidates = streams.len(),
             attempts = attempted.len(),
-            "download: no candidate worked — none were cached on a debrid service, or the cached ones did not contain the right files"
+            "download: no candidate worked — none were available from any provider, or the available ones did not contain the right files"
         );
         record_download_failure(id).await;
         queue
