@@ -66,9 +66,20 @@
     // lookup/link/mutation actually uses. `undefined` here just means "not
     // applicable" (missing id, or a type this feature doesn't cover, e.g.
     // person/company) — distinct from the store's own `"pending"`.
-    const resolved = $derived.by(() => {
-        if (!requestSource || !requestExternalId || !requestMediaType) return undefined;
-        return getResolvedLibraryId(requestSource, requestExternalId, requestMediaType);
+    //
+    // This has to be plain $state updated from $effect, not $derived: the
+    // store's resolver writes to its own cache as a side effect (to record
+    // "pending" / cache the eventual result), and Svelte 5 throws
+    // (`state_unsafe_mutation`) on a $state write reachable from inside a
+    // $derived's evaluation — derived values must be pure. $effect is the
+    // rune meant for exactly this "reading triggers a side effect" shape.
+    let resolved = $state<ReturnType<typeof getResolvedLibraryId> | undefined>(undefined);
+    $effect(() => {
+        if (!requestSource || !requestExternalId || !requestMediaType) {
+            resolved = undefined;
+            return;
+        }
+        resolved = getResolvedLibraryId(requestSource, requestExternalId, requestMediaType);
     });
 
     let mediaURL = $derived.by(() => {
@@ -212,8 +223,18 @@
                             mediaType={requestMediaType}
                             externalId={resolved.id}
                             onSuccess={(itemId) => {
-                                if (itemId != null) {
-                                    markLibraryStatusRequested(resolved.indexer, resolved.id, itemId);
+                                // Captured by value: by the time this async
+                                // callback runs, the reactive `resolved`
+                                // binding could have moved on to a different
+                                // value, which is why TS won't narrow it
+                                // in-place here the way it does above.
+                                const requestedId = resolved;
+                                if (itemId != null && requestedId && requestedId !== "pending") {
+                                    markLibraryStatusRequested(
+                                        requestedId.indexer,
+                                        requestedId.id,
+                                        itemId
+                                    );
                                 }
                             }}>
                             Request
