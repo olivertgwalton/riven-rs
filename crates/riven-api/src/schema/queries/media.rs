@@ -53,6 +53,22 @@ async fn load_show_tree(
     Ok((seasons, episodes_by_season))
 }
 
+/// Generous upper bound for the batched library-status lookups — a carousel
+/// row is a couple dozen cards at most, so this is headroom for that, not a
+/// tuned limit. Guards against one request building an arbitrarily large
+/// `IN (...)` list rather than actually protecting real usage.
+const MAX_BULK_STATUS_IDS: usize = 500;
+
+fn check_bulk_ids_len(ids: &[String]) -> Result<()> {
+    if ids.len() > MAX_BULK_STATUS_IDS {
+        return Err(Error::new(format!(
+            "too many ids in one request: {} (max {MAX_BULK_STATUS_IDS})",
+            ids.len()
+        )));
+    }
+    Ok(())
+}
+
 #[derive(Default)]
 pub struct MediaQuery;
 
@@ -152,6 +168,7 @@ impl MediaQuery {
         _ctx: &Context<'_>,
         tmdb_ids: Vec<String>,
     ) -> Result<Vec<MediaItemStatus>> {
+        check_bulk_ids_len(&tmdb_ids)?;
         Ok(repo::list_media_items_by_tmdb_ids(&tmdb_ids)
             .await?
             .into_iter()
@@ -166,6 +183,7 @@ impl MediaQuery {
         _ctx: &Context<'_>,
         tvdb_ids: Vec<String>,
     ) -> Result<Vec<MediaItemStatus>> {
+        check_bulk_ids_len(&tvdb_ids)?;
         Ok(repo::list_media_items_by_tvdb_ids(&tvdb_ids)
             .await?
             .into_iter()

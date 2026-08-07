@@ -35,9 +35,17 @@ type MediaItemStatusRow = {
 	tvdbId: string | null;
 };
 
+type ResolvedFetch = {
+	entry: LibraryStatusEntry;
+	// False when the batch request itself failed (network error, GraphQL
+	// error): the caller still needs an answer to stop spinning, but must
+	// not treat it as a confirmed result to persist.
+	cacheable: boolean;
+};
+
 type PendingBatch = {
 	ids: Set<string>;
-	resolvers: Map<string, ((entry: LibraryStatusEntry) => void)[]>;
+	resolvers: Map<string, ((result: ResolvedFetch) => void)[]>;
 };
 
 function emptyBatch(): PendingBatch {
@@ -80,6 +88,7 @@ async function flushBatch(indexer: Indexer) {
 	batches[indexer] = emptyBatch();
 
 	let rows: MediaItemStatusRow[] = [];
+	let failed = false;
 	try {
 		const field = indexer === "tmdb" ? "mediaItemStatusesByTmdbIds" : "mediaItemStatusesByTvdbIds";
 		const result = await gqlClient<Record<string, MediaItemStatusRow[]>>(BATCH_QUERIES[indexer], {
@@ -87,10 +96,13 @@ async function flushBatch(indexer: Indexer) {
 		});
 		rows = result[field] ?? [];
 	} catch {
-		// A failed batch shouldn't leave every card spinning forever — treat
-		// as "unknown" (rendered the same as "not in library") rather than
-		// retrying in a loop.
-		rows = [];
+		// A failed batch shouldn't leave every card spinning forever, so
+		// resolvers still get an answer — but that answer must not be
+		// cached as "not_found": caching a transient network failure as
+		// "confirmed absent from the library" would permanently show
+		// "Request" for an item that's actually already there, for the
+		// rest of the session, until a full reload clears the cache.
+		failed = true;
 	}
 
 	const byExternalId = new Map<string, LibraryStatusEntry>();
@@ -101,15 +113,19 @@ async function flushBatch(indexer: Indexer) {
 
 	for (const id of ids) {
 		const entry = byExternalId.get(id) ?? { status: "not_found" };
-		cache[keyFor(indexer, id)] = entry;
-		for (const resolve of resolvers.get(id) ?? []) resolve(entry);
+		if (failed) {
+			delete cache[keyFor(indexer, id)];
+		} else {
+			cache[keyFor(indexer, id)] = entry;
+		}
+		for (const resolve of resolvers.get(id) ?? []) resolve({ entry, cacheable: !failed });
 	}
 }
 
-function queueFetch(indexer: Indexer, id: string): Promise<LibraryStatusEntry> {
+function queueFetch(indexer: Indexer, id: string): Promise<ResolvedFetch> {
 	const batch = batches[indexer];
 	batch.ids.add(id);
-	const promise = new Promise<LibraryStatusEntry>((resolve) => {
+	const promise = new Promise<ResolvedFetch>((resolve) => {
 		const list = batch.resolvers.get(id) ?? [];
 		list.push(resolve);
 		batch.resolvers.set(id, list);
@@ -133,7 +149,9 @@ export type ResolvedId = { indexer: Indexer; id: string };
  * Cached and deduped per (source, mediaType, id) — the same title showing up
  * in multiple rows only ever resolves once.
  */
-const idResolutionCache = new Map<string, Promise<ResolvedId | null>>();
+type ResolvedFetchId = { result: ResolvedId | null; cacheable: boolean };
+
+const idResolutionCache = new Map<string, Promise<ResolvedFetchId>>();
 
 function resolutionCacheKey(source: ResolvableSource, externalId: string, mediaType: MediaKind): string {
 	return `${source}:${mediaType}:${externalId}`;
@@ -143,19 +161,31 @@ function resolveToLibraryId(
 	source: ResolvableSource,
 	externalId: string,
 	mediaType: MediaKind
-): Promise<ResolvedId | null> {
+): Promise<ResolvedFetchId> {
 	const target: Indexer = mediaType === "tv" ? "tvdb" : "tmdb";
 	if (source === target) {
-		return Promise.resolve({ indexer: target, id: externalId });
+		return Promise.resolve({ result: { indexer: target, id: externalId }, cacheable: true });
 	}
 	const cacheKey = resolutionCacheKey(source, externalId, mediaType);
-	let pending = idResolutionCache.get(cacheKey);
-	if (!pending) {
-		pending = resolveExternalId({ from: source, to: target, id: externalId, mediaType })
-			.then((r) => (r.resolved ? { indexer: target, id: r.id } : null))
-			.catch(() => null);
-		idResolutionCache.set(cacheKey, pending);
-	}
+	const cached = idResolutionCache.get(cacheKey);
+	if (cached) return cached;
+
+	const pending = resolveExternalId({ from: source, to: target, id: externalId, mediaType })
+		.then((r) => ({
+			result: r.resolved ? { indexer: target, id: r.id } : null,
+			cacheable: true
+		}))
+		.catch(() => {
+			// A request failure isn't a real "no match" answer — don't leave
+			// it memoized, or a transient network error would permanently
+			// look identical to "this id genuinely doesn't resolve" for the
+			// rest of the session.
+			idResolutionCache.delete(cacheKey);
+			return { result: null, cacheable: false };
+		});
+	// Set eagerly (before the request settles) so concurrent callers for the
+	// same id within the request window dedupe onto this one promise.
+	idResolutionCache.set(cacheKey, pending);
 	return pending;
 }
 
@@ -180,8 +210,12 @@ export function getResolvedLibraryId(
 	if (existing !== undefined) return existing;
 
 	resolvedIdState[key] = "pending";
-	resolveToLibraryId(source, externalId, mediaType).then((result) => {
-		resolvedIdState[key] = result;
+	resolveToLibraryId(source, externalId, mediaType).then(({ result, cacheable }) => {
+		if (cacheable) {
+			resolvedIdState[key] = result;
+		} else {
+			delete resolvedIdState[key];
+		}
 	});
 	return resolvedIdState[key];
 }
@@ -206,8 +240,12 @@ export function getLibraryStatus(
 	if (existing) return existing;
 
 	cache[key] = { status: "loading" };
-	queueFetch(resolved.indexer, resolved.id).then((entry) => {
-		cache[key] = entry;
+	queueFetch(resolved.indexer, resolved.id).then(({ entry, cacheable }) => {
+		if (cacheable) {
+			cache[key] = entry;
+		} else {
+			delete cache[key];
+		}
 	});
 	return cache[key];
 }

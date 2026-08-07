@@ -313,14 +313,23 @@ pub async fn attempt_download(
             )
             .await
             {
-                SeasonPersistOutcome::Complete | SeasonPersistOutcome::Partial => {
+                SeasonPersistOutcome::Complete => {
                     tracing::debug!(
                         id,
                         info_hash,
                         raw_title,
-                        "download: show pack processed, matching episodes saved"
+                        "download: show pack processed, show fully complete"
                     );
                     DownloadAttemptOutcome::TerminalHandled
+                }
+                SeasonPersistOutcome::Partial => {
+                    tracing::debug!(
+                        id,
+                        info_hash,
+                        raw_title,
+                        "download: show pack processed, matching episodes saved (show still incomplete)"
+                    );
+                    DownloadAttemptOutcome::Progressed
                 }
                 SeasonPersistOutcome::Failed => {
                     tracing::debug!(

@@ -269,7 +269,8 @@
                                                 onclick={(event) => {
                                                     event.stopPropagation();
                                                     handleMarkAsRead(notification.id);
-                                                }}>
+                                                }}
+                                                onkeydown={(event) => event.stopPropagation()}>
                                                 <Check class="size-3" />
                                             </Button>
                                         {/snippet}
@@ -287,7 +288,8 @@
                                             onclick={(event) => {
                                                 event.stopPropagation();
                                                 handleRemove(notification.id);
-                                            }}>
+                                            }}
+                                            onkeydown={(event) => event.stopPropagation()}>
                                             <Trash2 class="size-3" />
                                         </Button>
                                     {/snippet}

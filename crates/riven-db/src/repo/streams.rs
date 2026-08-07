@@ -736,6 +736,8 @@ pub async fn get_downloaded_profile_names_for_season(season_id: i64) -> Result<V
              FROM filesystem_entries fe
              JOIN media_items ep ON ep.id = fe.media_item_id
              WHERE ep.parent_id = $1
+               AND ep.is_requested = true
+               AND ep.state <> 'unreleased'
                AND fe.entry_type = 'media'
                AND fe.ranking_profile_name IS NOT NULL
              GROUP BY fe.ranking_profile_name
@@ -1067,6 +1069,25 @@ pub async fn blacklist_and_remove_filesystem_entry(entry_id: i64) -> Result<bool
         && let Some(stream) = streams::Entity::find_by_id(stream_id).one(orm()).await?
     {
         blacklist_stream_permanent_by_hash(entry.media_item_id, &stream.info_hash).await?;
+
+        // A season/show-pack release is linked to (and selected as a
+        // candidate against) the *season's or show's* own media_item_id —
+        // persist matches its files to individual episodes, but the
+        // candidate query that picks the stream in the first place runs at
+        // whichever level the download job targets. Blacklisting only the
+        // episode leaves the exact same pack fully eligible on the next
+        // season- or show-level regrab, since that query never looks at the
+        // episode's blacklist rows at all.
+        if let Ok(Some(hierarchy)) =
+            super::hierarchy::get_media_item_hierarchy(entry.media_item_id).await
+        {
+            if let Some(season_id) = hierarchy.resolved_season_id {
+                blacklist_stream_permanent_by_hash(season_id, &stream.info_hash).await?;
+            }
+            if let Some(show_id) = hierarchy.resolved_show_id {
+                blacklist_stream_permanent_by_hash(show_id, &stream.info_hash).await?;
+            }
+        }
     }
 
     let (deleted, media_item_id) = delete_filesystem_entry(entry_id).await?;

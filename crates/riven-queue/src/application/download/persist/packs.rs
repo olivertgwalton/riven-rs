@@ -469,6 +469,28 @@ pub async fn persist_show(
     }
 
     sync_item_request_state(item).await;
+
+    // The filesystem_entries inserts above already recomputed state for each
+    // episode (via the repo layer), and the recompute cascade walked them up
+    // through their seasons to the show. Read the now-current show state
+    // rather than assuming "some episodes got created" means "the whole show
+    // is done" — a show pack that only fills some of its seasons must report
+    // Partial so the caller keeps trying further candidates, the same as a
+    // season pack already does; treating it as terminal here would starve
+    // the rest of the show exactly like the season-level version of this bug.
+    let show_complete = repo::get_media_item(id)
+        .await
+        .ok()
+        .flatten()
+        .is_some_and(|i| i.state == MediaItemState::Completed);
+
+    if !show_complete {
+        queue
+            .notify(RivenEvent::MediaItemDownloadPartialSuccess { id })
+            .await;
+        return SeasonPersistOutcome::Partial;
+    }
+
     queue
         .filesystem_settings_revision
         .fetch_add(1, Ordering::SeqCst);

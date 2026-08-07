@@ -150,20 +150,37 @@ pub fn build_discovery_targets(
             if let Some(episode_number) = episode_number {
                 // Single-episode discovery: exactly one season in scope, and the
                 // target is that specific episode rather than the whole season.
-                let &number = selected.first().ok_or_else(|| {
-                    Error::new("A season is required to find streams for one episode")
-                })?;
+                // Ambiguous (zero or multiple) season selection is rejected
+                // outright rather than silently taking `selected.first()` — a
+                // caller that got the season wrong deserves an error, not a
+                // discovery pass against the wrong episode.
+                if selected.len() != 1 {
+                    return Err(Error::new(
+                        "Exactly one season is required to find streams for one episode",
+                    ));
+                }
+                let number = selected[0];
                 let season = all_seasons
                     .iter()
                     .find(|season| season.number == number)
                     .ok_or_else(|| {
                         Error::new(format!("Season {number} is not available from index data"))
                     })?;
-                let absolute_number = season
+                // A missing indexed episode must fail loudly too: silently
+                // continuing with `absolute_number: None` would let discovery
+                // run against a target the index data doesn't actually know
+                // about, rather than surfacing that the episode number is
+                // wrong or not yet indexed.
+                let episode = season
                     .episodes
                     .iter()
                     .find(|episode| episode.number == episode_number)
-                    .and_then(|episode| episode.absolute_number);
+                    .ok_or_else(|| {
+                        Error::new(format!(
+                            "Episode {episode_number} is not available in season {number}"
+                        ))
+                    })?;
+                let absolute_number = episode.absolute_number;
 
                 return Ok(vec![DiscoveryTarget {
                     item_type: MediaItemType::Episode,

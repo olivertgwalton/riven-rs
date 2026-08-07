@@ -239,6 +239,13 @@
                 { id }
             );
             selectedMovieVersionIdx = 0;
+            // Blacklisting usually moves the item off Completed, at which
+            // point completedDetailsSignature() returns "" and
+            // hydrateCompletedDetails never re-runs — so without resetting
+            // these, getMovieEntries() keeps reading the stale hydratedRiven
+            // snapshot that still has the just-deleted entry in it.
+            hydratedRiven = undefined;
+            lastHydratedCompletedKey = "";
             toast.success(`"${label}" blacklisted — searching for a replacement`);
             await hydrateInitialState();
         } catch {
