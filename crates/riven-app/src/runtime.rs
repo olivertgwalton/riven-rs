@@ -87,66 +87,6 @@ async fn flush_indexer_stats() {
     }
 }
 
-/// Resolve once a queue's claimed tasks have stopped moving, having first put
-/// them back on the queue.
-///
-/// This is the only externally visible trace of a worker whose task stream has
-/// died. apalis runs a worker's heartbeat and its task stream independently, so
-/// a single `StreamError` — a Redis timeout, a blip, a failed `get_jobs.lua` —
-/// ends `CallAll` permanently while the heartbeat carries on re-registering.
-/// The worker therefore stays in the workers set with a fresh timestamp and a
-/// healthy-looking process, and never fetches or runs anything again.
-///
-/// Which is why liveness is judged here on whether claimed work is progressing
-/// rather than on the registration: any check of "is a worker registered"
-/// cannot fire for this failure, because the registration is exactly the part
-/// that survives.
-async fn watch_for_stalled_queues(queue: &Arc<JobQueue>, cancel: &CancellationToken) {
-    const POLL: Duration = Duration::from_secs(60);
-
-    let mut redis = queue.redis.clone();
-    let queues = queue.queue_names();
-    let mut watch = riven_queue::InflightWatch::new();
-
-    loop {
-        tokio::select! {
-            _ = tokio::time::sleep(POLL) => {}
-            _ = cancel.cancelled() => return std::future::pending().await,
-        }
-
-        let stalled = watch
-            .observe(&mut redis, &queues, riven_queue::INFLIGHT_STALL_AFTER)
-            .await;
-        if stalled.is_empty() {
-            continue;
-        }
-
-        for queue_name in &stalled {
-            tracing::error!(
-                queue = %queue_name.queue,
-                stuck_tasks = queue_name.stuck_tasks,
-                stalled_for_secs = queue_name.stalled_for.as_secs(),
-                "queue's claimed tasks have not moved; its worker's task stream is dead"
-            );
-        }
-
-        // Put the stranded tasks back before rebuilding the workers. apalis
-        // ships `reenqueue_orphaned_jobs.lua` for exactly this and never calls
-        // it, so without this they stay claimed by a worker that will never
-        // run them, and the items behind them stay blocked by their dedup keys.
-        let names: Vec<String> = stalled.into_iter().map(|s| s.queue).collect();
-        match riven_queue::clear_worker_registrations(&mut redis, &names).await {
-            Ok(report) => tracing::info!(
-                queues = ?names,
-                requeued = report.jobs,
-                "requeued tasks stranded by a dead task stream"
-            ),
-            Err(error) => tracing::error!(%error, "failed to requeue stranded tasks"),
-        }
-        return;
-    }
-}
-
 async fn run_worker_monitor(
     queue: Arc<JobQueue>,
     cancel: CancellationToken,
@@ -182,17 +122,14 @@ async fn run_worker_monitor(
             }
         });
         tokio::pin!(handle);
+        // Individual worker failures never reach this select: the monitor's
+        // `should_restart` policy (see `start_workers`) rebuilds a failed
+        // worker in place and rescues its stranded claims. The monitor future
+        // resolving here means something categorically worse — every restart
+        // was declined or the monitor itself failed — so the whole thing is
+        // rebuilt from a clean maintenance pass.
         let result = tokio::select! {
             result = &mut handle => result,
-            () = watch_for_stalled_queues(&queue, &cancel) => {
-                // A worker died without taking the monitor down with it, so the
-                // monitor future is still pending and would park this loop
-                // forever. Drop it and go around, rebuilding every worker with
-                // a live task stream; the stranded tasks were requeued above.
-                handle.abort();
-                tracing::error!("restarting the monitor after a stalled queue");
-                continue;
-            }
             _ = cancel.cancelled() => {
                 handle.abort();
                 break;

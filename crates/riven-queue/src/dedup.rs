@@ -1,3 +1,12 @@
+//! Hand-rolled deduplication, kept deliberately.
+//!
+//! apalis-redis 1.0.0-rc.8 has native idempotency keys (`batch_push.lua`,
+//! `{queue}:idempotency` set) but they are write-only: the key is claimed with
+//! `SETNX`, the `expire` beside it is commented out, and no script anywhere
+//! releases it — so one push of an item would block that item forever. Until
+//! upstream releases keys on completion, dedup stays here: `SET NX` with a
+//! TTL, deleted by the guard when the handler finishes.
+
 /// Safety TTL for dedup keys. Under normal operation keys are deleted synchronously
 /// by `DedupGuard::drop`; this TTL fires only when the process is hard-killed before
 /// the guard runs, preventing permanently orphaned keys.

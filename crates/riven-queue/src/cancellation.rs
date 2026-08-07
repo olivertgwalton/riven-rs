@@ -1,3 +1,9 @@
+//! Hand-rolled cancellation, kept deliberately: apalis-redis rc.8 has
+//! `kill_job.lua`/`retry_job.lua`, but both operate on *a worker's own
+//! inflight set* — they exist for a worker disposing of a task it currently
+//! holds, not for an external caller cancelling pending work by content.
+//! Cancelling every task belonging to a deleted media item requires scanning
+//! payloads, which no native API offers.
 use super::*;
 
 impl JobQueue {

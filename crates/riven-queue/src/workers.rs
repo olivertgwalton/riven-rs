@@ -37,11 +37,11 @@ async fn handle_parse_scrape_results_job(
 
 async fn handle_download_job(job: DownloadJob, q: Data<Arc<JobQueue>>) -> Result<(), BoxDynError> {
     let _guard = DedupGuard::new("download", job.id, q.redis.clone());
-    // Paired entry/exit lines because the alternative is a Redis autopsy. When
-    // a worker's task stream dies its claimed tasks stay claimed and simply
-    // never run, which from the logs alone is indistinguishable from a queue
-    // with nothing to do: an entry with no exit means the handler hung, an
-    // absent entry for a claimed task means it never reached the handler.
+    // Paired entry/exit lines because the alternative is a Redis autopsy. An
+    // entry with no exit means the handler hung — or its future was dropped
+    // when the worker's task stream died, since `CallAllUnordered` drops
+    // in-flight futures on a stream error. An absent entry for a claimed task
+    // means it never reached the handler at all.
     tracing::debug!(id = job.id, "download job started");
     crate::application::download::run(job.id, &job, &q).await;
     tracing::debug!(id = job.id, "download job finished");
@@ -176,10 +176,40 @@ fn extract_fan_in_response(
     }
 }
 
+/// Requeue whatever the previous incarnation of `worker_name` was holding.
+///
+/// Fired from the worker factory on every restart (`runs > 0`). The dead
+/// incarnation's claims are still in its inflight set — same set the
+/// replacement registers under, and apalis never re-reads it — so they are
+/// invisible to everything except this. Spawned rather than awaited because
+/// the factory is synchronous; the requeue script is atomic, so the
+/// replacement's own claims cannot be caught in it (see
+/// [`crate::maintenance::requeue_stranded_inflight`]).
+fn rescue_previous_incarnation(q: &Arc<JobQueue>, queue_name: String, worker_name: String) {
+    let mut redis = q.redis.clone();
+    tokio::spawn(async move {
+        if let Err(error) =
+            crate::maintenance::requeue_stranded_inflight(&mut redis, &queue_name, &worker_name)
+                .await
+        {
+            tracing::error!(
+                worker = %worker_name,
+                queue = %queue_name,
+                %error,
+                "could not requeue the dead incarnation's tasks; they stay stranded until the next restart"
+            );
+        }
+    });
+}
+
 macro_rules! register_worker {
     ($monitor:expr, $queue:expr, $name:literal, $storage:ident, $n:expr, $handler:ident, $timeout_secs:expr) => {{
         let q = Arc::clone(&$queue);
-        $monitor.register(move |_| {
+        let queue_name = q.$storage.get_config().get_namespace().as_ref().to_owned();
+        $monitor.register(move |runs| {
+            if runs > 0 {
+                rescue_previous_incarnation(&q, queue_name.clone(), $name.to_owned());
+            }
             WorkerBuilder::new($name)
                 .backend(q.$storage.clone())
                 .enable_tracing()
@@ -195,7 +225,11 @@ macro_rules! register_worker {
     // reintroduce the thing the inner code was written to avoid.
     ($monitor:expr, $queue:expr, $name:literal, $storage:ident, $n:expr, $handler:ident) => {{
         let q = Arc::clone(&$queue);
-        $monitor.register(move |_| {
+        let queue_name = q.$storage.get_config().get_namespace().as_ref().to_owned();
+        $monitor.register(move |runs| {
+            if runs > 0 {
+                rescue_previous_incarnation(&q, queue_name.clone(), $name.to_owned());
+            }
             WorkerBuilder::new($name)
                 .backend(q.$storage.clone())
                 .enable_tracing()
@@ -294,8 +328,12 @@ pub fn start_workers(queue: Arc<JobQueue>, usenet_download_workers: Option<usize
     for ((plugin_name, event_type), storage) in &queue.plugin_hook_storages {
         let q = Arc::clone(&queue);
         let storage = storage.clone();
+        let queue_name = storage.get_config().get_namespace().as_ref().to_owned();
         let worker_name = format!("hook-{plugin_name}-{}", event_type.slug());
-        m = m.register(move |_| {
+        m = m.register(move |runs| {
+            if runs > 0 {
+                rescue_previous_incarnation(&q, queue_name.clone(), worker_name.clone());
+            }
             WorkerBuilder::new(worker_name.clone())
                 .backend(storage.clone())
                 .enable_tracing()
@@ -306,5 +344,31 @@ pub fn start_workers(queue: Arc<JobQueue>, usenet_download_workers: Option<usize
                 .build(handle_plugin_hook_job)
         });
     }
-    m
+
+    // The load-bearing line of this whole module. A worker's task stream and
+    // its heartbeat are one merged stream (`stream_select!` in apalis-core),
+    // and `Worker::run` returns on the first `Err` — so a single transient
+    // failure (a Redis response timeout, a reconnect blip, one failed
+    // `get_jobs.lua`) resolves the worker future with `StreamError`. Without a
+    // restart policy, `MonitoredWorker` treats that as final: the worker is
+    // gone until the process restarts, its queue goes silent while every other
+    // queue keeps running, and everything it had claimed stays claimed. With
+    // it, the factory above rebuilds the worker (and rescues its stranded
+    // claims) and the failure costs milliseconds.
+    //
+    // `GracefulExit` is the one non-restart: that is shutdown working as
+    // intended. Panics don't reach here — `.catch_panic()` converts them to
+    // task errors first.
+    m.should_restart(|ctx, error, attempt| match error {
+        WorkerError::GracefulExit => false,
+        error => {
+            tracing::error!(
+                worker = %ctx.name(),
+                %error,
+                attempt,
+                "worker failed; restarting it"
+            );
+            true
+        }
+    })
 }

@@ -46,9 +46,9 @@ pub use jobs::{
 };
 pub(crate) use maintenance::queue_config;
 pub use maintenance::{
-    INFLIGHT_STALL_AFTER, InflightWatch, RecoveryReport, StalledQueue, clear_worker_registrations,
-    prune_queue_history, purge_orphaned_active_jobs, purge_orphaned_worker_sets,
-    purge_stale_dedup_keys, reconcile_library_profiles, recover_stale_workers,
+    RecoveryReport, clear_worker_registrations, prune_queue_history, purge_orphaned_active_jobs,
+    purge_orphaned_worker_sets, purge_stale_dedup_keys, reconcile_library_profiles,
+    requeue_stranded_inflight,
 };
 pub use workers::start_workers;
 

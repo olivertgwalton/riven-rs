@@ -21,7 +21,6 @@ impl Scheduler {
     pub async fn run(self) {
         let mut content_tick = tokio::time::interval(Duration::from_secs(120));
         let mut cleanup_tick = tokio::time::interval(Duration::from_secs(60 * 60));
-        let mut worker_recovery_tick = tokio::time::interval(Duration::from_secs(60));
         let retry_wait =
             Self::retry_wait_duration(self.job_queue.retry_interval_secs.load(Ordering::SeqCst));
         let mut retry_sleep = std::pin::pin!(tokio::time::sleep(retry_wait));
@@ -50,15 +49,6 @@ impl Scheduler {
                         .reset(tokio::time::Instant::now() + next_wait);
                 }
                 _ = cleanup_tick.tick()        => self.cleanup_runtime_state().await,
-                _ = worker_recovery_tick.tick() => {
-                    let mut redis = self.job_queue.redis.clone();
-                    let queues = self.job_queue.queue_names();
-                    if let Err(error) =
-                        crate::recover_stale_workers(&mut redis, &queues).await
-                    {
-                        tracing::error!(%error, "failed to recover stale workers");
-                    }
-                }
             }
         }
     }
