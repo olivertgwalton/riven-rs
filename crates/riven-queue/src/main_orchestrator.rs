@@ -189,7 +189,31 @@ impl MainOrchestrator {
         }
         match item.item_type {
             MediaItemType::Show => {
-                push_requested_seasons(item.id, &self.queue).await;
+                // A show only gets season rows once its initial index
+                // actually completes (`apply_indexed_media_item` creates
+                // them). If a show is stuck in `Indexed` with zero seasons
+                // at all, its original `IndexJob` was lost before that ever
+                // happened — e.g. dropped off the event bus — and
+                // `push_requested_seasons` fanning out over an empty list is
+                // a silent no-op: the retry sweep would "retry" this show
+                // every cycle forever without ever doing anything. Re-index
+                // it instead so it actually gets metadata (title, poster,
+                // seasons/episodes) at least once.
+                match repo::list_seasons(item.id).await {
+                    Ok(seasons) if seasons.is_empty() => {
+                        self.queue.push_index(IndexJob::from_item(item)).await;
+                    }
+                    Ok(_) => {
+                        push_requested_seasons(item.id, &self.queue).await;
+                    }
+                    Err(error) => {
+                        tracing::error!(
+                            id = item.id,
+                            %error,
+                            "library sweep: could not check for existing seasons, skipping this show's retry this pass"
+                        );
+                    }
+                }
             }
             _ => {
                 self.queue
