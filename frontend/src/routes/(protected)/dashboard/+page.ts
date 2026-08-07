@@ -4,6 +4,7 @@ import { createScopedLogger } from "$lib/logger";
 import type {
 	ActivePlaybackSession,
 	DownloaderService,
+	IndexerStats,
 	NntpProviderHealth,
 	UsenetStreamingHealth,
 	UsenetTitleHealth,
@@ -138,6 +139,17 @@ const USENET_HEALTH_QUERY = `
     }
 `;
 
+const INDEXER_STATS_QUERY = `
+    query {
+        indexerStats {
+            indexer
+            searchQueries
+            capsQueries
+            successfulGrabs
+        }
+    }
+`;
+
 const DEBRID_ACCOUNT_INFO_QUERY = `
     query {
         debridAccountInfo {
@@ -256,6 +268,10 @@ export const load = (async ({ depends }) => {
 		.then((data) => (data.debridAccountInfo ?? []).map(mapDebridService))
 		.catch((): DownloaderService[] => []);
 
+	const indexerStats = gqlClient<{ indexerStats: IndexerStats[] }>(INDEXER_STATS_QUERY, {})
+		.then((data) => data.indexerStats ?? [])
+		.catch((): IndexerStats[] => []);
+
 	const EMPTY_TITLE_SUMMARY: UsenetTitleHealthSummary = {
 		healthy: 0,
 		unhealthy: 0,
@@ -297,6 +313,7 @@ export const load = (async ({ depends }) => {
 		statistics,
 		activePlaybackSessions,
 		downloaderServices,
+		indexerStats,
 		usenetHealth,
 	};
 }) satisfies PageLoad;

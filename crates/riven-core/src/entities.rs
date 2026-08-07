@@ -3,6 +3,7 @@
 pub mod auth;
 pub mod filesystem_entries;
 pub mod helpers;
+pub mod indexer_stats;
 pub mod item_requests;
 pub mod media_item_blacklisted_streams;
 pub mod media_item_streams;

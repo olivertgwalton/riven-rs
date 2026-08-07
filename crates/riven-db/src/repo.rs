@@ -1,4 +1,5 @@
 pub mod hierarchy;
+pub mod indexer_stats;
 pub mod media;
 pub mod requests;
 pub mod state;
@@ -8,6 +9,7 @@ pub mod usenet_health;
 pub mod usenet_traffic;
 
 pub use hierarchy::*;
+pub use indexer_stats::*;
 pub use media::*;
 pub use requests::*;
 pub use state::*;

@@ -476,6 +476,30 @@ type IndexShowMutationResponse {
 	show: Show
 }
 
+"""
+Lifetime totals for one configured indexer.
+"""
+type IndexerStats {
+	"""
+	The indexer's configured name, as it appears in the newznab settings.
+	"""
+	indexer: String!
+	"""
+	Release searches issued, counted per request (a paged search is
+	several).
+	"""
+	searchQueries: Int!
+	"""
+	Capability probes (`t=caps`) issued.
+	"""
+	capsQueries: Int!
+	"""
+	Releases taken from this indexer that ingested and were picked as the
+	item's download.
+	"""
+	successfulGrabs: Int!
+}
+
 type InstanceStatus {
 	setupCompleted: Boolean!
 	"""
@@ -1352,6 +1376,11 @@ type QueryRoot {
 	Cache + fetch metrics for the in-process usenet streaming engine.
 	"""
 	usenetStreamingHealth: UsenetStreamingHealth!
+	"""
+	Query and grab totals per indexer, busiest first. Counters are flushed
+	from memory once a minute, so the newest activity can lag by that much.
+	"""
+	indexerStats: [IndexerStats!]!
 	stats: LibraryStats!
 	"""
 	Get completed-item activity counts grouped by date (past year).

@@ -7,6 +7,7 @@ pub mod entities;
 pub mod events;
 pub mod filename;
 pub mod http;
+pub mod indexer_stats;
 pub mod local_source;
 pub mod logging;
 pub mod nzb;

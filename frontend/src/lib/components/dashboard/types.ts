@@ -102,6 +102,13 @@ export type UsenetTitleHealthSummary = {
 	total: number;
 };
 
+export type IndexerStats = {
+	indexer: string;
+	searchQueries: number;
+	capsQueries: number;
+	successfulGrabs: number;
+};
+
 export type UsenetProviderTraffic = {
 	host: string;
 	bytesDownloaded: number;

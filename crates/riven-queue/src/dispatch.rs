@@ -58,7 +58,10 @@ impl JobQueue {
     pub async fn fan_out_and_collect(&self, event: &RivenEvent) -> Vec<(String, HookOutcome)> {
         let event_type = event.event_type();
         if event_type.dispatch_strategy() != DispatchStrategy::FanIn {
-            tracing::error!(?event_type, "fan_out_and_collect called for non-FanIn event");
+            tracing::error!(
+                ?event_type,
+                "fan_out_and_collect called for non-FanIn event"
+            );
             return Vec::new();
         }
         let subscribers = self.registry.subscriber_names(event_type).await;

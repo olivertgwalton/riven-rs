@@ -456,6 +456,24 @@ export type IndexShowMutationResponse = {
   success: Scalars['Boolean']['output'];
 };
 
+/** Lifetime totals for one configured indexer. */
+export type IndexerStats = {
+  /** Capability probes (`t=caps`) issued. */
+  capsQueries: Scalars['Int']['output'];
+  /** The indexer's configured name, as it appears in the newznab settings. */
+  indexer: Scalars['String']['output'];
+  /**
+   * Release searches issued, counted per request (a paged search is
+   * several).
+   */
+  searchQueries: Scalars['Int']['output'];
+  /**
+   * Releases taken from this indexer that ingested and were picked as the
+   * item's download.
+   */
+  successfulGrabs: Scalars['Int']['output'];
+};
+
 export type InstanceStatus = {
   /** Human-readable reasons setup can't be completed yet (empty when ready). */
   blockers: Array<Scalars['String']['output']>;
@@ -1340,6 +1358,11 @@ export type QueryRoot = {
    */
   expectedFileCount: Scalars['Int']['output'];
   filesystemEntries: Array<FileSystemEntry>;
+  /**
+   * Query and grab totals per indexer, busiest first. Counters are flushed
+   * from memory once a minute, so the newest activity can lag by that much.
+   */
+  indexerStats: Array<IndexerStats>;
   /**
    * Return instance-level status flags used by frontend bootstrap flows.
    * Owns the setup-readiness rule so the UI never has to recompute it.

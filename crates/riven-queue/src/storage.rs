@@ -14,20 +14,18 @@ impl JobQueue {
         let apalis_conn = connect_managed(redis_url).await?;
 
         let index_storage =
-            RedisStorage::new_with_config(apalis_conn.clone(), RedisConfig::new("riven:index"));
+            RedisStorage::new_with_config(apalis_conn.clone(), queue_config("riven:index"));
         let scrape_storage =
-            RedisStorage::new_with_config(apalis_conn.clone(), RedisConfig::new("riven:scrape"));
+            RedisStorage::new_with_config(apalis_conn.clone(), queue_config("riven:scrape"));
         let parse_storage =
-            RedisStorage::new_with_config(apalis_conn.clone(), RedisConfig::new("riven:parse"));
+            RedisStorage::new_with_config(apalis_conn.clone(), queue_config("riven:parse"));
         let download_storage =
-            RedisStorage::new_with_config(apalis_conn.clone(), RedisConfig::new("riven:download"));
-        let rank_streams_storage = RedisStorage::new_with_config(
-            apalis_conn.clone(),
-            RedisConfig::new("riven:rank-streams"),
-        );
+            RedisStorage::new_with_config(apalis_conn.clone(), queue_config("riven:download"));
+        let rank_streams_storage =
+            RedisStorage::new_with_config(apalis_conn.clone(), queue_config("riven:rank-streams"));
         let process_media_item_storage = RedisStorage::new_with_config(
             apalis_conn.clone(),
-            RedisConfig::new("riven:process-media-item"),
+            queue_config("riven:process-media-item"),
         );
 
         let mut plugin_hook_storages: HashMap<(String, EventType), RedisStorage<PluginHookJob>> =
@@ -38,7 +36,7 @@ impl JobQueue {
             }
             let namespace = format!("riven:plugin-hook:{}:{plugin_name}", event_type.slug());
             let storage =
-                RedisStorage::new_with_config(apalis_conn.clone(), RedisConfig::new(&namespace));
+                RedisStorage::new_with_config(apalis_conn.clone(), queue_config(&namespace));
             plugin_hook_storages.insert((plugin_name, event_type), storage);
         }
 

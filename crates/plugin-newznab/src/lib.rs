@@ -5,9 +5,10 @@ use redis::AsyncCommands;
 use reqwest::StatusCode;
 use riven_core::events::{EventType, HookResponse, ScrapeRequest};
 use riven_core::http::{HttpServiceProfile, RateLimitedError};
+use riven_core::indexer_stats::{QueryKind, record_query};
 use riven_core::nzb::{
-    NZB_URL_TTL_SECS, NewznabCaps, NewznabItem, newznab_text_query, nzb_info_hash,
-    nzb_url_redis_key, parse_newznab_caps, parse_newznab_xml,
+    NZB_URL_TTL_SECS, NewznabCaps, NewznabItem, newznab_text_query, nzb_indexer_redis_key,
+    nzb_info_hash, nzb_url_redis_key, parse_newznab_caps, parse_newznab_xml,
 };
 use riven_core::plugin::{FieldType, Plugin, PluginContext, SettingField};
 use riven_core::settings::PluginSettings;
@@ -76,6 +77,7 @@ async fn caps_for(
         ("t", "caps".to_string()),
         ("apikey", indexer.apikey.clone()),
     ];
+    record_query(&indexer.name, QueryKind::Caps);
     let body = match http
         .send_data(indexer_profile(indexer), None, |client| {
             client.get(&url).query(&params)
@@ -379,6 +381,7 @@ async fn scrape_page(
         key
     };
 
+    record_query(&indexer.name, QueryKind::Search);
     let resp = match http
         .send_data(indexer_profile(indexer), Some(dedupe_key), |client| {
             client.get(&url).query(&params)
@@ -548,6 +551,14 @@ impl Plugin for NewznabPlugin {
                             .set_ex(
                                 nzb_url_redis_key(&info_hash),
                                 &item.nzb_url,
+                                NZB_URL_TTL_SECS,
+                            )
+                            .await;
+                        // Attribution for the grab this release may earn later.
+                        let _result: Result<(), _> = redis_conn
+                            .set_ex(
+                                nzb_indexer_redis_key(&info_hash),
+                                &indexer.name,
                                 NZB_URL_TTL_SECS,
                             )
                             .await;

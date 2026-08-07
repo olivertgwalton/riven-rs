@@ -12,10 +12,12 @@
     import UsenetProvidersCard from "$lib/components/dashboard/usenet-providers-card.svelte";
     import UsenetActivityCard from "$lib/components/dashboard/usenet-activity-card.svelte";
     import UsenetHealthCard from "$lib/components/dashboard/usenet-health-card.svelte";
+    import IndexerStatsCard from "$lib/components/dashboard/indexer-stats-card.svelte";
     import type {
         ActivePlaybackSession,
         DownloaderService,
         DashboardStatistics,
+        IndexerStats,
         NntpProviderHealth,
         UsenetStreamingHealth,
         UsenetTitleHealth,
@@ -42,6 +44,7 @@
     };
     let usenetTitleSummary = $state<UsenetTitleHealthSummary>(EMPTY_HEALTH_SUMMARY);
     let usenetTraffic = $state<UsenetTraffic | null>(null);
+    let indexerStats = $state<IndexerStats[]>([]);
 
     const serviceStatuses = $derived(
         (data as PageData & { services?: Record<string, boolean | null> }).services ?? null
@@ -166,6 +169,17 @@
         }
     `;
 
+    const INDEXER_STATS_QUERY = `
+        query {
+            indexerStats {
+                indexer
+                searchQueries
+                capsQueries
+                successfulGrabs
+            }
+        }
+    `;
+
     const STATS_QUERY = `
         query DashboardStats {
             stats {
@@ -262,6 +276,9 @@
         Promise.resolve(data.downloaderServices).then((services) => {
             if (!cancelled) downloaderServices = services ?? [];
         });
+        Promise.resolve(data.indexerStats).then((rows) => {
+            if (!cancelled) indexerStats = rows ?? [];
+        });
         Promise.resolve(data.usenetHealth).then((health) => {
             if (!cancelled && health) {
                 usenetProviders = health.providers ?? [];
@@ -312,6 +329,16 @@
                 }
             } catch {
                 // Keep the last successful usenet-health snapshot on transient failures.
+            }
+            try {
+                const result = await gqlClient<{ indexerStats: IndexerStats[] }>(
+                    INDEXER_STATS_QUERY
+                );
+                if (!cancelled) {
+                    indexerStats = result.indexerStats ?? [];
+                }
+            } catch {
+                // Keep the last successful indexer-stats snapshot on transient failures.
             }
         };
 
@@ -364,6 +391,9 @@
     <ReleaseYearCard data={statistics?.media_year_releases ?? []} />
     <ServiceStatusCard statuses={serviceStatuses} />
     <DownloaderServicesGrid services={downloaderServices} />
+    {#if indexerStats.length > 0}
+        <IndexerStatsCard stats={indexerStats} />
+    {/if}
     <WatchingNowCard sessions={activePlaybackSessions} />
     {#if usenetProviders.length > 0}
         <UsenetProvidersCard providers={usenetProviders} />

@@ -39,7 +39,7 @@ fn nzb_body_cache() -> &'static ByteLru<String, Arc<String>> {
 pub(crate) const PROFILE: HttpServiceProfile =
     HttpServiceProfile::new("usenet-nzb-fetch").with_rate_limit(30, Duration::from_secs(60));
 
-pub(crate) use riven_core::nzb::{is_nzb_info_hash, nzb_url_redis_key};
+pub(crate) use riven_core::nzb::{is_nzb_info_hash, nzb_indexer_redis_key, nzb_url_redis_key};
 
 /// A candidate that fails ingest/verification at download time is permanently
 /// blacklisted immediately — it's a dead release, and retrying it every
@@ -475,6 +475,12 @@ impl Plugin for UsenetPlugin {
             "usenet stream registered"
         );
 
+        // The release ingested and verified, so this is the one the item ends
+        // up with — a successful grab for whichever indexer supplied it.
+        if let Some(indexer) = nzb_indexer_for_hash(info_hash, ctx).await {
+            riven_core::indexer_stats::record_successful_grab(&indexer);
+        }
+
         Ok(HookResponse::Download(Box::new(DownloadResult {
             info_hash: info_hash.to_string(),
             files,
@@ -516,6 +522,18 @@ impl Plugin for UsenetPlugin {
 async fn nzb_url_for_hash(info_hash: &str, ctx: &PluginContext) -> Option<String> {
     let mut redis = ctx.redis.clone();
     AsyncCommands::get::<_, Option<String>>(&mut redis, nzb_url_redis_key(info_hash))
+        .await
+        .ok()
+        .flatten()
+}
+
+/// Which indexer this release was scraped from, if it was scraped recently
+/// enough for the mapping to still be around. `None` for anything that did not
+/// come from a Newznab indexer, and the grab then goes uncounted rather than
+/// being attributed to the wrong one.
+async fn nzb_indexer_for_hash(info_hash: &str, ctx: &PluginContext) -> Option<String> {
+    let mut redis = ctx.redis.clone();
+    AsyncCommands::get::<_, Option<String>>(&mut redis, nzb_indexer_redis_key(info_hash))
         .await
         .ok()
         .flatten()

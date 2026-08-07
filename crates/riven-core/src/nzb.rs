@@ -27,6 +27,15 @@ pub fn nzb_url_redis_key(info_hash: &str) -> String {
     format!("riven:nzb:url:{info_hash}")
 }
 
+/// Which indexer a release came from, written next to its URL at scrape time.
+/// The download path is where a grab becomes real, and by then the scrape
+/// results are long gone — this is the only handle back to the indexer that
+/// earned the grab. Same TTL as the URL: without the URL there is no grab to
+/// attribute anyway.
+pub fn nzb_indexer_redis_key(info_hash: &str) -> String {
+    format!("riven:nzb:indexer:{info_hash}")
+}
+
 /// Seasons numbered as calendar years (Formula 1 "Season 2020", daily shows).
 /// Indexers don't parse these releases into season/ep attributes, so a
 /// `season=2020` filter matches nothing server-side.

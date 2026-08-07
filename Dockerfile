@@ -21,7 +21,8 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/app/target,sharing=locked \
     SQLX_OFFLINE=true cargo chef cook --release --recipe-path recipe.json
 
-COPY . .
+COPY Cargo.toml Cargo.lock ./
+COPY crates/ crates/
 # target/ is a cache mount and is wiped after the RUN, so copy the binary out
 # to a stable path before the layer ends.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \

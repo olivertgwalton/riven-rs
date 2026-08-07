@@ -37,7 +37,14 @@ async fn handle_parse_scrape_results_job(
 
 async fn handle_download_job(job: DownloadJob, q: Data<Arc<JobQueue>>) -> Result<(), BoxDynError> {
     let _guard = DedupGuard::new("download", job.id, q.redis.clone());
+    // Paired entry/exit lines because the alternative is a Redis autopsy. When
+    // a worker's task stream dies its claimed tasks stay claimed and simply
+    // never run, which from the logs alone is indistinguishable from a queue
+    // with nothing to do: an entry with no exit means the handler hung, an
+    // absent entry for a claimed task means it never reached the handler.
+    tracing::debug!(id = job.id, "download job started");
     crate::application::download::run(job.id, &job, &q).await;
+    tracing::debug!(id = job.id, "download job finished");
     Ok(())
 }
 
