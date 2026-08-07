@@ -829,6 +829,22 @@ type MediaItemStateTree {
 	seasons: [SeasonState!]!
 }
 
+"""
+Minimal per-item library status: just enough to render a "Request" vs
+"current state" button on a suggested-content card without paying for a
+full season/episode tree (unlike `MediaItemStateTree`, which
+`apply_indexed_media_item`-style callers need for shows but a poster card
+never does). Returned in bulk by the `mediaItemStatusesBy*Ids` batch
+queries so a whole carousel row resolves in one round trip instead of one
+query per card.
+"""
+type MediaItemStatus {
+	id: Int!
+	state: MediaItemState!
+	tmdbId: String
+	tvdbId: String
+}
+
 enum MediaItemType {
 	MOVIE
 	SHOW
@@ -1278,6 +1294,18 @@ type QueryRoot {
 	mediaItemFull(id: Int!): MediaItemFull
 	mediaItemStateByTmdb(tmdbId: String!): MediaItemStateTree
 	mediaItemStateByTvdb(tvdbId: String!): MediaItemStateTree
+	"""
+	Bulk library-status lookup for a set of TMDB ids: one round trip for
+	a whole suggested-content carousel row instead of one query per card.
+	Ids not found in the library are simply absent from the result — the
+	caller treats "no matching entry" as "not yet requested".
+	"""
+	mediaItemStatusesByTmdbIds(tmdbIds: [String!]!): [MediaItemStatus!]!
+	"""
+	Bulk library-status lookup for a set of TVDB ids — the show-side
+	counterpart to `mediaItemStatusesByTmdbIds`, same batching rationale.
+	"""
+	mediaItemStatusesByTvdbIds(tvdbIds: [String!]!): [MediaItemStatus!]!
 	movies: [MediaItem!]!
 	shows: [MediaItem!]!
 	seasons(showId: Int!, includeSpecials: Boolean): [MediaItem!]!

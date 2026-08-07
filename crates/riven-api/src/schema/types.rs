@@ -60,6 +60,32 @@ pub struct MediaItemStateTree {
     pub seasons: Vec<SeasonState>,
 }
 
+/// Minimal per-item library status: just enough to render a "Request" vs
+/// "current state" button on a suggested-content card without paying for a
+/// full season/episode tree (unlike `MediaItemStateTree`, which
+/// `apply_indexed_media_item`-style callers need for shows but a poster card
+/// never does). Returned in bulk by the `mediaItemStatusesBy*Ids` batch
+/// queries so a whole carousel row resolves in one round trip instead of one
+/// query per card.
+#[derive(SimpleObject)]
+pub struct MediaItemStatus {
+    pub id: i64,
+    pub state: MediaItemState,
+    pub tmdb_id: Option<String>,
+    pub tvdb_id: Option<String>,
+}
+
+impl From<MediaItem> for MediaItemStatus {
+    fn from(item: MediaItem) -> Self {
+        Self {
+            id: item.id,
+            state: item.state,
+            tmdb_id: item.tmdb_id,
+            tvdb_id: item.tvdb_id,
+        }
+    }
+}
+
 #[derive(SimpleObject)]
 pub struct ItemsPage {
     pub items: Vec<MediaItemListRow>,

@@ -143,6 +143,36 @@ impl MediaQuery {
         self.media_item_state_for(item).await
     }
 
+    /// Bulk library-status lookup for a set of TMDB ids: one round trip for
+    /// a whole suggested-content carousel row instead of one query per card.
+    /// Ids not found in the library are simply absent from the result — the
+    /// caller treats "no matching entry" as "not yet requested".
+    async fn media_item_statuses_by_tmdb_ids(
+        &self,
+        _ctx: &Context<'_>,
+        tmdb_ids: Vec<String>,
+    ) -> Result<Vec<MediaItemStatus>> {
+        Ok(repo::list_media_items_by_tmdb_ids(&tmdb_ids)
+            .await?
+            .into_iter()
+            .map(MediaItemStatus::from)
+            .collect())
+    }
+
+    /// Bulk library-status lookup for a set of TVDB ids — the show-side
+    /// counterpart to `mediaItemStatusesByTmdbIds`, same batching rationale.
+    async fn media_item_statuses_by_tvdb_ids(
+        &self,
+        _ctx: &Context<'_>,
+        tvdb_ids: Vec<String>,
+    ) -> Result<Vec<MediaItemStatus>> {
+        Ok(repo::list_media_items_by_tvdb_ids(&tvdb_ids)
+            .await?
+            .into_iter()
+            .map(MediaItemStatus::from)
+            .collect())
+    }
+
     async fn movies(&self, _ctx: &Context<'_>) -> Result<Vec<MediaItem>> {
         Ok(repo::list_movies().await?)
     }

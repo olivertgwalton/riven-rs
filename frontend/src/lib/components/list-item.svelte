@@ -1,8 +1,10 @@
 <script lang="ts">
     import PortraitCard from "$lib/components/media/portrait-card.svelte";
+    import ItemRequest from "$lib/components/media/riven/item-request.svelte";
     import { Badge } from "$lib/components/ui/badge/index.js";
     import { cn } from "$lib/utils";
     import { resolve } from "$app/paths";
+    import { getLibraryStatus, markLibraryStatusRequested } from "$lib/stores/library-status.svelte";
 
     const badgeVariantClasses: Record<string, string> = {
         success: "bg-green-600/90 text-white border-0",
@@ -64,6 +66,46 @@
         return parts.join(" • ") || null;
     });
 
+    // The Request/status button only makes sense for a movie/show sourced
+    // from an external indexer with a usable id — "riven" (already-resolved
+    // library items) and "anilist" (no tmdb/tvdb id available at all) can't
+    // be requested or status-checked this way, and person/company results
+    // aren't requestable content in the first place.
+    const requestMediaType = $derived.by<"movie" | "tv" | null>(() => {
+        if (normalizedType === "movie" || normalizedType === "tv") return normalizedType;
+        return null;
+    });
+    const requestIndexer = $derived.by<"tmdb" | "tvdb" | null>(() => {
+        if (indexer === "tmdb" || indexer === "tvdb") return indexer;
+        return null;
+    });
+    const requestExternalId = $derived(data.id != null ? String(data.id) : null);
+    const requestEligible = $derived(
+        !!requestMediaType && !!requestIndexer && !!requestExternalId
+    );
+
+    let statusEntry = $state<ReturnType<typeof getLibraryStatus> | null>(null);
+    $effect(() => {
+        if (!requestEligible || !requestIndexer || !requestExternalId || !requestMediaType) {
+            statusEntry = null;
+            return;
+        }
+        statusEntry = getLibraryStatus(requestIndexer, requestExternalId, requestMediaType);
+    });
+
+    // The footer's Request button/status pill lives inside the card's own <a>
+    // (so it stays visually anchored to the poster), so a click on it would
+    // otherwise also navigate to the details page. Rather than attach a click
+    // handler to a non-interactive wrapper around it (which needs its own
+    // keyboard handling and ARIA role to be accessible), the check lives on
+    // the anchor itself — already a properly interactive element — and just
+    // looks at whether the click originated inside the marked footer region.
+    function handleCardClick(e: MouseEvent) {
+        if ((e.target as HTMLElement | null)?.closest("[data-card-footer-action]")) {
+            e.preventDefault();
+        }
+    }
+
     // Default container classes (w-full allows grid to control width)
     // Merged with passed className
     const containerClasses = $derived(
@@ -111,11 +153,53 @@
                     )}>{data.badge.text}</Badge>
             {/if}
         {/snippet}
+        {#snippet footer()}
+            {#if requestEligible && requestIndexer && requestExternalId && requestMediaType}
+                {#if statusEntry === null || statusEntry.status === "loading"}
+                    <span
+                        class="inline-flex h-6 w-20 animate-pulse rounded-full bg-white/10 backdrop-blur-md"
+                        aria-hidden="true"></span>
+                {:else if statusEntry.status === "not_found"}
+                    <div data-card-footer-action>
+                        <ItemRequest
+                            size="sm"
+                            variant="ghost"
+                            class="h-6 rounded-full border-0 bg-green-600/80 px-3 text-[10px] font-semibold text-emerald-50 shadow-sm backdrop-blur-md hover:bg-green-600/70 hover:text-emerald-50"
+                            title={data.title}
+                            ids={[]}
+                            mediaType={requestMediaType}
+                            externalId={requestExternalId}
+                            onSuccess={(itemId) => {
+                                if (itemId != null) {
+                                    markLibraryStatusRequested(
+                                        requestIndexer,
+                                        requestExternalId,
+                                        requestMediaType,
+                                        itemId
+                                    );
+                                }
+                            }}>
+                            Request
+                        </ItemRequest>
+                    </div>
+                {:else}
+                    <span
+                        class={cn(
+                            "inline-flex h-6 items-center justify-center rounded-full px-3 text-[10px] font-semibold shadow-sm backdrop-blur-md",
+                            statusEntry.state === "Failed"
+                                ? "bg-red-600/80 text-red-50"
+                                : "bg-blue-600/80 text-blue-50"
+                        )}>
+                        {statusEntry.state}
+                    </span>
+                {/if}
+            {/if}
+        {/snippet}
     </PortraitCard>
 {/snippet}
 
 {#if mediaURL}
-    <a href={getMediaHref(mediaURL)} class={containerClasses}>
+    <a href={getMediaHref(mediaURL)} class={containerClasses} onclick={handleCardClick}>
         {@render cardContent()}
     </a>
 {:else}
