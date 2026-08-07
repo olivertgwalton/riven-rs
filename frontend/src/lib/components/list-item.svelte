@@ -5,7 +5,11 @@
     import { Badge } from "$lib/components/ui/badge/index.js";
     import { cn } from "$lib/utils";
     import { resolve } from "$app/paths";
-    import { getLibraryStatus, markLibraryStatusRequested } from "$lib/stores/library-status.svelte";
+    import {
+        getLibraryStatus,
+        markLibraryStatusRequested,
+        getResolvedLibraryId
+    } from "$lib/stores/library-status.svelte";
 
     const badgeVariantClasses: Record<string, string> = {
         success: "bg-green-600/90 text-white border-0",
@@ -26,10 +30,45 @@
     let normalizedType = $derived.by(() => {
         let t = type;
         if (indexer === "anilist" && !t) t = data.media_type;
+        if (indexer === "anilist" && t) {
+            // Anilist's raw MediaFormat enum (TV, TV_SHORT, MOVIE, SPECIAL,
+            // OVA, ONA, MUSIC, ...) has no movie/tv split of its own — Riven
+            // only distinguishes Movie vs Show, and everything that isn't a
+            // standalone MOVIE is episodic/serialized content, which maps to
+            // a Show. Passed straight through from the raw GraphQL response
+            // (see lists-cache.svelte.ts), so it's uppercase, not "tv"/"movie".
+            t = t.toUpperCase() === "MOVIE" ? "movie" : "tv";
+        }
         if ((indexer === "tvdb" || indexer === "tmdb") && t === "show") t = "tv";
         // Ensure type is set if only in data
         if (!t && data.media_type) t = data.media_type;
         return t;
+    });
+
+    // Mirrors the fallback used elsewhere in this component: an absent
+    // indexer has always meant "assume tmdb" for link-building (the
+    // SearchStore-backed trending pages never tag their raw TMDB results
+    // with one at all).
+    const requestSource = $derived.by<"tmdb" | "tvdb" | "anilist" | null>(() => {
+        if (indexer === "tmdb" || indexer === "tvdb" || indexer === "anilist") return indexer;
+        if (indexer === undefined) return "tmdb";
+        return null;
+    });
+    const requestMediaType = $derived.by<"movie" | "tv" | null>(() => {
+        if (normalizedType === "movie" || normalizedType === "tv") return normalizedType;
+        return null;
+    });
+    const requestExternalId = $derived(data.id != null ? String(data.id) : null);
+
+    // Riven's library is keyed by tmdb-movie/tvdb-show ids only. A TMDB
+    // *show* id and every Anilist id aren't usable directly and resolve
+    // through the store first; `resolved` is the identity every downstream
+    // lookup/link/mutation actually uses. `undefined` here just means "not
+    // applicable" (missing id, or a type this feature doesn't cover, e.g.
+    // person/company) — distinct from the store's own `"pending"`.
+    const resolved = $derived.by(() => {
+        if (!requestSource || !requestExternalId || !requestMediaType) return undefined;
+        return getResolvedLibraryId(requestSource, requestExternalId, requestMediaType);
     });
 
     let mediaURL = $derived.by(() => {
@@ -53,6 +92,18 @@
             // If indexer is undefined, assume tmdb behavior for now as default
             return `/details/media/${data.id}/${normalizedType}${queryParam}`;
         }
+
+        if (indexer === "anilist" && (normalizedType === "movie" || normalizedType === "tv")) {
+            // There is no /details/anilist/... route — Anilist ids aren't
+            // ones the details page understands at all. Resolve to the
+            // equivalent TMDB/TVDB id first (same resolution the button
+            // below uses) rather than link to a guaranteed 404; while
+            // that's in flight, no link is better than a broken one.
+            if (!resolved || resolved === "pending") return null;
+            const queryParam = resolved.indexer === "tvdb" ? "?indexer=tvdb" : "";
+            return `/details/media/${resolved.id}/${normalizedType}${queryParam}`;
+        }
+
         return `/details/${indexer}${normalizedType ? `/${normalizedType}` : ""}/${data.id}`;
     });
     let subtitle = $derived.by(() => {
@@ -67,38 +118,21 @@
         return parts.join(" • ") || null;
     });
 
-    // The Request/status button only makes sense for a movie/show sourced
-    // from an external indexer with a usable id — "riven" (already-resolved
-    // library items) and "anilist" (no tmdb/tvdb id available at all) can't
-    // be requested or status-checked this way, and person/company results
-    // aren't requestable content in the first place.
-    const requestMediaType = $derived.by<"movie" | "tv" | null>(() => {
-        if (normalizedType === "movie" || normalizedType === "tv") return normalizedType;
-        return null;
-    });
-    // Mirrors `mediaURL`'s own fallback below: some result sources (the raw
-    // TMDB search/discover results behind the dedicated trending pages, via
-    // SearchStore) never tag their items with an `indexer` at all, and an
-    // absent indexer has always meant "assume tmdb" for this component's own
-    // link-building — treating it any differently here just means the button
-    // silently never renders for those pages instead of erroring loudly.
-    const requestIndexer = $derived.by<"tmdb" | "tvdb" | null>(() => {
-        if (indexer === "tmdb" || indexer === "tvdb") return indexer;
-        if (indexer === undefined) return "tmdb";
-        return null;
-    });
-    const requestExternalId = $derived(data.id != null ? String(data.id) : null);
-    const requestEligible = $derived(
-        !!requestMediaType && !!requestIndexer && !!requestExternalId
-    );
+    // The Request/status button only makes sense for a movie/show with a
+    // resolvable identity in Riven's own library id-space — "riven"
+    // (already-resolved library items, e.g. Recently Added) and
+    // person/company results aren't requestable content in the first place,
+    // and `resolved === null` means an Anilist/TMDB-show id that genuinely
+    // couldn't be matched to anything.
+    const requestEligible = $derived(!!resolved && resolved !== "pending");
 
     let statusEntry = $state<ReturnType<typeof getLibraryStatus> | null>(null);
     $effect(() => {
-        if (!requestEligible || !requestIndexer || !requestExternalId || !requestMediaType) {
+        if (!requestSource || !requestExternalId || !requestMediaType) {
             statusEntry = null;
             return;
         }
-        statusEntry = getLibraryStatus(requestIndexer, requestExternalId, requestMediaType);
+        statusEntry = getLibraryStatus(requestSource, requestExternalId, requestMediaType);
     });
 
     // The footer's Request button/status pill lives inside the card's own <a>
@@ -162,7 +196,7 @@
             {/if}
         {/snippet}
         {#snippet footer()}
-            {#if requestEligible && requestIndexer && requestExternalId && requestMediaType}
+            {#if requestEligible && resolved && resolved !== "pending" && requestMediaType}
                 {#if statusEntry === null || statusEntry.status === "loading"}
                     <span
                         class="inline-flex h-6 w-20 animate-pulse rounded-full bg-white/10 backdrop-blur-md"
@@ -176,15 +210,10 @@
                             title={data.title}
                             ids={[]}
                             mediaType={requestMediaType}
-                            externalId={requestExternalId}
+                            externalId={resolved.id}
                             onSuccess={(itemId) => {
                                 if (itemId != null) {
-                                    markLibraryStatusRequested(
-                                        requestIndexer,
-                                        requestExternalId,
-                                        requestMediaType,
-                                        itemId
-                                    );
+                                    markLibraryStatusRequested(resolved.indexer, resolved.id, itemId);
                                 }
                             }}>
                             Request

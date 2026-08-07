@@ -20,6 +20,7 @@ export type LibraryStatusEntry =
 
 type Indexer = "tmdb" | "tvdb";
 type MediaKind = "movie" | "tv";
+export type ResolvableSource = Indexer | "anilist";
 
 const cache = $state<Record<string, LibraryStatusEntry>>({});
 
@@ -117,66 +118,95 @@ function queueFetch(indexer: Indexer, id: string): Promise<LibraryStatusEntry> {
 	return promise;
 }
 
-// TMDB has no independent notion of a TV show's *Riven* identity — every show
-// in this app is keyed by TVDB id (see the tmdb->tvdb resolution the details
-// page's +page.ts does before it will even fetch show metadata). A TMDB-
-// sourced TV card therefore has to resolve to a TVDB id first before its
-// library status can be looked up at all. Deduped per id so the same show
-// appearing in multiple rows doesn't re-resolve repeatedly.
-const tvResolutionCache = new Map<string, Promise<string | null>>();
-function resolveTmdbTvToTvdb(tmdbId: string): Promise<string | null> {
-	let pending = tvResolutionCache.get(tmdbId);
+export type ResolvedId = { indexer: Indexer; id: string };
+
+/**
+ * Resolve an id from a source id-space to the id-space Riven's own library
+ * actually keys that content by (movies by TMDB id, shows by TVDB id — never
+ * TMDB, see the details page's own `+page.ts` resolution for the same
+ * reason). Two sources need this: Anilist ids aren't TMDB/TVDB ids at all, and
+ * a TMDB-sourced *TV show* result still needs translating since shows are
+ * keyed by TVDB id regardless of where the search result came from. A TMDB
+ * *movie* or a TVDB result is already in the right space and resolves
+ * instantly with no network call.
+ *
+ * Cached and deduped per (source, mediaType, id) — the same title showing up
+ * in multiple rows only ever resolves once.
+ */
+const idResolutionCache = new Map<string, Promise<ResolvedId | null>>();
+
+function resolutionCacheKey(source: ResolvableSource, externalId: string, mediaType: MediaKind): string {
+	return `${source}:${mediaType}:${externalId}`;
+}
+
+function resolveToLibraryId(
+	source: ResolvableSource,
+	externalId: string,
+	mediaType: MediaKind
+): Promise<ResolvedId | null> {
+	const target: Indexer = mediaType === "tv" ? "tvdb" : "tmdb";
+	if (source === target) {
+		return Promise.resolve({ indexer: target, id: externalId });
+	}
+	const cacheKey = resolutionCacheKey(source, externalId, mediaType);
+	let pending = idResolutionCache.get(cacheKey);
 	if (!pending) {
-		pending = resolveExternalId({ from: "tmdb", to: "tvdb", id: tmdbId, mediaType: "tv" })
-			.then((r) => (r.resolved ? r.id : null))
+		pending = resolveExternalId({ from: source, to: target, id: externalId, mediaType })
+			.then((r) => (r.resolved ? { indexer: target, id: r.id } : null))
 			.catch(() => null);
-		tvResolutionCache.set(tmdbId, pending);
+		idResolutionCache.set(cacheKey, pending);
 	}
 	return pending;
 }
 
+const resolvedIdState = $state<Record<string, ResolvedId | null | "pending">>({});
+
 /**
- * Reactive read of a suggested item's library status. First call for a given
- * (indexer, externalId) kicks off the batched fetch (or, for a TMDB-sourced
- * TV show, a resolve-to-TVDB step first) and returns `{status: "loading"}`;
- * once the result lands, the returned entry updates in place (the backing
- * store is `$state`, so callers reading this inside a component re-render).
+ * Reactive read of a source id's resolved (tmdb-movie or tvdb-show) identity
+ * in Riven's own library id-space. Used both to build a working details-page
+ * link for a source whose raw id Riven never uses directly (Anilist), and by
+ * `getLibraryStatus` internally for the same sources.
+ *
+ * Returns `"pending"` while the resolution is in flight, `null` if the id
+ * could not be resolved at all (e.g. an anime with no TMDB/TVDB match yet).
+ */
+export function getResolvedLibraryId(
+	source: ResolvableSource,
+	externalId: string,
+	mediaType: MediaKind
+): ResolvedId | null | "pending" {
+	const key = resolutionCacheKey(source, externalId, mediaType);
+	const existing = resolvedIdState[key];
+	if (existing !== undefined) return existing;
+
+	resolvedIdState[key] = "pending";
+	resolveToLibraryId(source, externalId, mediaType).then((result) => {
+		resolvedIdState[key] = result;
+	});
+	return resolvedIdState[key];
+}
+
+/**
+ * Reactive read of a suggested item's library status. Sources whose ids
+ * aren't already in Riven's own id-space (Anilist always; TMDB for a TV
+ * show) resolve first via `getResolvedLibraryId`, then join the same batched
+ * lookup as everything else.
  */
 export function getLibraryStatus(
-	indexer: Indexer,
+	source: ResolvableSource,
 	externalId: string,
 	mediaType: MediaKind
 ): LibraryStatusEntry {
-	if (indexer === "tmdb" && mediaType === "tv") {
-		const resolveKey = `tmdb-tv:${externalId}`;
-		const existing = cache[resolveKey];
-		if (existing) return existing;
+	const resolved = getResolvedLibraryId(source, externalId, mediaType);
+	if (resolved === "pending") return { status: "loading" };
+	if (resolved === null) return { status: "not_found" };
 
-		cache[resolveKey] = { status: "loading" };
-		resolveTmdbTvToTvdb(externalId)
-			.then((tvdbId) => {
-				if (!tvdbId) {
-					cache[resolveKey] = { status: "not_found" };
-					return undefined;
-				}
-				return queueFetch("tvdb", tvdbId).then((entry) => {
-					cache[resolveKey] = entry;
-					cache[keyFor("tvdb", tvdbId)] = entry;
-				});
-			})
-			.catch(() => {
-				cache[resolveKey] = { status: "not_found" };
-			});
-		return cache[resolveKey];
-	}
-
-	const effectiveIndexer: Indexer = indexer === "tvdb" ? "tvdb" : "tmdb";
-	const key = keyFor(effectiveIndexer, externalId);
+	const key = keyFor(resolved.indexer, resolved.id);
 	const existing = cache[key];
 	if (existing) return existing;
 
 	cache[key] = { status: "loading" };
-	queueFetch(effectiveIndexer, externalId).then((entry) => {
+	queueFetch(resolved.indexer, resolved.id).then((entry) => {
 		cache[key] = entry;
 	});
 	return cache[key];
@@ -185,18 +215,10 @@ export function getLibraryStatus(
 /**
  * Optimistically flip a card from "Request" to a status pill right after a
  * successful request mutation, instead of waiting on a fresh network round
- * trip to notice the newly-created item.
+ * trip to notice the newly-created item. Callers pass the *resolved*
+ * (tmdb-movie or tvdb-show) identity — the same one the request mutation
+ * itself was actually sent with.
  */
-export function markLibraryStatusRequested(
-	indexer: Indexer,
-	externalId: string,
-	mediaType: MediaKind,
-	itemId: number
-) {
-	const entry: LibraryStatusEntry = { status: "found", id: itemId, state: "Indexed" };
-	if (indexer === "tmdb" && mediaType === "tv") {
-		cache[`tmdb-tv:${externalId}`] = entry;
-		return;
-	}
-	cache[keyFor(indexer === "tvdb" ? "tvdb" : "tmdb", externalId)] = entry;
+export function markLibraryStatusRequested(indexer: Indexer, externalId: string, itemId: number) {
+	cache[keyFor(indexer, externalId)] = { status: "found", id: itemId, state: "Indexed" };
 }
