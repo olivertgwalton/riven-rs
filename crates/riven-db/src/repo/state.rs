@@ -178,9 +178,21 @@ async fn load_child_states(
 /// Apply the leaf-state rules. Pure so it can be unit-tested without a DB.
 ///
 /// Order matters: `Unreleased` (aired_at in the future) wins over everything,
-/// then sticky `Paused`/`Failed`, then the attempts ceiling, then media-entry
-/// existence (movies / episodes only), then any non-blacklisted stream.
-/// Default is `Indexed`.
+/// then sticky `Paused`, then media-entry existence (movies / episodes only),
+/// then sticky `Failed`, then the attempts ceiling, then any non-blacklisted
+/// stream. Default is `Indexed`.
+///
+/// `Failed` is sticky against everything *except* a real media entry: a
+/// season-pack download matches files by season+episode number regardless of
+/// the target episode's current state, so an episode marked `Failed` long ago
+/// can still receive a genuine file today (e.g. once a season-level retry
+/// that was previously stuck on an earlier episode finally reaches it). A
+/// media entry on disk is a stronger, more direct signal than the
+/// `failed_attempts` counter — leaving the item stuck on `Failed` after that
+/// would mean a real download nobody can see. `Paused` stays sticky
+/// unconditionally: it is a deliberate user action, and a paused item is
+/// excluded from the download pipeline in the first place, so it cannot
+/// legitimately acquire a new media entry to override it with anyway.
 pub fn leaf_state(
     item_type: MediaItemType,
     current_state: MediaItemState,
@@ -193,17 +205,17 @@ pub fn leaf_state(
     if is_unreleased {
         return MediaItemState::Unreleased;
     }
-    if matches!(
-        current_state,
-        MediaItemState::Paused | MediaItemState::Failed
-    ) {
+    if current_state == MediaItemState::Paused {
+        return current_state;
+    }
+    if matches!(item_type, MediaItemType::Movie | MediaItemType::Episode) && has_media_entry {
+        return MediaItemState::Completed;
+    }
+    if current_state == MediaItemState::Failed {
         return current_state;
     }
     if max_attempts > 0 && failed_attempts >= max_attempts {
         return MediaItemState::Failed;
-    }
-    if matches!(item_type, MediaItemType::Movie | MediaItemType::Episode) && has_media_entry {
-        return MediaItemState::Completed;
     }
     if has_non_blacklisted_stream {
         return MediaItemState::Scraped;
