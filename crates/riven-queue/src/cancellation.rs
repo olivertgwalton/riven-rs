@@ -9,7 +9,7 @@ use super::*;
 impl JobQueue {
     /// Returns true if `cancel_items` was called for this id recently. In-flight
     /// download handlers poll this between candidates so deleting an item
-    /// stops debrid churn immediately, not only after the whole candidate list
+    /// stops provider churn immediately, not only after the whole candidate list
     /// has been walked.
     pub async fn is_cancelled(&self, id: i64) -> bool {
         let mut conn = self.redis.clone();
@@ -26,7 +26,7 @@ impl JobQueue {
     /// the deleted item leaves no debris.
     ///
     /// Called from the `remove_items` mutation so deleting a request from the
-    /// UI immediately stops its jobs from churning the debrid service.
+    /// UI immediately stops its jobs from churning the download providers.
     pub async fn cancel_items(&self, ids: &[i64]) {
         if ids.is_empty() {
             return;

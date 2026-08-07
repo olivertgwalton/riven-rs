@@ -6,7 +6,7 @@
 //! - `index:` — fetching metadata from the metadata providers
 //! - `scrape:` — asking the scrapers for releases
 //! - `parse:` — parsing/ranking those releases into download candidates
-//! - `download:` — picking a candidate and getting it from a debrid service
+//! - `download:` — picking a candidate and getting it from a download plugin
 //! - `pipeline:` — the per-item state machine deciding what happens next
 //! - `library sweep:` — the periodic pass that re-queues incomplete items
 //!
