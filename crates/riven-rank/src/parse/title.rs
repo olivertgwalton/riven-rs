@@ -344,18 +344,12 @@ pub(crate) fn extract_title(raw: &str) -> String {
         }
     }
 
+    // A network tag ends the title. A tag at position 0 is the title itself
+    // ("Vice", "Red Dawn"), not a tag.
+    if let Some(start) = super::detect::first_network_start(&cleaned)
+        && start > 0
     {
-        static RE_TITLE_NETWORK: LazyLock<Regex> = LazyLock::new(|| {
-            Regex::new(
-                r"(?i)\b(?:ATVP|ATV\+|Apple\s*TV\+?|AMZN|Amazon|NF|Netflix|NICK(?:elodeon)?|DSNP|DNSP|Disney\s*\+?|D\+|HMAX|HBO(?:\s*Max)?|HULU|PCOK|Peacock|PMTP|Paramount\+?|CBS|NBC|AMC|PBS|CC|Comedy\s*Central|CRAV|Crave|DCU|DC\s*Universe|DSNY|DisneyNOW|ESPN|FOX|FUNI|Funimation|RED|YouTube\s*(?:Red|Premium)|STAN|STZ|STARZ|SHO|Showtime|VRV|Crunchyroll|iT|iTunes|VUDU|ROKU|TVNZ|VICE|Sony|Hallmark|Adult\s*\.?\s*Swim|Animal\s*\.?\s*Planet|ANPL|Cartoon\s*\.?\s*Network)\b",
-            )
-            .unwrap()
-        });
-        if let Some(m) = RE_TITLE_NETWORK.find(&cleaned)
-            && m.start() > 0
-        {
-            end = end.min(m.start());
-        }
+        end = end.min(start);
     }
 
     if let Some(start) = min_match_start(

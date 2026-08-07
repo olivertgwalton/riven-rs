@@ -4,12 +4,26 @@ use std::sync::LazyLock;
 use super::ParsedData;
 use super::patterns::*;
 
+/// `NF`, `NICK`, `CC`, `AMC`, `FOX`, `RED`, `STAN`, `SHO`, `VICE` and `iT` are
+/// matched case-sensitively, because each is also an ordinary title word —
+/// "Code **Red**", "Miami **Vice**", "The **Fox** and the Hound",
+/// "Wreck-**It** Ralph". The scene writes the tag in its own fixed case while
+/// the word is title-cased, and case is the only thing that separates them:
+/// both sit in the same place in a release name, directly before the year or
+/// resolution, so position cannot tell them apart.
+///
+/// The error is not symmetric. A missed tag leaves one extra word in the
+/// title; a false one truncates the title at that word, which makes *every*
+/// release for that item fail title matching — the item becomes undownloadable.
+///
+/// Spelled-out brand names (`Netflix`, `Showtime`) stay case-insensitive: they
+/// are long enough not to collide, and usenet names are often all-lowercase.
 static NETWORK_TABLE: LazyLock<Vec<(Regex, &'static str)>> = LazyLock::new(|| {
     [
         (r"(?i)\b(?:ATVP|ATV\+|Apple\s*TV\+?)\b", "Apple TV"),
         (r"(?i)\b(?:AMZN|Amazon)\b", "Amazon"),
-        (r"(?i)\b(?:NF|Netflix)\b", "Netflix"),
-        (r"(?i)\b(?:NICK(?:elodeon)?)\b", "Nickelodeon"),
+        (r"(?i)\b(?:(?-i:NF)|Netflix)\b", "Netflix"),
+        (r"(?i)\b(?:(?-i:NICK)|Nickelodeon)\b", "Nickelodeon"),
         (r"(?i)\b(?:DSNP|DNSP|Disney\s*\+?|D\+)\b", "Disney"),
         (r"(?i)\b(?:HMAX|HBO(?:\s*Max)?)\b", "HBO"),
         (r"(?i)\bHULU\b", "Hulu"),
@@ -17,29 +31,29 @@ static NETWORK_TABLE: LazyLock<Vec<(Regex, &'static str)>> = LazyLock::new(|| {
         (r"(?i)\b(?:PMTP|Paramount\+?)\b", "Paramount"),
         (r"(?i)\bCBS\b", "CBS"),
         (r"(?i)\bNBC\b", "NBC"),
-        (r"(?i)\bAMC\b", "AMC"),
+        (r"\bAMC\b", "AMC"),
         (r"(?i)\bPBS\b", "PBS"),
-        (r"(?i)\b(?:CC|Comedy\s*Central)\b", "Comedy Central"),
+        (r"(?i)\b(?:(?-i:CC)|Comedy\s*Central)\b", "Comedy Central"),
         (r"(?i)\b(?:CRAV|Crave)\b", "Crave"),
         (r"(?i)\b(?:DCU|DC\s*Universe)\b", "DC Universe"),
         (r"(?i)\b(?:DSNY|DisneyNOW)\b", "DisneyNOW"),
         (r"(?i)\bESPN\b", "ESPN"),
-        (r"(?i)\bFOX\b", "FOX"),
+        (r"\bFOX\b", "FOX"),
         (r"(?i)\b(?:FUNI|Funimation)\b", "Funimation"),
         (
-            r"(?i)\b(?:RED|YouTube\s*(?:Red|Premium))\b",
+            r"(?i)\b(?:(?-i:RED)|YouTube\s*(?:Red|Premium))\b",
             "YouTube Premium",
         ),
-        (r"(?i)\bSTAN\b", "Stan"),
+        (r"\bSTAN\b", "Stan"),
         (r"(?i)\b(?:STZ|STARZ)\b", "STARZ"),
-        (r"(?i)\b(?:SHO|Showtime)\b", "Showtime"),
+        (r"(?i)\b(?:(?-i:SHO)|Showtime)\b", "Showtime"),
         (r"(?i)\bVRV\b", "VRV"),
         (r"(?i)\b(?:Crunchyroll|[. \-]CR[. \-])\b", "Crunchyroll"),
-        (r"(?i)\b(?:iT|iTunes)\b", "iTunes"),
+        (r"(?i)\b(?:(?-i:iT)|iTunes)\b", "iTunes"),
         (r"(?i)\bVUDU\b", "VUDU"),
         (r"(?i)\bROKU\b", "Roku"),
         (r"(?i)\bTVNZ\b", "TVNZ"),
-        (r"(?i)\bVICE\b", "VICE"),
+        (r"\bVICE\b", "VICE"),
         (r"(?i)\bSony\b", "Sony"),
         (r"(?i)\bHallmark\b", "Hallmark"),
         (r"(?i)\bAdult\s*\.?\s*Swim\b", "Adult Swim"),
@@ -59,6 +73,16 @@ pub(crate) fn detect_network(raw: &str, data: &mut ParsedData) {
             return;
         }
     }
+}
+
+/// Where the first network tag starts, for `extract_title` — the title ends
+/// there. Shares [`NETWORK_TABLE`] rather than restating it, so the two can't
+/// disagree about what counts as a tag.
+pub(crate) fn first_network_start(text: &str) -> Option<usize> {
+    NETWORK_TABLE
+        .iter()
+        .filter_map(|(re, _)| re.find(text).map(|m| m.start()))
+        .min()
 }
 
 /// Check if a detected group name is actually a false positive (codec, format, etc.).

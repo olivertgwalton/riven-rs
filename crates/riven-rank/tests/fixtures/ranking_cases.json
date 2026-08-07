@@ -1,0 +1,200 @@
+{
+  "fetch": [
+    {
+      "why": "a required pattern overrides every other check, RTN-style",
+      "settings": { "require": ["MustFetch"], "exclude": ["1080p"] },
+      "title": "Movie.Title.MustFetch.1080p.BluRay.x264-GROUP",
+      "fetch": true
+    },
+    {
+      "why": "language only nudges ranking by default — no hard reject",
+      "title": "Movie.Title.2024.GERMAN.1080p.WEB-DL.AVC.DDP5.1-GROUP",
+      "fetch": true
+    },
+    {
+      "why": "a release with no detected language is not rejected by default",
+      "title": "Movie.Title.2024.1080p.WEB-DL.AVC.DDP5.1-GROUP",
+      "fetch": true
+    },
+    {
+      "why": "an opted-in required language rejects releases missing it",
+      "settings": { "languages": { "required": ["fr"] } },
+      "title": "Movie.Title.2024.GERMAN.1080p.WEB-DL.AVC.DDP5.1-GROUP",
+      "fetch": false,
+      "failed": ["missing_required_language"]
+    },
+    {
+      "why": "…and accepts the ones that have it",
+      "settings": { "languages": { "required": ["fr"] } },
+      "title": "Movie.Title.2024.FRENCH.1080p.WEB-DL.AVC.DDP5.1-GROUP",
+      "fetch": true
+    },
+    {
+      "why": "an excluded language rejects matching releases",
+      "settings": { "languages": { "exclude": ["de"] } },
+      "title": "Movie.Title.2024.GERMAN.1080p.WEB-DL.AVC.DDP5.1-GROUP",
+      "fetch": false,
+      "failed": ["excluded_language"]
+    },
+    {
+      "why": "allow_english_in_languages beats an explicit english exclude",
+      "settings": { "languages": { "exclude": ["en"] } },
+      "title": "Movie.Title.2024.ENGLISH.1080p.WEB-DL.AVC.DDP5.1-GROUP",
+      "fetch": true
+    },
+    {
+      "why": "ultra_hd takes both the premium disc release and the web fallback",
+      "profile": "ultra_hd",
+      "title": "Movie.Title.2024.2160p.BluRay.REMUX.DV.HDR.HEVC.TrueHD.Atmos-GROUP",
+      "fetch": true
+    },
+    {
+      "profile": "ultra_hd",
+      "title": "Movie.Title.2024.2160p.WEB-DL.SDR.HEVC.DDP5.1-GROUP",
+      "fetch": true
+    },
+    {
+      "why": "ultra_hd keeps 1080p as a fallback (ranked far below 2160p)",
+      "profile": "ultra_hd",
+      "title": "Movie.Title.2024.1080p.WEB-DL.SDR.AVC.DDP5.1-GROUP",
+      "fetch": true
+    },
+    {
+      "why": "…but nothing below it",
+      "profile": "ultra_hd",
+      "title": "Movie.Title.2024.720p.WEB-DL.SDR.AVC.DDP5.1-GROUP",
+      "fetch": false,
+      "failed": ["resolution"]
+    },
+    {
+      "profile": "hd",
+      "title": "Movie.Title.2024.1080p.BluRay.REMUX.SDR.AVC.TrueHD.7.1-GROUP",
+      "fetch": true
+    },
+    {
+      "profile": "hd",
+      "title": "Movie.Title.2024.1080p.HDTV.SDR.AVC.AAC2.0-GROUP",
+      "fetch": true
+    },
+    {
+      "profile": "standard",
+      "title": "Movie.Title.2024.720p.WEB-DL.SDR.AVC.DDP5.1-GROUP",
+      "fetch": true
+    },
+    {
+      "profile": "standard",
+      "title": "Movie.Title.2024.480p.HDRip.SDR.AVC.MP3-GROUP",
+      "fetch": true
+    },
+    {
+      "why": "trash is rejected whatever the profile",
+      "profile": "standard",
+      "title": "Movie.Title.2024.CAM.x264-GROUP",
+      "fetch": false,
+      "failed": ["trash_quality"]
+    }
+  ],
+
+  "order": [
+    {
+      "why": "4K disc beats 4K web, which beats anything below 2160p",
+      "profile": "ultra_hd",
+      "best_to_worst": [
+        "Movie.Title.2024.2160p.BluRay.REMUX.DV.HDR.HEVC.TrueHD.Atmos-GROUP",
+        "Movie.Title.2024.2160p.BluRay.HDR.HEVC.DTS-HD.MA.7.1-GROUP",
+        "Movie.Title.2024.2160p.WEB-DL.HDR.HEVC.DDP5.1.Atmos-GROUP",
+        "Movie.Title.2024.2160p.WEB-DL.SDR.HEVC.DDP5.1-GROUP"
+      ]
+    },
+    {
+      "why": "hd: remux first, then web over lossy disc rips, broadcast last",
+      "profile": "hd",
+      "best_to_worst": [
+        "Movie.Title.2024.1080p.BluRay.REMUX.SDR.AVC.TrueHD.7.1-GROUP",
+        "Movie.Title.2024.1080p.WEB-DL.SDR.AVC.DDP5.1-GROUP",
+        "Movie.Title.2024.1080p.BluRay.SDR.AVC.DTS.5.1-GROUP",
+        "Movie.Title.2024.1080p.HDTV.SDR.AVC.AAC2.0-GROUP"
+      ]
+    },
+    {
+      "why": "standard keeps the hd source order and drops a rung to 480p last",
+      "profile": "standard",
+      "best_to_worst": [
+        "Movie.Title.2024.720p.WEB-DL.SDR.AVC.DDP5.1-GROUP",
+        "Movie.Title.2024.720p.BluRay.SDR.AVC.DTS.5.1-GROUP",
+        "Movie.Title.2024.480p.HDRip.SDR.AVC.MP3-GROUP"
+      ]
+    }
+  ],
+
+  "similarity": [
+    {
+      "why": "no correct_title to compare against means no similarity gate",
+      "title": "Movie.Title.2023.1080p.BluRay.x264-GROUP",
+      "correct_title": "",
+      "lev_ratio": 0.0
+    },
+    {
+      "why": "a country tag matching the item is not a title mismatch",
+      "title": "Top.Gear.UK.S05.1080p.WEB.H264-GROUP",
+      "correct_title": "Top Gear",
+      "country": "gbr",
+      "lev_ratio": 1.0
+    },
+    {
+      "why": "…but the other country's version of the show is",
+      "title": "Top.Gear.US.S05.1080p.WEB.H264-GROUP",
+      "correct_title": "Top Gear",
+      "country": "gbr",
+      "error": "title_similarity"
+    },
+    {
+      "why": "without an item country the country tag stays a mismatch",
+      "title": "Top.Gear.UK.S05.1080p.WEB.H264-GROUP",
+      "correct_title": "Top Gear",
+      "error": "title_similarity"
+    },
+    {
+      "why": "the word 'It' is not the iTunes tag — case-folding it truncated the title to 'Wreck' and rejected every real release of this film",
+      "title": "Wreck-It.Ralph.2012.1080p.BluRay.x264-GROUP",
+      "correct_title": "Wreck-It Ralph",
+      "lev_ratio": 1.0
+    },
+    {
+      "why": "same truncation, mid-title rather than second word",
+      "title": "Whose.Line.Is.It.Anyway.S01E01.1080p.WEB.H264-GROUP",
+      "correct_title": "Whose Line Is It Anyway",
+      "lev_ratio": 1.0
+    },
+    {
+      "why": "the real lowercase-i iTunes tag still parses as a network, not as title text",
+      "title": "Movie.Title.2019.1080p.iT.WEB-DL.H.264-GROUP",
+      "correct_title": "Movie Title",
+      "lev_ratio": 1.0
+    },
+    {
+      "why": "'Red' the title word is not the RED tag — this truncated to 'Code'",
+      "title": "Code.Red.2013.1080p.BluRay.x264-GROUP",
+      "correct_title": "Code Red",
+      "lev_ratio": 1.0
+    },
+    {
+      "why": "'Vice' the title word is not the VICE tag — this truncated to 'Miami'",
+      "title": "Miami.Vice.2006.1080p.BluRay.x264-GROUP",
+      "correct_title": "Miami Vice",
+      "lev_ratio": 1.0
+    },
+    {
+      "why": "'Fox' mid-title is not the FOX tag — this truncated to 'The'",
+      "title": "The.Fox.and.the.Hound.1981.1080p.BluRay.x264-GROUP",
+      "correct_title": "The Fox and the Hound",
+      "lev_ratio": 1.0
+    },
+    {
+      "why": "the uppercase tag is still a tag, so it stays out of the title",
+      "title": "Show.Name.RED.WEB-DL.1080p.H.264-GROUP",
+      "correct_title": "Show Name",
+      "lev_ratio": 1.0
+    }
+  ]
+}

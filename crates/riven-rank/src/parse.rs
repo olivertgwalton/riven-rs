@@ -46,6 +46,7 @@ pub(crate) use title::normalize_title;
 use title::{extract_title, normalize_edition};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
 pub struct ParsedData {
     pub raw_title: String,
     pub parsed_title: String,
