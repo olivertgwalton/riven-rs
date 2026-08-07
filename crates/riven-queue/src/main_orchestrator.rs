@@ -189,7 +189,39 @@ impl MainOrchestrator {
         }
         match item.item_type {
             MediaItemType::Show => {
-                push_requested_seasons(item.id, &self.queue).await;
+                // A show only gets season rows once its initial index
+                // actually completes (`apply_indexed_media_item` creates
+                // them). If a show is stuck in `Indexed` with zero seasons
+                // and was never actually indexed (`indexed_at` still null),
+                // its original `IndexJob` was lost before that ever
+                // happened — e.g. dropped off the event bus — and
+                // `push_requested_seasons` fanning out over an empty list is
+                // a silent no-op: the retry sweep would "retry" this show
+                // every cycle forever without ever doing anything. Re-index
+                // it instead so it actually gets metadata (title, poster,
+                // seasons/episodes) at least once.
+                //
+                // `indexed_at` gates this specifically so a show that HAS
+                // completed indexing but genuinely has no season data (a bad
+                // upstream metadata entry, not a lost job) doesn't get
+                // reindexed every sweep forever with no backoff — that case
+                // falls through to the harmless no-op below instead, same as
+                // before this fix existed.
+                match repo::list_seasons(item.id).await {
+                    Ok(seasons) if seasons.is_empty() && item.indexed_at.is_none() => {
+                        self.queue.push_index(IndexJob::from_item(item)).await;
+                    }
+                    Ok(_) => {
+                        push_requested_seasons(item.id, &self.queue).await;
+                    }
+                    Err(error) => {
+                        tracing::error!(
+                            id = item.id,
+                            %error,
+                            "library sweep: could not check for existing seasons, skipping this show's retry this pass"
+                        );
+                    }
+                }
             }
             _ => {
                 self.queue

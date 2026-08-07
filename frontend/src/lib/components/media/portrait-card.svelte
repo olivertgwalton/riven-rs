@@ -13,6 +13,7 @@
         onSelectToggle?: () => void;
         class?: string;
         topRight?: Snippet;
+        footer?: Snippet;
         showContent?: boolean;
     }
 
@@ -26,6 +27,7 @@
         onSelectToggle,
         class: className,
         topRight,
+        footer,
         showContent = true
     }: Props = $props();
 </script>
@@ -100,6 +102,11 @@
                 <p class="mt-1 line-clamp-1 text-xs font-medium text-zinc-300/90">
                     {subtitle}
                 </p>
+            {/if}
+            {#if footer}
+                <div class="mt-2">
+                    {@render footer()}
+                </div>
             {/if}
         </div>
     {/if}

@@ -175,6 +175,7 @@ type DiscoveredStream {
 	isCached: Boolean!
 	itemType: MediaItemType!
 	seasonNumber: Int
+	episodeNumber: Int
 }
 
 input DownloadMediaItemMutationInput {
@@ -828,6 +829,22 @@ type MediaItemStateTree {
 	seasons: [SeasonState!]!
 }
 
+"""
+Minimal per-item library status: just enough to render a "Request" vs
+"current state" button on a suggested-content card without paying for a
+full season/episode tree (unlike `MediaItemStateTree`, which
+`apply_indexed_media_item`-style callers need for shows but a poster card
+never does). Returned in bulk by the `mediaItemStatusesBy*Ids` batch
+queries so a whole carousel row resolves in one round trip instead of one
+query per card.
+"""
+type MediaItemStatus {
+	id: Int!
+	state: MediaItemState!
+	tmdbId: String
+	tvdbId: String
+}
+
 enum MediaItemType {
 	MOVIE
 	SHOW
@@ -1056,6 +1073,14 @@ type MutationRoot {
 	`filesystem_entries` recomputes the owning item's state automatically.
 	"""
 	deleteFilesystemEntry(id: Int!): Boolean!
+	"""
+	Reject a downloaded file: permanently blacklist the release behind it
+	and remove its tracked entry, then clear the owning item's retry
+	backoff so a replacement is searched for on the next scheduler pass.
+	Use when a download turned out wrong — mismatched title, bad quality,
+	wrong language, etc.
+	"""
+	blacklistFilesystemEntry(id: Int!): Boolean!
 	resetLibrary: Int!
 	"""
 	Reset items to Indexed state and clear failed_attempts.
@@ -1096,7 +1121,7 @@ type MutationRoot {
 	"""
 	Discover stream candidates without creating or mutating media items.
 	"""
-	discoverStreams(itemType: MediaItemType!, title: String!, imdbId: String, tmdbId: String, tvdbId: String, seasons: [Int!], cachedOnly: Boolean): [DiscoveredStream!]!
+	discoverStreams(itemType: MediaItemType!, title: String!, imdbId: String, tmdbId: String, tvdbId: String, seasons: [Int!], episodeNumber: Int, cachedOnly: Boolean): [DiscoveredStream!]!
 	"""
 	Create or prepare the real target item only after the user picks a specific stream.
 	
@@ -1105,7 +1130,7 @@ type MutationRoot {
 	to that season; a multi-season pack links to the **show** so the download
 	flow can fill every season it contains.
 	"""
-	downloadDiscoveredStream(itemType: MediaItemType!, title: String!, imdbId: String, tmdbId: String, tvdbId: String, seasonNumber: Int, seasons: [Int!], infoHash: String!, magnet: String!, parsedData: JSON, rank: Int): String!
+	downloadDiscoveredStream(itemType: MediaItemType!, title: String!, imdbId: String, tmdbId: String, tvdbId: String, seasonNumber: Int, episodeNumber: Int, seasons: [Int!], infoHash: String!, magnet: String!, parsedData: JSON, rank: Int): String!
 	"""
 	Re-acquire a usenet title whose release is broken (missing data) or was
 	never ingested. The item is "completed" only because it still has a
@@ -1269,6 +1294,18 @@ type QueryRoot {
 	mediaItemFull(id: Int!): MediaItemFull
 	mediaItemStateByTmdb(tmdbId: String!): MediaItemStateTree
 	mediaItemStateByTvdb(tvdbId: String!): MediaItemStateTree
+	"""
+	Bulk library-status lookup for a set of TMDB ids: one round trip for
+	a whole suggested-content carousel row instead of one query per card.
+	Ids not found in the library are simply absent from the result — the
+	caller treats "no matching entry" as "not yet requested".
+	"""
+	mediaItemStatusesByTmdbIds(tmdbIds: [String!]!): [MediaItemStatus!]!
+	"""
+	Bulk library-status lookup for a set of TVDB ids — the show-side
+	counterpart to `mediaItemStatusesByTmdbIds`, same batching rationale.
+	"""
+	mediaItemStatusesByTvdbIds(tvdbIds: [String!]!): [MediaItemStatus!]!
 	movies: [MediaItem!]!
 	shows: [MediaItem!]!
 	seasons(showId: Int!, includeSpecials: Boolean): [MediaItem!]!

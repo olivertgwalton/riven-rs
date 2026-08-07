@@ -280,6 +280,7 @@ pub trait Plugin: Send + Sync + 'static {
                 plugin_name,
                 provider,
                 duration_seconds,
+                ..
             } => {
                 let info = DownloadSuccessInfo {
                     id: *id,

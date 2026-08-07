@@ -127,7 +127,10 @@ pub async fn persist_movie(
             .notify(RivenEvent::MediaItemDownloadError {
                 id,
                 title: item.title.clone(),
+                item_type: item.item_type,
                 error: e.to_string(),
+                tmdb_id: item.tmdb_id.clone(),
+                tvdb_id: item.tvdb_id.clone(),
             })
             .await;
         return false;
@@ -160,7 +163,10 @@ pub async fn persist_episode(
                 .notify(RivenEvent::MediaItemDownloadError {
                     id,
                     title: item.title.clone(),
+                    item_type: item.item_type,
                     error: "episode has no parent season".into(),
+                    tmdb_id: item.tmdb_id.clone(),
+                    tvdb_id: crate::context::notification_tvdb_id(item, Some(hierarchy)),
                 })
                 .await;
             return false;
@@ -302,7 +308,10 @@ pub async fn persist_episode(
                 .notify(RivenEvent::MediaItemDownloadError {
                     id,
                     title: item.title.clone(),
+                    item_type: item.item_type,
                     error: e.to_string(),
+                    tmdb_id: item.tmdb_id.clone(),
+                    tvdb_id: crate::context::notification_tvdb_id(item, Some(hierarchy)),
                 })
                 .await;
             return false;

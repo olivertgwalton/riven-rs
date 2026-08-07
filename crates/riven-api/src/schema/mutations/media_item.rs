@@ -1,6 +1,6 @@
 use async_graphql::*;
 use riven_core::events::RivenEvent;
-use riven_core::types::{MediaItemState, build_magnet_uri};
+use riven_core::types::{MediaItemState, MediaItemType, build_magnet_uri};
 use riven_db::repo;
 use riven_queue::JobQueue;
 use riven_queue::application::download::{
@@ -145,6 +145,21 @@ impl MediaItemMutations {
             .count();
 
         let parse_ctx = build_parse_item_context(fresh.clone()).await;
+        // For Episode/Season items `fresh.tvdb_id` is that item's own TVDB
+        // record (an episode's individual id, or empty for a season), not
+        // the show's series id the frontend's details link expects — see
+        // `riven_queue::context::notification_tvdb_id` for the same fix
+        // applied on the queue side.
+        let notify_tvdb_id = match parse_ctx.item_type {
+            MediaItemType::Episode | MediaItemType::Season => {
+                repo::get_media_item_hierarchy(input.id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .and_then(|h| h.resolved_show_tvdb_id)
+            }
+            _ => fresh.tvdb_id.clone(),
+        };
         if new_streams_count == 0 {
             if let Err(err) = repo::increment_failed_attempts(input.id).await {
                 tracing::warn!(id = input.id, %err, "failed to increment failed_attempts");
@@ -154,6 +169,8 @@ impl MediaItemMutations {
                     id: input.id,
                     title: parse_ctx.item_title,
                     item_type: parse_ctx.item_type,
+                    tmdb_id: fresh.tmdb_id.clone(),
+                    tvdb_id: notify_tvdb_id.clone(),
                 })
                 .await;
 
@@ -176,6 +193,8 @@ impl MediaItemMutations {
                 title: parse_ctx.item_title,
                 item_type: parse_ctx.item_type,
                 stream_count: new_streams_count,
+                tmdb_id: fresh.tmdb_id.clone(),
+                tvdb_id: notify_tvdb_id,
             })
             .await;
 

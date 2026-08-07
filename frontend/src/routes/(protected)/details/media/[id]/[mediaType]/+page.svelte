@@ -226,6 +226,33 @@
         }
     }
 
+    async function blacklistFilesystemEntry(id: number, label: string) {
+        if (
+            !confirm(
+                `Blacklist "${label}"? This permanently excludes this exact release so it is never selected again, removes the tracked file entry, and searches for a replacement.`
+            )
+        )
+            return;
+        try {
+            await gqlClient<{ blacklistFilesystemEntry: boolean }>(
+                `mutation BlacklistFilesystemEntry($id: Int!) { blacklistFilesystemEntry(id: $id) }`,
+                { id }
+            );
+            selectedMovieVersionIdx = 0;
+            // Blacklisting usually moves the item off Completed, at which
+            // point completedDetailsSignature() returns "" and
+            // hydrateCompletedDetails never re-runs — so without resetting
+            // these, getMovieEntries() keeps reading the stale hydratedRiven
+            // snapshot that still has the just-deleted entry in it.
+            hydratedRiven = undefined;
+            lastHydratedCompletedKey = "";
+            toast.success(`"${label}" blacklisted — searching for a replacement`);
+            await hydrateInitialState();
+        } catch {
+            toast.error("Failed to blacklist version");
+        }
+    }
+
     async function handleRequestSuccess() {
         if (rivenPending) {
             return;
@@ -1145,7 +1172,11 @@
                             stateByEpisodeNumber={selectedRivenEpisodesByNumber}
                             detailsByEpisodeNumber={selectedHydratedEpisodesByNumber}
                             {formatSize}
-                            onDeleteFilesystemEntry={deleteFilesystemEntry} />
+                            onDeleteFilesystemEntry={deleteFilesystemEntry}
+                            onBlacklistFilesystemEntry={blacklistFilesystemEntry}
+                            onItemActionSuccess={hydrateInitialState}
+                            showItemId={rivenId ? rivenId.toString() : null}
+                            showExternalId={data.mediaDetails?.details?.id?.toString() ?? ""} />
                     </section>
                 {/if}
 
@@ -1586,6 +1617,25 @@
                                                     );
                                                 }}>
                                                 Remove this version
+                                            </button>
+                                        {/if}
+
+                                        <!-- Blacklist wrong/bad version -->
+                                        {#if fs?.id}
+                                            <button
+                                                type="button"
+                                                class="text-destructive/70 hover:text-destructive border-destructive/30 hover:border-destructive/70 mt-2 rounded-md border px-3 py-1.5 text-xs transition-colors"
+                                                onclick={() => {
+                                                    if (fs.id == null) return;
+                                                    blacklistFilesystemEntry(
+                                                        fs.id,
+                                                        getFilesystemEntryLabel(
+                                                            fs,
+                                                            `Version ${selectedMovieVersionIdx + 1}`
+                                                        )
+                                                    );
+                                                }}>
+                                                Blacklist this release
                                             </button>
                                         {/if}
                                     </div>

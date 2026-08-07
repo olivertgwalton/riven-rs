@@ -17,6 +17,7 @@ use super::types::DiscoveredStream;
 pub struct DiscoveryTarget {
     pub item_type: MediaItemType,
     pub season_number: Option<i32>,
+    pub episode_number: Option<i32>,
     pub scrape_title: String,
     pub parse_ctx: ParseContext,
 }
@@ -95,6 +96,7 @@ pub fn build_discovery_targets(
     requested_title: &str,
     indexed: &IndexedMediaItem,
     seasons: Option<&[i32]>,
+    episode_number: Option<i32>,
     profiles: Vec<(String, riven_rank::RankSettings)>,
     dubbed_anime_only: bool,
 ) -> Result<Vec<DiscoveryTarget>> {
@@ -108,6 +110,7 @@ pub fn build_discovery_targets(
         MediaItemType::Movie => Ok(vec![DiscoveryTarget {
             item_type: MediaItemType::Movie,
             season_number: None,
+            episode_number: None,
             scrape_title: correct_title.clone(),
             parse_ctx: ParseContext {
                 item_type: MediaItemType::Movie,
@@ -144,6 +147,71 @@ pub fn build_discovery_targets(
                 return Err(Error::new("Select at least one season to find streams"));
             }
 
+            if let Some(episode_number) = episode_number {
+                // Single-episode discovery: exactly one season in scope, and the
+                // target is that specific episode rather than the whole season.
+                // Ambiguous (zero or multiple) season selection is rejected
+                // outright rather than silently taking `selected.first()` — a
+                // caller that got the season wrong deserves an error, not a
+                // discovery pass against the wrong episode.
+                if selected.len() != 1 {
+                    return Err(Error::new(
+                        "Exactly one season is required to find streams for one episode",
+                    ));
+                }
+                let number = selected[0];
+                let season = all_seasons
+                    .iter()
+                    .find(|season| season.number == number)
+                    .ok_or_else(|| {
+                        Error::new(format!("Season {number} is not available from index data"))
+                    })?;
+                // A missing indexed episode must fail loudly too: silently
+                // continuing with `absolute_number: None` would let discovery
+                // run against a target the index data doesn't actually know
+                // about, rather than surfacing that the episode number is
+                // wrong or not yet indexed.
+                let episode = season
+                    .episodes
+                    .iter()
+                    .find(|episode| episode.number == episode_number)
+                    .ok_or_else(|| {
+                        Error::new(format!(
+                            "Episode {episode_number} is not available in season {number}"
+                        ))
+                    })?;
+                let absolute_number = episode.absolute_number;
+
+                return Ok(vec![DiscoveryTarget {
+                    item_type: MediaItemType::Episode,
+                    season_number: Some(number),
+                    episode_number: Some(episode_number),
+                    scrape_title: correct_title.clone(),
+                    parse_ctx: ParseContext {
+                        item_type: MediaItemType::Episode,
+                        season_number: Some(number),
+                        episode_number: Some(episode_number),
+                        absolute_number,
+                        item_year: None,
+                        parent_year: indexed.year,
+                        item_country: indexed.country.clone(),
+                        season_episodes: season
+                            .episodes
+                            .iter()
+                            .map(|episode| (episode.number, episode.absolute_number))
+                            .collect(),
+                        show_season_numbers: vec![],
+                        show_status: indexed.status,
+                        item_title: correct_title.clone(),
+                        item_aired_at: None,
+                        correct_title,
+                        aliases,
+                        profiles,
+                        dubbed_anime_only,
+                    },
+                }]);
+            }
+
             let mut targets = Vec::new();
             for number in selected {
                 let season = all_seasons
@@ -156,6 +224,7 @@ pub fn build_discovery_targets(
                 targets.push(DiscoveryTarget {
                     item_type: MediaItemType::Season,
                     season_number: Some(number),
+                    episode_number: None,
                     scrape_title: correct_title.clone(),
                     parse_ctx: ParseContext {
                         item_type: MediaItemType::Season,
@@ -195,6 +264,7 @@ pub async fn discover_streams(
     tmdb_id: Option<&str>,
     tvdb_id: Option<&str>,
     seasons: Option<&[i32]>,
+    episode_number: Option<i32>,
     cached_only: bool,
 ) -> Result<Vec<DiscoveredStream>> {
     let indexed = run_index_discovery(registry, item_type, imdb_id, tmdb_id, tvdb_id).await?;
@@ -208,6 +278,7 @@ pub async fn discover_streams(
         title,
         &indexed,
         seasons,
+        episode_number,
         profiles,
         dubbed_anime_only,
     )?;
@@ -223,7 +294,7 @@ pub async fn discover_streams(
             tvdb_id,
             &target.scrape_title,
             target.season_number,
-            None,
+            target.episode_number,
         )
         .await;
         let ranked = tokio::task::spawn_blocking({
@@ -235,8 +306,9 @@ pub async fn discover_streams(
 
         discovered.extend(ranked.into_iter().map(|candidate| DiscoveredStream {
             key: format!(
-                "{}:{}",
+                "{}:{}:{}",
                 target.season_number.unwrap_or(0),
+                target.episode_number.unwrap_or(0),
                 candidate.info_hash.to_lowercase()
             ),
             title: candidate.title,
@@ -248,6 +320,7 @@ pub async fn discover_streams(
             is_cached: false,
             item_type: target.item_type,
             season_number: target.season_number,
+            episode_number: target.episode_number,
         }));
     }
 
@@ -424,6 +497,7 @@ pub async fn ensure_download_target(
     tmdb_id: Option<&str>,
     tvdb_id: Option<&str>,
     season_number: Option<i32>,
+    episode_number: Option<i32>,
 ) -> Result<MediaItem> {
     match item_type {
         MediaItemType::Movie => {
@@ -485,6 +559,36 @@ pub async fn ensure_download_target(
                     ))
                 })
         }
-        _ => Err(Error::new("Only movie and season downloads are supported")),
+        MediaItemType::Episode => {
+            let episode_number =
+                episode_number.ok_or_else(|| Error::new("Episode number is required"))?;
+            // Recurse to get the prepared (indexed, episode-populated) season,
+            // then pick the one episode out of it — boxed since an async fn
+            // can't otherwise call itself (the future would be infinite-sized).
+            let season = Box::pin(ensure_download_target(
+                registry,
+                MediaItemType::Season,
+                title,
+                imdb_id,
+                tmdb_id,
+                tvdb_id,
+                season_number,
+                None,
+            ))
+            .await?;
+
+            repo::list_episodes(season.id)
+                .await?
+                .into_iter()
+                .find(|episode| episode.episode_number == Some(episode_number))
+                .ok_or_else(|| {
+                    Error::new(format!(
+                        "Episode {episode_number} not found after preparation"
+                    ))
+                })
+        }
+        _ => Err(Error::new(
+            "Only movie, season, and episode downloads are supported",
+        )),
     }
 }

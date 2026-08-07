@@ -62,12 +62,25 @@ pub enum RivenEvent {
         title: String,
         item_type: MediaItemType,
         stream_count: usize,
+        /// So the UI notification for this event can link to the item's
+        /// detail page. Movies are usually TMDB-matched; shows/seasons/
+        /// episodes are frequently TVDB-only (no TMDB match at all) — the
+        /// UI needs whichever one is actually populated.
+        tmdb_id: Option<String>,
+        tvdb_id: Option<String>,
     },
     #[serde(rename = "riven.media-item.scrape.error")]
     MediaItemScrapeError {
         id: i64,
         title: String,
+        item_type: MediaItemType,
         error: String,
+        /// So the UI notification for this event can link to the item's
+        /// detail page. Movies are usually TMDB-matched; shows/seasons/
+        /// episodes are frequently TVDB-only (no TMDB match at all) — the
+        /// UI needs whichever one is actually populated.
+        tmdb_id: Option<String>,
+        tvdb_id: Option<String>,
     },
     #[serde(rename = "riven.media-item.scrape.error.incorrect-state")]
     MediaItemScrapeErrorIncorrectState { id: i64 },
@@ -76,6 +89,12 @@ pub enum RivenEvent {
         id: i64,
         title: String,
         item_type: MediaItemType,
+        /// So the UI notification for this event can link to the item's
+        /// detail page. Movies are usually TMDB-matched; shows/seasons/
+        /// episodes are frequently TVDB-only (no TMDB match at all) — the
+        /// UI needs whichever one is actually populated.
+        tmdb_id: Option<String>,
+        tvdb_id: Option<String>,
     },
     #[serde(rename = "riven.media-item.download.requested")]
     MediaItemDownloadRequested {
@@ -107,7 +126,14 @@ pub enum RivenEvent {
     MediaItemDownloadError {
         id: i64,
         title: String,
+        item_type: MediaItemType,
         error: String,
+        /// So the UI notification for this event can link to the item's
+        /// detail page. Movies are usually TMDB-matched; shows/seasons/
+        /// episodes are frequently TVDB-only (no TMDB match at all) — the
+        /// UI needs whichever one is actually populated.
+        tmdb_id: Option<String>,
+        tvdb_id: Option<String>,
     },
     #[serde(rename = "riven.media-item.download.error.incorrect-state")]
     MediaItemDownloadErrorIncorrectState { id: i64 },
@@ -124,6 +150,12 @@ pub enum RivenEvent {
         year: Option<i32>,
         imdb_id: Option<String>,
         tmdb_id: Option<String>,
+        /// Movies are usually TMDB-matched; shows/seasons/episodes are
+        /// frequently TVDB-only (no TMDB match at all) — the UI notification
+        /// for this event needs whichever one is actually populated to link
+        /// to the item's detail page.
+        #[serde(default)]
+        tvdb_id: Option<String>,
         poster_path: Option<String>,
         plugin_name: String,
         provider: Option<String>,

@@ -173,6 +173,7 @@ export type DebridUserInfo = {
 };
 
 export type DiscoveredStream = {
+  episodeNumber?: Maybe<Scalars['Int']['output']>;
   fileSizeBytes?: Maybe<Scalars['Int']['output']>;
   infoHash: Scalars['String']['output'];
   isCached: Scalars['Boolean']['output'];
@@ -782,6 +783,22 @@ export type MediaItemStateTree = {
   tvdbId?: Maybe<Scalars['String']['output']>;
 };
 
+/**
+ * Minimal per-item library status: just enough to render a "Request" vs
+ * "current state" button on a suggested-content card without paying for a
+ * full season/episode tree (unlike `MediaItemStateTree`, which
+ * `apply_indexed_media_item`-style callers need for shows but a poster card
+ * never does). Returned in bulk by the `mediaItemStatusesBy*Ids` batch
+ * queries so a whole carousel row resolves in one round trip instead of one
+ * query per card.
+ */
+export type MediaItemStatus = {
+  id: Scalars['Int']['output'];
+  state: MediaItemState;
+  tmdbId?: Maybe<Scalars['String']['output']>;
+  tvdbId?: Maybe<Scalars['String']['output']>;
+};
+
 export type MediaItemType =
   | 'EPISODE'
   | 'MOVIE'
@@ -900,6 +917,14 @@ export type MutationRoot = {
    * If omitted, all non-special seasons are requested.
    */
   addItem: MediaItem;
+  /**
+   * Reject a downloaded file: permanently blacklist the release behind it
+   * and remove its tracked entry, then clear the owning item's retry
+   * backoff so a replacement is searched for on the next scheduler pass.
+   * Use when a download turned out wrong — mismatched title, bad quality,
+   * wrong language, etc.
+   */
+  blacklistFilesystemEntry: Scalars['Boolean']['output'];
   /** Mark the instance-wide first-run setup flow as completed. */
   completeInitialSetup: Scalars['Boolean']['output'];
   /** Delete a custom ranking profile by ID. Built-in profiles cannot be deleted. */
@@ -1062,6 +1087,11 @@ export type MutationRootAddItemArgs = {
 };
 
 
+export type MutationRootBlacklistFilesystemEntryArgs = {
+  id: Scalars['Int']['input'];
+};
+
+
 export type MutationRootDeleteCustomProfileArgs = {
   id: Scalars['Int']['input'];
 };
@@ -1084,6 +1114,7 @@ export type MutationRootDiscoverItemArgs = {
 
 export type MutationRootDiscoverStreamsArgs = {
   cachedOnly?: InputMaybe<Scalars['Boolean']['input']>;
+  episodeNumber?: InputMaybe<Scalars['Int']['input']>;
   imdbId?: InputMaybe<Scalars['String']['input']>;
   itemType: MediaItemType;
   seasons?: InputMaybe<Array<Scalars['Int']['input']>>;
@@ -1094,6 +1125,7 @@ export type MutationRootDiscoverStreamsArgs = {
 
 
 export type MutationRootDownloadDiscoveredStreamArgs = {
+  episodeNumber?: InputMaybe<Scalars['Int']['input']>;
   imdbId?: InputMaybe<Scalars['String']['input']>;
   infoHash: Scalars['String']['input'];
   itemType: MediaItemType;
@@ -1385,6 +1417,18 @@ export type QueryRoot = {
   mediaItemFullByTvdb?: Maybe<MediaItemFull>;
   mediaItemStateByTmdb?: Maybe<MediaItemStateTree>;
   mediaItemStateByTvdb?: Maybe<MediaItemStateTree>;
+  /**
+   * Bulk library-status lookup for a set of TMDB ids: one round trip for
+   * a whole suggested-content carousel row instead of one query per card.
+   * Ids not found in the library are simply absent from the result — the
+   * caller treats "no matching entry" as "not yet requested".
+   */
+  mediaItemStatusesByTmdbIds: Array<MediaItemStatus>;
+  /**
+   * Bulk library-status lookup for a set of TVDB ids — the show-side
+   * counterpart to `mediaItemStatusesByTmdbIds`, same batching rationale.
+   */
+  mediaItemStatusesByTvdbIds: Array<MediaItemStatus>;
   mediaItems: Array<MediaItemUnion>;
   /**
    * Everything the movie detail page renders, in one shape shared with
@@ -1578,6 +1622,16 @@ export type QueryRootMediaItemStateByTmdbArgs = {
 
 export type QueryRootMediaItemStateByTvdbArgs = {
   tvdbId: Scalars['String']['input'];
+};
+
+
+export type QueryRootMediaItemStatusesByTmdbIdsArgs = {
+  tmdbIds: Array<Scalars['String']['input']>;
+};
+
+
+export type QueryRootMediaItemStatusesByTvdbIdsArgs = {
+  tvdbIds: Array<Scalars['String']['input']>;
 };
 
 

@@ -53,6 +53,22 @@ async fn load_show_tree(
     Ok((seasons, episodes_by_season))
 }
 
+/// Generous upper bound for the batched library-status lookups — a carousel
+/// row is a couple dozen cards at most, so this is headroom for that, not a
+/// tuned limit. Guards against one request building an arbitrarily large
+/// `IN (...)` list rather than actually protecting real usage.
+const MAX_BULK_STATUS_IDS: usize = 500;
+
+fn check_bulk_ids_len(ids: &[String]) -> Result<()> {
+    if ids.len() > MAX_BULK_STATUS_IDS {
+        return Err(Error::new(format!(
+            "too many ids in one request: {} (max {MAX_BULK_STATUS_IDS})",
+            ids.len()
+        )));
+    }
+    Ok(())
+}
+
 #[derive(Default)]
 pub struct MediaQuery;
 
@@ -141,6 +157,38 @@ impl MediaQuery {
     ) -> Result<Option<MediaItemStateTree>> {
         let item = repo::get_media_item_by_tvdb(&tvdb_id).await?;
         self.media_item_state_for(item).await
+    }
+
+    /// Bulk library-status lookup for a set of TMDB ids: one round trip for
+    /// a whole suggested-content carousel row instead of one query per card.
+    /// Ids not found in the library are simply absent from the result — the
+    /// caller treats "no matching entry" as "not yet requested".
+    async fn media_item_statuses_by_tmdb_ids(
+        &self,
+        _ctx: &Context<'_>,
+        tmdb_ids: Vec<String>,
+    ) -> Result<Vec<MediaItemStatus>> {
+        check_bulk_ids_len(&tmdb_ids)?;
+        Ok(repo::list_media_items_by_tmdb_ids(&tmdb_ids)
+            .await?
+            .into_iter()
+            .map(MediaItemStatus::from)
+            .collect())
+    }
+
+    /// Bulk library-status lookup for a set of TVDB ids — the show-side
+    /// counterpart to `mediaItemStatusesByTmdbIds`, same batching rationale.
+    async fn media_item_statuses_by_tvdb_ids(
+        &self,
+        _ctx: &Context<'_>,
+        tvdb_ids: Vec<String>,
+    ) -> Result<Vec<MediaItemStatus>> {
+        check_bulk_ids_len(&tvdb_ids)?;
+        Ok(repo::list_media_items_by_tvdb_ids(&tvdb_ids)
+            .await?
+            .into_iter()
+            .map(MediaItemStatus::from)
+            .collect())
     }
 
     async fn movies(&self, _ctx: &Context<'_>) -> Result<Vec<MediaItem>> {
