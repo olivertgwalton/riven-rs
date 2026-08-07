@@ -75,8 +75,15 @@
         if (normalizedType === "movie" || normalizedType === "tv") return normalizedType;
         return null;
     });
+    // Mirrors `mediaURL`'s own fallback below: some result sources (the raw
+    // TMDB search/discover results behind the dedicated trending pages, via
+    // SearchStore) never tag their items with an `indexer` at all, and an
+    // absent indexer has always meant "assume tmdb" for this component's own
+    // link-building — treating it any differently here just means the button
+    // silently never renders for those pages instead of erroring loudly.
     const requestIndexer = $derived.by<"tmdb" | "tvdb" | null>(() => {
         if (indexer === "tmdb" || indexer === "tvdb") return indexer;
+        if (indexer === undefined) return "tmdb";
         return null;
     });
     const requestExternalId = $derived(data.id != null ? String(data.id) : null);
