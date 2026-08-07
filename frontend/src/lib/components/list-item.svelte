@@ -1,6 +1,7 @@
 <script lang="ts">
     import PortraitCard from "$lib/components/media/portrait-card.svelte";
     import ItemRequest from "$lib/components/media/riven/item-request.svelte";
+    import StatusBadge from "$lib/components/media/status-badge.svelte";
     import { Badge } from "$lib/components/ui/badge/index.js";
     import { cn } from "$lib/utils";
     import { resolve } from "$app/paths";
@@ -190,15 +191,7 @@
                         </ItemRequest>
                     </div>
                 {:else}
-                    <span
-                        class={cn(
-                            "inline-flex h-6 items-center justify-center rounded-full px-3 text-[10px] font-semibold shadow-sm backdrop-blur-md",
-                            statusEntry.state === "Failed"
-                                ? "bg-red-600/80 text-red-50"
-                                : "bg-blue-600/80 text-blue-50"
-                        )}>
-                        {statusEntry.state}
-                    </span>
+                    <StatusBadge state={statusEntry.state} size="sm" class="border-white/10 border" />
                 {/if}
             {/if}
         {/snippet}
