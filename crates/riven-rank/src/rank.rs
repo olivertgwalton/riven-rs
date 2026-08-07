@@ -68,6 +68,38 @@ fn lev_ratio(a: &str, b: &str) -> f64 {
     (total_len - distance) / total_len
 }
 
+/// Whether every word of `query` appears in `text`, in the same relative
+/// order — a subsequence, not necessarily contiguous — *and* the match
+/// reaches the end of `text`, with no unmatched words trailing after it.
+///
+/// Handles official release titles that wrap the canonical title in extra
+/// leading or interspersed words the metadata provider doesn't carry as an
+/// alias. The "New Initial D the Movie: Legend 2 – Racer" release-naming
+/// convention is a real example: TMDB's title for it is just "Initial D
+/// Legend 2: Racer", and a pure Levenshtein ratio penalizes "the movie" as
+/// noise diluting the match, scoring well under threshold even though every
+/// query word is present and in order.
+///
+/// The end-of-text requirement is load-bearing, not incidental: without it,
+/// this would also match a release for a same-named derivative or spin-off
+/// title, which is exactly "query + extra *trailing* words" (TVDB's "Top
+/// Gear: The Races" against a query of "Top Gear" is the incident
+/// `is_derivative_alias` exists for — see the alias loop below). Extra words
+/// before or between the query's words are tolerated; extra words after the
+/// query's last word are not. A release genuinely about something else won't
+/// have the query's words in matching order at all, so this stays safe
+/// beyond that too — a wrong sequel number still fails, since the mismatched
+/// number breaks the subsequence.
+fn contains_words_in_order(text: &str, query: &str) -> bool {
+    let mut query_words = query.split_whitespace().peekable();
+    if query_words.peek().is_none() {
+        return false;
+    }
+    let mut text_words = text.split_whitespace();
+    let all_found = query_words.all(|word| text_words.any(|candidate| candidate == word));
+    all_found && text_words.next().is_none()
+}
+
 /// If the last word of a normalized title is the (lowercased) country code
 /// `country`, return the title without it.
 fn strip_trailing_country(normalized_title: &str, country: &str) -> Option<String> {
@@ -93,6 +125,10 @@ fn best_title_ratio(
 ) -> f64 {
     let normalized_query = crate::parse::normalize_title(correct_title);
     let mut best_ratio = lev_ratio(&data.normalized_title, &normalized_query);
+
+    if contains_words_in_order(&data.normalized_title, &normalized_query) {
+        best_ratio = best_ratio.max(1.0);
+    }
 
     if let (Some(parsed_country), Some(item_country)) = (data.country.as_deref(), item_country)
         && crate::country::countries_match(parsed_country, item_country)
@@ -346,6 +382,75 @@ mod tests {
         assert!(!is_derivative_alias(
             "top gear australia",
             "top gear australia"
+        ));
+    }
+
+    #[test]
+    fn contains_words_in_order_ignores_interspersed_extra_words() {
+        assert!(contains_words_in_order(
+            "new initial d the movie legend 2 racer",
+            "initial d legend 2 racer"
+        ));
+        assert!(contains_words_in_order("toy story", "toy story"));
+        assert!(!contains_words_in_order("", "toy story"));
+        assert!(!contains_words_in_order("toy story", ""));
+    }
+
+    #[test]
+    fn contains_words_in_order_rejects_a_mismatched_sequel_number() {
+        // "legend 1 awakening" does not contain "legend 2 racer" in order —
+        // the wrong number breaks the subsequence, so a genuinely different
+        // entry must not slip through this check.
+        assert!(!contains_words_in_order(
+            "new initial d the movie legend 1 awakening",
+            "initial d legend 2 racer"
+        ));
+    }
+
+    #[test]
+    fn contains_words_in_order_rejects_out_of_order_words() {
+        assert!(!contains_words_in_order("story toy", "toy story"));
+    }
+
+    #[test]
+    fn contains_words_in_order_rejects_trailing_extra_words() {
+        // "top gear the races" is query "top gear" plus a trailing suffix —
+        // a derivative spin-off title, not the parent show. Extra words
+        // are only tolerated before or between the query's words.
+        assert!(!contains_words_in_order("top gear the races", "top gear"));
+    }
+
+    #[test]
+    fn title_matches_the_official_new_initial_d_movie_naming() {
+        // Reproduces the Initial D Legend 2/3 incident: TMDB's titles are
+        // "Initial D Legend 2: Racer" / "Initial D Legend 3: Dream", but every
+        // release in the wild is titled "New Initial D the Movie: Legend N –
+        // <Subtitle>", which scores well under the Levenshtein threshold on
+        // its own (~0.77 against a 0.85 default) despite containing every
+        // query word in order.
+        let settings = RankSettings::default();
+        let aliases = HashMap::new();
+
+        let legend_2 = parse(
+            "New.Initial.D.The.Movie.Legend.2.-.Racer.2015.1080p.BluRay.x264.AAC5.1-WORLD.mp4",
+        );
+        assert!(title_matches(
+            &legend_2,
+            "Initial D Legend 2: Racer",
+            None,
+            &aliases,
+            &settings
+        ));
+
+        // The previous movie in the series must still be rejected against
+        // Legend 2's title — this is the exact false-positive this fix must
+        // not introduce.
+        assert!(!title_matches(
+            &legend_2,
+            "Initial D Legend 1: Awakening",
+            None,
+            &aliases,
+            &settings
         ));
     }
 }
