@@ -1078,8 +1078,8 @@ pub async fn blacklist_and_remove_filesystem_entry(entry_id: i64) -> Result<bool
         // episode leaves the exact same pack fully eligible on the next
         // season- or show-level regrab, since that query never looks at the
         // episode's blacklist rows at all.
-        if let Ok(Some(hierarchy)) =
-            super::hierarchy::get_media_item_hierarchy(entry.media_item_id).await
+        if let Some(hierarchy) =
+            super::hierarchy::get_media_item_hierarchy(entry.media_item_id).await?
         {
             if let Some(season_id) = hierarchy.resolved_season_id {
                 blacklist_stream_permanent_by_hash(season_id, &stream.info_hash).await?;
