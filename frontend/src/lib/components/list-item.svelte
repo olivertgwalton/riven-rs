@@ -163,8 +163,8 @@
                     <div data-card-footer-action>
                         <ItemRequest
                             size="sm"
-                            variant="ghost"
-                            class="h-6 rounded-full border-0 bg-green-600/80 px-3 text-[10px] font-semibold text-emerald-50 shadow-sm backdrop-blur-md hover:bg-green-600/70 hover:text-emerald-50"
+                            variant="secondary"
+                            class="border-primary/50 text-primary hover:bg-primary/10 hover:text-primary hover:border-primary h-6 rounded-full border bg-black/40 px-3 text-[10px] font-semibold shadow-sm backdrop-blur-md"
                             title={data.title}
                             ids={[]}
                             mediaType={requestMediaType}
