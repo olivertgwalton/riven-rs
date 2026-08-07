@@ -242,23 +242,42 @@ async fn callback_inner(
     let user = link_or_create_user(state, provider, &info, &token).await?;
     let token = create_session(&auth.db, &user.id, None).await?;
 
-    Ok((
-        StatusCode::FOUND,
-        [
-            (LOCATION, pending.callback_url),
-            (SET_COOKIE, session_cookie(auth.cookie_secure, &token)),
-            (
-                SET_COOKIE,
-                cookie(
-                    &cookie_name(STATE_COOKIE, auth.cookie_secure),
-                    "",
-                    0,
-                    auth.cookie_secure,
-                ),
-            ),
-        ],
-    )
-        .into_response())
+    // Two `Set-Cookie` headers, not one: axum's `[(K, V); N]` response impl
+    // calls `HeaderMap::insert` per entry, which — unlike every other
+    // header — is wrong for `Set-Cookie`, since a repeated `insert` replaces
+    // rather than adds and silently drops the first cookie. Building the
+    // `HeaderMap` directly and using `append` (what `Extend` uses internally)
+    // is what actually sends both.
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        LOCATION,
+        pending.callback_url.parse().map_err(|error| {
+            anyhow::anyhow!("callback URL is not a valid header value: {error}")
+        })?,
+    );
+    headers.append(
+        SET_COOKIE,
+        session_cookie(auth.cookie_secure, &token)
+            .parse()
+            .map_err(|error| {
+                anyhow::anyhow!("session cookie is not a valid header value: {error}")
+            })?,
+    );
+    headers.append(
+        SET_COOKIE,
+        cookie(
+            &cookie_name(STATE_COOKIE, auth.cookie_secure),
+            "",
+            0,
+            auth.cookie_secure,
+        )
+        .parse()
+        .map_err(|error| {
+            anyhow::anyhow!("state-clear cookie is not a valid header value: {error}")
+        })?,
+    );
+
+    Ok((StatusCode::FOUND, headers).into_response())
 }
 
 /// An existing `(provider, sub)` account row wins outright. Failing that, a
