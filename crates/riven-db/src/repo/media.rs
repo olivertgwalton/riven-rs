@@ -105,6 +105,34 @@ pub async fn get_media_item_by_tvdb(id: &str) -> Result<Option<MediaItem>> {
     find_one_by(media_items::Column::TvdbId, id).await
 }
 
+/// Batch form of [`get_media_item_by_tmdb`]/[`get_media_item_by_tvdb`]: one
+/// query for a whole set of external ids rather than one round trip per id.
+/// Used to resolve a suggested-content carousel row's library status without
+/// N+1 queries. Restricted to top-level items since a season/episode never
+/// carries its own tmdb/tvdb id independent of its show's.
+async fn list_top_level_by_external_ids(
+    column: media_items::Column,
+    ids: &[String],
+) -> Result<Vec<MediaItem>> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    Ok(media_items::Entity::find()
+        .filter(column.is_in(ids.iter().cloned()))
+        .filter(media_items::Column::ItemType.is_in([MediaItemType::Movie, MediaItemType::Show]))
+        .into_model::<MediaItem>()
+        .all(orm())
+        .await?)
+}
+
+pub async fn list_media_items_by_tmdb_ids(ids: &[String]) -> Result<Vec<MediaItem>> {
+    list_top_level_by_external_ids(media_items::Column::TmdbId, ids).await
+}
+
+pub async fn list_media_items_by_tvdb_ids(ids: &[String]) -> Result<Vec<MediaItem>> {
+    list_top_level_by_external_ids(media_items::Column::TvdbId, ids).await
+}
+
 async fn list_by_type(item_type: MediaItemType) -> Result<Vec<MediaItem>> {
     Ok(media_items::Entity::find()
         .filter(media_items::Column::ItemType.eq(item_type))

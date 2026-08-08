@@ -41,6 +41,27 @@ pub struct DownloadHierarchyContext {
     pub show_is_anime: bool,
 }
 
+/// The tvdb_id to expose on a `RivenEvent` for notification click-through.
+///
+/// For a Movie or Show item, `item.tvdb_id` already is the right id. For an
+/// Episode or Season item it is *not*: TVDB gives every episode its own
+/// record id, distinct from the show's series id, and seasons frequently
+/// carry no tvdb_id of their own at all — so `item.tvdb_id` there is either
+/// the wrong resource type or empty. The frontend's `/details/media/{id}/tv`
+/// route expects a series id, so Episode/Season notifications need the
+/// resolved show's tvdb_id instead, or the link 404s against TVDB.
+pub fn notification_tvdb_id(
+    item: &MediaItem,
+    hierarchy: Option<&DownloadHierarchyContext>,
+) -> Option<String> {
+    match item.item_type {
+        MediaItemType::Episode | MediaItemType::Season => {
+            hierarchy.and_then(|h| h.show_tvdb_id.clone())
+        }
+        _ => item.tvdb_id.clone(),
+    }
+}
+
 /// Unwrap a repo lookup's `Result<Option<T>>`, logging why it came up empty.
 fn log_lookup<T, E: std::fmt::Display>(
     id: i64,
@@ -100,7 +121,13 @@ pub async fn load_media_item_or_download_error(
                 .notify(RivenEvent::MediaItemDownloadError {
                     id,
                     title: String::new(),
+                    // The item couldn't even be loaded, so there's nothing to
+                    // read a real type/tmdb_id/tvdb_id from — `Movie` matches
+                    // the frontend's own fallback for an unmapped item type.
+                    item_type: MediaItemType::Movie,
                     error: error_msg.into(),
+                    tmdb_id: None,
+                    tvdb_id: None,
                 })
                 .await;
             None

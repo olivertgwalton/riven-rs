@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use super::*;
 
 /// Persist a season (pack) download result.
@@ -25,7 +27,10 @@ pub async fn persist_season(
                 .notify(RivenEvent::MediaItemDownloadError {
                     id,
                     title: item.title.clone(),
+                    item_type: item.item_type,
                     error: "season has no parent show".into(),
+                    tmdb_id: item.tmdb_id.clone(),
+                    tvdb_id: crate::context::notification_tvdb_id(item, Some(hierarchy)),
                 })
                 .await;
             return SeasonPersistOutcome::Failed;
@@ -48,7 +53,10 @@ pub async fn persist_season(
                 .notify(RivenEvent::MediaItemDownloadError {
                     id,
                     title: item.title.clone(),
+                    item_type: item.item_type,
                     error: format!("failed to load parent show: {error}"),
+                    tmdb_id: item.tmdb_id.clone(),
+                    tvdb_id: crate::context::notification_tvdb_id(item, Some(hierarchy)),
                 })
                 .await;
             return SeasonPersistOutcome::Failed;
@@ -62,7 +70,10 @@ pub async fn persist_season(
                 .notify(RivenEvent::MediaItemDownloadError {
                     id,
                     title: item.title.clone(),
+                    item_type: item.item_type,
                     error: e.to_string(),
+                    tmdb_id: item.tmdb_id.clone(),
+                    tvdb_id: crate::context::notification_tvdb_id(item, Some(hierarchy)),
                 })
                 .await;
             return SeasonPersistOutcome::Failed;
@@ -183,9 +194,25 @@ pub async fn persist_season(
         episode_matches = by_ep;
     }
 
+    // Episodes that already have this profile: a release that only touches
+    // these must not read as progress, or the season-level download loop
+    // (which stops trying further candidates the moment one "succeeds")
+    // would get stuck forever re-persisting the same already-done episode
+    // that keeps winning the rank tie-break, never reaching the streams for
+    // episodes that are actually still missing.
+    let already_satisfied: HashSet<i64> = match profile_name {
+        Some(name) => repo::get_episode_ids_with_profile_for_season(id, name)
+            .await
+            .unwrap_or_default(),
+        None => HashSet::new(),
+    };
+
     let mut completed_episode_ids: Vec<i64> = Vec::new();
 
     for (ep, matched) in &episode_matches {
+        if already_satisfied.contains(&ep.id) {
+            continue;
+        }
         let episode_number = ep.episode_number.unwrap_or(1);
         for (file, part) in select_episode_files(matched) {
             let path = episode_vfs_path(&show_name, season_number, episode_number, part, path_tag);
@@ -265,6 +292,7 @@ pub async fn persist_season(
             year: item.year,
             imdb_id: item.imdb_id.clone(),
             tmdb_id: item.tmdb_id.clone(),
+            tvdb_id: crate::context::notification_tvdb_id(item, Some(hierarchy)),
             poster_path: item.poster_path.clone(),
             plugin_name: dl.plugin_name,
             provider: dl.provider,
@@ -308,7 +336,10 @@ pub async fn persist_show(
                 .notify(RivenEvent::MediaItemDownloadError {
                     id,
                     title: item.title.clone(),
+                    item_type: item.item_type,
                     error: e.to_string(),
+                    tmdb_id: item.tmdb_id.clone(),
+                    tvdb_id: item.tvdb_id.clone(),
                 })
                 .await;
             return SeasonPersistOutcome::Failed;
@@ -331,6 +362,15 @@ pub async fn persist_show(
         .map(|f| (f, parse_file_path(&f.filename)))
         .collect();
 
+    // See the equivalent lookup in `persist_season` for why episodes already
+    // holding this profile must be excluded rather than just re-persisted.
+    let already_satisfied: HashSet<i64> = match profile_name {
+        Some(name) => repo::get_episode_ids_with_profile_for_show(id, name)
+            .await
+            .unwrap_or_default(),
+        None => HashSet::new(),
+    };
+
     let mut completed_episode_ids: Vec<i64> = Vec::new();
 
     // One query for every season's episodes rather than one per season.
@@ -346,7 +386,10 @@ pub async fn persist_show(
                 .notify(RivenEvent::MediaItemDownloadError {
                     id,
                     title: item.title.clone(),
+                    item_type: item.item_type,
                     error: e.to_string(),
+                    tmdb_id: item.tmdb_id.clone(),
+                    tvdb_id: item.tvdb_id.clone(),
                 })
                 .await;
             return SeasonPersistOutcome::Failed;
@@ -360,6 +403,9 @@ pub async fn persist_show(
         };
 
         for ep in episodes {
+            if already_satisfied.contains(&ep.id) {
+                continue;
+            }
             let episode_number = ep.episode_number.unwrap_or(1);
             let matched: Vec<(&DownloadFile, riven_rank::ParsedData)> = parsed_video_files
                 .iter()
@@ -423,6 +469,28 @@ pub async fn persist_show(
     }
 
     sync_item_request_state(item).await;
+
+    // The filesystem_entries inserts above already recomputed state for each
+    // episode (via the repo layer), and the recompute cascade walked them up
+    // through their seasons to the show. Read the now-current show state
+    // rather than assuming "some episodes got created" means "the whole show
+    // is done" — a show pack that only fills some of its seasons must report
+    // Partial so the caller keeps trying further candidates, the same as a
+    // season pack already does; treating it as terminal here would starve
+    // the rest of the show exactly like the season-level version of this bug.
+    let show_complete = repo::get_media_item(id)
+        .await
+        .ok()
+        .flatten()
+        .is_some_and(|i| i.state == MediaItemState::Completed);
+
+    if !show_complete {
+        queue
+            .notify(RivenEvent::MediaItemDownloadPartialSuccess { id })
+            .await;
+        return SeasonPersistOutcome::Partial;
+    }
+
     queue
         .filesystem_settings_revision
         .fetch_add(1, Ordering::SeqCst);
@@ -437,6 +505,7 @@ pub async fn persist_show(
             year: item.year,
             imdb_id: item.imdb_id.clone(),
             tmdb_id: item.tmdb_id.clone(),
+            tvdb_id: item.tvdb_id.clone(),
             poster_path: item.poster_path.clone(),
             plugin_name: dl.plugin_name,
             provider: dl.provider,

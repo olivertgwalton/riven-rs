@@ -46,7 +46,7 @@ export type GqlFilesystemEntry = Pick<
 	| "mediaMetadata"
 >;
 
-export type GqlEpisodeFull = Pick<EpisodeFull, "episodeNumber" | "state"> & {
+export type GqlEpisodeFull = Pick<EpisodeFull, "id" | "episodeNumber" | "state"> & {
 	filesystemEntry?: GqlFilesystemEntry | null;
 	filesystemEntries?: GqlFilesystemEntry[];
 };
@@ -118,7 +118,7 @@ const MEDIA_ITEM_FULL_FIELDS = `
     seasons {
         seasonNumber state isRequested
         episodes {
-            episodeNumber state
+            id episodeNumber state
             filesystemEntry {
                 ${FILESYSTEM_ENTRY_FIELDS}
             }

@@ -27,6 +27,10 @@
         size?: "default" | "sm" | "lg" | "icon" | "icon-sm" | "icon-lg";
         class?: string;
         seasons?: SeasonInfo[];
+        /** Scopes the whole dialog to one episode: no season picker, every
+         * search and download targets exactly this season+episode. */
+        episodeNumber?: number | null;
+        seasonNumber?: number | null;
         children?: Snippet;
     }
 
@@ -45,8 +49,9 @@
         rank?: number | null;
         fileSizeBytes?: number | null;
         isCached: boolean;
-        itemType: "MOVIE" | "SEASON";
+        itemType: "MOVIE" | "SEASON" | "EPISODE";
         seasonNumber?: number | null;
+        episodeNumber?: number | null;
     }
 
     /**
@@ -61,8 +66,8 @@
         open = false;
     }
 
-    const DISCOVER_STREAMS_MUTATION = `mutation($itemType: MediaItemType!, $title: String!, $imdbId: String, $tmdbId: String, $tvdbId: String, $seasons: [Int!], $cachedOnly: Boolean) {
-        discoverStreams(itemType: $itemType, title: $title, imdbId: $imdbId, tmdbId: $tmdbId, tvdbId: $tvdbId, seasons: $seasons, cachedOnly: $cachedOnly) {
+    const DISCOVER_STREAMS_MUTATION = `mutation($itemType: MediaItemType!, $title: String!, $imdbId: String, $tmdbId: String, $tvdbId: String, $seasons: [Int!], $episodeNumber: Int, $cachedOnly: Boolean) {
+        discoverStreams(itemType: $itemType, title: $title, imdbId: $imdbId, tmdbId: $tmdbId, tvdbId: $tvdbId, seasons: $seasons, episodeNumber: $episodeNumber, cachedOnly: $cachedOnly) {
             key
             title
             infoHash
@@ -73,11 +78,12 @@
             isCached
             itemType
             seasonNumber
+            episodeNumber
         }
     }`;
 
-    const DOWNLOAD_DISCOVERED_STREAM_MUTATION = `mutation($itemType: MediaItemType!, $title: String!, $imdbId: String, $tmdbId: String, $tvdbId: String, $seasonNumber: Int, $seasons: [Int!], $infoHash: String!, $magnet: String!, $parsedData: JSON, $rank: Int) {
-        downloadDiscoveredStream(itemType: $itemType, title: $title, imdbId: $imdbId, tmdbId: $tmdbId, tvdbId: $tvdbId, seasonNumber: $seasonNumber, seasons: $seasons, infoHash: $infoHash, magnet: $magnet, parsedData: $parsedData, rank: $rank)
+    const DOWNLOAD_DISCOVERED_STREAM_MUTATION = `mutation($itemType: MediaItemType!, $title: String!, $imdbId: String, $tmdbId: String, $tvdbId: String, $seasonNumber: Int, $episodeNumber: Int, $seasons: [Int!], $infoHash: String!, $magnet: String!, $parsedData: JSON, $rank: Int) {
+        downloadDiscoveredStream(itemType: $itemType, title: $title, imdbId: $imdbId, tmdbId: $tmdbId, tvdbId: $tvdbId, seasonNumber: $seasonNumber, episodeNumber: $episodeNumber, seasons: $seasons, infoHash: $infoHash, magnet: $magnet, parsedData: $parsedData, rank: $rank)
     }`;
 
     let {
@@ -88,6 +94,8 @@
         variant = "ghost",
         size = "sm",
         seasons = [],
+        episodeNumber = null,
+        seasonNumber = null,
         children,
         ...restProps
     }: Props = $props();
@@ -104,7 +112,10 @@
     let streams = $state<StreamCandidate[]>([]);
     let downloadingKey = $state<string | null>(null);
 
-    const hasSeasonSelector = $derived(mediaType === "tv" && seasons.length > 0);
+    const isEpisodeMode = $derived(mediaType === "tv" && episodeNumber != null);
+    const hasSeasonSelector = $derived(
+        mediaType === "tv" && seasons.length > 0 && !isEpisodeMode
+    );
     const visibleStreams = $derived(
         cachedOnly ? streams.filter((stream) => stream.isCached) : streams
     );
@@ -169,8 +180,9 @@
     async function submitDownload(
         key: string,
         vars: {
-            itemType: "MOVIE" | "SEASON";
+            itemType: "MOVIE" | "SEASON" | "EPISODE";
             seasonNumber: number | null;
+            episodeNumber?: number | null;
             seasons?: number[] | null;
             infoHash: string;
             magnet: string;
@@ -191,6 +203,7 @@
                     tmdbId: resolvedTmdbId,
                     tvdbId: resolvedTvdbId,
                     seasonNumber: vars.seasonNumber,
+                    episodeNumber: vars.episodeNumber ?? null,
                     seasons: vars.seasons ?? null,
                     infoHash: vars.infoHash,
                     magnet: vars.magnet,
@@ -227,7 +240,12 @@
                     imdbId: null,
                     tmdbId: resolvedTmdbId,
                     tvdbId: resolvedTvdbId,
-                    seasons: hasSeasonSelector ? selectedSeasons : null,
+                    seasons: hasSeasonSelector
+                        ? selectedSeasons
+                        : isEpisodeMode && seasonNumber != null
+                          ? [seasonNumber]
+                          : null,
+                    episodeNumber: isEpisodeMode ? episodeNumber : null,
                     cachedOnly
                 }
             );
@@ -244,11 +262,16 @@
 
     function downloadStream(stream: StreamCandidate) {
         // A pack that parses to multiple seasons fills every one it contains;
-        // the backend links it to the show rather than a single season.
-        const packSeasons = stream.parsedData?.seasons?.filter((n) => n > 0) ?? [];
+        // the backend links it to the show rather than a single season. Not
+        // relevant in episode mode: every result there is already scoped to
+        // the one season+episode the dialog was opened for.
+        const packSeasons = isEpisodeMode
+            ? []
+            : (stream.parsedData?.seasons?.filter((n) => n > 0) ?? []);
         return submitDownload(stream.key, {
             itemType: stream.itemType,
             seasonNumber: stream.seasonNumber ?? null,
+            episodeNumber: stream.episodeNumber ?? null,
             seasons: packSeasons.length ? packSeasons : null,
             infoHash: stream.infoHash,
             magnet: stream.magnet,
@@ -261,6 +284,23 @@
         if (!cleanedHash) {
             error = "Enter a valid 40-char info hash or paste a magnet link";
             return;
+        }
+
+        if (isEpisodeMode) {
+            if (seasonNumber == null) {
+                error = "No season number available for this episode";
+                toast.error(error);
+                return;
+            }
+            return submitDownload(`manual:${cleanedHash}`, {
+                itemType: "EPISODE",
+                seasonNumber,
+                episodeNumber,
+                seasons: null,
+                infoHash: cleanedHash,
+                magnet: `magnet:?xt=urn:btih:${cleanedHash}`,
+                parsedData: null
+            });
         }
 
         if (mediaType === "tv" && selectedSeasons.length === 0) {
@@ -322,7 +362,9 @@
                                 <p class="text-xs text-zinc-400">
                                     {mediaType === "movie"
                                         ? "Movie discovery"
-                                        : "Season pack discovery"}
+                                        : isEpisodeMode
+                                          ? `Episode ${episodeNumber} discovery`
+                                          : "Season pack discovery"}
                                 </p>
                                 <button
                                     type="button"
@@ -465,6 +507,10 @@
                                                         {#if stream.seasonNumber != null}
                                                             <Badge variant="outline"
                                                                 >Season {stream.seasonNumber}</Badge>
+                                                        {/if}
+                                                        {#if stream.episodeNumber != null}
+                                                            <Badge variant="outline"
+                                                                >Episode {stream.episodeNumber}</Badge>
                                                         {/if}
                                                         <Badge
                                                             variant={stream.isCached

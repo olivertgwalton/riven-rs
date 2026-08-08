@@ -4,21 +4,33 @@
     import * as Sheet from "$lib/components/ui/sheet/index.js";
     import LandscapeCard from "$lib/components/media/landscape-card.svelte";
     import StatusBadge from "$lib/components/media/status-badge.svelte";
+    import ItemAction from "$lib/components/media/riven/item-action.svelte";
+    import ItemManualScrape from "$lib/components/media/riven/item-manual-scrape.svelte";
     import { IsMobile } from "$lib/hooks/is-mobile.svelte";
     import type { EpisodeSummary } from "$lib/gql/schema";
     import type { MediaMetadata, Maybe } from "$lib/gql/schema";
     import type { GqlEpisodeFull, GqlFilesystemEntry } from "$lib/services/riven-media";
     import { untrack } from "svelte";
+    import RotateCcw from "@lucide/svelte/icons/rotate-ccw";
+    import RefreshCw from "@lucide/svelte/icons/refresh-cw";
+    import Search from "@lucide/svelte/icons/search";
 
     interface Props {
         episodes: EpisodeSummary[];
         selectedSeason?: string;
         selectedEpisode?: string;
         showTitle?: string | null;
-        stateByEpisodeNumber: Map<number, Pick<GqlEpisodeFull, "episodeNumber" | "state">>;
+        stateByEpisodeNumber: Map<number, Pick<GqlEpisodeFull, "id" | "episodeNumber" | "state">>;
         detailsByEpisodeNumber: Map<number, GqlEpisodeFull>;
         formatSize: (bytes: number) => string;
         onDeleteFilesystemEntry: (id: number, label: string) => void | Promise<void>;
+        onBlacklistFilesystemEntry: (id: number, label: string) => void | Promise<void>;
+        onItemActionSuccess?: () => void | Promise<void>;
+        /** The show's own riven item id / external (TMDB or TVDB) id — manual
+         * scrape resolves the episode target itself, so these are the show's
+         * identity, not any particular episode's. */
+        showItemId?: string | null;
+        showExternalId?: string;
     }
 
     let {
@@ -29,7 +41,11 @@
         stateByEpisodeNumber,
         detailsByEpisodeNumber,
         formatSize,
-        onDeleteFilesystemEntry
+        onDeleteFilesystemEntry,
+        onBlacklistFilesystemEntry,
+        onItemActionSuccess,
+        showItemId = null,
+        showExternalId = ""
     }: Props = $props();
 
     const isMobile = new IsMobile();
@@ -137,6 +153,42 @@
         {/if}
         {#if rivenEpisode}
             <StatusBadge class="text-xs" state={rivenEpisode.state} />
+        {/if}
+        {#if episode.number != null && showExternalId}
+            <ItemManualScrape
+                size="sm"
+                variant="secondary"
+                class="border-border text-muted-foreground hover:bg-muted hover:text-foreground border bg-transparent px-2"
+                title={episode.name}
+                itemId={showItemId}
+                externalId={showExternalId}
+                mediaType="tv"
+                seasonNumber={episode.seasonNumber}
+                episodeNumber={episode.number}>
+                <Search class="h-3.5 w-3.5" />
+            </ItemManualScrape>
+        {/if}
+        {#if rivenEpisode?.id != null}
+            <ItemAction
+                kind="reset"
+                size="sm"
+                variant="secondary"
+                class="border-border text-muted-foreground hover:bg-muted hover:text-foreground border bg-transparent px-2"
+                title={episode.name}
+                ids={[rivenEpisode.id.toString()]}
+                onSuccess={onItemActionSuccess}>
+                <RotateCcw class="h-3.5 w-3.5" />
+            </ItemAction>
+            <ItemAction
+                kind="retry"
+                size="sm"
+                variant="secondary"
+                class="border-border text-muted-foreground hover:bg-muted hover:text-foreground border bg-transparent px-2"
+                title={episode.name}
+                ids={[rivenEpisode.id.toString()]}
+                onSuccess={onItemActionSuccess}>
+                <RefreshCw class="h-3.5 w-3.5" />
+            </ItemAction>
         {/if}
     </div>
 {/snippet}
@@ -379,6 +431,16 @@
                     }}>
                     Remove this version
                 </button>
+                <button
+                    type="button"
+                    class="text-destructive/70 hover:text-destructive border-destructive/30 hover:border-destructive/70 mt-2 rounded-md border px-3 py-1.5 text-xs transition-colors"
+                    onclick={() => {
+                        if (fs.id == null) return;
+                        if (episodeNumber != null) selectedVersionIdxByEpisode[episodeNumber] = 0;
+                        onBlacklistFilesystemEntry(fs.id, getFsLabel(fs, episodeNumber));
+                    }}>
+                    Blacklist this release
+                </button>
             {/if}
         </div>
     </div>
@@ -436,9 +498,9 @@
                 <Drawer.Trigger class="group w-full text-left">
                     {@render episodeTrigger(episode, rivenEpisode)}
                 </Drawer.Trigger>
-                <Drawer.Content class="max-h-[85vh] outline-none">
-                    <div class="mx-auto w-full max-w-4xl px-4 pb-6 md:px-6">
-                        <Drawer.Header class="px-0 pt-2 pb-0 text-left">
+                <Drawer.Content class="max-h-[85vh] overflow-hidden outline-none">
+                    <div class="mx-auto flex w-full min-h-0 max-w-4xl flex-1 flex-col px-4 pb-6 md:px-6">
+                        <Drawer.Header class="shrink-0 px-0 pt-2 pb-0 text-left">
                             <Drawer.Title class="font-heading text-2xl font-bold tracking-tight">
                                 S{episode.seasonNumber}E{episode.number} - {episode.name}
                             </Drawer.Title>

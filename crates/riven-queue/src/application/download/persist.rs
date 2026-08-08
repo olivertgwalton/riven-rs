@@ -108,6 +108,7 @@ pub async fn finalize_download_success(
     start_time: Instant,
     provider: Option<String>,
     plugin_name: Option<String>,
+    hierarchy: Option<&DownloadHierarchyContext>,
 ) {
     sync_item_request_state(item).await;
 
@@ -125,6 +126,7 @@ pub async fn finalize_download_success(
             year: item.year,
             imdb_id: item.imdb_id.clone(),
             tmdb_id: item.tmdb_id.clone(),
+            tvdb_id: crate::context::notification_tvdb_id(item, hierarchy),
             poster_path: item.poster_path.clone(),
             plugin_name: plugin_name.unwrap_or_default(),
             provider,

@@ -26,6 +26,7 @@ impl StreamsMutations {
         tmdb_id: Option<String>,
         tvdb_id: Option<String>,
         seasons: Option<Vec<i32>>,
+        episode_number: Option<i32>,
         cached_only: Option<bool>,
     ) -> Result<Vec<DiscoveredStream>> {
         require(ctx, Capability::ScrapeItems)?;
@@ -39,6 +40,7 @@ impl StreamsMutations {
             tmdb_id.as_deref(),
             tvdb_id.as_deref(),
             seasons.as_deref(),
+            episode_number,
             cached_only.unwrap_or(false),
         )
         .await
@@ -59,6 +61,7 @@ impl StreamsMutations {
         tmdb_id: Option<String>,
         tvdb_id: Option<String>,
         season_number: Option<i32>,
+        episode_number: Option<i32>,
         seasons: Option<Vec<i32>>,
         info_hash: String,
         magnet: String,
@@ -78,6 +81,19 @@ impl StreamsMutations {
                 tmdb_id.as_deref(),
                 tvdb_id.as_deref(),
                 None,
+                None,
+            )
+            .await?
+        } else if item_type == MediaItemType::Episode {
+            ensure_download_target(
+                registry.as_ref(),
+                MediaItemType::Episode,
+                &title,
+                imdb_id.as_deref(),
+                tmdb_id.as_deref(),
+                tvdb_id.as_deref(),
+                season_number,
+                episode_number,
             )
             .await?
         } else {
@@ -94,6 +110,7 @@ impl StreamsMutations {
                         tmdb_id.as_deref(),
                         tvdb_id.as_deref(),
                         Some(*single),
+                        None,
                     )
                     .await?
                 }

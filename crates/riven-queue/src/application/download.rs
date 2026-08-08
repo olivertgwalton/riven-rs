@@ -15,7 +15,9 @@ use riven_db::repo;
 use riven_rank::RankSettings;
 use serde::Deserialize;
 
-use crate::context::{DownloadHierarchyContext, load_download_hierarchy_context};
+use crate::context::{
+    DownloadHierarchyContext, load_download_hierarchy_context, notification_tvdb_id,
+};
 use crate::discovery::load_active_profiles;
 use crate::{DownloadJob, JobQueue, RankStreamsJob};
 
@@ -298,7 +300,10 @@ pub async fn run(id: i64, job: &DownloadJob, queue: &JobQueue) {
             .notify(RivenEvent::MediaItemDownloadError {
                 id,
                 title: item.title.clone(),
+                item_type: item.item_type,
                 error: "no streams available for download".into(),
+                tmdb_id: item.tmdb_id.clone(),
+                tvdb_id: notification_tvdb_id(&item, hierarchy.as_ref()),
             })
             .await;
         return;
@@ -591,7 +596,10 @@ async fn run_preferred_stream(
             .notify(RivenEvent::MediaItemDownloadError {
                 id,
                 title: item.title.clone(),
+                item_type: item.item_type,
                 error: "selected stream is not linked to this item".into(),
+                tmdb_id: item.tmdb_id.clone(),
+                tvdb_id: notification_tvdb_id(item, hierarchy),
             })
             .await;
         return false;
@@ -621,9 +629,11 @@ async fn run_preferred_stream(
         .await
         {
             DownloadAttemptOutcome::Failed => continue,
-            DownloadAttemptOutcome::TerminalHandled => return true,
+            DownloadAttemptOutcome::TerminalHandled | DownloadAttemptOutcome::Progressed => {
+                return true;
+            }
             DownloadAttemptOutcome::Succeeded => {
-                finalize_download_success(id, item, queue, start_time, None, None).await;
+                finalize_download_success(id, item, queue, start_time, None, None, hierarchy).await;
                 return true;
             }
         }
@@ -640,7 +650,10 @@ async fn run_preferred_stream(
         .notify(RivenEvent::MediaItemDownloadError {
             id,
             title: item.title.clone(),
+            item_type: item.item_type,
             error: "selected stream could not be downloaded from any provider".into(),
+            tmdb_id: item.tmdb_id.clone(),
+            tvdb_id: notification_tvdb_id(item, hierarchy),
         })
         .await;
     false
@@ -778,7 +791,35 @@ async fn run_downloads(
                         profile_done = true;
                         continue 'streams;
                     }
+                    DownloadAttemptOutcome::Progressed => {
+                        // Season/Show made progress but isn't fully done —
+                        // keep going with the next candidate stream instead
+                        // of stopping, so this pass can fill every episode a
+                        // good release exists for right now.
+                        any_success = true;
+                        continue 'streams;
+                    }
                 }
+            }
+
+            // Every configured (plugin, provider) combination was either not
+            // cached or failed outright — this release doesn't work.
+            // Blacklist it permanently: `clear_blacklisted_streams` wipes
+            // non-permanent entries at the start of the item's very next
+            // scrape (its normal job is letting a fresh scrape re-evaluate
+            // previously-rejected streams), which runs constantly on the
+            // retry cycle — a temporary entry here would be undone before it
+            // ever stopped this stream from being re-selected, defeating the
+            // point of blacklisting it at all.
+            if let Err(err) = repo::blacklist_stream_permanent_by_hash(id, &stream.info_hash).await
+            {
+                tracing::warn!(
+                    id,
+                    info_hash = %stream.info_hash,
+                    title = %item.title,
+                    %err,
+                    "download: could not blacklist an unusable stream, it may be reselected next cycle"
+                );
             }
         }
     }
@@ -796,7 +837,10 @@ async fn run_downloads(
             .notify(RivenEvent::MediaItemDownloadError {
                 id,
                 title: item.title.clone(),
+                item_type: item.item_type,
                 error: "no valid torrent found after trying cached candidates".into(),
+                tmdb_id: item.tmdb_id.clone(),
+                tvdb_id: notification_tvdb_id(item, hierarchy),
             })
             .await;
         return false;
@@ -825,7 +869,7 @@ async fn run_downloads(
             .await;
     }
 
-    finalize_download_success(id, item, queue, start_time, None, None).await;
+    finalize_download_success(id, item, queue, start_time, None, None, hierarchy).await;
     true
 }
 
