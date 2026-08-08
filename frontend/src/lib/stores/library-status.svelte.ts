@@ -65,7 +65,7 @@ function emptyBatch(): PendingBatch {
 
 const batches: Record<Indexer, PendingBatch> = {
 	tmdb: emptyBatch(),
-	tvdb: emptyBatch()
+	tvdb: emptyBatch(),
 };
 
 let flushScheduled = false;
@@ -87,7 +87,7 @@ const BATCH_QUERIES: Record<Indexer, string> = {
     }`,
 	tvdb: `query($ids: [String!]!) {
         mediaItemStatusesByTvdbIds(tvdbIds: $ids) { id state tmdbId tvdbId }
-    }`
+    }`,
 };
 
 /**
@@ -108,7 +108,10 @@ async function flushBatch(indexer: Indexer) {
 	let rows: MediaItemStatusRow[] = [];
 	let failed = false;
 	try {
-		const field = indexer === "tmdb" ? "mediaItemStatusesByTmdbIds" : "mediaItemStatusesByTvdbIds";
+		const field =
+			indexer === "tmdb"
+				? "mediaItemStatusesByTmdbIds"
+				: "mediaItemStatusesByTvdbIds";
 		const chunks: string[][] = [];
 		for (let start = 0; start < ids.length; start += MAX_IDS_PER_QUERY) {
 			chunks.push(ids.slice(start, start + MAX_IDS_PER_QUERY));
@@ -131,7 +134,12 @@ async function flushBatch(indexer: Indexer) {
 	const byExternalId = new Map<string, LibraryStatusEntry>();
 	for (const row of rows) {
 		const extId = indexer === "tmdb" ? row.tmdbId : row.tvdbId;
-		if (extId) byExternalId.set(extId, { status: "found", id: row.id, state: row.state });
+		if (extId)
+			byExternalId.set(extId, {
+				status: "found",
+				id: row.id,
+				state: row.state,
+			});
 	}
 
 	for (const id of ids) {
@@ -147,7 +155,8 @@ async function flushBatch(indexer: Indexer) {
 			// whole grid on every event.
 			cache[key] = entry;
 		}
-		for (const resolve of resolvers.get(id) ?? []) resolve({ entry, cacheable: !failed });
+		for (const resolve of resolvers.get(id) ?? [])
+			resolve({ entry, cacheable: !failed });
 	}
 }
 
@@ -191,27 +200,39 @@ type ResolvedFetchId = { result: ResolvedId | null; cacheable: boolean };
 
 const idResolutionCache = new Map<string, Promise<ResolvedFetchId>>();
 
-function resolutionCacheKey(source: ResolvableSource, externalId: string, mediaType: MediaKind): string {
+function resolutionCacheKey(
+	source: ResolvableSource,
+	externalId: string,
+	mediaType: MediaKind,
+): string {
 	return `${source}:${mediaType}:${externalId}`;
 }
 
 function resolveToLibraryId(
 	source: ResolvableSource,
 	externalId: string,
-	mediaType: MediaKind
+	mediaType: MediaKind,
 ): Promise<ResolvedFetchId> {
 	const target: Indexer = mediaType === "tv" ? "tvdb" : "tmdb";
 	if (source === target) {
-		return Promise.resolve({ result: { indexer: target, id: externalId }, cacheable: true });
+		return Promise.resolve({
+			result: { indexer: target, id: externalId },
+			cacheable: true,
+		});
 	}
 	const cacheKey = resolutionCacheKey(source, externalId, mediaType);
 	const cached = idResolutionCache.get(cacheKey);
 	if (cached) return cached;
 
-	const pending = resolveExternalId({ from: source, to: target, id: externalId, mediaType })
+	const pending = resolveExternalId({
+		from: source,
+		to: target,
+		id: externalId,
+		mediaType,
+	})
 		.then((r) => ({
 			result: r.resolved ? { indexer: target, id: r.id } : null,
-			cacheable: true
+			cacheable: true,
 		}))
 		.catch(() => {
 			// A request failure isn't a real "no match" answer — don't leave
@@ -227,7 +248,9 @@ function resolveToLibraryId(
 	return pending;
 }
 
-const resolvedIdState = $state<Record<string, ResolvedId | null | "pending">>({});
+const resolvedIdState = $state<Record<string, ResolvedId | null | "pending">>(
+	{},
+);
 
 /**
  * Reactive read of a source id's resolved (tmdb-movie or tvdb-show) identity
@@ -241,20 +264,22 @@ const resolvedIdState = $state<Record<string, ResolvedId | null | "pending">>({}
 export function getResolvedLibraryId(
 	source: ResolvableSource,
 	externalId: string,
-	mediaType: MediaKind
+	mediaType: MediaKind,
 ): ResolvedId | null | "pending" {
 	const key = resolutionCacheKey(source, externalId, mediaType);
 	const existing = resolvedIdState[key];
 	if (existing !== undefined) return existing;
 
 	resolvedIdState[key] = "pending";
-	resolveToLibraryId(source, externalId, mediaType).then(({ result, cacheable }) => {
-		if (cacheable) {
-			resolvedIdState[key] = result;
-		} else {
-			delete resolvedIdState[key];
-		}
-	});
+	resolveToLibraryId(source, externalId, mediaType).then(
+		({ result, cacheable }) => {
+			if (cacheable) {
+				resolvedIdState[key] = result;
+			} else {
+				delete resolvedIdState[key];
+			}
+		},
+	);
 	return resolvedIdState[key];
 }
 
@@ -267,7 +292,7 @@ export function getResolvedLibraryId(
 export function getLibraryStatus(
 	source: ResolvableSource,
 	externalId: string,
-	mediaType: MediaKind
+	mediaType: MediaKind,
 ): LibraryStatusEntry {
 	const resolved = getResolvedLibraryId(source, externalId, mediaType);
 	if (resolved === "pending") return { status: "loading" };
@@ -347,7 +372,7 @@ function onVisibilityChange() {
 export function watchLibraryStatus(
 	source: ResolvableSource,
 	externalId: string,
-	mediaType: MediaKind
+	mediaType: MediaKind,
 ): () => void {
 	const key = resolutionCacheKey(source, externalId, mediaType);
 	watchers.set(key, (watchers.get(key) ?? 0) + 1);
@@ -383,6 +408,14 @@ export function watchLibraryStatus(
  * (tmdb-movie or tvdb-show) identity — the same one the request mutation
  * itself was actually sent with.
  */
-export function markLibraryStatusRequested(indexer: Indexer, externalId: string, itemId: number) {
-	cache[keyFor(indexer, externalId)] = { status: "found", id: itemId, state: "Indexed" };
+export function markLibraryStatusRequested(
+	indexer: Indexer,
+	externalId: string,
+	itemId: number,
+) {
+	cache[keyFor(indexer, externalId)] = {
+		status: "found",
+		id: itemId,
+		state: "Indexed",
+	};
 }

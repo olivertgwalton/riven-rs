@@ -268,7 +268,10 @@ export const load = (async ({ depends }) => {
 		.then((data) => (data.debridAccountInfo ?? []).map(mapDebridService))
 		.catch((): DownloaderService[] => []);
 
-	const indexerStats = gqlClient<{ indexerStats: IndexerStats[] }>(INDEXER_STATS_QUERY, {})
+	const indexerStats = gqlClient<{ indexerStats: IndexerStats[] }>(
+		INDEXER_STATS_QUERY,
+		{},
+	)
 		.then((data) => data.indexerStats ?? [])
 		.catch((): IndexerStats[] => []);
 

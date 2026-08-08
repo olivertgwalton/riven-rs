@@ -147,10 +147,10 @@ export const authClient = {
 				return { data: null, error: error ?? EMPTY_RESPONSE };
 			}
 			const assertion = await getPasskeyAssertion(options, init);
-			return call<{ user: AuthUser }>(
-				"/passkey/verify-authentication",
-				{ method: "POST", body: { response: assertion } },
-			);
+			return call<{ user: AuthUser }>("/passkey/verify-authentication", {
+				method: "POST",
+				body: { response: assertion },
+			});
 		},
 
 		/**
