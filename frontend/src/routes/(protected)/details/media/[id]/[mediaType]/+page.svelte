@@ -19,6 +19,7 @@
     import Download from "@lucide/svelte/icons/download";
     import { cn } from "$lib/utils";
     import PortraitCard from "$lib/components/media/portrait-card.svelte";
+    import ListItem from "$lib/components/list-item.svelte";
     import ItemRequest from "$lib/components/media/riven/item-request.svelte";
     import ItemAction from "$lib/components/media/riven/item-action.svelte";
     import ItemManualScrape from "$lib/components/media/riven/item-manual-scrape.svelte";
@@ -62,13 +63,6 @@
         eidr: { name: "EIDR", url: "https://ui.eidr.org/view/content?id=" }
     };
     const getExternal = (key: string) => externalMeta[key.replace("_id", "")];
-
-    function mediaHref(id: number | string, mediaType: string) {
-        return resolve("/(protected)/details/media/[id]/[mediaType]", {
-            id: String(id),
-            mediaType
-        });
-    }
 
     function entityHref(id: number | string, type: string, query?: string) {
         const path = resolve("/(protected)/details/entity/[id]/[type]", {
@@ -731,15 +725,11 @@
             <Carousel.Content class="-ml-3">
                 {#each items as item (`${item.mediaType}-${item.id}`)}
                     <Carousel.Item class="basis-auto pl-3">
-                        <a
-                            href={mediaHref(item.id, item.mediaType)}
-                            class="group relative block opacity-80 transition-all duration-300 hover:opacity-100">
-                            <PortraitCard
-                                title={item.title}
-                                subtitle={`${item.mediaType === "tv" ? "TV" : "Movie"}${item.year ? ` • ${item.year}` : ""}`}
-                                image={item.posterPath}
-                                class="w-36 md:w-44 lg:w-48" />
-                        </a>
+                        <ListItem
+                            data={item}
+                            indexer={item.indexer}
+                            type={item.mediaType}
+                            class="w-36 opacity-80 transition-all duration-300 hover:opacity-100 md:w-44 lg:w-48" />
                     </Carousel.Item>
                 {/each}
             </Carousel.Content>

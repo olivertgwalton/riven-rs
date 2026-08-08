@@ -25,24 +25,6 @@
         id: number;
         name: string;
         overview: string | null;
-        poster_path: string | null;
-        backdrop_path: string | null;
-        parts: Array<{
-            id: number;
-            title: string;
-            overview?: string | null;
-            poster_path: string | null;
-            backdrop_path: string | null;
-            release_date?: string | null;
-            media_type: "movie";
-            year: string;
-        }>;
-    }
-
-    interface GqlCollectionDetails {
-        id: number;
-        name: string;
-        overview: string | null;
         posterPath: string | null;
         backdropPath: string | null;
         parts: Array<{
@@ -74,7 +56,7 @@
         loading = true;
         error = null;
         try {
-            const data = await gqlClient<{ tmdbCollectionDetails: GqlCollectionDetails }>(
+            const data = await gqlClient<{ tmdbCollectionDetails: CollectionDetails }>(
                 `query Collection($id: Int!) {
                     tmdbCollectionDetails(id: $id) {
                         id
@@ -96,18 +78,7 @@
                 }`,
                 { id: collectionId }
             );
-            collectionData = {
-                ...data.tmdbCollectionDetails,
-                poster_path: data.tmdbCollectionDetails.posterPath,
-                backdrop_path: data.tmdbCollectionDetails.backdropPath,
-                parts: data.tmdbCollectionDetails.parts.map((part) => ({
-                    ...part,
-                    poster_path: part.posterPath,
-                    backdrop_path: part.backdropPath,
-                    release_date: part.releaseDate,
-                    media_type: part.mediaType
-                }))
-            } as CollectionDetails;
+            collectionData = data.tmdbCollectionDetails;
         } catch (e) {
             logger.error("Failed to fetch collection", e);
             error = "Failed to load collection details.";
@@ -205,10 +176,10 @@
                     {error}
                 </div>
             {:else if collectionData}
-                {#if collectionData.backdrop_path}
+                {#if collectionData.backdropPath}
                     <div class="relative h-48 w-full overflow-hidden rounded-xl shadow-lg md:h-64">
                         <img
-                            src={collectionData.backdrop_path}
+                            src={collectionData.backdropPath}
                             alt={collectionData.name}
                             class="h-full w-full object-cover" />
                         <div
@@ -244,7 +215,7 @@
 							onclick={closeOnMobile}>
                             <LandscapeCard
                                 title={part.title}
-                                image={part.backdrop_path}
+                                image={part.backdropPath}
                                 overview={part.overview}
                                 tmdbId={part.id}
                                 mediaType="movie"

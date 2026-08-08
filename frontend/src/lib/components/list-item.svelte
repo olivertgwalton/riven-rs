@@ -29,7 +29,7 @@
     // Normalize type for different indexers
     let normalizedType = $derived.by(() => {
         let t = type;
-        if (indexer === "anilist" && !t) t = data.media_type;
+        if (indexer === "anilist" && !t) t = data.mediaType;
         if (indexer === "anilist" && t) {
             // Anilist's raw MediaFormat enum (TV, TV_SHORT, MOVIE, SPECIAL,
             // OVA, ONA, MUSIC, ...) has no movie/tv split of its own — Riven
@@ -41,7 +41,7 @@
         }
         if ((indexer === "tvdb" || indexer === "tmdb") && t === "show") t = "tv";
         // Ensure type is set if only in data
-        if (!t && data.media_type) t = data.media_type;
+        if (!t && data.mediaType) t = data.mediaType;
         return t;
     });
 
@@ -94,11 +94,10 @@
         ) {
             const params: string[] = [];
             if (indexer === "tvdb") params.push("indexer=tvdb");
-            if (data.details_query) {
-                for (const [key, value] of Object.entries(data.details_query)) {
-                    params.push(`${encodeURIComponent(key)}=${encodeURIComponent(String(value))}`);
-                }
-            }
+            // Already-encoded query string (e.g. "season=1&episode=2"), built
+            // by the producer that knows which extra params the details page
+            // needs for this item.
+            if (data.detailsQuery) params.push(String(data.detailsQuery));
             const queryParam = params.length > 0 ? `?${params.join("&")}` : "";
             // If indexer is undefined, assume tmdb behavior for now as default
             return `/details/media/${data.id}/${normalizedType}${queryParam}`;
@@ -119,10 +118,10 @@
     });
     let subtitle = $derived.by(() => {
         const parts = [];
-        if (data.media_type === "tv" || normalizedType === "tv") parts.push("TV");
-        else if (data.media_type === "movie" || normalizedType === "movie") parts.push("Movie");
-        else if (data.media_type === "person" || normalizedType === "person") parts.push("Person");
-        else if (data.media_type === "company" || normalizedType === "company")
+        if (data.mediaType === "tv" || normalizedType === "tv") parts.push("TV");
+        else if (data.mediaType === "movie" || normalizedType === "movie") parts.push("Movie");
+        else if (data.mediaType === "person" || normalizedType === "person") parts.push("Person");
+        else if (data.mediaType === "company" || normalizedType === "company")
             parts.push("Studio");
 
         if (data.year && data.year !== "N/A") parts.push(data.year);
@@ -193,10 +192,10 @@
     <PortraitCard
         title={data.title}
         {subtitle}
-        image={data.poster_path}
+        image={data.posterPath}
         {isSelectable}
-        isSelected={isSelectable && !!data.riven_id && selectStore?.has(data.riven_id)}
-        onSelectToggle={() => selectStore?.toggle(data.riven_id)}>
+        isSelected={isSelectable && !!data.rivenId && selectStore?.has(data.rivenId)}
+        onSelectToggle={() => selectStore?.toggle(data.rivenId)}>
         {#snippet topRight()}
             {#if data.badge}
                 <Badge

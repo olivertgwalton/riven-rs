@@ -36,8 +36,8 @@ export interface BaseListItem {
 	id: number;
 	title?: string;
 	name?: string;
-	poster_path?: string | null;
-	media_type?: string;
+	posterPath?: string | null;
+	mediaType?: string;
 	[key: string]: unknown;
 }
 

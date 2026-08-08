@@ -25,14 +25,8 @@
                         year: string;
                     }>;
                 };
-            }>(ANILIST_TRENDING_QUERY, { page, perPage: 20 }).then((data) =>
-                data.trendingAnilist.results.map((item) => ({
-                    id: item.id,
-                    title: item.title,
-                    poster_path: item.posterPath,
-                    media_type: item.mediaType,
-                    year: item.year
-                }))
+            }>(ANILIST_TRENDING_QUERY, { page, perPage: 20 }).then(
+                (data) => data.trendingAnilist.results
             )
     });
     let loadMoreTrigger: HTMLDivElement;
@@ -89,7 +83,7 @@
                 class="grid grid-cols-2 gap-6 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-7 2xl:grid-cols-9">
                 {#each anilistTrendingStore.items as item (item.id)}
                     <div class="aspect-[2/3] w-full">
-                        <ListItem data={item} indexer="anilist" type={item.media_type} />
+                        <ListItem data={item} indexer="anilist" type={item.mediaType} />
                     </div>
                 {/each}
                 {#if anilistTrendingStore.loading}

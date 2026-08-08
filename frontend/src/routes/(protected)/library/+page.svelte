@@ -211,19 +211,19 @@
             return {
                 id,
                 title: item.title,
-                poster_path: posterPath,
-                media_type: mediaPageType,
+                posterPath,
+                mediaType: mediaPageType,
                 year: extractYear(item.airedAt),
                 indexer,
                 type: mediaPageType,
-                details_query: detailParams.join("&"),
+                detailsQuery: detailParams.join("&"),
                 badge:
                     rawType === "season"
                         ? { text: "Season", variant: "default" }
                         : rawType === "episode"
                           ? { text: "Episode", variant: "default" }
                           : undefined,
-                riven_id: item.id
+                rivenId: item.id
             } satisfies LibraryItem;
         });
     }
@@ -385,7 +385,7 @@
         {#if liveTotalItems > 0}
             <div
                 class="grid grid-cols-2 gap-4 sm:grid-cols-3 md:grid-cols-4 md:gap-6 lg:grid-cols-5 xl:grid-cols-6 2xl:grid-cols-7">
-                {#each liveItems as item, i (item.riven_id)}
+                {#each liveItems as item, i (item.rivenId)}
                     <div
                         class="animate-in fade-in slide-in-from-bottom-4 fill-mode-backwards duration-700"
                         style="animation-delay: {i * 30}ms">

@@ -148,19 +148,19 @@ function transformItems(items: GqlMediaItem[]) {
 			return {
 				id,
 				title: item.title,
-				poster_path: posterPath,
-				media_type: mediaPageType,
+				posterPath,
+				mediaType: mediaPageType,
 				year: extractYear(item.airedAt),
 				indexer,
 				type: mediaPageType,
-				details_query: detailParams.toString(),
+				detailsQuery: detailParams.toString(),
 				badge:
 					rawType === "season"
 						? { text: "Season", variant: "default" }
 						: rawType === "episode"
 							? { text: "Episode", variant: "default" }
 							: undefined,
-				riven_id: item.id,
+				rivenId: item.id,
 			};
 		})
 		.filter((item): item is NonNullable<typeof item> => item !== null);

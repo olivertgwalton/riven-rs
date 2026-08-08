@@ -56,12 +56,7 @@
         popularity?: number;
     };
     type TrendingResponse = { trendingTmdb: { results: TrendingResult[] } };
-    const mapTrending = (d: TrendingResponse) =>
-        d.trendingTmdb.results.map((r) => ({
-            ...r,
-            poster_path: r.posterPath,
-            media_type: r.mediaType
-        }));
+    const mapTrending = (d: TrendingResponse) => d.trendingTmdb.results;
 
     const trendingMoviesStore = new MediaListStore<BaseListItem>({
         key: "trendingMovies",
@@ -96,14 +91,8 @@
                         year: string;
                     }>;
                 };
-            }>(ANILIST_TRENDING_QUERY, { page, perPage: 20 }).then((data) =>
-                data.trendingAnilist.results.map((item) => ({
-                    id: item.id,
-                    title: item.title,
-                    poster_path: item.posterPath,
-                    media_type: item.mediaType,
-                    year: item.year
-                }))
+            }>(ANILIST_TRENDING_QUERY, { page, perPage: 20 }).then(
+                (data) => data.trendingAnilist.results
             )
     });
 

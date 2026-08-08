@@ -49,10 +49,10 @@ export interface RecentListItem {
 	id: string | number;
 	indexer: string;
 	title: string;
-	poster_path: string | null;
-	media_type: string;
+	posterPath: string | null;
+	mediaType: string;
 	year: number | string;
-	riven_id: number;
+	rivenId: number;
 	[key: string]: unknown;
 }
 
@@ -85,15 +85,15 @@ export function mapRecentItemsPage(data: RecentItemsResponse): RecentItemsPage {
 			id,
 			indexer,
 			title: item.title,
-			poster_path: item.posterPath ?? null,
-			media_type:
+			posterPath: item.posterPath ?? null,
+			mediaType:
 				item.itemType.toLowerCase() === "show"
 					? "tv"
 					: item.itemType.toLowerCase(),
 			year:
 				item.year ||
 				(item.airedAt ? new Date(item.airedAt).getFullYear() : "N/A"),
-			riven_id: item.id,
+			rivenId: item.id,
 		} satisfies RecentListItem;
 	});
 
