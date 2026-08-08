@@ -345,6 +345,49 @@ pub async fn run(id: i64, job: &DownloadJob, queue: &JobQueue) {
     }
 }
 
+/// Whether the item currently has a stream that would actually pass
+/// title/year/quality-profile filtering for at least one active profile,
+/// i.e. a real download candidate exists right now — as opposed to merely
+/// "a non-blacklisted stream exists", which is all `get_best_stream` /
+/// `push_download_from_best_stream` check. Quality and title-match
+/// rejections at download time never blacklist the stream (only "no
+/// provider could fetch it" does), so an item whose scraped candidates are
+/// all wrong-title or wrong-quality releases would otherwise keep passing
+/// that cheaper check forever, letting `handle_scrape` skip re-scraping
+/// indefinitely instead of ever looking for a better release. Mirrors the
+/// hierarchy/profile/stream assembly `run` uses for a real download attempt.
+pub async fn has_realistic_download_candidate(item: &MediaItem, queue: &JobQueue) -> bool {
+    let hierarchy = match item.item_type {
+        MediaItemType::Episode | MediaItemType::Season | MediaItemType::Show => {
+            Some(load_download_hierarchy_context(item).await)
+        }
+        _ => None,
+    };
+
+    let ranks = queue.resolution_ranks.read().await.clone();
+    let streams = match repo::get_non_blacklisted_streams(item.id, &ranks).await {
+        Ok(streams) => streams,
+        Err(error) => {
+            tracing::warn!(
+                id = item.id,
+                title = %item.title,
+                %error,
+                "download: could not read this item's streams to check for a realistic candidate; assuming none"
+            );
+            return false;
+        }
+    };
+    if streams.is_empty() {
+        return false;
+    }
+
+    let active_profiles: Vec<(String, RankSettings)> = load_active_profiles().await;
+    let title_ctx = TitleMatchContext::new(item, hierarchy.as_ref());
+    active_profiles.iter().any(|(_, settings)| {
+        !rank_streams_for_profile(&streams, item, settings, &title_ctx).is_empty()
+    })
+}
+
 /// Load the media item; return `None` (without emitting a user-visible event)
 /// when it's gone
 async fn load_item_silently(id: i64, phase: &str) -> Option<MediaItem> {

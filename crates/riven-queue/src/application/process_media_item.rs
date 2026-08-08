@@ -23,6 +23,7 @@ use riven_core::types::{MediaItemState, MediaItemType};
 use riven_db::entities::MediaItem;
 use riven_db::repo;
 
+use crate::application::download::has_realistic_download_candidate;
 use crate::context::load_show_context;
 use crate::{JobQueue, ProcessMediaItemJob, ProcessStep, ScrapeJob};
 
@@ -87,14 +88,23 @@ async fn handle_scrape(job: &ProcessMediaItemJob, item: &MediaItem, queue: &JobQ
         return;
     }
 
-    if item.state == MediaItemState::Scraped && queue.push_download_from_best_stream(item.id).await
-    {
-        tracing::debug!(
-            id = item.id,
-            title = %item.title,
-            "pipeline: already has untried streams from an earlier scrape, downloading one instead of scraping again"
-        );
-        return;
+    if item.state == MediaItemState::Scraped {
+        if has_realistic_download_candidate(item, queue).await {
+            if queue.push_download_from_best_stream(item.id).await {
+                tracing::debug!(
+                    id = item.id,
+                    title = %item.title,
+                    "pipeline: already has untried streams from an earlier scrape, downloading one instead of scraping again"
+                );
+                return;
+            }
+        } else {
+            tracing::debug!(
+                id = item.id,
+                title = %item.title,
+                "pipeline: has untried streams from an earlier scrape, but none would pass title/quality filtering; scraping again instead of retrying them"
+            );
+        }
     }
 
     match item.item_type {
