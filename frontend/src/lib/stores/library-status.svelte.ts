@@ -8,10 +8,21 @@
  * to `getLibraryStatus` within the same tick is coalesced into one batched
  * `mediaItemStatusesByTmdbIds`/`ByTvdbIds` query via a microtask-scheduled
  * flush, so a whole row resolves in one (or two, tmdb+tvdb) request.
+ *
+ * Badges then stay live off the same Riven events the details page reacts to
+ * (`itemScraped`, `itemDownloaded`, `itemFailed`, `itemsDeleted`, and the
+ * request events). The details page can afford `mediaItemStateUpdatesByTmdb`,
+ * a per-item subscription that reloads the item and walks its parentage on
+ * every event — at one item per page. A grid can't: with N cards that is N
+ * server-side streams doing N database round trips per event, to render one
+ * word each. So cards share a single subscription and re-run the batch query
+ * for whatever is currently on screen, which is the same push, fanned out
+ * here instead of per card.
  */
 
 import { gqlClient } from "$lib/graphql-client";
 import { resolveExternalId } from "$lib/services/backend-metadata";
+import { subscribeToRivenMediaEvents } from "$lib/services/riven-live-updates";
 
 export type LibraryStatusEntry =
 	| { status: "loading" }
@@ -79,6 +90,13 @@ const BATCH_QUERIES: Record<Indexer, string> = {
     }`
 };
 
+/**
+ * Server-side ceiling on one bulk status lookup (`MAX_BULK_STATUS_IDS`).
+ * Exceeding it fails the whole query, which would leave every card in the
+ * batch spinning — so oversized batches are split rather than sent.
+ */
+const MAX_IDS_PER_QUERY = 500;
+
 async function flushBatch(indexer: Indexer) {
 	const batch = batches[indexer];
 	if (batch.ids.size === 0) return;
@@ -91,10 +109,15 @@ async function flushBatch(indexer: Indexer) {
 	let failed = false;
 	try {
 		const field = indexer === "tmdb" ? "mediaItemStatusesByTmdbIds" : "mediaItemStatusesByTvdbIds";
-		const result = await gqlClient<Record<string, MediaItemStatusRow[]>>(BATCH_QUERIES[indexer], {
-			ids
-		});
-		rows = result[field] ?? [];
+		const chunks: string[][] = [];
+		for (let start = 0; start < ids.length; start += MAX_IDS_PER_QUERY) {
+			chunks.push(ids.slice(start, start + MAX_IDS_PER_QUERY));
+		}
+		const query = BATCH_QUERIES[indexer];
+		const fetchChunk = (chunk: string[]) =>
+			gqlClient<Record<string, MediaItemStatusRow[]>>(query, { ids: chunk });
+		const results = await Promise.all(chunks.map(fetchChunk));
+		rows = results.flatMap((result) => result[field] ?? []);
 	} catch {
 		// A failed batch shouldn't leave every card spinning forever, so
 		// resolvers still get an answer — but that answer must not be
@@ -113,13 +136,28 @@ async function flushBatch(indexer: Indexer) {
 
 	for (const id of ids) {
 		const entry = byExternalId.get(id) ?? { status: "not_found" };
+		const key = keyFor(indexer, id);
 		if (failed) {
-			delete cache[keyFor(indexer, id)];
-		} else {
-			cache[keyFor(indexer, id)] = entry;
+			delete cache[key];
+		} else if (!sameEntry(cache[key], entry)) {
+			// Only write when something actually moved. Most items in a
+			// refetch are unchanged — one episode finishing doesn't alter the
+			// other fifty cards on screen — and an unconditional assignment
+			// would invalidate every card's reactive read and re-render the
+			// whole grid on every event.
+			cache[key] = entry;
 		}
 		for (const resolve of resolvers.get(id) ?? []) resolve({ entry, cacheable: !failed });
 	}
+}
+
+function sameEntry(
+	a: LibraryStatusEntry | undefined,
+	b: LibraryStatusEntry,
+): boolean {
+	if (!a || a.status !== b.status) return false;
+	if (a.status !== "found" || b.status !== "found") return true;
+	return a.id === b.id && a.state === b.state;
 }
 
 function queueFetch(indexer: Indexer, id: string): Promise<ResolvedFetch> {
@@ -248,6 +286,94 @@ export function getLibraryStatus(
 		}
 	});
 	return cache[key];
+}
+
+/**
+ * Cards currently on screen, by resolution key, refcounted because the same
+ * title legitimately appears in several rows at once (trending and
+ * recommendations, say) and the last one unmounting is the only one that
+ * should stop the watch.
+ */
+const watchers = new Map<string, number>();
+
+let unsubscribeFromEvents: (() => void) | undefined;
+
+/**
+ * Set when events arrived while the tab was in the background, so the catch-up
+ * on return is one refetch rather than one per event missed.
+ */
+let missedEventsWhileHidden = false;
+
+function documentHidden(): boolean {
+	return typeof document !== "undefined" && document.hidden;
+}
+
+/**
+ * Re-read every on-screen card's status. Cards whose id-space translation
+ * hasn't landed yet are skipped — the resolution itself will run the lookup
+ * when it settles.
+ *
+ * Deferred entirely while the tab is hidden: nobody can see the badges, and a
+ * backgrounded tab left open through a download queue would otherwise keep
+ * querying all night for pixels nobody is looking at.
+ */
+function refetchWatched() {
+	if (documentHidden()) {
+		missedEventsWhileHidden = true;
+		return;
+	}
+	for (const key of watchers.keys()) {
+		const resolved = resolvedIdState[key];
+		if (!resolved || resolved === "pending") continue;
+		void queueFetch(resolved.indexer, resolved.id);
+	}
+}
+
+function onVisibilityChange() {
+	if (documentHidden() || !missedEventsWhileHidden) return;
+	missedEventsWhileHidden = false;
+	refetchWatched();
+}
+
+/**
+ * Register a card as on screen, so its badge follows the library instead of
+ * freezing at whatever it read on first paint. Returns the matching
+ * unregister — call it on unmount (returning it straight out of an `$effect`
+ * does the right thing).
+ *
+ * The event subscription is opened by the first watcher and closed by the
+ * last, so a page with no suggested-content cards holds no stream open.
+ */
+export function watchLibraryStatus(
+	source: ResolvableSource,
+	externalId: string,
+	mediaType: MediaKind
+): () => void {
+	const key = resolutionCacheKey(source, externalId, mediaType);
+	watchers.set(key, (watchers.get(key) ?? 0) + 1);
+
+	if (!unsubscribeFromEvents) {
+		// `subscribeToRivenMediaEvents` debounces and shares one set of streams
+		// across the whole app, so a burst of events (a season finishing a
+		// dozen episodes) collapses into one batched refetch.
+		unsubscribeFromEvents = subscribeToRivenMediaEvents(refetchWatched);
+		document.addEventListener("visibilitychange", onVisibilityChange);
+	}
+
+	return () => {
+		const remaining = (watchers.get(key) ?? 1) - 1;
+		if (remaining > 0) {
+			watchers.set(key, remaining);
+			return;
+		}
+		watchers.delete(key);
+		if (watchers.size === 0) {
+			unsubscribeFromEvents?.();
+			unsubscribeFromEvents = undefined;
+			document.removeEventListener("visibilitychange", onVisibilityChange);
+			missedEventsWhileHidden = false;
+		}
+	};
 }
 
 /**

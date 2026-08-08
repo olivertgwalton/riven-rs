@@ -8,7 +8,8 @@
     import {
         getLibraryStatus,
         markLibraryStatusRequested,
-        getResolvedLibraryId
+        getResolvedLibraryId,
+        watchLibraryStatus
     } from "$lib/stores/library-status.svelte";
 
     const badgeVariantClasses: Record<string, string> = {
@@ -143,6 +144,14 @@
             return;
         }
         statusEntry = getLibraryStatus(requestSource, requestExternalId, requestMediaType);
+    });
+
+    // Keep the badge following the library for as long as this card is on
+    // screen: the store re-reads every watched card's status when Riven emits
+    // a media event, the same events the details page listens to.
+    $effect(() => {
+        if (!requestSource || !requestExternalId || !requestMediaType) return;
+        return watchLibraryStatus(requestSource, requestExternalId, requestMediaType);
     });
 
     // The footer's Request button/status pill lives inside the card's own <a>
