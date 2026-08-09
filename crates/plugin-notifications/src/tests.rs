@@ -46,6 +46,34 @@ fn notification_url_parser_supports_discord_and_json_aliases() {
 }
 
 #[test]
+fn notification_url_parser_supports_pushbullet() {
+    match parse_notification_url("pbul://o.abc123token") {
+        Some(NotificationService::Pushbullet { access_token }) => {
+            assert_eq!(access_token, "o.abc123token");
+        }
+        _ => panic!("expected pushbullet URL"),
+    }
+
+    // A device/channel/email target (Apprise's `pbul://token/#channel` etc.)
+    // isn't supported, but must not be folded into the token itself.
+    match parse_notification_url("pbul://o.abc123token/some-device-id") {
+        Some(NotificationService::Pushbullet { access_token }) => {
+            assert_eq!(access_token, "o.abc123token");
+        }
+        _ => panic!("expected pushbullet URL"),
+    }
+}
+
+#[test]
+fn pushbullet_body_condenses_the_core_fields_into_one_line() {
+    let body = build_pushbullet_body(&payload());
+    assert_eq!(
+        body,
+        "Movie • 2024 • via stremthru • realdebrid • in 1h 1m 1s"
+    );
+}
+
+#[test]
 fn duration_formatter_uses_human_units() {
     assert_eq!(format_duration(12.4), "12.4s");
     assert_eq!(format_duration(125.0), "2m 5s");

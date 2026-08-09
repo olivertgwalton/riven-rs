@@ -15,7 +15,10 @@ mod metadata;
 
 use dispatch::dispatch_webhooks;
 #[cfg(test)]
-use dispatch::{NotificationService, build_simple_embed, format_duration, parse_notification_url};
+use dispatch::{
+    NotificationService, build_pushbullet_body, build_simple_embed, format_duration,
+    parse_notification_url,
+};
 use metadata::{fetch_tmdb_overview, fetch_tvdb_slug};
 
 const TMDB_BASE_URL: &str = "https://api.themoviedb.org/3";
@@ -60,7 +63,10 @@ impl Plugin for NotificationsPlugin {
                 .required()
                 .with_placeholder("https://discord.com/api/webhooks/...")
                 .with_description(
-                    "Comma-separated webhook URLs. Supports Discord and generic JSON endpoints.",
+                    "Comma-separated webhook URLs, using Apprise-style notation. Supports \
+                     Discord (a full webhook URL or discord://id/token), Pushbullet \
+                     (pbul://<access_token>), and generic JSON endpoints (json://... or \
+                     jsons://...).",
                 ),
             SettingField::new("detailed", "Detailed Embeds", FieldType::Boolean).with_description(
                 "Show rich Discord embeds with overview, rating, and external links.",
