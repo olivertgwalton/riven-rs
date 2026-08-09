@@ -318,8 +318,7 @@ mod tests {
         let data = parse("SpiderMan-BrandNewDay-1080p-English.mp4");
         assert!(data.quality.is_none());
 
-        let mut permissive = RankSettings::default();
-        permissive.options.quality.remove_unknown_quality = false;
+        let permissive = RankSettings::default();
         let (ok, failed) = check_fetch(&data, &permissive);
         assert!(ok, "unknown quality should pass when the toggle is off");
         assert!(!failed.contains(&"unknown_quality".to_string()));
