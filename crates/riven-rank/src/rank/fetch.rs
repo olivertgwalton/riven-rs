@@ -156,6 +156,10 @@ fn fetch_resolution(data: &ParsedData, settings: &RankSettings, failed: &mut Vec
 
 fn fetch_quality(data: &ParsedData, settings: &RankSettings, failed: &mut Vec<String>) -> bool {
     let Some(q) = data.quality.as_deref() else {
+        if settings.options.quality.remove_unknown_quality {
+            failed.push("unknown_quality".into());
+            return false;
+        }
         return true;
     };
     if let Some(cr) = settings.custom_ranks.quality_rank(q)
@@ -297,4 +301,49 @@ pub fn check_fetch(data: &ParsedData, settings: &RankSettings) -> (bool, Vec<Str
         failed.is_empty() || required_matches(data, settings),
         failed,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parse::parse;
+
+    /// Reproduces a real incident: "Spider-Man: Brand New Day" (still
+    /// theatrical-only) had a fake/camrip release accepted because its
+    /// filename had no recognizable quality tag (`SpiderMan-BrandNewDay-1080p-
+    /// English.mp4`), and an unparseable quality tag was treated as
+    /// automatically acceptable rather than suspicious.
+    #[test]
+    fn unknown_quality_passes_by_default_but_can_be_rejected() {
+        let data = parse("SpiderMan-BrandNewDay-1080p-English.mp4");
+        assert!(data.quality.is_none());
+
+        let mut permissive = RankSettings::default();
+        permissive.options.quality.remove_unknown_quality = false;
+        let (ok, failed) = check_fetch(&data, &permissive);
+        assert!(ok, "unknown quality should pass when the toggle is off");
+        assert!(!failed.contains(&"unknown_quality".to_string()));
+
+        let mut strict = RankSettings::default();
+        strict.options.quality.remove_unknown_quality = true;
+        let (ok, failed) = check_fetch(&data, &strict);
+        assert!(
+            !ok,
+            "unknown quality should be rejected when the toggle is on"
+        );
+        assert!(failed.contains(&"unknown_quality".to_string()));
+    }
+
+    /// A release with a recognized quality tag is unaffected by the toggle.
+    #[test]
+    fn known_quality_is_unaffected_by_the_unknown_quality_toggle() {
+        let data = parse("The.Odyssey.2026.1080p.WEB-DL.x264-GROUP.mkv");
+        assert_eq!(data.quality.as_deref(), Some("WEB-DL"));
+
+        let mut strict = RankSettings::default();
+        strict.options.quality.remove_unknown_quality = true;
+        let (ok, failed) = check_fetch(&data, &strict);
+        assert!(ok, "a recognized quality tag must not be rejected");
+        assert!(!failed.contains(&"unknown_quality".to_string()));
+    }
 }
