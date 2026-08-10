@@ -12,7 +12,7 @@ pub(crate) async fn dispatch_webhooks(
     custom_title: Option<&str>,
     custom_body: Option<&str>,
 ) -> bool {
-    let mut all_ok = true;
+    let mut all_ok = !urls.is_empty();
     for url_str in urls {
         match parse_notification_url(url_str) {
             Some(NotificationService::Discord {
