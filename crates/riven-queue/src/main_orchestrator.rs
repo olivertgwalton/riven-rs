@@ -22,7 +22,7 @@ use tokio::sync::broadcast;
 use crate::application::process_media_item::{fan_out_to_children, push_requested_seasons};
 use crate::context;
 use crate::lifecycle::{LibraryOrchestrator, sync_item_request_state};
-use crate::{IndexJob, JobQueue, ProcessMediaItemJob, ProcessStep};
+use crate::{IndexJob, JobQueue, ProcessMediaItemJob, ProcessStep, scheduled_index_task_id};
 
 /// Owns the queue and dispatches events to typed actor calls.
 pub struct MainOrchestrator {
@@ -264,9 +264,91 @@ impl MainOrchestrator {
         schedule_datetime(target_date, offset_minutes, fallback_days)
     }
 
+    /// Recreates any scheduled-reindex entry the `index` queue's Redis-backed
+    /// schedule has lost — e.g. a restart without persistence, an eviction,
+    /// or a bug — but that Postgres still says should exist (a continuing
+    /// show, or an unreleased item). Without this, a lost schedule is
+    /// permanent: nothing else in the system would ever notice or recheck
+    /// that item again. Runs once at startup (the scheduler's first
+    /// `retry_library` tick) and on every subsequent tick, so a gap closes
+    /// within one sweep interval rather than persisting indefinitely.
+    /// Gated by `reconcile_scheduled_reindexes` (default on).
+    async fn reconcile_scheduled_reindexes(&self) {
+        if !self
+            .queue
+            .reindex_config
+            .read()
+            .await
+            .reconcile_scheduled_reindexes
+        {
+            return;
+        }
+
+        let candidate_ids = match repo::get_items_needing_scheduled_reindex().await {
+            Ok(ids) => ids,
+            Err(error) => {
+                tracing::error!(
+                    %error,
+                    "reconcile: could not list items needing a scheduled reindex, skipping this pass"
+                );
+                return;
+            }
+        };
+        if candidate_ids.is_empty() {
+            return;
+        }
+
+        let scheduled_set = self
+            .queue
+            .index_storage
+            .get_config()
+            .scheduled_jobs_set()
+            .to_string();
+        let mut conn = self.queue.redis.clone();
+        let existing: Vec<String> = match redis::cmd("ZRANGE")
+            .arg(&scheduled_set)
+            .arg(0)
+            .arg(-1)
+            .query_async(&mut conn)
+            .await
+        {
+            Ok(members) => members,
+            Err(error) => {
+                tracing::error!(
+                    %error,
+                    "reconcile: could not read the index queue's scheduled set, skipping this pass"
+                );
+                return;
+            }
+        };
+        let existing: std::collections::HashSet<String> = existing.into_iter().collect();
+
+        let missing: Vec<i64> = candidate_ids
+            .into_iter()
+            .filter(|id| !existing.contains(&scheduled_index_task_id(*id).to_string()))
+            .collect();
+        if missing.is_empty() {
+            return;
+        }
+
+        tracing::warn!(
+            count = missing.len(),
+            ids = ?missing,
+            "reconcile: found item(s) that should have a scheduled reindex but don't \
+             (likely a prior Redis restart/eviction) — rescheduling them now"
+        );
+        for id in missing {
+            if let Some(item) = self.load_item(id).await {
+                self.schedule_reindex(&item).await;
+            }
+        }
+    }
+
     /// Retry-library actor. Periodically called by the worker to nudge items
     /// stuck in retryable states.
     pub async fn retry_library(&self) {
+        self.reconcile_scheduled_reindexes().await;
+
         match repo::get_ongoing_container_ids().await {
             Ok(ids) => {
                 if let Err(error) = repo::force_recompute(&ids).await {

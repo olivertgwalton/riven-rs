@@ -234,6 +234,37 @@ pub async fn get_ongoing_container_ids() -> Result<Vec<i64>> {
         .await?)
 }
 
+/// IDs of every item that should currently have a pending scheduled reindex
+/// — a continuing show, or any non-show item still `Unreleased` — mirroring
+/// `MainOrchestrator::handle_index_success`'s own `needs_reindex` predicate
+/// (the show branch's "has a known next air date" half is intentionally
+/// dropped here: an ended show can't have one, and a continuing show is
+/// already covered, so the `show_status` check alone is equivalent for this
+/// purpose). Used to detect a scheduled-reindex job that Redis lost — e.g. a
+/// restart without persistence — so it can be recreated instead of the item
+/// silently never being rechecked again.
+pub async fn get_items_needing_scheduled_reindex() -> Result<Vec<i64>> {
+    Ok(media_items::Entity::find()
+        .filter(
+            Condition::any()
+                .add(
+                    Condition::all()
+                        .add(media_items::Column::ItemType.eq(MediaItemType::Show))
+                        .add(media_items::Column::ShowStatus.eq(ShowStatus::Continuing)),
+                )
+                .add(
+                    Condition::all()
+                        .add(media_items::Column::ItemType.ne(MediaItemType::Show))
+                        .add(media_items::Column::State.eq(MediaItemState::Unreleased)),
+                ),
+        )
+        .select_only()
+        .column(media_items::Column::Id)
+        .into_tuple::<i64>()
+        .all(orm())
+        .await?)
+}
+
 /// Return the earliest requested unreleased descendant air date for a show.
 pub async fn get_next_unreleased_air_date_for_show(
     show_id: i64,

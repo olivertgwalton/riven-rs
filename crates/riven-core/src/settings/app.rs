@@ -52,6 +52,15 @@ pub struct RivenSettings {
     pub schedule_offset_minutes: u64,
     /// Fallback delay when an unreleased/ongoing item has no known future air date.
     pub unknown_air_date_offset_days: u64,
+    /// When true (default), reconcile the index queue's scheduled-reindex
+    /// entries against the database on startup and on every retry-library
+    /// tick: a continuing show or unreleased item that should have a pending
+    /// reindex scheduled but doesn't (its Redis entry was lost — a restart
+    /// without persistence, an eviction, a bug) gets a fresh one scheduled
+    /// rather than silently never being rechecked again. Set to false to
+    /// disable if this sweep ever needs to be ruled out as a cause of
+    /// unexpected load.
+    pub reconcile_scheduled_reindexes: bool,
 
     /// Bearer token / API key required on the GraphQL endpoint.
     /// Empty string means no authentication is enforced.
@@ -111,6 +120,7 @@ impl Default for RivenSettings {
             maximum_scrape_attempts: 0,
             schedule_offset_minutes: 30,
             unknown_air_date_offset_days: 7,
+            reconcile_scheduled_reindexes: true,
             api_key: String::new(),
             public_url: String::new(),
             cors_allowed_origins: String::new(),
