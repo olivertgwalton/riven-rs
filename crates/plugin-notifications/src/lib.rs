@@ -96,36 +96,42 @@ impl Plugin for NotificationsPlugin {
             .with_description("Optional. Required for overview text in detailed Discord embeds."),
             SettingField::new(
                 "movie_use_custom_template",
-                "Movie: use custom template",
+                "Use custom template",
                 FieldType::Boolean,
             )
+            .with_section("Movie notifications")
             .with_description(
-                "Off by default (uses the built-in layout). Switch on to apply the movie \
-                 templates below — leaves them in place, so you can draft a template \
-                 without it taking effect yet.",
+                "Off by default (uses the built-in layout). Switch on to apply the templates \
+                 below — leaves them in place, so you can draft a template without it taking \
+                 effect yet.",
             ),
-            SettingField::new("movie_title_template", "Movie: title", FieldType::Textarea)
+            SettingField::new("movie_title_template", "Title", FieldType::Textarea)
+                .with_section("Movie notifications")
                 .with_placeholder("Downloaded: {{title}} ({{year}})")
                 .with_description(TEMPLATE_VARIABLES_HELP),
-            SettingField::new("movie_body_template", "Movie: body", FieldType::Textarea)
+            SettingField::new("movie_body_template", "Body", FieldType::Textarea)
+                .with_section("Movie notifications")
                 .with_placeholder(
                     "{{quality}} {{resolution}} by {{release_group}} via {{downloader}}",
                 )
                 .with_description(TEMPLATE_VARIABLES_HELP),
             SettingField::new(
                 "show_use_custom_template",
-                "Show: use custom template",
+                "Use custom template",
                 FieldType::Boolean,
             )
+            .with_section("Show notifications")
             .with_description(
-                "Off by default (uses the built-in layout). Switch on to apply the show \
-                 templates below — leaves them in place, so you can draft a template \
-                 without it taking effect yet.",
+                "Off by default (uses the built-in layout). Switch on to apply the templates \
+                 below — leaves them in place, so you can draft a template without it taking \
+                 effect yet.",
             ),
-            SettingField::new("show_title_template", "Show: title", FieldType::Textarea)
+            SettingField::new("show_title_template", "Title", FieldType::Textarea)
+                .with_section("Show notifications")
                 .with_placeholder("Downloaded: {{title}}")
                 .with_description(TEMPLATE_VARIABLES_HELP),
-            SettingField::new("show_body_template", "Show: body", FieldType::Textarea)
+            SettingField::new("show_body_template", "Body", FieldType::Textarea)
+                .with_section("Show notifications")
                 .with_placeholder("{{episode_title}} S{{season}}E{{episode}} — {{quality}}")
                 .with_description(TEMPLATE_VARIABLES_HELP),
         ]

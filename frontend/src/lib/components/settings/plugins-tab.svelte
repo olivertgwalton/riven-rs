@@ -3,7 +3,10 @@
     import { Button } from "$lib/components/ui/button/index.js";
     import { Separator } from "$lib/components/ui/separator/index.js";
     import SettingFieldEditor from "./setting-field-editor.svelte";
-    import { pluginStatus } from "./helpers";
+    import { pluginStatus, buildGeneralSections } from "./helpers";
+    import { gqlClient } from "$lib/graphql-client";
+    import { SEND_TEST_NOTIFICATION } from "./operations";
+    import { toast } from "svelte-sonner";
     import type { SettingsSection, SetupGroup } from "./types";
 
     let {
@@ -19,6 +22,36 @@
     let selectedId = $state<string | null>(null);
     let saving = $state(false);
     const selected = $derived(sections.find((s) => s.id === selectedId) ?? sections[0] ?? null);
+    const groupedSchema = $derived(buildGeneralSections(selected?.schema ?? []));
+
+    // The notifications plugin's movie/show template sections each get an
+    // inline "send a test notification" action so a template can be
+    // previewed without waiting for a real download. Keyed by section title
+    // rather than a boolean per category, since a plugin could in principle
+    // have more than two testable sections later.
+    const TESTABLE_NOTIFICATION_SECTIONS: Record<string, "MOVIE" | "EPISODE"> = {
+        "Movie notifications": "MOVIE",
+        "Show notifications": "EPISODE"
+    };
+    let testing = $state<Record<string, boolean>>({});
+
+    async function sendTestNotification(sectionTitle: string) {
+        const itemType = TESTABLE_NOTIFICATION_SECTIONS[sectionTitle];
+        if (!itemType || testing[sectionTitle]) return;
+        testing[sectionTitle] = true;
+        try {
+            await gqlClient<{ sendTestNotification: boolean }>(SEND_TEST_NOTIFICATION, {
+                itemType
+            });
+            toast.success(`Test ${itemType === "MOVIE" ? "movie" : "show"} notification sent`);
+        } catch (error) {
+            toast.error(
+                error instanceof Error ? error.message : "Failed to send test notification"
+            );
+        } finally {
+            testing[sectionTitle] = false;
+        }
+    }
 
     // Group plugins by their backend category, in the backend-defined group
     // order (media → sources → services), each sorted by name. Anything with an
@@ -93,9 +126,26 @@
                     {/if}
                 </div>
 
-                <div class="space-y-4">
-                    {#each selected.schema as field (field.key)}
-                        <SettingFieldEditor {field} bind:value={selected.values[field.key]} />
+                <div class="space-y-8">
+                    {#each groupedSchema as group, i (group.title || `__default-${i}`)}
+                        <section class="space-y-4">
+                            {#if group.title}
+                                <h3 class="text-base font-semibold tracking-tight">{group.title}</h3>
+                            {/if}
+                            {#each group.fields as field (field.key)}
+                                <SettingFieldEditor {field} bind:value={selected.values[field.key]} />
+                            {/each}
+                            {#if group.title in TESTABLE_NOTIFICATION_SECTIONS}
+                                <Button
+                                    type="button"
+                                    variant="outline"
+                                    size="sm"
+                                    disabled={testing[group.title]}
+                                    onclick={() => sendTestNotification(group.title)}>
+                                    {testing[group.title] ? "Sending…" : "Send test notification"}
+                                </Button>
+                            {/if}
+                        </section>
                     {/each}
                 </div>
 
