@@ -5,6 +5,8 @@ pub(crate) async fn dispatch_webhooks(
     urls: &[String],
     payload: &NotificationPayload,
     detailed: bool,
+    custom_title: Option<&str>,
+    custom_body: Option<&str>,
 ) {
     for url_str in urls {
         match parse_notification_url(url_str) {
@@ -12,8 +14,16 @@ pub(crate) async fn dispatch_webhooks(
                 webhook_id,
                 webhook_token,
             }) => {
-                if let Err(error) =
-                    send_discord(&ctx.http, &webhook_id, &webhook_token, payload, detailed).await
+                if let Err(error) = send_discord(
+                    &ctx.http,
+                    &webhook_id,
+                    &webhook_token,
+                    payload,
+                    detailed,
+                    custom_title,
+                    custom_body,
+                )
+                .await
                 {
                     // Never log `url_str` here — it's the full discord.com
                     // webhook URL, which is itself a bearer credential.
@@ -21,7 +31,10 @@ pub(crate) async fn dispatch_webhooks(
                 }
             }
             Some(NotificationService::Pushbullet { access_token }) => {
-                if let Err(error) = send_pushbullet(&ctx.http, &access_token, payload).await {
+                if let Err(error) =
+                    send_pushbullet(&ctx.http, &access_token, payload, custom_title, custom_body)
+                        .await
+                {
                     // Never log `url_str` here — it embeds the Pushbullet
                     // access token, which grants full account access.
                     tracing::error!(error = %error, service = "pushbullet", "failed to send pushbullet notification");
@@ -104,9 +117,13 @@ async fn send_discord(
     webhook_token: &str,
     payload: &NotificationPayload,
     detailed: bool,
+    custom_title: Option<&str>,
+    custom_body: Option<&str>,
 ) -> anyhow::Result<()> {
     let url = format!("https://discord.com/api/webhooks/{webhook_id}/{webhook_token}");
-    let body = if detailed {
+    let body = if custom_title.is_some() || custom_body.is_some() {
+        build_custom_embed(payload, custom_title, custom_body)
+    } else if detailed {
         build_detailed_embed(payload)
     } else {
         build_simple_embed(payload)
@@ -156,8 +173,10 @@ pub(crate) fn build_simple_embed(payload: &NotificationPayload) -> serde_json::V
     serde_json::json!({ "embeds": [embed] })
 }
 
-fn build_detailed_embed(payload: &NotificationPayload) -> serde_json::Value {
-    let media_label = if payload.is_anime {
+/// Human label for the item type, factoring in the anime override — shared
+/// between the detailed and custom embed builders.
+fn media_label(payload: &NotificationPayload) -> &'static str {
+    if payload.is_anime {
         "Anime"
     } else {
         match payload.item_type {
@@ -166,16 +185,55 @@ fn build_detailed_embed(payload: &NotificationPayload) -> serde_json::Value {
             MediaItemType::Season => "Season",
             MediaItemType::Episode => "Episode",
         }
-    };
+    }
+}
 
-    let color: u32 = if payload.is_anime {
+/// Embed accent color by item type, factoring in the anime override —
+/// shared between the detailed and custom embed builders.
+fn embed_color(payload: &NotificationPayload) -> u32 {
+    if payload.is_anime {
         0x9B59B6
     } else {
         match payload.item_type {
             MediaItemType::Movie => 0xE67E22,
             MediaItemType::Show | MediaItemType::Season | MediaItemType::Episode => 0x3498DB,
         }
-    };
+    }
+}
+
+/// A custom title/body template rendered into Discord's embed shape — the
+/// visual chrome (color, poster thumbnail, timestamp) is kept, but the
+/// structured fields/description of the default embeds are replaced
+/// entirely by the rendered body, since a user writing their own template
+/// is opting out of the auto-generated layout, not just its wording.
+fn build_custom_embed(
+    payload: &NotificationPayload,
+    custom_title: Option<&str>,
+    custom_body: Option<&str>,
+) -> serde_json::Value {
+    let title = custom_title
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("Downloaded: {}", payload.full_title));
+
+    let mut embed = serde_json::json!({
+        "title": title,
+        "color": embed_color(payload),
+        "timestamp": &payload.timestamp,
+    });
+
+    if let Some(body) = custom_body {
+        embed["description"] = serde_json::json!(body);
+    }
+    if let Some(ref poster) = payload.poster_path {
+        embed["thumbnail"] = serde_json::json!({ "url": poster });
+    }
+
+    serde_json::json!({ "embeds": [embed] })
+}
+
+fn build_detailed_embed(payload: &NotificationPayload) -> serde_json::Value {
+    let media_label = media_label(payload);
+    let color: u32 = embed_color(payload);
 
     let title = match payload.year {
         Some(year) => format!("{} ({})", payload.full_title, year),
@@ -269,9 +327,15 @@ async fn send_pushbullet(
     http: &riven_core::http::HttpClient,
     access_token: &str,
     payload: &NotificationPayload,
+    custom_title: Option<&str>,
+    custom_body: Option<&str>,
 ) -> anyhow::Result<()> {
-    let title = format!("Downloaded: {}", payload.full_title);
-    let body = build_pushbullet_body(payload);
+    let title = custom_title
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("Downloaded: {}", payload.full_title));
+    let body = custom_body
+        .map(str::to_string)
+        .unwrap_or_else(|| build_pushbullet_body(payload));
     tracing::debug!(
         title = %payload.full_title,
         "sending pushbullet notification"

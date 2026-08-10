@@ -12,6 +12,7 @@ use std::time::Duration;
 
 mod dispatch;
 mod metadata;
+mod templates;
 
 use dispatch::dispatch_webhooks;
 #[cfg(test)]
@@ -20,10 +21,23 @@ use dispatch::{
     parse_notification_url,
 };
 use metadata::{fetch_tmdb_overview, fetch_tvdb_slug};
+use templates::{TemplateCategory, render_template, template_category, template_variables};
 
 const TMDB_BASE_URL: &str = "https://api.themoviedb.org/3";
 const TVDB_BASE_URL: &str = "https://api4.thetvdb.com/v4";
 const TVDB_DEFAULT_API_KEY: &str = "6be85335-5c4f-4d8d-b945-d3ed0eb8cdce";
+
+/// Shared description for all four template fields. Plain `{{variable}}`
+/// substitution, no conditionals — a variable with no value for this
+/// download renders as an empty string, so avoid a lone line built entirely
+/// from one optional variable (e.g. `Group: {{release_group}}`) if you'd
+/// rather it disappear than leave a bare label.
+const TEMPLATE_VARIABLES_HELP: &str = "Leave blank to use the default layout. Available in \
+     both movie and show templates: {{title}}, {{year}}, {{quality}}, {{resolution}}, \
+     {{release_group}}, {{downloader}}, {{provider}}, {{rating}}, {{overview}}, {{poster}}, \
+     {{duration}}, {{tmdb_link}}, {{imdb_link}}. Show templates only: {{season}}, \
+     {{episode}}, {{episode_title}}, {{tvdb_link}} — empty for a season/show-level \
+     completion rather than a single episode.";
 
 const TMDB_PROFILE: HttpServiceProfile =
     HttpServiceProfile::new("tmdb").with_rate_limit(40, Duration::from_secs(1));
@@ -77,6 +91,40 @@ impl Plugin for NotificationsPlugin {
                 FieldType::Password,
             )
             .with_description("Optional. Required for overview text in detailed Discord embeds."),
+            SettingField::new(
+                "movie_use_custom_template",
+                "Movie: use custom template",
+                FieldType::Boolean,
+            )
+            .with_description(
+                "Off by default (uses the built-in layout). Switch on to apply the movie \
+                 templates below — leaves them in place, so you can draft a template \
+                 without it taking effect yet.",
+            ),
+            SettingField::new("movie_title_template", "Movie: title", FieldType::Textarea)
+                .with_placeholder("Downloaded: {{title}} ({{year}})")
+                .with_description(TEMPLATE_VARIABLES_HELP),
+            SettingField::new("movie_body_template", "Movie: body", FieldType::Textarea)
+                .with_placeholder(
+                    "{{quality}} {{resolution}} by {{release_group}} via {{downloader}}",
+                )
+                .with_description(TEMPLATE_VARIABLES_HELP),
+            SettingField::new(
+                "show_use_custom_template",
+                "Show: use custom template",
+                FieldType::Boolean,
+            )
+            .with_description(
+                "Off by default (uses the built-in layout). Switch on to apply the show \
+                 templates below — leaves them in place, so you can draft a template \
+                 without it taking effect yet.",
+            ),
+            SettingField::new("show_title_template", "Show: title", FieldType::Textarea)
+                .with_placeholder("Downloaded: {{title}}")
+                .with_description(TEMPLATE_VARIABLES_HELP),
+            SettingField::new("show_body_template", "Show: body", FieldType::Textarea)
+                .with_placeholder("{{episode_title}} S{{season}}E{{episode}} — {{quality}}")
+                .with_description(TEMPLATE_VARIABLES_HELP),
         ]
     }
 
@@ -108,6 +156,12 @@ impl Plugin for NotificationsPlugin {
             rating: None,
             overview: None,
             tvdb_slug: None,
+            resolution: None,
+            quality: None,
+            release_group: None,
+            season: None,
+            episode: None,
+            episode_title: None,
         };
 
         if !rewrite_for_request_root(ctx, info.id, &mut payload).await? {
@@ -123,7 +177,58 @@ impl Plugin for NotificationsPlugin {
             }
         }
 
-        dispatch_webhooks(ctx, &urls, &payload, detailed).await;
+        // The release behind this download — quality/resolution/group come
+        // from the just-created filesystem entry's linked stream, not the
+        // item itself, so this always looks up `info.id` (the item that
+        // actually triggered this download) rather than any request-root
+        // item `rewrite_for_request_root` may have substituted above.
+        match repo::get_latest_release_info(info.id).await {
+            Ok(Some(release)) => {
+                payload.resolution = release.resolution;
+                payload.quality = release.quality;
+                payload.release_group = release.release_group;
+            }
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!(id = info.id, %error, "failed to look up release info for notification templates");
+            }
+        }
+
+        let (use_custom_key, title_key, body_key) = match template_category(payload.item_type) {
+            TemplateCategory::Movie => (
+                "movie_use_custom_template",
+                "movie_title_template",
+                "movie_body_template",
+            ),
+            TemplateCategory::Show => (
+                "show_use_custom_template",
+                "show_title_template",
+                "show_body_template",
+            ),
+        };
+        let (custom_title, custom_body) = if ctx.settings.get_bool(use_custom_key) {
+            let vars = template_variables(&payload);
+            (
+                ctx.settings
+                    .get(title_key)
+                    .map(|t| render_template(t, &vars)),
+                ctx.settings
+                    .get(body_key)
+                    .map(|t| render_template(t, &vars)),
+            )
+        } else {
+            (None, None)
+        };
+
+        dispatch_webhooks(
+            ctx,
+            &urls,
+            &payload,
+            detailed,
+            custom_title.as_deref(),
+            custom_body.as_deref(),
+        )
+        .await;
 
         Ok(HookResponse::Empty)
     }
@@ -141,6 +246,9 @@ async fn rewrite_for_request_root(
     payload.is_anime = item.is_anime;
     payload.rating = item.rating;
     payload.tvdb_id = item.tvdb_id.clone();
+    payload.season = item.season_number;
+    payload.episode = item.episode_number;
+    payload.episode_title = (item.item_type == MediaItemType::Episode).then(|| item.title.clone());
 
     let Some(request_id) = item.item_request_id else {
         return Ok(true);
@@ -171,6 +279,15 @@ async fn rewrite_for_request_root(
     payload.poster_path = root_item.poster_path.clone();
     payload.is_anime = root_item.is_anime;
     payload.rating = root_item.rating;
+    // Overwritten to match the root item rather than kept from the
+    // originally-triggering item: a request completing means the whole
+    // show/season is done, not specifically whichever episode happened to
+    // finish last, so season/episode should reflect that (empty unless the
+    // root item is itself a single requested episode).
+    payload.season = root_item.season_number;
+    payload.episode = root_item.episode_number;
+    payload.episode_title =
+        (root_item.item_type == MediaItemType::Episode).then(|| root_item.title.clone());
     payload.duration_seconds = request
         .completed_at
         .unwrap_or_else(Utc::now)
@@ -200,6 +317,12 @@ struct NotificationPayload {
     overview: Option<String>,
     #[serde(skip)]
     tvdb_slug: Option<String>,
+    resolution: Option<String>,
+    quality: Option<String>,
+    release_group: Option<String>,
+    season: Option<i32>,
+    episode: Option<i32>,
+    episode_title: Option<String>,
 }
 
 async fn mark_request_notification_sent(

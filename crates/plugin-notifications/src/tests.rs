@@ -19,6 +19,12 @@ fn payload() -> NotificationPayload {
         rating: Some(8.25),
         overview: Some("Short overview".to_string()),
         tvdb_slug: None,
+        resolution: Some("1080p".to_string()),
+        quality: Some("WEB-DL".to_string()),
+        release_group: Some("GROUP".to_string()),
+        season: None,
+        episode: None,
+        episode_title: None,
     }
 }
 
