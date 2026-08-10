@@ -157,7 +157,25 @@ impl MainOrchestrator {
         };
         sync_item_request_state(&item).await;
 
-        let needs_reindex = match item.item_type {
+        if self.needs_reindex(&item).await {
+            self.schedule_reindex(&item).await;
+        } else {
+            self.queue.clear_scheduled_index(item.id).await;
+        }
+        if item.state != MediaItemState::Unreleased && item.is_requested {
+            self.process_media_item(&item).await;
+        }
+    }
+
+    /// Whether `item` should have a pending scheduled reindex: a continuing
+    /// show, a show with a known next unreleased air date (covers a show
+    /// that hasn't settled into `Continuing` yet, e.g. right after its first
+    /// index), or any non-show item still `Unreleased`. Shared between
+    /// `handle_index_success` (decides right after a fresh index) and
+    /// `reconcile_scheduled_reindexes` (checks Redis still has what it
+    /// should) so the two can never drift apart.
+    async fn needs_reindex(&self, item: &MediaItem) -> bool {
+        match item.item_type {
             MediaItemType::Show => {
                 item.show_status == Some(ShowStatus::Continuing)
                     || repo::get_next_unreleased_air_date_for_show(item.id)
@@ -167,14 +185,6 @@ impl MainOrchestrator {
                         .is_some()
             }
             _ => item.state == MediaItemState::Unreleased,
-        };
-        if needs_reindex {
-            self.schedule_reindex(&item).await;
-        } else {
-            self.queue.clear_scheduled_index(item.id).await;
-        }
-        if item.state != MediaItemState::Unreleased && item.is_requested {
-            self.process_media_item(&item).await;
         }
     }
 
@@ -284,12 +294,12 @@ impl MainOrchestrator {
             return;
         }
 
-        let candidate_ids = match repo::get_items_needing_scheduled_reindex().await {
+        let candidate_ids = match repo::get_reindex_schedule_candidates().await {
             Ok(ids) => ids,
             Err(error) => {
                 tracing::error!(
                     %error,
-                    "reconcile: could not list items needing a scheduled reindex, skipping this pass"
+                    "reconcile: could not list items that might need a scheduled reindex, skipping this pass"
                 );
                 return;
             }
@@ -323,24 +333,37 @@ impl MainOrchestrator {
         };
         let existing: std::collections::HashSet<String> = existing.into_iter().collect();
 
-        let missing: Vec<i64> = candidate_ids
+        let missing_ids: Vec<i64> = candidate_ids
             .into_iter()
             .filter(|id| !existing.contains(&scheduled_index_task_id(*id).to_string()))
             .collect();
-        if missing.is_empty() {
+        if missing_ids.is_empty() {
             return;
         }
 
-        tracing::warn!(
-            count = missing.len(),
-            ids = ?missing,
-            "reconcile: found item(s) that should have a scheduled reindex but don't \
-             (likely a prior Redis restart/eviction) — rescheduling them now"
-        );
-        for id in missing {
-            if let Some(item) = self.load_item(id).await {
+        // `get_reindex_schedule_candidates` is a deliberately loose superset
+        // (SQL-cheap; can't express "has a known next air date" without a
+        // per-show query); `needs_reindex` is the real predicate, so it's
+        // applied here per candidate rather than trusting the SQL filter
+        // alone — otherwise a non-`Continuing` show with no upcoming episode
+        // would get rescheduled every single sweep for no reason.
+        let mut rescheduled = Vec::new();
+        for id in missing_ids {
+            let Some(item) = self.load_item(id).await else {
+                continue;
+            };
+            if self.needs_reindex(&item).await {
                 self.schedule_reindex(&item).await;
+                rescheduled.push(id);
             }
+        }
+        if !rescheduled.is_empty() {
+            tracing::warn!(
+                count = rescheduled.len(),
+                ids = ?rescheduled,
+                "reconcile: found item(s) that should have a scheduled reindex but don't \
+                 (likely a prior Redis restart/eviction) — rescheduled them now"
+            );
         }
     }
 

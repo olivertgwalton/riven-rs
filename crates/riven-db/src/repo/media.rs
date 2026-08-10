@@ -234,23 +234,29 @@ pub async fn get_ongoing_container_ids() -> Result<Vec<i64>> {
         .await?)
 }
 
-/// IDs of every item that should currently have a pending scheduled reindex
-/// — a continuing show, or any non-show item still `Unreleased` — mirroring
-/// `MainOrchestrator::handle_index_success`'s own `needs_reindex` predicate
-/// (the show branch's "has a known next air date" half is intentionally
-/// dropped here: an ended show can't have one, and a continuing show is
-/// already covered, so the `show_status` check alone is equivalent for this
-/// purpose). Used to detect a scheduled-reindex job that Redis lost — e.g. a
-/// restart without persistence — so it can be recreated instead of the item
-/// silently never being rechecked again.
-pub async fn get_items_needing_scheduled_reindex() -> Result<Vec<i64>> {
+/// IDs of every item that *might* need a pending scheduled reindex — a
+/// deliberately loose superset, not the precise predicate. It's the SQL-cheap
+/// half of the check: any non-`Ended` show (`show_status` is `Continuing`,
+/// or `NULL` on a not-yet-fully-indexed row — only an explicitly `Ended` show
+/// can be safely excluded, since it can never have a future air date either
+/// way), plus any non-show item still `Unreleased`. Whether a candidate
+/// *actually* needs one — in particular a non-`Continuing` show's "has a
+/// known next air date" case — depends on a query keyed by show id
+/// (`get_next_unreleased_air_date_for_show`), so callers must still apply
+/// `MainOrchestrator`'s real `needs_reindex` predicate per candidate; this
+/// only narrows the table scan down to the plausible set first.
+pub async fn get_reindex_schedule_candidates() -> Result<Vec<i64>> {
     Ok(media_items::Entity::find()
         .filter(
             Condition::any()
                 .add(
                     Condition::all()
                         .add(media_items::Column::ItemType.eq(MediaItemType::Show))
-                        .add(media_items::Column::ShowStatus.eq(ShowStatus::Continuing)),
+                        .add(
+                            Condition::any()
+                                .add(media_items::Column::ShowStatus.is_null())
+                                .add(media_items::Column::ShowStatus.ne(ShowStatus::Ended)),
+                        ),
                 )
                 .add(
                     Condition::all()
