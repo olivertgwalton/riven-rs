@@ -74,6 +74,8 @@ pub enum EventType {
     ActivePlaybackSessionsRequested,
     #[serde(rename = "riven.media-server.artwork.requested")]
     ArtworkRequested,
+    #[serde(rename = "riven.notifications.test-requested")]
+    NotificationTestRequested,
 }
 
 impl EventType {
@@ -119,6 +121,7 @@ impl EventType {
             Self::DebridUserInfoRequested => "riven.debrid.user-info.requested",
             Self::ActivePlaybackSessionsRequested => "riven.media-server.active-sessions.requested",
             Self::ArtworkRequested => "riven.media-server.artwork.requested",
+            Self::NotificationTestRequested => "riven.notifications.test-requested",
         }
     }
 
@@ -176,7 +179,10 @@ impl EventType {
             | Self::DebridUserInfoRequested
             // Serves one browser request; the caller needs the bytes back, so
             // it cannot be queued.
-            | Self::ArtworkRequested => Inline,
+            | Self::ArtworkRequested
+            // The GraphQL mutation needs the send result in-process to
+            // report success/failure back to the caller.
+            | Self::NotificationTestRequested => Inline,
 
             Self::MediaItemScrapeRequested | Self::MediaItemIndexRequested
             | Self::ContentServiceRequested => FanIn,
@@ -237,6 +243,7 @@ mod tests {
             DebridUserInfoRequested,
             ActivePlaybackSessionsRequested,
             ArtworkRequested,
+            NotificationTestRequested,
         ];
         for variant in all {
             match variant {
@@ -265,7 +272,8 @@ mod tests {
                 | MediaItemsDeleted
                 | DebridUserInfoRequested
                 | ActivePlaybackSessionsRequested
-                | ArtworkRequested => {}
+                | ArtworkRequested
+                | NotificationTestRequested => {}
             }
         }
         all.to_vec()

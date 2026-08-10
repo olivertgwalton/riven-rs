@@ -190,6 +190,13 @@ pub enum RivenEvent {
         server: String,
         reference: String,
     },
+    /// Send a notification built from placeholder data so a custom template
+    /// can be previewed without waiting for a real download. `item_type`
+    /// picks which category's templates apply — `Movie` for the movie
+    /// templates, anything else for the show templates (mirroring
+    /// `plugin_notifications`'s own movie/show split).
+    #[serde(rename = "riven.notifications.test-requested")]
+    NotificationTestRequested { item_type: MediaItemType },
 }
 
 impl RivenEvent {
@@ -264,6 +271,7 @@ impl RivenEvent {
             Self::DebridUserInfoRequested => EventType::DebridUserInfoRequested,
             Self::ActivePlaybackSessionsRequested => EventType::ActivePlaybackSessionsRequested,
             Self::ArtworkRequested { .. } => EventType::ArtworkRequested,
+            Self::NotificationTestRequested { .. } => EventType::NotificationTestRequested,
         }
     }
 }

@@ -1064,6 +1064,13 @@ type MutationRoot {
 	"""
 	updateSettings(section: String!, values: JSON!): SettingsSection!
 	"""
+	Send a notification built from placeholder data, so a custom
+	notification template can be previewed without waiting for a real
+	download. `item_type: Movie` previews the movie template; anything
+	else previews the show template as a single test episode.
+	"""
+	sendTestNotification(itemType: MediaItemType!): Boolean!
+	"""
 	Recompute stored library-profile matches for every existing media entry.
 	"""
 	rematchFilesystemLibraryProfiles: Int!

@@ -58,7 +58,10 @@ impl Plugin for NotificationsPlugin {
     }
 
     fn subscribed_events(&self) -> &[EventType] {
-        &[EventType::MediaItemDownloadSuccess]
+        &[
+            EventType::MediaItemDownloadSuccess,
+            EventType::NotificationTestRequested,
+        ]
     }
 
     async fn validate(
@@ -133,7 +136,6 @@ impl Plugin for NotificationsPlugin {
         info: &DownloadSuccessInfo<'_>,
         ctx: &PluginContext,
     ) -> anyhow::Result<HookResponse> {
-        let urls = ctx.settings.get_list("urls");
         let detailed = ctx.settings.get_bool("detailed");
 
         let mut payload = NotificationPayload {
@@ -194,43 +196,105 @@ impl Plugin for NotificationsPlugin {
             }
         }
 
-        let (use_custom_key, title_key, body_key) = match template_category(payload.item_type) {
-            TemplateCategory::Movie => (
-                "movie_use_custom_template",
-                "movie_title_template",
-                "movie_body_template",
-            ),
-            TemplateCategory::Show => (
-                "show_use_custom_template",
-                "show_title_template",
-                "show_body_template",
-            ),
-        };
-        let (custom_title, custom_body) = if ctx.settings.get_bool(use_custom_key) {
-            let vars = template_variables(&payload);
-            (
-                ctx.settings
-                    .get(title_key)
-                    .map(|t| render_template(t, &vars)),
-                ctx.settings
-                    .get(body_key)
-                    .map(|t| render_template(t, &vars)),
-            )
-        } else {
-            (None, None)
-        };
-
-        dispatch_webhooks(
-            ctx,
-            &urls,
-            &payload,
-            detailed,
-            custom_title.as_deref(),
-            custom_body.as_deref(),
-        )
-        .await;
+        render_and_dispatch(ctx, &payload, detailed).await;
 
         Ok(HookResponse::Empty)
+    }
+
+    /// Preview a template with placeholder data — see the trait default's
+    /// doc comment. `item_type` selects the dummy payload's category:
+    /// `Movie` for the movie templates, anything else for the show
+    /// templates (populated as a single test episode so season/episode/
+    /// episode_title all render with a value).
+    async fn on_notification_test_requested(
+        &self,
+        item_type: MediaItemType,
+        ctx: &PluginContext,
+    ) -> anyhow::Result<HookResponse> {
+        let detailed = ctx.settings.get_bool("detailed");
+        let payload = dummy_payload(item_type);
+        render_and_dispatch(ctx, &payload, detailed).await;
+        Ok(HookResponse::Empty)
+    }
+}
+
+/// Shared tail of `on_download_success` and `on_notification_test_requested`:
+/// pick the movie/show template pair, render it if that category's "use
+/// custom template" toggle is on, and dispatch to every configured target.
+async fn render_and_dispatch(ctx: &PluginContext, payload: &NotificationPayload, detailed: bool) {
+    let urls = ctx.settings.get_list("urls");
+    let (use_custom_key, title_key, body_key) = match template_category(payload.item_type) {
+        TemplateCategory::Movie => (
+            "movie_use_custom_template",
+            "movie_title_template",
+            "movie_body_template",
+        ),
+        TemplateCategory::Show => (
+            "show_use_custom_template",
+            "show_title_template",
+            "show_body_template",
+        ),
+    };
+    let (custom_title, custom_body) = if ctx.settings.get_bool(use_custom_key) {
+        let vars = template_variables(payload);
+        (
+            ctx.settings
+                .get(title_key)
+                .map(|t| render_template(t, &vars)),
+            ctx.settings
+                .get(body_key)
+                .map(|t| render_template(t, &vars)),
+        )
+    } else {
+        (None, None)
+    };
+
+    dispatch_webhooks(
+        ctx,
+        &urls,
+        payload,
+        detailed,
+        custom_title.as_deref(),
+        custom_body.as_deref(),
+    )
+    .await;
+}
+
+/// Placeholder payload for `on_notification_test_requested`. `item_type` is
+/// `Movie` for the movie category; any other value builds a single test
+/// episode so every show-only variable (season/episode/episode_title) has a
+/// value to preview.
+fn dummy_payload(item_type: MediaItemType) -> NotificationPayload {
+    let is_movie = item_type == MediaItemType::Movie;
+    let name = if is_movie { "Test Movie" } else { "Test Show" };
+    NotificationPayload {
+        event: "riven.notifications.test-requested".to_string(),
+        title: name.to_string(),
+        full_title: name.to_string(),
+        item_type,
+        year: Some(2026),
+        imdb_id: Some("tt0000000".to_string()),
+        tmdb_id: Some("0".to_string()),
+        tvdb_id: (!is_movie).then(|| "0".to_string()),
+        poster_path: None,
+        downloader: "stremthru".to_string(),
+        provider: Some("realdebrid".to_string()),
+        duration_seconds: 42.0,
+        timestamp: Utc::now().to_rfc3339(),
+        is_anime: false,
+        rating: Some(7.5),
+        overview: Some(
+            "This is a test notification, sent from Riven's settings to preview your \
+             notification template."
+                .to_string(),
+        ),
+        tvdb_slug: (!is_movie).then(|| "test-show".to_string()),
+        resolution: Some("1080p".to_string()),
+        quality: Some("WEB-DL".to_string()),
+        release_group: Some("GROUP".to_string()),
+        season: (!is_movie).then_some(1),
+        episode: (!is_movie).then_some(1),
+        episode_title: (!is_movie).then(|| "Test Episode".to_string()),
     }
 }
 

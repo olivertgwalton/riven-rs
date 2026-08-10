@@ -1047,6 +1047,13 @@ export type MutationRoot = {
    */
   seerrHandleWebhook: Scalars['Boolean']['output'];
   /**
+   * Send a notification built from placeholder data, so a custom
+   * notification template can be previewed without waiting for a real
+   * download. `item_type: Movie` previews the movie template; anything
+   * else previews the show template as a single test episode.
+   */
+  sendTestNotification: Scalars['Boolean']['output'];
+  /**
    * Enable or disable a ranking profile (built-in or custom) by name.
    * Enabled profiles are used for multi-version scraping and downloading.
    */
@@ -1229,6 +1236,11 @@ export type MutationRootScrapeMediaItemArgs = {
 
 export type MutationRootSeerrHandleWebhookArgs = {
   payload: Scalars['JSON']['input'];
+};
+
+
+export type MutationRootSendTestNotificationArgs = {
+  itemType: MediaItemType;
 };
 
 

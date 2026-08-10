@@ -152,6 +152,7 @@ mod tests {
         ("updateRankSettings", "ManageSettings"),
         ("updateAllSettings", "ManageSettings"),
         ("updateSettings", "ManageSettings"),
+        ("sendTestNotification", "ManageSettings"),
         ("completeInitialSetup", "ManageSettings"),
         ("rematchFilesystemLibraryProfiles", "ManageSettings"),
         ("indexMovie", "ManageSettings"),

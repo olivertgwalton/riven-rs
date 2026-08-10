@@ -1,5 +1,6 @@
 use async_graphql::*;
 use riven_core::downloader::DownloaderConfig;
+use riven_core::events::RivenEvent;
 use riven_core::logging::{LogControl, LogSettings};
 use riven_core::plugin::PluginRegistry;
 use riven_core::settings::FilesystemSettings;
@@ -178,6 +179,29 @@ impl SettingsMutations {
             apply_plugin_settings(ctx, &section, values).await?;
             let registry = ctx.data::<Arc<PluginRegistry>>()?;
             build_plugin_section(registry, &section).await
+        }
+    }
+
+    /// Send a notification built from placeholder data, so a custom
+    /// notification template can be previewed without waiting for a real
+    /// download. `item_type: Movie` previews the movie template; anything
+    /// else previews the show template as a single test episode.
+    async fn send_test_notification(
+        &self,
+        ctx: &Context<'_>,
+        item_type: riven_core::types::MediaItemType,
+    ) -> Result<bool> {
+        require_settings_access(ctx)?;
+        let registry = ctx.data::<Arc<PluginRegistry>>()?;
+        let event = RivenEvent::NotificationTestRequested { item_type };
+        match registry.dispatch_to_plugin("notifications", &event).await {
+            Some(Ok(_)) => Ok(true),
+            Some(Err(error)) => Err(Error::new(format!(
+                "failed to send test notification: {error}"
+            ))),
+            None => Err(Error::new(
+                "the notifications plugin isn't enabled, or its webhook URLs aren't configured",
+            )),
         }
     }
 

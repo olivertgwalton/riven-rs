@@ -186,6 +186,18 @@ pub trait Plugin: Send + Sync + 'static {
         Ok(HookResponse::Empty)
     }
 
+    /// Send a notification built from placeholder data, so a plugin that
+    /// supports custom templates (currently only `notifications`) can let a
+    /// user preview one without waiting for a real download. The default is
+    /// `Empty`, so any other plugin simply declines.
+    async fn on_notification_test_requested(
+        &self,
+        _item_type: MediaItemType,
+        _ctx: &PluginContext,
+    ) -> anyhow::Result<HookResponse> {
+        Ok(HookResponse::Empty)
+    }
+
     /// Default dispatcher — do not override. Routes a `RivenEvent` to the matching `on_*` hook.
     async fn handle_event(
         &self,
@@ -319,6 +331,9 @@ pub trait Plugin: Send + Sync + 'static {
             }
             RivenEvent::ArtworkRequested { server, reference } => {
                 self.on_artwork_requested(server, reference, ctx).await
+            }
+            RivenEvent::NotificationTestRequested { item_type } => {
+                self.on_notification_test_requested(*item_type, ctx).await
             }
         }
     }
