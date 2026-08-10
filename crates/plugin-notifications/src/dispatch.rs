@@ -15,17 +15,23 @@ pub(crate) async fn dispatch_webhooks(
                 if let Err(error) =
                     send_discord(&ctx.http, &webhook_id, &webhook_token, payload, detailed).await
                 {
-                    tracing::error!(error = %error, url = url_str, "failed to send discord notification");
+                    // Never log `url_str` here — it's the full discord.com
+                    // webhook URL, which is itself a bearer credential.
+                    tracing::error!(error = %error, service = "discord", "failed to send discord notification");
                 }
             }
             Some(NotificationService::Pushbullet { access_token }) => {
                 if let Err(error) = send_pushbullet(&ctx.http, &access_token, payload).await {
-                    tracing::error!(error = %error, url = url_str, "failed to send pushbullet notification");
+                    // Never log `url_str` here — it embeds the Pushbullet
+                    // access token, which grants full account access.
+                    tracing::error!(error = %error, service = "pushbullet", "failed to send pushbullet notification");
                 }
             }
             Some(NotificationService::Json { url }) => {
                 if let Err(error) = send_json_webhook(&ctx.http, &url, payload).await {
-                    tracing::error!(error = %error, url = url_str, "failed to send json notification");
+                    // Generic webhook URLs commonly embed a secret path
+                    // segment too, so this omits `url_str`/`url` as well.
+                    tracing::error!(error = %error, service = "json", "failed to send json notification");
                 }
             }
             None => {
@@ -63,11 +69,13 @@ pub(crate) fn parse_notification_url(url: &str) -> Option<NotificationService> {
         // `.../DEVICE_ID`, `.../email@address` for targeted delivery — not
         // supported here, so a trailing path segment is dropped rather than
         // treated as part of the token, matching a plain-token-only client.
-        let access_token = match rest.split_once('/') {
-            Some((token, _)) => token.to_string(),
-            None => rest.to_string(),
-        };
-        Some(NotificationService::Pushbullet { access_token })
+        // A missing/empty token (`pbul://`, `pbul:///device-id`) is rejected
+        // outright rather than reaching send_pushbullet with an empty
+        // Access-Token header.
+        let token = rest.split('/').next().filter(|token| !token.is_empty())?;
+        Some(NotificationService::Pushbullet {
+            access_token: token.to_string(),
+        })
     } else if let Some(rest) = url.strip_prefix("json://") {
         Some(NotificationService::Json {
             url: format!("http://{rest}"),

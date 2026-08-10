@@ -65,6 +65,12 @@ fn notification_url_parser_supports_pushbullet() {
 }
 
 #[test]
+fn notification_url_parser_rejects_pushbullet_urls_with_no_token() {
+    assert!(parse_notification_url("pbul://").is_none());
+    assert!(parse_notification_url("pbul:///some-device-id").is_none());
+}
+
+#[test]
 fn pushbullet_body_condenses_the_core_fields_into_one_line() {
     let body = build_pushbullet_body(&payload());
     assert_eq!(
