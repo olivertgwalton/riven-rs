@@ -24,6 +24,17 @@ use crate::context;
 use crate::lifecycle::{LibraryOrchestrator, sync_item_request_state};
 use crate::{IndexJob, JobQueue, ProcessMediaItemJob, ProcessStep, scheduled_index_task_id};
 
+/// Outcome of [`MainOrchestrator::needs_reindex`]'s eligibility check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReindexNeed {
+    Needed,
+    NotNeeded,
+    /// The eligibility lookup itself failed (e.g. a DB error) — callers must
+    /// not treat this as `NotNeeded`, since that would tear down a
+    /// legitimately scheduled job over a transient failure.
+    Unknown,
+}
+
 /// Owns the queue and dispatches events to typed actor calls.
 pub struct MainOrchestrator {
     queue: Arc<JobQueue>,
@@ -157,10 +168,13 @@ impl MainOrchestrator {
         };
         sync_item_request_state(&item).await;
 
-        if self.needs_reindex(&item).await {
-            self.schedule_reindex(&item).await;
-        } else {
-            self.queue.clear_scheduled_index(item.id).await;
+        match self.needs_reindex(&item).await {
+            ReindexNeed::Needed => self.schedule_reindex(&item).await,
+            ReindexNeed::NotNeeded => self.queue.clear_scheduled_index(item.id).await,
+            // Lookup failed — leave whatever schedule already exists alone
+            // rather than guessing; we'll get another chance at the next
+            // index or reconcile pass.
+            ReindexNeed::Unknown => {}
         }
         if item.state != MediaItemState::Unreleased && item.is_requested {
             self.process_media_item(&item).await;
@@ -174,17 +188,37 @@ impl MainOrchestrator {
     /// `handle_index_success` (decides right after a fresh index) and
     /// `reconcile_scheduled_reindexes` (checks Redis still has what it
     /// should) so the two can never drift apart.
-    async fn needs_reindex(&self, item: &MediaItem) -> bool {
+    ///
+    /// Returns `Unknown` rather than collapsing a failed eligibility lookup
+    /// to `NotNeeded` — a transient DB error must never look like "this show
+    /// has no upcoming episode" and cause an existing schedule to be torn
+    /// down.
+    async fn needs_reindex(&self, item: &MediaItem) -> ReindexNeed {
         match item.item_type {
             MediaItemType::Show => {
-                item.show_status == Some(ShowStatus::Continuing)
-                    || repo::get_next_unreleased_air_date_for_show(item.id)
-                        .await
-                        .ok()
-                        .flatten()
-                        .is_some()
+                if item.show_status == Some(ShowStatus::Continuing) {
+                    return ReindexNeed::Needed;
+                }
+                match repo::get_next_unreleased_air_date_for_show(item.id).await {
+                    Ok(Some(_)) => ReindexNeed::Needed,
+                    Ok(None) => ReindexNeed::NotNeeded,
+                    Err(error) => {
+                        tracing::error!(
+                            %error,
+                            item_id = item.id,
+                            "could not look up next air date; leaving its scheduled reindex as-is"
+                        );
+                        ReindexNeed::Unknown
+                    }
+                }
             }
-            _ => item.state == MediaItemState::Unreleased,
+            _ => {
+                if item.state == MediaItemState::Unreleased {
+                    ReindexNeed::Needed
+                } else {
+                    ReindexNeed::NotNeeded
+                }
+            }
         }
     }
 
@@ -352,7 +386,7 @@ impl MainOrchestrator {
             let Some(item) = self.load_item(id).await else {
                 continue;
             };
-            if self.needs_reindex(&item).await {
+            if matches!(self.needs_reindex(&item).await, ReindexNeed::Needed) {
                 self.schedule_reindex(&item).await;
                 rescheduled.push(id);
             }
