@@ -35,7 +35,10 @@ pub(crate) async fn dispatch_webhooks(
                 }
             }
             None => {
-                tracing::warn!(url = url_str, "unsupported notification URL scheme");
+                // Never log `url_str` here — a rejected pbul:// URL still
+                // embeds the Pushbullet access token even though parsing
+                // failed.
+                tracing::warn!("unsupported notification URL scheme");
             }
         }
     }
