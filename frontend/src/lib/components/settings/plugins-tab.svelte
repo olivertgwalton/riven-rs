@@ -31,7 +31,7 @@
     // have more than two testable sections later.
     const TESTABLE_NOTIFICATION_SECTIONS: Record<string, "MOVIE" | "EPISODE"> = {
         "Movie notifications": "MOVIE",
-        "Show notifications": "EPISODE"
+        "TV show notifications": "EPISODE"
     };
     let testing = $state<Record<string, boolean>>({});
 

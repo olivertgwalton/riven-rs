@@ -120,18 +120,18 @@ impl Plugin for NotificationsPlugin {
                 "Use custom template",
                 FieldType::Boolean,
             )
-            .with_section("Show notifications")
+            .with_section("TV show notifications")
             .with_description(
                 "Off by default (uses the built-in layout). Switch on to apply the templates \
                  below — leaves them in place, so you can draft a template without it taking \
                  effect yet.",
             ),
             SettingField::new("show_title_template", "Title", FieldType::Textarea)
-                .with_section("Show notifications")
+                .with_section("TV show notifications")
                 .with_placeholder("Downloaded: {{title}}")
                 .with_description(TEMPLATE_VARIABLES_HELP),
             SettingField::new("show_body_template", "Body", FieldType::Textarea)
-                .with_section("Show notifications")
+                .with_section("TV show notifications")
                 .with_placeholder("{{episode_title}} S{{season}}E{{episode}} — {{quality}}")
                 .with_description(TEMPLATE_VARIABLES_HELP),
         ]
