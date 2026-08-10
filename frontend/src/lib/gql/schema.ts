@@ -1049,7 +1049,7 @@ export type MutationRoot = {
   /**
    * Send a notification built from placeholder data, so a custom
    * notification template can be previewed without waiting for a real
-   * download. `item_type: Movie` previews the movie template; anything
+   * download. `itemType: MOVIE` previews the movie template; anything
    * else previews the show template as a single test episode.
    */
   sendTestNotification: Scalars['Boolean']['output'];

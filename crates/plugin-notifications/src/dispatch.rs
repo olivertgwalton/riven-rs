@@ -1,5 +1,9 @@
 use super::*;
 
+/// Sends the notification to every configured target. Returns `true` only if
+/// every one accepted it — `on_download_success` ignores this (a completed
+/// download must not fail over a flaky webhook), but the test-notification
+/// path uses it to report an actual failure instead of a false "sent".
 pub(crate) async fn dispatch_webhooks(
     ctx: &PluginContext,
     urls: &[String],
@@ -7,7 +11,8 @@ pub(crate) async fn dispatch_webhooks(
     detailed: bool,
     custom_title: Option<&str>,
     custom_body: Option<&str>,
-) {
+) -> bool {
+    let mut all_ok = true;
     for url_str in urls {
         match parse_notification_url(url_str) {
             Some(NotificationService::Discord {
@@ -25,6 +30,7 @@ pub(crate) async fn dispatch_webhooks(
                 )
                 .await
                 {
+                    all_ok = false;
                     // Never log `url_str` here — it's the full discord.com
                     // webhook URL, which is itself a bearer credential.
                     tracing::error!(error = %error, service = "discord", "failed to send discord notification");
@@ -35,6 +41,7 @@ pub(crate) async fn dispatch_webhooks(
                     send_pushbullet(&ctx.http, &access_token, payload, custom_title, custom_body)
                         .await
                 {
+                    all_ok = false;
                     // Never log `url_str` here — it embeds the Pushbullet
                     // access token, which grants full account access.
                     tracing::error!(error = %error, service = "pushbullet", "failed to send pushbullet notification");
@@ -42,12 +49,14 @@ pub(crate) async fn dispatch_webhooks(
             }
             Some(NotificationService::Json { url }) => {
                 if let Err(error) = send_json_webhook(&ctx.http, &url, payload).await {
+                    all_ok = false;
                     // Generic webhook URLs commonly embed a secret path
                     // segment too, so this omits `url_str`/`url` as well.
                     tracing::error!(error = %error, service = "json", "failed to send json notification");
                 }
             }
             None => {
+                all_ok = false;
                 // Never log `url_str` here — a rejected pbul:// URL still
                 // embeds the Pushbullet access token even though parsing
                 // failed.
@@ -55,6 +64,7 @@ pub(crate) async fn dispatch_webhooks(
             }
         }
     }
+    all_ok
 }
 
 pub(crate) enum NotificationService {
@@ -206,7 +216,26 @@ fn embed_color(payload: &NotificationPayload) -> u32 {
 /// structured fields/description of the default embeds are replaced
 /// entirely by the rendered body, since a user writing their own template
 /// is opting out of the auto-generated layout, not just its wording.
-fn build_custom_embed(
+/// Discord's hard per-embed caps (<https://discord.com/safety/using-webhooks-and-embeds>):
+/// title 256 chars, description 4096 chars. Exceeding either makes Discord
+/// reject the whole webhook request with a 400, so a rendered custom
+/// template — which can be arbitrarily long once `{{overview}}` or a verbose
+/// body template is in the mix — is truncated before being sent.
+const DISCORD_EMBED_TITLE_MAX_CHARS: usize = 256;
+const DISCORD_EMBED_DESCRIPTION_MAX_CHARS: usize = 4096;
+
+/// Truncates at a `char` boundary (never splits a multi-byte UTF-8
+/// sequence) and appends an ellipsis when truncation actually happened.
+pub(crate) fn truncate_chars(s: &str, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
+        return s.to_string();
+    }
+    let mut truncated: String = s.chars().take(max_chars.saturating_sub(1)).collect();
+    truncated.push('…');
+    truncated
+}
+
+pub(crate) fn build_custom_embed(
     payload: &NotificationPayload,
     custom_title: Option<&str>,
     custom_body: Option<&str>,
@@ -214,6 +243,7 @@ fn build_custom_embed(
     let title = custom_title
         .map(str::to_string)
         .unwrap_or_else(|| format!("Downloaded: {}", payload.full_title));
+    let title = truncate_chars(&title, DISCORD_EMBED_TITLE_MAX_CHARS);
 
     let mut embed = serde_json::json!({
         "title": title,
@@ -222,7 +252,8 @@ fn build_custom_embed(
     });
 
     if let Some(body) = custom_body {
-        embed["description"] = serde_json::json!(body);
+        embed["description"] =
+            serde_json::json!(truncate_chars(body, DISCORD_EMBED_DESCRIPTION_MAX_CHARS));
     }
     if let Some(ref poster) = payload.poster_path {
         embed["thumbnail"] = serde_json::json!({ "url": poster });

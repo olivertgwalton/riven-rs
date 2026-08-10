@@ -119,3 +119,38 @@ fn simple_embed_contains_core_download_fields() {
             .any(|field| field["name"] == "Provider" && field["value"] == "realdebrid")
     );
 }
+
+#[test]
+fn truncate_chars_is_a_no_op_at_or_under_the_limit() {
+    assert_eq!(truncate_chars("hello", 5), "hello");
+    assert_eq!(truncate_chars("hello", 10), "hello");
+}
+
+#[test]
+fn truncate_chars_shortens_and_marks_anything_over_the_limit() {
+    let truncated = truncate_chars("hello world", 5);
+    assert_eq!(truncated.chars().count(), 5);
+    assert!(truncated.starts_with("hell"));
+    assert!(truncated.ends_with('…'));
+}
+
+#[test]
+fn truncate_chars_counts_chars_not_bytes_so_multi_byte_text_is_not_split_mid_character() {
+    // Each "é" is 2 UTF-8 bytes; a byte-index truncation at 5 would split one
+    // in half and produce invalid UTF-8 (or panic). char-based truncation
+    // must not.
+    let truncated = truncate_chars("ééééé", 3);
+    assert_eq!(truncated.chars().count(), 3);
+    assert!(truncated.ends_with('…'));
+}
+
+#[test]
+fn custom_embed_truncates_title_and_description_to_discords_limits() {
+    let long_title = "T".repeat(300);
+    let long_body = "B".repeat(5000);
+    let embed =
+        build_custom_embed(&payload(), Some(&long_title), Some(&long_body))["embeds"][0].clone();
+
+    assert_eq!(embed["title"].as_str().unwrap().chars().count(), 256);
+    assert_eq!(embed["description"].as_str().unwrap().chars().count(), 4096);
+}

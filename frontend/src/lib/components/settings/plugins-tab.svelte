@@ -35,11 +35,16 @@
     };
     let testing = $state<Record<string, boolean>>({});
 
+    // Saves the plugin's current draft values before dispatching the test —
+    // otherwise a template edited but not yet saved would test against the
+    // stale, previously-persisted template instead of what's on screen,
+    // silently misleading whoever is trying to verify their edit.
     async function sendTestNotification(sectionTitle: string) {
         const itemType = TESTABLE_NOTIFICATION_SECTIONS[sectionTitle];
-        if (!itemType || testing[sectionTitle]) return;
+        if (!itemType || testing[sectionTitle] || saving || !selected) return;
         testing[sectionTitle] = true;
         try {
+            await save(selected);
             await gqlClient<{ sendTestNotification: boolean }>(SEND_TEST_NOTIFICATION, {
                 itemType
             });
@@ -140,7 +145,7 @@
                                     type="button"
                                     variant="outline"
                                     size="sm"
-                                    disabled={testing[group.title]}
+                                    disabled={testing[group.title] || saving}
                                     onclick={() => sendTestNotification(group.title)}>
                                     {testing[group.title] ? "Sending…" : "Send test notification"}
                                 </Button>

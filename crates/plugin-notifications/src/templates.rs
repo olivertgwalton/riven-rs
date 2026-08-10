@@ -20,6 +20,24 @@ pub(crate) fn template_category(item_type: MediaItemType) -> TemplateCategory {
     }
 }
 
+/// The plugin-setting keys for a category: (use custom template, title, body).
+pub(crate) fn template_keys(
+    category: TemplateCategory,
+) -> (&'static str, &'static str, &'static str) {
+    match category {
+        TemplateCategory::Movie => (
+            "movie_use_custom_template",
+            "movie_title_template",
+            "movie_body_template",
+        ),
+        TemplateCategory::Show => (
+            "show_use_custom_template",
+            "show_title_template",
+            "show_body_template",
+        ),
+    }
+}
+
 /// Build the `{{variable}}` → value map for a payload. Every variable listed
 /// in the plugin's settings schema has an entry here, even when the
 /// underlying field is absent — those substitute to an empty string rather

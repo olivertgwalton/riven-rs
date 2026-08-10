@@ -17,11 +17,11 @@ mod templates;
 use dispatch::dispatch_webhooks;
 #[cfg(test)]
 use dispatch::{
-    NotificationService, build_pushbullet_body, build_simple_embed, format_duration,
-    parse_notification_url,
+    NotificationService, build_custom_embed, build_pushbullet_body, build_simple_embed,
+    format_duration, parse_notification_url, truncate_chars,
 };
 use metadata::{fetch_tmdb_overview, fetch_tvdb_slug};
-use templates::{TemplateCategory, render_template, template_category, template_variables};
+use templates::{render_template, template_category, template_keys, template_variables};
 
 const TMDB_BASE_URL: &str = "https://api.themoviedb.org/3";
 const TVDB_BASE_URL: &str = "https://api4.thetvdb.com/v4";
@@ -176,7 +176,16 @@ impl Plugin for NotificationsPlugin {
             return Ok(HookResponse::Empty);
         }
 
-        if detailed {
+        // A custom template can reference {{overview}}/{{tvdb_link}} whether
+        // or not "Detailed Embeds" (a Discord-only concern) is on, so this
+        // metadata is fetched whenever either could use it — not just when
+        // `detailed` is set, or a real notification would silently render
+        // both as empty for anyone using a custom template without also
+        // enabling detailed embeds, even though the test-notification
+        // preview (which doesn't consult this at all) would show them
+        // populated.
+        let (use_custom_key, _, _) = template_keys(template_category(payload.item_type));
+        if detailed || ctx.settings.get_bool(use_custom_key) {
             if let Some(api_key) = ctx.settings.get("tmdb_api_key") {
                 payload.overview = fetch_tmdb_overview(&ctx.http, api_key, &payload).await;
             }
@@ -202,6 +211,8 @@ impl Plugin for NotificationsPlugin {
             }
         }
 
+        // Best effort: a completed download must not fail (or retry) just
+        // because a webhook target is temporarily unreachable or misconfigured.
         render_and_dispatch(ctx, &payload, detailed).await;
 
         Ok(HookResponse::Empty)
@@ -212,6 +223,11 @@ impl Plugin for NotificationsPlugin {
     /// `Movie` for the movie templates, anything else for the show
     /// templates (populated as a single test episode so season/episode/
     /// episode_title all render with a value).
+    ///
+    /// Unlike `on_download_success`, delivery failure here is *not* best
+    /// effort — the whole point of a test notification is confirming the
+    /// configured target actually works, so a failed delivery must surface
+    /// as an error rather than reporting success unconditionally.
     async fn on_notification_test_requested(
         &self,
         item_type: MediaItemType,
@@ -219,28 +235,29 @@ impl Plugin for NotificationsPlugin {
     ) -> anyhow::Result<HookResponse> {
         let detailed = ctx.settings.get_bool("detailed");
         let payload = dummy_payload(item_type);
-        render_and_dispatch(ctx, &payload, detailed).await;
-        Ok(HookResponse::Empty)
+        if render_and_dispatch(ctx, &payload, detailed).await {
+            Ok(HookResponse::Empty)
+        } else {
+            Err(anyhow::anyhow!(
+                "failed to deliver the test notification to at least one configured target — check the logs for details"
+            ))
+        }
     }
 }
 
 /// Shared tail of `on_download_success` and `on_notification_test_requested`:
 /// pick the movie/show template pair, render it if that category's "use
 /// custom template" toggle is on, and dispatch to every configured target.
-async fn render_and_dispatch(ctx: &PluginContext, payload: &NotificationPayload, detailed: bool) {
+/// Returns whether every configured target accepted the notification —
+/// `on_download_success` ignores this (best effort), `on_notification_test_requested`
+/// surfaces a failure to the caller.
+async fn render_and_dispatch(
+    ctx: &PluginContext,
+    payload: &NotificationPayload,
+    detailed: bool,
+) -> bool {
     let urls = ctx.settings.get_list("urls");
-    let (use_custom_key, title_key, body_key) = match template_category(payload.item_type) {
-        TemplateCategory::Movie => (
-            "movie_use_custom_template",
-            "movie_title_template",
-            "movie_body_template",
-        ),
-        TemplateCategory::Show => (
-            "show_use_custom_template",
-            "show_title_template",
-            "show_body_template",
-        ),
-    };
+    let (use_custom_key, title_key, body_key) = template_keys(template_category(payload.item_type));
     let (custom_title, custom_body) = if ctx.settings.get_bool(use_custom_key) {
         let vars = template_variables(payload);
         (
@@ -263,7 +280,7 @@ async fn render_and_dispatch(ctx: &PluginContext, payload: &NotificationPayload,
         custom_title.as_deref(),
         custom_body.as_deref(),
     )
-    .await;
+    .await
 }
 
 /// Placeholder payload for `on_notification_test_requested`. `item_type` is
