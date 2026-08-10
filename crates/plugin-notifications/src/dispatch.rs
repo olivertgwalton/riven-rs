@@ -67,15 +67,22 @@ pub(crate) fn parse_notification_url(url: &str) -> Option<NotificationService> {
     } else if let Some(rest) = url.strip_prefix("pbul://") {
         // Apprise's pushbullet scheme also allows `pbul://token/#channel`,
         // `.../DEVICE_ID`, `.../email@address` for targeted delivery — not
-        // supported here, so a trailing path segment is dropped rather than
-        // treated as part of the token, matching a plain-token-only client.
+        // supported here. A target segment is rejected outright rather than
+        // silently dropped: send_pushbullet never sends a target parameter,
+        // and Pushbullet broadcasts to every device on the account when no
+        // target is set, so silently dropping a configured target would leak
+        // the notification to devices the user deliberately excluded.
         // A missing/empty token (`pbul://`, `pbul:///device-id`) is rejected
-        // outright rather than reaching send_pushbullet with an empty
+        // outright too, rather than reaching send_pushbullet with an empty
         // Access-Token header.
-        let token = rest.split('/').next().filter(|token| !token.is_empty())?;
-        Some(NotificationService::Pushbullet {
-            access_token: token.to_string(),
-        })
+        let (token, target) = rest.split_once('/').unwrap_or((rest, ""));
+        if token.is_empty() || !target.is_empty() {
+            None
+        } else {
+            Some(NotificationService::Pushbullet {
+                access_token: token.to_string(),
+            })
+        }
     } else if let Some(rest) = url.strip_prefix("json://") {
         Some(NotificationService::Json {
             url: format!("http://{rest}"),

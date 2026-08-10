@@ -54,9 +54,8 @@ fn notification_url_parser_supports_pushbullet() {
         _ => panic!("expected pushbullet URL"),
     }
 
-    // A device/channel/email target (Apprise's `pbul://token/#channel` etc.)
-    // isn't supported, but must not be folded into the token itself.
-    match parse_notification_url("pbul://o.abc123token/some-device-id") {
+    // A trailing slash with nothing after it is still a plain-token URL.
+    match parse_notification_url("pbul://o.abc123token/") {
         Some(NotificationService::Pushbullet { access_token }) => {
             assert_eq!(access_token, "o.abc123token");
         }
@@ -68,6 +67,18 @@ fn notification_url_parser_supports_pushbullet() {
 fn notification_url_parser_rejects_pushbullet_urls_with_no_token() {
     assert!(parse_notification_url("pbul://").is_none());
     assert!(parse_notification_url("pbul:///some-device-id").is_none());
+}
+
+#[test]
+fn notification_url_parser_rejects_pushbullet_urls_with_a_target() {
+    // A device/channel/email target (Apprise's `pbul://token/#channel`,
+    // `.../DEVICE_ID`, `.../email@address`) isn't supported. send_pushbullet
+    // never sends a target parameter, and Pushbullet broadcasts to every
+    // device on the account when none is set — so a target must be rejected
+    // outright rather than silently dropped, which would otherwise leak the
+    // notification to devices the user meant to exclude.
+    assert!(parse_notification_url("pbul://o.abc123token/some-device-id").is_none());
+    assert!(parse_notification_url("pbul://o.abc123token/#a-channel").is_none());
 }
 
 #[test]
