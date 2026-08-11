@@ -52,7 +52,7 @@ hyper = { version = "1", default-features = false }
 # implementation, and its serialized `Passkey` format matches what the
 # previous better-auth-rs setup stored, so registered credentials survive.
 webauthn-rs = { version = "0.5", features = ["conditional-ui"] }
-base64 = "0.22"
+base64 = "0.23"
 uuid = { version = "1", features = ["v4"] }
 
 # ORM — entities/enums live in riven-core (the shared crate, à la riven-ts's
