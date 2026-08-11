@@ -330,6 +330,12 @@ export const authClient = {
 				body,
 			});
 		},
+		updateUserRole(body: { user_id: string; role: string }) {
+			return call<{ user: AuthUser }>("/admin/update-user-role", {
+				method: "POST",
+				body,
+			});
+		},
 		removeUser(body: { user_id: string }) {
 			return call<{ success: boolean }>("/admin/remove-user", {
 				method: "POST",

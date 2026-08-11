@@ -64,10 +64,28 @@
 
     const { form: formData, enhance, delayed } = form;
     let deletingId = $state<string | null>(null);
+    let changingRoleId = $state<string | null>(null);
 
     function formatCreatedAt(value: ManagedUser["created_at"]) {
         if (!value) return "Unknown";
         return dateUtils.formatDate(value) ?? "Unknown";
+    }
+
+    async function changeRole(user: ManagedUser, role: string) {
+        if (role === (user.role ?? "user")) return;
+
+        changingRoleId = user.id;
+        const { error } = await authClient.admin.updateUserRole({ user_id: user.id, role });
+        changingRoleId = null;
+
+        if (error) {
+            toast.error(error.message);
+            await invalidateAll();
+            return;
+        }
+
+        await invalidateAll();
+        toast.success("User role updated.");
     }
 
     async function deleteUser(user: ManagedUser) {
@@ -185,9 +203,22 @@
                                 <div class="text-muted-foreground text-xs">{user.email}</div>
                             </Table.Cell>
                             <Table.Cell>
-                                <Badge variant={user.role === "admin" ? "default" : "secondary"}>
-                                    {user.role ?? "user"}
-                                </Badge>
+                                {#if user.id === currentUserId}
+                                    <Badge variant={user.role === "admin" ? "default" : "secondary"}>
+                                        {user.role ?? "user"}
+                                    </Badge>
+                                {:else}
+                                    <select
+                                        value={user.role ?? "user"}
+                                        disabled={changingRoleId === user.id}
+                                        onchange={(event) =>
+                                            changeRole(user, event.currentTarget.value)}
+                                        class="border-input bg-background ring-offset-background focus-visible:ring-ring h-8 rounded-md border px-2 py-1 text-sm focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-50">
+                                        <option value="user">User</option>
+                                        <option value="manager">Manager</option>
+                                        <option value="admin">Admin</option>
+                                    </select>
+                                {/if}
                             </Table.Cell>
                             <Table.Cell class="text-muted-foreground text-sm">
                                 {formatCreatedAt(user.created_at)}

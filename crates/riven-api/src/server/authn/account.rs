@@ -397,6 +397,72 @@ pub(super) async fn create_user(
 }
 
 #[derive(Deserialize)]
+pub(super) struct UpdateUserRole {
+    user_id: String,
+    role: String,
+}
+
+pub(super) async fn update_user_role(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Json(body): Json<UpdateUserRole>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let caller = require_admin(&state, &headers).await?;
+    let db = &state.auth.db;
+
+    let role = match body.role.as_str() {
+        role @ ("admin" | "manager" | "user") => role,
+        other => return Err(ApiError::bad_request(format!("Unknown role: {other}"))),
+    };
+
+    if body.user_id == caller.id {
+        return Err(ApiError::bad_request("Cannot change your own role"));
+    }
+
+    // Demoting the last admin would leave an instance nobody can administer.
+    // `target` is fetched (and locked) inside the transaction, not before it:
+    // reading it beforehand would let a concurrent request promote it to
+    // admin in between, so this guard would evaluate against a stale
+    // "not admin" role and skip the admin count entirely. Counting and
+    // updating as separate statements would race too — two admins demoting
+    // each other at the same time could each see "2 admins" and both
+    // proceed, leaving zero. `FOR UPDATE` inside a transaction locks every
+    // admin row for its duration, so a concurrent demotion blocks until this
+    // one commits (or rolls back) and then re-counts against the result.
+    let tx = db.begin().await?;
+    let target = user::Entity::find_by_id(&body.user_id)
+        .lock_exclusive()
+        .one(&tx)
+        .await?
+        .ok_or_else(|| ApiError::bad_request("No such user"))?;
+    if role_from_user(target.role.as_deref()) == UserRole::Admin && role != "admin" {
+        let admin_ids: Vec<String> = user::Entity::find()
+            .filter(user::Column::Role.eq("admin"))
+            .select_only()
+            .column(user::Column::Id)
+            .lock_exclusive()
+            .into_tuple()
+            .all(&tx)
+            .await?;
+        if admin_ids.len() <= 1 {
+            return Err(ApiError::bad_request("Cannot demote the last admin"));
+        }
+    }
+
+    let updated = user::ActiveModel {
+        id: Set(target.id),
+        role: Set(Some(role.to_string())),
+        updated_at: Set(Utc::now()),
+        ..Default::default()
+    }
+    .update(&tx)
+    .await?;
+    tx.commit().await?;
+    tracing::info!(user_id = %updated.id, role, by = %caller.id, "user role changed by admin");
+    Ok(Json(json!({ "user": updated })))
+}
+
+#[derive(Deserialize)]
 pub(super) struct RemoveUser {
     user_id: String,
 }
