@@ -393,11 +393,13 @@ pub async fn create_episode(
                absolute_number = COALESCE(EXCLUDED.absolute_number, media_items.absolute_number),
                season_number   = COALESCE(EXCLUDED.season_number, media_items.season_number),
                is_requested    = EXCLUDED.is_requested OR media_items.is_requested,
-               -- Transition unreleased episodes that have since aired, preferring precise UTC time
+               -- Transition unreleased episodes that have since aired, preferring precise UTC time.
+               -- `date::timestamptz` interprets midnight in the session's TimeZone, not UTC — explicit
+               -- `::timestamp AT TIME ZONE 'UTC'` anchors it regardless of session config.
                state = CASE
                    WHEN media_items.state = 'unreleased'
-                    AND COALESCE(EXCLUDED.aired_at_utc, EXCLUDED.aired_at::timestamptz) IS NOT NULL
-                    AND COALESCE(EXCLUDED.aired_at_utc, EXCLUDED.aired_at::timestamptz) <= NOW()
+                    AND COALESCE(EXCLUDED.aired_at_utc, EXCLUDED.aired_at::timestamp AT TIME ZONE 'UTC') IS NOT NULL
+                    AND COALESCE(EXCLUDED.aired_at_utc, EXCLUDED.aired_at::timestamp AT TIME ZONE 'UTC') <= NOW()
                    THEN 'indexed'::media_item_state
                    ELSE media_items.state
                END,
