@@ -418,18 +418,23 @@ pub(super) async fn update_user_role(
     if body.user_id == caller.id {
         return Err(ApiError::bad_request("Cannot change your own role"));
     }
-    let target = user::Entity::find_by_id(&body.user_id)
-        .one(db)
-        .await?
-        .ok_or_else(|| ApiError::bad_request("No such user"))?;
 
     // Demoting the last admin would leave an instance nobody can administer.
-    // Counting and updating as separate statements would race: two admins
-    // demoting each other at the same time could each see "2 admins" and both
+    // `target` is fetched (and locked) inside the transaction, not before it:
+    // reading it beforehand would let a concurrent request promote it to
+    // admin in between, so this guard would evaluate against a stale
+    // "not admin" role and skip the admin count entirely. Counting and
+    // updating as separate statements would race too — two admins demoting
+    // each other at the same time could each see "2 admins" and both
     // proceed, leaving zero. `FOR UPDATE` inside a transaction locks every
     // admin row for its duration, so a concurrent demotion blocks until this
     // one commits (or rolls back) and then re-counts against the result.
     let tx = db.begin().await?;
+    let target = user::Entity::find_by_id(&body.user_id)
+        .lock_exclusive()
+        .one(&tx)
+        .await?
+        .ok_or_else(|| ApiError::bad_request("No such user"))?;
     if role_from_user(target.role.as_deref()) == UserRole::Admin && role != "admin" {
         let admin_ids: Vec<String> = user::Entity::find()
             .filter(user::Column::Role.eq("admin"))
