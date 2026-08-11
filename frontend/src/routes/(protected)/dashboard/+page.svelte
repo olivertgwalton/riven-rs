@@ -204,6 +204,10 @@
                 year
                 count
             }
+            providerBreakdown {
+                provider
+                count
+            }
         }
     `;
 
@@ -227,6 +231,7 @@
         };
         activity: Record<string, number>;
         yearReleases: { year: number; count: number }[];
+        providerBreakdown: { provider: string; count: number }[];
     };
 
     function mapDashboardStats(result: GqlDashboardStats): DashboardStatistics {
@@ -251,7 +256,8 @@
                 Unreleased: s.unreleased
             },
             activity: result.activity ?? {},
-            media_year_releases: result.yearReleases ?? []
+            media_year_releases: result.yearReleases ?? [],
+            provider_breakdown: result.providerBreakdown ?? []
         };
     }
 

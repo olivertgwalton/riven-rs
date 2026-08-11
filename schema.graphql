@@ -1282,6 +1282,11 @@ type ProductionCompany {
 	originCountry: String
 }
 
+type ProviderBreakdown {
+	provider: String!
+	count: Int!
+}
+
 type QueryRoot {
 	viewer: Viewer!
 	mediaItemById(id: Int!): MediaItemUnion
@@ -1428,6 +1433,11 @@ type QueryRoot {
 	Count of movies and shows per release year.
 	"""
 	yearReleases: [YearRelease!]!
+	"""
+	Count of completed downloads grouped by the plugin that fulfilled them
+	(usenet vs. debrid, via stremthru).
+	"""
+	providerBreakdown: [ProviderBreakdown!]!
 	"""
 	Get debrid account information for all configured stores.
 	"""

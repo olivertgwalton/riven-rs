@@ -9,6 +9,7 @@ export type DashboardStatistics = {
 	states: Record<string, number>;
 	activity: Record<string, number>;
 	media_year_releases: { year: number; count: number }[];
+	provider_breakdown: { provider: string; count: number }[];
 };
 
 export type DownloaderService = {

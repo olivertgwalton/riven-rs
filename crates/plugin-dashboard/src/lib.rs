@@ -48,6 +48,12 @@ pub struct YearRelease {
     pub count: i64,
 }
 
+#[derive(SimpleObject)]
+pub struct ProviderBreakdown {
+    pub provider: String,
+    pub count: i64,
+}
+
 #[derive(Default)]
 pub struct DashboardQuery;
 
@@ -147,6 +153,16 @@ impl DashboardQuery {
             .await?
             .into_iter()
             .map(|(year, count)| YearRelease { year, count })
+            .collect())
+    }
+
+    /// Count of completed downloads grouped by the plugin that fulfilled them
+    /// (usenet vs. debrid, via stremthru).
+    async fn provider_breakdown(&self, _ctx: &Context<'_>) -> GqlResult<Vec<ProviderBreakdown>> {
+        Ok(repo::get_provider_breakdown()
+            .await?
+            .into_iter()
+            .map(|(provider, count)| ProviderBreakdown { provider, count })
             .collect())
     }
 

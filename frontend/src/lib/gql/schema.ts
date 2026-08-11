@@ -1360,6 +1360,11 @@ export type ProductionCompany = {
   originCountry?: Maybe<Scalars['String']['output']>;
 };
 
+export type ProviderBreakdown = {
+  count: Scalars['Int']['output'];
+  provider: Scalars['String']['output'];
+};
+
 export type QueryRoot = {
   /** Get active playback sessions from configured media-server plugins. */
   activePlaybackSessions: Array<ActivePlaybackSession>;
@@ -1443,6 +1448,11 @@ export type QueryRoot = {
   nntpProviders: Array<NntpProviderHealth>;
   /** A cast/crew member or a company, both rendered through one shape. */
   personDetails: PersonDetails;
+  /**
+   * Count of completed downloads grouped by the plugin that fulfilled them
+   * (usenet vs. debrid, via stremthru).
+   */
+  providerBreakdown: Array<ProviderBreakdown>;
   /**
    * Return all quality profiles as an ordered array of
    * `{ id, label, description, settings }` objects.

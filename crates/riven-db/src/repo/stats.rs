@@ -147,6 +147,30 @@ pub async fn get_year_releases() -> Result<Vec<(i32, i64)>> {
     Ok(rows.into_iter().map(|r| (r.year, r.count)).collect())
 }
 
+/// Count completed downloads grouped by the plugin that fulfilled them
+/// (`"usenet"` or `"stremthru"` today — see `filesystem_entries.plugin`).
+/// Only `media` entries count; subtitle sidecar rows would double-count a
+/// single download under the same provider.
+pub async fn get_provider_breakdown() -> Result<Vec<(String, i64)>> {
+    #[derive(FromQueryResult)]
+    struct ProviderRow {
+        provider: String,
+        count: i64,
+    }
+    // `entry_type = 'media'` is a predicate only, so no ::text cast is needed.
+    let rows = ProviderRow::find_by_statement(Statement::from_string(
+        DbBackend::Postgres,
+        r#"SELECT plugin AS provider, COUNT(*)::bigint AS count
+           FROM filesystem_entries
+           WHERE entry_type = 'media' AND plugin IS NOT NULL
+           GROUP BY plugin
+           ORDER BY count DESC"#,
+    ))
+    .all(orm())
+    .await?;
+    Ok(rows.into_iter().map(|r| (r.provider, r.count)).collect())
+}
+
 /// Fetch upcoming unreleased items with the show title resolved in a single JOIN.
 pub async fn get_calendar_entries(limit: i64) -> Result<Vec<crate::entities::CalendarRow>> {
     // Self-joins to resolve the ancestor show title — keep the raw statement.

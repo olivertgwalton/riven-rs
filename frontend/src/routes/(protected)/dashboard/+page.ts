@@ -39,6 +39,10 @@ const STATS_QUERY = `
             year
             count
         }
+        providerBreakdown {
+            provider
+            count
+        }
     }
 `;
 
@@ -185,6 +189,7 @@ type GqlStatsResult = {
 	};
 	activity: Record<string, number>;
 	yearReleases: { year: number; count: number }[];
+	providerBreakdown: { provider: string; count: number }[];
 };
 
 type GqlDebridAccountInfo = {
@@ -249,6 +254,7 @@ export const load = (async ({ depends }) => {
 				},
 				activity: data.activity ?? {},
 				media_year_releases: data.yearReleases ?? [],
+				provider_breakdown: data.providerBreakdown ?? [],
 			};
 		})
 		.catch((err) => {

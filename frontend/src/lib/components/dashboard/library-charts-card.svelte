@@ -27,6 +27,28 @@
                   color: String(color)
               }))
     );
+
+    const PROVIDER_LABELS: Record<string, string> = {
+        usenet: "Usenet",
+        stremthru: "Debrid"
+    };
+    const PROVIDER_COLORS: Record<string, string> = {
+        usenet: "#a78bfa",
+        stremthru: "#22d3ee"
+    };
+    const FALLBACK_PROVIDER_COLORS = ["#94a3b8", "#f472b6", "#facc15"];
+
+    const providerRows = $derived.by(() =>
+        (statistics?.provider_breakdown ?? [])
+            .filter((item) => item.count > 0)
+            .map((item, index) => ({
+                label: PROVIDER_LABELS[item.provider] ?? item.provider,
+                value: item.count,
+                color:
+                    PROVIDER_COLORS[item.provider] ??
+                    FALLBACK_PROVIDER_COLORS[index % FALLBACK_PROVIDER_COLORS.length]
+            }))
+    );
 </script>
 
 {#snippet LegendRows({ items }: { items: { label: string; value: number; color?: string }[] })}
@@ -47,7 +69,7 @@
     </div>
 {/snippet}
 
-<section class="border-border/60 grid gap-12 border-b py-8 lg:grid-cols-2">
+<section class="border-border/60 grid gap-12 border-b py-8 lg:grid-cols-3">
     <div class="min-w-0">
         <h2 class="text-base font-semibold">Library States</h2>
 
@@ -89,6 +111,33 @@
                 </PieChart>
             </ResponsiveChartContainer>
             {@render LegendRows({ items: contentRows })}
+        </div>
+    </div>
+
+    <div class="min-w-0">
+        <h2 class="text-base font-semibold">Provider Split</h2>
+
+        <div class="mt-6 grid items-center gap-6 sm:grid-cols-[14rem_minmax(0,1fr)]">
+            {#if providerRows.length === 0}
+                <p class="text-muted-foreground text-sm">No completed downloads yet.</p>
+            {:else}
+                <ResponsiveChartContainer config={{}} class="mx-auto h-56 w-56">
+                    <PieChart
+                        data={providerRows}
+                        key="label"
+                        value="value"
+                        c="color"
+                        innerRadius={-50}
+                        cornerRadius={5}
+                        padAngle={0.02}
+                        padding={{ top: 16, bottom: 32, left: 32, right: 16 }}>
+                        {#snippet tooltip()}
+                            <Chart.Tooltip />
+                        {/snippet}
+                    </PieChart>
+                </ResponsiveChartContainer>
+                {@render LegendRows({ items: providerRows })}
+            {/if}
         </div>
     </div>
 </section>
