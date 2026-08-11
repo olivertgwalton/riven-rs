@@ -424,12 +424,22 @@ pub(super) async fn update_user_role(
         .ok_or_else(|| ApiError::bad_request("No such user"))?;
 
     // Demoting the last admin would leave an instance nobody can administer.
+    // Counting and updating as separate statements would race: two admins
+    // demoting each other at the same time could each see "2 admins" and both
+    // proceed, leaving zero. `FOR UPDATE` inside a transaction locks every
+    // admin row for its duration, so a concurrent demotion blocks until this
+    // one commits (or rolls back) and then re-counts against the result.
+    let tx = db.begin().await?;
     if role_from_user(target.role.as_deref()) == UserRole::Admin && role != "admin" {
-        let admins = user::Entity::find()
+        let admin_ids: Vec<String> = user::Entity::find()
             .filter(user::Column::Role.eq("admin"))
-            .count(db)
+            .select_only()
+            .column(user::Column::Id)
+            .lock_exclusive()
+            .into_tuple()
+            .all(&tx)
             .await?;
-        if admins <= 1 {
+        if admin_ids.len() <= 1 {
             return Err(ApiError::bad_request("Cannot demote the last admin"));
         }
     }
@@ -440,8 +450,9 @@ pub(super) async fn update_user_role(
         updated_at: Set(Utc::now()),
         ..Default::default()
     }
-    .update(db)
+    .update(&tx)
     .await?;
+    tx.commit().await?;
     tracing::info!(user_id = %updated.id, role, by = %caller.id, "user role changed by admin");
     Ok(Json(json!({ "user": updated })))
 }
