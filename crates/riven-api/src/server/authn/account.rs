@@ -397,6 +397,56 @@ pub(super) async fn create_user(
 }
 
 #[derive(Deserialize)]
+pub(super) struct UpdateUserRole {
+    user_id: String,
+    role: String,
+}
+
+pub(super) async fn update_user_role(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Json(body): Json<UpdateUserRole>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let caller = require_admin(&state, &headers).await?;
+    let db = &state.auth.db;
+
+    let role = match body.role.as_str() {
+        role @ ("admin" | "manager" | "user") => role,
+        other => return Err(ApiError::bad_request(format!("Unknown role: {other}"))),
+    };
+
+    if body.user_id == caller.id {
+        return Err(ApiError::bad_request("Cannot change your own role"));
+    }
+    let target = user::Entity::find_by_id(&body.user_id)
+        .one(db)
+        .await?
+        .ok_or_else(|| ApiError::bad_request("No such user"))?;
+
+    // Demoting the last admin would leave an instance nobody can administer.
+    if role_from_user(target.role.as_deref()) == UserRole::Admin && role != "admin" {
+        let admins = user::Entity::find()
+            .filter(user::Column::Role.eq("admin"))
+            .count(db)
+            .await?;
+        if admins <= 1 {
+            return Err(ApiError::bad_request("Cannot demote the last admin"));
+        }
+    }
+
+    let updated = user::ActiveModel {
+        id: Set(target.id),
+        role: Set(Some(role.to_string())),
+        updated_at: Set(Utc::now()),
+        ..Default::default()
+    }
+    .update(db)
+    .await?;
+    tracing::info!(user_id = %updated.id, role, by = %caller.id, "user role changed by admin");
+    Ok(Json(json!({ "user": updated })))
+}
+
+#[derive(Deserialize)]
 pub(super) struct RemoveUser {
     user_id: String,
 }

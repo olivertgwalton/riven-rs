@@ -125,6 +125,7 @@ pub fn router() -> axum::Router<ApiState> {
         .route("/passkey/update-passkey", post(passkey::update_passkey))
         .route("/admin/list-users", get(account::list_users))
         .route("/admin/create-user", post(account::create_user))
+        .route("/admin/update-user-role", post(account::update_user_role))
         .route("/admin/remove-user", post(account::remove_user))
         .route("/first-user", get(password::first_user_availability))
         .route("/oidc-providers", get(oidc_providers))
