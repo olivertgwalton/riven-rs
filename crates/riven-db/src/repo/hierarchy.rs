@@ -330,6 +330,27 @@ pub async fn create_season(
     Ok(item)
 }
 
+/// A known-past/-present air date is the only case that's actually ready to
+/// scrape. A future date, and an entirely unknown one (a TVDB "TBA" stub with
+/// no title or air date yet), both mean the same thing here: there's nothing
+/// real to search for yet. Treating "unknown" as "already aired" used to send
+/// these straight into the scrape/retry pipeline, where they'd burn through
+/// attempts against placeholder metadata until they landed on `Failed`.
+/// `Unreleased` instead puts them on the reindex scheduler
+/// (`next_reindex_at`'s `unknown_air_date_offset_days` fallback for a `None`
+/// date), which just re-checks the metadata periodically until a real date
+/// appears; `create_episode`'s ON CONFLICT branch already flips it to
+/// `Indexed` itself once that happens.
+pub fn episode_state_for_air_date(
+    aired_at_utc: Option<chrono::DateTime<Utc>>,
+    now: chrono::DateTime<Utc>,
+) -> MediaItemState {
+    match aired_at_utc {
+        Some(dt) if dt <= now => MediaItemState::Indexed,
+        _ => MediaItemState::Unreleased,
+    }
+}
+
 pub async fn create_episode(
     season_id: i64,
     number: i32,
@@ -346,12 +367,12 @@ pub async fn create_episode(
     let now = Utc::now();
     let default_title = format!("Episode {number:02}");
     let title_str = title.unwrap_or(&default_title);
-    let state = match aired_at_utc
-        .or_else(|| aired_at.map(|d| d.and_hms_opt(0, 0, 0).expect("midnight is valid").and_utc()))
-    {
-        Some(dt) if dt > now => MediaItemState::Unreleased,
-        _ => MediaItemState::Indexed,
-    };
+    let state = episode_state_for_air_date(
+        aired_at_utc.or_else(|| {
+            aired_at.map(|d| d.and_hms_opt(0, 0, 0).expect("midnight is valid").and_utc())
+        }),
+        now,
+    );
     let state_text = match state {
         MediaItemState::Unreleased => "unreleased",
         _ => "indexed",
