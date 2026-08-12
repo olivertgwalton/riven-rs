@@ -257,6 +257,40 @@ enum ScrapeOutcome {
     Failed(anyhow::Error),
 }
 
+/// How long to sit out when an indexer says the daily quota is gone but not
+/// when it comes back. The reset is usually midnight in the indexer's own
+/// timezone, which it never tells us, so re-probe hourly instead of guessing
+/// a wall-clock time — 24 wasted hits a day, against thousands spent
+/// rediscovering the same spent key on every scrape.
+const QUOTA_PROBE_INTERVAL: Duration = Duration::from_secs(60 * 60);
+/// Ceiling on a self-reported wait. `LimiterState::pause_for` only ever
+/// extends a pause, so one absurd value would park an indexer for good.
+const MAX_QUOTA_PAUSE: Duration = Duration::from_secs(12 * 60 * 60);
+
+/// The pause an indexer's error body is asking for, or `None` when the body
+/// is not a spent-quota report.
+///
+/// Newznab signals an exhausted daily API quota as HTTP 500 carrying an
+/// `<error>` document — `Request limit reached (5000/5000)`, or
+/// `Request limit reached. Retry in 380 minutes.` when it is willing to say
+/// how long. Only 429 is a status code we can act on generically, so without
+/// this the body reads as a plain 5xx: `execute_with_retry` re-sends it as a
+/// transient upstream failure, and every later scrape spends more of a
+/// budget that is already gone.
+fn quota_exhausted_pause(body: &str) -> Option<Duration> {
+    let lower = body.to_ascii_lowercase();
+    if !lower.contains("request limit reached") {
+        return None;
+    }
+    let minutes = lower
+        .split_once("retry in ")
+        .and_then(|(_, rest)| rest.split_whitespace().next())
+        .and_then(|value| value.parse::<u64>().ok());
+    Some(minutes.map_or(QUOTA_PROBE_INTERVAL, |m| {
+        Duration::from_secs(m * 60).min(MAX_QUOTA_PAUSE)
+    }))
+}
+
 /// Issue one scrape against one indexer and return its items, paging until the
 /// indexer runs out of matches or [`MAX_RESULTS`] is reached. Errors are
 /// returned to the caller so the fan-out can log per-indexer failures
@@ -395,6 +429,16 @@ async fn scrape_page(
     if !status.is_success() {
         let body = resp.text().unwrap_or_default();
         let snippet = body.chars().take(200).collect::<String>();
+        if let Some(pause) = quota_exhausted_pause(&body) {
+            tracing::warn!(
+                indexer = %indexer.name,
+                pause_secs = pause.as_secs(),
+                snippet = %snippet,
+                "newznab indexer is out of daily API quota; pausing it until the quota resets",
+            );
+            http.pause_service(&indexer_profile(indexer), pause);
+            return ScrapeOutcome::RateLimited(snippet);
+        }
         if status == StatusCode::TOO_MANY_REQUESTS {
             return ScrapeOutcome::RateLimited(snippet);
         }
@@ -581,7 +625,7 @@ impl Plugin for NewznabPlugin {
                         imdb_id = request.imdb_id,
                         tvdb_id = request.tvdb_id,
                         snippet = %snippet,
-                        "newznab indexer rate-limited (429); skipping",
+                        "newznab indexer rate-limited; skipping",
                     );
                     per_indexer_counts.push((indexer.name.clone(), 0));
                 }
@@ -623,6 +667,48 @@ impl Plugin for NewznabPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Both bodies are verbatim from live indexers. The first is the common
+    /// one and carries no wait, the second is the only form that does.
+    #[test]
+    fn reads_a_spent_quota_out_of_a_500_body() {
+        assert_eq!(
+            quota_exhausted_pause(
+                r#"<error code="500" description="Request limit reached (5000/5000)"/>"#
+            ),
+            Some(QUOTA_PROBE_INTERVAL),
+        );
+        assert_eq!(
+            quota_exhausted_pause(
+                r#"<error code="500" description="Request limit reached. Retry in 380 minutes."/>"#
+            ),
+            Some(Duration::from_secs(380 * 60)),
+        );
+    }
+
+    /// A self-reported wait is capped: `pause_for` only ever extends a pause,
+    /// so an absurd value would otherwise park the indexer permanently.
+    #[test]
+    fn caps_an_absurd_self_reported_wait() {
+        assert_eq!(
+            quota_exhausted_pause(
+                r#"<error code="500" description="Request limit reached. Retry in 999999 minutes."/>"#
+            ),
+            Some(MAX_QUOTA_PAUSE),
+        );
+    }
+
+    /// Ordinary upstream failures must stay `Failed` so they keep their
+    /// transient-5xx retry instead of parking the indexer for an hour.
+    #[test]
+    fn leaves_unrelated_errors_alone() {
+        assert_eq!(
+            quota_exhausted_pause("<error code=\"200\" description=\"Missing parameter\"/>"),
+            None
+        );
+        assert_eq!(quota_exhausted_pause("502 Bad Gateway"), None);
+        assert_eq!(quota_exhausted_pause(""), None);
+    }
 
     /// The regression paging exists for: a query with more matches than one
     /// page must not stop at the first page, as every scrape did before.

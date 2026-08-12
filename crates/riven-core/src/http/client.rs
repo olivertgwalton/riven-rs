@@ -150,6 +150,18 @@ impl HttpClient {
         response.json()
     }
 
+    /// Hold back every later request on `profile` for `delay`, exactly as a
+    /// 429 carrying that `Retry-After` would.
+    ///
+    /// [`send`](Self::send) can only recognise exhaustion that arrives as a
+    /// status code. Some upstreams signal it in the body instead — Newznab
+    /// reports a spent daily quota as HTTP 500 with an `<error>` document —
+    /// and only the caller knows how to read that, so it needs a way to say
+    /// so once it has.
+    pub fn pause_service(&self, profile: &HttpServiceProfile, delay: Duration) {
+        self.service_state(profile).register_retry_after(delay);
+    }
+
     fn service_state(&self, profile: &HttpServiceProfile) -> Arc<ServiceState> {
         self.services
             .entry(profile.name.as_ref().to_owned())
