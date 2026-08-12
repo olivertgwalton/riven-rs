@@ -176,6 +176,12 @@ pub struct DownloadJob {
     pub magnet: String,
     #[serde(default)]
     pub preferred_info_hash: Option<String>,
+    /// How many times this job has been requeued because a download plugin
+    /// was rate-limited mid-walk. Drives the same escalating backoff the
+    /// scrape flow uses; `serde(default)` keeps jobs serialized before the
+    /// field existed deserializable.
+    #[serde(default)]
+    pub rate_limit_retries: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

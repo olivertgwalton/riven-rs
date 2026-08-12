@@ -40,6 +40,17 @@ impl JobQueue {
         .await;
     }
 
+    /// Push a `DownloadJob` to run after `delay` — the requeue half of a
+    /// rate-limit deferral. Bypasses `push_deduped` for the same reason
+    /// `push_scrape_after` does: the dedup key only covers the in-flight
+    /// phase, and this job is the continuation of one that just released it.
+    pub async fn push_download_after(&self, job: DownloadJob, delay: std::time::Duration) {
+        let task = TaskBuilder::new(job).run_after(delay).build();
+        if let Err(e) = self.download_storage.clone().push_task(task).await {
+            tracing::error!(error = %e, "failed to push delayed DownloadJob");
+        }
+    }
+
     /// Entry point for the download flow. Pushes a `RankStreamsJob` which loads
     /// streams, runs the cache check, builds ranked candidates, hands off to
     /// `DownloadJob` (find-valid-torrent + persist).

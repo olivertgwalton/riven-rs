@@ -369,15 +369,24 @@ impl Plugin for UsenetPlugin {
             return Ok(HookResponse::Empty);
         };
 
-        let Some(xml_arc) = fetch_nzb_xml(info_hash, ctx).await else {
-            // No NZB body means no release name exists anywhere yet — the
-            // media item id is the only handle a reader has here.
-            tracing::warn!(
-                info_hash,
-                media_item_id = id,
-                "no NZB body available; cannot ingest"
-            );
-            return Ok(HookResponse::DownloadStreamUnavailable);
+        let xml_arc = match fetch_nzb_xml(info_hash, ctx).await {
+            Ok(Some(xml)) => xml,
+            Ok(None) => {
+                // No NZB body means no release name exists anywhere yet — the
+                // media item id is the only handle a reader has here.
+                tracing::warn!(
+                    info_hash,
+                    media_item_id = id,
+                    "no NZB body available; cannot ingest"
+                );
+                return Ok(HookResponse::DownloadStreamUnavailable);
+            }
+            // The fetch was rate-limited, which says nothing about the
+            // release. Propagate so the download job requeues; answering
+            // `DownloadStreamUnavailable` here is how a saturated NZB
+            // limiter once permanently blacklisted thousands of good
+            // streams in an afternoon.
+            Err(error) => return Err(error),
         };
         // Cheap head-only peek (never a full parse — see `peek_release_title`),
         // so every log below this point names the release rather than only its
@@ -539,24 +548,44 @@ async fn nzb_indexer_for_hash(info_hash: &str, ctx: &PluginContext) -> Option<St
         .flatten()
 }
 
-async fn fetch_nzb_xml(info_hash: &str, ctx: &PluginContext) -> Option<Arc<String>> {
+/// `Ok(None)` means the NZB genuinely cannot be had (no URL mapping left in
+/// Redis, or the indexer answered without a body) — a verdict about the
+/// release. `Err` is [`RateLimitedError`] only: a verdict about *this moment*,
+/// which the caller must surface as a deferral, never as unavailability.
+/// Other transport errors stay `Ok(None)`, matching the behaviour this
+/// function has always had for them.
+async fn fetch_nzb_xml(
+    info_hash: &str,
+    ctx: &PluginContext,
+) -> anyhow::Result<Option<Arc<String>>> {
     if let Some(hit) = nzb_body_cache().get(info_hash) {
-        return Some(hit);
+        return Ok(Some(hit));
     }
-    let nzb_url = nzb_url_for_hash(info_hash, ctx).await?;
-    let resp = ctx
+    let Some(nzb_url) = nzb_url_for_hash(info_hash, ctx).await else {
+        return Ok(None);
+    };
+    let resp = match ctx
         .http
         .send_data(PROFILE, Some(nzb_url.clone()), |client| {
             client.get(&nzb_url)
         })
         .await
-        .ok()?;
+    {
+        Ok(resp) => resp,
+        Err(error) if error.is::<riven_core::http::RateLimitedError>() => return Err(error),
+        Err(error) => {
+            tracing::debug!(info_hash, %error, "nzb fetch failed");
+            return Ok(None);
+        }
+    };
     if !resp.status().is_success() {
         tracing::debug!(info_hash, status = %resp.status(), "nzb fetch returned non-success");
-        return None;
+        return Ok(None);
     }
-    let xml = resp.text().ok()?;
+    let Ok(xml) = resp.text() else {
+        return Ok(None);
+    };
     let arc = Arc::new(xml);
     nzb_body_cache().put(info_hash.to_string(), arc.clone(), arc.len() as u64);
-    Some(arc)
+    Ok(Some(arc))
 }
