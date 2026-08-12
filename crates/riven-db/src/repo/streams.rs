@@ -712,48 +712,30 @@ pub async fn get_downloaded_profile_names(media_item_id: i64) -> Result<Vec<Stri
     Ok(rows.into_iter().flatten().collect())
 }
 
-/// For a Season item, return profile names that every *expected* episode
-/// (requested, and not still `unreleased`) already has a downloaded entry
-/// for — i.e. a profile genuinely has nothing left to grab for this season,
-/// not just "at least one episode happens to have it".
+/// For a Season item, return the profile names that any episode under it
+/// already has a downloaded entry for.
 ///
-/// The distinction matters because the season-level download loop treats a
-/// profile in this list as fully satisfied and skips it entirely on every
-/// future pass. Reporting a profile "done" as soon as *any* episode has it
-/// (the previous behavior) meant a season that downloaded its first couple
-/// of episodes at a given quality would never be revisited for the rest —
-/// every later episode's matching stream sat unblacklisted and unused
-/// forever, since the profile that would have driven the download attempt
-/// toward it was already considered finished.
-///
-/// Raw SQL: the "every expected episode has this profile" comparison is a
-/// `HAVING count(...) >= (subquery)` the query builder can't express.
+/// Deliberately "any episode", not "every expected episode". Requiring full
+/// per-episode coverage makes the season-level download loop treat a profile
+/// as unfinished for as long as a single episode lacks it, so it re-drives
+/// episodes that are already `completed`; those get demoted back to
+/// `scraped`, which keeps the season `partially_completed`, which feeds them
+/// straight back into the retry loop. Episodes requested individually still
+/// get every enabled profile via `get_downloaded_profile_names`, so the
+/// looser season check costs nothing at request time.
 pub async fn get_downloaded_profile_names_for_season(season_id: i64) -> Result<Vec<String>> {
-    let rows = orm()
-        .query_all_raw(Statement::from_sql_and_values(
-            DbBackend::Postgres,
-            "SELECT fe.ranking_profile_name AS profile_name
-             FROM filesystem_entries fe
-             JOIN media_items ep ON ep.id = fe.media_item_id
-             WHERE ep.parent_id = $1
-               AND ep.is_requested = true
-               AND ep.state <> 'unreleased'
-               AND fe.entry_type = 'media'
-               AND fe.ranking_profile_name IS NOT NULL
-             GROUP BY fe.ranking_profile_name
-             HAVING COUNT(DISTINCT fe.media_item_id) >= (
-                 SELECT COUNT(*) FROM media_items expected
-                 WHERE expected.parent_id = $1
-                   AND expected.is_requested = true
-                   AND expected.state <> 'unreleased'
-             )",
-            [season_id.into()],
-        ))
+    let rows: Vec<Option<String>> = filesystem_entries::Entity::find()
+        .inner_join(riven_core::entities::media_items::Entity)
+        .filter(riven_core::entities::media_items::Column::ParentId.eq(season_id))
+        .filter(filesystem_entries::Column::EntryType.eq(FileSystemEntryType::Media))
+        .filter(filesystem_entries::Column::RankingProfileName.is_not_null())
+        .select_only()
+        .column(filesystem_entries::Column::RankingProfileName)
+        .distinct()
+        .into_tuple()
+        .all(orm())
         .await?;
-    Ok(rows
-        .into_iter()
-        .filter_map(|row| row.try_get::<String>("", "profile_name").ok())
-        .collect())
+    Ok(rows.into_iter().flatten().collect())
 }
 
 /// Episode ids under a season that already have an entry for the given
