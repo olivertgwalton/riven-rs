@@ -15,7 +15,10 @@ mod metadata;
 
 use dispatch::dispatch_webhooks;
 #[cfg(test)]
-use dispatch::{NotificationService, build_simple_embed, format_duration, parse_notification_url};
+use dispatch::{
+    NotificationService, NtfyAuth, build_ntfy_body, build_simple_embed, format_duration,
+    parse_notification_url,
+};
 use metadata::{fetch_tmdb_overview, fetch_tvdb_slug};
 
 const TMDB_BASE_URL: &str = "https://api.themoviedb.org/3";

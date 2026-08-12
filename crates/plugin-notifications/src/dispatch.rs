@@ -23,6 +23,27 @@ pub(crate) async fn dispatch_webhooks(
                     tracing::error!(error = %error, url = url_str, "failed to send json notification");
                 }
             }
+            Some(NotificationService::Ntfy {
+                base_url,
+                topic,
+                auth,
+                priority,
+                tags,
+            }) => {
+                if let Err(error) = send_ntfy(
+                    &ctx.http,
+                    &base_url,
+                    &topic,
+                    &auth,
+                    priority.as_deref(),
+                    tags.as_deref(),
+                    payload,
+                )
+                .await
+                {
+                    tracing::error!(error = %error, url = url_str, "failed to send ntfy notification");
+                }
+            }
             None => {
                 tracing::warn!(url = url_str, "unsupported notification URL scheme");
             }
@@ -38,6 +59,19 @@ pub(crate) enum NotificationService {
     Json {
         url: String,
     },
+    Ntfy {
+        base_url: String,
+        topic: String,
+        auth: NtfyAuth,
+        priority: Option<String>,
+        tags: Option<String>,
+    },
+}
+
+pub(crate) enum NtfyAuth {
+    None,
+    Basic { user: String, password: String },
+    Token(String),
 }
 
 pub(crate) fn parse_notification_url(url: &str) -> Option<NotificationService> {
@@ -54,12 +88,91 @@ pub(crate) fn parse_notification_url(url: &str) -> Option<NotificationService> {
         Some(NotificationService::Json {
             url: format!("http://{rest}"),
         })
+    } else if let Some(rest) = url.strip_prefix("jsons://") {
+        Some(NotificationService::Json {
+            url: format!("https://{rest}"),
+        })
+    } else if url.starts_with("ntfy://") || url.starts_with("ntfys://") {
+        parse_ntfy_url(url)
     } else {
-        url.strip_prefix("jsons://")
-            .map(|rest| NotificationService::Json {
-                url: format!("https://{rest}"),
-            })
+        None
     }
+}
+
+/// Apprise's ntfy scheme: `ntfy://topic` (public ntfy.sh), `ntfy://host/topic`
+/// or `ntfys://host/topic` (self-hosted, http/https respectively), each
+/// optionally prefixed with `user:pass@` (Basic auth) or `token@` (Bearer
+/// auth). Only a single topic is supported — Apprise's `{topic1}/{topic2}`
+/// multi-topic form is not, since without an explicit host there is no way
+/// to tell a second topic segment apart from a hostname.
+fn parse_ntfy_url(url: &str) -> Option<NotificationService> {
+    let (secure_scheme, rest) = if let Some(rest) = url.strip_prefix("ntfys://") {
+        (true, rest)
+    } else {
+        (false, url.strip_prefix("ntfy://")?)
+    };
+
+    let (rest, query) = match rest.split_once('?') {
+        Some((path, q)) => (path, Some(q)),
+        None => (rest, None),
+    };
+
+    let (auth_part, after_auth) = match rest.split_once('@') {
+        Some((a, b)) => (Some(a), b),
+        None => (None, rest),
+    };
+
+    let (base_url, topic) = match after_auth.split_once('/') {
+        Some((host, topic)) if !host.is_empty() && !topic.is_empty() => {
+            // ntfy.sh itself has no plaintext endpoint, so an explicit
+            // `ntfy://ntfy.sh/topic` still needs to be forced to https.
+            let scheme = if secure_scheme || host.eq_ignore_ascii_case("ntfy.sh") {
+                "https"
+            } else {
+                "http"
+            };
+            (format!("{scheme}://{host}"), topic.to_string())
+        }
+        // A `/` is present but the host or topic on one side of it is empty
+        // (e.g. `myhost/` or `/topic`) — not a valid self-hosted target.
+        Some(_) => return None,
+        None if !after_auth.is_empty() => ("https://ntfy.sh".to_string(), after_auth.to_string()),
+        None => return None,
+    };
+
+    let auth = match auth_part {
+        None => NtfyAuth::None,
+        Some(a) => match a.split_once(':') {
+            Some((user, password)) => NtfyAuth::Basic {
+                user: user.to_string(),
+                password: password.to_string(),
+            },
+            None => NtfyAuth::Token(a.to_string()),
+        },
+    };
+
+    let mut priority = None;
+    let mut tags = None;
+    for pair in query.into_iter().flat_map(|q| q.split('&')) {
+        let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+        match key {
+            "priority" if matches!(value, "max" | "high" | "low" | "min") => {
+                priority = Some(value.to_string());
+            }
+            "tags" if !value.is_empty() => {
+                tags = Some(value.to_string());
+            }
+            _ => {}
+        }
+    }
+
+    Some(NotificationService::Ntfy {
+        base_url,
+        topic,
+        auth,
+        priority,
+        tags,
+    })
 }
 
 async fn send_discord(
@@ -245,6 +358,68 @@ async fn send_json_webhook(
     .await?
     .error_for_status()?;
     Ok(())
+}
+
+async fn send_ntfy(
+    http: &riven_core::http::HttpClient,
+    base_url: &str,
+    topic: &str,
+    auth: &NtfyAuth,
+    priority: Option<&str>,
+    tags: Option<&str>,
+    payload: &NotificationPayload,
+) -> anyhow::Result<()> {
+    let url = format!("{base_url}/{topic}");
+    let body = build_ntfy_body(payload);
+    tracing::debug!(
+        topic,
+        title = %payload.full_title,
+        "sending ntfy notification"
+    );
+    http.send(profiles::NTFY, |client| {
+        let mut request = client.post(&url).json(&body);
+        request = match auth {
+            NtfyAuth::None => request,
+            NtfyAuth::Basic { user, password } => request.basic_auth(user, Some(password)),
+            NtfyAuth::Token(token) => request.bearer_auth(token),
+        };
+        if let Some(priority) = priority {
+            request = request.header("X-Priority", priority);
+        }
+        if let Some(tags) = tags {
+            request = request.header("X-Tags", tags);
+        }
+        request
+    })
+    .await?
+    .error_for_status()?;
+    Ok(())
+}
+
+pub(crate) fn build_ntfy_body(payload: &NotificationPayload) -> serde_json::Value {
+    let mut body = serde_json::json!({
+        "title": format!("Downloaded: {}", payload.full_title),
+        "message": build_ntfy_message(payload),
+    });
+    if let Some(ref poster) = payload.poster_path {
+        body["attach"] = serde_json::json!(poster);
+    }
+    body
+}
+
+/// ntfy's `message` field is plain text — no embed support — so this
+/// condenses the same core fields `build_simple_embed` shows into one line.
+fn build_ntfy_message(payload: &NotificationPayload) -> String {
+    let mut parts = vec![format!("{:?}", payload.item_type)];
+    if let Some(year) = payload.year {
+        parts.push(year.to_string());
+    }
+    parts.push(format!("via {}", payload.downloader));
+    if let Some(ref provider) = payload.provider {
+        parts.push(provider.clone());
+    }
+    parts.push(format!("in {}", format_duration(payload.duration_seconds)));
+    parts.join(" • ")
 }
 
 pub(crate) fn format_duration(seconds: f64) -> String {

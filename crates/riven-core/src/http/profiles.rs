@@ -49,3 +49,4 @@ impl HttpServiceProfile {
 
 pub const DISCORD_WEBHOOK: HttpServiceProfile = HttpServiceProfile::new("discord_webhook");
 pub const WEBHOOK_JSON: HttpServiceProfile = HttpServiceProfile::new("json_webhook");
+pub const NTFY: HttpServiceProfile = HttpServiceProfile::new("ntfy");
