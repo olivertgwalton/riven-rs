@@ -369,38 +369,49 @@ async fn send_ntfy(
     tags: Option<&str>,
     payload: &NotificationPayload,
 ) -> anyhow::Result<()> {
-    let url = format!("{base_url}/{topic}");
-    let body = build_ntfy_body(payload);
+    // ntfy only parses a JSON publish body at the root endpoint — POSTing
+    // JSON straight to `/{topic}` (as this used to) gets treated as a plain
+    // publish and the raw JSON text ends up as the literal message body.
+    // The root form also keeps title/message/tags fully UTF-8 safe: the
+    // header-based per-topic form would need every non-ASCII byte (accented
+    // titles, the "•" separator below) RFC 2047-encoded, since HTTP header
+    // values are ASCII-only.
+    let body = build_ntfy_body(topic, priority, tags, payload);
     tracing::debug!(
         topic,
         title = %payload.full_title,
         "sending ntfy notification"
     );
     http.send(profiles::NTFY, |client| {
-        let mut request = client.post(&url).json(&body);
-        request = match auth {
+        let request = client.post(base_url).json(&body);
+        match auth {
             NtfyAuth::None => request,
             NtfyAuth::Basic { user, password } => request.basic_auth(user, Some(password)),
             NtfyAuth::Token(token) => request.bearer_auth(token),
-        };
-        if let Some(priority) = priority {
-            request = request.header("X-Priority", priority);
         }
-        if let Some(tags) = tags {
-            request = request.header("X-Tags", tags);
-        }
-        request
     })
     .await?
     .error_for_status()?;
     Ok(())
 }
 
-pub(crate) fn build_ntfy_body(payload: &NotificationPayload) -> serde_json::Value {
+pub(crate) fn build_ntfy_body(
+    topic: &str,
+    priority: Option<&str>,
+    tags: Option<&str>,
+    payload: &NotificationPayload,
+) -> serde_json::Value {
     let mut body = serde_json::json!({
+        "topic": topic,
         "title": format!("Downloaded: {}", payload.full_title),
         "message": build_ntfy_message(payload),
     });
+    if let Some(priority) = priority {
+        body["priority"] = serde_json::json!(priority);
+    }
+    if let Some(tags) = tags {
+        body["tags"] = serde_json::json!(tags.split(',').map(str::trim).collect::<Vec<_>>());
+    }
     if let Some(ref poster) = payload.poster_path {
         body["attach"] = serde_json::json!(poster);
     }

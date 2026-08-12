@@ -172,12 +172,23 @@ fn ntfy_url_parser_rejects_a_missing_topic() {
 
 #[test]
 fn ntfy_body_condenses_the_core_fields_and_attaches_the_poster() {
-    let body = build_ntfy_body(&payload());
+    let body = build_ntfy_body("mytopic", None, None, &payload());
 
+    assert_eq!(body["topic"], "mytopic");
     assert_eq!(body["title"], "Downloaded: Movie");
     assert_eq!(
         body["message"],
         "Movie • 2024 • via stremthru • realdebrid • in 1h 1m 1s"
     );
     assert_eq!(body["attach"], "https://image.test/poster.jpg");
+    assert!(body.get("priority").is_none());
+    assert!(body.get("tags").is_none());
+}
+
+#[test]
+fn ntfy_body_includes_priority_and_tags_as_a_json_array() {
+    let body = build_ntfy_body("mytopic", Some("high"), Some("warning, skull"), &payload());
+
+    assert_eq!(body["priority"], "high");
+    assert_eq!(body["tags"], serde_json::json!(["warning", "skull"]));
 }
