@@ -130,4 +130,51 @@ mod tests {
         handle.abort();
         Ok(())
     }
+
+    /// The congestion-collapse guard: when the wait for a token is longer than
+    /// a job can afford, the call must hand back `RateLimitedError` promptly so
+    /// the caller can requeue, rather than sitting on its worker slot until the
+    /// job's own deadline kills it having made no request at all.
+    #[tokio::test]
+    async fn defers_instead_of_waiting_out_a_long_rate_limit() -> anyhow::Result<()> {
+        let counter = Arc::new(AtomicUsize::new(0));
+        let (addr, handle) = spawn_json_server(Arc::clone(&counter)).await?;
+        let http = HttpClient::new(reqwest::Client::new());
+        let url = format!("http://{addr}/value");
+        // One token per minute: the second caller would have to wait ~60s,
+        // far past what the limiter is willing to block for.
+        let profile =
+            HttpServiceProfile::new("test-defer").with_rate_limit(1, Duration::from_secs(60));
+
+        http.get_json::<serde_json::Value, _>(profile.clone(), format!("{url}?a=1"), |client| {
+            client.get(format!("{url}?a=1"))
+        })
+        .await?;
+
+        let started = Instant::now();
+        let deferred = http
+            .get_json::<serde_json::Value, _>(profile, format!("{url}?a=2"), |client| {
+                client.get(format!("{url}?a=2"))
+            })
+            .await;
+
+        let error = deferred.expect_err("second call should defer, not wait");
+        assert!(
+            error.is::<super::RateLimitedError>(),
+            "expected RateLimitedError, got: {error}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "deferring must be prompt, took {:?}",
+            started.elapsed()
+        );
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            1,
+            "the deferred call must not reach the server"
+        );
+
+        handle.abort();
+        Ok(())
+    }
 }
