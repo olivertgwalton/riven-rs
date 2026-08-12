@@ -41,7 +41,9 @@ pub(crate) async fn dispatch_webhooks(
                 )
                 .await
                 {
-                    tracing::error!(error = %error, url = url_str, "failed to send ntfy notification");
+                    // Never log `url_str` here — a basic-auth password or
+                    // bearer token in the URL would end up in the logs.
+                    tracing::error!(error = %error, endpoint = %base_url, "failed to send ntfy notification");
                 }
             }
             None => {
@@ -123,7 +125,11 @@ fn parse_ntfy_url(url: &str) -> Option<NotificationService> {
     };
 
     let (base_url, topic) = match after_auth.split_once('/') {
-        Some((host, topic)) if !host.is_empty() && !topic.is_empty() => {
+        // `/` is not a valid character in an ntfy topic name, so a further
+        // `/` inside `topic` means this is a multi-segment path (e.g.
+        // `host/topic-one/topic-two`) — not the single-topic form this
+        // supports.
+        Some((host, topic)) if !host.is_empty() && !topic.is_empty() && !topic.contains('/') => {
             // ntfy.sh itself has no plaintext endpoint, so an explicit
             // `ntfy://ntfy.sh/topic` still needs to be forced to https.
             let scheme = if secure_scheme || host.eq_ignore_ascii_case("ntfy.sh") {
@@ -134,7 +140,8 @@ fn parse_ntfy_url(url: &str) -> Option<NotificationService> {
             (format!("{scheme}://{host}"), topic.to_string())
         }
         // A `/` is present but the host or topic on one side of it is empty
-        // (e.g. `myhost/` or `/topic`) — not a valid self-hosted target.
+        // (e.g. `myhost/` or `/topic`), or the topic itself has a further
+        // `/` — not a valid self-hosted target.
         Some(_) => return None,
         None if !after_auth.is_empty() => ("https://ntfy.sh".to_string(), after_auth.to_string()),
         None => return None,

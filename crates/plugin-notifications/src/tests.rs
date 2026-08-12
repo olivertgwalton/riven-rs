@@ -171,6 +171,14 @@ fn ntfy_url_parser_rejects_a_missing_topic() {
 }
 
 #[test]
+fn ntfy_url_parser_rejects_a_multi_segment_topic() {
+    // `/` isn't a valid character in an ntfy topic name, so a second
+    // segment here reads as a topic path rather than the supported
+    // single-topic form.
+    assert!(parse_notification_url("ntfy://host/topic-one/topic-two").is_none());
+}
+
+#[test]
 fn ntfy_body_condenses_the_core_fields_and_attaches_the_poster() {
     let body = build_ntfy_body("mytopic", None, None, &payload());
 
