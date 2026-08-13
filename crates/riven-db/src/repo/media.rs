@@ -206,6 +206,7 @@ pub async fn get_pending_items_for_retry(item_type: MediaItemType) -> Result<Vec
         ]))
         .filter(media_items::Column::ItemType.eq(item_type))
         .filter(media_items::Column::IsRequested.eq(true))
+        .filter(media_items::Column::ManualScrapeOnly.eq(false))
         .filter(Expr::cust(FAILED_ATTEMPTS_COOLDOWN_SQL))
         .order_by_asc(media_items::Column::FailedAttempts)
         .order_by_with_nulls(
@@ -381,6 +382,20 @@ pub async fn set_active_stream(id: i64, stream_id: i64) -> Result<()> {
         id: Unchanged(id),
         active_stream_id: Set(Some(stream_id)),
         updated_at: Set(Some(Utc::now())),
+        ..Default::default()
+    }
+    .update(orm())
+    .await?;
+    Ok(())
+}
+
+/// Opt an item out of [`get_pending_items_for_retry`]'s automatic re-scrape
+/// loop — called after a Manual Scrape mutation resolves it, since the user
+/// has already made the pick that loop exists to make on its own.
+pub async fn mark_manual_scrape_only(id: i64) -> Result<()> {
+    media_items::ActiveModel {
+        id: Unchanged(id),
+        manual_scrape_only: Set(true),
         ..Default::default()
     }
     .update(orm())

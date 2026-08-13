@@ -298,6 +298,7 @@ mod tests {
             runtime: None,
             item_request_id: None,
             active_stream_id: None,
+            manual_scrape_only: false,
         }
     }
 

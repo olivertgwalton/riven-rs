@@ -161,6 +161,16 @@ async fn handle_validate(job: &ProcessMediaItemJob, item: &MediaItem, queue: &Jo
             fan_out_to_children(&item, queue).await;
         }
         MediaItemState::Failed | MediaItemState::Paused => {}
+        MediaItemState::Scraped | MediaItemState::Indexed | MediaItemState::Unreleased
+            if item.manual_scrape_only =>
+        {
+            tracing::debug!(
+                id = item.id,
+                title = %item.title,
+                state = ?item.state,
+                "pipeline: item still isn't complete after the download step, but it was manually scraped; not scheduling an automatic retry"
+            );
+        }
         MediaItemState::Scraped | MediaItemState::Indexed | MediaItemState::Unreleased => {
             // Mirrors `FAILED_ATTEMPTS_COOLDOWN_SQL`'s escalating tiers — this
             // job-level re-push doesn't go through `get_pending_items_for_retry`,

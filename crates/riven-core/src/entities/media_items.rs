@@ -71,6 +71,11 @@ pub struct Model {
     pub network_timezone: Option<String>,
     pub aired_at_utc: Option<DateTimeUtc>,
     pub last_scrape_attempt_at: Option<DateTimeUtc>,
+    /// Set once a Manual Scrape (a picked discovery result, a pasted
+    /// magnet/hash, or a pasted NZB URL) resolves this item. Opts it out of
+    /// `get_pending_items_for_retry`'s automatic re-scrape loop, since the
+    /// user has already made the pick that loop exists to make on its own.
+    pub manual_scrape_only: bool,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

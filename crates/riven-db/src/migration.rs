@@ -41,6 +41,7 @@ macro_rules! sql_migrations {
                 migrations.push(Box::new(M038DropBetterAuthPluginTables));
                 migrations.push(Box::new(M039DropUserBanColumns));
                 migrations.push(Box::new(M040IndexerStats));
+                migrations.push(Box::new(M041ManualScrapeNoAutoRetry));
                 migrations
             }
         }
@@ -69,6 +70,12 @@ sql_migration!(
     M040IndexerStats,
     "m040_indexer_stats",
     "040_indexer_stats.sql"
+);
+
+sql_migration!(
+    M041ManualScrapeNoAutoRetry,
+    "m041_manual_scrape_no_auto_retry",
+    "041_manual_scrape_no_auto_retry.sql"
 );
 
 /// Authentication tables, generated from riven's own entities.
