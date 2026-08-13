@@ -226,6 +226,13 @@ export type Episode = {
   lastScrapeAttemptAt?: Maybe<Scalars['DateTime']['output']>;
   /** Lookup keys: `["abs:{absoluteNumber}", "{seasonNumber}:{episodeNumber}"]`. */
   lookupKeys: Array<Scalars['String']['output']>;
+  /**
+   * Set once a Manual Scrape (a picked discovery result, a pasted
+   * magnet/hash, or a pasted NZB URL) resolves this item. Opts it out of
+   * `get_pending_items_for_retry`'s automatic re-scrape loop, since the
+   * user has already made the pick that loop exists to make on its own.
+   */
+  manualScrapeOnly: Scalars['Boolean']['output'];
   network?: Maybe<Scalars['String']['output']>;
   networkTimezone?: Maybe<Scalars['String']['output']>;
   parentId?: Maybe<Scalars['Int']['output']>;
@@ -283,6 +290,13 @@ export type EpisodeFull = {
   itemType: MediaItemType;
   language?: Maybe<Scalars['String']['output']>;
   lastScrapeAttemptAt?: Maybe<Scalars['DateTime']['output']>;
+  /**
+   * Set once a Manual Scrape (a picked discovery result, a pasted
+   * magnet/hash, or a pasted NZB URL) resolves this item. Opts it out of
+   * `get_pending_items_for_retry`'s automatic re-scrape loop, since the
+   * user has already made the pick that loop exists to make on its own.
+   */
+  manualScrapeOnly: Scalars['Boolean']['output'];
   network?: Maybe<Scalars['String']['output']>;
   networkTimezone?: Maybe<Scalars['String']['output']>;
   parentId?: Maybe<Scalars['Int']['output']>;
@@ -634,6 +648,13 @@ export type MediaItem = {
   itemType: MediaItemType;
   language?: Maybe<Scalars['String']['output']>;
   lastScrapeAttemptAt?: Maybe<Scalars['DateTime']['output']>;
+  /**
+   * Set once a Manual Scrape (a picked discovery result, a pasted
+   * magnet/hash, or a pasted NZB URL) resolves this item. Opts it out of
+   * `get_pending_items_for_retry`'s automatic re-scrape loop, since the
+   * user has already made the pick that loop exists to make on its own.
+   */
+  manualScrapeOnly: Scalars['Boolean']['output'];
   network?: Maybe<Scalars['String']['output']>;
   networkTimezone?: Maybe<Scalars['String']['output']>;
   parentId?: Maybe<Scalars['Int']['output']>;
@@ -683,6 +704,13 @@ export type MediaItemFull = {
   itemType: MediaItemType;
   language?: Maybe<Scalars['String']['output']>;
   lastScrapeAttemptAt?: Maybe<Scalars['DateTime']['output']>;
+  /**
+   * Set once a Manual Scrape (a picked discovery result, a pasted
+   * magnet/hash, or a pasted NZB URL) resolves this item. Opts it out of
+   * `get_pending_items_for_retry`'s automatic re-scrape loop, since the
+   * user has already made the pick that loop exists to make on its own.
+   */
+  manualScrapeOnly: Scalars['Boolean']['output'];
   network?: Maybe<Scalars['String']['output']>;
   networkTimezone?: Maybe<Scalars['String']['output']>;
   parentId?: Maybe<Scalars['Int']['output']>;
@@ -730,6 +758,13 @@ export type MediaItemListRow = {
   itemType: MediaItemType;
   language?: Maybe<Scalars['String']['output']>;
   lastScrapeAttemptAt?: Maybe<Scalars['DateTime']['output']>;
+  /**
+   * Set once a Manual Scrape (a picked discovery result, a pasted
+   * magnet/hash, or a pasted NZB URL) resolves this item. Opts it out of
+   * `get_pending_items_for_retry`'s automatic re-scrape loop, since the
+   * user has already made the pick that loop exists to make on its own.
+   */
+  manualScrapeOnly: Scalars['Boolean']['output'];
   network?: Maybe<Scalars['String']['output']>;
   networkTimezone?: Maybe<Scalars['String']['output']>;
   parentId?: Maybe<Scalars['Int']['output']>;
@@ -861,6 +896,13 @@ export type Movie = {
   itemType: MediaItemType;
   language?: Maybe<Scalars['String']['output']>;
   lastScrapeAttemptAt?: Maybe<Scalars['DateTime']['output']>;
+  /**
+   * Set once a Manual Scrape (a picked discovery result, a pasted
+   * magnet/hash, or a pasted NZB URL) resolves this item. Opts it out of
+   * `get_pending_items_for_retry`'s automatic re-scrape loop, since the
+   * user has already made the pick that loop exists to make on its own.
+   */
+  manualScrapeOnly: Scalars['Boolean']['output'];
   network?: Maybe<Scalars['String']['output']>;
   networkTimezone?: Maybe<Scalars['String']['output']>;
   parentId?: Maybe<Scalars['Int']['output']>;
@@ -948,6 +990,19 @@ export type MutationRoot = {
    * flow can fill every season it contains.
    */
   downloadDiscoveredStream: Scalars['String']['output'];
+  /**
+   * Manually queue a specific NZB by URL, bypassing indexer search entirely
+   * — the usenet equivalent of [`download_discovered_stream`]'s explicit
+   * magnet/hash field. The URL is hashed into the same `nzb-`-prefixed
+   * `info_hash` a real newznab scrape would produce and stashed in Redis
+   * under the same keys ([`nzb_url_redis_key`]), so `plugin-usenet`'s
+   * download-time fetch can't tell the difference from a scraped result.
+   *
+   * TV has no parsed release metadata to infer seasons from here (there was
+   * no scrape), so the caller must supply `season_number`/`episode_number`
+   * or `seasons` explicitly.
+   */
+  downloadExplicitNzb: Scalars['String']['output'];
   downloadMediaItem: DownloadMediaItemMutationResponse;
   /**
    * Persist indexer data for a movie and advance it to the scraping stage.
@@ -1132,6 +1187,19 @@ export type MutationRootDownloadDiscoveredStreamArgs = {
   magnet: Scalars['String']['input'];
   parsedData?: InputMaybe<Scalars['JSON']['input']>;
   rank?: InputMaybe<Scalars['Int']['input']>;
+  seasonNumber?: InputMaybe<Scalars['Int']['input']>;
+  seasons?: InputMaybe<Array<Scalars['Int']['input']>>;
+  title: Scalars['String']['input'];
+  tmdbId?: InputMaybe<Scalars['String']['input']>;
+  tvdbId?: InputMaybe<Scalars['String']['input']>;
+};
+
+
+export type MutationRootDownloadExplicitNzbArgs = {
+  episodeNumber?: InputMaybe<Scalars['Int']['input']>;
+  imdbId?: InputMaybe<Scalars['String']['input']>;
+  itemType: MediaItemType;
+  nzbUrl: Scalars['String']['input'];
   seasonNumber?: InputMaybe<Scalars['Int']['input']>;
   seasons?: InputMaybe<Array<Scalars['Int']['input']>>;
   title: Scalars['String']['input'];
@@ -1847,6 +1915,13 @@ export type Season = {
   itemType: MediaItemType;
   language?: Maybe<Scalars['String']['output']>;
   lastScrapeAttemptAt?: Maybe<Scalars['DateTime']['output']>;
+  /**
+   * Set once a Manual Scrape (a picked discovery result, a pasted
+   * magnet/hash, or a pasted NZB URL) resolves this item. Opts it out of
+   * `get_pending_items_for_retry`'s automatic re-scrape loop, since the
+   * user has already made the pick that loop exists to make on its own.
+   */
+  manualScrapeOnly: Scalars['Boolean']['output'];
   network?: Maybe<Scalars['String']['output']>;
   networkTimezone?: Maybe<Scalars['String']['output']>;
   parentId?: Maybe<Scalars['Int']['output']>;
@@ -1905,6 +1980,13 @@ export type SeasonFull = {
   itemType: MediaItemType;
   language?: Maybe<Scalars['String']['output']>;
   lastScrapeAttemptAt?: Maybe<Scalars['DateTime']['output']>;
+  /**
+   * Set once a Manual Scrape (a picked discovery result, a pasted
+   * magnet/hash, or a pasted NZB URL) resolves this item. Opts it out of
+   * `get_pending_items_for_retry`'s automatic re-scrape loop, since the
+   * user has already made the pick that loop exists to make on its own.
+   */
+  manualScrapeOnly: Scalars['Boolean']['output'];
   network?: Maybe<Scalars['String']['output']>;
   networkTimezone?: Maybe<Scalars['String']['output']>;
   parentId?: Maybe<Scalars['Int']['output']>;
@@ -2007,6 +2089,13 @@ export type Show = {
   itemType: MediaItemType;
   language?: Maybe<Scalars['String']['output']>;
   lastScrapeAttemptAt?: Maybe<Scalars['DateTime']['output']>;
+  /**
+   * Set once a Manual Scrape (a picked discovery result, a pasted
+   * magnet/hash, or a pasted NZB URL) resolves this item. Opts it out of
+   * `get_pending_items_for_retry`'s automatic re-scrape loop, since the
+   * user has already made the pick that loop exists to make on its own.
+   */
+  manualScrapeOnly: Scalars['Boolean']['output'];
   network?: Maybe<Scalars['String']['output']>;
   networkTimezone?: Maybe<Scalars['String']['output']>;
   parentId?: Maybe<Scalars['Int']['output']>;

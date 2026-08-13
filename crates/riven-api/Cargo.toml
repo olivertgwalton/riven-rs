@@ -8,6 +8,7 @@ rust-version.workspace = true
 webauthn-rs = { workspace = true }
 base64 = { workspace = true }
 uuid = { workspace = true }
+redis = { workspace = true }
 riven-core = { path = "../riven-core" }
 riven-db = { path = "../riven-db" }
 riven-rank = { path = "../riven-rank" }

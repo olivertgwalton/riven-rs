@@ -45,6 +45,7 @@ impl StremioAddonToken {
 pub fn build_schema(
     registry: Arc<PluginRegistry>,
     job_queue: Arc<riven_queue::JobQueue>,
+    redis_conn: redis::aio::ConnectionManager,
     http_client: HttpClient,
     log_directory: String,
     downloader_config: Arc<RwLock<DownloaderConfig>>,
@@ -60,6 +61,7 @@ pub fn build_schema(
     )
     .data(registry)
     .data(job_queue)
+    .data(redis_conn)
     .data(http_client)
     .data(downloader_config)
     .data(log_control)
@@ -139,6 +141,7 @@ mod tests {
         ("downloadMediaItem", "ScrapeItems"),
         ("discoverStreams", "ScrapeItems"),
         ("downloadDiscoveredStream", "ScrapeItems"),
+        ("downloadExplicitNzb", "ScrapeItems"),
         ("saveStreamUrl", "ScrapeItems"),
         ("rescanUsenetHealth", "ScrapeItems"),
         // Deletes *and* re-scrapes, so it requires both.

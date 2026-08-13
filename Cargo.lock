@@ -4368,6 +4368,7 @@ dependencies = [
  "plugin-dashboard",
  "plugin-seerr",
  "rand_core 0.6.4",
+ "redis",
  "reqwest",
  "riven-core",
  "riven-db",

@@ -230,6 +230,13 @@ type Episode {
 	airedAtUtc: DateTime
 	lastScrapeAttemptAt: DateTime
 	"""
+	Set once a Manual Scrape (a picked discovery result, a pasted
+	magnet/hash, or a pasted NZB URL) resolves this item. Opts it out of
+	`get_pending_items_for_retry`'s automatic re-scrape loop, since the
+	user has already made the pick that loop exists to make on its own.
+	"""
+	manualScrapeOnly: Boolean!
+	"""
 	Absolute artwork URL. The column holds a bare path for anything indexed
 	before the plugins normalised what they wrote, so it is resolved here
 	rather than in each client.
@@ -291,6 +298,13 @@ type EpisodeFull {
 	networkTimezone: String
 	airedAtUtc: DateTime
 	lastScrapeAttemptAt: DateTime
+	"""
+	Set once a Manual Scrape (a picked discovery result, a pasted
+	magnet/hash, or a pasted NZB URL) resolves this item. Opts it out of
+	`get_pending_items_for_retry`'s automatic re-scrape loop, since the
+	user has already made the pick that loop exists to make on its own.
+	"""
+	manualScrapeOnly: Boolean!
 	"""
 	Absolute artwork URL. The column holds a bare path for anything indexed
 	before the plugins normalised what they wrote, so it is resolved here
@@ -691,6 +705,13 @@ type MediaItem {
 	airedAtUtc: DateTime
 	lastScrapeAttemptAt: DateTime
 	"""
+	Set once a Manual Scrape (a picked discovery result, a pasted
+	magnet/hash, or a pasted NZB URL) resolves this item. Opts it out of
+	`get_pending_items_for_retry`'s automatic re-scrape loop, since the
+	user has already made the pick that loop exists to make on its own.
+	"""
+	manualScrapeOnly: Boolean!
+	"""
 	Absolute artwork URL. The column holds a bare path for anything indexed
 	before the plugins normalised what they wrote, so it is resolved here
 	rather than in each client.
@@ -740,6 +761,13 @@ type MediaItemFull {
 	airedAtUtc: DateTime
 	lastScrapeAttemptAt: DateTime
 	"""
+	Set once a Manual Scrape (a picked discovery result, a pasted
+	magnet/hash, or a pasted NZB URL) resolves this item. Opts it out of
+	`get_pending_items_for_retry`'s automatic re-scrape loop, since the
+	user has already made the pick that loop exists to make on its own.
+	"""
+	manualScrapeOnly: Boolean!
+	"""
 	Absolute artwork URL. The column holds a bare path for anything indexed
 	before the plugins normalised what they wrote, so it is resolved here
 	rather than in each client.
@@ -788,6 +816,13 @@ type MediaItemListRow {
 	networkTimezone: String
 	airedAtUtc: DateTime
 	lastScrapeAttemptAt: DateTime
+	"""
+	Set once a Manual Scrape (a picked discovery result, a pasted
+	magnet/hash, or a pasted NZB URL) resolves this item. Opts it out of
+	`get_pending_items_for_retry`'s automatic re-scrape loop, since the
+	user has already made the pick that loop exists to make on its own.
+	"""
+	manualScrapeOnly: Boolean!
 	"""
 	Absolute artwork URL. The column holds a bare path for anything indexed
 	before the plugins normalised what they wrote, so it is resolved here
@@ -925,6 +960,13 @@ type Movie {
 	networkTimezone: String
 	airedAtUtc: DateTime
 	lastScrapeAttemptAt: DateTime
+	"""
+	Set once a Manual Scrape (a picked discovery result, a pasted
+	magnet/hash, or a pasted NZB URL) resolves this item. Opts it out of
+	`get_pending_items_for_retry`'s automatic re-scrape loop, since the
+	user has already made the pick that loop exists to make on its own.
+	"""
+	manualScrapeOnly: Boolean!
 	"""
 	Absolute artwork URL. The column holds a bare path for anything indexed
 	before the plugins normalised what they wrote, so it is resolved here
@@ -1131,6 +1173,19 @@ type MutationRoot {
 	flow can fill every season it contains.
 	"""
 	downloadDiscoveredStream(itemType: MediaItemType!, title: String!, imdbId: String, tmdbId: String, tvdbId: String, seasonNumber: Int, episodeNumber: Int, seasons: [Int!], infoHash: String!, magnet: String!, parsedData: JSON, rank: Int): String!
+	"""
+	Manually queue a specific NZB by URL, bypassing indexer search entirely
+	— the usenet equivalent of [`download_discovered_stream`]'s explicit
+	magnet/hash field. The URL is hashed into the same `nzb-`-prefixed
+	`info_hash` a real newznab scrape would produce and stashed in Redis
+	under the same keys ([`nzb_url_redis_key`]), so `plugin-usenet`'s
+	download-time fetch can't tell the difference from a scraped result.
+	
+	TV has no parsed release metadata to infer seasons from here (there was
+	no scrape), so the caller must supply `season_number`/`episode_number`
+	or `seasons` explicitly.
+	"""
+	downloadExplicitNzb(itemType: MediaItemType!, title: String!, imdbId: String, tmdbId: String, tvdbId: String, seasonNumber: Int, episodeNumber: Int, seasons: [Int!], nzbUrl: String!): String!
 	"""
 	Re-acquire a usenet title whose release is broken (missing data) or was
 	never ingested. The item is "completed" only because it still has a
@@ -1592,6 +1647,13 @@ type Season {
 	airedAtUtc: DateTime
 	lastScrapeAttemptAt: DateTime
 	"""
+	Set once a Manual Scrape (a picked discovery result, a pasted
+	magnet/hash, or a pasted NZB URL) resolves this item. Opts it out of
+	`get_pending_items_for_retry`'s automatic re-scrape loop, since the
+	user has already made the pick that loop exists to make on its own.
+	"""
+	manualScrapeOnly: Boolean!
+	"""
 	Absolute artwork URL. The column holds a bare path for anything indexed
 	before the plugins normalised what they wrote, so it is resolved here
 	rather than in each client.
@@ -1657,6 +1719,13 @@ type SeasonFull {
 	networkTimezone: String
 	airedAtUtc: DateTime
 	lastScrapeAttemptAt: DateTime
+	"""
+	Set once a Manual Scrape (a picked discovery result, a pasted
+	magnet/hash, or a pasted NZB URL) resolves this item. Opts it out of
+	`get_pending_items_for_retry`'s automatic re-scrape loop, since the
+	user has already made the pick that loop exists to make on its own.
+	"""
+	manualScrapeOnly: Boolean!
 	"""
 	Absolute artwork URL. The column holds a bare path for anything indexed
 	before the plugins normalised what they wrote, so it is resolved here
@@ -1769,6 +1838,13 @@ type Show {
 	networkTimezone: String
 	airedAtUtc: DateTime
 	lastScrapeAttemptAt: DateTime
+	"""
+	Set once a Manual Scrape (a picked discovery result, a pasted
+	magnet/hash, or a pasted NZB URL) resolves this item. Opts it out of
+	`get_pending_items_for_retry`'s automatic re-scrape loop, since the
+	user has already made the pick that loop exists to make on its own.
+	"""
+	manualScrapeOnly: Boolean!
 	"""
 	Absolute artwork URL. The column holds a bare path for anything indexed
 	before the plugins normalised what they wrote, so it is resolved here

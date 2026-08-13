@@ -86,6 +86,10 @@
         downloadDiscoveredStream(itemType: $itemType, title: $title, imdbId: $imdbId, tmdbId: $tmdbId, tvdbId: $tvdbId, seasonNumber: $seasonNumber, episodeNumber: $episodeNumber, seasons: $seasons, infoHash: $infoHash, magnet: $magnet, parsedData: $parsedData, rank: $rank)
     }`;
 
+    const DOWNLOAD_EXPLICIT_NZB_MUTATION = `mutation($itemType: MediaItemType!, $title: String!, $imdbId: String, $tmdbId: String, $tvdbId: String, $seasonNumber: Int, $episodeNumber: Int, $seasons: [Int!], $nzbUrl: String!) {
+        downloadExplicitNzb(itemType: $itemType, title: $title, imdbId: $imdbId, tmdbId: $tmdbId, tvdbId: $tvdbId, seasonNumber: $seasonNumber, episodeNumber: $episodeNumber, seasons: $seasons, nzbUrl: $nzbUrl)
+    }`;
+
     let {
         title,
         itemId,
@@ -109,6 +113,8 @@
     let customTmdbId = $state("");
     let customTvdbId = $state("");
     let explicitHash = $state("");
+    let nzbUrl = $state("");
+    let searchQuery = $state("");
     let streams = $state<StreamCandidate[]>([]);
     let downloadingKey = $state<string | null>(null);
 
@@ -117,7 +123,12 @@
         mediaType === "tv" && seasons.length > 0 && !isEpisodeMode
     );
     const visibleStreams = $derived(
-        cachedOnly ? streams.filter((stream) => stream.isCached) : streams
+        (() => {
+            const query = searchQuery.trim().toLowerCase();
+            return streams
+                .filter((stream) => !cachedOnly || stream.isCached)
+                .filter((stream) => !query || stream.title.toLowerCase().includes(query));
+        })()
     );
     const resolvedTmdbId = $derived(
         mediaType === "movie" ? (clean(customTmdbId) ?? externalId) : null
@@ -136,6 +147,13 @@
             if (/^[0-9a-fA-F]{40}$/.test(trimmed) || /^[0-9a-fA-F]{64}$/.test(trimmed))
                 return trimmed.toLowerCase();
             return null;
+        })()
+    );
+    const cleanedNzbUrl = $derived(
+        (() => {
+            const trimmed = nzbUrl.trim();
+            if (!trimmed) return null;
+            return /^https?:\/\//i.test(trimmed) ? trimmed : null;
         })()
     );
     const hadExistingItem = $derived(Boolean(itemId));
@@ -170,6 +188,8 @@
         customTmdbId = "";
         customTvdbId = "";
         explicitHash = "";
+        nzbUrl = "";
+        searchQuery = "";
         advancedOpen = false;
         selectedSeasons = seasons
             .filter((season) => season.status !== "Available")
@@ -177,40 +197,14 @@
             .sort((a, b) => a - b);
     }
 
-    async function submitDownload(
-        key: string,
-        vars: {
-            itemType: "MOVIE" | "SEASON" | "EPISODE";
-            seasonNumber: number | null;
-            episodeNumber?: number | null;
-            seasons?: number[] | null;
-            infoHash: string;
-            magnet: string;
-            parsedData?: StreamCandidate["parsedData"];
-            rank?: number | null;
-        }
-    ) {
+    /** Shared by every mutation this dialog can fire: track the in-flight key,
+     * surface errors, and on success close the dialog and refresh the page. */
+    async function runDownload(key: string, mutation: string, variables: Record<string, unknown>) {
         downloadingKey = key;
         error = null;
 
         try {
-            await gqlClient<{ downloadDiscoveredStream: string }>(
-                DOWNLOAD_DISCOVERED_STREAM_MUTATION,
-                {
-                    itemType: vars.itemType,
-                    title: title ?? "Unknown",
-                    imdbId: null,
-                    tmdbId: resolvedTmdbId,
-                    tvdbId: resolvedTvdbId,
-                    seasonNumber: vars.seasonNumber,
-                    episodeNumber: vars.episodeNumber ?? null,
-                    seasons: vars.seasons ?? null,
-                    infoHash: vars.infoHash,
-                    magnet: vars.magnet,
-                    parsedData: vars.parsedData ?? null,
-                    rank: vars.rank ?? null
-                }
-            );
+            await gqlClient(mutation, variables);
 
             toast.success(
                 hadExistingItem
@@ -225,6 +219,35 @@
         } finally {
             downloadingKey = null;
         }
+    }
+
+    function submitDownload(
+        key: string,
+        vars: {
+            itemType: "MOVIE" | "SEASON" | "EPISODE";
+            seasonNumber: number | null;
+            episodeNumber?: number | null;
+            seasons?: number[] | null;
+            infoHash: string;
+            magnet: string;
+            parsedData?: StreamCandidate["parsedData"];
+            rank?: number | null;
+        }
+    ) {
+        return runDownload(key, DOWNLOAD_DISCOVERED_STREAM_MUTATION, {
+            itemType: vars.itemType,
+            title: title ?? "Unknown",
+            imdbId: null,
+            tmdbId: resolvedTmdbId,
+            tvdbId: resolvedTvdbId,
+            seasonNumber: vars.seasonNumber,
+            episodeNumber: vars.episodeNumber ?? null,
+            seasons: vars.seasons ?? null,
+            infoHash: vars.infoHash,
+            magnet: vars.magnet,
+            parsedData: vars.parsedData ?? null,
+            rank: vars.rank ?? null
+        });
     }
 
     async function discoverStreams() {
@@ -316,6 +339,53 @@
             infoHash: cleanedHash,
             magnet: `magnet:?xt=urn:btih:${cleanedHash}`,
             parsedData: null
+        });
+    }
+
+    function downloadNzbUrl() {
+        if (!cleanedNzbUrl) {
+            error = "Enter a valid NZB URL (must start with http:// or https://)";
+            toast.error(error);
+            return;
+        }
+
+        const key = `manual-nzb:${cleanedNzbUrl}`;
+
+        if (isEpisodeMode) {
+            if (seasonNumber == null) {
+                error = "No season number available for this episode";
+                toast.error(error);
+                return;
+            }
+            return runDownload(key, DOWNLOAD_EXPLICIT_NZB_MUTATION, {
+                itemType: "EPISODE",
+                title: title ?? "Unknown",
+                imdbId: null,
+                tmdbId: resolvedTmdbId,
+                tvdbId: resolvedTvdbId,
+                seasonNumber,
+                episodeNumber,
+                seasons: null,
+                nzbUrl: cleanedNzbUrl
+            });
+        }
+
+        if (mediaType === "tv" && selectedSeasons.length === 0) {
+            error = "Select at least one season before downloading an NZB";
+            toast.error(error);
+            return;
+        }
+
+        return runDownload(key, DOWNLOAD_EXPLICIT_NZB_MUTATION, {
+            itemType: mediaType === "movie" ? "MOVIE" : "SEASON",
+            title: title ?? "Unknown",
+            imdbId: null,
+            tmdbId: resolvedTmdbId,
+            tvdbId: resolvedTvdbId,
+            seasonNumber: mediaType === "tv" ? selectedSeasons[0] : null,
+            episodeNumber: null,
+            seasons: mediaType === "tv" ? selectedSeasons : null,
+            nzbUrl: cleanedNzbUrl
         });
     }
 
@@ -423,8 +493,8 @@
                         {/if}
 
                         {#if advancedOpen}
-                            <div class="mt-4 grid gap-3 md:grid-cols-2">
-                                <div class="space-y-2">
+                            <div class="mt-4">
+                                <div class="max-w-xs space-y-2">
                                     <Label
                                         >{mediaType === "movie"
                                             ? "Custom TMDB ID"
@@ -435,26 +505,56 @@
                                             bind:value={customTvdbId}
                                             placeholder={externalId} />{/if}
                                 </div>
-                                <div class="space-y-2">
-                                    <Label>Explicit Stream Hash</Label>
-                                    <Input
-                                        bind:value={explicitHash}
-                                        placeholder="40-char info hash" />
-                                </div>
                             </div>
                         {/if}
-                        {#if cleanedHash}
-                            <div class="mt-4 flex justify-end">
-                                <Button
-                                    variant="outline"
-                                    onclick={downloadExplicitHash}
-                                    disabled={downloadingKey !== null}>
-                                    {#if downloadingKey === `manual:${cleanedHash}`}<LoaderCircle
-                                            class="mr-2 h-4 w-4 animate-spin" />{/if}
-                                    Download Explicit Hash
-                                </Button>
+                    </div>
+
+                    <div class="rounded-2xl border border-white/10 bg-white/5 p-4">
+                        <p class="mb-3 text-sm font-semibold text-white">Add a specific release</p>
+                        <p class="mb-4 text-xs text-zinc-400">
+                            Already know what you want? Paste a magnet link/hash or an NZB URL to
+                            queue it directly, skipping discovery entirely.
+                        </p>
+                        <div class="grid gap-4 md:grid-cols-2">
+                            <div class="space-y-2">
+                                <Label class="flex items-center gap-1.5">
+                                    <Magnet class="h-3.5 w-3.5" />
+                                    Magnet link or info hash
+                                </Label>
+                                <Input
+                                    bind:value={explicitHash}
+                                    placeholder="magnet:?xt=urn:btih:... or 40-char hash" />
+                                {#if cleanedHash}
+                                    <Button
+                                        size="sm"
+                                        variant="outline"
+                                        onclick={downloadExplicitHash}
+                                        disabled={downloadingKey !== null}>
+                                        {#if downloadingKey === `manual:${cleanedHash}`}<LoaderCircle
+                                                class="mr-2 h-4 w-4 animate-spin" />{/if}
+                                        Download This Magnet
+                                    </Button>
+                                {/if}
                             </div>
-                        {/if}
+                            <div class="space-y-2">
+                                <Label class="flex items-center gap-1.5">
+                                    <Newspaper class="h-3.5 w-3.5" />
+                                    NZB URL
+                                </Label>
+                                <Input bind:value={nzbUrl} placeholder="https://.../release.nzb" />
+                                {#if cleanedNzbUrl}
+                                    <Button
+                                        size="sm"
+                                        variant="outline"
+                                        onclick={downloadNzbUrl}
+                                        disabled={downloadingKey !== null}>
+                                        {#if downloadingKey === `manual-nzb:${cleanedNzbUrl}`}<LoaderCircle
+                                                class="mr-2 h-4 w-4 animate-spin" />{/if}
+                                        Download This NZB
+                                    </Button>
+                                {/if}
+                            </div>
+                        </div>
                     </div>
 
                     <div class="rounded-2xl border border-white/10 bg-white/5 p-4">
@@ -468,12 +568,21 @@
                             <Badge variant="outline">{visibleStreams.length} found</Badge>
                         </div>
 
+                        {#if streams.length}
+                            <Input
+                                class="mb-4"
+                                bind:value={searchQuery}
+                                placeholder="Filter by title, release group, resolution..." />
+                        {/if}
+
                         {#if !visibleStreams.length}
                             <div
                                 class="rounded-xl border border-dashed border-white/15 px-6 py-12 text-center text-sm text-zinc-400">
                                 {#if loading}
                                     <LoaderCircle class="mx-auto mb-3 h-5 w-5 animate-spin" />
                                     Waiting for backend results...
+                                {:else if streams.length && searchQuery.trim()}
+                                    No streams matched "{searchQuery.trim()}".
                                 {:else if streams.length && cachedOnly}
                                     No cached streams matched the current filter.
                                 {:else}

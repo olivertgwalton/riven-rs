@@ -219,7 +219,7 @@ async fn main() -> Result<()> {
 
     let registry = setup::register_plugins(
         http_client.clone(),
-        redis_conn,
+        redis_conn.clone(),
         settings.filesystem.mount_path.clone(),
         &settings,
     )
@@ -351,6 +351,7 @@ async fn main() -> Result<()> {
     let gql_handle = tokio::spawn({
         let jq = job_queue.clone();
         let reg = registry.clone();
+        let redis_conn = redis_conn.clone();
         let api_key = (!settings.api_key.is_empty()).then(|| settings.api_key.clone());
         let log_dir = settings.log_directory.clone();
         let mut cors_allowed_origins: Vec<String> = settings
@@ -383,6 +384,7 @@ async fn main() -> Result<()> {
                 port: gql_port,
                 registry: reg,
                 job_queue: jq.clone(),
+                redis_conn: redis_conn.clone(),
                 http_client: http_client.clone(),
                 api_key,
                 log_directory: log_dir,

@@ -40,6 +40,7 @@ pub struct StartServerConfig {
     pub port: u16,
     pub registry: Arc<PluginRegistry>,
     pub job_queue: Arc<JobQueue>,
+    pub redis_conn: redis::aio::ConnectionManager,
     pub http_client: HttpClient,
     pub api_key: Option<String>,
     pub log_directory: String,
@@ -94,6 +95,7 @@ pub async fn start_server(config: StartServerConfig) -> Result<()> {
         port,
         registry,
         job_queue,
+        redis_conn,
         http_client,
         api_key,
         log_directory,
@@ -115,6 +117,7 @@ pub async fn start_server(config: StartServerConfig) -> Result<()> {
     let schema = build_schema(
         registry.clone(),
         job_queue.clone(),
+        redis_conn,
         http_client,
         log_directory,
         downloader_config,
