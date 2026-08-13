@@ -493,8 +493,8 @@
                         {/if}
 
                         {#if advancedOpen}
-                            <div class="mt-4">
-                                <div class="max-w-xs space-y-2">
+                            <div class="mt-4 grid gap-3 md:grid-cols-3">
+                                <div class="space-y-2">
                                     <Label
                                         >{mediaType === "movie"
                                             ? "Custom TMDB ID"
@@ -505,56 +505,50 @@
                                             bind:value={customTvdbId}
                                             placeholder={externalId} />{/if}
                                 </div>
+                                <div class="space-y-2">
+                                    <Label class="flex items-center gap-1.5">
+                                        <Magnet class="h-3.5 w-3.5" />
+                                        Magnet link or info hash
+                                    </Label>
+                                    <Input
+                                        bind:value={explicitHash}
+                                        placeholder="magnet:?xt=urn:btih:... or 40-char hash" />
+                                </div>
+                                <div class="space-y-2">
+                                    <Label class="flex items-center gap-1.5">
+                                        <Newspaper class="h-3.5 w-3.5" />
+                                        NZB URL
+                                    </Label>
+                                    <Input
+                                        bind:value={nzbUrl}
+                                        placeholder="https://.../release.nzb" />
+                                </div>
                             </div>
                         {/if}
-                    </div>
-
-                    <div class="rounded-2xl border border-white/10 bg-white/5 p-4">
-                        <p class="mb-3 text-sm font-semibold text-white">Add a specific release</p>
-                        <p class="mb-4 text-xs text-zinc-400">
-                            Already know what you want? Paste a magnet link/hash or an NZB URL to
-                            queue it directly, skipping discovery entirely.
-                        </p>
-                        <div class="grid gap-4 md:grid-cols-2">
-                            <div class="space-y-2">
-                                <Label class="flex items-center gap-1.5">
-                                    <Magnet class="h-3.5 w-3.5" />
-                                    Magnet link or info hash
-                                </Label>
-                                <Input
-                                    bind:value={explicitHash}
-                                    placeholder="magnet:?xt=urn:btih:... or 40-char hash" />
+                        {#if cleanedHash || cleanedNzbUrl}
+                            <div class="mt-4 flex justify-end gap-2">
                                 {#if cleanedHash}
                                     <Button
-                                        size="sm"
                                         variant="outline"
                                         onclick={downloadExplicitHash}
                                         disabled={downloadingKey !== null}>
                                         {#if downloadingKey === `manual:${cleanedHash}`}<LoaderCircle
                                                 class="mr-2 h-4 w-4 animate-spin" />{/if}
-                                        Download This Magnet
+                                        Download Explicit Hash
                                     </Button>
                                 {/if}
-                            </div>
-                            <div class="space-y-2">
-                                <Label class="flex items-center gap-1.5">
-                                    <Newspaper class="h-3.5 w-3.5" />
-                                    NZB URL
-                                </Label>
-                                <Input bind:value={nzbUrl} placeholder="https://.../release.nzb" />
                                 {#if cleanedNzbUrl}
                                     <Button
-                                        size="sm"
                                         variant="outline"
                                         onclick={downloadNzbUrl}
                                         disabled={downloadingKey !== null}>
                                         {#if downloadingKey === `manual-nzb:${cleanedNzbUrl}`}<LoaderCircle
                                                 class="mr-2 h-4 w-4 animate-spin" />{/if}
-                                        Download This NZB
+                                        Download NZB
                                     </Button>
                                 {/if}
                             </div>
-                        </div>
+                        {/if}
                     </div>
 
                     <div class="rounded-2xl border border-white/10 bg-white/5 p-4">
