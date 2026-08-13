@@ -24,6 +24,12 @@ impl RateLimit {
     }
 }
 
+/// Longest a caller will block waiting for a token before being told to
+/// requeue. Short enough to stay far inside the tightest job deadline (the
+/// plugin-hook worker's 180s), long enough that ordinary sub-second pacing
+/// still resolves in-place rather than churning the queue.
+const MAX_LIMITER_WAIT: Duration = Duration::from_secs(10);
+
 #[derive(Debug)]
 pub(super) struct ServiceState {
     pub(super) profile: HttpServiceProfile,
@@ -38,12 +44,29 @@ impl ServiceState {
         }
     }
 
-    pub(super) async fn acquire_slot(&self) {
+    /// Take a token, or report that the caller should hand its job back to the
+    /// queue. `false` means no token was available and waiting for one would
+    /// cost more than [`MAX_LIMITER_WAIT`].
+    ///
+    /// riven-ts never has to make this choice: BullMQ's limiter is queue-level,
+    /// so a worker does not *pick up* a job while the queue is limited and a
+    /// rate-limited job is never sitting in a slot. riven's limiter is
+    /// per-request and inside the handler, so the equivalent is "wait briefly,
+    /// otherwise defer" — a job that keeps waiting holds its worker slot and
+    /// spends its own deadline doing nothing, which is how a saturated bucket
+    /// turns into every job dying at its timeout having made no request.
+    pub(super) async fn acquire_slot(&self) -> bool {
+        let deadline = Instant::now() + MAX_LIMITER_WAIT;
         loop {
             let wait = self.limiter.lock().next_wait(&self.profile);
             match wait {
-                Some(d) => sleep(d).await,
-                None => return,
+                Some(d) => {
+                    if Instant::now() + d > deadline {
+                        return false;
+                    }
+                    sleep(d).await;
+                }
+                None => return true,
             }
         }
     }

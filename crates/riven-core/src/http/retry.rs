@@ -5,8 +5,8 @@ use reqwest::header::HeaderMap;
 use serde::Deserialize;
 use tokio::time::sleep;
 
-use super::HttpServiceProfile;
 use super::rate_limit::ServiceState;
+use super::{HttpServiceProfile, RateLimitedError};
 
 pub(super) const BACKOFF_BASE_SECS: u64 = 5;
 const JITTER: f64 = 0.5;
@@ -156,12 +156,16 @@ pub(super) fn parse_rate_limit_pause(
     }
 }
 
+/// Returns [`RateLimitedError`] rather than blocking when the service's
+/// limiter cannot supply a token promptly, so the caller can requeue the job
+/// and free its worker slot — matching riven-ts, where a rate-limited job is
+/// handed back via `Worker.RateLimitError()` instead of waiting in place.
 pub(super) async fn execute_with_retry<F>(
     client: &reqwest::Client,
     service: Option<&ServiceState>,
     attempts: u32,
     make_request: F,
-) -> reqwest::Result<reqwest::Response>
+) -> anyhow::Result<reqwest::Response>
 where
     F: Fn(&reqwest::Client) -> reqwest::RequestBuilder,
 {
@@ -171,8 +175,14 @@ where
     loop {
         let is_last = attempt + 1 >= attempts;
 
-        if let Some(service) = service {
-            service.acquire_slot().await;
+        if let Some(service) = service
+            && !service.acquire_slot().await
+        {
+            tracing::debug!(
+                service = service.profile.name.as_ref(),
+                "http request deferred: the service is rate-limited, requeueing instead of holding the slot"
+            );
+            return Err(RateLimitedError.into());
         }
 
         match make_request(client).send().await {
@@ -202,7 +212,7 @@ where
                 sleep(delay).await;
                 attempt += 1;
             }
-            Err(e) => return Err(e),
+            Err(e) => return Err(e.into()),
         }
     }
 }

@@ -5,7 +5,7 @@ use dashmap::DashMap;
 use reqwest::StatusCode;
 use serde::de::DeserializeOwned;
 
-use super::inflight::InFlightRequest;
+use super::inflight::{InFlightRequest, SharedError};
 use super::rate_limit::ServiceState;
 use super::response::HttpResponseData;
 use super::retry::{BACKOFF_BASE_SECS, execute_with_retry, parse_rate_limit_pause};
@@ -31,11 +31,14 @@ impl HttpClient {
         &self.inner
     }
 
+    /// Fails with [`RateLimitedError`] when the service's limiter cannot supply
+    /// a token promptly. Callers should requeue rather than retry inline — the
+    /// point is to give the worker slot back, not to wait somewhere else.
     pub async fn send<F>(
         &self,
         profile: HttpServiceProfile,
         make_request: F,
-    ) -> reqwest::Result<reqwest::Response>
+    ) -> anyhow::Result<reqwest::Response>
     where
         F: Fn(&reqwest::Client) -> reqwest::RequestBuilder,
     {
@@ -91,9 +94,9 @@ impl HttpClient {
             impl Drop for InflightGuard {
                 fn drop(&mut self) {
                     if !self.completed {
-                        self.state.finish(Err(
-                            "inflight leader cancelled before completing request".to_string(),
-                        ));
+                        self.state.finish(Err(SharedError::message(
+                            "inflight leader cancelled before completing request",
+                        )));
                     }
                     self.inflight.remove(&self.key);
                 }
@@ -110,15 +113,15 @@ impl HttpClient {
                 Ok(response) => HttpResponseData::from_response(response)
                     .await
                     .map(Arc::new)
-                    .map_err(|e| e.to_string()),
-                Err(e) => Err(e.to_string()),
+                    .map_err(|e| SharedError::message(e.to_string())),
+                Err(e) => Err(SharedError::new(&e)),
             };
             state.finish(result.clone());
             guard.completed = true;
-            return result.map_err(anyhow::Error::msg);
+            return result.map_err(SharedError::into_anyhow);
         }
 
-        state.wait().await.map_err(anyhow::Error::msg)
+        state.wait().await.map_err(SharedError::into_anyhow)
     }
 
     pub async fn get_json<T, F>(

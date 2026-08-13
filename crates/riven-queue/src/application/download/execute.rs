@@ -25,6 +25,14 @@ pub enum DownloadAttemptOutcome {
     /// count, can be a day apart under the escalating backoff).
     Progressed,
     TerminalHandled,
+    /// A plugin was rate-limited before it could say anything about the
+    /// release. This is a fact about *now*, not about the stream, and the
+    /// two must never be conflated: recording it as `Failed` counts toward
+    /// `failed_attempts` and — once every provider "fails" — permanently
+    /// blacklists a release nobody actually looked at. The caller must stop
+    /// the walk and requeue the whole job, because the limiter that deferred
+    /// this candidate would defer every later candidate the same way.
+    Deferred,
 }
 
 pub async fn attempt_download(
@@ -66,15 +74,21 @@ pub async fn attempt_download(
         cached_stores: stores.clone(),
     };
 
+    #[derive(Default)]
+    struct DispatchVerdict {
+        result: Option<Box<DownloadResult>>,
+        saw_unavailable: bool,
+        saw_rate_limited: bool,
+    }
+
     async fn dispatch_once(
         queue: &JobQueue,
         event: &RivenEvent,
         info_hash: &str,
         raw_title: &str,
-    ) -> (Option<Box<DownloadResult>>, bool) {
+    ) -> DispatchVerdict {
         let results = queue.registry.dispatch(event).await;
-        let mut download_result: Option<Box<DownloadResult>> = None;
-        let mut saw_unavailable = false;
+        let mut verdict = DispatchVerdict::default();
         for (plugin_name, result) in results {
             match result {
                 Ok(HookResponse::Download(download)) => {
@@ -85,11 +99,11 @@ pub async fn attempt_download(
                         files = download.files.len(),
                         "download: plugin accepted the release and returned its file list"
                     );
-                    download_result = Some(download);
+                    verdict.result = Some(download);
                     break;
                 }
                 Ok(HookResponse::DownloadStreamUnavailable) => {
-                    saw_unavailable = true;
+                    verdict.saw_unavailable = true;
                     tracing::debug!(
                         plugin = plugin_name,
                         info_hash,
@@ -98,6 +112,19 @@ pub async fn attempt_download(
                     );
                 }
                 Ok(_) => {}
+                // A rate-limited plugin said nothing about the release — it
+                // never got as far as looking. Kept apart from real errors so
+                // the caller defers the job instead of letting the walk fall
+                // through to "no provider could fetch it", which blacklists.
+                Err(ref error) if error.is::<riven_core::http::RateLimitedError>() => {
+                    verdict.saw_rate_limited = true;
+                    tracing::debug!(
+                        plugin = plugin_name,
+                        info_hash,
+                        raw_title,
+                        "download: plugin is rate-limited; the job will requeue rather than judge this release"
+                    );
+                }
                 Err(error) => {
                     tracing::warn!(
                         plugin = plugin_name,
@@ -109,13 +136,12 @@ pub async fn attempt_download(
                 }
             }
         }
-        (download_result, saw_unavailable)
+        verdict
     }
 
-    let (mut download_result, mut saw_unavailable) =
-        dispatch_once(queue, &event, info_hash, raw_title).await;
+    let mut verdict = dispatch_once(queue, &event, info_hash, raw_title).await;
 
-    if download_result.is_none() && saw_unavailable {
+    if verdict.result.is_none() && verdict.saw_unavailable && !verdict.saw_rate_limited {
         if let Err(error) = clear_stremthru_cache_check_keys(queue, info_hash, raw_title).await {
             tracing::error!(
                 id,
@@ -137,15 +163,20 @@ pub async fn attempt_download(
                 magnet: stream.magnet.clone(),
                 cached_stores: Vec::new(),
             };
-            let (retry_result, retry_unavailable) =
-                dispatch_once(queue, &retry_event, info_hash, raw_title).await;
-            download_result = retry_result;
-            saw_unavailable = retry_unavailable;
+            verdict = dispatch_once(queue, &retry_event, info_hash, raw_title).await;
         }
     }
 
-    let Some(download) = download_result else {
-        if saw_unavailable
+    // Deferral outranks every no-result verdict: with a rate-limited plugin
+    // in the mix, "unavailable" from the others is at best a partial answer,
+    // and "no provider could provide it" would be recorded against the
+    // stream. Only an actual accepted download supersedes it.
+    if verdict.result.is_none() && verdict.saw_rate_limited {
+        return DownloadAttemptOutcome::Deferred;
+    }
+
+    let Some(download) = verdict.result else {
+        if verdict.saw_unavailable
             && let Err(error) = clear_stremthru_cache_check_keys(queue, info_hash, raw_title).await
         {
             tracing::error!(

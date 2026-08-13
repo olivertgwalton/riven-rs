@@ -423,6 +423,12 @@ async fn scrape_page(
         .await
     {
         Ok(r) => r,
+        // A deferred request means the limiter is saturated, not that the
+        // indexer is broken: report it as rate-limited so the scrape is
+        // requeued with backoff rather than counted as a failure.
+        Err(error) if error.is::<RateLimitedError>() => {
+            return ScrapeOutcome::RateLimited(error.to_string());
+        }
         Err(error) => return ScrapeOutcome::Failed(error),
     };
     let status = resp.status();

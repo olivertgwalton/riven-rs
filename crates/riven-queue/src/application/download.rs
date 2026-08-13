@@ -217,6 +217,7 @@ pub async fn run_rank_streams(id: i64, job: &RankStreamsJob, queue: &JobQueue) {
         info_hash: preferred.clone().unwrap_or_default(),
         magnet: magnet_for_preferred.unwrap_or_default(),
         preferred_info_hash: preferred,
+        rate_limit_retries: 0,
     };
     queue.push_download(download_job).await;
 }
@@ -321,8 +322,8 @@ pub async fn run(id: i64, job: &DownloadJob, queue: &JobQueue) {
         "download: trying candidate streams best-first until one is cached and matches"
     );
 
-    if let Some(preferred_info_hash) = job.preferred_info_hash.as_ref() {
-        let _ = run_preferred_stream(
+    let outcome = if let Some(preferred_info_hash) = job.preferred_info_hash.as_ref() {
+        run_preferred_stream(
             id,
             &item,
             queue,
@@ -333,9 +334,9 @@ pub async fn run(id: i64, job: &DownloadJob, queue: &JobQueue) {
             &mut cache,
             hierarchy.as_ref(),
         )
-        .await;
+        .await
     } else {
-        let _ = run_downloads(
+        run_downloads(
             id,
             &item,
             queue,
@@ -346,7 +347,35 @@ pub async fn run(id: i64, job: &DownloadJob, queue: &JobQueue) {
             &mut cache,
             hierarchy.as_ref(),
         )
-        .await;
+        .await
+    };
+
+    // A deferred walk learned nothing about any stream: requeue the whole job
+    // on the shared rate-limit ladder and record nothing against the item —
+    // no `failed_attempts`, no blacklist, no error event. Mirrors what
+    // `handle_scrape` does when every scraper is rate-limited, and riven-ts's
+    // `Worker.RateLimitError()` (hand the job back un-attempted). No retry
+    // ceiling on purpose: the ladder tops out at 24h, and the only thing a
+    // ceiling could add is converting "provider busy for a long time" into a
+    // recorded failure.
+    if matches!(outcome, DownloadWalkOutcome::Deferred) {
+        let backoff = super::scrape::rate_limit_backoff(job.rate_limit_retries);
+        tracing::warn!(
+            id,
+            title = %item.title,
+            attempt = job.rate_limit_retries + 1,
+            retry_in_secs = backoff.as_secs(),
+            "download: a provider is rate-limited right now; requeueing this download rather than judging its streams"
+        );
+        queue
+            .push_download_after(
+                DownloadJob {
+                    rate_limit_retries: job.rate_limit_retries + 1,
+                    ..job.clone()
+                },
+                backoff,
+            )
+            .await;
     }
 }
 
@@ -423,6 +452,20 @@ async fn load_item_silently(id: i64, phase: &str) -> Option<MediaItem> {
 /// `lookup` once per `(stream, plugin, provider)`; we lazily fetch the full
 /// hash list the first time and reuse the response for every subsequent
 /// stream that asks for the same provider.
+/// A provider's cache-check (or a download plugin mid-walk) was rate-limited:
+/// nothing was learned about any stream, and the whole job should requeue.
+struct WalkDeferred;
+
+/// How a download walk ended. `Finished` means it ran to a verdict — the
+/// walk's own success/failure handling (blacklists, `failed_attempts`, the
+/// events) has already run by the time it returns. `Deferred` means it
+/// stopped early because a service was rate-limited, and none of that
+/// verdict-recording happened: the caller owns requeueing the job.
+enum DownloadWalkOutcome {
+    Finished,
+    Deferred,
+}
+
 struct CacheMemo {
     hashes: Vec<String>,
     /// `(plugin, provider)` → `hash → cached files`. An empty inner Vec is
@@ -451,16 +494,20 @@ impl CacheMemo {
         provider: Option<&str>,
         info_hash: &str,
         attempt_unknown: bool,
-    ) -> Option<Vec<CacheCheckFile>> {
+    ) -> Result<Option<Vec<CacheCheckFile>>, WalkDeferred> {
         let key = (plugin_name.to_string(), provider.map(str::to_string));
         if !self.results.contains_key(&key) {
+            // A deferred fetch is deliberately not memoized: nothing was
+            // learned, and the requeued job should ask again.
             let map =
                 fetch_provider_cache(queue, plugin_name, provider, &self.hashes, attempt_unknown)
-                    .await;
+                    .await?;
             self.results.insert(key.clone(), map);
         }
-        let map = self.results.get(&key)?;
-        map.get(&info_hash.to_lowercase()).cloned()
+        Ok(self
+            .results
+            .get(&key)
+            .and_then(|map| map.get(&info_hash.to_lowercase()).cloned()))
     }
 }
 
@@ -474,7 +521,7 @@ async fn fetch_provider_cache(
     provider: Option<&str>,
     hashes: &[String],
     attempt_unknown: bool,
-) -> HashMap<String, Vec<CacheCheckFile>> {
+) -> Result<HashMap<String, Vec<CacheCheckFile>>, WalkDeferred> {
     let event = RivenEvent::MediaItemDownloadCacheCheckRequested {
         hashes: hashes.to_vec(),
         provider: provider.map(str::to_string),
@@ -494,6 +541,18 @@ async fn fetch_provider_cache(
             }
         }
         Some(Ok(_)) | None => {}
+        // Rate-limited is not "unavailable": an empty map here makes every
+        // stream look uncached, the walk skips them all, and the per-stream
+        // fallthrough blacklists releases nobody could actually check.
+        Some(Err(ref error)) if error.is::<riven_core::http::RateLimitedError>() => {
+            tracing::debug!(
+                plugin = plugin_name,
+                provider,
+                hashes = hashes.len(),
+                "download: this provider's cache-check is rate-limited; requeueing the job"
+            );
+            return Err(WalkDeferred);
+        }
         Some(Err(error)) => {
             tracing::warn!(
                 plugin = plugin_name,
@@ -504,7 +563,7 @@ async fn fetch_provider_cache(
             );
         }
     }
-    out
+    Ok(out)
 }
 
 /// Build the flat `(plugin, provider)` iteration order used by the download
@@ -581,7 +640,7 @@ async fn run_preferred_stream(
     plugin_providers: &[(String, Option<String>)],
     cache: &mut CacheMemo,
     hierarchy: Option<&DownloadHierarchyContext>,
-) -> bool {
+) -> DownloadWalkOutcome {
     let Some(stream) = streams
         .iter()
         .find(|s| s.info_hash.eq_ignore_ascii_case(preferred_info_hash))
@@ -602,7 +661,7 @@ async fn run_preferred_stream(
                 tvdb_id: notification_tvdb_id(item, hierarchy),
             })
             .await;
-        return false;
+        return DownloadWalkOutcome::Finished;
     };
 
     let attempt_unknown = queue
@@ -612,7 +671,7 @@ async fn run_preferred_stream(
         .attempt_unknown_downloads;
 
     for (plugin, provider) in plugin_providers {
-        let cached_files = cache
+        let cached_files = match cache
             .lookup(
                 queue,
                 plugin,
@@ -620,7 +679,11 @@ async fn run_preferred_stream(
                 &stream.info_hash,
                 attempt_unknown,
             )
-            .await;
+            .await
+        {
+            Ok(files) => files,
+            Err(WalkDeferred) => return DownloadWalkOutcome::Deferred,
+        };
         let stores = stores_for_attempt(provider, cached_files);
 
         match attempt_download(
@@ -629,12 +692,13 @@ async fn run_preferred_stream(
         .await
         {
             DownloadAttemptOutcome::Failed => continue,
+            DownloadAttemptOutcome::Deferred => return DownloadWalkOutcome::Deferred,
             DownloadAttemptOutcome::TerminalHandled | DownloadAttemptOutcome::Progressed => {
-                return true;
+                return DownloadWalkOutcome::Finished;
             }
             DownloadAttemptOutcome::Succeeded => {
                 finalize_download_success(id, item, queue, start_time, None, None, hierarchy).await;
-                return true;
+                return DownloadWalkOutcome::Finished;
             }
         }
     }
@@ -656,7 +720,7 @@ async fn run_preferred_stream(
             tvdb_id: notification_tvdb_id(item, hierarchy),
         })
         .await;
-    false
+    DownloadWalkOutcome::Finished
 }
 
 async fn run_downloads(
@@ -669,7 +733,7 @@ async fn run_downloads(
     plugin_providers: &[(String, Option<String>)],
     cache: &mut CacheMemo,
     hierarchy: Option<&DownloadHierarchyContext>,
-) -> bool {
+) -> DownloadWalkOutcome {
     let mut done_profiles: HashSet<String> = fetch_done_profiles(id, item.item_type)
         .await
         .into_iter()
@@ -720,7 +784,7 @@ async fn run_downloads(
                     title = %item.title,
                     "download: cancelled by the user, stopping without trying the remaining streams"
                 );
-                return any_success;
+                return DownloadWalkOutcome::Finished;
             }
 
             if let Some(size) = stream.file_size_bytes
@@ -745,7 +809,7 @@ async fn run_downloads(
                     continue;
                 }
 
-                let cached_files = cache
+                let cached_files = match cache
                     .lookup(
                         queue,
                         plugin,
@@ -753,7 +817,11 @@ async fn run_downloads(
                         &stream.info_hash,
                         attempt_unknown,
                     )
-                    .await;
+                    .await
+                {
+                    Ok(files) => files,
+                    Err(WalkDeferred) => return DownloadWalkOutcome::Deferred,
+                };
 
                 let is_cached = cached_files.is_some();
                 if !is_cached && !attempt_unknown {
@@ -785,6 +853,10 @@ async fn run_downloads(
                     DownloadAttemptOutcome::Failed => {
                         attempted.insert(key);
                     }
+                    // Returning from inside the provider loop also skips the
+                    // per-stream permanent blacklist below — deliberately, as
+                    // nothing was learned about this stream.
+                    DownloadAttemptOutcome::Deferred => return DownloadWalkOutcome::Deferred,
                     DownloadAttemptOutcome::TerminalHandled | DownloadAttemptOutcome::Succeeded => {
                         done_profiles.insert(profile_name.clone());
                         any_success = true;
@@ -843,14 +915,14 @@ async fn run_downloads(
                 tvdb_id: notification_tvdb_id(item, hierarchy),
             })
             .await;
-        return false;
+        return DownloadWalkOutcome::Finished;
     }
 
     // Season/Show persists already emit their own Success/PartialSuccess events
     // and library-state updates per profile (see persist_season/persist_show);
     // the notify+finalize below is the Movie/Episode-only completion path.
     if matches!(item.item_type, MediaItemType::Season | MediaItemType::Show) {
-        return true;
+        return DownloadWalkOutcome::Finished;
     }
 
     if !profiles
@@ -870,7 +942,7 @@ async fn run_downloads(
     }
 
     finalize_download_success(id, item, queue, start_time, None, None, hierarchy).await;
-    true
+    DownloadWalkOutcome::Finished
 }
 
 fn stores_for_attempt(

@@ -15,7 +15,9 @@ use crate::context::{
 use crate::discovery::rank_streams;
 use crate::{IndexJob, JobQueue, ParseScrapeResultsJob, ScrapeJob};
 
-fn rate_limit_backoff(prior_retries: u32) -> Duration {
+/// Shared by the scrape and download flows: both requeue with this ladder
+/// when every service they depend on is rate-limited right now.
+pub(crate) fn rate_limit_backoff(prior_retries: u32) -> Duration {
     let secs = match prior_retries {
         0 => 2 * 60,
         1 => 5 * 60,
