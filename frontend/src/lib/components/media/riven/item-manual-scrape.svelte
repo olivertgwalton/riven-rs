@@ -5,6 +5,7 @@
     import { toast } from "svelte-sonner";
     import type { Snippet } from "svelte";
     import * as Dialog from "$lib/components/ui/dialog/index.js";
+    import * as DropdownMenu from "$lib/components/ui/dropdown-menu/index.js";
     import { Button } from "$lib/components/ui/button/index.js";
     import { Label } from "$lib/components/ui/label/index.js";
     import { Badge } from "$lib/components/ui/badge/index.js";
@@ -15,6 +16,7 @@
     import HardDrive from "@lucide/svelte/icons/hard-drive";
     import Newspaper from "@lucide/svelte/icons/newspaper";
     import Magnet from "@lucide/svelte/icons/magnet";
+    import Filter from "@lucide/svelte/icons/filter";
     import SeasonSelector, { type SeasonInfo } from "./season-selector.svelte";
     import { page } from "$app/state";
 
@@ -155,6 +157,7 @@
     let previewingManual = $state(false);
     let nzbFileInput = $state<HTMLInputElement | undefined>(undefined);
     let searchQuery = $state("");
+    let providerFilter = $state({ torrent: true, usenet: true });
     let streams = $state<StreamCandidate[]>([]);
     let downloadingKey = $state<string | null>(null);
 
@@ -167,8 +170,14 @@
             const query = searchQuery.trim().toLowerCase();
             return streams
                 .filter((stream) => !cachedOnly || stream.isCached)
-                .filter((stream) => !query || stream.title.toLowerCase().includes(query));
+                .filter((stream) => !query || stream.title.toLowerCase().includes(query))
+                .filter((stream) =>
+                    isUsenet(stream.infoHash) ? providerFilter.usenet : providerFilter.torrent
+                );
         })()
+    );
+    const disabledProviderCount = $derived(
+        (providerFilter.torrent ? 0 : 1) + (providerFilter.usenet ? 0 : 1)
     );
     const resolvedTmdbId = $derived(
         mediaType === "movie" ? (clean(customTmdbId) ?? externalId) : null
@@ -232,6 +241,7 @@
         uploadingNzb = false;
         previewingManual = false;
         searchQuery = "";
+        providerFilter = { torrent: true, usenet: true };
         advancedOpen = false;
         selectedSeasons = seasons
             .filter((season) => season.status !== "Available")
@@ -710,10 +720,50 @@
                         </div>
 
                         {#if streams.length}
-                            <Input
-                                class="mb-4"
-                                bind:value={searchQuery}
-                                placeholder="Filter by title, release group, resolution..." />
+                            <div class="mb-4 flex gap-2">
+                                <Input
+                                    class="flex-1"
+                                    bind:value={searchQuery}
+                                    placeholder="Filter by title, release group, resolution..." />
+                                <DropdownMenu.Root>
+                                    <DropdownMenu.Trigger>
+                                        {#snippet child({ props })}
+                                            <Button
+                                                {...props}
+                                                variant="outline"
+                                                size="sm"
+                                                class="shrink-0">
+                                                <Filter class="h-3.5 w-3.5" />
+                                                Filter
+                                                {#if disabledProviderCount > 0}
+                                                    <Badge
+                                                        variant="outline"
+                                                        class="ml-1 h-4 px-1 text-[0.65rem]"
+                                                        >{disabledProviderCount}</Badge>
+                                                {/if}
+                                            </Button>
+                                        {/snippet}
+                                    </DropdownMenu.Trigger>
+                                    <DropdownMenu.Content
+                                        align="end"
+                                        class="rounded-2xl border border-white/10 bg-zinc-950/95 shadow-2xl shadow-black/50 backdrop-blur-2xl">
+                                        <DropdownMenu.Label>Download provider</DropdownMenu.Label>
+                                        <DropdownMenu.Separator />
+                                        <DropdownMenu.CheckboxItem
+                                            bind:checked={providerFilter.torrent}
+                                            onSelect={(e) => e.preventDefault()}>
+                                            <Magnet class="h-3.5 w-3.5 text-amber-400" />
+                                            Torrent
+                                        </DropdownMenu.CheckboxItem>
+                                        <DropdownMenu.CheckboxItem
+                                            bind:checked={providerFilter.usenet}
+                                            onSelect={(e) => e.preventDefault()}>
+                                            <Newspaper class="h-3.5 w-3.5 text-sky-400" />
+                                            Usenet
+                                        </DropdownMenu.CheckboxItem>
+                                    </DropdownMenu.Content>
+                                </DropdownMenu.Root>
+                            </div>
                         {/if}
 
                         {#if !visibleStreams.length}
@@ -724,6 +774,8 @@
                                     Waiting for backend results...
                                 {:else if streams.length && searchQuery.trim()}
                                     No streams matched "{searchQuery.trim()}".
+                                {:else if streams.length && disabledProviderCount > 0}
+                                    No streams matched the current provider filter.
                                 {:else if streams.length && cachedOnly}
                                     No cached streams matched the current filter.
                                 {:else}
