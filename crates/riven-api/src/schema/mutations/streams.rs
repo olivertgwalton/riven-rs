@@ -1,5 +1,6 @@
 use async_graphql::*;
 use redis::AsyncCommands;
+use riven_core::http::{HttpClient, HttpServiceProfile};
 use riven_core::nzb::{NZB_URL_TTL_SECS, nzb_indexer_redis_key, nzb_info_hash, nzb_url_redis_key};
 use riven_core::plugin::PluginRegistry;
 use riven_core::types::MediaItemType;
@@ -7,12 +8,28 @@ use riven_db::entities::MediaItem;
 use riven_db::repo;
 use riven_queue::{JobQueue, RankStreamsJob};
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::schema::auth::{Capability, require};
 use crate::schema::discovery::{
-    discover_streams, ensure_download_target, ensure_show_target, resolve_pack_seasons,
+    apply_cache_status, discover_streams, ensure_download_target, ensure_show_target,
+    resolve_pack_seasons,
 };
 use crate::schema::types::DiscoveredStream;
+
+const PREVIEW_NZB_PROFILE: HttpServiceProfile =
+    HttpServiceProfile::new("manual-nzb-preview").with_rate_limit(10, Duration::from_secs(60));
+
+/// The `dn=` (display name) parameter from a magnet URI, URL-decoded. `None`
+/// for a bare hash or a magnet with no `dn=` — the only case
+/// [`preview_manual_magnet`] can't offer a real title for.
+fn extract_magnet_display_name(magnet: &str) -> Option<String> {
+    let (_, query) = magnet.split_once('?')?;
+    url::form_urlencoded::parse(query.as_bytes())
+        .find(|(key, _)| key == "dn")
+        .map(|(_, value)| value.into_owned())
+        .filter(|name| !name.trim().is_empty())
+}
 
 #[derive(Default)]
 pub struct StreamsMutations;
@@ -239,5 +256,108 @@ impl StreamsMutations {
             .await;
 
         Ok("Download queued".to_string())
+    }
+
+    /// Turns a manually-pasted magnet link/hash into a full [`DiscoveredStream`]
+    /// card — same shape, same badges as a real scrape result — instead of
+    /// downloading it sight-unseen. Parses whatever the magnet's own `dn=`
+    /// carries through [`riven_rank::parse`] (the exact parser real scrape
+    /// results go through) for resolution/quality/audio/etc., and checks
+    /// debrid cache status via the same dispatch [`discover_streams`] uses.
+    /// Creates or mutates nothing — the pick only becomes real when the
+    /// resulting card's "Download This" calls `downloadDiscoveredStream`,
+    /// same as any other result in the list.
+    async fn preview_manual_magnet(
+        &self,
+        ctx: &Context<'_>,
+        item_type: MediaItemType,
+        info_hash: String,
+        magnet: String,
+        season_number: Option<i32>,
+        episode_number: Option<i32>,
+    ) -> Result<DiscoveredStream> {
+        require(ctx, Capability::ScrapeItems)?;
+        let registry = ctx.data::<Arc<PluginRegistry>>()?;
+
+        let title = extract_magnet_display_name(&magnet).unwrap_or_else(|| info_hash.clone());
+        let parsed = riven_rank::parse(&title);
+
+        let mut stream = DiscoveredStream {
+            key: format!("manual:{}", info_hash.to_lowercase()),
+            title,
+            magnet,
+            info_hash,
+            parsed_data: serde_json::to_value(&parsed).ok(),
+            rank: None,
+            file_size_bytes: None,
+            is_cached: false,
+            item_type,
+            season_number,
+            episode_number,
+        };
+        apply_cache_status(registry.as_ref(), std::slice::from_mut(&mut stream)).await;
+
+        Ok(stream)
+    }
+
+    /// The NZB equivalent of [`preview_manual_magnet`]: fetches the URL
+    /// (whether pasted directly or handed back by the upload endpoint),
+    /// peeks its release title the same way `plugin-usenet` does at ingest
+    /// time, and parses that through [`riven_rank::parse`]. Usenet has no
+    /// debrid-style cache concept — every `nzb-` hash is unconditionally
+    /// "cached" here, matching `plugin-usenet`'s own cache-check response.
+    /// Nothing is persisted; the fetched content is discarded once peeked.
+    async fn preview_manual_nzb(
+        &self,
+        ctx: &Context<'_>,
+        item_type: MediaItemType,
+        nzb_url: String,
+        season_number: Option<i32>,
+        episode_number: Option<i32>,
+    ) -> Result<DiscoveredStream> {
+        require(ctx, Capability::ScrapeItems)?;
+        let http = ctx.data::<HttpClient>()?;
+
+        let nzb_url = nzb_url.trim();
+        if !nzb_url.starts_with("http://") && !nzb_url.starts_with("https://") {
+            return Err(async_graphql::Error::new(
+                "NZB URL must start with http:// or https://",
+            ));
+        }
+
+        let response = http
+            .send_data(PREVIEW_NZB_PROFILE, Some(nzb_url.to_string()), |client| {
+                client.get(nzb_url)
+            })
+            .await
+            .map_err(|error| async_graphql::Error::new(format!("Failed to fetch NZB: {error}")))?;
+        if !response.status().is_success() {
+            return Err(async_graphql::Error::new(format!(
+                "NZB URL returned HTTP {}",
+                response.status()
+            )));
+        }
+        let xml = response
+            .text()
+            .map_err(|error| async_graphql::Error::new(format!("Failed to read NZB: {error}")))?;
+
+        let title = riven_usenet::peek_release_title(&xml)
+            .unwrap_or_else(|| riven_usenet::UNKNOWN_FILE_LABEL.to_string());
+        let parsed = riven_rank::parse(&title);
+        let info_hash = nzb_info_hash(nzb_url);
+
+        Ok(DiscoveredStream {
+            key: format!("manual-nzb:{}", info_hash.to_lowercase()),
+            title,
+            magnet: String::new(),
+            info_hash,
+            parsed_data: serde_json::to_value(&parsed).ok(),
+            rank: None,
+            file_size_bytes: None,
+            is_cached: true,
+            item_type,
+            season_number,
+            episode_number,
+        })
     }
 }

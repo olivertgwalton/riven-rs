@@ -1022,6 +1022,28 @@ export type MutationRoot = {
   /** Pause items. */
   pauseItems: Scalars['Int']['output'];
   /**
+   * Turns a manually-pasted magnet link/hash into a full [`DiscoveredStream`]
+   * card — same shape, same badges as a real scrape result — instead of
+   * downloading it sight-unseen. Parses whatever the magnet's own `dn=`
+   * carries through [`riven_rank::parse`] (the exact parser real scrape
+   * results go through) for resolution/quality/audio/etc., and checks
+   * debrid cache status via the same dispatch [`discover_streams`] uses.
+   * Creates or mutates nothing — the pick only becomes real when the
+   * resulting card's "Download This" calls `downloadDiscoveredStream`,
+   * same as any other result in the list.
+   */
+  previewManualMagnet: DiscoveredStream;
+  /**
+   * The NZB equivalent of [`preview_manual_magnet`]: fetches the URL
+   * (whether pasted directly or handed back by the upload endpoint),
+   * peeks its release title the same way `plugin-usenet` does at ingest
+   * time, and parses that through [`riven_rank::parse`]. Usenet has no
+   * debrid-style cache concept — every `nzb-` hash is unconditionally
+   * "cached" here, matching `plugin-usenet`'s own cache-check response.
+   * Nothing is persisted; the fetched content is discarded once peeked.
+   */
+  previewManualNzb: DiscoveredStream;
+  /**
    * Re-acquire a usenet title whose release is broken (missing data) or was
    * never ingested. The item is "completed" only because it still has a
    * media filesystem entry, so reset alone bounces back to completed; we
@@ -1225,6 +1247,23 @@ export type MutationRootIndexShowArgs = {
 
 export type MutationRootPauseItemsArgs = {
   ids: Array<Scalars['Int']['input']>;
+};
+
+
+export type MutationRootPreviewManualMagnetArgs = {
+  episodeNumber?: InputMaybe<Scalars['Int']['input']>;
+  infoHash: Scalars['String']['input'];
+  itemType: MediaItemType;
+  magnet: Scalars['String']['input'];
+  seasonNumber?: InputMaybe<Scalars['Int']['input']>;
+};
+
+
+export type MutationRootPreviewManualNzbArgs = {
+  episodeNumber?: InputMaybe<Scalars['Int']['input']>;
+  itemType: MediaItemType;
+  nzbUrl: Scalars['String']['input'];
+  seasonNumber?: InputMaybe<Scalars['Int']['input']>;
 };
 
 

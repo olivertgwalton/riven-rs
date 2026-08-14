@@ -52,6 +52,11 @@
         itemType: "MOVIE" | "SEASON" | "EPISODE";
         seasonNumber?: number | null;
         episodeNumber?: number | null;
+        /** Client-only: set only on a card built from a manual NZB
+         * preview (paste or upload), never present on a real scrape
+         * result. Lets `downloadStream` route to `downloadExplicitNzb`
+         * instead of `downloadDiscoveredStream` for these cards. */
+        manualNzbUrl?: string;
     }
 
     /**
@@ -90,6 +95,38 @@
         downloadExplicitNzb(itemType: $itemType, title: $title, imdbId: $imdbId, tmdbId: $tmdbId, tvdbId: $tvdbId, seasonNumber: $seasonNumber, episodeNumber: $episodeNumber, seasons: $seasons, nzbUrl: $nzbUrl)
     }`;
 
+    const PREVIEW_MANUAL_MAGNET_MUTATION = `mutation($itemType: MediaItemType!, $infoHash: String!, $magnet: String!, $seasonNumber: Int, $episodeNumber: Int) {
+        previewManualMagnet(itemType: $itemType, infoHash: $infoHash, magnet: $magnet, seasonNumber: $seasonNumber, episodeNumber: $episodeNumber) {
+            key
+            title
+            infoHash
+            magnet
+            parsedData
+            rank
+            fileSizeBytes
+            isCached
+            itemType
+            seasonNumber
+            episodeNumber
+        }
+    }`;
+
+    const PREVIEW_MANUAL_NZB_MUTATION = `mutation($itemType: MediaItemType!, $nzbUrl: String!, $seasonNumber: Int, $episodeNumber: Int) {
+        previewManualNzb(itemType: $itemType, nzbUrl: $nzbUrl, seasonNumber: $seasonNumber, episodeNumber: $episodeNumber) {
+            key
+            title
+            infoHash
+            magnet
+            parsedData
+            rank
+            fileSizeBytes
+            isCached
+            itemType
+            seasonNumber
+            episodeNumber
+        }
+    }`;
+
     let {
         title,
         itemId,
@@ -115,6 +152,7 @@
     let explicitHash = $state("");
     let nzbUrl = $state("");
     let uploadingNzb = $state(false);
+    let previewingManual = $state(false);
     let nzbFileInput = $state<HTMLInputElement | undefined>(undefined);
     let searchQuery = $state("");
     let streams = $state<StreamCandidate[]>([]);
@@ -192,6 +230,7 @@
         explicitHash = "";
         nzbUrl = "";
         uploadingNzb = false;
+        previewingManual = false;
         searchQuery = "";
         advancedOpen = false;
         selectedSeasons = seasons
@@ -324,6 +363,46 @@
         if (nzbFileInput) nzbFileInput.value = "";
     }
 
+    /** Inserted at the top (most-recently-added is most visible) rather than
+     * appended; re-previewing the same release replaces its existing card in
+     * place instead of duplicating it. Also drops the "Cached only" filter
+     * when the new card is uncached — that filter defaults on, and without
+     * this a manually-added uncached release would vanish from view the
+     * instant it's added, with only the success toast as a clue why. */
+    function addOrReplaceStream(candidate: StreamCandidate) {
+        const idx = streams.findIndex((s) => s.key === candidate.key);
+        if (idx >= 0) {
+            streams = streams.map((s, i) => (i === idx ? candidate : s));
+        } else {
+            streams = [candidate, ...streams];
+        }
+        if (!candidate.isCached) cachedOnly = false;
+    }
+
+    function manualTargetSeasonNumber() {
+        if (isEpisodeMode) return seasonNumber;
+        return mediaType === "tv" ? (selectedSeasons[0] ?? null) : null;
+    }
+
+    /** `false` means a season/episode precondition failed and an error toast
+     * was already shown — the caller just bails without going further. */
+    function validateManualTarget(): boolean {
+        if (isEpisodeMode) {
+            if (seasonNumber == null) {
+                error = "No season number available for this episode";
+                toast.error(error);
+                return false;
+            }
+            return true;
+        }
+        if (mediaType === "tv" && selectedSeasons.length === 0) {
+            error = "Select at least one season first";
+            toast.error(error);
+            return false;
+        }
+        return true;
+    }
+
     function downloadStream(stream: StreamCandidate) {
         // A pack that parses to multiple seasons fills every one it contains;
         // the backend links it to the show rather than a single season. Not
@@ -332,6 +411,21 @@
         const packSeasons = isEpisodeMode
             ? []
             : (stream.parsedData?.seasons?.filter((n) => n > 0) ?? []);
+
+        if (stream.manualNzbUrl) {
+            return runDownload(stream.key, DOWNLOAD_EXPLICIT_NZB_MUTATION, {
+                itemType: stream.itemType,
+                title: title ?? "Unknown",
+                imdbId: null,
+                tmdbId: resolvedTmdbId,
+                tvdbId: resolvedTvdbId,
+                seasonNumber: stream.seasonNumber ?? null,
+                episodeNumber: stream.episodeNumber ?? null,
+                seasons: packSeasons.length ? packSeasons : null,
+                nzbUrl: stream.manualNzbUrl
+            });
+        }
+
         return submitDownload(stream.key, {
             itemType: stream.itemType,
             seasonNumber: stream.seasonNumber ?? null,
@@ -344,90 +438,79 @@
         });
     }
 
-    function downloadExplicitHash() {
+    /** Turns a pasted magnet/hash into a full stream-candidate card (same
+     * badges a real scrape result gets) instead of downloading it
+     * sight-unseen — the card's own "Download This" is what actually queues
+     * it, via `downloadStream` above. */
+    async function previewManualMagnet() {
         if (!cleanedHash) {
             error = "Enter a valid 40-char info hash or paste a magnet link";
-            return;
-        }
-
-        if (isEpisodeMode) {
-            if (seasonNumber == null) {
-                error = "No season number available for this episode";
-                toast.error(error);
-                return;
-            }
-            return submitDownload(`manual:${cleanedHash}`, {
-                itemType: "EPISODE",
-                seasonNumber,
-                episodeNumber,
-                seasons: null,
-                infoHash: cleanedHash,
-                magnet: `magnet:?xt=urn:btih:${cleanedHash}`,
-                parsedData: null
-            });
-        }
-
-        if (mediaType === "tv" && selectedSeasons.length === 0) {
-            error = "Select at least one season before downloading an explicit hash";
             toast.error(error);
             return;
         }
+        if (!validateManualTarget()) return;
 
-        return submitDownload(`manual:${cleanedHash}`, {
-            itemType: mediaType === "movie" ? "MOVIE" : "SEASON",
-            seasonNumber: mediaType === "tv" ? selectedSeasons[0] : null,
-            seasons: mediaType === "tv" ? selectedSeasons : null,
-            infoHash: cleanedHash,
-            magnet: `magnet:?xt=urn:btih:${cleanedHash}`,
-            parsedData: null
-        });
+        const trimmed = explicitHash.trim();
+        const magnet = trimmed.toLowerCase().startsWith("magnet:")
+            ? trimmed
+            : `magnet:?xt=urn:btih:${cleanedHash}`;
+
+        previewingManual = true;
+        error = null;
+        try {
+            const data = await gqlClient<{ previewManualMagnet: StreamCandidate }>(
+                PREVIEW_MANUAL_MAGNET_MUTATION,
+                {
+                    itemType: isEpisodeMode ? "EPISODE" : mediaType === "movie" ? "MOVIE" : "SEASON",
+                    infoHash: cleanedHash,
+                    magnet,
+                    seasonNumber: manualTargetSeasonNumber(),
+                    episodeNumber: isEpisodeMode ? episodeNumber : null
+                }
+            );
+            addOrReplaceStream(data.previewManualMagnet);
+            explicitHash = "";
+            toast.success("Added to stream candidates");
+        } catch (e) {
+            error = e instanceof Error ? e.message : "Failed to preview magnet";
+            toast.error(error);
+        } finally {
+            previewingManual = false;
+        }
     }
 
-    function downloadNzbUrl() {
+    /** NZB equivalent of `previewManualMagnet` — same "add a card, download
+     * from the list" flow, for either a pasted URL or one handed back by
+     * `uploadNzbFile`. */
+    async function previewManualNzb() {
         if (!cleanedNzbUrl) {
             error = "Enter a valid NZB URL (must start with http:// or https://)";
             toast.error(error);
             return;
         }
+        if (!validateManualTarget()) return;
 
-        const key = `manual-nzb:${cleanedNzbUrl}`;
-
-        if (isEpisodeMode) {
-            if (seasonNumber == null) {
-                error = "No season number available for this episode";
-                toast.error(error);
-                return;
-            }
-            return runDownload(key, DOWNLOAD_EXPLICIT_NZB_MUTATION, {
-                itemType: "EPISODE",
-                title: title ?? "Unknown",
-                imdbId: null,
-                tmdbId: resolvedTmdbId,
-                tvdbId: resolvedTvdbId,
-                seasonNumber,
-                episodeNumber,
-                seasons: null,
-                nzbUrl: cleanedNzbUrl
-            });
-        }
-
-        if (mediaType === "tv" && selectedSeasons.length === 0) {
-            error = "Select at least one season before downloading an NZB";
+        previewingManual = true;
+        error = null;
+        try {
+            const data = await gqlClient<{ previewManualNzb: StreamCandidate }>(
+                PREVIEW_MANUAL_NZB_MUTATION,
+                {
+                    itemType: isEpisodeMode ? "EPISODE" : mediaType === "movie" ? "MOVIE" : "SEASON",
+                    nzbUrl: cleanedNzbUrl,
+                    seasonNumber: manualTargetSeasonNumber(),
+                    episodeNumber: isEpisodeMode ? episodeNumber : null
+                }
+            );
+            addOrReplaceStream({ ...data.previewManualNzb, manualNzbUrl: cleanedNzbUrl });
+            nzbUrl = "";
+            toast.success("Added to stream candidates");
+        } catch (e) {
+            error = e instanceof Error ? e.message : "Failed to preview NZB";
             toast.error(error);
-            return;
+        } finally {
+            previewingManual = false;
         }
-
-        return runDownload(key, DOWNLOAD_EXPLICIT_NZB_MUTATION, {
-            itemType: mediaType === "movie" ? "MOVIE" : "SEASON",
-            title: title ?? "Unknown",
-            imdbId: null,
-            tmdbId: resolvedTmdbId,
-            tvdbId: resolvedTvdbId,
-            seasonNumber: mediaType === "tv" ? selectedSeasons[0] : null,
-            episodeNumber: null,
-            seasons: mediaType === "tv" ? selectedSeasons : null,
-            nzbUrl: cleanedNzbUrl
-        });
     }
 
     $effect(() => {
@@ -557,11 +640,12 @@
                                     {#if cleanedHash}
                                         <Button
                                             size="sm"
-                                            onclick={downloadExplicitHash}
-                                            disabled={downloadingKey !== null}>
-                                            {#if downloadingKey === `manual:${cleanedHash}`}<LoaderCircle
-                                                    class="mr-2 h-4 w-4 animate-spin" />{/if}
-                                            Download Explicit Hash
+                                            onclick={previewManualMagnet}
+                                            disabled={previewingManual}>
+                                            {#if previewingManual}
+                                                <LoaderCircle class="mr-2 h-4 w-4 animate-spin" />
+                                            {/if}
+                                            Add to Candidates
                                         </Button>
                                     {/if}
                                 </div>
@@ -594,11 +678,12 @@
                                         {#if cleanedNzbUrl}
                                             <Button
                                                 size="sm"
-                                                onclick={downloadNzbUrl}
-                                                disabled={downloadingKey !== null}>
-                                                {#if downloadingKey === `manual-nzb:${cleanedNzbUrl}`}<LoaderCircle
-                                                        class="mr-2 h-4 w-4 animate-spin" />{/if}
-                                                Download NZB
+                                                onclick={previewManualNzb}
+                                                disabled={previewingManual}>
+                                                {#if previewingManual}
+                                                    <LoaderCircle class="mr-2 h-4 w-4 animate-spin" />
+                                                {/if}
+                                                Add to Candidates
                                             </Button>
                                         {/if}
                                     </div>
