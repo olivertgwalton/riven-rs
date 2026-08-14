@@ -20,12 +20,6 @@ use crate::schema::types::DiscoveredStream;
 const PREVIEW_NZB_PROFILE: HttpServiceProfile =
     HttpServiceProfile::new("manual-nzb-preview").with_rate_limit(10, Duration::from_secs(60));
 
-/// Same cap as the upload endpoint's `MAX_UPLOAD_BYTES` (kept as a separate
-/// constant since that one is `pub(super)` to the `server` module) — one
-/// shared size philosophy for "an NZB body this API will ever read into
-/// memory," whether it arrived as an upload or was fetched from a URL.
-const MAX_FETCHED_NZB_BYTES: usize = 8 * 1024 * 1024;
-
 /// TTL for `download_explicit_nzb`'s Redis entry — deliberately longer than
 /// `riven_core::nzb::NZB_URL_TTL_SECS` (7 days, sized for a real scrape's URL
 /// going stale).
@@ -124,34 +118,22 @@ async fn fetch_capped_nzb_text(
                 async_graphql::Error::new("Failed to fetch NZB")
             })?,
     };
-    read_capped_nzb_body(response).await
-}
-
-/// Reads `response` as text, rejecting it once it exceeds
-/// [`MAX_FETCHED_NZB_BYTES`] rather than after — `HttpClient::send_data`
-/// buffers the whole body unconditionally before a caller ever gets to check
-/// its length, which for an NZB URL a caller supplies directly would let a
-/// malicious/huge response exhaust memory before any size check could run.
-/// Reading the raw response chunk-by-chunk with a running total closes that.
-async fn read_capped_nzb_body(mut response: reqwest::Response) -> Result<String> {
-    if !response.status().is_success() {
-        return Err(async_graphql::Error::new("Failed to fetch NZB"));
-    }
-
-    let mut buf = Vec::new();
-    while let Some(chunk) = response.chunk().await.map_err(|error| {
-        tracing::debug!(%error, "manual NZB fetch chunk read failed");
-        async_graphql::Error::new("Failed to fetch NZB")
-    })? {
-        buf.extend_from_slice(&chunk);
-        if buf.len() > MAX_FETCHED_NZB_BYTES {
-            return Err(async_graphql::Error::new("NZB response is too large"));
-        }
-    }
-    String::from_utf8(buf).map_err(|error| {
-        tracing::debug!(%error, "manual NZB response was not valid UTF-8");
-        async_graphql::Error::new("Failed to read NZB")
-    })
+    riven_core::http::ssrf_guard::read_capped_text(response)
+        .await
+        .map_err(|error| {
+            let message = match &error {
+                riven_core::http::ssrf_guard::CappedReadError::TooLarge => {
+                    "NZB response is too large"
+                }
+                riven_core::http::ssrf_guard::CappedReadError::InvalidUtf8 => "Failed to read NZB",
+                riven_core::http::ssrf_guard::CappedReadError::NotSuccess(_)
+                | riven_core::http::ssrf_guard::CappedReadError::Transport(_) => {
+                    "Failed to fetch NZB"
+                }
+            };
+            tracing::debug!(%error, "manual NZB fetch failed");
+            async_graphql::Error::new(message)
+        })
 }
 
 /// The `dn=` (display name) parameter from a magnet URI, URL-decoded. `None`

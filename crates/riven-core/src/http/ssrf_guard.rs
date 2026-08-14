@@ -13,14 +13,20 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
+/// Every caller-supplied NZB body this process reads into memory shares this
+/// cap — whether it arrived as an upload (`MAX_UPLOAD_BYTES`, `riven-api`'s
+/// `server` module) or was fetched from a URL ([`read_capped_text`]).
+pub const MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
+
 /// Deliberately hand-rolled against the well-known private/reserved ranges
 /// rather than the standard library's `is_global()` (still unstable) or an
 /// extra dependency — this only needs to be right for IPv4 RFC 1918 /
 /// loopback / link-local / CGNAT / reserved and the IPv6 loopback /
-/// unique-local / link-local equivalents (including an IPv4 address embedded
-/// in an IPv4-mapped IPv6 address, e.g. `::ffff:127.0.0.1`, which the bare
-/// `Ipv6Addr` checks below don't catch), which covers every realistic
-/// internal address a container on a host like this could be reached at.
+/// unique-local / link-local equivalents, including an IPv4 address embedded
+/// in any of the three IPv6 forms that carry one (`::ffff:a.b.c.d` mapped,
+/// the deprecated `::a.b.c.d` compatible form, and `64:ff9b::a.b.c.d`
+/// NAT64), which covers every realistic internal address a container on a
+/// host like this could be reached at.
 pub fn is_global_ip(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => is_global_ipv4(v4),
@@ -29,6 +35,23 @@ pub fn is_global_ip(ip: IpAddr) -> bool {
                 return is_global_ipv4(mapped);
             }
             let segments = v6.segments();
+            // NAT64 well-known prefix (64:ff9b::/96, RFC 6052): a NAT64
+            // gateway routes this straight to the embedded IPv4 address, so
+            // it deserves exactly the same trust level as if the caller had
+            // supplied that address directly.
+            if segments[0..6] == [0x0064, 0xff9b, 0, 0, 0, 0] {
+                return is_global_ipv4(embedded_ipv4(segments));
+            }
+            // The deprecated IPv4-compatible form (`::a.b.c.d`, RFC 4291
+            // §2.5.5.1): high 96 bits zero. This overlaps a handful of
+            // genuinely-reserved low-value addresses (`::1`, `::2`, ...),
+            // but every one of those decodes to a `0.0.0.0/8` IPv4 address,
+            // which `is_global_ipv4` already rejects outright — so treating
+            // them as "compatible" here changes nothing about whether they
+            // pass.
+            if segments[0..6] == [0, 0, 0, 0, 0, 0] {
+                return is_global_ipv4(embedded_ipv4(segments));
+            }
             !(v6.is_loopback()
                 || v6.is_unspecified()
                 || v6.is_multicast()
@@ -36,6 +59,15 @@ pub fn is_global_ip(ip: IpAddr) -> bool {
                 || (segments[0] & 0xffc0) == 0xfe80) // link-local, fe80::/10
         }
     }
+}
+
+fn embedded_ipv4(segments: [u16; 8]) -> Ipv4Addr {
+    Ipv4Addr::new(
+        (segments[6] >> 8) as u8,
+        (segments[6] & 0xff) as u8,
+        (segments[7] >> 8) as u8,
+        (segments[7] & 0xff) as u8,
+    )
 }
 
 fn is_global_ipv4(v4: Ipv4Addr) -> bool {
@@ -83,4 +115,95 @@ pub fn build_pinned_client(host: &str, addr: SocketAddr) -> reqwest::Result<reqw
         .resolve(host, addr)
         .timeout(Duration::from_secs(20))
         .build()
+}
+
+/// Why a [`read_capped_text`] call failed. Kept distinct from a bare
+/// `reqwest::Error` so callers can tell "the upstream said no"/"too big"/"not
+/// text" apart from a genuine transport failure, without groveling through
+/// an error message to do it.
+#[derive(Debug)]
+pub enum CappedReadError {
+    NotSuccess(reqwest::StatusCode),
+    Transport(reqwest::Error),
+    TooLarge,
+    InvalidUtf8,
+}
+
+impl std::fmt::Display for CappedReadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotSuccess(status) => write!(f, "response status {status}"),
+            Self::Transport(error) => write!(f, "transport error: {error}"),
+            Self::TooLarge => write!(f, "response exceeded {MAX_RESPONSE_BYTES} bytes"),
+            Self::InvalidUtf8 => write!(f, "response was not valid UTF-8"),
+        }
+    }
+}
+
+impl std::error::Error for CappedReadError {}
+
+/// Reads `response` as text, rejecting it once it exceeds
+/// [`MAX_RESPONSE_BYTES`] rather than after — buffering a whole body
+/// unconditionally before a caller ever gets to check its length would let a
+/// malicious or merely oversized upstream exhaust memory before any size
+/// check could run. Reading the raw response chunk-by-chunk with a running
+/// total closes that.
+pub async fn read_capped_text(mut response: reqwest::Response) -> Result<String, CappedReadError> {
+    if !response.status().is_success() {
+        return Err(CappedReadError::NotSuccess(response.status()));
+    }
+
+    let mut buf = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(CappedReadError::Transport)? {
+        buf.extend_from_slice(&chunk);
+        if buf.len() > MAX_RESPONSE_BYTES {
+            return Err(CappedReadError::TooLarge);
+        }
+    }
+    String::from_utf8(buf).map_err(|_utf8_error| CappedReadError::InvalidUtf8)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejects_non_global_addresses() {
+        let non_global: &[&str] = &[
+            "10.0.0.1",           // RFC 1918 private
+            "127.0.0.1",          // loopback
+            "169.254.169.254",    // link-local / cloud metadata
+            "100.64.0.1",         // CGNAT
+            "0.0.0.0",            // unspecified / 0.0.0.0/8
+            "192.0.0.1",          // IETF protocol assignments
+            "240.0.0.1",          // reserved
+            "255.255.255.255",    // broadcast
+            "::1",                // IPv6 loopback
+            "fd00::1",            // unique local
+            "fe80::1",            // link-local
+            "::ffff:127.0.0.1",   // IPv4-mapped loopback
+            "::ffff:10.0.0.1",    // IPv4-mapped private
+            "::7f00:1",           // deprecated IPv4-compatible loopback (::127.0.0.1)
+            "64:ff9b::a9fe:a9fe", // NAT64-embedded link-local (169.254.169.254)
+        ];
+        for addr in non_global {
+            let ip: IpAddr = addr.parse().unwrap();
+            assert!(!is_global_ip(ip), "{addr} should not be global");
+        }
+    }
+
+    #[test]
+    fn accepts_public_addresses() {
+        let global: &[&str] = &[
+            "8.8.8.8",
+            "1.1.1.1",
+            "2606:4700:4700::1111",
+            "::ffff:8.8.8.8",
+            "64:ff9b::808:808", // NAT64-embedded 8.8.8.8
+        ];
+        for addr in global {
+            let ip: IpAddr = addr.parse().unwrap();
+            assert!(is_global_ip(ip), "{addr} should be global");
+        }
+    }
 }

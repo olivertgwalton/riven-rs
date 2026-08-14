@@ -657,8 +657,9 @@ async fn fetch_pinned_manual_nzb_xml(nzb_url: &str) -> anyhow::Result<Option<Str
     };
     let client = riven_core::http::ssrf_guard::build_pinned_client(host, addr)?;
     let response = client.get(nzb_url).send().await?;
-    if !response.status().is_success() {
-        return Ok(None);
+    match riven_core::http::ssrf_guard::read_capped_text(response).await {
+        Ok(xml) => Ok(Some(xml)),
+        Err(riven_core::http::ssrf_guard::CappedReadError::NotSuccess(_)) => Ok(None),
+        Err(error) => Err(error.into()),
     }
-    Ok(Some(response.text().await?))
 }
