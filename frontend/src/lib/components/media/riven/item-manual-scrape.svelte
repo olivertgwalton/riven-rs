@@ -569,18 +569,16 @@
                                         accept=".nzb,application/x-nzb,text/xml"
                                         class="hidden"
                                         onchange={handleNzbFileSelected} />
-                                    <button
-                                        type="button"
-                                        class="inline-flex w-fit items-center gap-1.5 rounded-full border border-white/10 px-2.5 py-1 text-xs text-zinc-400 transition hover:border-white/20 hover:text-zinc-200 disabled:cursor-not-allowed disabled:opacity-50"
+                                    <Button
+                                        variant="outline"
+                                        size="sm"
                                         disabled={uploadingNzb}
                                         onclick={() => nzbFileInput?.click()}>
                                         {#if uploadingNzb}
-                                            <LoaderCircle class="h-3 w-3 animate-spin" />
-                                            Uploading...
-                                        {:else}
-                                            Upload .nzb file instead
+                                            <LoaderCircle class="mr-2 h-4 w-4 animate-spin" />
                                         {/if}
-                                    </button>
+                                        Upload .nzb file instead
+                                    </Button>
                                 </div>
                             </div>
                         {/if}
