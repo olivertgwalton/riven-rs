@@ -81,86 +81,23 @@ async fn validate_nzb_fetch_target(
         .host_str()
         .ok_or_else(|| async_graphql::Error::new("NZB URL is not reachable"))?;
     let port = parsed.port_or_known_default().unwrap_or(80);
-    let addrs = tokio::net::lookup_host((host, port))
+    let addr = riven_core::http::ssrf_guard::resolve_public_target(host, port)
         .await
         .map_err(|error| {
             tracing::debug!(%error, "manual NZB URL lookup_host failed");
             async_graphql::Error::new("NZB URL is not reachable")
         })?
-        .collect::<Vec<_>>();
-    if addrs.is_empty() || !addrs.iter().all(|addr| is_global_ip(addr.ip())) {
-        return Err(async_graphql::Error::new("NZB URL is not reachable"));
-    }
-    Ok(Some((host.to_string(), addrs[0])))
-}
-
-/// Deliberately hand-rolled against the well-known private/reserved ranges
-/// rather than the standard library's `is_global()` (still unstable) or an
-/// extra dependency — this only needs to be right for IPv4 RFC 1918 /
-/// loopback / link-local / CGNAT / reserved and the IPv6 loopback /
-/// unique-local / link-local equivalents (including an IPv4 address embedded
-/// in an IPv4-mapped IPv6 address, e.g. `::ffff:127.0.0.1`, which the
-/// bare `Ipv6Addr` checks below don't catch), which covers every realistic
-/// internal address a container on this host could be reached at.
-fn is_global_ip(ip: std::net::IpAddr) -> bool {
-    match ip {
-        std::net::IpAddr::V4(v4) => is_global_ipv4(v4),
-        std::net::IpAddr::V6(v6) => {
-            if let Some(mapped) = v6.to_ipv4_mapped() {
-                return is_global_ipv4(mapped);
-            }
-            let segments = v6.segments();
-            !(v6.is_loopback()
-                || v6.is_unspecified()
-                || v6.is_multicast()
-                || (segments[0] & 0xfe00) == 0xfc00 // unique local, fc00::/7
-                || (segments[0] & 0xffc0) == 0xfe80) // link-local, fe80::/10
-        }
-    }
-}
-
-fn is_global_ipv4(v4: std::net::Ipv4Addr) -> bool {
-    let octets = v4.octets();
-    !(v4.is_private()
-        || v4.is_loopback()
-        || v4.is_link_local()
-        || v4.is_broadcast()
-        || v4.is_documentation()
-        || v4.is_multicast()
-        || octets[0] == 0 // 0.0.0.0/8 ("this network"), broader than is_unspecified's exact 0.0.0.0
-        || (octets[0] == 100 && (64..=127).contains(&octets[1])) // 100.64.0.0/10, CGNAT
-        || (octets[0] == 192 && octets[1] == 0 && octets[2] == 0) // 192.0.0.0/24, IETF protocol assignments
-        || octets[0] >= 240) // 240.0.0.0/4 reserved, includes 255.255.255.255
-}
-
-/// A one-shot client for a single validated external NZB URL, scoped to
-/// exactly the address [`validate_nzb_fetch_target`] checked: redirects are
-/// disabled outright (this feature has no legitimate need to follow one — a
-/// user whose indexer redirects can paste the final URL instead), and
-/// `.resolve` pins `host` to `addr` so the connection can't re-run DNS and
-/// land somewhere the earlier check never saw. Without both, a malicious or
-/// compromised upstream could 30x to an internal address, or simply change
-/// its DNS answer between the check and this connection, and bypass the
-/// public-address validation entirely.
-fn build_pinned_nzb_client(host: &str, addr: std::net::SocketAddr) -> Result<reqwest::Client> {
-    reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .resolve(host, addr)
-        .timeout(Duration::from_secs(20))
-        .build()
-        .map_err(|error| {
-            tracing::debug!(%error, "failed to build pinned NZB fetch client");
-            async_graphql::Error::new("Failed to fetch NZB")
-        })
+        .ok_or_else(|| async_graphql::Error::new("NZB URL is not reachable"))?;
+    Ok(Some((host.to_string(), addr)))
 }
 
 /// Fetches `nzb_url` and reads it as text. `pinned_target` is
 /// [`validate_nzb_fetch_target`]'s result: `Some((host, addr))` for a real
-/// external URL, fetched through [`build_pinned_nzb_client`] rather than the
-/// shared rate-limited client — that client follows redirects and performs
-/// its own DNS resolution, either of which would undo the validation that
-/// was just done. `None` is the trusted loopback-upload exemption, safe to
-/// fetch through the ordinary shared client.
+/// external URL, fetched through [`riven_core::http::ssrf_guard::build_pinned_client`]
+/// rather than the shared rate-limited client — that client follows
+/// redirects and performs its own DNS resolution, either of which would undo
+/// the validation that was just done. `None` is the trusted loopback-upload
+/// exemption, safe to fetch through the ordinary shared client.
 async fn fetch_capped_nzb_text(
     http: &HttpClient,
     nzb_url: &str,
@@ -168,7 +105,12 @@ async fn fetch_capped_nzb_text(
 ) -> Result<String> {
     let response = match pinned_target {
         Some((host, addr)) => {
-            let client = build_pinned_nzb_client(&host, addr)?;
+            let client = riven_core::http::ssrf_guard::build_pinned_client(&host, addr).map_err(
+                |error| {
+                    tracing::debug!(%error, "failed to build pinned NZB fetch client");
+                    async_graphql::Error::new("Failed to fetch NZB")
+                },
+            )?;
             client.get(nzb_url).send().await.map_err(|error| {
                 tracing::debug!(%error, "manual NZB fetch request failed");
                 async_graphql::Error::new("Failed to fetch NZB")
