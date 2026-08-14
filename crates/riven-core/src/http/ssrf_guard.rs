@@ -42,6 +42,15 @@ pub fn is_global_ip(ip: IpAddr) -> bool {
             if segments[0..6] == [0x0064, 0xff9b, 0, 0, 0, 0] {
                 return is_global_ipv4(embedded_ipv4(segments));
             }
+            // The RFC 8215 *local-use* IPv4/IPv6 translation prefix
+            // (64:ff9b:1::/48) is a distinct block from the well-known one
+            // above: reserved for a site's own internal NAT64, not globally
+            // routable. Unlike 64:ff9b::/96, there's no embedded-IPv4
+            // fallback to defer to here — the whole point of this prefix is
+            // that it's local-use only, so reject it outright.
+            if segments[0] == 0x0064 && segments[1] == 0xff9b && segments[2] == 0x0001 {
+                return false;
+            }
             // The deprecated IPv4-compatible form (`::a.b.c.d`, RFC 4291
             // §2.5.5.1): high 96 bits zero. This overlaps a handful of
             // genuinely-reserved low-value addresses (`::1`, `::2`, ...),
@@ -155,10 +164,10 @@ pub async fn read_capped_text(mut response: reqwest::Response) -> Result<String,
 
     let mut buf = Vec::new();
     while let Some(chunk) = response.chunk().await.map_err(CappedReadError::Transport)? {
-        buf.extend_from_slice(&chunk);
-        if buf.len() > MAX_RESPONSE_BYTES {
+        if buf.len() + chunk.len() > MAX_RESPONSE_BYTES {
             return Err(CappedReadError::TooLarge);
         }
+        buf.extend_from_slice(&chunk);
     }
     String::from_utf8(buf).map_err(|_utf8_error| CappedReadError::InvalidUtf8)
 }
@@ -185,6 +194,8 @@ mod tests {
             "::ffff:10.0.0.1",    // IPv4-mapped private
             "::7f00:1",           // deprecated IPv4-compatible loopback (::127.0.0.1)
             "64:ff9b::a9fe:a9fe", // NAT64-embedded link-local (169.254.169.254)
+            "64:ff9b:1::1",       // RFC 8215 local-use translation prefix
+            "64:ff9b:1::808:808", // same prefix, would decode to a public IPv4 if allowed
         ];
         for addr in non_global {
             let ip: IpAddr = addr.parse().unwrap();
