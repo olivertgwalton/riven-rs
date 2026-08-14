@@ -268,6 +268,17 @@
             : [...selectedSeasons, seasonNumber].sort((a, b) => a - b);
     }
 
+    /** Clears only what the Filter dropdown itself controls (provider,
+     * resolution, quality) — matches `activeFilterCount`, which the dropdown's
+     * own Reset button is enabled/disabled by. The separate search box is
+     * cleared by `reset()`, not here, so Reset's enabled state always
+     * reflects exactly what it's about to clear. */
+    function resetFilters() {
+        providerFilter = { torrent: true, usenet: true };
+        resolutionFilter.clear();
+        qualityFilter.clear();
+    }
+
     function reset() {
         loading = false;
         error = null;
@@ -280,9 +291,7 @@
         uploadingNzb = false;
         previewingManual = false;
         searchQuery = "";
-        providerFilter = { torrent: true, usenet: true };
-        resolutionFilter.clear();
-        qualityFilter.clear();
+        resetFilters();
         advancedOpen = false;
         selectedSeasons = seasons
             .filter((season) => season.status !== "Available")
@@ -784,6 +793,18 @@
                                     <DropdownMenu.Content
                                         align="end"
                                         class="max-h-80 overflow-y-auto rounded-2xl border border-white/10 bg-zinc-950/95 shadow-2xl shadow-black/50 backdrop-blur-2xl">
+                                        <div class="flex items-center justify-between gap-3 px-1.5 py-1">
+                                            <DropdownMenu.Label class="p-0"
+                                                >Filters</DropdownMenu.Label>
+                                            <button
+                                                type="button"
+                                                class="text-xs text-zinc-400 transition hover:text-zinc-200 disabled:cursor-not-allowed disabled:opacity-50"
+                                                onclick={resetFilters}
+                                                disabled={activeFilterCount === 0}>
+                                                Reset
+                                            </button>
+                                        </div>
+                                        <DropdownMenu.Separator />
                                         <DropdownMenu.Label>Download provider</DropdownMenu.Label>
                                         <DropdownMenu.Separator />
                                         <DropdownMenu.CheckboxItem
@@ -851,7 +872,12 @@
                             </div>
                         {:else}
                             <div
-                                class="max-h-[48vh] overflow-y-auto rounded-xl pr-1 sm:max-h-[52vh]">
+                                style="scrollbar-width: thin;"
+                                class="max-h-[48vh] overflow-y-auto rounded-xl pr-1 sm:max-h-[52vh]
+                                    [&::-webkit-scrollbar]:block [&::-webkit-scrollbar]:w-1.5
+                                    [&::-webkit-scrollbar-thumb]:rounded-full
+                                    [&::-webkit-scrollbar-thumb]:bg-white/15
+                                    [&::-webkit-scrollbar-track]:bg-transparent">
                                 <div class="space-y-3">
                                     {#each visibleStreams as stream (stream.key)}
                                         <div
