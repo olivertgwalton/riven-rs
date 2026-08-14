@@ -554,6 +554,16 @@
                                     <Input
                                         bind:value={explicitHash}
                                         placeholder="magnet:?xt=urn:btih:... or 40-char hash" />
+                                    {#if cleanedHash}
+                                        <Button
+                                            size="sm"
+                                            onclick={downloadExplicitHash}
+                                            disabled={downloadingKey !== null}>
+                                            {#if downloadingKey === `manual:${cleanedHash}`}<LoaderCircle
+                                                    class="mr-2 h-4 w-4 animate-spin" />{/if}
+                                            Download Explicit Hash
+                                        </Button>
+                                    {/if}
                                 </div>
                                 <div class="space-y-2">
                                     <Label class="flex items-center gap-1.5">
@@ -563,45 +573,36 @@
                                     <Input
                                         bind:value={nzbUrl}
                                         placeholder="https://.../release.nzb" />
+                                    <p class="text-center text-[0.65rem] text-zinc-500">or</p>
                                     <input
                                         bind:this={nzbFileInput}
                                         type="file"
                                         accept=".nzb,application/x-nzb,text/xml"
                                         class="hidden"
                                         onchange={handleNzbFileSelected} />
-                                    <Button
-                                        variant="outline"
-                                        size="sm"
-                                        disabled={uploadingNzb}
-                                        onclick={() => nzbFileInput?.click()}>
-                                        {#if uploadingNzb}
-                                            <LoaderCircle class="mr-2 h-4 w-4 animate-spin" />
+                                    <div class="flex flex-wrap gap-2">
+                                        <Button
+                                            variant="outline"
+                                            size="sm"
+                                            disabled={uploadingNzb}
+                                            onclick={() => nzbFileInput?.click()}>
+                                            {#if uploadingNzb}
+                                                <LoaderCircle class="mr-2 h-4 w-4 animate-spin" />
+                                            {/if}
+                                            Upload NZB file
+                                        </Button>
+                                        {#if cleanedNzbUrl}
+                                            <Button
+                                                size="sm"
+                                                onclick={downloadNzbUrl}
+                                                disabled={downloadingKey !== null}>
+                                                {#if downloadingKey === `manual-nzb:${cleanedNzbUrl}`}<LoaderCircle
+                                                        class="mr-2 h-4 w-4 animate-spin" />{/if}
+                                                Download NZB
+                                            </Button>
                                         {/if}
-                                        Upload .nzb file instead
-                                    </Button>
+                                    </div>
                                 </div>
-                            </div>
-                        {/if}
-                        {#if cleanedHash || cleanedNzbUrl}
-                            <div class="mt-4 flex justify-end gap-2">
-                                {#if cleanedHash}
-                                    <Button
-                                        onclick={downloadExplicitHash}
-                                        disabled={downloadingKey !== null}>
-                                        {#if downloadingKey === `manual:${cleanedHash}`}<LoaderCircle
-                                                class="mr-2 h-4 w-4 animate-spin" />{/if}
-                                        Download Explicit Hash
-                                    </Button>
-                                {/if}
-                                {#if cleanedNzbUrl}
-                                    <Button
-                                        onclick={downloadNzbUrl}
-                                        disabled={downloadingKey !== null}>
-                                        {#if downloadingKey === `manual-nzb:${cleanedNzbUrl}`}<LoaderCircle
-                                                class="mr-2 h-4 w-4 animate-spin" />{/if}
-                                        Download NZB
-                                    </Button>
-                                {/if}
                             </div>
                         {/if}
                     </div>
