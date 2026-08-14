@@ -341,8 +341,21 @@ impl StreamsMutations {
             .text()
             .map_err(|error| async_graphql::Error::new(format!("Failed to read NZB: {error}")))?;
 
-        let title = riven_usenet::peek_release_title(&xml)
+        // Full parse rather than the cheap `peek_release_title` used at
+        // ingest time (log lines only): a preview also wants the total size,
+        // which needs every file's segment list materialized anyway, and
+        // this is a one-shot user action rather than a hot path.
+        let document = riven_usenet::parse_nzb_document(&xml).ok();
+        let title = document
+            .as_ref()
+            .and_then(riven_usenet::NzbDocument::release_title)
             .unwrap_or_else(|| riven_usenet::UNKNOWN_FILE_LABEL.to_string());
+        let file_size_bytes = document.as_ref().map(|doc| {
+            doc.files
+                .iter()
+                .map(|file| file.segments.total_bytes())
+                .sum::<u64>() as i64
+        });
         let parsed = riven_rank::parse(&title);
         let info_hash = nzb_info_hash(nzb_url);
 
@@ -353,7 +366,7 @@ impl StreamsMutations {
             info_hash,
             parsed_data: serde_json::to_value(&parsed).ok(),
             rank: None,
-            file_size_bytes: None,
+            file_size_bytes,
             is_cached: true,
             item_type,
             season_number,

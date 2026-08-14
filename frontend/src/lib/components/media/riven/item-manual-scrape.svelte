@@ -328,7 +328,10 @@
     /** Uploads a raw .nzb file and, on success, drops the resulting (loopback)
      * URL straight into `nzbUrl` — everything downstream (validation, the
      * download button, the mutation itself) is exactly what pasting a URL
-     * already drives, with no separate upload-specific download path. */
+     * already drives, with no separate upload-specific download path. Once
+     * uploaded, the URL is already known-good — straight into
+     * `previewManualNzb` rather than making the user click a second,
+     * redundant "add it" button for a file they just picked. */
     async function uploadNzbFile(file: File) {
         uploadingNzb = true;
         error = null;
@@ -351,9 +354,12 @@
         } catch (e) {
             error = e instanceof Error ? e.message : "Failed to upload NZB file";
             toast.error(error);
+            return;
         } finally {
             uploadingNzb = false;
         }
+
+        await previewManualNzb();
     }
 
     function handleNzbFileSelected(e: Event) {
