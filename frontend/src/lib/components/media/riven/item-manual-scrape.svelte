@@ -159,12 +159,14 @@
     let nzbFileInput = $state<HTMLInputElement | undefined>(undefined);
     let searchQuery = $state("");
     let providerFilter = $state({ torrent: true, usenet: true });
-    // Empty set = no restriction (show everything) — same convention as the
-    // search box being empty. Populated with whatever distinct values are
-    // actually present in `streams`, so this never offers a resolution/
-    // quality nobody actually has.
-    const resolutionFilter = new SvelteSet<string>();
-    const qualityFilter = new SvelteSet<string>();
+    // Every checkbox in the Filter dropdown starts checked (nothing
+    // excluded) — tracking *excluded* values rather than *included* ones is
+    // what makes that true by construction, with no sync step needed: a
+    // resolution/quality that doesn't exist yet (a stream not previewed/
+    // discovered yet) is, by definition, not in this set, so it starts
+    // included the moment it appears.
+    const excludedResolutions = new SvelteSet<string>();
+    const excludedQualities = new SvelteSet<string>();
     let streams = $state<StreamCandidate[]>([]);
     let downloadingKey = $state<string | null>(null);
 
@@ -183,14 +185,13 @@
                 )
                 .filter(
                     (stream) =>
-                        resolutionFilter.size === 0 ||
-                        (stream.parsedData?.resolution &&
-                            resolutionFilter.has(stream.parsedData.resolution))
+                        !stream.parsedData?.resolution ||
+                        !excludedResolutions.has(stream.parsedData.resolution)
                 )
                 .filter(
                     (stream) =>
-                        qualityFilter.size === 0 ||
-                        (stream.parsedData?.quality && qualityFilter.has(stream.parsedData.quality))
+                        !stream.parsedData?.quality ||
+                        !excludedQualities.has(stream.parsedData.quality)
                 );
         })()
     );
@@ -198,7 +199,7 @@
         (providerFilter.torrent ? 0 : 1) + (providerFilter.usenet ? 0 : 1)
     );
     const activeFilterCount = $derived(
-        disabledProviderCount + resolutionFilter.size + qualityFilter.size
+        disabledProviderCount + excludedResolutions.size + excludedQualities.size
     );
     const availableResolutions = $derived(
         Array.from(
@@ -275,8 +276,8 @@
      * reflects exactly what it's about to clear. */
     function resetFilters() {
         providerFilter = { torrent: true, usenet: true };
-        resolutionFilter.clear();
-        qualityFilter.clear();
+        excludedResolutions.clear();
+        excludedQualities.clear();
     }
 
     function reset() {
@@ -824,11 +825,11 @@
                                             <DropdownMenu.Label>Resolution</DropdownMenu.Label>
                                             {#each availableResolutions as resolution (resolution)}
                                                 <DropdownMenu.CheckboxItem
-                                                    checked={resolutionFilter.has(resolution)}
+                                                    checked={!excludedResolutions.has(resolution)}
                                                     onCheckedChange={(checked) =>
                                                         checked
-                                                            ? resolutionFilter.add(resolution)
-                                                            : resolutionFilter.delete(resolution)}
+                                                            ? excludedResolutions.delete(resolution)
+                                                            : excludedResolutions.add(resolution)}
                                                     closeOnSelect={false}>
                                                     {resolution}
                                                 </DropdownMenu.CheckboxItem>
@@ -839,11 +840,11 @@
                                             <DropdownMenu.Label>Quality</DropdownMenu.Label>
                                             {#each availableQualities as quality (quality)}
                                                 <DropdownMenu.CheckboxItem
-                                                    checked={qualityFilter.has(quality)}
+                                                    checked={!excludedQualities.has(quality)}
                                                     onCheckedChange={(checked) =>
                                                         checked
-                                                            ? qualityFilter.add(quality)
-                                                            : qualityFilter.delete(quality)}
+                                                            ? excludedQualities.delete(quality)
+                                                            : excludedQualities.add(quality)}
                                                     closeOnSelect={false}>
                                                     {quality}
                                                 </DropdownMenu.CheckboxItem>
