@@ -43,10 +43,25 @@ const MANUAL_NZB_URL_TTL_SECS: u64 = 60 * 60 * 24 * 30;
 /// response status/error text this resolver would otherwise echo back as an
 /// oracle to enumerate what's reachable. Rejects anything that doesn't
 /// resolve to a public address, except this crate's own loopback temp-upload
-/// URL (`uploaded_nzb_filename` recognizes exactly that shape and nothing
-/// else — see its own doc comment for why a plain substring check there
-/// would have been just as exploitable as skipping this check entirely).
-async fn validate_nzb_fetch_target(raw: &str) -> Result<()> {
+/// URL — which must additionally land on `gql_port`, this instance's real
+/// listen port, or the shape check alone (`uploaded_nzb_filename`) would let
+/// an attacker reuse the trusted `127.0.0.1` exemption to reach *any* other
+/// port on the container's loopback interface.
+///
+/// Returns the exact address the caller must connect to (`None` for the
+/// trusted loopback-upload exemption, where no pinning is needed): DNS is
+/// resolved and validated here, but a caller that re-resolves the hostname
+/// itself when it actually connects (ordinary redirect-following HTTP
+/// clients do exactly this) reopens the same SSRF this function exists to
+/// close — either a compromised/malicious upstream's redirect, or the
+/// authoritative DNS answer simply changing between this check and the real
+/// connection (DNS rebinding). Callers that make a real outbound connection
+/// must pin to the returned address rather than letting the URL's hostname
+/// be resolved a second time.
+async fn validate_nzb_fetch_target(
+    raw: &str,
+    gql_port: u16,
+) -> Result<Option<(String, std::net::SocketAddr)>> {
     let parsed = url::Url::parse(raw).map_err(|error| {
         tracing::debug!(%error, "manual NZB URL failed to parse");
         async_graphql::Error::new("NZB URL must start with http:// or https://")
@@ -56,8 +71,10 @@ async fn validate_nzb_fetch_target(raw: &str) -> Result<()> {
             "NZB URL must start with http:// or https://",
         ));
     }
-    if riven_core::nzb::uploaded_nzb_filename(raw).is_some() {
-        return Ok(());
+    if riven_core::nzb::uploaded_nzb_filename(raw).is_some()
+        && parsed.port_or_known_default() == Some(gql_port)
+    {
+        return Ok(None);
     }
 
     let host = parsed
@@ -74,27 +91,24 @@ async fn validate_nzb_fetch_target(raw: &str) -> Result<()> {
     if addrs.is_empty() || !addrs.iter().all(|addr| is_global_ip(addr.ip())) {
         return Err(async_graphql::Error::new("NZB URL is not reachable"));
     }
-    Ok(())
+    Ok(Some((host.to_string(), addrs[0])))
 }
 
 /// Deliberately hand-rolled against the well-known private/reserved ranges
 /// rather than the standard library's `is_global()` (still unstable) or an
 /// extra dependency — this only needs to be right for IPv4 RFC 1918 /
-/// loopback / link-local and the IPv6 loopback / unique-local / link-local
-/// equivalents, which covers every realistic internal address a container on
-/// this host could be reached at.
+/// loopback / link-local / CGNAT / reserved and the IPv6 loopback /
+/// unique-local / link-local equivalents (including an IPv4 address embedded
+/// in an IPv4-mapped IPv6 address, e.g. `::ffff:127.0.0.1`, which the
+/// bare `Ipv6Addr` checks below don't catch), which covers every realistic
+/// internal address a container on this host could be reached at.
 fn is_global_ip(ip: std::net::IpAddr) -> bool {
     match ip {
-        std::net::IpAddr::V4(v4) => {
-            !(v4.is_private()
-                || v4.is_loopback()
-                || v4.is_link_local()
-                || v4.is_unspecified()
-                || v4.is_broadcast()
-                || v4.is_documentation()
-                || v4.is_multicast())
-        }
+        std::net::IpAddr::V4(v4) => is_global_ipv4(v4),
         std::net::IpAddr::V6(v6) => {
+            if let Some(mapped) = v6.to_ipv4_mapped() {
+                return is_global_ipv4(mapped);
+            }
             let segments = v6.segments();
             !(v6.is_loopback()
                 || v6.is_unspecified()
@@ -105,21 +119,79 @@ fn is_global_ip(ip: std::net::IpAddr) -> bool {
     }
 }
 
-/// Fetches `url` and reads it as text, rejecting the response once it exceeds
+fn is_global_ipv4(v4: std::net::Ipv4Addr) -> bool {
+    let octets = v4.octets();
+    !(v4.is_private()
+        || v4.is_loopback()
+        || v4.is_link_local()
+        || v4.is_broadcast()
+        || v4.is_documentation()
+        || v4.is_multicast()
+        || octets[0] == 0 // 0.0.0.0/8 ("this network"), broader than is_unspecified's exact 0.0.0.0
+        || (octets[0] == 100 && (64..=127).contains(&octets[1])) // 100.64.0.0/10, CGNAT
+        || (octets[0] == 192 && octets[1] == 0 && octets[2] == 0) // 192.0.0.0/24, IETF protocol assignments
+        || octets[0] >= 240) // 240.0.0.0/4 reserved, includes 255.255.255.255
+}
+
+/// A one-shot client for a single validated external NZB URL, scoped to
+/// exactly the address [`validate_nzb_fetch_target`] checked: redirects are
+/// disabled outright (this feature has no legitimate need to follow one — a
+/// user whose indexer redirects can paste the final URL instead), and
+/// `.resolve` pins `host` to `addr` so the connection can't re-run DNS and
+/// land somewhere the earlier check never saw. Without both, a malicious or
+/// compromised upstream could 30x to an internal address, or simply change
+/// its DNS answer between the check and this connection, and bypass the
+/// public-address validation entirely.
+fn build_pinned_nzb_client(host: &str, addr: std::net::SocketAddr) -> Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .resolve(host, addr)
+        .timeout(Duration::from_secs(20))
+        .build()
+        .map_err(|error| {
+            tracing::debug!(%error, "failed to build pinned NZB fetch client");
+            async_graphql::Error::new("Failed to fetch NZB")
+        })
+}
+
+/// Fetches `nzb_url` and reads it as text. `pinned_target` is
+/// [`validate_nzb_fetch_target`]'s result: `Some((host, addr))` for a real
+/// external URL, fetched through [`build_pinned_nzb_client`] rather than the
+/// shared rate-limited client — that client follows redirects and performs
+/// its own DNS resolution, either of which would undo the validation that
+/// was just done. `None` is the trusted loopback-upload exemption, safe to
+/// fetch through the ordinary shared client.
+async fn fetch_capped_nzb_text(
+    http: &HttpClient,
+    nzb_url: &str,
+    pinned_target: Option<(String, std::net::SocketAddr)>,
+) -> Result<String> {
+    let response = match pinned_target {
+        Some((host, addr)) => {
+            let client = build_pinned_nzb_client(&host, addr)?;
+            client.get(nzb_url).send().await.map_err(|error| {
+                tracing::debug!(%error, "manual NZB fetch request failed");
+                async_graphql::Error::new("Failed to fetch NZB")
+            })?
+        }
+        None => http
+            .send(PREVIEW_NZB_PROFILE, |client| client.get(nzb_url))
+            .await
+            .map_err(|error| {
+                tracing::debug!(%error, "manual NZB fetch request failed");
+                async_graphql::Error::new("Failed to fetch NZB")
+            })?,
+    };
+    read_capped_nzb_body(response).await
+}
+
+/// Reads `response` as text, rejecting it once it exceeds
 /// [`MAX_FETCHED_NZB_BYTES`] rather than after — `HttpClient::send_data`
 /// buffers the whole body unconditionally before a caller ever gets to check
 /// its length, which for an NZB URL a caller supplies directly would let a
 /// malicious/huge response exhaust memory before any size check could run.
-/// Reading `HttpClient::send`'s raw response chunk-by-chunk with a running
-/// total closes that.
-async fn fetch_capped_nzb_text(http: &HttpClient, nzb_url: &str) -> Result<String> {
-    let mut response = http
-        .send(PREVIEW_NZB_PROFILE, |client| client.get(nzb_url))
-        .await
-        .map_err(|error| {
-            tracing::debug!(%error, "manual NZB fetch request failed");
-            async_graphql::Error::new("Failed to fetch NZB")
-        })?;
+/// Reading the raw response chunk-by-chunk with a running total closes that.
+async fn read_capped_nzb_body(mut response: reqwest::Response) -> Result<String> {
     if !response.status().is_success() {
         return Err(async_graphql::Error::new("Failed to fetch NZB"));
     }
@@ -327,9 +399,10 @@ impl StreamsMutations {
         let registry = ctx.data::<Arc<PluginRegistry>>()?;
         let job_queue = ctx.data::<Arc<JobQueue>>()?;
         let redis_conn = ctx.data::<redis::aio::ConnectionManager>()?;
+        let gql_port = ctx.data::<crate::schema::GqlPort>()?.0;
 
         let nzb_url = nzb_url.trim();
-        validate_nzb_fetch_target(nzb_url).await?;
+        validate_nzb_fetch_target(nzb_url, gql_port).await?;
 
         let target = resolve_manual_download_target(
             registry.as_ref(),
@@ -444,10 +517,11 @@ impl StreamsMutations {
     ) -> Result<DiscoveredStream> {
         require(ctx, Capability::ScrapeItems)?;
         let http = ctx.data::<HttpClient>()?;
+        let gql_port = ctx.data::<crate::schema::GqlPort>()?.0;
 
         let nzb_url = nzb_url.trim();
-        validate_nzb_fetch_target(nzb_url).await?;
-        let xml = fetch_capped_nzb_text(http, nzb_url).await?;
+        let pinned_target = validate_nzb_fetch_target(nzb_url, gql_port).await?;
+        let xml = fetch_capped_nzb_text(http, nzb_url, pinned_target).await?;
 
         // Full parse rather than the cheap `peek_release_title` used at
         // ingest time (log lines only): a preview also wants the total size,

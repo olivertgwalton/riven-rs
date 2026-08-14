@@ -136,6 +136,7 @@ pub async fn start_server(config: StartServerConfig) -> Result<()> {
         crate::schema::StremioAddonToken(riven_core::stremio::addon_token(
             api_key.as_deref().unwrap_or_default(),
         )),
+        crate::schema::GqlPort(port),
     );
 
     start_event_controller(job_queue.clone());
