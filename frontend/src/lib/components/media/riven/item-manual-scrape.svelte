@@ -4,6 +4,7 @@
     import { gqlClient } from "$lib/graphql-client";
     import { toast } from "svelte-sonner";
     import type { Snippet } from "svelte";
+    import { SvelteSet } from "svelte/reactivity";
     import * as Dialog from "$lib/components/ui/dialog/index.js";
     import * as DropdownMenu from "$lib/components/ui/dropdown-menu/index.js";
     import { Button } from "$lib/components/ui/button/index.js";
@@ -158,6 +159,12 @@
     let nzbFileInput = $state<HTMLInputElement | undefined>(undefined);
     let searchQuery = $state("");
     let providerFilter = $state({ torrent: true, usenet: true });
+    // Empty set = no restriction (show everything) — same convention as the
+    // search box being empty. Populated with whatever distinct values are
+    // actually present in `streams`, so this never offers a resolution/
+    // quality nobody actually has.
+    const resolutionFilter = new SvelteSet<string>();
+    const qualityFilter = new SvelteSet<string>();
     let streams = $state<StreamCandidate[]>([]);
     let downloadingKey = $state<string | null>(null);
 
@@ -173,11 +180,43 @@
                 .filter((stream) => !query || stream.title.toLowerCase().includes(query))
                 .filter((stream) =>
                     isUsenet(stream.infoHash) ? providerFilter.usenet : providerFilter.torrent
+                )
+                .filter(
+                    (stream) =>
+                        resolutionFilter.size === 0 ||
+                        (stream.parsedData?.resolution &&
+                            resolutionFilter.has(stream.parsedData.resolution))
+                )
+                .filter(
+                    (stream) =>
+                        qualityFilter.size === 0 ||
+                        (stream.parsedData?.quality && qualityFilter.has(stream.parsedData.quality))
                 );
         })()
     );
     const disabledProviderCount = $derived(
         (providerFilter.torrent ? 0 : 1) + (providerFilter.usenet ? 0 : 1)
+    );
+    const activeFilterCount = $derived(
+        disabledProviderCount + resolutionFilter.size + qualityFilter.size
+    );
+    const availableResolutions = $derived(
+        Array.from(
+            new Set(
+                streams
+                    .map((stream) => stream.parsedData?.resolution)
+                    .filter((value): value is string => Boolean(value))
+            )
+        ).sort()
+    );
+    const availableQualities = $derived(
+        Array.from(
+            new Set(
+                streams
+                    .map((stream) => stream.parsedData?.quality)
+                    .filter((value): value is string => Boolean(value))
+            )
+        ).sort()
     );
     const resolvedTmdbId = $derived(
         mediaType === "movie" ? (clean(customTmdbId) ?? externalId) : null
@@ -242,6 +281,8 @@
         previewingManual = false;
         searchQuery = "";
         providerFilter = { torrent: true, usenet: true };
+        resolutionFilter.clear();
+        qualityFilter.clear();
         advancedOpen = false;
         selectedSeasons = seasons
             .filter((season) => season.status !== "Available")
@@ -728,39 +769,65 @@
                                 <DropdownMenu.Root>
                                     <DropdownMenu.Trigger>
                                         {#snippet child({ props })}
-                                            <Button
-                                                {...props}
-                                                variant="outline"
-                                                size="sm"
-                                                class="shrink-0">
+                                            <Button {...props} variant="outline" class="shrink-0">
                                                 <Filter class="h-3.5 w-3.5" />
                                                 Filter
-                                                {#if disabledProviderCount > 0}
+                                                {#if activeFilterCount > 0}
                                                     <Badge
                                                         variant="outline"
                                                         class="ml-1 h-4 px-1 text-[0.65rem]"
-                                                        >{disabledProviderCount}</Badge>
+                                                        >{activeFilterCount}</Badge>
                                                 {/if}
                                             </Button>
                                         {/snippet}
                                     </DropdownMenu.Trigger>
                                     <DropdownMenu.Content
                                         align="end"
-                                        class="rounded-2xl border border-white/10 bg-zinc-950/95 shadow-2xl shadow-black/50 backdrop-blur-2xl">
+                                        class="max-h-80 overflow-y-auto rounded-2xl border border-white/10 bg-zinc-950/95 shadow-2xl shadow-black/50 backdrop-blur-2xl">
                                         <DropdownMenu.Label>Download provider</DropdownMenu.Label>
                                         <DropdownMenu.Separator />
                                         <DropdownMenu.CheckboxItem
                                             bind:checked={providerFilter.torrent}
-                                            onSelect={(e) => e.preventDefault()}>
+                                            closeOnSelect={false}>
                                             <Magnet class="h-3.5 w-3.5 text-amber-400" />
                                             Torrent
                                         </DropdownMenu.CheckboxItem>
                                         <DropdownMenu.CheckboxItem
                                             bind:checked={providerFilter.usenet}
-                                            onSelect={(e) => e.preventDefault()}>
+                                            closeOnSelect={false}>
                                             <Newspaper class="h-3.5 w-3.5 text-sky-400" />
                                             Usenet
                                         </DropdownMenu.CheckboxItem>
+                                        {#if availableResolutions.length}
+                                            <DropdownMenu.Separator />
+                                            <DropdownMenu.Label>Resolution</DropdownMenu.Label>
+                                            {#each availableResolutions as resolution (resolution)}
+                                                <DropdownMenu.CheckboxItem
+                                                    checked={resolutionFilter.has(resolution)}
+                                                    onCheckedChange={(checked) =>
+                                                        checked
+                                                            ? resolutionFilter.add(resolution)
+                                                            : resolutionFilter.delete(resolution)}
+                                                    closeOnSelect={false}>
+                                                    {resolution}
+                                                </DropdownMenu.CheckboxItem>
+                                            {/each}
+                                        {/if}
+                                        {#if availableQualities.length}
+                                            <DropdownMenu.Separator />
+                                            <DropdownMenu.Label>Quality</DropdownMenu.Label>
+                                            {#each availableQualities as quality (quality)}
+                                                <DropdownMenu.CheckboxItem
+                                                    checked={qualityFilter.has(quality)}
+                                                    onCheckedChange={(checked) =>
+                                                        checked
+                                                            ? qualityFilter.add(quality)
+                                                            : qualityFilter.delete(quality)}
+                                                    closeOnSelect={false}>
+                                                    {quality}
+                                                </DropdownMenu.CheckboxItem>
+                                            {/each}
+                                        {/if}
                                     </DropdownMenu.Content>
                                 </DropdownMenu.Root>
                             </div>
@@ -774,8 +841,8 @@
                                     Waiting for backend results...
                                 {:else if streams.length && searchQuery.trim()}
                                     No streams matched "{searchQuery.trim()}".
-                                {:else if streams.length && disabledProviderCount > 0}
-                                    No streams matched the current provider filter.
+                                {:else if streams.length && activeFilterCount > 0}
+                                    No streams matched the current filter.
                                 {:else if streams.length && cachedOnly}
                                     No cached streams matched the current filter.
                                 {:else}
