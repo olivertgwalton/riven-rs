@@ -498,7 +498,7 @@ impl Plugin for UsenetPlugin {
         if let Some(url) = nzb_url_for_hash(info_hash, ctx).await
             && let Some(filename) = riven_core::nzb::uploaded_nzb_filename(&url)
         {
-            riven_core::nzb::delete_nzb_upload(filename).await;
+            riven_core::nzb::delete_nzb_upload(&filename).await;
         }
 
         Ok(HookResponse::Download(Box::new(DownloadResult {

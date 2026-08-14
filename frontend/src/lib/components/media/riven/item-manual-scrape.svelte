@@ -704,16 +704,22 @@
                                     <Input
                                         bind:value={explicitHash}
                                         placeholder="magnet:?xt=urn:btih:... or 40-char hash" />
-                                    {#if cleanedHash}
+                                    {#if explicitHash.trim()}
                                         <Button
                                             size="sm"
                                             onclick={previewManualMagnet}
-                                            disabled={previewingManual}>
+                                            disabled={previewingManual || !cleanedHash}>
                                             {#if previewingManual}
                                                 <LoaderCircle class="mr-2 h-4 w-4 animate-spin" />
                                             {/if}
                                             Add to Candidates
                                         </Button>
+                                        {#if !cleanedHash}
+                                            <p class="text-xs text-amber-400">
+                                                Enter a valid 40-char info hash or paste a magnet
+                                                link.
+                                            </p>
+                                        {/if}
                                     {/if}
                                 </div>
                                 <div class="space-y-2">
@@ -742,11 +748,11 @@
                                             {/if}
                                             Upload NZB file
                                         </Button>
-                                        {#if cleanedNzbUrl}
+                                        {#if nzbUrl.trim()}
                                             <Button
                                                 size="sm"
                                                 onclick={previewManualNzb}
-                                                disabled={previewingManual}>
+                                                disabled={previewingManual || !cleanedNzbUrl}>
                                                 {#if previewingManual}
                                                     <LoaderCircle class="mr-2 h-4 w-4 animate-spin" />
                                                 {/if}
@@ -754,6 +760,12 @@
                                             </Button>
                                         {/if}
                                     </div>
+                                    {#if nzbUrl.trim() && !cleanedNzbUrl}
+                                        <p class="text-xs text-amber-400">
+                                            Enter a valid NZB URL (must start with http:// or
+                                            https://).
+                                        </p>
+                                    {/if}
                                 </div>
                             </div>
                         {/if}

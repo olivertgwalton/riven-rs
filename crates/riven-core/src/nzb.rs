@@ -71,14 +71,26 @@ pub async fn store_nzb_upload(bytes: &[u8], gql_port: u16) -> std::io::Result<St
 
 /// If `url` points at one of this crate's own temp uploads, the filename it
 /// was stored under (validated — see [`is_valid_upload_filename`]). `None` for
-/// any real external NZB URL, including one that merely happens to contain
-/// [`NZB_UPLOAD_ROUTE_PREFIX`] somewhere that isn't a genuine single path
-/// segment (a query string or fragment, say) — a `downloadExplicitNzb` caller
-/// controls this string directly, so it is untrusted input right up to this
-/// check.
-pub fn uploaded_nzb_filename(url: &str) -> Option<&str> {
-    let (_, tail) = url.split_once(NZB_UPLOAD_ROUTE_PREFIX)?;
-    is_valid_upload_filename(tail).then_some(tail)
+/// any real external NZB URL — a `downloadExplicitNzb`/`previewManualNzb`
+/// caller controls this string directly, so it is untrusted input right up to
+/// this check.
+///
+/// Parses `url` properly (scheme + host, not a raw substring match) rather
+/// than just checking the path contains [`NZB_UPLOAD_ROUTE_PREFIX`] somewhere:
+/// a plain `url.contains(...)` check would also accept
+/// `https://evil.example/internal/nzb-uploads/<uuid>.nzb` as "one of ours",
+/// which — since this function's whole purpose is deciding what's safe to
+/// delete on disk after a fetch succeeds — would let an attacker-controlled
+/// external host trigger a local file deletion by shaping their response to
+/// pass whatever came next. Requiring `http://127.0.0.1:<any port>/...`
+/// specifically (the exact shape [`store_nzb_upload`] produces) closes that.
+pub fn uploaded_nzb_filename(url: &str) -> Option<String> {
+    let parsed = url::Url::parse(url).ok()?;
+    if parsed.scheme() != "http" || parsed.host_str() != Some("127.0.0.1") {
+        return None;
+    }
+    let tail = parsed.path().strip_prefix(NZB_UPLOAD_ROUTE_PREFIX)?;
+    is_valid_upload_filename(tail).then(|| tail.to_string())
 }
 
 /// Best-effort delete of an ingested upload's temp file. Re-validates
@@ -564,7 +576,7 @@ mod tests {
     fn uploaded_nzb_filename_accepts_a_real_upload_url() {
         let filename = "550e8400-e29b-41d4-a716-446655440000.nzb";
         let url = format!("http://127.0.0.1:8082{NZB_UPLOAD_ROUTE_PREFIX}{filename}");
-        assert_eq!(uploaded_nzb_filename(&url), Some(filename));
+        assert_eq!(uploaded_nzb_filename(&url), Some(filename.to_string()));
     }
 
     #[test]
@@ -573,6 +585,26 @@ mod tests {
             uploaded_nzb_filename("https://indexer.example/get/abc123.nzb"),
             None
         );
+    }
+
+    /// The host, not just the path, must be the loopback upload address —
+    /// otherwise an external server could shape its own URL/path to be
+    /// mistaken for one of this instance's own temp uploads and have a local
+    /// file deleted on its behalf after a successful fetch.
+    #[test]
+    fn uploaded_nzb_filename_rejects_an_external_host_on_the_upload_path() {
+        let filename = "550e8400-e29b-41d4-a716-446655440000.nzb";
+        for hostile in [
+            format!("https://evil.example{NZB_UPLOAD_ROUTE_PREFIX}{filename}"),
+            format!("http://evil.example:8080{NZB_UPLOAD_ROUTE_PREFIX}{filename}"),
+            // Same path shape, wrong loopback literal (IPv6, or a hostname
+            // that merely resolves to 127.0.0.1) — only the exact
+            // `127.0.0.1` host string this crate itself writes is trusted.
+            format!("http://localhost{NZB_UPLOAD_ROUTE_PREFIX}{filename}"),
+            format!("http://[::1]{NZB_UPLOAD_ROUTE_PREFIX}{filename}"),
+        ] {
+            assert_eq!(uploaded_nzb_filename(&hostile), None, "{hostile:?}");
+        }
     }
 
     /// The specific attack this whole check exists to stop: a caller-supplied

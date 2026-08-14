@@ -54,6 +54,12 @@ pub async fn reset_items_by_ids(ids: Vec<i64>) -> Result<u64> {
             MediaItemState::Indexed.as_enum(),
         )
         .col_expr(media_items::Column::FailedAttempts, Expr::value(0))
+        // An explicit reset through the library UI is the user opting these
+        // items back into automatic handling — clear any `manual_scrape_only`
+        // a prior Manual Scrape pick left set, or `get_pending_items_for_retry`
+        // would keep excluding them from the very automatic retry this reset
+        // is supposed to restore.
+        .col_expr(media_items::Column::ManualScrapeOnly, Expr::value(false))
         .col_expr(media_items::Column::UpdatedAt, Expr::cust("NOW()"))
         .filter(media_items::Column::Id.is_in(ids.iter().copied()))
         .exec(orm())
@@ -76,6 +82,9 @@ pub async fn retry_items_by_ids(ids: Vec<i64>) -> Result<u64> {
         // actually restores eligibility; resetting `failed_attempts` alone
         // does nothing if the item was scraped within the last 30 minutes.
         .col_expr(media_items::Column::LastScrapeAttemptAt, Expr::cust("NULL"))
+        // Same reasoning as `reset_items_by_ids`: an explicit "retry now"
+        // is the user re-opting these items into automatic handling.
+        .col_expr(media_items::Column::ManualScrapeOnly, Expr::value(false))
         .col_expr(media_items::Column::UpdatedAt, Expr::cust("NOW()"))
         .filter(media_items::Column::Id.is_in(ids.iter().copied()))
         .exec(orm())

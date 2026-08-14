@@ -1,7 +1,7 @@
 use async_graphql::*;
 use redis::AsyncCommands;
 use riven_core::http::{HttpClient, HttpServiceProfile};
-use riven_core::nzb::{NZB_URL_TTL_SECS, nzb_indexer_redis_key, nzb_info_hash, nzb_url_redis_key};
+use riven_core::nzb::{nzb_indexer_redis_key, nzb_info_hash, nzb_url_redis_key};
 use riven_core::plugin::PluginRegistry;
 use riven_core::types::MediaItemType;
 use riven_db::entities::MediaItem;
@@ -19,6 +19,126 @@ use crate::schema::types::DiscoveredStream;
 
 const PREVIEW_NZB_PROFILE: HttpServiceProfile =
     HttpServiceProfile::new("manual-nzb-preview").with_rate_limit(10, Duration::from_secs(60));
+
+/// Same cap as the upload endpoint's `MAX_UPLOAD_BYTES` (kept as a separate
+/// constant since that one is `pub(super)` to the `server` module) — one
+/// shared size philosophy for "an NZB body this API will ever read into
+/// memory," whether it arrived as an upload or was fetched from a URL.
+const MAX_FETCHED_NZB_BYTES: usize = 8 * 1024 * 1024;
+
+/// TTL for `download_explicit_nzb`'s Redis entry — deliberately longer than
+/// `riven_core::nzb::NZB_URL_TTL_SECS` (7 days, sized for a real scrape's URL
+/// going stale).
+/// See the call site for why: a manually-supplied URL's item is also marked
+/// `manual_scrape_only`, which forecloses the automatic-retry path that would
+/// otherwise be the safety net for a download that needs a delayed retry.
+const MANUAL_NZB_URL_TTL_SECS: u64 = 60 * 60 * 24 * 30;
+
+/// A manually-supplied NZB URL a caller with `ScrapeItems` controls directly
+/// gets fetched server-side (`preview_manual_nzb`) or handed to
+/// `plugin-usenet` to fetch later (`download_explicit_nzb`). Without this
+/// check that is a same-origin-request forgery primitive: an authenticated
+/// but otherwise unprivileged caller could point it at a cloud metadata
+/// endpoint, another container, or a localhost-bound admin port, and use the
+/// response status/error text this resolver would otherwise echo back as an
+/// oracle to enumerate what's reachable. Rejects anything that doesn't
+/// resolve to a public address, except this crate's own loopback temp-upload
+/// URL (`uploaded_nzb_filename` recognizes exactly that shape and nothing
+/// else — see its own doc comment for why a plain substring check there
+/// would have been just as exploitable as skipping this check entirely).
+async fn validate_nzb_fetch_target(raw: &str) -> Result<()> {
+    let parsed = url::Url::parse(raw).map_err(|error| {
+        tracing::debug!(%error, "manual NZB URL failed to parse");
+        async_graphql::Error::new("NZB URL must start with http:// or https://")
+    })?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(async_graphql::Error::new(
+            "NZB URL must start with http:// or https://",
+        ));
+    }
+    if riven_core::nzb::uploaded_nzb_filename(raw).is_some() {
+        return Ok(());
+    }
+
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| async_graphql::Error::new("NZB URL is not reachable"))?;
+    let port = parsed.port_or_known_default().unwrap_or(80);
+    let addrs = tokio::net::lookup_host((host, port))
+        .await
+        .map_err(|error| {
+            tracing::debug!(%error, "manual NZB URL lookup_host failed");
+            async_graphql::Error::new("NZB URL is not reachable")
+        })?
+        .collect::<Vec<_>>();
+    if addrs.is_empty() || !addrs.iter().all(|addr| is_global_ip(addr.ip())) {
+        return Err(async_graphql::Error::new("NZB URL is not reachable"));
+    }
+    Ok(())
+}
+
+/// Deliberately hand-rolled against the well-known private/reserved ranges
+/// rather than the standard library's `is_global()` (still unstable) or an
+/// extra dependency — this only needs to be right for IPv4 RFC 1918 /
+/// loopback / link-local and the IPv6 loopback / unique-local / link-local
+/// equivalents, which covers every realistic internal address a container on
+/// this host could be reached at.
+fn is_global_ip(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            !(v4.is_private()
+                || v4.is_loopback()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+                || v4.is_broadcast()
+                || v4.is_documentation()
+                || v4.is_multicast())
+        }
+        std::net::IpAddr::V6(v6) => {
+            let segments = v6.segments();
+            !(v6.is_loopback()
+                || v6.is_unspecified()
+                || v6.is_multicast()
+                || (segments[0] & 0xfe00) == 0xfc00 // unique local, fc00::/7
+                || (segments[0] & 0xffc0) == 0xfe80) // link-local, fe80::/10
+        }
+    }
+}
+
+/// Fetches `url` and reads it as text, rejecting the response once it exceeds
+/// [`MAX_FETCHED_NZB_BYTES`] rather than after — `HttpClient::send_data`
+/// buffers the whole body unconditionally before a caller ever gets to check
+/// its length, which for an NZB URL a caller supplies directly would let a
+/// malicious/huge response exhaust memory before any size check could run.
+/// Reading `HttpClient::send`'s raw response chunk-by-chunk with a running
+/// total closes that.
+async fn fetch_capped_nzb_text(http: &HttpClient, nzb_url: &str) -> Result<String> {
+    let mut response = http
+        .send(PREVIEW_NZB_PROFILE, |client| client.get(nzb_url))
+        .await
+        .map_err(|error| {
+            tracing::debug!(%error, "manual NZB fetch request failed");
+            async_graphql::Error::new("Failed to fetch NZB")
+        })?;
+    if !response.status().is_success() {
+        return Err(async_graphql::Error::new("Failed to fetch NZB"));
+    }
+
+    let mut buf = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|error| {
+        tracing::debug!(%error, "manual NZB fetch chunk read failed");
+        async_graphql::Error::new("Failed to fetch NZB")
+    })? {
+        buf.extend_from_slice(&chunk);
+        if buf.len() > MAX_FETCHED_NZB_BYTES {
+            return Err(async_graphql::Error::new("NZB response is too large"));
+        }
+    }
+    String::from_utf8(buf).map_err(|error| {
+        tracing::debug!(%error, "manual NZB response was not valid UTF-8");
+        async_graphql::Error::new("Failed to read NZB")
+    })
+}
 
 /// The `dn=` (display name) parameter from a magnet URI, URL-decoded. `None`
 /// for a bare hash or a magnet with no `dn=` — the only case
@@ -209,11 +329,7 @@ impl StreamsMutations {
         let redis_conn = ctx.data::<redis::aio::ConnectionManager>()?;
 
         let nzb_url = nzb_url.trim();
-        if !nzb_url.starts_with("http://") && !nzb_url.starts_with("https://") {
-            return Err(async_graphql::Error::new(
-                "NZB URL must start with http:// or https://",
-            ));
-        }
+        validate_nzb_fetch_target(nzb_url).await?;
 
         let target = resolve_manual_download_target(
             registry.as_ref(),
@@ -231,15 +347,26 @@ impl StreamsMutations {
 
         let info_hash = nzb_info_hash(nzb_url);
         let mut redis_conn = redis_conn.clone();
+        // Longer than the 7-day TTL a real scrape's URL gets: this item is
+        // also being marked `manual_scrape_only` below, which opts it out of
+        // the automatic retry scheduler entirely — so if its own download
+        // ever needs a delayed retry (escalating cooldown after a transient
+        // failure, or the queue just being backed up) that pushes past seven
+        // days, the URL would otherwise expire with no automatic path left to
+        // recover it.
         redis_conn
-            .set_ex::<_, _, ()>(nzb_url_redis_key(&info_hash), nzb_url, NZB_URL_TTL_SECS)
+            .set_ex::<_, _, ()>(
+                nzb_url_redis_key(&info_hash),
+                nzb_url,
+                MANUAL_NZB_URL_TTL_SECS,
+            )
             .await
             .map_err(|error| async_graphql::Error::new(error.to_string()))?;
         redis_conn
             .set_ex::<_, _, ()>(
                 nzb_indexer_redis_key(&info_hash),
                 "manual",
-                NZB_URL_TTL_SECS,
+                MANUAL_NZB_URL_TTL_SECS,
             )
             .await
             .map_err(|error| async_graphql::Error::new(error.to_string()))?;
@@ -319,27 +446,8 @@ impl StreamsMutations {
         let http = ctx.data::<HttpClient>()?;
 
         let nzb_url = nzb_url.trim();
-        if !nzb_url.starts_with("http://") && !nzb_url.starts_with("https://") {
-            return Err(async_graphql::Error::new(
-                "NZB URL must start with http:// or https://",
-            ));
-        }
-
-        let response = http
-            .send_data(PREVIEW_NZB_PROFILE, Some(nzb_url.to_string()), |client| {
-                client.get(nzb_url)
-            })
-            .await
-            .map_err(|error| async_graphql::Error::new(format!("Failed to fetch NZB: {error}")))?;
-        if !response.status().is_success() {
-            return Err(async_graphql::Error::new(format!(
-                "NZB URL returned HTTP {}",
-                response.status()
-            )));
-        }
-        let xml = response
-            .text()
-            .map_err(|error| async_graphql::Error::new(format!("Failed to read NZB: {error}")))?;
+        validate_nzb_fetch_target(nzb_url).await?;
+        let xml = fetch_capped_nzb_text(http, nzb_url).await?;
 
         // Full parse rather than the cheap `peek_release_title` used at
         // ingest time (log lines only): a preview also wants the total size,
