@@ -586,7 +586,6 @@
                             <div class="mt-4 flex justify-end gap-2">
                                 {#if cleanedHash}
                                     <Button
-                                        variant="outline"
                                         onclick={downloadExplicitHash}
                                         disabled={downloadingKey !== null}>
                                         {#if downloadingKey === `manual:${cleanedHash}`}<LoaderCircle
@@ -596,7 +595,6 @@
                                 {/if}
                                 {#if cleanedNzbUrl}
                                     <Button
-                                        variant="outline"
                                         onclick={downloadNzbUrl}
                                         disabled={downloadingKey !== null}>
                                         {#if downloadingKey === `manual-nzb:${cleanedNzbUrl}`}<LoaderCircle
