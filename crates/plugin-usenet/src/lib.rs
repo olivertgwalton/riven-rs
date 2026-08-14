@@ -490,6 +490,17 @@ impl Plugin for UsenetPlugin {
             riven_core::indexer_stats::record_successful_grab(&indexer);
         }
 
+        // If this release came from Manual Scrape's "upload an NZB" entry
+        // point rather than a real indexer, the ingested article data (just
+        // written to the DB/usenet cache above) is now the durable copy —
+        // the temp file this URL points at has done its job and can go.
+        // `uploaded_nzb_filename` is a no-op for any real external NZB URL.
+        if let Some(url) = nzb_url_for_hash(info_hash, ctx).await
+            && let Some(filename) = riven_core::nzb::uploaded_nzb_filename(&url)
+        {
+            riven_core::nzb::delete_nzb_upload(filename).await;
+        }
+
         Ok(HookResponse::Download(Box::new(DownloadResult {
             info_hash: info_hash.to_string(),
             files,

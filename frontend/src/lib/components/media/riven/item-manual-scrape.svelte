@@ -114,6 +114,8 @@
     let customTvdbId = $state("");
     let explicitHash = $state("");
     let nzbUrl = $state("");
+    let uploadingNzb = $state(false);
+    let nzbFileInput = $state<HTMLInputElement | undefined>(undefined);
     let searchQuery = $state("");
     let streams = $state<StreamCandidate[]>([]);
     let downloadingKey = $state<string | null>(null);
@@ -189,6 +191,7 @@
         customTvdbId = "";
         explicitHash = "";
         nzbUrl = "";
+        uploadingNzb = false;
         searchQuery = "";
         advancedOpen = false;
         selectedSeasons = seasons
@@ -281,6 +284,44 @@
         } finally {
             loading = false;
         }
+    }
+
+    /** Uploads a raw .nzb file and, on success, drops the resulting (loopback)
+     * URL straight into `nzbUrl` — everything downstream (validation, the
+     * download button, the mutation itself) is exactly what pasting a URL
+     * already drives, with no separate upload-specific download path. */
+    async function uploadNzbFile(file: File) {
+        uploadingNzb = true;
+        error = null;
+
+        try {
+            const formData = new FormData();
+            formData.append("file", file);
+            const response = await fetch("/internal/nzb-upload", {
+                method: "POST",
+                credentials: "include",
+                body: formData
+            });
+            if (!response.ok) {
+                const message = await response.text();
+                throw new Error(message || `Upload failed (${response.status})`);
+            }
+            const data: { url: string } = await response.json();
+            nzbUrl = data.url;
+            toast.success(`${file.name} uploaded`);
+        } catch (e) {
+            error = e instanceof Error ? e.message : "Failed to upload NZB file";
+            toast.error(error);
+        } finally {
+            uploadingNzb = false;
+        }
+    }
+
+    function handleNzbFileSelected(e: Event) {
+        const file = (e.target as HTMLInputElement).files?.[0];
+        if (file) uploadNzbFile(file);
+        // Cleared so selecting the same file again still fires `change`.
+        if (nzbFileInput) nzbFileInput.value = "";
     }
 
     function downloadStream(stream: StreamCandidate) {
@@ -522,6 +563,24 @@
                                     <Input
                                         bind:value={nzbUrl}
                                         placeholder="https://.../release.nzb" />
+                                    <input
+                                        bind:this={nzbFileInput}
+                                        type="file"
+                                        accept=".nzb,application/x-nzb,text/xml"
+                                        class="hidden"
+                                        onchange={handleNzbFileSelected} />
+                                    <button
+                                        type="button"
+                                        class="inline-flex w-fit items-center gap-1.5 rounded-full border border-white/10 px-2.5 py-1 text-xs text-zinc-400 transition hover:border-white/20 hover:text-zinc-200 disabled:cursor-not-allowed disabled:opacity-50"
+                                        disabled={uploadingNzb}
+                                        onclick={() => nzbFileInput?.click()}>
+                                        {#if uploadingNzb}
+                                            <LoaderCircle class="h-3 w-3 animate-spin" />
+                                            Uploading...
+                                        {:else}
+                                            Upload .nzb file instead
+                                        {/if}
+                                    </button>
                                 </div>
                             </div>
                         {/if}

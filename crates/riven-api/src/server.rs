@@ -5,6 +5,7 @@ mod board;
 mod graphql;
 mod legacy_password;
 mod media;
+mod nzb_upload;
 mod oidc;
 mod plex;
 mod stremio;
@@ -12,11 +13,15 @@ mod stremio;
 use std::sync::Arc;
 
 use anyhow::Result;
+use axum::extract::DefaultBodyLimit;
 use axum::http::{
     HeaderName, HeaderValue, Method,
     header::{ACCEPT_RANGES, AUTHORIZATION, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE},
 };
-use axum::{Router, routing::get};
+use axum::{
+    Router,
+    routing::{get, post},
+};
 use riven_core::http::HttpClient;
 use riven_core::logging::LogControl;
 use riven_core::plugin::PluginRegistry;
@@ -86,6 +91,10 @@ mod state {
         /// Held here as well as in the schema so the artwork proxy can dispatch
         /// to media-server plugins without going through GraphQL.
         pub registry: Arc<riven_core::plugin::PluginRegistry>,
+        /// The port this server itself is bound to, so the NZB-upload handler
+        /// can hand back a loopback URL (`http://127.0.0.1:{gql_port}/...`)
+        /// without threading the instance's public URL through just for this.
+        pub gql_port: u16,
     }
 }
 
@@ -160,6 +169,7 @@ pub async fn start_server(config: StartServerConfig) -> Result<()> {
         runtime: tokio::runtime::Handle::current(),
         auth: auth.clone(),
         registry,
+        gql_port: port,
     };
 
     let board_guard =
@@ -213,6 +223,25 @@ pub async fn start_server(config: StartServerConfig) -> Result<()> {
         // Proxies media-server artwork so the browser never receives the Plex
         // token / Emby API key that fetching it requires. See `artwork.rs`.
         .route("/artwork/{server}", get(artwork::artwork_handler))
+        // Manual Scrape's "upload an NZB file" entry point. The action lives
+        // at a deliberately distinct path from where the staged file is
+        // served back out (`/internal/nzb-uploads/{file}`, matching
+        // `riven_core::nzb::NZB_UPLOAD_ROUTE_PREFIX`) rather than sharing it,
+        // so this exact-match route and the `nest_service` below can never
+        // ambiguously overlap in the router. The upload action itself is
+        // capped to a small body via a route-scoped `DefaultBodyLimit`;
+        // serving the staged file back out (fetched by `plugin-usenet`'s own
+        // HTTP client, never the browser) carries no such limit since it only
+        // ever reads what this route already wrote. See `nzb_upload.rs`.
+        .route(
+            "/internal/nzb-upload",
+            post(nzb_upload::upload_handler)
+                .route_layer(DefaultBodyLimit::max(nzb_upload::MAX_UPLOAD_BYTES)),
+        )
+        .nest_service(
+            "/internal/nzb-uploads",
+            ServeDir::new(riven_core::nzb::NZB_UPLOAD_DIR),
+        )
         // Everything auth: sign-in/out, sign-up, sessions, password, Plex,
         // passkeys, OIDC, admin — see `authn::router`. It carries its own
         // rate-limit middleware, which needs the state to resolve a caller.

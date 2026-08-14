@@ -21,7 +21,7 @@ plugin-calendar = { path = "../plugin-calendar" }
 plugin-seerr = { path = "../plugin-seerr" }
 async-graphql = { workspace = true }
 async-graphql-axum = { workspace = true }
-axum = { workspace = true }
+axum = { workspace = true, features = ["multipart"] }
 tower-http = { workspace = true, features = ["fs", "set-header"] }
 tokio = { workspace = true }
 tokio-util = { workspace = true }

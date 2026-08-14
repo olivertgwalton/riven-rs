@@ -7,6 +7,13 @@ use tokio_util::sync::CancellationToken;
 use crate::JobQueue;
 use crate::main_orchestrator::MainOrchestrator;
 
+/// How long a Manual Scrape NZB-upload temp file is allowed to sit unclaimed
+/// before the hourly sweep removes it. Generous relative to how fast the
+/// normal path actually clears one (ingest happens within seconds to minutes
+/// of the upload) — this is a backstop for the abnormal case, not the
+/// primary cleanup mechanism.
+const NZB_UPLOAD_STALE_AGE: Duration = Duration::from_secs(24 * 60 * 60);
+
 /// Periodic scheduler.
 pub struct Scheduler {
     job_queue: Arc<JobQueue>,
@@ -69,6 +76,15 @@ impl Scheduler {
             Ok(0) => {}
             Ok(removed) => tracing::info!(removed, "pruned orphan streams"),
             Err(error) => tracing::error!(%error, "failed to prune orphan streams"),
+        }
+
+        // Backstop for Manual Scrape's NZB-upload temp files: the normal path
+        // deletes one the moment plugin-usenet ingests it, but a bad upload,
+        // a crash mid-flow, or a manual scrape the user never followed
+        // through on would otherwise leak a file forever.
+        let removed = riven_core::nzb::sweep_stale_nzb_uploads(NZB_UPLOAD_STALE_AGE).await;
+        if removed > 0 {
+            tracing::info!(removed, "pruned stale NZB upload temp files");
         }
     }
 
