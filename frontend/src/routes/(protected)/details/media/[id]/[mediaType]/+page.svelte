@@ -859,6 +859,12 @@
                                     {completedFileCount}/{totalFileCount} files
                                 </span>
                             {/if}
+                            {#if riven?.addedBy}
+                                <span
+                                    class="text-muted-foreground border-border rounded-full border px-3 py-1.5 text-sm font-medium">
+                                    Added by {riven.addedBy}
+                                </span>
+                            {/if}
                         </div>
 
                         <!-- Actions - Right under title -->

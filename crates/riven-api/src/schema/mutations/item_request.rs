@@ -6,7 +6,7 @@ use riven_queue::lifecycle::{upsert_requested_movie, upsert_requested_show};
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use crate::schema::auth::{Capability, require};
+use crate::schema::auth::{Capability, RequestAuth, require};
 
 use super::MutationStatusText;
 
@@ -66,6 +66,17 @@ pub(super) struct RequestItemsResult {
     updated_items: Vec<ItemRequest>,
 }
 
+/// The signed-in riven user who is requesting, if any — always preferred
+/// over a caller-supplied `requested_by` on the input, which exists for
+/// non-interactive callers (an API-key-authenticated integration) that have
+/// no riven session to draw an identity from. A signed-in user's own
+/// requests must attribute to *them*, not to whatever string the client
+/// happened to send — trusting the input here would let one riven user's
+/// request be misattributed to another by simply setting the field.
+fn session_requester(ctx: &Context<'_>) -> Result<Option<String>> {
+    Ok(ctx.data::<RequestAuth>()?.username.clone())
+}
+
 #[derive(Default)]
 pub struct ItemRequestMutations;
 
@@ -83,11 +94,12 @@ impl ItemRequestMutations {
     ) -> Result<RequestItemMutationResponse> {
         require(ctx, Capability::RequestItems)?;
         let job_queue = ctx.data::<Arc<JobQueue>>()?;
+        let requested_by = session_requester(ctx)?.or_else(|| input.requested_by.clone());
         let outcome = match upsert_requested_movie(
             &input.title,
             input.imdb_id.as_deref(),
             input.tmdb_id.as_deref(),
-            input.requested_by.as_deref(),
+            requested_by.as_deref(),
             input.external_request_id.as_deref(),
         )
         .await
@@ -139,11 +151,12 @@ impl ItemRequestMutations {
     ) -> Result<RequestItemMutationResponse> {
         require(ctx, Capability::RequestItems)?;
         let job_queue = ctx.data::<Arc<JobQueue>>()?;
+        let requested_by = session_requester(ctx)?.or_else(|| input.requested_by.clone());
         let outcome = match upsert_requested_show(
             &input.title,
             input.imdb_id.as_deref(),
             input.tvdb_id.as_deref(),
-            input.requested_by.as_deref(),
+            requested_by.as_deref(),
             input.external_request_id.as_deref(),
             input.seasons.as_deref(),
         )
@@ -213,6 +226,7 @@ impl ItemRequestMutations {
     ) -> Result<RequestItemsResult> {
         require(ctx, Capability::RequestItems)?;
         let job_queue = ctx.data::<Arc<JobQueue>>()?;
+        let requester = session_requester(ctx)?;
         let mut seen: HashSet<String> = HashSet::new();
         let mut new_items: Vec<ItemRequest> = Vec::new();
         let mut updated_items: Vec<ItemRequest> = Vec::new();
@@ -233,11 +247,12 @@ impl ItemRequestMutations {
 
             count += 1;
 
+            let requested_by = requester.clone().or_else(|| movie.requested_by.clone());
             let outcome = upsert_requested_movie(
                 &movie.title,
                 movie.imdb_id.as_deref(),
                 movie.tmdb_id.as_deref(),
-                movie.requested_by.as_deref(),
+                requested_by.as_deref(),
                 movie.external_request_id.as_deref(),
             )
             .await
@@ -277,11 +292,12 @@ impl ItemRequestMutations {
 
             let seasons = show.seasons.as_deref();
 
+            let requested_by = requester.clone().or_else(|| show.requested_by.clone());
             let outcome = upsert_requested_show(
                 &show.title,
                 show.imdb_id.as_deref(),
                 show.tvdb_id.as_deref(),
-                show.requested_by.as_deref(),
+                requested_by.as_deref(),
                 show.external_request_id.as_deref(),
                 seasons,
             )

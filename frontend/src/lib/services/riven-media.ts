@@ -63,7 +63,7 @@ export type GqlSeasonFull = Pick<
 
 export type GqlMediaItemFull = Pick<
 	MediaItemFull,
-	"id" | "state" | "imdbId" | "tmdbId" | "tvdbId"
+	"id" | "state" | "imdbId" | "tmdbId" | "tvdbId" | "addedBy"
 > & {
 	filesystemEntry?: GqlFilesystemEntry | null;
 	filesystemEntries?: GqlFilesystemEntry[];
@@ -111,7 +111,7 @@ const FILESYSTEM_ENTRY_FIELDS = `
 `;
 
 const MEDIA_ITEM_FULL_FIELDS = `
-    id state imdbId tmdbId tvdbId
+    id state imdbId tmdbId tvdbId addedBy
     filesystemEntry {
         ${FILESYSTEM_ENTRY_FIELDS}
     }
@@ -145,7 +145,7 @@ const RAW_MEDIA_ITEM_FULL_FIELDS = `
     createdAt updatedAt indexedAt scrapedAt scrapedTimes
     aliases network country language isAnime airedAt year genres rating contentRating
     failedAttempts itemType isRequested showStatus seasonNumber isSpecial parentId
-    episodeNumber absoluteNumber runtime itemRequestId activeStreamId
+    episodeNumber absoluteNumber runtime itemRequestId activeStreamId addedBy
     filesystemEntry {
         ${RAW_FILESYSTEM_ENTRY_FIELDS}
     }

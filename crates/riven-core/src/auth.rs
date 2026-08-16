@@ -91,12 +91,19 @@ impl Capability {
 #[derive(Clone, Debug)]
 pub struct RequestAuth {
     pub role: UserRole,
+    /// The signed-in user's display handle (`display_username`, falling back
+    /// to `username` — the same preference order the frontend already uses
+    /// for this account, see `sidebar.svelte`/`user-management.svelte`).
+    /// `None` for a trusted-API-key caller, which has no user behind it, or
+    /// for the rare account with neither field set.
+    pub username: Option<String>,
 }
 
 impl RequestAuth {
     pub fn trusted_api_key() -> Self {
         Self {
             role: UserRole::Admin,
+            username: None,
         }
     }
 }

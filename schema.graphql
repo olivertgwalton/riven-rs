@@ -235,6 +235,21 @@ type Episode {
 	rather than in each client.
 	"""
 	posterPath: String
+	"""
+	Who is responsible for this item existing, for display next to other
+	item metadata. `None` for anything with no linked request at all — a
+	list-plugin auto-add (Trakt/Listrr/mdblist), or an item created via
+	`discoverItem`, which never creates an `item_requests` row.
+	
+	A Seerr-originated request collapses to the fixed label `"Seerr"`
+	rather than the specific Seerr user who asked for it — that identity
+	lives in Seerr's own UI, not duplicated here. `item_requests.requested_by`
+	doubles as that Seerr-requester email *and*, for a request made
+	directly through riven's own `requestMovie`/`requestShow`/`addItem`
+	mutations, the riven username that called them — `external_request_id`
+	(set only by Seerr) is what tells the two apart.
+	"""
+	addedBy: String
 	streams(infoHashes: [String!]): [Stream!]!
 	"""
 	The parent season for this episode.
@@ -297,6 +312,21 @@ type EpisodeFull {
 	rather than in each client.
 	"""
 	posterPath: String
+	"""
+	Who is responsible for this item existing, for display next to other
+	item metadata. `None` for anything with no linked request at all — a
+	list-plugin auto-add (Trakt/Listrr/mdblist), or an item created via
+	`discoverItem`, which never creates an `item_requests` row.
+	
+	A Seerr-originated request collapses to the fixed label `"Seerr"`
+	rather than the specific Seerr user who asked for it — that identity
+	lives in Seerr's own UI, not duplicated here. `item_requests.requested_by`
+	doubles as that Seerr-requester email *and*, for a request made
+	directly through riven's own `requestMovie`/`requestShow`/`addItem`
+	mutations, the riven username that called them — `external_request_id`
+	(set only by Seerr) is what tells the two apart.
+	"""
+	addedBy: String
 	filesystemEntry: FileSystemEntry
 	filesystemEntries: [FileSystemEntry!]!
 }
@@ -696,6 +726,21 @@ type MediaItem {
 	rather than in each client.
 	"""
 	posterPath: String
+	"""
+	Who is responsible for this item existing, for display next to other
+	item metadata. `None` for anything with no linked request at all — a
+	list-plugin auto-add (Trakt/Listrr/mdblist), or an item created via
+	`discoverItem`, which never creates an `item_requests` row.
+	
+	A Seerr-originated request collapses to the fixed label `"Seerr"`
+	rather than the specific Seerr user who asked for it — that identity
+	lives in Seerr's own UI, not duplicated here. `item_requests.requested_by`
+	doubles as that Seerr-requester email *and*, for a request made
+	directly through riven's own `requestMovie`/`requestShow`/`addItem`
+	mutations, the riven username that called them — `external_request_id`
+	(set only by Seerr) is what tells the two apart.
+	"""
+	addedBy: String
 }
 
 """
@@ -745,6 +790,21 @@ type MediaItemFull {
 	rather than in each client.
 	"""
 	posterPath: String
+	"""
+	Who is responsible for this item existing, for display next to other
+	item metadata. `None` for anything with no linked request at all — a
+	list-plugin auto-add (Trakt/Listrr/mdblist), or an item created via
+	`discoverItem`, which never creates an `item_requests` row.
+	
+	A Seerr-originated request collapses to the fixed label `"Seerr"`
+	rather than the specific Seerr user who asked for it — that identity
+	lives in Seerr's own UI, not duplicated here. `item_requests.requested_by`
+	doubles as that Seerr-requester email *and*, for a request made
+	directly through riven's own `requestMovie`/`requestShow`/`addItem`
+	mutations, the riven username that called them — `external_request_id`
+	(set only by Seerr) is what tells the two apart.
+	"""
+	addedBy: String
 	filesystemEntry: FileSystemEntry
 	filesystemEntries: [FileSystemEntry!]!
 	seasons: [SeasonFull!]!
@@ -794,6 +854,21 @@ type MediaItemListRow {
 	rather than in each client.
 	"""
 	posterPath: String
+	"""
+	Who is responsible for this item existing, for display next to other
+	item metadata. `None` for anything with no linked request at all — a
+	list-plugin auto-add (Trakt/Listrr/mdblist), or an item created via
+	`discoverItem`, which never creates an `item_requests` row.
+	
+	A Seerr-originated request collapses to the fixed label `"Seerr"`
+	rather than the specific Seerr user who asked for it — that identity
+	lives in Seerr's own UI, not duplicated here. `item_requests.requested_by`
+	doubles as that Seerr-requester email *and*, for a request made
+	directly through riven's own `requestMovie`/`requestShow`/`addItem`
+	mutations, the riven username that called them — `external_request_id`
+	(set only by Seerr) is what tells the two apart.
+	"""
+	addedBy: String
 	showId: Int
 	showTitle: String
 	showTmdbId: String
@@ -931,6 +1006,21 @@ type Movie {
 	rather than in each client.
 	"""
 	posterPath: String
+	"""
+	Who is responsible for this item existing, for display next to other
+	item metadata. `None` for anything with no linked request at all — a
+	list-plugin auto-add (Trakt/Listrr/mdblist), or an item created via
+	`discoverItem`, which never creates an `item_requests` row.
+	
+	A Seerr-originated request collapses to the fixed label `"Seerr"`
+	rather than the specific Seerr user who asked for it — that identity
+	lives in Seerr's own UI, not duplicated here. `item_requests.requested_by`
+	doubles as that Seerr-requester email *and*, for a request made
+	directly through riven's own `requestMovie`/`requestShow`/`addItem`
+	mutations, the riven username that called them — `external_request_id`
+	(set only by Seerr) is what tells the two apart.
+	"""
+	addedBy: String
 	streams(infoHashes: [String!]): [Stream!]!
 	"""
 	Always 1 — a movie has exactly one expected media file.
@@ -1597,6 +1687,21 @@ type Season {
 	rather than in each client.
 	"""
 	posterPath: String
+	"""
+	Who is responsible for this item existing, for display next to other
+	item metadata. `None` for anything with no linked request at all — a
+	list-plugin auto-add (Trakt/Listrr/mdblist), or an item created via
+	`discoverItem`, which never creates an `item_requests` row.
+	
+	A Seerr-originated request collapses to the fixed label `"Seerr"`
+	rather than the specific Seerr user who asked for it — that identity
+	lives in Seerr's own UI, not duplicated here. `item_requests.requested_by`
+	doubles as that Seerr-requester email *and*, for a request made
+	directly through riven's own `requestMovie`/`requestShow`/`addItem`
+	mutations, the riven username that called them — `external_request_id`
+	(set only by Seerr) is what tells the two apart.
+	"""
+	addedBy: String
 	streams(infoHashes: [String!]): [Stream!]!
 	"""
 	The parent show for this season.
@@ -1663,6 +1768,21 @@ type SeasonFull {
 	rather than in each client.
 	"""
 	posterPath: String
+	"""
+	Who is responsible for this item existing, for display next to other
+	item metadata. `None` for anything with no linked request at all — a
+	list-plugin auto-add (Trakt/Listrr/mdblist), or an item created via
+	`discoverItem`, which never creates an `item_requests` row.
+	
+	A Seerr-originated request collapses to the fixed label `"Seerr"`
+	rather than the specific Seerr user who asked for it — that identity
+	lives in Seerr's own UI, not duplicated here. `item_requests.requested_by`
+	doubles as that Seerr-requester email *and*, for a request made
+	directly through riven's own `requestMovie`/`requestShow`/`addItem`
+	mutations, the riven username that called them — `external_request_id`
+	(set only by Seerr) is what tells the two apart.
+	"""
+	addedBy: String
 	episodes: [EpisodeFull!]!
 }
 
@@ -1775,6 +1895,21 @@ type Show {
 	rather than in each client.
 	"""
 	posterPath: String
+	"""
+	Who is responsible for this item existing, for display next to other
+	item metadata. `None` for anything with no linked request at all — a
+	list-plugin auto-add (Trakt/Listrr/mdblist), or an item created via
+	`discoverItem`, which never creates an `item_requests` row.
+	
+	A Seerr-originated request collapses to the fixed label `"Seerr"`
+	rather than the specific Seerr user who asked for it — that identity
+	lives in Seerr's own UI, not duplicated here. `item_requests.requested_by`
+	doubles as that Seerr-requester email *and*, for a request made
+	directly through riven's own `requestMovie`/`requestShow`/`addItem`
+	mutations, the riven username that called them — `external_request_id`
+	(set only by Seerr) is what tells the two apart.
+	"""
+	addedBy: String
 	streams(infoHashes: [String!]): [Stream!]!
 	"""
 	Seasons for this show. Excludes season 0 (specials) by default.

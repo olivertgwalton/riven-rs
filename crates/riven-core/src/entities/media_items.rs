@@ -190,4 +190,36 @@ impl Model {
             crate::entities::helpers::Artwork::Poster,
         )
     }
+
+    /// Who is responsible for this item existing, for display next to other
+    /// item metadata. `None` for anything with no linked request at all — a
+    /// list-plugin auto-add (Trakt/Listrr/mdblist), or an item created via
+    /// `discoverItem`, which never creates an `item_requests` row.
+    ///
+    /// A Seerr-originated request collapses to the fixed label `"Seerr"`
+    /// rather than the specific Seerr user who asked for it — that identity
+    /// lives in Seerr's own UI, not duplicated here. `item_requests.requested_by`
+    /// doubles as that Seerr-requester email *and*, for a request made
+    /// directly through riven's own `requestMovie`/`requestShow`/`addItem`
+    /// mutations, the riven username that called them — `external_request_id`
+    /// (set only by Seerr) is what tells the two apart.
+    async fn added_by(
+        &self,
+        ctx: &async_graphql::Context<'_>,
+    ) -> async_graphql::Result<Option<String>> {
+        let Some(item_request_id) = self.item_request_id else {
+            return Ok(None);
+        };
+        let db = ctx.data::<sea_orm::DatabaseConnection>()?;
+        let request = super::item_requests::Entity::find_by_id(item_request_id)
+            .one(db)
+            .await?;
+        Ok(request.and_then(|request| {
+            if request.external_request_id.is_some() {
+                Some("Seerr".to_string())
+            } else {
+                request.requested_by
+            }
+        }))
+    }
 }

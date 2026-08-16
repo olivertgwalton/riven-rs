@@ -7,7 +7,7 @@ use riven_queue::lifecycle::{upsert_requested_movie, upsert_requested_show};
 use riven_queue::{IndexJob, JobQueue};
 use std::sync::Arc;
 
-use crate::schema::auth::{Capability, require, require_settings_access};
+use crate::schema::auth::{Capability, RequestAuth, require, require_settings_access};
 
 #[derive(Default)]
 pub struct LibraryMutations;
@@ -136,17 +136,22 @@ impl LibraryMutations {
     ) -> Result<MediaItem> {
         require(ctx, Capability::AddItems)?;
         let job_queue = ctx.data::<Arc<JobQueue>>()?;
+        let requested_by = ctx.data::<RequestAuth>()?.username.clone();
         let outcome = match item_type {
-            MediaItemType::Movie => {
-                upsert_requested_movie(&title, imdb_id.as_deref(), tmdb_id.as_deref(), None, None)
-                    .await
-                    .map_err(Error::from)?
-            }
+            MediaItemType::Movie => upsert_requested_movie(
+                &title,
+                imdb_id.as_deref(),
+                tmdb_id.as_deref(),
+                requested_by.as_deref(),
+                None,
+            )
+            .await
+            .map_err(Error::from)?,
             MediaItemType::Show => upsert_requested_show(
                 &title,
                 imdb_id.as_deref(),
                 tvdb_id.as_deref(),
-                None,
+                requested_by.as_deref(),
                 None,
                 seasons.as_deref(),
             )

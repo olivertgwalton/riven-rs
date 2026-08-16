@@ -202,6 +202,21 @@ export type DownloadMediaItemMutationResponse = {
 export type Episode = {
   absoluteNumber?: Maybe<Scalars['Int']['output']>;
   activeStreamId?: Maybe<Scalars['Int']['output']>;
+  /**
+   * Who is responsible for this item existing, for display next to other
+   * item metadata. `None` for anything with no linked request at all — a
+   * list-plugin auto-add (Trakt/Listrr/mdblist), or an item created via
+   * `discoverItem`, which never creates an `item_requests` row.
+   *
+   * A Seerr-originated request collapses to the fixed label `"Seerr"`
+   * rather than the specific Seerr user who asked for it — that identity
+   * lives in Seerr's own UI, not duplicated here. `item_requests.requested_by`
+   * doubles as that Seerr-requester email *and*, for a request made
+   * directly through riven's own `requestMovie`/`requestShow`/`addItem`
+   * mutations, the riven username that called them — `external_request_id`
+   * (set only by Seerr) is what tells the two apart.
+   */
+  addedBy?: Maybe<Scalars['String']['output']>;
   airedAt?: Maybe<Scalars['NaiveDate']['output']>;
   airedAtUtc?: Maybe<Scalars['DateTime']['output']>;
   aliases?: Maybe<Scalars['JSON']['output']>;
@@ -261,6 +276,21 @@ export type EpisodeStreamsArgs = {
 export type EpisodeFull = {
   absoluteNumber?: Maybe<Scalars['Int']['output']>;
   activeStreamId?: Maybe<Scalars['Int']['output']>;
+  /**
+   * Who is responsible for this item existing, for display next to other
+   * item metadata. `None` for anything with no linked request at all — a
+   * list-plugin auto-add (Trakt/Listrr/mdblist), or an item created via
+   * `discoverItem`, which never creates an `item_requests` row.
+   *
+   * A Seerr-originated request collapses to the fixed label `"Seerr"`
+   * rather than the specific Seerr user who asked for it — that identity
+   * lives in Seerr's own UI, not duplicated here. `item_requests.requested_by`
+   * doubles as that Seerr-requester email *and*, for a request made
+   * directly through riven's own `requestMovie`/`requestShow`/`addItem`
+   * mutations, the riven username that called them — `external_request_id`
+   * (set only by Seerr) is what tells the two apart.
+   */
+  addedBy?: Maybe<Scalars['String']['output']>;
   airedAt?: Maybe<Scalars['NaiveDate']['output']>;
   airedAtUtc?: Maybe<Scalars['DateTime']['output']>;
   aliases?: Maybe<Scalars['JSON']['output']>;
@@ -614,6 +644,21 @@ export type MediaDetails = {
 export type MediaItem = {
   absoluteNumber?: Maybe<Scalars['Int']['output']>;
   activeStreamId?: Maybe<Scalars['Int']['output']>;
+  /**
+   * Who is responsible for this item existing, for display next to other
+   * item metadata. `None` for anything with no linked request at all — a
+   * list-plugin auto-add (Trakt/Listrr/mdblist), or an item created via
+   * `discoverItem`, which never creates an `item_requests` row.
+   *
+   * A Seerr-originated request collapses to the fixed label `"Seerr"`
+   * rather than the specific Seerr user who asked for it — that identity
+   * lives in Seerr's own UI, not duplicated here. `item_requests.requested_by`
+   * doubles as that Seerr-requester email *and*, for a request made
+   * directly through riven's own `requestMovie`/`requestShow`/`addItem`
+   * mutations, the riven username that called them — `external_request_id`
+   * (set only by Seerr) is what tells the two apart.
+   */
+  addedBy?: Maybe<Scalars['String']['output']>;
   airedAt?: Maybe<Scalars['NaiveDate']['output']>;
   airedAtUtc?: Maybe<Scalars['DateTime']['output']>;
   aliases?: Maybe<Scalars['JSON']['output']>;
@@ -661,6 +706,21 @@ export type MediaItem = {
 export type MediaItemFull = {
   absoluteNumber?: Maybe<Scalars['Int']['output']>;
   activeStreamId?: Maybe<Scalars['Int']['output']>;
+  /**
+   * Who is responsible for this item existing, for display next to other
+   * item metadata. `None` for anything with no linked request at all — a
+   * list-plugin auto-add (Trakt/Listrr/mdblist), or an item created via
+   * `discoverItem`, which never creates an `item_requests` row.
+   *
+   * A Seerr-originated request collapses to the fixed label `"Seerr"`
+   * rather than the specific Seerr user who asked for it — that identity
+   * lives in Seerr's own UI, not duplicated here. `item_requests.requested_by`
+   * doubles as that Seerr-requester email *and*, for a request made
+   * directly through riven's own `requestMovie`/`requestShow`/`addItem`
+   * mutations, the riven username that called them — `external_request_id`
+   * (set only by Seerr) is what tells the two apart.
+   */
+  addedBy?: Maybe<Scalars['String']['output']>;
   airedAt?: Maybe<Scalars['NaiveDate']['output']>;
   airedAtUtc?: Maybe<Scalars['DateTime']['output']>;
   aliases?: Maybe<Scalars['JSON']['output']>;
@@ -710,6 +770,21 @@ export type MediaItemFull = {
 export type MediaItemListRow = {
   absoluteNumber?: Maybe<Scalars['Int']['output']>;
   activeStreamId?: Maybe<Scalars['Int']['output']>;
+  /**
+   * Who is responsible for this item existing, for display next to other
+   * item metadata. `None` for anything with no linked request at all — a
+   * list-plugin auto-add (Trakt/Listrr/mdblist), or an item created via
+   * `discoverItem`, which never creates an `item_requests` row.
+   *
+   * A Seerr-originated request collapses to the fixed label `"Seerr"`
+   * rather than the specific Seerr user who asked for it — that identity
+   * lives in Seerr's own UI, not duplicated here. `item_requests.requested_by`
+   * doubles as that Seerr-requester email *and*, for a request made
+   * directly through riven's own `requestMovie`/`requestShow`/`addItem`
+   * mutations, the riven username that called them — `external_request_id`
+   * (set only by Seerr) is what tells the two apart.
+   */
+  addedBy?: Maybe<Scalars['String']['output']>;
   airedAt?: Maybe<Scalars['NaiveDate']['output']>;
   airedAtUtc?: Maybe<Scalars['DateTime']['output']>;
   aliases?: Maybe<Scalars['JSON']['output']>;
@@ -839,6 +914,21 @@ export type MediaMetadata = {
 export type Movie = {
   absoluteNumber?: Maybe<Scalars['Int']['output']>;
   activeStreamId?: Maybe<Scalars['Int']['output']>;
+  /**
+   * Who is responsible for this item existing, for display next to other
+   * item metadata. `None` for anything with no linked request at all — a
+   * list-plugin auto-add (Trakt/Listrr/mdblist), or an item created via
+   * `discoverItem`, which never creates an `item_requests` row.
+   *
+   * A Seerr-originated request collapses to the fixed label `"Seerr"`
+   * rather than the specific Seerr user who asked for it — that identity
+   * lives in Seerr's own UI, not duplicated here. `item_requests.requested_by`
+   * doubles as that Seerr-requester email *and*, for a request made
+   * directly through riven's own `requestMovie`/`requestShow`/`addItem`
+   * mutations, the riven username that called them — `external_request_id`
+   * (set only by Seerr) is what tells the two apart.
+   */
+  addedBy?: Maybe<Scalars['String']['output']>;
   airedAt?: Maybe<Scalars['NaiveDate']['output']>;
   airedAtUtc?: Maybe<Scalars['DateTime']['output']>;
   aliases?: Maybe<Scalars['JSON']['output']>;
@@ -1823,6 +1913,21 @@ export type ScrapeMediaItemMutationResponse = {
 export type Season = {
   absoluteNumber?: Maybe<Scalars['Int']['output']>;
   activeStreamId?: Maybe<Scalars['Int']['output']>;
+  /**
+   * Who is responsible for this item existing, for display next to other
+   * item metadata. `None` for anything with no linked request at all — a
+   * list-plugin auto-add (Trakt/Listrr/mdblist), or an item created via
+   * `discoverItem`, which never creates an `item_requests` row.
+   *
+   * A Seerr-originated request collapses to the fixed label `"Seerr"`
+   * rather than the specific Seerr user who asked for it — that identity
+   * lives in Seerr's own UI, not duplicated here. `item_requests.requested_by`
+   * doubles as that Seerr-requester email *and*, for a request made
+   * directly through riven's own `requestMovie`/`requestShow`/`addItem`
+   * mutations, the riven username that called them — `external_request_id`
+   * (set only by Seerr) is what tells the two apart.
+   */
+  addedBy?: Maybe<Scalars['String']['output']>;
   airedAt?: Maybe<Scalars['NaiveDate']['output']>;
   airedAtUtc?: Maybe<Scalars['DateTime']['output']>;
   aliases?: Maybe<Scalars['JSON']['output']>;
@@ -1884,6 +1989,21 @@ export type SeasonStreamsArgs = {
 export type SeasonFull = {
   absoluteNumber?: Maybe<Scalars['Int']['output']>;
   activeStreamId?: Maybe<Scalars['Int']['output']>;
+  /**
+   * Who is responsible for this item existing, for display next to other
+   * item metadata. `None` for anything with no linked request at all — a
+   * list-plugin auto-add (Trakt/Listrr/mdblist), or an item created via
+   * `discoverItem`, which never creates an `item_requests` row.
+   *
+   * A Seerr-originated request collapses to the fixed label `"Seerr"`
+   * rather than the specific Seerr user who asked for it — that identity
+   * lives in Seerr's own UI, not duplicated here. `item_requests.requested_by`
+   * doubles as that Seerr-requester email *and*, for a request made
+   * directly through riven's own `requestMovie`/`requestShow`/`addItem`
+   * mutations, the riven username that called them — `external_request_id`
+   * (set only by Seerr) is what tells the two apart.
+   */
+  addedBy?: Maybe<Scalars['String']['output']>;
   airedAt?: Maybe<Scalars['NaiveDate']['output']>;
   airedAtUtc?: Maybe<Scalars['DateTime']['output']>;
   aliases?: Maybe<Scalars['JSON']['output']>;
@@ -1982,6 +2102,21 @@ export type SetupGroup = {
 export type Show = {
   absoluteNumber?: Maybe<Scalars['Int']['output']>;
   activeStreamId?: Maybe<Scalars['Int']['output']>;
+  /**
+   * Who is responsible for this item existing, for display next to other
+   * item metadata. `None` for anything with no linked request at all — a
+   * list-plugin auto-add (Trakt/Listrr/mdblist), or an item created via
+   * `discoverItem`, which never creates an `item_requests` row.
+   *
+   * A Seerr-originated request collapses to the fixed label `"Seerr"`
+   * rather than the specific Seerr user who asked for it — that identity
+   * lives in Seerr's own UI, not duplicated here. `item_requests.requested_by`
+   * doubles as that Seerr-requester email *and*, for a request made
+   * directly through riven's own `requestMovie`/`requestShow`/`addItem`
+   * mutations, the riven username that called them — `external_request_id`
+   * (set only by Seerr) is what tells the two apart.
+   */
+  addedBy?: Maybe<Scalars['String']['output']>;
   airedAt?: Maybe<Scalars['NaiveDate']['output']>;
   airedAtUtc?: Maybe<Scalars['DateTime']['output']>;
   aliases?: Maybe<Scalars['JSON']['output']>;
