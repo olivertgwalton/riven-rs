@@ -122,6 +122,7 @@ async fn fetch_list_items(
                 imdb_id: item.imdb_id.clone(),
                 tvdb_id: item.tvdb_id.map(|id| id.to_string()),
                 tmdb_id: item.tmdb_id.map(|id| id.to_string()),
+                requested_by: Some("Listrr".to_string()),
                 ..Default::default()
             });
         }

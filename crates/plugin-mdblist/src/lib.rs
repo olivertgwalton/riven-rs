@@ -101,6 +101,7 @@ async fn fetch_and_build_content(
                 imdb_id: item.imdb_id(),
                 tmdb_id: item.tmdb_id().map(|id| id.to_string()),
                 tvdb_id: item.tvdb_id().map(|id| id.to_string()),
+                requested_by: Some("MDBList".to_string()),
                 ..Default::default()
             });
         }
@@ -120,6 +121,7 @@ async fn fetch_and_build_content(
             content.insert_show(ExternalIds {
                 imdb_id: item.imdb_id(),
                 tvdb_id: item.tvdb_id().map(|id| id.to_string()),
+                requested_by: Some("MDBList".to_string()),
                 ..Default::default()
             });
         }
