@@ -52,3 +52,33 @@ impl Related<super::media_items::Entity> for Entity {
 }
 
 impl ActiveModelBehavior for ActiveModel {}
+
+/// Who is responsible for the item this request is linked to existing —
+/// shared by every GraphQL type that surfaces an `addedBy`-style field
+/// (`media_items::Model` and `riven-api`'s `MediaItemStateTree`), so both the
+/// full item view and the lightweight live-state view resolve it identically
+/// rather than one of them silently drifting from the other. `None` for a
+/// `media_item_id` with no linked request at all — a list-plugin auto-add
+/// with the source-attribution wired up ("Trakt"/"Listrr"/"MDBList" as
+/// `requested_by`) still resolves to a real label; only something with
+/// neither a request row nor a source label falls through to `None`.
+///
+/// A Seerr-originated request (`external_request_id` set) collapses to the
+/// fixed label `"Seerr"` rather than the specific Seerr user who asked for
+/// it — that identity lives in Seerr's own UI, not duplicated here.
+pub async fn resolve_added_by(
+    item_request_id: Option<i64>,
+    db: &sea_orm::DatabaseConnection,
+) -> Result<Option<String>, sea_orm::DbErr> {
+    let Some(item_request_id) = item_request_id else {
+        return Ok(None);
+    };
+    let request = Entity::find_by_id(item_request_id).one(db).await?;
+    Ok(request.and_then(|request| {
+        if request.external_request_id.is_some() {
+            Some("Seerr".to_string())
+        } else {
+            request.requested_by
+        }
+    }))
+}

@@ -394,6 +394,7 @@ impl MediaQuery {
             tvdb_id: item.tvdb_id,
             expected_file_count,
             seasons,
+            item_request_id: item.item_request_id,
         })
     }
 

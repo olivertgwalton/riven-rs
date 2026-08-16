@@ -84,7 +84,7 @@ export type GqlSeasonState = Pick<
 
 export type GqlMediaItemStateTree = Pick<
 	MediaItemStateTree,
-	"id" | "state" | "imdbId" | "tmdbId" | "tvdbId"
+	"id" | "state" | "imdbId" | "tmdbId" | "tvdbId" | "addedBy"
 > & {
 	seasons?: GqlSeasonState[];
 };
@@ -169,7 +169,7 @@ const RAW_MEDIA_ITEM_FULL_FIELDS = `
 `;
 
 const MEDIA_ITEM_STATE_FIELDS = `
-    id state imdbId tmdbId tvdbId
+    id state imdbId tmdbId tvdbId addedBy
     seasons {
         id seasonNumber state isRequested
         episodes {

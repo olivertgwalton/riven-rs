@@ -204,17 +204,9 @@ export type Episode = {
   activeStreamId?: Maybe<Scalars['Int']['output']>;
   /**
    * Who is responsible for this item existing, for display next to other
-   * item metadata. `None` for anything with no linked request at all — a
-   * list-plugin auto-add (Trakt/Listrr/mdblist), or an item created via
-   * `discoverItem`, which never creates an `item_requests` row.
-   *
-   * A Seerr-originated request collapses to the fixed label `"Seerr"`
-   * rather than the specific Seerr user who asked for it — that identity
-   * lives in Seerr's own UI, not duplicated here. `item_requests.requested_by`
-   * doubles as that Seerr-requester email *and*, for a request made
-   * directly through riven's own `requestMovie`/`requestShow`/`addItem`
-   * mutations, the riven username that called them — `external_request_id`
-   * (set only by Seerr) is what tells the two apart.
+   * item metadata. See [`super::item_requests::resolve_added_by`] for the
+   * full rules — `None` only for an item with no linked request at all
+   * (e.g. `discoverItem`, which never creates one).
    */
   addedBy?: Maybe<Scalars['String']['output']>;
   airedAt?: Maybe<Scalars['NaiveDate']['output']>;
@@ -278,17 +270,9 @@ export type EpisodeFull = {
   activeStreamId?: Maybe<Scalars['Int']['output']>;
   /**
    * Who is responsible for this item existing, for display next to other
-   * item metadata. `None` for anything with no linked request at all — a
-   * list-plugin auto-add (Trakt/Listrr/mdblist), or an item created via
-   * `discoverItem`, which never creates an `item_requests` row.
-   *
-   * A Seerr-originated request collapses to the fixed label `"Seerr"`
-   * rather than the specific Seerr user who asked for it — that identity
-   * lives in Seerr's own UI, not duplicated here. `item_requests.requested_by`
-   * doubles as that Seerr-requester email *and*, for a request made
-   * directly through riven's own `requestMovie`/`requestShow`/`addItem`
-   * mutations, the riven username that called them — `external_request_id`
-   * (set only by Seerr) is what tells the two apart.
+   * item metadata. See [`super::item_requests::resolve_added_by`] for the
+   * full rules — `None` only for an item with no linked request at all
+   * (e.g. `discoverItem`, which never creates one).
    */
   addedBy?: Maybe<Scalars['String']['output']>;
   airedAt?: Maybe<Scalars['NaiveDate']['output']>;
@@ -646,17 +630,9 @@ export type MediaItem = {
   activeStreamId?: Maybe<Scalars['Int']['output']>;
   /**
    * Who is responsible for this item existing, for display next to other
-   * item metadata. `None` for anything with no linked request at all — a
-   * list-plugin auto-add (Trakt/Listrr/mdblist), or an item created via
-   * `discoverItem`, which never creates an `item_requests` row.
-   *
-   * A Seerr-originated request collapses to the fixed label `"Seerr"`
-   * rather than the specific Seerr user who asked for it — that identity
-   * lives in Seerr's own UI, not duplicated here. `item_requests.requested_by`
-   * doubles as that Seerr-requester email *and*, for a request made
-   * directly through riven's own `requestMovie`/`requestShow`/`addItem`
-   * mutations, the riven username that called them — `external_request_id`
-   * (set only by Seerr) is what tells the two apart.
+   * item metadata. See [`super::item_requests::resolve_added_by`] for the
+   * full rules — `None` only for an item with no linked request at all
+   * (e.g. `discoverItem`, which never creates one).
    */
   addedBy?: Maybe<Scalars['String']['output']>;
   airedAt?: Maybe<Scalars['NaiveDate']['output']>;
@@ -708,17 +684,9 @@ export type MediaItemFull = {
   activeStreamId?: Maybe<Scalars['Int']['output']>;
   /**
    * Who is responsible for this item existing, for display next to other
-   * item metadata. `None` for anything with no linked request at all — a
-   * list-plugin auto-add (Trakt/Listrr/mdblist), or an item created via
-   * `discoverItem`, which never creates an `item_requests` row.
-   *
-   * A Seerr-originated request collapses to the fixed label `"Seerr"`
-   * rather than the specific Seerr user who asked for it — that identity
-   * lives in Seerr's own UI, not duplicated here. `item_requests.requested_by`
-   * doubles as that Seerr-requester email *and*, for a request made
-   * directly through riven's own `requestMovie`/`requestShow`/`addItem`
-   * mutations, the riven username that called them — `external_request_id`
-   * (set only by Seerr) is what tells the two apart.
+   * item metadata. See [`super::item_requests::resolve_added_by`] for the
+   * full rules — `None` only for an item with no linked request at all
+   * (e.g. `discoverItem`, which never creates one).
    */
   addedBy?: Maybe<Scalars['String']['output']>;
   airedAt?: Maybe<Scalars['NaiveDate']['output']>;
@@ -772,17 +740,9 @@ export type MediaItemListRow = {
   activeStreamId?: Maybe<Scalars['Int']['output']>;
   /**
    * Who is responsible for this item existing, for display next to other
-   * item metadata. `None` for anything with no linked request at all — a
-   * list-plugin auto-add (Trakt/Listrr/mdblist), or an item created via
-   * `discoverItem`, which never creates an `item_requests` row.
-   *
-   * A Seerr-originated request collapses to the fixed label `"Seerr"`
-   * rather than the specific Seerr user who asked for it — that identity
-   * lives in Seerr's own UI, not duplicated here. `item_requests.requested_by`
-   * doubles as that Seerr-requester email *and*, for a request made
-   * directly through riven's own `requestMovie`/`requestShow`/`addItem`
-   * mutations, the riven username that called them — `external_request_id`
-   * (set only by Seerr) is what tells the two apart.
+   * item metadata. See [`super::item_requests::resolve_added_by`] for the
+   * full rules — `None` only for an item with no linked request at all
+   * (e.g. `discoverItem`, which never creates one).
    */
   addedBy?: Maybe<Scalars['String']['output']>;
   airedAt?: Maybe<Scalars['NaiveDate']['output']>;
@@ -849,6 +809,15 @@ export type MediaItemState =
 
 /** Lightweight media state tree used for live state subscriptions. */
 export type MediaItemStateTree = {
+  /**
+   * Mirrors `MediaItem.addedBy` — see
+   * [`riven_core::entities::item_requests::resolve_added_by`] for the
+   * full rules. Kept in sync with the full item view so this page's live
+   * state updates (which use this lightweight type, not `MediaItemFull`)
+   * don't silently drop the field once a subscription push overwrites the
+   * initial full fetch.
+   */
+  addedBy?: Maybe<Scalars['String']['output']>;
   expectedFileCount: Scalars['Int']['output'];
   id: Scalars['Int']['output'];
   imdbId?: Maybe<Scalars['String']['output']>;
@@ -916,17 +885,9 @@ export type Movie = {
   activeStreamId?: Maybe<Scalars['Int']['output']>;
   /**
    * Who is responsible for this item existing, for display next to other
-   * item metadata. `None` for anything with no linked request at all — a
-   * list-plugin auto-add (Trakt/Listrr/mdblist), or an item created via
-   * `discoverItem`, which never creates an `item_requests` row.
-   *
-   * A Seerr-originated request collapses to the fixed label `"Seerr"`
-   * rather than the specific Seerr user who asked for it — that identity
-   * lives in Seerr's own UI, not duplicated here. `item_requests.requested_by`
-   * doubles as that Seerr-requester email *and*, for a request made
-   * directly through riven's own `requestMovie`/`requestShow`/`addItem`
-   * mutations, the riven username that called them — `external_request_id`
-   * (set only by Seerr) is what tells the two apart.
+   * item metadata. See [`super::item_requests::resolve_added_by`] for the
+   * full rules — `None` only for an item with no linked request at all
+   * (e.g. `discoverItem`, which never creates one).
    */
   addedBy?: Maybe<Scalars['String']['output']>;
   airedAt?: Maybe<Scalars['NaiveDate']['output']>;
@@ -1915,17 +1876,9 @@ export type Season = {
   activeStreamId?: Maybe<Scalars['Int']['output']>;
   /**
    * Who is responsible for this item existing, for display next to other
-   * item metadata. `None` for anything with no linked request at all — a
-   * list-plugin auto-add (Trakt/Listrr/mdblist), or an item created via
-   * `discoverItem`, which never creates an `item_requests` row.
-   *
-   * A Seerr-originated request collapses to the fixed label `"Seerr"`
-   * rather than the specific Seerr user who asked for it — that identity
-   * lives in Seerr's own UI, not duplicated here. `item_requests.requested_by`
-   * doubles as that Seerr-requester email *and*, for a request made
-   * directly through riven's own `requestMovie`/`requestShow`/`addItem`
-   * mutations, the riven username that called them — `external_request_id`
-   * (set only by Seerr) is what tells the two apart.
+   * item metadata. See [`super::item_requests::resolve_added_by`] for the
+   * full rules — `None` only for an item with no linked request at all
+   * (e.g. `discoverItem`, which never creates one).
    */
   addedBy?: Maybe<Scalars['String']['output']>;
   airedAt?: Maybe<Scalars['NaiveDate']['output']>;
@@ -1991,17 +1944,9 @@ export type SeasonFull = {
   activeStreamId?: Maybe<Scalars['Int']['output']>;
   /**
    * Who is responsible for this item existing, for display next to other
-   * item metadata. `None` for anything with no linked request at all — a
-   * list-plugin auto-add (Trakt/Listrr/mdblist), or an item created via
-   * `discoverItem`, which never creates an `item_requests` row.
-   *
-   * A Seerr-originated request collapses to the fixed label `"Seerr"`
-   * rather than the specific Seerr user who asked for it — that identity
-   * lives in Seerr's own UI, not duplicated here. `item_requests.requested_by`
-   * doubles as that Seerr-requester email *and*, for a request made
-   * directly through riven's own `requestMovie`/`requestShow`/`addItem`
-   * mutations, the riven username that called them — `external_request_id`
-   * (set only by Seerr) is what tells the two apart.
+   * item metadata. See [`super::item_requests::resolve_added_by`] for the
+   * full rules — `None` only for an item with no linked request at all
+   * (e.g. `discoverItem`, which never creates one).
    */
   addedBy?: Maybe<Scalars['String']['output']>;
   airedAt?: Maybe<Scalars['NaiveDate']['output']>;
@@ -2104,17 +2049,9 @@ export type Show = {
   activeStreamId?: Maybe<Scalars['Int']['output']>;
   /**
    * Who is responsible for this item existing, for display next to other
-   * item metadata. `None` for anything with no linked request at all — a
-   * list-plugin auto-add (Trakt/Listrr/mdblist), or an item created via
-   * `discoverItem`, which never creates an `item_requests` row.
-   *
-   * A Seerr-originated request collapses to the fixed label `"Seerr"`
-   * rather than the specific Seerr user who asked for it — that identity
-   * lives in Seerr's own UI, not duplicated here. `item_requests.requested_by`
-   * doubles as that Seerr-requester email *and*, for a request made
-   * directly through riven's own `requestMovie`/`requestShow`/`addItem`
-   * mutations, the riven username that called them — `external_request_id`
-   * (set only by Seerr) is what tells the two apart.
+   * item metadata. See [`super::item_requests::resolve_added_by`] for the
+   * full rules — `None` only for an item with no linked request at all
+   * (e.g. `discoverItem`, which never creates one).
    */
   addedBy?: Maybe<Scalars['String']['output']>;
   airedAt?: Maybe<Scalars['NaiveDate']['output']>;

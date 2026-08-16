@@ -50,6 +50,7 @@ pub struct SeasonState {
 
 /// Lightweight media state tree used for live state subscriptions.
 #[derive(SimpleObject)]
+#[graphql(complex)]
 pub struct MediaItemStateTree {
     pub id: i64,
     pub state: MediaItemState,
@@ -58,6 +59,28 @@ pub struct MediaItemStateTree {
     pub tvdb_id: Option<String>,
     pub expected_file_count: i64,
     pub seasons: Vec<SeasonState>,
+    /// Not exposed directly — resolved through [`Self::added_by`], the same
+    /// as `media_items::Model` does for the full item view. This type has no
+    /// other link back to `MediaItem`, so the id has to travel with it.
+    #[graphql(skip)]
+    pub item_request_id: Option<i64>,
+}
+
+#[async_graphql::ComplexObject]
+impl MediaItemStateTree {
+    /// Mirrors `MediaItem.addedBy` — see
+    /// [`riven_core::entities::item_requests::resolve_added_by`] for the
+    /// full rules. Kept in sync with the full item view so this page's live
+    /// state updates (which use this lightweight type, not `MediaItemFull`)
+    /// don't silently drop the field once a subscription push overwrites the
+    /// initial full fetch.
+    async fn added_by(
+        &self,
+        ctx: &async_graphql::Context<'_>,
+    ) -> async_graphql::Result<Option<String>> {
+        let db = ctx.data::<sea_orm::DatabaseConnection>()?;
+        Ok(riven_core::entities::item_requests::resolve_added_by(self.item_request_id, db).await?)
+    }
 }
 
 /// Minimal per-item library status: just enough to render a "Request" vs

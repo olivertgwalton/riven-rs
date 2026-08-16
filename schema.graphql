@@ -237,17 +237,9 @@ type Episode {
 	posterPath: String
 	"""
 	Who is responsible for this item existing, for display next to other
-	item metadata. `None` for anything with no linked request at all — a
-	list-plugin auto-add (Trakt/Listrr/mdblist), or an item created via
-	`discoverItem`, which never creates an `item_requests` row.
-	
-	A Seerr-originated request collapses to the fixed label `"Seerr"`
-	rather than the specific Seerr user who asked for it — that identity
-	lives in Seerr's own UI, not duplicated here. `item_requests.requested_by`
-	doubles as that Seerr-requester email *and*, for a request made
-	directly through riven's own `requestMovie`/`requestShow`/`addItem`
-	mutations, the riven username that called them — `external_request_id`
-	(set only by Seerr) is what tells the two apart.
+	item metadata. See [`super::item_requests::resolve_added_by`] for the
+	full rules — `None` only for an item with no linked request at all
+	(e.g. `discoverItem`, which never creates one).
 	"""
 	addedBy: String
 	streams(infoHashes: [String!]): [Stream!]!
@@ -314,17 +306,9 @@ type EpisodeFull {
 	posterPath: String
 	"""
 	Who is responsible for this item existing, for display next to other
-	item metadata. `None` for anything with no linked request at all — a
-	list-plugin auto-add (Trakt/Listrr/mdblist), or an item created via
-	`discoverItem`, which never creates an `item_requests` row.
-	
-	A Seerr-originated request collapses to the fixed label `"Seerr"`
-	rather than the specific Seerr user who asked for it — that identity
-	lives in Seerr's own UI, not duplicated here. `item_requests.requested_by`
-	doubles as that Seerr-requester email *and*, for a request made
-	directly through riven's own `requestMovie`/`requestShow`/`addItem`
-	mutations, the riven username that called them — `external_request_id`
-	(set only by Seerr) is what tells the two apart.
+	item metadata. See [`super::item_requests::resolve_added_by`] for the
+	full rules — `None` only for an item with no linked request at all
+	(e.g. `discoverItem`, which never creates one).
 	"""
 	addedBy: String
 	filesystemEntry: FileSystemEntry
@@ -728,17 +712,9 @@ type MediaItem {
 	posterPath: String
 	"""
 	Who is responsible for this item existing, for display next to other
-	item metadata. `None` for anything with no linked request at all — a
-	list-plugin auto-add (Trakt/Listrr/mdblist), or an item created via
-	`discoverItem`, which never creates an `item_requests` row.
-	
-	A Seerr-originated request collapses to the fixed label `"Seerr"`
-	rather than the specific Seerr user who asked for it — that identity
-	lives in Seerr's own UI, not duplicated here. `item_requests.requested_by`
-	doubles as that Seerr-requester email *and*, for a request made
-	directly through riven's own `requestMovie`/`requestShow`/`addItem`
-	mutations, the riven username that called them — `external_request_id`
-	(set only by Seerr) is what tells the two apart.
+	item metadata. See [`super::item_requests::resolve_added_by`] for the
+	full rules — `None` only for an item with no linked request at all
+	(e.g. `discoverItem`, which never creates one).
 	"""
 	addedBy: String
 }
@@ -792,17 +768,9 @@ type MediaItemFull {
 	posterPath: String
 	"""
 	Who is responsible for this item existing, for display next to other
-	item metadata. `None` for anything with no linked request at all — a
-	list-plugin auto-add (Trakt/Listrr/mdblist), or an item created via
-	`discoverItem`, which never creates an `item_requests` row.
-	
-	A Seerr-originated request collapses to the fixed label `"Seerr"`
-	rather than the specific Seerr user who asked for it — that identity
-	lives in Seerr's own UI, not duplicated here. `item_requests.requested_by`
-	doubles as that Seerr-requester email *and*, for a request made
-	directly through riven's own `requestMovie`/`requestShow`/`addItem`
-	mutations, the riven username that called them — `external_request_id`
-	(set only by Seerr) is what tells the two apart.
+	item metadata. See [`super::item_requests::resolve_added_by`] for the
+	full rules — `None` only for an item with no linked request at all
+	(e.g. `discoverItem`, which never creates one).
 	"""
 	addedBy: String
 	filesystemEntry: FileSystemEntry
@@ -856,17 +824,9 @@ type MediaItemListRow {
 	posterPath: String
 	"""
 	Who is responsible for this item existing, for display next to other
-	item metadata. `None` for anything with no linked request at all — a
-	list-plugin auto-add (Trakt/Listrr/mdblist), or an item created via
-	`discoverItem`, which never creates an `item_requests` row.
-	
-	A Seerr-originated request collapses to the fixed label `"Seerr"`
-	rather than the specific Seerr user who asked for it — that identity
-	lives in Seerr's own UI, not duplicated here. `item_requests.requested_by`
-	doubles as that Seerr-requester email *and*, for a request made
-	directly through riven's own `requestMovie`/`requestShow`/`addItem`
-	mutations, the riven username that called them — `external_request_id`
-	(set only by Seerr) is what tells the two apart.
+	item metadata. See [`super::item_requests::resolve_added_by`] for the
+	full rules — `None` only for an item with no linked request at all
+	(e.g. `discoverItem`, which never creates one).
 	"""
 	addedBy: String
 	showId: Int
@@ -902,6 +862,15 @@ type MediaItemStateTree {
 	tvdbId: String
 	expectedFileCount: Int!
 	seasons: [SeasonState!]!
+	"""
+	Mirrors `MediaItem.addedBy` — see
+	[`riven_core::entities::item_requests::resolve_added_by`] for the
+	full rules. Kept in sync with the full item view so this page's live
+	state updates (which use this lightweight type, not `MediaItemFull`)
+	don't silently drop the field once a subscription push overwrites the
+	initial full fetch.
+	"""
+	addedBy: String
 }
 
 """
@@ -1008,17 +977,9 @@ type Movie {
 	posterPath: String
 	"""
 	Who is responsible for this item existing, for display next to other
-	item metadata. `None` for anything with no linked request at all — a
-	list-plugin auto-add (Trakt/Listrr/mdblist), or an item created via
-	`discoverItem`, which never creates an `item_requests` row.
-	
-	A Seerr-originated request collapses to the fixed label `"Seerr"`
-	rather than the specific Seerr user who asked for it — that identity
-	lives in Seerr's own UI, not duplicated here. `item_requests.requested_by`
-	doubles as that Seerr-requester email *and*, for a request made
-	directly through riven's own `requestMovie`/`requestShow`/`addItem`
-	mutations, the riven username that called them — `external_request_id`
-	(set only by Seerr) is what tells the two apart.
+	item metadata. See [`super::item_requests::resolve_added_by`] for the
+	full rules — `None` only for an item with no linked request at all
+	(e.g. `discoverItem`, which never creates one).
 	"""
 	addedBy: String
 	streams(infoHashes: [String!]): [Stream!]!
@@ -1689,17 +1650,9 @@ type Season {
 	posterPath: String
 	"""
 	Who is responsible for this item existing, for display next to other
-	item metadata. `None` for anything with no linked request at all — a
-	list-plugin auto-add (Trakt/Listrr/mdblist), or an item created via
-	`discoverItem`, which never creates an `item_requests` row.
-	
-	A Seerr-originated request collapses to the fixed label `"Seerr"`
-	rather than the specific Seerr user who asked for it — that identity
-	lives in Seerr's own UI, not duplicated here. `item_requests.requested_by`
-	doubles as that Seerr-requester email *and*, for a request made
-	directly through riven's own `requestMovie`/`requestShow`/`addItem`
-	mutations, the riven username that called them — `external_request_id`
-	(set only by Seerr) is what tells the two apart.
+	item metadata. See [`super::item_requests::resolve_added_by`] for the
+	full rules — `None` only for an item with no linked request at all
+	(e.g. `discoverItem`, which never creates one).
 	"""
 	addedBy: String
 	streams(infoHashes: [String!]): [Stream!]!
@@ -1770,17 +1723,9 @@ type SeasonFull {
 	posterPath: String
 	"""
 	Who is responsible for this item existing, for display next to other
-	item metadata. `None` for anything with no linked request at all — a
-	list-plugin auto-add (Trakt/Listrr/mdblist), or an item created via
-	`discoverItem`, which never creates an `item_requests` row.
-	
-	A Seerr-originated request collapses to the fixed label `"Seerr"`
-	rather than the specific Seerr user who asked for it — that identity
-	lives in Seerr's own UI, not duplicated here. `item_requests.requested_by`
-	doubles as that Seerr-requester email *and*, for a request made
-	directly through riven's own `requestMovie`/`requestShow`/`addItem`
-	mutations, the riven username that called them — `external_request_id`
-	(set only by Seerr) is what tells the two apart.
+	item metadata. See [`super::item_requests::resolve_added_by`] for the
+	full rules — `None` only for an item with no linked request at all
+	(e.g. `discoverItem`, which never creates one).
 	"""
 	addedBy: String
 	episodes: [EpisodeFull!]!
@@ -1897,17 +1842,9 @@ type Show {
 	posterPath: String
 	"""
 	Who is responsible for this item existing, for display next to other
-	item metadata. `None` for anything with no linked request at all — a
-	list-plugin auto-add (Trakt/Listrr/mdblist), or an item created via
-	`discoverItem`, which never creates an `item_requests` row.
-	
-	A Seerr-originated request collapses to the fixed label `"Seerr"`
-	rather than the specific Seerr user who asked for it — that identity
-	lives in Seerr's own UI, not duplicated here. `item_requests.requested_by`
-	doubles as that Seerr-requester email *and*, for a request made
-	directly through riven's own `requestMovie`/`requestShow`/`addItem`
-	mutations, the riven username that called them — `external_request_id`
-	(set only by Seerr) is what tells the two apart.
+	item metadata. See [`super::item_requests::resolve_added_by`] for the
+	full rules — `None` only for an item with no linked request at all
+	(e.g. `discoverItem`, which never creates one).
 	"""
 	addedBy: String
 	streams(infoHashes: [String!]): [Stream!]!
