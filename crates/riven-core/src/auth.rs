@@ -96,7 +96,18 @@ pub struct RequestAuth {
     /// for this account, see `sidebar.svelte`/`user-management.svelte`).
     /// `None` for a trusted-API-key caller, which has no user behind it, or
     /// for the rare account with neither field set.
+    ///
+    /// `None` alone doesn't say *why* — that's [`Self::is_trusted_api_key`].
+    /// A caller that wants to fall back to some other source of identity
+    /// (e.g. a caller-supplied string) only when there's no session at all
+    /// must check that flag first: treating "no username" as "no session"
+    /// would let a signed-in user with an unset username masquerade as
+    /// whatever identity they supply themselves.
     pub username: Option<String>,
+    /// Whether this request authenticated via the configured API key rather
+    /// than a real session. See [`Self::username`]'s doc for why this needs
+    /// to be checked separately from it being `None`.
+    pub is_trusted_api_key: bool,
 }
 
 impl RequestAuth {
@@ -104,6 +115,7 @@ impl RequestAuth {
         Self {
             role: UserRole::Admin,
             username: None,
+            is_trusted_api_key: true,
         }
     }
 }

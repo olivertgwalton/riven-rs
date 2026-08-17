@@ -66,15 +66,28 @@ pub(super) struct RequestItemsResult {
     updated_items: Vec<ItemRequest>,
 }
 
-/// The signed-in riven user who is requesting, if any — always preferred
-/// over a caller-supplied `requested_by` on the input, which exists for
-/// non-interactive callers (an API-key-authenticated integration) that have
-/// no riven session to draw an identity from. A signed-in user's own
-/// requests must attribute to *them*, not to whatever string the client
-/// happened to send — trusting the input here would let one riven user's
-/// request be misattributed to another by simply setting the field.
-fn session_requester(ctx: &Context<'_>) -> Result<Option<String>> {
-    Ok(ctx.data::<RequestAuth>()?.username.clone())
+/// The requester to record for a direct riven request: the signed-in
+/// user's own identity when there is one, the caller-supplied
+/// `requested_by` only for a trusted-API-key caller (a non-interactive
+/// integration, which has no session identity to draw from at all), and
+/// `None` otherwise.
+///
+/// The API-key fallback must never apply to a *session*-authenticated call,
+/// even one whose account happens to have no `username`/`display_username`
+/// set (`RequestAuth::username` is `None` for both cases, which is why this
+/// checks `is_trusted_api_key` explicitly rather than treating "no
+/// username" as "no session"): a signed-in user must never be able to
+/// attribute their own request to an arbitrary string just by leaving both
+/// name fields unset — that defeats the whole point of preferring the
+/// session identity over caller input in the first place.
+fn resolve_requester(auth: &RequestAuth, input_requested_by: Option<&str>) -> Option<String> {
+    if let Some(username) = &auth.username {
+        return Some(username.clone());
+    }
+    if auth.is_trusted_api_key {
+        return input_requested_by.map(str::to_owned);
+    }
+    None
 }
 
 #[derive(Default)]
@@ -94,7 +107,8 @@ impl ItemRequestMutations {
     ) -> Result<RequestItemMutationResponse> {
         require(ctx, Capability::RequestItems)?;
         let job_queue = ctx.data::<Arc<JobQueue>>()?;
-        let requested_by = session_requester(ctx)?.or_else(|| input.requested_by.clone());
+        let requested_by =
+            resolve_requester(ctx.data::<RequestAuth>()?, input.requested_by.as_deref());
         let outcome = match upsert_requested_movie(
             &input.title,
             input.imdb_id.as_deref(),
@@ -151,7 +165,8 @@ impl ItemRequestMutations {
     ) -> Result<RequestItemMutationResponse> {
         require(ctx, Capability::RequestItems)?;
         let job_queue = ctx.data::<Arc<JobQueue>>()?;
-        let requested_by = session_requester(ctx)?.or_else(|| input.requested_by.clone());
+        let requested_by =
+            resolve_requester(ctx.data::<RequestAuth>()?, input.requested_by.as_deref());
         let outcome = match upsert_requested_show(
             &input.title,
             input.imdb_id.as_deref(),
@@ -226,7 +241,7 @@ impl ItemRequestMutations {
     ) -> Result<RequestItemsResult> {
         require(ctx, Capability::RequestItems)?;
         let job_queue = ctx.data::<Arc<JobQueue>>()?;
-        let requester = session_requester(ctx)?;
+        let auth = ctx.data::<RequestAuth>()?;
         let mut seen: HashSet<String> = HashSet::new();
         let mut new_items: Vec<ItemRequest> = Vec::new();
         let mut updated_items: Vec<ItemRequest> = Vec::new();
@@ -247,7 +262,7 @@ impl ItemRequestMutations {
 
             count += 1;
 
-            let requested_by = requester.clone().or_else(|| movie.requested_by.clone());
+            let requested_by = resolve_requester(auth, movie.requested_by.as_deref());
             let outcome = upsert_requested_movie(
                 &movie.title,
                 movie.imdb_id.as_deref(),
@@ -292,7 +307,7 @@ impl ItemRequestMutations {
 
             let seasons = show.seasons.as_deref();
 
-            let requested_by = requester.clone().or_else(|| show.requested_by.clone());
+            let requested_by = resolve_requester(auth, show.requested_by.as_deref());
             let outcome = upsert_requested_show(
                 &show.title,
                 show.imdb_id.as_deref(),

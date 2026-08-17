@@ -154,6 +154,7 @@ async fn session_auth(
                 .display_username
                 .clone()
                 .or_else(|| user.username.clone()),
+            is_trusted_api_key: false,
         })),
     }
 }
