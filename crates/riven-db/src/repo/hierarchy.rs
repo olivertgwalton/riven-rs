@@ -346,11 +346,17 @@ pub async fn create_episode(
     let now = Utc::now();
     let default_title = format!("Episode {number:02}");
     let title_str = title.unwrap_or(&default_title);
+    // An episode with no air date is unreleased, not indexed: TVDB lists
+    // announced-but-unscheduled episodes as TBA with a null date, and treating
+    // those as aired puts them straight into the scrape loop for a file nobody
+    // has posted. The reindex fallback (`unknown_air_date_offset_days`) keeps
+    // checking back, and the `ON CONFLICT` below flips them to `indexed` as
+    // soon as a real date lands and passes.
     let state = match aired_at_utc
         .or_else(|| aired_at.map(|d| d.and_hms_opt(0, 0, 0).expect("midnight is valid").and_utc()))
     {
-        Some(dt) if dt > now => MediaItemState::Unreleased,
-        _ => MediaItemState::Indexed,
+        Some(dt) if dt <= now => MediaItemState::Indexed,
+        _ => MediaItemState::Unreleased,
     };
     let state_text = match state {
         MediaItemState::Unreleased => "unreleased",

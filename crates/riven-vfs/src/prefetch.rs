@@ -88,6 +88,10 @@ const RETAIN_BEHIND_UNITS: u64 = 2;
 /// and back without refetching, while a file's worth of abandoned windows can
 /// never accumulate behind one open handle.
 const ABANDONED_WINDOWS: usize = 3;
+/// Consecutive backward out-of-window reads that must arrive before one is
+/// believed to be a seek rather than a probe. See
+/// [`Actor::deflect_backward_probe`].
+const BACKWARD_PROBES_BEFORE_REPOINT: usize = 3;
 const MIN_TAIL_PROBE: u64 = 16 * 1024;
 const MAX_TAIL_PROBE: u64 = 10 * MIB;
 /// The one read-ahead cache: every open file, both origins, one budget. Its hit
@@ -226,6 +230,9 @@ struct Direct {
     id: u64,
     request: ReadRequest,
     result: io::Result<Bytes>,
+    /// Whole units the fetch covered, ready for the shared cache. Empty on the
+    /// unaligned path, which serves bytes and keeps none.
+    units: Vec<(u64, Bytes)>,
 }
 
 /// One open network file. Dropping it closes the command channel; the actor
@@ -253,6 +260,7 @@ impl Prefetcher {
                 direct_tx,
                 cursor: 0,
                 resets: 0,
+                backward_probes: 0,
                 file,
                 cache: shared_unit_cache(),
                 active: BTreeMap::new(),
@@ -302,6 +310,9 @@ struct Actor {
     direct_tx: mpsc::UnboundedSender<Direct>,
     cursor: u64,
     resets: u64,
+    /// Consecutive backward out-of-window reads served without moving the
+    /// window. Cleared by any read the window itself serves.
+    backward_probes: usize,
     /// Which file this actor's units belong to in the shared cache.
     file: FileKey,
     cache: &'static UnitCache,
@@ -416,9 +427,18 @@ impl Actor {
         self.source.report_position(request.start);
 
         if self.is_tail_probe(&request) {
-            // Bypasses the cache for the origin, so it costs what a miss costs.
+            // Served here rather than by falling through, because the hit path
+            // below runs through `finish` — and `finish` advances the cursor,
+            // which for the one read that is always at the far end of the file
+            // would jam the window against EOF. That is why this branch comes
+            // before the cache lookup at all; it needs its own.
+            if let Some(data) = self.read_cached(request.start, request.len) {
+                self.cache.record(true);
+                request.respond(Ok(data));
+                return;
+            }
             self.cache.record(false);
-            self.spawn_direct(request);
+            self.serve_off_window(request);
             return;
         }
 
@@ -431,6 +451,10 @@ impl Actor {
         self.cache.record(false);
 
         if !self.in_current_window(&request) {
+            if self.deflect_backward_probe(&request) {
+                self.serve_off_window(request);
+                return;
+            }
             self.reset(request.start);
         }
 
@@ -472,13 +496,68 @@ impl Actor {
 
     fn on_direct(&mut self, direct: Direct) {
         self.direct_active.remove(&direct.id);
+        // Published to the shared cache but deliberately *not* recorded in
+        // `held`. `held` is what this stream's window owns and what
+        // `trim_to_window` is entitled to evict — and it would evict these
+        // first, since a probe's units are the furthest thing from the cursor
+        // there is. Leaving them out means their lifetime is the shared LRU's
+        // ceiling instead: they survive until some other file needs the room,
+        // which is exactly how long a probe's bytes are worth keeping.
+        for (start, bytes) in direct.units {
+            let weight = bytes.len() as u64;
+            self.cache.put(self.key(start), bytes, weight);
+        }
         direct.request.respond(direct.result);
     }
 
-    /// Repoint this handle's window after a seek or a probe. Fills already on
-    /// the wire keep running and their bytes stay in the shared [`UnitCache`],
-    /// so a backward read or a probe never throws away work another handle —
-    /// or this one, a moment later — still needs. The cache's own LRU bound
+    /// Whether to serve this out-of-window read without moving the window —
+    /// a player probing backwards rather than seeking there.
+    ///
+    /// A backward read is nearly always a probe: an mkv SeekHead, an mp4 moov,
+    /// an index re-read. Letting one repoint the window is a real stall.
+    /// [`Actor::reset`] moves the cursor wherever it is told, so a probe at
+    /// offset 0 during playback at 5 GB dropped the cursor to 0 — and the
+    /// [`Actor::dispatch`] that follows the probe's own fill then spent every
+    /// slot [`Config::max_in_flight`] allows on units at the wrong end of the
+    /// file, while the cushion the player was draining stopped advancing. The
+    /// bytes always survived it, since [`Actor::trim_to_window`] keeps what is
+    /// ahead of the cursor; the wire did not.
+    ///
+    /// Forward reads are left alone. Out there, out-of-window means a seek,
+    /// and repointing at once is what makes one fast — only the backward
+    /// direction is ambiguous enough to be worth waiting out. altmount arrives
+    /// at the same place from the other side, with a blanket `ephemeralStreak`
+    /// over every non-sequential read (`metadata_remote_file.go`); splitting
+    /// the directions costs a forward seek nothing.
+    ///
+    /// [`BACKWARD_PROBES_BEFORE_REPOINT`] is kept at altmount's 3 rather than
+    /// the 2 that would cover the single-probe case, because the error is
+    /// asymmetric: guessing high costs one extra round trip on a rewind,
+    /// guessing low leaves the stall in place under a burst of probes.
+    fn deflect_backward_probe(&mut self, request: &ReadRequest) -> bool {
+        // The whole request behind the cursor, so a read straddling it — which
+        // is playback, not a probe — can never be mistaken for one.
+        if request.end() > self.cursor {
+            return false;
+        }
+        self.backward_probes += 1;
+        if self.backward_probes >= BACKWARD_PROBES_BEFORE_REPOINT {
+            return false;
+        }
+        tracing::debug!(
+            target: "streaming",
+            cursor = self.cursor,
+            probe = request.start,
+            consecutive = self.backward_probes,
+            "serving a backward probe without repointing the window"
+        );
+        true
+    }
+
+    /// Repoint this handle's window after a seek. Fills already on the wire
+    /// keep running and their bytes stay in the shared [`UnitCache`], so a
+    /// backward read or a probe never throws away work another handle — or
+    /// this one, a moment later — still needs. The cache's own LRU bound
     /// reclaims what nothing reads again.
     ///
     /// Logged because a reset means this window starts over. It is no longer
@@ -502,6 +581,7 @@ impl Actor {
             self.spawn_direct(request);
         }
         self.cursor = position;
+        self.backward_probes = 0;
         self.trim_to_window();
     }
 
@@ -574,6 +654,78 @@ impl Actor {
         self.active.insert(start, task);
     }
 
+    /// Serve a read the window is not going to follow.
+    ///
+    /// Probe-sized reads are rounded out to whole units and kept, because the
+    /// reads that land here are the ones a player repeats: the moov atom it
+    /// re-reads on every seek, the Cues at the end of an mkv, the header it
+    /// checks again mid-playback. Each of those used to pay the wire every
+    /// time — [`Actor::spawn_direct`] replies with the bytes and drops them —
+    /// even though the units around them are exactly what the shared cache is
+    /// for.
+    ///
+    /// Anything wider than one cushion keeps the old behaviour. Rounding out a
+    /// range that large would publish an unbounded number of units on behalf of
+    /// a read nothing is going to repeat, which is the HTTP bridge asking for a
+    /// whole file, not a player probing.
+    fn serve_off_window(&mut self, request: ReadRequest) {
+        if self.unit_count(request.start, request.end()) <= self.config.window_units() {
+            self.spawn_probe(request);
+        } else {
+            self.spawn_direct(request);
+        }
+    }
+
+    /// Fetch the units a probe spans, publish them, and slice the reply out.
+    ///
+    /// The alignment costs at most a unit of over-read at each end. On the
+    /// article origin that is free — a segment is fetched and decoded whole
+    /// however few of its bytes were asked for — and on the HTTP origin it is
+    /// the same 1 MiB unit every windowed read already imposes.
+    fn spawn_probe(&mut self, request: ReadRequest) {
+        let unit = self.config.unit;
+        let first = self.config.unit_start(request.start);
+        let last = self.config.unit_start(request.end().saturating_sub(1));
+        let end = last.saturating_add(unit).min(self.size);
+        let source = self.source.clone();
+        let sender = self.direct_tx.clone();
+        let size = self.size;
+        let id = self.next_direct_id;
+        self.next_direct_id = self.next_direct_id.wrapping_add(1);
+        let task = tokio::spawn(async move {
+            let span = read_exact(source, size, first, (end - first) as usize).await;
+            let (result, units) = match span {
+                Ok(bytes) => {
+                    let mut units = Vec::new();
+                    let mut start = first;
+                    while start < end {
+                        let lo = (start - first) as usize;
+                        let hi = (lo + unit as usize).min(bytes.len());
+                        if lo >= hi {
+                            break;
+                        }
+                        units.push((start, bytes.slice(lo..hi)));
+                        start = start.saturating_add(unit);
+                    }
+                    let offset = (request.start - first) as usize;
+                    let take = request.len.min(bytes.len().saturating_sub(offset));
+                    (Ok(bytes.slice(offset..offset + take)), units)
+                }
+                Err(error) => (Err(error), Vec::new()),
+            };
+            drop(sender.send(Direct {
+                id,
+                request,
+                result,
+                units,
+            }));
+        });
+        self.direct_active.insert(id, task);
+    }
+
+    /// Serve a read as the bytes it asked for and nothing more. For ranges the
+    /// window will not follow *and* no one will repeat — see
+    /// [`Actor::serve_off_window`].
     fn spawn_direct(&mut self, request: ReadRequest) {
         let source = self.source.clone();
         let sender = self.direct_tx.clone();
@@ -586,6 +738,7 @@ impl Actor {
                 id,
                 request,
                 result,
+                units: Vec::new(),
             }));
         });
         self.direct_active.insert(id, task);
@@ -605,6 +758,9 @@ impl Actor {
 
     fn finish(&mut self, request: ReadRequest, data: Bytes) {
         self.cursor = self.cursor.max(request.start + data.len() as u64);
+        // The window served this one, so whatever probing came before it is
+        // over: a later backward read starts a fresh run.
+        self.backward_probes = 0;
         self.trim_to_window();
         request.respond(Ok(data));
     }
@@ -1077,6 +1233,110 @@ mod tests {
         prefetcher.read(5_000, 50).await.unwrap();
         tokio::task::yield_now().await;
         assert_eq!(source.call_count(), settled);
+    }
+
+    /// A probe's bytes are worth keeping: players re-read the same header and
+    /// the same tail. Before this, every repeat went back to the origin,
+    /// because the direct path replied with the bytes and dropped them.
+    #[tokio::test]
+    async fn a_repeated_backward_probe_is_served_from_cache() {
+        let source = Source::new(100_000, 100);
+        let prefetcher = reader(source.clone());
+
+        prefetcher.read(5_000, 50).await.unwrap();
+        wait_until_settled(&source).await;
+
+        prefetcher.read(0, 50).await.unwrap();
+        wait_until_settled(&source).await;
+        let settled = source.call_count();
+
+        prefetcher.read(0, 50).await.unwrap();
+        tokio::task::yield_now().await;
+        assert_eq!(source.call_count(), settled, "a repeated probe refetched");
+    }
+
+    /// The tail is checked before the cache is consulted, because serving it
+    /// through `finish` would drag the cursor to EOF. It still has to be a hit
+    /// on the second look.
+    #[tokio::test]
+    async fn a_repeated_tail_probe_is_served_from_cache() {
+        let source = Source::new(1_000_000, 100_000);
+        let prefetcher = reader(source.clone());
+
+        prefetcher.read(990_000, 50).await.unwrap();
+        wait_until_settled(&source).await;
+        let settled = source.call_count();
+
+        prefetcher.read(990_000, 50).await.unwrap();
+        tokio::task::yield_now().await;
+        assert_eq!(
+            source.call_count(),
+            settled,
+            "a repeated tail probe refetched"
+        );
+
+        let after = prefetcher.snapshot().await;
+        assert!(
+            after.cursor < 900_000,
+            "a tail probe dragged the window to EOF: cursor at {}",
+            after.cursor
+        );
+    }
+
+    /// The other half of the probe guarantee: the bytes surviving is not
+    /// enough if the wire spends a whole window fetching the probe's end of
+    /// the file. Before this, `reset` moved the cursor to 0 and the dispatch
+    /// after the probe's fill drained `max_in_flight` there.
+    #[tokio::test]
+    async fn a_backward_probe_does_not_repoint_the_window() {
+        let source = Source::new(100_000, 100);
+        let prefetcher = reader(source.clone());
+
+        prefetcher.read(5_000, 50).await.unwrap();
+        wait_until_settled(&source).await;
+        let settled = source.call_count();
+
+        prefetcher.read(0, 50).await.unwrap();
+        wait_until_settled(&source).await;
+
+        assert_eq!(
+            source.call_count() - settled,
+            1,
+            "a backward probe should cost its own read and nothing else"
+        );
+        let after = prefetcher.snapshot().await;
+        assert!(
+            after.cursor >= 5_000,
+            "the window followed a probe backwards: cursor at {}",
+            after.cursor
+        );
+    }
+
+    /// A player that really is reading backwards must still be followed —
+    /// the deflection is a delay, not a refusal.
+    ///
+    /// The reads are a unit apart on purpose. Probes land in the shared cache
+    /// now, so several reads inside one unit are one wire fetch and one
+    /// deflection; it takes distinct units to make a run the counter can see.
+    #[tokio::test]
+    async fn a_sustained_backward_read_still_repoints_the_window() {
+        let source = Source::new(100_000, 100);
+        let prefetcher = reader(source.clone());
+
+        prefetcher.read(50_000, 50).await.unwrap();
+        wait_until_settled(&source).await;
+
+        for i in 0..BACKWARD_PROBES_BEFORE_REPOINT as u64 {
+            prefetcher.read(i * 1_000, 50).await.unwrap();
+        }
+        wait_until_settled(&source).await;
+
+        let after = prefetcher.snapshot().await;
+        assert!(
+            after.cursor < 50_000,
+            "the window never followed a sustained backward read: cursor at {}",
+            after.cursor
+        );
     }
 
     #[tokio::test]

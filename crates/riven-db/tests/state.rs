@@ -227,6 +227,7 @@ fn leaf(
         item_type,
         state,
         is_unreleased,
+        true,
         failed_attempts,
         has_media_entry,
         false,
@@ -246,6 +247,7 @@ fn leaf_missing_profile(
         item_type,
         state,
         false,
+        true,
         failed_attempts,
         true,
         true,
@@ -392,6 +394,7 @@ fn leaf_without_a_file_ignores_profile_coverage() {
             MediaItemType::Episode,
             Indexed,
             false,
+            true,
             0,
             false,
             true,
@@ -399,5 +402,65 @@ fn leaf_without_a_file_ignores_profile_coverage() {
             0
         ),
         Scraped
+    );
+}
+
+/// An episode metadata has no date for at all has not been scheduled, let alone
+/// released: `TBA` rows must not enter the scrape loop.
+#[test]
+fn leaf_missing_air_date_is_unreleased() {
+    assert_eq!(
+        leaf_state(
+            MediaItemType::Episode,
+            Indexed,
+            false,
+            false,
+            17,
+            false,
+            false,
+            false,
+            0,
+        ),
+        Unreleased
+    );
+}
+
+/// ...but a file on disk outranks the missing date: metadata gaps are common
+/// for old episodes that plainly did air.
+#[test]
+fn leaf_missing_air_date_yields_to_a_real_file() {
+    assert_eq!(
+        leaf_state(
+            MediaItemType::Episode,
+            Completed,
+            false,
+            false,
+            0,
+            true,
+            false,
+            false,
+            0,
+        ),
+        Completed
+    );
+}
+
+/// A show or season without a date derives its state from its children; only
+/// leaves read a missing date as unreleased.
+#[test]
+fn leaf_missing_air_date_does_not_touch_containers() {
+    assert_eq!(
+        leaf_state(
+            MediaItemType::Show,
+            Indexed,
+            false,
+            false,
+            0,
+            false,
+            false,
+            false,
+            0,
+        ),
+        Indexed
     );
 }

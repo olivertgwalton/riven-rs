@@ -126,6 +126,7 @@ struct ItemFacts {
     show_status: Option<ShowStatus>,
     parent_id: Option<i64>,
     is_unreleased: bool,
+    has_air_date: bool,
     failed_attempts: i32,
     has_media_entry: bool,
     missing_enabled_profile: bool,
@@ -145,6 +146,7 @@ async fn load_item_facts(item_id: i64) -> Result<Option<ItemFacts>> {
               m.parent_id,
               m.failed_attempts,
               (m.aired_at IS NOT NULL AND m.aired_at > CURRENT_DATE) AS is_unreleased,
+              (m.aired_at IS NOT NULL) AS has_air_date,
               EXISTS(
                   SELECT 1 FROM filesystem_entries fe
                   WHERE fe.media_item_id = m.id AND fe.entry_type = 'media'
@@ -201,10 +203,11 @@ async fn load_child_states(
 
 /// Apply the leaf-state rules. Pure so it can be unit-tested without a DB.
 ///
-/// Order matters: `Unreleased` (aired_at in the future) wins over everything,
+/// Order matters: `Unreleased` (a future air date) wins over everything,
 /// then sticky `Paused`, then media-entry existence (movies / episodes only),
-/// then sticky `Failed`, then the attempts ceiling, then any non-blacklisted
-/// stream. Default is `Indexed`.
+/// then a missing air date (movies / episodes only), then sticky `Failed`,
+/// then the attempts ceiling, then any non-blacklisted stream. Default is
+/// `Indexed`.
 ///
 /// `Failed` is sticky against everything *except* a real media entry: a
 /// season-pack download matches files by season+episode number regardless of
@@ -217,10 +220,18 @@ async fn load_child_states(
 /// unconditionally: it is a deliberate user action, and a paused item is
 /// excluded from the download pipeline in the first place, so it cannot
 /// legitimately acquire a new media entry to override it with anyway.
+///
+/// A leaf with no air date *at all* is `Unreleased` too, but only after the
+/// media-entry check: metadata sometimes omits a date for something that aired
+/// years ago, and a file on disk settles that better than the missing date
+/// does. With no file, an undated leaf is an announced-but-unscheduled entry —
+/// TVDB carries those as `TBA` with a null date — and calling it `Indexed`
+/// parks it in the scrape loop forever chasing a release nobody has posted.
 pub fn leaf_state(
     item_type: MediaItemType,
     current_state: MediaItemState,
     is_unreleased: bool,
+    has_air_date: bool,
     failed_attempts: i32,
     has_media_entry: bool,
     missing_enabled_profile: bool,
@@ -247,6 +258,9 @@ pub fn leaf_state(
         }
         return MediaItemState::Completed;
     }
+    if !has_air_date && matches!(item_type, MediaItemType::Movie | MediaItemType::Episode) {
+        return MediaItemState::Unreleased;
+    }
     if current_state == MediaItemState::Failed {
         return current_state;
     }
@@ -271,6 +285,7 @@ async fn recompute_one(item_id: i64, max_attempts: i32) -> Result<Option<i64>> {
             facts.item_type,
             facts.state,
             facts.is_unreleased,
+            facts.has_air_date,
             facts.failed_attempts,
             facts.has_media_entry,
             facts.missing_enabled_profile,
