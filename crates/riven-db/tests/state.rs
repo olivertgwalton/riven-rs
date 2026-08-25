@@ -228,6 +228,7 @@ fn leaf(
         state,
         is_unreleased,
         true,
+        true,
         failed_attempts,
         has_media_entry,
         has_non_blacklisted_stream,
@@ -328,6 +329,7 @@ fn leaf_missing_air_date_is_unreleased() {
             Indexed,
             false,
             false,
+            true,
             17,
             false,
             false,
@@ -347,6 +349,7 @@ fn leaf_missing_air_date_yields_to_a_real_file() {
             Completed,
             false,
             false,
+            true,
             0,
             true,
             false,
@@ -366,11 +369,75 @@ fn leaf_missing_air_date_does_not_touch_containers() {
             Indexed,
             false,
             false,
+            true,
             0,
             false,
             false,
-            0
+            0,
         ),
         Indexed
+    );
+}
+
+/// A movie is created bare from a request and indexed a second later. Reading
+/// its not-yet-fetched date as `Unreleased` put that badge on every film the
+/// moment it was added, until indexing replaced it with `Indexed`.
+#[test]
+fn leaf_movie_without_a_date_is_not_unreleased_before_indexing() {
+    assert_eq!(
+        leaf_state(
+            MediaItemType::Movie,
+            Indexed,
+            false,
+            false,
+            false,
+            0,
+            false,
+            false,
+            0,
+        ),
+        Indexed
+    );
+}
+
+/// Once the indexer has run and still produced no date, the missing date is
+/// the metadata's answer and the original rule applies.
+#[test]
+fn leaf_movie_without_a_date_is_unreleased_once_indexed() {
+    assert_eq!(
+        leaf_state(
+            MediaItemType::Movie,
+            Indexed,
+            false,
+            false,
+            true,
+            0,
+            false,
+            false,
+            0,
+        ),
+        Unreleased
+    );
+}
+
+/// Episodes never carry an `indexed_at` of their own — they exist only because
+/// the show indexer created them, so a null date is already the answer. They
+/// must not be gated on it, or every `TBA` episode lands back in the scrape
+/// loop.
+#[test]
+fn leaf_episode_without_a_date_is_unreleased_though_never_indexed() {
+    assert_eq!(
+        leaf_state(
+            MediaItemType::Episode,
+            Indexed,
+            false,
+            false,
+            false,
+            0,
+            false,
+            false,
+            0,
+        ),
+        Unreleased
     );
 }

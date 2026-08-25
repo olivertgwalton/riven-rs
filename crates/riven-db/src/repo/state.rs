@@ -116,6 +116,7 @@ struct ItemFacts {
     parent_id: Option<i64>,
     is_unreleased: bool,
     has_air_date: bool,
+    has_been_indexed: bool,
     failed_attempts: i32,
     has_media_entry: bool,
     has_non_blacklisted_stream: bool,
@@ -135,6 +136,7 @@ async fn load_item_facts(item_id: i64) -> Result<Option<ItemFacts>> {
               m.failed_attempts,
               (m.aired_at IS NOT NULL AND m.aired_at > CURRENT_DATE) AS is_unreleased,
               (m.aired_at IS NOT NULL) AS has_air_date,
+              (m.indexed_at IS NOT NULL) AS has_been_indexed,
               EXISTS(
                   SELECT 1 FROM filesystem_entries fe
                   WHERE fe.media_item_id = m.id AND fe.entry_type = 'media'
@@ -203,11 +205,25 @@ async fn load_child_states(
 /// does. With no file, an undated leaf is an announced-but-unscheduled entry —
 /// TVDB carries those as `TBA` with a null date — and calling it `Indexed`
 /// parks it in the scrape loop forever chasing a release nobody has posted.
+///
+/// That reading only holds once there *is* metadata to read. A movie is
+/// created bare from a request and indexed a second or two later, so until
+/// then a null date says nothing about the release — and saying `Unreleased`
+/// flashed that badge on every newly added film before it settled to
+/// `Indexed`. `indexed_at` separates the two, the same discriminator
+/// `handle_scrape` uses for "never indexed, so there is no metadata to scrape
+/// with". Episodes need no such guard and must not get one: an episode row
+/// exists only because the show indexer created it, so it is born with
+/// whatever metadata there was and a null date here is the answer rather than
+/// a gap before one. They also never carry an `indexed_at` of their own —
+/// only movies and shows do — so gating them on it would park every `TBA`
+/// episode back in the scrape loop.
 pub fn leaf_state(
     item_type: MediaItemType,
     current_state: MediaItemState,
     is_unreleased: bool,
     has_air_date: bool,
+    has_been_indexed: bool,
     failed_attempts: i32,
     has_media_entry: bool,
     has_non_blacklisted_stream: bool,
@@ -222,7 +238,12 @@ pub fn leaf_state(
     if matches!(item_type, MediaItemType::Movie | MediaItemType::Episode) && has_media_entry {
         return MediaItemState::Completed;
     }
-    if !has_air_date && matches!(item_type, MediaItemType::Movie | MediaItemType::Episode) {
+    let undated_means_unreleased = match item_type {
+        MediaItemType::Movie => has_been_indexed,
+        MediaItemType::Episode => true,
+        _ => false,
+    };
+    if !has_air_date && undated_means_unreleased {
         return MediaItemState::Unreleased;
     }
     if current_state == MediaItemState::Failed {
@@ -250,6 +271,7 @@ async fn recompute_one(item_id: i64, max_attempts: i32) -> Result<Option<i64>> {
             facts.state,
             facts.is_unreleased,
             facts.has_air_date,
+            facts.has_been_indexed,
             facts.failed_attempts,
             facts.has_media_entry,
             facts.has_non_blacklisted_stream,
