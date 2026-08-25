@@ -13,17 +13,6 @@ use sea_orm::{
 
 use crate::orm;
 
-/// How many failed attempts an item that *already has a file* will spend
-/// chasing an enabled profile it is missing before settling for what it has.
-///
-/// Deliberately separate from `maximum_scrape_attempts`: that ceiling turns an
-/// item `Failed`, which is the wrong answer for something already downloaded
-/// and playable, and it is commonly left disabled (`0`) — which here would mean
-/// an item whose missing profile does not exist anywhere gets re-scraped
-/// forever. A profile upgrade is best-effort by nature, so it gets a small
-/// fixed budget and then stops asking.
-const PROFILE_UPGRADE_ATTEMPTS: i32 = 3;
-
 /// Read the per-item retry ceiling from the `general` settings blob. `0`
 /// disables the ceiling.
 async fn read_max_attempts() -> Result<i32> {
@@ -129,7 +118,6 @@ struct ItemFacts {
     has_air_date: bool,
     failed_attempts: i32,
     has_media_entry: bool,
-    missing_enabled_profile: bool,
     has_non_blacklisted_stream: bool,
 }
 
@@ -151,18 +139,6 @@ async fn load_item_facts(item_id: i64) -> Result<Option<ItemFacts>> {
                   SELECT 1 FROM filesystem_entries fe
                   WHERE fe.media_item_id = m.id AND fe.entry_type = 'media'
               ) AS has_media_entry,
-              -- An enabled profile with no entry of its own: the item has a
-              -- file but not every file that was asked for.
-              EXISTS(
-                  SELECT 1 FROM ranking_profiles rp
-                  WHERE rp.enabled
-                    AND NOT EXISTS(
-                        SELECT 1 FROM filesystem_entries fe
-                        WHERE fe.media_item_id = m.id
-                          AND fe.entry_type = 'media'
-                          AND fe.ranking_profile_name = rp.name
-                    )
-              ) AS missing_enabled_profile,
               EXISTS(
                   SELECT 1 FROM media_item_streams ms
                   WHERE ms.media_item_id = m.id
@@ -234,7 +210,6 @@ pub fn leaf_state(
     has_air_date: bool,
     failed_attempts: i32,
     has_media_entry: bool,
-    missing_enabled_profile: bool,
     has_non_blacklisted_stream: bool,
     max_attempts: i32,
 ) -> MediaItemState {
@@ -245,17 +220,6 @@ pub fn leaf_state(
         return current_state;
     }
     if matches!(item_type, MediaItemType::Movie | MediaItemType::Episode) && has_media_entry {
-        // A file exists, so this item can never be `Failed` and never re-enters
-        // the pipeline from scratch. It can still have work left: with more
-        // than one profile enabled, "has a file" and "has the files that were
-        // asked for" are different questions, and only the second one means
-        // done. `PartiallyCompleted` is already a retryable state, so saying it
-        // here is enough — the existing retry loop picks the item up, and
-        // `run_downloads` skips every profile `get_downloaded_profile_names`
-        // reports as satisfied, so only the missing one is chased.
-        if missing_enabled_profile && failed_attempts < PROFILE_UPGRADE_ATTEMPTS {
-            return MediaItemState::PartiallyCompleted;
-        }
         return MediaItemState::Completed;
     }
     if !has_air_date && matches!(item_type, MediaItemType::Movie | MediaItemType::Episode) {
@@ -288,7 +252,6 @@ async fn recompute_one(item_id: i64, max_attempts: i32) -> Result<Option<i64>> {
             facts.has_air_date,
             facts.failed_attempts,
             facts.has_media_entry,
-            facts.missing_enabled_profile,
             facts.has_non_blacklisted_stream,
             max_attempts,
         )

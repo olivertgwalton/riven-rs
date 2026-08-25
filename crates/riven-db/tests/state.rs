@@ -230,29 +230,8 @@ fn leaf(
         true,
         failed_attempts,
         has_media_entry,
-        false,
         has_non_blacklisted_stream,
         max_attempts,
-    )
-}
-
-/// Same, but for the profile-coverage cases: the item has a file and an
-/// enabled profile still has none.
-fn leaf_missing_profile(
-    item_type: MediaItemType,
-    state: MediaItemState,
-    failed_attempts: i32,
-) -> MediaItemState {
-    leaf_state(
-        item_type,
-        state,
-        false,
-        true,
-        failed_attempts,
-        true,
-        true,
-        true,
-        0,
     )
 }
 
@@ -339,72 +318,6 @@ fn leaf_indexed_when_no_facts() {
     );
 }
 
-/// With more than one profile enabled, "has a file" and "has the files that
-/// were asked for" are different questions. Only the second means done, and
-/// `PartiallyCompleted` is already retryable, so the existing retry loop
-/// picks the item up and chases just the missing profile.
-#[test]
-fn leaf_with_a_missing_enabled_profile_is_partially_completed() {
-    assert_eq!(
-        leaf_missing_profile(MediaItemType::Episode, Completed, 0),
-        PartiallyCompleted
-    );
-    assert_eq!(
-        leaf_missing_profile(MediaItemType::Movie, Completed, 0),
-        PartiallyCompleted
-    );
-}
-
-/// The chase is best-effort and must terminate: an item whose missing profile
-/// simply does not exist anywhere would otherwise be re-scraped forever, since
-/// `maximum_scrape_attempts` cannot apply to something already downloaded
-/// (`Failed` is the wrong answer for a file that plays).
-#[test]
-fn leaf_settles_for_what_it_has_once_the_upgrade_budget_is_spent() {
-    assert_eq!(
-        leaf_missing_profile(MediaItemType::Episode, PartiallyCompleted, 2),
-        PartiallyCompleted
-    );
-    assert_eq!(
-        leaf_missing_profile(MediaItemType::Episode, PartiallyCompleted, 3),
-        Completed
-    );
-    assert_eq!(
-        leaf_missing_profile(MediaItemType::Episode, PartiallyCompleted, 99),
-        Completed
-    );
-}
-
-/// Every enabled profile satisfied is still plain `Completed` — the common
-/// case must not change.
-#[test]
-fn leaf_with_full_profile_coverage_is_completed() {
-    assert_eq!(
-        leaf(MediaItemType::Episode, Completed, false, 0, true, true, 0),
-        Completed
-    );
-}
-
-/// A missing profile must not resurrect an item that has no file at all: the
-/// flag is only consulted on the has-a-media-entry branch.
-#[test]
-fn leaf_without_a_file_ignores_profile_coverage() {
-    assert_eq!(
-        leaf_state(
-            MediaItemType::Episode,
-            Indexed,
-            false,
-            true,
-            0,
-            false,
-            true,
-            true,
-            0
-        ),
-        Scraped
-    );
-}
-
 /// An episode metadata has no date for at all has not been scheduled, let alone
 /// released: `TBA` rows must not enter the scrape loop.
 #[test]
@@ -416,7 +329,6 @@ fn leaf_missing_air_date_is_unreleased() {
             false,
             false,
             17,
-            false,
             false,
             false,
             0,
@@ -438,7 +350,6 @@ fn leaf_missing_air_date_yields_to_a_real_file() {
             0,
             true,
             false,
-            false,
             0,
         ),
         Completed
@@ -458,8 +369,7 @@ fn leaf_missing_air_date_does_not_touch_containers() {
             0,
             false,
             false,
-            false,
-            0,
+            0
         ),
         Indexed
     );
