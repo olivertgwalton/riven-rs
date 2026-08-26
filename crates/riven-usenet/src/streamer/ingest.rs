@@ -4,8 +4,8 @@ use futures::StreamExt;
 use futures::stream;
 
 use crate::nzb::{
-    NzbFile, detect_rar_volume_groups, filename_from_subject, looks_like_media, looks_obfuscated,
-    parse_nzb_document,
+    NzbFile, detect_rar_volume_groups, detect_rar_volume_groups_by_name, filename_from_subject,
+    looks_like_media, looks_obfuscated, parse_nzb_document, rar_volume_info,
 };
 use crate::par2::{Par2Block, Par2FileDesc, looks_like_par2, parse_file_descriptors, parse_set};
 use crate::rar::{self, RarEncryption, RarVolumeFileEntry};
@@ -396,7 +396,15 @@ impl UsenetStreamer {
         password: Option<&str>,
         par2_blob: Option<&[u8]>,
     ) -> Result<Option<Vec<NzbMetaFile>>, StreamerError> {
-        let groups = detect_rar_volume_groups(files);
+        let mut groups = detect_rar_volume_groups(files);
+        if groups.is_empty() {
+            // Every subject in the NZB may be fully obfuscated — not just an
+            // obfuscated *name* with the extension intact, but no dot at all
+            // — leaving nothing for the subject-based heuristic above to key
+            // off. The release's own PAR2 set still names its volumes in
+            // cleartext, so recover those and retry grouping by name.
+            groups = self.recover_rar_groups_from_par2(files, par2_blob).await;
+        }
         if groups.is_empty() {
             return Ok(None);
         }
@@ -1043,6 +1051,83 @@ impl UsenetStreamer {
             return None;
         }
         Some(media)
+    }
+
+    /// Rescue RAR grouping when [`detect_rar_volume_groups`] finds nothing
+    /// because every NZB subject is a bare, extensionless hash (not merely
+    /// an obfuscated *name* — no dot survives at all, so the name-based
+    /// heuristic has nothing to key off). PAR2 protects the RAR volumes
+    /// themselves and lists their real names in cleartext regardless of how
+    /// obfuscated the posting is, so this recovers those names, lines them
+    /// up positionally against the NZB's non-PAR2 files (same
+    /// posting-order assumption [`Self::recover_filenames_from_par2`]
+    /// already relies on), and retries grouping keyed by the recovered
+    /// names instead of the subjects. Returns an empty `Vec` — same as "no
+    /// groups found" — on any mismatch, so the caller's existing
+    /// direct-file fallback is unaffected.
+    async fn recover_rar_groups_from_par2(
+        &self,
+        files: &[NzbFile],
+        prefetched_blob: Option<&[u8]>,
+    ) -> Vec<Vec<usize>> {
+        let owned_buf;
+        let buf = match prefetched_blob {
+            Some(b) => b,
+            None => match self.fetch_par2_blob(files).await {
+                Some(b) => {
+                    owned_buf = b;
+                    &owned_buf
+                }
+                None => return Vec::new(),
+            },
+        };
+        let descs: Vec<Par2FileDesc> = match parse_file_descriptors(buf) {
+            Ok(d) => d,
+            Err(error) => {
+                tracing::debug!(error = %error, "par2 FileDesc parse failed");
+                return Vec::new();
+            }
+        };
+        let archive_names: Vec<String> = descs
+            .into_iter()
+            .map(|d| d.filename)
+            .filter(|n| rar_volume_info(n).is_some())
+            .collect();
+        if archive_names.is_empty() {
+            return Vec::new();
+        }
+
+        let non_par2_indices: Vec<usize> = files
+            .iter()
+            .enumerate()
+            .filter(|(_, f)| !looks_like_par2(&filename_from_subject(&f.subject)))
+            .map(|(idx, _)| idx)
+            .collect();
+        if non_par2_indices.len() != archive_names.len() {
+            tracing::debug!(
+                non_par2 = non_par2_indices.len(),
+                recovered = archive_names.len(),
+                "par2 FileDesc count differs from non-par2 file count; skipping rar rescue"
+            );
+            return Vec::new();
+        }
+
+        let mut names: Vec<String> = files
+            .iter()
+            .map(|f| filename_from_subject(&f.subject))
+            .collect();
+        for (idx, recovered) in non_par2_indices.into_iter().zip(archive_names.into_iter()) {
+            names[idx] = recovered;
+        }
+        let groups = detect_rar_volume_groups_by_name(&names);
+        if !groups.is_empty() {
+            tracing::info!(
+                sets = groups.len(),
+                "recovered rar volume grouping via par2 FileDesc names \
+                 (subjects were fully obfuscated)"
+            );
+        }
+        groups
     }
 }
 

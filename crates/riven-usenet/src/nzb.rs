@@ -420,10 +420,23 @@ pub fn rar_volume_info(filename: &str) -> Option<(String, u32)> {
 /// produces one group; a season pack with one archive per episode produces
 /// N groups. Non-RAR files (par2/sfv/nfo/.mkv) are excluded.
 pub fn detect_rar_volume_groups(files: &[NzbFile]) -> Vec<Vec<usize>> {
+    let names: Vec<String> = files
+        .iter()
+        .map(|f| filename_from_subject(&f.subject))
+        .collect();
+    detect_rar_volume_groups_by_name(&names)
+}
+
+/// Same grouping as [`detect_rar_volume_groups`], but keyed off caller-
+/// supplied names rather than each file's own subject. Used when every
+/// subject in the NZB is fully obfuscated (a bare hash with no surviving
+/// extension at all, so nothing in the subject can identify a RAR volume)
+/// and the real volume names have instead been recovered from the
+/// release's own PAR2 `FileDesc` packets.
+pub fn detect_rar_volume_groups_by_name(names: &[String]) -> Vec<Vec<usize>> {
     let mut groups: HashMap<String, Vec<(u32, usize)>> = HashMap::new();
-    for (idx, f) in files.iter().enumerate() {
-        let filename = filename_from_subject(&f.subject);
-        if let Some((base, vol)) = rar_volume_info(&filename) {
+    for (idx, filename) in names.iter().enumerate() {
+        if let Some((base, vol)) = rar_volume_info(filename) {
             groups.entry(base).or_default().push((vol, idx));
         }
     }
@@ -559,5 +572,39 @@ mod tests {
         let g0_v0 = &files[groups[0][0]].subject;
         let g1_v0 = &files[groups[1][0]].subject;
         assert_ne!(g0_v0, g1_v0);
+    }
+
+    #[test]
+    fn subject_based_grouping_finds_nothing_when_every_subject_is_a_bare_hash() {
+        // Real-world obfuscated posts: the subject carries no extension at
+        // all, not even a disguised one — `filename_from_subject` returns
+        // just the hash, so `rar_volume_info` has nothing to parse.
+        let mk = |s: &str| NzbFile {
+            subject: format!(r#""{s}" yEnc (01/68)"#),
+            poster: String::new(),
+            groups: vec![],
+            segments: crate::segments::SegmentList::default(),
+        };
+        let files = vec![
+            mk("8badd0f960beffdba23932997b03f927"),
+            mk("11bbffea29666529a3a0a5bee1cc6357"),
+            mk("d00c1ce31c1e324cd1a73babfdae6872"),
+        ];
+        assert!(detect_rar_volume_groups(&files).is_empty());
+    }
+
+    #[test]
+    fn detect_rar_volume_groups_by_name_rescues_par2_recovered_names() {
+        // Same three volumes as above, but grouped by names recovered from
+        // the release's PAR2 FileDesc packets instead of the (useless)
+        // subjects — this is what `recover_rar_groups_from_par2` feeds in.
+        let recovered = vec![
+            "Show.S01E01.r00".to_string(),
+            "Show.S01E01.r01".to_string(),
+            "Show.S01E01.rar".to_string(),
+        ];
+        let groups = detect_rar_volume_groups_by_name(&recovered);
+        assert_eq!(groups.len(), 1, "expected the three volumes to form one set");
+        assert_eq!(groups[0], vec![2, 0, 1], "ordered rar, r00, r01 by volume index");
     }
 }
