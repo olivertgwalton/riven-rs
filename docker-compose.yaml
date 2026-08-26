@@ -23,23 +23,44 @@ services:
             timeout: 5s
             retries: 5
 
-#    jellyfin:
-#        image: jellyfin/jellyfin:latest
-#        env_file: .env
-#        depends_on:
-#            riven:
-#                condition: service_healthy
-#        ports:
-#            - "8096:8096"
-#        volumes:
-#            - jellyfin_data:/config
-#            - jellyfin_cache:/cache
-#            - type: bind
-#              source: ${RIVEN_STORAGE_PATH}
-#              target: /mnt/riven
-#              read_only: true
-#              bind:
-#                  propagation: slave
+    jellyfin:
+        image: jellyfin/jellyfin:preview
+        env_file: .env
+        depends_on:
+            riven:
+                condition: service_healthy
+        ports:
+            - "8097:8096"
+        volumes:
+            - jellyfin_data:/config
+            - jellyfin_cache:/cache
+            - type: bind
+              source: ${RIVEN_STORAGE_PATH}
+              target: /mnt/riven
+              read_only: true
+              bind:
+                  propagation: slave
+
+    emby:
+        image: lscr.io/linuxserver/emby:latest
+        env_file: .env
+        depends_on:
+            riven:
+                condition: service_healthy
+        ports:
+            - "8096:8096"
+        volumes:
+            - emby_data:/config
+            - type: bind
+              source: ${RIVEN_STORAGE_PATH}
+              target: /mnt/riven
+              read_only: true
+              bind:
+                  propagation: slave
+            - type: bind
+              source: ~/server/test-media
+              target: /mnt/test-media
+              read_only: true
 
 #    plex:
 #        image: plexinc/pms-docker:latest
@@ -91,6 +112,7 @@ volumes:
     seerr_data:
     jellyfin_data:
     jellyfin_cache:
+    emby_data:
     riven_logs:
 
 networks:
