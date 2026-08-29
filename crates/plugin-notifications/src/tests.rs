@@ -68,3 +68,135 @@ fn simple_embed_contains_core_download_fields() {
             .any(|field| field["name"] == "Provider" && field["value"] == "realdebrid")
     );
 }
+
+#[test]
+fn ntfy_url_parser_defaults_to_the_public_server() {
+    match parse_notification_url("ntfy://mytopic") {
+        Some(NotificationService::Ntfy {
+            base_url,
+            topic,
+            auth: NtfyAuth::None,
+            priority: None,
+            tags: None,
+        }) => {
+            assert_eq!(base_url, "https://ntfy.sh");
+            assert_eq!(topic, "mytopic");
+        }
+        _ => panic!("expected a public-server ntfy URL"),
+    }
+
+    // `ntfys://` is still just the public server when no host is given.
+    match parse_notification_url("ntfys://mytopic") {
+        Some(NotificationService::Ntfy { base_url, .. }) => {
+            assert_eq!(base_url, "https://ntfy.sh");
+        }
+        _ => panic!("expected a public-server ntfy URL"),
+    }
+}
+
+#[test]
+fn ntfy_url_parser_supports_self_hosted_servers() {
+    match parse_notification_url("ntfy://myhost.local/mytopic") {
+        Some(NotificationService::Ntfy {
+            base_url, topic, ..
+        }) => {
+            assert_eq!(base_url, "http://myhost.local");
+            assert_eq!(topic, "mytopic");
+        }
+        _ => panic!("expected a self-hosted ntfy URL"),
+    }
+
+    match parse_notification_url("ntfys://myhost.local:8080/mytopic") {
+        Some(NotificationService::Ntfy { base_url, .. }) => {
+            assert_eq!(base_url, "https://myhost.local:8080");
+        }
+        _ => panic!("expected a secure self-hosted ntfy URL"),
+    }
+
+    // The public server has no plaintext endpoint, so an explicit host of
+    // ntfy.sh is forced to https even under the plain `ntfy://` scheme.
+    match parse_notification_url("ntfy://ntfy.sh/mytopic") {
+        Some(NotificationService::Ntfy { base_url, .. }) => {
+            assert_eq!(base_url, "https://ntfy.sh");
+        }
+        _ => panic!("expected ntfy.sh to be forced to https"),
+    }
+}
+
+#[test]
+fn ntfy_url_parser_supports_basic_and_token_auth() {
+    match parse_notification_url("ntfy://user:pass@myhost/mytopic") {
+        Some(NotificationService::Ntfy {
+            auth: NtfyAuth::Basic { user, password },
+            ..
+        }) => {
+            assert_eq!(user, "user");
+            assert_eq!(password, "pass");
+        }
+        _ => panic!("expected basic auth"),
+    }
+
+    match parse_notification_url("ntfy://tk_abc123@ntfy.sh/mytopic") {
+        Some(NotificationService::Ntfy {
+            auth: NtfyAuth::Token(token),
+            ..
+        }) => {
+            assert_eq!(token, "tk_abc123");
+        }
+        _ => panic!("expected token auth"),
+    }
+}
+
+#[test]
+fn ntfy_url_parser_reads_priority_and_tags() {
+    match parse_notification_url("ntfy://mytopic?priority=high&tags=warning,skull") {
+        Some(NotificationService::Ntfy { priority, tags, .. }) => {
+            assert_eq!(priority.as_deref(), Some("high"));
+            assert_eq!(tags.as_deref(), Some("warning,skull"));
+        }
+        _ => panic!("expected priority and tags to be parsed"),
+    }
+
+    // An unrecognized priority is dropped rather than passed through blindly.
+    match parse_notification_url("ntfy://mytopic?priority=bogus") {
+        Some(NotificationService::Ntfy { priority, .. }) => assert_eq!(priority, None),
+        _ => panic!("expected an ntfy URL"),
+    }
+}
+
+#[test]
+fn ntfy_url_parser_rejects_a_missing_topic() {
+    assert!(parse_notification_url("ntfy://").is_none());
+    assert!(parse_notification_url("ntfy://myhost/").is_none());
+}
+
+#[test]
+fn ntfy_url_parser_rejects_a_multi_segment_topic() {
+    // `/` isn't a valid character in an ntfy topic name, so a second
+    // segment here reads as a topic path rather than the supported
+    // single-topic form.
+    assert!(parse_notification_url("ntfy://host/topic-one/topic-two").is_none());
+}
+
+#[test]
+fn ntfy_body_condenses_the_core_fields_and_attaches_the_poster() {
+    let body = build_ntfy_body("mytopic", None, None, &payload());
+
+    assert_eq!(body["topic"], "mytopic");
+    assert_eq!(body["title"], "Downloaded: Movie");
+    assert_eq!(
+        body["message"],
+        "Movie • 2024 • via stremthru • realdebrid • in 1h 1m 1s"
+    );
+    assert_eq!(body["attach"], "https://image.test/poster.jpg");
+    assert!(body.get("priority").is_none());
+    assert!(body.get("tags").is_none());
+}
+
+#[test]
+fn ntfy_body_includes_priority_and_tags_as_a_json_array() {
+    let body = build_ntfy_body("mytopic", Some("high"), Some("warning, skull"), &payload());
+
+    assert_eq!(body["priority"], "high");
+    assert_eq!(body["tags"], serde_json::json!(["warning", "skull"]));
+}
