@@ -40,6 +40,7 @@ fn matching_profiles_allow_any_positive_token_and_respect_exclusions() {
         },
     );
     let settings = FilesystemSettings {
+        symlink_path: String::new(),
         mount_path: "/mount".to_string(),
         library_profiles,
     };
@@ -63,6 +64,7 @@ fn matching_profiles_allow_any_positive_token_and_respect_exclusions() {
 #[test]
 fn matching_profiles_reject_when_no_positive_token_matches() {
     let settings = FilesystemSettings {
+        symlink_path: String::new(),
         mount_path: "/mount".to_string(),
         library_profiles: HashMap::from([(
             "nonkids".to_string(),
@@ -108,6 +110,7 @@ fn matching_profiles_reject_when_no_positive_token_matches() {
 #[test]
 fn matching_profiles_support_language_country_year_and_rating_filters() {
     let settings = FilesystemSettings {
+        symlink_path: String::new(),
         mount_path: "/mount".to_string(),
         library_profiles: HashMap::from([(
             "curated".to_string(),

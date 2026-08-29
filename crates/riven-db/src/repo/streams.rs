@@ -939,6 +939,27 @@ pub async fn list_vfs_file_names(dir_path: &str) -> Result<Vec<VfsFileName>> {
     )
 }
 
+/// Every media/subtitle entry path in the library, in one pass.
+///
+/// The FUSE layer answers `readdir` a directory at a time, which is right for a
+/// kernel asking about one directory. The symlink reconciler needs the whole
+/// tree at once to diff it against the disk, and asking per-directory would be
+/// a query per title.
+pub async fn list_vfs_entry_paths() -> Result<Vec<VfsEntryPath>> {
+    Ok(
+        VfsEntryPath::find_by_statement(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT path, library_profiles \
+             FROM filesystem_entries \
+             WHERE entry_type IN ('media', 'subtitle') \
+             ORDER BY path",
+            [],
+        ))
+        .all(orm())
+        .await?,
+    )
+}
+
 /// Aggregate stat (timestamps + entry count) for all media entries under `path_prefix`.
 /// A `path_prefix` of `""` covers all entries; `/movies` covers only movies, etc.
 #[derive(sea_orm::FromQueryResult)]
