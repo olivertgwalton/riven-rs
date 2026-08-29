@@ -6,7 +6,7 @@ use riven_queue::lifecycle::{upsert_requested_movie, upsert_requested_show};
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use crate::schema::auth::{Capability, require};
+use crate::schema::auth::{Capability, RequestAuth, require};
 
 use super::MutationStatusText;
 
@@ -66,6 +66,30 @@ pub(super) struct RequestItemsResult {
     updated_items: Vec<ItemRequest>,
 }
 
+/// The requester to record for a direct riven request: the signed-in
+/// user's own identity when there is one, the caller-supplied
+/// `requested_by` only for a trusted-API-key caller (a non-interactive
+/// integration, which has no session identity to draw from at all), and
+/// `None` otherwise.
+///
+/// The API-key fallback must never apply to a *session*-authenticated call,
+/// even one whose account happens to have no `username`/`display_username`
+/// set (`RequestAuth::username` is `None` for both cases, which is why this
+/// checks `is_trusted_api_key` explicitly rather than treating "no
+/// username" as "no session"): a signed-in user must never be able to
+/// attribute their own request to an arbitrary string just by leaving both
+/// name fields unset — that defeats the whole point of preferring the
+/// session identity over caller input in the first place.
+fn resolve_requester(auth: &RequestAuth, input_requested_by: Option<&str>) -> Option<String> {
+    if let Some(username) = &auth.username {
+        return Some(username.clone());
+    }
+    if auth.is_trusted_api_key {
+        return input_requested_by.map(str::to_owned);
+    }
+    None
+}
+
 #[derive(Default)]
 pub struct ItemRequestMutations;
 
@@ -83,11 +107,13 @@ impl ItemRequestMutations {
     ) -> Result<RequestItemMutationResponse> {
         require(ctx, Capability::RequestItems)?;
         let job_queue = ctx.data::<Arc<JobQueue>>()?;
+        let requested_by =
+            resolve_requester(ctx.data::<RequestAuth>()?, input.requested_by.as_deref());
         let outcome = match upsert_requested_movie(
             &input.title,
             input.imdb_id.as_deref(),
             input.tmdb_id.as_deref(),
-            input.requested_by.as_deref(),
+            requested_by.as_deref(),
             input.external_request_id.as_deref(),
         )
         .await
@@ -139,11 +165,13 @@ impl ItemRequestMutations {
     ) -> Result<RequestItemMutationResponse> {
         require(ctx, Capability::RequestItems)?;
         let job_queue = ctx.data::<Arc<JobQueue>>()?;
+        let requested_by =
+            resolve_requester(ctx.data::<RequestAuth>()?, input.requested_by.as_deref());
         let outcome = match upsert_requested_show(
             &input.title,
             input.imdb_id.as_deref(),
             input.tvdb_id.as_deref(),
-            input.requested_by.as_deref(),
+            requested_by.as_deref(),
             input.external_request_id.as_deref(),
             input.seasons.as_deref(),
         )
@@ -213,6 +241,7 @@ impl ItemRequestMutations {
     ) -> Result<RequestItemsResult> {
         require(ctx, Capability::RequestItems)?;
         let job_queue = ctx.data::<Arc<JobQueue>>()?;
+        let auth = ctx.data::<RequestAuth>()?;
         let mut seen: HashSet<String> = HashSet::new();
         let mut new_items: Vec<ItemRequest> = Vec::new();
         let mut updated_items: Vec<ItemRequest> = Vec::new();
@@ -233,11 +262,12 @@ impl ItemRequestMutations {
 
             count += 1;
 
+            let requested_by = resolve_requester(auth, movie.requested_by.as_deref());
             let outcome = upsert_requested_movie(
                 &movie.title,
                 movie.imdb_id.as_deref(),
                 movie.tmdb_id.as_deref(),
-                movie.requested_by.as_deref(),
+                requested_by.as_deref(),
                 movie.external_request_id.as_deref(),
             )
             .await
@@ -277,11 +307,12 @@ impl ItemRequestMutations {
 
             let seasons = show.seasons.as_deref();
 
+            let requested_by = resolve_requester(auth, show.requested_by.as_deref());
             let outcome = upsert_requested_show(
                 &show.title,
                 show.imdb_id.as_deref(),
                 show.tvdb_id.as_deref(),
-                show.requested_by.as_deref(),
+                requested_by.as_deref(),
                 show.external_request_id.as_deref(),
                 seasons,
             )

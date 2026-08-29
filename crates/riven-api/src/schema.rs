@@ -6,6 +6,7 @@ use riven_core::downloader::DownloaderConfig;
 use riven_core::http::HttpClient;
 use riven_core::logging::LogControl;
 use riven_core::plugin::PluginRegistry;
+use sea_orm::DatabaseConnection;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -45,6 +46,7 @@ impl StremioAddonToken {
 pub fn build_schema(
     registry: Arc<PluginRegistry>,
     job_queue: Arc<riven_queue::JobQueue>,
+    db: DatabaseConnection,
     http_client: HttpClient,
     log_directory: String,
     downloader_config: Arc<RwLock<DownloaderConfig>>,
@@ -60,6 +62,7 @@ pub fn build_schema(
     )
     .data(registry)
     .data(job_queue)
+    .data(db)
     .data(http_client)
     .data(downloader_config)
     .data(log_control)

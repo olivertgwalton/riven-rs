@@ -104,8 +104,8 @@ pub(super) async fn authorize_request(
     headers: &HeaderMap,
     query: Option<&str>,
 ) -> Result<RequestAuth, Unauthorized> {
-    if let Some(role) = session_role(state, headers).await? {
-        return Ok(RequestAuth { role });
+    if let Some(auth) = session_auth(state, headers).await? {
+        return Ok(auth);
     }
 
     if has_valid_api_key(state, headers, query) {
@@ -129,10 +129,10 @@ pub(super) async fn authorize_request(
 /// A session that *exists* but is unusable (expired or revoked) still returns
 /// `Err`. Falling through only offers the value to `api_key_matches`, which
 /// grants nothing unless it equals the configured key.
-async fn session_role(
+async fn session_auth(
     state: &ApiState,
     headers: &HeaderMap,
-) -> Result<Option<UserRole>, Unauthorized> {
+) -> Result<Option<RequestAuth>, Unauthorized> {
     use super::authn::SessionState;
 
     let session_state = super::authn::authenticate(&state.auth, headers)
@@ -148,7 +148,14 @@ async fn session_role(
             tracing::debug!("auth rejected: session expired or revoked");
             Err(Unauthorized)
         }
-        SessionState::Valid { user, .. } => Ok(Some(role_from_user(user.role.as_deref()))),
+        SessionState::Valid { user, .. } => Ok(Some(RequestAuth {
+            role: role_from_user(user.role.as_deref()),
+            username: user
+                .display_username
+                .clone()
+                .or_else(|| user.username.clone()),
+            is_trusted_api_key: false,
+        })),
     }
 }
 
@@ -199,7 +206,7 @@ mod tests {
 
     /// `Authorization: Bearer <api-key>` is documented as a supported way to
     /// call the API, and `api_key_matches` reads that header — but every such
-    /// request was rejected before reaching it, because `session_role` treated
+    /// request was rejected before reaching it, because `session_auth` treated
     /// the value as a session token and failed on the miss.
     #[test]
     fn an_api_key_presented_as_a_bearer_token_is_accepted() {

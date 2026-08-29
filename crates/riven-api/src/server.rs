@@ -115,6 +115,7 @@ pub async fn start_server(config: StartServerConfig) -> Result<()> {
     let schema = build_schema(
         registry.clone(),
         job_queue.clone(),
+        riven_db::orm().clone(),
         http_client,
         log_directory,
         downloader_config,

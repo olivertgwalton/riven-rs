@@ -190,4 +190,16 @@ impl Model {
             crate::entities::helpers::Artwork::Poster,
         )
     }
+
+    /// Who is responsible for this item existing, for display next to other
+    /// item metadata. See [`super::item_requests::resolve_added_by`] for the
+    /// full rules — `None` only for an item with no linked request at all
+    /// (e.g. `discoverItem`, which never creates one).
+    async fn added_by(
+        &self,
+        ctx: &async_graphql::Context<'_>,
+    ) -> async_graphql::Result<Option<String>> {
+        let db = ctx.data::<sea_orm::DatabaseConnection>()?;
+        Ok(super::item_requests::resolve_added_by(self.item_request_id, db).await?)
+    }
 }

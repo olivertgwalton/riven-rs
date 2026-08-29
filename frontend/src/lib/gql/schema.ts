@@ -202,6 +202,13 @@ export type DownloadMediaItemMutationResponse = {
 export type Episode = {
   absoluteNumber?: Maybe<Scalars['Int']['output']>;
   activeStreamId?: Maybe<Scalars['Int']['output']>;
+  /**
+   * Who is responsible for this item existing, for display next to other
+   * item metadata. See [`super::item_requests::resolve_added_by`] for the
+   * full rules — `None` only for an item with no linked request at all
+   * (e.g. `discoverItem`, which never creates one).
+   */
+  addedBy?: Maybe<Scalars['String']['output']>;
   airedAt?: Maybe<Scalars['NaiveDate']['output']>;
   airedAtUtc?: Maybe<Scalars['DateTime']['output']>;
   aliases?: Maybe<Scalars['JSON']['output']>;
@@ -261,6 +268,13 @@ export type EpisodeStreamsArgs = {
 export type EpisodeFull = {
   absoluteNumber?: Maybe<Scalars['Int']['output']>;
   activeStreamId?: Maybe<Scalars['Int']['output']>;
+  /**
+   * Who is responsible for this item existing, for display next to other
+   * item metadata. See [`super::item_requests::resolve_added_by`] for the
+   * full rules — `None` only for an item with no linked request at all
+   * (e.g. `discoverItem`, which never creates one).
+   */
+  addedBy?: Maybe<Scalars['String']['output']>;
   airedAt?: Maybe<Scalars['NaiveDate']['output']>;
   airedAtUtc?: Maybe<Scalars['DateTime']['output']>;
   aliases?: Maybe<Scalars['JSON']['output']>;
@@ -614,6 +628,13 @@ export type MediaDetails = {
 export type MediaItem = {
   absoluteNumber?: Maybe<Scalars['Int']['output']>;
   activeStreamId?: Maybe<Scalars['Int']['output']>;
+  /**
+   * Who is responsible for this item existing, for display next to other
+   * item metadata. See [`super::item_requests::resolve_added_by`] for the
+   * full rules — `None` only for an item with no linked request at all
+   * (e.g. `discoverItem`, which never creates one).
+   */
+  addedBy?: Maybe<Scalars['String']['output']>;
   airedAt?: Maybe<Scalars['NaiveDate']['output']>;
   airedAtUtc?: Maybe<Scalars['DateTime']['output']>;
   aliases?: Maybe<Scalars['JSON']['output']>;
@@ -661,6 +682,13 @@ export type MediaItem = {
 export type MediaItemFull = {
   absoluteNumber?: Maybe<Scalars['Int']['output']>;
   activeStreamId?: Maybe<Scalars['Int']['output']>;
+  /**
+   * Who is responsible for this item existing, for display next to other
+   * item metadata. See [`super::item_requests::resolve_added_by`] for the
+   * full rules — `None` only for an item with no linked request at all
+   * (e.g. `discoverItem`, which never creates one).
+   */
+  addedBy?: Maybe<Scalars['String']['output']>;
   airedAt?: Maybe<Scalars['NaiveDate']['output']>;
   airedAtUtc?: Maybe<Scalars['DateTime']['output']>;
   aliases?: Maybe<Scalars['JSON']['output']>;
@@ -710,6 +738,13 @@ export type MediaItemFull = {
 export type MediaItemListRow = {
   absoluteNumber?: Maybe<Scalars['Int']['output']>;
   activeStreamId?: Maybe<Scalars['Int']['output']>;
+  /**
+   * Who is responsible for this item existing, for display next to other
+   * item metadata. See [`super::item_requests::resolve_added_by`] for the
+   * full rules — `None` only for an item with no linked request at all
+   * (e.g. `discoverItem`, which never creates one).
+   */
+  addedBy?: Maybe<Scalars['String']['output']>;
   airedAt?: Maybe<Scalars['NaiveDate']['output']>;
   airedAtUtc?: Maybe<Scalars['DateTime']['output']>;
   aliases?: Maybe<Scalars['JSON']['output']>;
@@ -774,6 +809,15 @@ export type MediaItemState =
 
 /** Lightweight media state tree used for live state subscriptions. */
 export type MediaItemStateTree = {
+  /**
+   * Mirrors `MediaItem.addedBy` — see
+   * [`riven_core::entities::item_requests::resolve_added_by`] for the
+   * full rules. Kept in sync with the full item view so this page's live
+   * state updates (which use this lightweight type, not `MediaItemFull`)
+   * don't silently drop the field once a subscription push overwrites the
+   * initial full fetch.
+   */
+  addedBy?: Maybe<Scalars['String']['output']>;
   expectedFileCount: Scalars['Int']['output'];
   id: Scalars['Int']['output'];
   imdbId?: Maybe<Scalars['String']['output']>;
@@ -839,6 +883,13 @@ export type MediaMetadata = {
 export type Movie = {
   absoluteNumber?: Maybe<Scalars['Int']['output']>;
   activeStreamId?: Maybe<Scalars['Int']['output']>;
+  /**
+   * Who is responsible for this item existing, for display next to other
+   * item metadata. See [`super::item_requests::resolve_added_by`] for the
+   * full rules — `None` only for an item with no linked request at all
+   * (e.g. `discoverItem`, which never creates one).
+   */
+  addedBy?: Maybe<Scalars['String']['output']>;
   airedAt?: Maybe<Scalars['NaiveDate']['output']>;
   airedAtUtc?: Maybe<Scalars['DateTime']['output']>;
   aliases?: Maybe<Scalars['JSON']['output']>;
@@ -1823,6 +1874,13 @@ export type ScrapeMediaItemMutationResponse = {
 export type Season = {
   absoluteNumber?: Maybe<Scalars['Int']['output']>;
   activeStreamId?: Maybe<Scalars['Int']['output']>;
+  /**
+   * Who is responsible for this item existing, for display next to other
+   * item metadata. See [`super::item_requests::resolve_added_by`] for the
+   * full rules — `None` only for an item with no linked request at all
+   * (e.g. `discoverItem`, which never creates one).
+   */
+  addedBy?: Maybe<Scalars['String']['output']>;
   airedAt?: Maybe<Scalars['NaiveDate']['output']>;
   airedAtUtc?: Maybe<Scalars['DateTime']['output']>;
   aliases?: Maybe<Scalars['JSON']['output']>;
@@ -1884,6 +1942,13 @@ export type SeasonStreamsArgs = {
 export type SeasonFull = {
   absoluteNumber?: Maybe<Scalars['Int']['output']>;
   activeStreamId?: Maybe<Scalars['Int']['output']>;
+  /**
+   * Who is responsible for this item existing, for display next to other
+   * item metadata. See [`super::item_requests::resolve_added_by`] for the
+   * full rules — `None` only for an item with no linked request at all
+   * (e.g. `discoverItem`, which never creates one).
+   */
+  addedBy?: Maybe<Scalars['String']['output']>;
   airedAt?: Maybe<Scalars['NaiveDate']['output']>;
   airedAtUtc?: Maybe<Scalars['DateTime']['output']>;
   aliases?: Maybe<Scalars['JSON']['output']>;
@@ -1982,6 +2047,13 @@ export type SetupGroup = {
 export type Show = {
   absoluteNumber?: Maybe<Scalars['Int']['output']>;
   activeStreamId?: Maybe<Scalars['Int']['output']>;
+  /**
+   * Who is responsible for this item existing, for display next to other
+   * item metadata. See [`super::item_requests::resolve_added_by`] for the
+   * full rules — `None` only for an item with no linked request at all
+   * (e.g. `discoverItem`, which never creates one).
+   */
+  addedBy?: Maybe<Scalars['String']['output']>;
   airedAt?: Maybe<Scalars['NaiveDate']['output']>;
   airedAtUtc?: Maybe<Scalars['DateTime']['output']>;
   aliases?: Maybe<Scalars['JSON']['output']>;

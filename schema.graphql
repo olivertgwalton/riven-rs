@@ -235,6 +235,13 @@ type Episode {
 	rather than in each client.
 	"""
 	posterPath: String
+	"""
+	Who is responsible for this item existing, for display next to other
+	item metadata. See [`super::item_requests::resolve_added_by`] for the
+	full rules — `None` only for an item with no linked request at all
+	(e.g. `discoverItem`, which never creates one).
+	"""
+	addedBy: String
 	streams(infoHashes: [String!]): [Stream!]!
 	"""
 	The parent season for this episode.
@@ -297,6 +304,13 @@ type EpisodeFull {
 	rather than in each client.
 	"""
 	posterPath: String
+	"""
+	Who is responsible for this item existing, for display next to other
+	item metadata. See [`super::item_requests::resolve_added_by`] for the
+	full rules — `None` only for an item with no linked request at all
+	(e.g. `discoverItem`, which never creates one).
+	"""
+	addedBy: String
 	filesystemEntry: FileSystemEntry
 	filesystemEntries: [FileSystemEntry!]!
 }
@@ -696,6 +710,13 @@ type MediaItem {
 	rather than in each client.
 	"""
 	posterPath: String
+	"""
+	Who is responsible for this item existing, for display next to other
+	item metadata. See [`super::item_requests::resolve_added_by`] for the
+	full rules — `None` only for an item with no linked request at all
+	(e.g. `discoverItem`, which never creates one).
+	"""
+	addedBy: String
 }
 
 """
@@ -745,6 +766,13 @@ type MediaItemFull {
 	rather than in each client.
 	"""
 	posterPath: String
+	"""
+	Who is responsible for this item existing, for display next to other
+	item metadata. See [`super::item_requests::resolve_added_by`] for the
+	full rules — `None` only for an item with no linked request at all
+	(e.g. `discoverItem`, which never creates one).
+	"""
+	addedBy: String
 	filesystemEntry: FileSystemEntry
 	filesystemEntries: [FileSystemEntry!]!
 	seasons: [SeasonFull!]!
@@ -794,6 +822,13 @@ type MediaItemListRow {
 	rather than in each client.
 	"""
 	posterPath: String
+	"""
+	Who is responsible for this item existing, for display next to other
+	item metadata. See [`super::item_requests::resolve_added_by`] for the
+	full rules — `None` only for an item with no linked request at all
+	(e.g. `discoverItem`, which never creates one).
+	"""
+	addedBy: String
 	showId: Int
 	showTitle: String
 	showTmdbId: String
@@ -827,6 +862,15 @@ type MediaItemStateTree {
 	tvdbId: String
 	expectedFileCount: Int!
 	seasons: [SeasonState!]!
+	"""
+	Mirrors `MediaItem.addedBy` — see
+	[`riven_core::entities::item_requests::resolve_added_by`] for the
+	full rules. Kept in sync with the full item view so this page's live
+	state updates (which use this lightweight type, not `MediaItemFull`)
+	don't silently drop the field once a subscription push overwrites the
+	initial full fetch.
+	"""
+	addedBy: String
 }
 
 """
@@ -931,6 +975,13 @@ type Movie {
 	rather than in each client.
 	"""
 	posterPath: String
+	"""
+	Who is responsible for this item existing, for display next to other
+	item metadata. See [`super::item_requests::resolve_added_by`] for the
+	full rules — `None` only for an item with no linked request at all
+	(e.g. `discoverItem`, which never creates one).
+	"""
+	addedBy: String
 	streams(infoHashes: [String!]): [Stream!]!
 	"""
 	Always 1 — a movie has exactly one expected media file.
@@ -1597,6 +1648,13 @@ type Season {
 	rather than in each client.
 	"""
 	posterPath: String
+	"""
+	Who is responsible for this item existing, for display next to other
+	item metadata. See [`super::item_requests::resolve_added_by`] for the
+	full rules — `None` only for an item with no linked request at all
+	(e.g. `discoverItem`, which never creates one).
+	"""
+	addedBy: String
 	streams(infoHashes: [String!]): [Stream!]!
 	"""
 	The parent show for this season.
@@ -1663,6 +1721,13 @@ type SeasonFull {
 	rather than in each client.
 	"""
 	posterPath: String
+	"""
+	Who is responsible for this item existing, for display next to other
+	item metadata. See [`super::item_requests::resolve_added_by`] for the
+	full rules — `None` only for an item with no linked request at all
+	(e.g. `discoverItem`, which never creates one).
+	"""
+	addedBy: String
 	episodes: [EpisodeFull!]!
 }
 
@@ -1775,6 +1840,13 @@ type Show {
 	rather than in each client.
 	"""
 	posterPath: String
+	"""
+	Who is responsible for this item existing, for display next to other
+	item metadata. See [`super::item_requests::resolve_added_by`] for the
+	full rules — `None` only for an item with no linked request at all
+	(e.g. `discoverItem`, which never creates one).
+	"""
+	addedBy: String
 	streams(infoHashes: [String!]): [Stream!]!
 	"""
 	Seasons for this show. Excludes season 0 (specials) by default.
