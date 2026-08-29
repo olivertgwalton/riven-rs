@@ -22,6 +22,12 @@ export const UPDATE_SETTINGS = `
     }
 `;
 
+export const SEND_TEST_NOTIFICATION = `
+    mutation SendTestNotification($itemType: MediaItemType!) {
+        sendTestNotification(itemType: $itemType)
+    }
+`;
+
 export const INSTANCE_STATUS = `
     query {
         instanceStatus {

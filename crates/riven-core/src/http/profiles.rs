@@ -49,3 +49,7 @@ impl HttpServiceProfile {
 
 pub const DISCORD_WEBHOOK: HttpServiceProfile = HttpServiceProfile::new("discord_webhook");
 pub const WEBHOOK_JSON: HttpServiceProfile = HttpServiceProfile::new("json_webhook");
+// Single attempt: retrying a push on an ambiguous transport failure (e.g. a
+// timeout after the request already reached Pushbullet) risks delivering the
+// same "download complete" notification twice.
+pub const PUSHBULLET: HttpServiceProfile = HttpServiceProfile::new("pushbullet").with_attempts(1);

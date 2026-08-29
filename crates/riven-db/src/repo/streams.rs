@@ -521,6 +521,41 @@ pub async fn get_media_entry_by_id(entry_id: i64) -> Result<Option<FileSystemEnt
         .await?)
 }
 
+#[derive(Debug, Clone, FromQueryResult)]
+pub struct DownloadReleaseInfo {
+    pub resolution: Option<String>,
+    pub quality: Option<String>,
+    pub release_group: Option<String>,
+}
+
+/// The resolution/quality/release-group of the release behind the most
+/// recently created filesystem entry for an item — i.e. the one a
+/// `MediaItemDownloadSuccess` event for this item just fired for. Used by
+/// notification templates. `quality`/`release_group` come from the linked
+/// stream's parsed release data via a jsonb lookup the query builder can't
+/// express; `None` if the item has no filesystem entries yet, or its stream
+/// row is missing (usenet entries may have no `stream_id`).
+pub async fn get_latest_release_info(item_id: i64) -> Result<Option<DownloadReleaseInfo>> {
+    let sql = r#"SELECT
+               fe.resolution AS resolution,
+               s.parsed_data->>'quality' AS quality,
+               s.parsed_data->>'group' AS release_group
+           FROM filesystem_entries fe
+           LEFT JOIN streams s ON s.id = fe.stream_id
+           WHERE fe.media_item_id = $1 AND fe.entry_type = 'media'
+           ORDER BY fe.created_at DESC
+           LIMIT 1"#;
+    Ok(
+        DownloadReleaseInfo::find_by_statement(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            sql,
+            [item_id.into()],
+        ))
+        .one(orm())
+        .await?,
+    )
+}
+
 /// Return the most likely next playback target for episodic content.
 /// Movies and non-episodic items return `None`.
 pub async fn get_next_playback_entry(entry_id: i64) -> Result<Option<FileSystemEntry>> {
