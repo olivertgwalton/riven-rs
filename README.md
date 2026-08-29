@@ -86,9 +86,62 @@ Common settings:
 | `RIVEN_SETTING__LOG_DIRECTORY` | `./logs` | Directory for log output. |
 | `RIVEN_SETTING__VFS_MOUNT_PATH` | empty | VFS mount path. |
 | `RIVEN_SETTING__FILESYSTEM__MOUNT_PATH` | empty | Preferred VFS mount path. |
+| `RIVEN_SETTING__FILESYSTEM__SYMLINK_PATH` | empty | Where to materialise the library as real directories holding symlinks into the VFS. Empty disables it. See [Symlink library](#symlink-library). |
 | `RIVEN_SETTING__VFS_CACHE_MAX_SIZE_MB` | `0` | VFS chunk cache size. `0` uses the default. |
 | `RIVEN_SETTING__CORS_ALLOWED_ORIGINS` | empty | Comma-separated list of CORS origins. If empty, falls back to `ORIGIN`; if both are unset, CORS is permissive (warns on startup). |
 | `RIVEN_SETTING__OIDC_PROVIDERS` | `[]` | Sign in via PocketID, Authelia, Keycloak, or any other OIDC-compliant identity provider. See [OIDC sign-in](#oidc-sign-in) below. |
+
+### Symlink library
+
+The VFS is mounted read-only and answers only for paths the database knows
+about, so a media server has nowhere to put the files it authors beside a
+title: a theme song, an `.nfo`, trickplay tiles, an extracted subtitle. Every
+one of those writes fails with `Read-only file system`, and the server reports
+it as a plugin or a scan that quietly does nothing.
+
+Setting `filesystem.symlink_path` materialises the library a second way: real
+directories, over the same layout the VFS serves, with every media file a
+symlink into the mount. The server is pointed at that tree instead. It reads
+the media through the symlink -- so the bytes still stream from the VFS, and
+nothing is copied -- and writes its sidecars into a directory that is genuinely
+on disk.
+
+Two paths, so they must not be nested; riven refuses to reconcile if either
+contains the other.
+
+**It is off by default, and turning it on is four lines plus a settings
+change.** Nothing about an existing deployment changes until you opt in:
+`symlink_path` defaults to empty, and Compose keeps the VFS exactly where it
+was, parking the (unused, empty) library volume at `/mnt/riven-library`.
+
+To enable it, in `.env`:
+
+```
+RIVEN_VFS_MOUNT=/mnt/riven-vfs
+RIVEN_LIBRARY_MOUNT=/mnt/riven
+RIVEN_SETTING__FILESYSTEM__MOUNT_PATH=/mnt/riven-vfs
+RIVEN_SETTING__FILESYSTEM__SYMLINK_PATH=/mnt/riven
+```
+
+The VFS moves to `/mnt/riven-vfs` and the tree takes `/mnt/riven`, which is
+deliberate: the media servers keep the library path they already have, so
+switching costs no rescan and no item identifiers. The mount has to be visible
+in the consuming container at the same path riven wrote into the links, or
+every link dangles.
+
+**Mind the order, and mind the database.** A `filesystem` block saved in the
+`general` settings row overrides the two `RIVEN_SETTING__FILESYSTEM__*`
+variables entirely, so on an instance that has ever saved settings the paths
+must be changed there instead. And apply the settings *before* recreating the
+containers: with the new mounts but the old `mount_path`, riven mounts the VFS
+into the empty library volume, where it does not propagate, and the media
+servers see an empty library.
+
+The tree is reconciled at startup, whenever the library settles after a change,
+and on a slow sweep underneath both. Reconciling never removes a regular file
+-- only symlinks it would have created itself. A directory left holding nothing
+but sidecars is kept rather than tidied away, so a title downloaded again finds
+its theme song already there.
 
 ### OIDC sign-in
 

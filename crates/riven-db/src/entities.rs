@@ -104,6 +104,15 @@ pub struct VfsFileName {
     pub library_profiles: Option<serde_json::Value>,
 }
 
+/// One media/subtitle entry with its full VFS path. Used by the symlink
+/// reconciler, which needs the whole tree in a single query rather than the
+/// per-directory listings the FUSE layer answers `readdir` from.
+#[derive(Debug, Clone, sea_orm::FromQueryResult)]
+pub struct VfsEntryPath {
+    pub path: String,
+    pub library_profiles: Option<serde_json::Value>,
+}
+
 impl FilesystemProfileEntryCandidate {
     pub fn filesystem_content_type(&self) -> FilesystemContentType {
         match self.content_type.as_str() {

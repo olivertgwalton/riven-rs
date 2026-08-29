@@ -235,7 +235,7 @@ impl MediaItemMutations {
                         MutationStatusText::InternalServerError
                     }
                 },
-                item: error.item.map(MediaItemUnion::from),
+                item: error.item.map(|item| MediaItemUnion::from(*item)),
             }),
         }
     }

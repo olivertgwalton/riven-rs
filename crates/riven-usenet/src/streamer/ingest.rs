@@ -1116,7 +1116,7 @@ impl UsenetStreamer {
             .iter()
             .map(|f| filename_from_subject(&f.subject))
             .collect();
-        for (idx, recovered) in non_par2_indices.into_iter().zip(archive_names.into_iter()) {
+        for (idx, recovered) in non_par2_indices.into_iter().zip(archive_names) {
             names[idx] = recovered;
         }
         let groups = detect_rar_volume_groups_by_name(&names);

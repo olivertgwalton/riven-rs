@@ -98,6 +98,7 @@ mod tests {
         let layout = VfsLibraryLayout::new(FilesystemSettings {
             mount_path: "/mount".to_string(),
             library_profiles: profiles,
+            ..FilesystemSettings::default()
         });
 
         assert_eq!(parse_path(&layout, "/kids"), PathTarget::ProfilePrefixDir);
@@ -139,6 +140,7 @@ mod tests {
         let layout = VfsLibraryLayout::new(FilesystemSettings {
             mount_path: "/mount".to_string(),
             library_profiles: profiles,
+            ..FilesystemSettings::default()
         });
 
         assert_eq!(
@@ -168,6 +170,7 @@ mod tests {
         let layout = VfsLibraryLayout::new(FilesystemSettings {
             mount_path: "/mount".to_string(),
             library_profiles: profiles,
+            ..FilesystemSettings::default()
         });
 
         assert_eq!(

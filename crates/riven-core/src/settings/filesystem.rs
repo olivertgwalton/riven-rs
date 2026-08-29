@@ -62,6 +62,16 @@ impl Default for FilesystemLibraryProfile {
 #[serde(default)]
 pub struct FilesystemSettings {
     pub mount_path: String,
+    /// Where to materialise the library as real directories holding symlinks
+    /// into `mount_path`. Empty disables it, which is the default and the
+    /// behaviour every existing install already has.
+    ///
+    /// The VFS is mounted read-only and serves no path that is not a media
+    /// file, so a media server cannot write the sidecars it expects to keep
+    /// beside a title -- theme songs, `.nfo`, trickplay, extracted subtitles.
+    /// Pointing the server at this tree instead gives it real directories to
+    /// write into while the media itself is still streamed through the VFS.
+    pub symlink_path: String,
     pub library_profiles: HashMap<String, FilesystemLibraryProfile>,
 }
 

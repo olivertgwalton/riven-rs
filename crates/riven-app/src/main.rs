@@ -337,6 +337,20 @@ async fn main() -> Result<()> {
 
     let cancel = CancellationToken::new();
 
+    // The symlink tree a media server writes its sidecars into. The VFS is
+    // read-only and serves no path the database does not know, so a theme
+    // song, an `.nfo` or a trickplay tile has nowhere to land beside a title;
+    // this tree gives it real directories over the same layout. Off unless a
+    // path is configured, which is every install that has not asked for it.
+    drop(tokio::spawn(riven_api::symlink_sync::run(
+        riven_api::symlink_sync::SymlinkSyncConfig {
+            filesystem_settings: job_queue.filesystem_settings.clone(),
+            vfs_layout: job_queue.vfs_layout.clone(),
+            filesystem_settings_revision: job_queue.filesystem_settings_revision.clone(),
+            cancel: cancel.clone(),
+        },
+    )));
+
     let gql_host = settings.gql_host.clone();
     let gql_port = settings.gql_port;
     // Auth configuration was validated before the database was opened; see

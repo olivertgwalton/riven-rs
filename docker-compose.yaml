@@ -36,10 +36,17 @@ services:
             - jellyfin_cache:/cache
             - type: bind
               source: ${RIVEN_STORAGE_PATH}
-              target: /mnt/riven
+              target: ${RIVEN_VFS_MOUNT:-/mnt/riven}
               read_only: true
               bind:
                   propagation: slave
+            # The library as real directories holding symlinks into the VFS
+            # above. Writable, because this is where the server keeps the
+            # sidecars it authors: theme songs, .nfo, trickplay, extracted
+            # subtitles. The media itself is still streamed through the VFS.
+            # Unused, and mounted out of the way, until RIVEN_LIBRARY_MOUNT
+            # says otherwise -- see "Symlink library" in the README.
+            - riven_library:${RIVEN_LIBRARY_MOUNT:-/mnt/riven-library}
 
     emby:
         image: lscr.io/linuxserver/emby:latest
@@ -53,10 +60,17 @@ services:
             - emby_data:/config
             - type: bind
               source: ${RIVEN_STORAGE_PATH}
-              target: /mnt/riven
+              target: ${RIVEN_VFS_MOUNT:-/mnt/riven}
               read_only: true
               bind:
                   propagation: slave
+            # The library as real directories holding symlinks into the VFS
+            # above. Writable, because this is where the server keeps the
+            # sidecars it authors: theme songs, .nfo, trickplay, extracted
+            # subtitles. The media itself is still streamed through the VFS.
+            # Unused, and mounted out of the way, until RIVEN_LIBRARY_MOUNT
+            # says otherwise -- see "Symlink library" in the README.
+            - riven_library:${RIVEN_LIBRARY_MOUNT:-/mnt/riven-library}
             - type: bind
               source: ~/server/test-media
               target: /mnt/test-media
@@ -90,9 +104,11 @@ services:
         volumes:
             - type: bind
               source: ${RIVEN_STORAGE_PATH}
-              target: /mnt/riven
+              target: ${RIVEN_VFS_MOUNT:-/mnt/riven}
               bind:
                   propagation: shared
+            # Written by the symlink reconciler, read by the media servers.
+            - riven_library:${RIVEN_LIBRARY_MOUNT:-/mnt/riven-library}
             - riven_logs:/app/logs
         devices:
             - /dev/fuse
@@ -113,6 +129,7 @@ volumes:
     jellyfin_data:
     jellyfin_cache:
     emby_data:
+    riven_library:
     riven_logs:
 
 networks:

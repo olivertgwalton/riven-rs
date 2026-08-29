@@ -352,6 +352,13 @@ pub(crate) fn extract_title(raw: &str) -> String {
         end = end.min(start);
     }
 
+    // An edition or status tag ends the title. A tag at position 0 is the
+    // title's own first word ("Uncut Gems", "Extended Family", "Proper
+    // Manners"), not a tag — the same rule the year and network checks above
+    // already apply, and without it such a title parses to the empty string.
+    // Nothing is lost by leaving the word in: every one of these tags has a
+    // field of its own on `ParsedData`, set by matching the raw title rather
+    // than by what the title extractor kept.
     if let Some(start) = min_match_start(
         &cleaned,
         &[
@@ -364,6 +371,17 @@ pub(crate) fn extract_title(raw: &str) -> String {
             &RE_REPACK,
             &RE_DUBBED,
             &RE_HARDCODED,
+        ],
+    ) && start > 0
+    {
+        end = end.min(start);
+    }
+
+    // A codec, audio format or file extension takes no such guard: none of
+    // them is a word a title starts with.
+    if let Some(start) = min_match_start(
+        &cleaned,
+        &[
             &RE_CODEC_AVC,
             &RE_CODEC_HEVC,
             &RE_CODEC_XVID,

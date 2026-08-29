@@ -1,4 +1,5 @@
 pub mod schema;
+pub mod symlink_sync;
 pub mod vfs_mount;
 
 mod profiles;

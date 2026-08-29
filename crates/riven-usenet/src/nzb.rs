@@ -604,7 +604,15 @@ mod tests {
             "Show.S01E01.rar".to_string(),
         ];
         let groups = detect_rar_volume_groups_by_name(&recovered);
-        assert_eq!(groups.len(), 1, "expected the three volumes to form one set");
-        assert_eq!(groups[0], vec![2, 0, 1], "ordered rar, r00, r01 by volume index");
+        assert_eq!(
+            groups.len(),
+            1,
+            "expected the three volumes to form one set"
+        );
+        assert_eq!(
+            groups[0],
+            vec![2, 0, 1],
+            "ordered rar, r00, r01 by volume index"
+        );
     }
 }
