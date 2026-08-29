@@ -46,6 +46,51 @@ fn notification_url_parser_supports_discord_and_json_aliases() {
 }
 
 #[test]
+fn notification_url_parser_supports_pushbullet() {
+    match parse_notification_url("pbul://o.abc123token") {
+        Some(NotificationService::Pushbullet { access_token }) => {
+            assert_eq!(access_token, "o.abc123token");
+        }
+        _ => panic!("expected pushbullet URL"),
+    }
+
+    // A trailing slash with nothing after it is still a plain-token URL.
+    match parse_notification_url("pbul://o.abc123token/") {
+        Some(NotificationService::Pushbullet { access_token }) => {
+            assert_eq!(access_token, "o.abc123token");
+        }
+        _ => panic!("expected pushbullet URL"),
+    }
+}
+
+#[test]
+fn notification_url_parser_rejects_pushbullet_urls_with_no_token() {
+    assert!(parse_notification_url("pbul://").is_none());
+    assert!(parse_notification_url("pbul:///some-device-id").is_none());
+}
+
+#[test]
+fn notification_url_parser_rejects_pushbullet_urls_with_a_target() {
+    // A device/channel/email target (Apprise's `pbul://token/#channel`,
+    // `.../DEVICE_ID`, `.../email@address`) isn't supported. send_pushbullet
+    // never sends a target parameter, and Pushbullet broadcasts to every
+    // device on the account when none is set — so a target must be rejected
+    // outright rather than silently dropped, which would otherwise leak the
+    // notification to devices the user meant to exclude.
+    assert!(parse_notification_url("pbul://o.abc123token/some-device-id").is_none());
+    assert!(parse_notification_url("pbul://o.abc123token/#a-channel").is_none());
+}
+
+#[test]
+fn pushbullet_body_condenses_the_core_fields_into_one_line() {
+    let body = build_pushbullet_body(&payload());
+    assert_eq!(
+        body,
+        "Movie • 2024 • via stremthru • realdebrid • in 1h 1m 1s"
+    );
+}
+
+#[test]
 fn duration_formatter_uses_human_units() {
     assert_eq!(format_duration(12.4), "12.4s");
     assert_eq!(format_duration(125.0), "2m 5s");

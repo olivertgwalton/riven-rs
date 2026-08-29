@@ -15,16 +15,30 @@ pub(crate) async fn dispatch_webhooks(
                 if let Err(error) =
                     send_discord(&ctx.http, &webhook_id, &webhook_token, payload, detailed).await
                 {
-                    tracing::error!(error = %error, url = url_str, "failed to send discord notification");
+                    // Never log `url_str` here — it's the full discord.com
+                    // webhook URL, which is itself a bearer credential.
+                    tracing::error!(error = %error, service = "discord", "failed to send discord notification");
+                }
+            }
+            Some(NotificationService::Pushbullet { access_token }) => {
+                if let Err(error) = send_pushbullet(&ctx.http, &access_token, payload).await {
+                    // Never log `url_str` here — it embeds the Pushbullet
+                    // access token, which grants full account access.
+                    tracing::error!(error = %error, service = "pushbullet", "failed to send pushbullet notification");
                 }
             }
             Some(NotificationService::Json { url }) => {
                 if let Err(error) = send_json_webhook(&ctx.http, &url, payload).await {
-                    tracing::error!(error = %error, url = url_str, "failed to send json notification");
+                    // Generic webhook URLs commonly embed a secret path
+                    // segment too, so this omits `url_str`/`url` as well.
+                    tracing::error!(error = %error, service = "json", "failed to send json notification");
                 }
             }
             None => {
-                tracing::warn!(url = url_str, "unsupported notification URL scheme");
+                // Never log `url_str` here — a rejected pbul:// URL still
+                // embeds the Pushbullet access token even though parsing
+                // failed.
+                tracing::warn!("unsupported notification URL scheme");
             }
         }
     }
@@ -34,6 +48,9 @@ pub(crate) enum NotificationService {
     Discord {
         webhook_id: String,
         webhook_token: String,
+    },
+    Pushbullet {
+        access_token: String,
     },
     Json {
         url: String,
@@ -50,6 +67,25 @@ pub(crate) fn parse_notification_url(url: &str) -> Option<NotificationService> {
             webhook_id: webhook_id.to_string(),
             webhook_token: webhook_token.to_string(),
         })
+    } else if let Some(rest) = url.strip_prefix("pbul://") {
+        // Apprise's pushbullet scheme also allows `pbul://token/#channel`,
+        // `.../DEVICE_ID`, `.../email@address` for targeted delivery — not
+        // supported here. A target segment is rejected outright rather than
+        // silently dropped: send_pushbullet never sends a target parameter,
+        // and Pushbullet broadcasts to every device on the account when no
+        // target is set, so silently dropping a configured target would leak
+        // the notification to devices the user deliberately excluded.
+        // A missing/empty token (`pbul://`, `pbul:///device-id`) is rejected
+        // outright too, rather than reaching send_pushbullet with an empty
+        // Access-Token header.
+        let (token, target) = rest.split_once('/').unwrap_or((rest, ""));
+        if token.is_empty() || !target.is_empty() {
+            None
+        } else {
+            Some(NotificationService::Pushbullet {
+                access_token: token.to_string(),
+            })
+        }
     } else if let Some(rest) = url.strip_prefix("json://") {
         Some(NotificationService::Json {
             url: format!("http://{rest}"),
@@ -227,6 +263,47 @@ fn build_detailed_embed(payload: &NotificationPayload) -> serde_json::Value {
     }
 
     serde_json::json!({ "embeds": [embed] })
+}
+
+async fn send_pushbullet(
+    http: &riven_core::http::HttpClient,
+    access_token: &str,
+    payload: &NotificationPayload,
+) -> anyhow::Result<()> {
+    let title = format!("Downloaded: {}", payload.full_title);
+    let body = build_pushbullet_body(payload);
+    tracing::debug!(
+        title = %payload.full_title,
+        "sending pushbullet notification"
+    );
+    http.send(profiles::PUSHBULLET, |client| {
+        client
+            .post("https://api.pushbullet.com/v2/pushes")
+            .header("Access-Token", access_token)
+            .json(&serde_json::json!({
+                "type": "note",
+                "title": title,
+                "body": body,
+            }))
+    })
+    .await?
+    .error_for_status()?;
+    Ok(())
+}
+
+/// Pushbullet notes are plain text — no embed support — so this condenses
+/// the same core fields `build_simple_embed` shows into one line.
+pub(crate) fn build_pushbullet_body(payload: &NotificationPayload) -> String {
+    let mut parts = vec![format!("{:?}", payload.item_type)];
+    if let Some(year) = payload.year {
+        parts.push(year.to_string());
+    }
+    parts.push(format!("via {}", payload.downloader));
+    if let Some(ref provider) = payload.provider {
+        parts.push(provider.clone());
+    }
+    parts.push(format!("in {}", format_duration(payload.duration_seconds)));
+    parts.join(" • ")
 }
 
 async fn send_json_webhook(
