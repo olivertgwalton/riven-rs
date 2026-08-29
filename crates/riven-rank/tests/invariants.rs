@@ -53,7 +53,6 @@ fn every_release_has_a_title() {
     const KNOWN: &[&str] = &[
         "2.Sezon",
         "Ponyo[2008]DvDrip-H264 Quad Audio[Eng Jap Fre Spa]AC3 5.1[DXO]",
-        "Uncut.Gems.2019.1080p.NF.WEB-DL.DDP5.1.x264-NTG",
     ];
 
     let found: Vec<(&str, String)> = parsed()

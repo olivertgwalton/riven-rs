@@ -100,6 +100,54 @@ fn contains_words_in_order(text: &str, query: &str) -> bool {
     all_found && text_words.next().is_none()
 }
 
+/// Whether `query`'s words appear in `text` as one contiguous run, in order.
+///
+/// Tighter than [`contains_words_in_order`] on purpose: this one runs against
+/// the *raw release name*, which carries every metadata token after the
+/// title, so a subsequence check there would match almost anything.
+fn contains_contiguous_words(text: &str, query: &str) -> bool {
+    let query_words: Vec<&str> = query.split_whitespace().collect();
+    if query_words.is_empty() {
+        return false;
+    }
+    let text_words: Vec<&str> = text.split_whitespace().collect();
+    text_words
+        .windows(query_words.len())
+        .any(|window| window == query_words.as_slice())
+}
+
+/// Whether `parsed_title` is `query`'s opening words and strictly fewer of
+/// them — the shape a release has when the title extractor cut the title
+/// short at a word that is also a release tag.
+fn is_truncated_title(parsed_title: &str, query: &str) -> bool {
+    let parsed_words: Vec<&str> = parsed_title.split_whitespace().collect();
+    let query_words: Vec<&str> = query.split_whitespace().collect();
+    parsed_words.len() < query_words.len() && parsed_words[..] == query_words[..parsed_words.len()]
+}
+
+/// The release name as words, for `contains_contiguous_words` to search.
+///
+/// `normalize_title` *deletes* punctuation rather than splitting on it, which
+/// is right for a metadata title ("Ocean's Eleven" becomes "oceans eleven")
+/// and wrong for a dot-separated release name, where it would fuse
+/// "Grand.Theft.Auto" into a single word. So separators become spaces first,
+/// and apostrophes are dropped rather than spaced so that both sides spell a
+/// possessive the same way.
+fn normalize_release_title(raw_title: &str) -> String {
+    let spaced: String = raw_title
+        .chars()
+        .filter(|c| !matches!(c, '\'' | '\u{2019}'))
+        .map(|c| {
+            if c.is_alphanumeric() || c.is_whitespace() || c == '&' {
+                c
+            } else {
+                ' '
+            }
+        })
+        .collect();
+    crate::parse::normalize_title(&spaced)
+}
+
 /// If the last word of a normalized title is the (lowercased) country code
 /// `country`, return the title without it.
 fn strip_trailing_country(normalized_title: &str, country: &str) -> Option<String> {
@@ -127,6 +175,24 @@ fn best_title_ratio(
     let mut best_ratio = lev_ratio(&data.normalized_title, &normalized_query);
 
     if contains_words_in_order(&data.normalized_title, &normalized_query) {
+        best_ratio = best_ratio.max(1.0);
+    }
+
+    // The title extractor ends a title at the first release tag it sees, so an
+    // item whose own name contains one parses to a truncation of itself and
+    // scores below any sane threshold: "Grand Theft Auto VI: An Extended Look"
+    // comes back as "grand theft auto vi an", a ratio of 0.76, and every
+    // release for it is rejected as being for a different title. Two
+    // conditions together identify that and nothing else. What the parser kept
+    // has to be the query's opening words and strictly fewer of them, which a
+    // derivative title fails — its parsed title is *longer* than the query
+    // rather than a prefix of it ("top gear the races" against "top gear").
+    // And the release name has to spell the whole query out as a contiguous
+    // run, which an earlier entry in a series fails ("The.Matrix.1999" does
+    // not contain "the matrix reloaded", so it cannot pass itself off as one).
+    if is_truncated_title(&data.normalized_title, &normalized_query)
+        && contains_contiguous_words(&normalize_release_title(&data.raw_title), &normalized_query)
+    {
         best_ratio = best_ratio.max(1.0);
     }
 
@@ -405,6 +471,135 @@ mod tests {
             "new initial d the movie legend 1 awakening",
             "initial d legend 2 racer"
         ));
+    }
+
+    #[test]
+    fn a_title_containing_a_release_tag_survives_the_truncated_parse() {
+        // Reproduces the Grand Theft Auto VI (tmdb) incident: "Extended" is
+        // both a word in the film's name and a release tag, so the title
+        // extractor cuts the parsed title at it and all fourteen scraped
+        // releases were rejected as being for a different title.
+        let settings = RankSettings::default();
+        let aliases = HashMap::new();
+        let correct = "Grand Theft Auto VI: An Extended Look";
+
+        for raw in [
+            "Grand.Theft.Auto.VI.An.Extended.Look.2026.2160p.NF.WEB-DL.DDP5.1.H.265-KRATOS",
+            "Grand.Theft.Auto.VI.An.Extended.Look.2026.1080p.WEB.h264-EDITH",
+            "Grand.Theft.Auto.VI.An.Extended.Look.2026.720p.NF.WEB-DL.DDP5.1.H.264-Kitsune",
+        ] {
+            let data = parse(raw);
+            assert!(
+                title_matches(&data, correct, None, &aliases, &settings),
+                "{raw} is this exact title and must match"
+            );
+        }
+    }
+
+    #[test]
+    fn the_truncated_title_rescue_does_not_admit_a_different_entry() {
+        let settings = RankSettings::default();
+        let aliases = HashMap::new();
+
+        // A shorter, earlier entry in a series is a word-prefix of the one
+        // being asked for, so it clears `is_truncated_title` — and must still
+        // be rejected, because its release name does not contain the whole
+        // title.
+        let matrix = parse("The.Matrix.1999.2160p.UHD.BluRay.x265-GROUP");
+        assert!(!title_matches(
+            &matrix,
+            "The Matrix Reloaded",
+            None,
+            &aliases,
+            &settings
+        ));
+
+        // A derivative title fails the other half: its parsed title is longer
+        // than the query rather than a prefix of it.
+        let races = parse("Top.Gear.The.Races.S01E01.1080p.WEB-DL.DDP2.0.H-264.mkv");
+        assert!(!title_matches(
+            &races, "Top Gear", None, &aliases, &settings
+        ));
+    }
+
+    #[test]
+    fn contains_contiguous_words_requires_an_unbroken_run() {
+        assert!(contains_contiguous_words(
+            "grand theft auto vi an extended look 2160p nf web dl",
+            "grand theft auto vi an extended look"
+        ));
+        // Present, in order, but not contiguous.
+        assert!(!contains_contiguous_words(
+            "grand theft auto vi the an extended look",
+            "grand theft auto vi an extended look"
+        ));
+        assert!(!contains_contiguous_words("toy story", "toy story 2"));
+        assert!(!contains_contiguous_words("toy story", ""));
+    }
+
+    #[test]
+    fn is_truncated_title_wants_a_strict_word_prefix() {
+        assert!(is_truncated_title(
+            "grand theft auto vi an",
+            "grand theft auto vi an extended look"
+        ));
+        assert!(is_truncated_title("", "uncut gems"));
+        // Equal length is not a truncation.
+        assert!(!is_truncated_title("top gear", "top gear"));
+        // Longer than the query: a derivative title, not a truncation.
+        assert!(!is_truncated_title("top gear the races", "top gear"));
+        // Same length but a different word: a wrong sequel, not a truncation.
+        assert!(!is_truncated_title(
+            "grand theft auto vi trailer",
+            "grand theft auto vi an extended look"
+        ));
+    }
+
+    #[test]
+    fn normalize_release_title_splits_on_separators_but_not_apostrophes() {
+        assert_eq!(
+            normalize_release_title("Grand.Theft.Auto.VI.An.Extended.Look.2026.2160p.WEB-DL"),
+            "grand theft auto vi an extended look 2160p web dl"
+        );
+        // The metadata side normalises "Ocean's Eleven" to "oceans eleven",
+        // so the release side has to spell it the same way.
+        assert_eq!(
+            normalize_release_title("Ocean's.Eleven.2001.1080p.BluRay"),
+            "oceans eleven 1080p bluray"
+        );
+    }
+
+    #[test]
+    fn a_title_that_begins_with_a_release_tag_is_not_parsed_away() {
+        // Without the position-0 guard in the title extractor each of these
+        // parses to the empty string, which no threshold can rescue.
+        let settings = RankSettings::default();
+        let aliases = HashMap::new();
+
+        for (raw, correct) in [
+            (
+                "Uncut.Gems.2019.2160p.WEB-DL.DDP5.1.HDR.H.265-FLUX",
+                "Uncut Gems",
+            ),
+            (
+                "Extended.Family.S01E01.1080p.WEB.h264-ETHEL",
+                "Extended Family",
+            ),
+            (
+                "Unrated.The.Movie.2018.1080p.WEB-DL.H264-GROUP",
+                "Unrated: The Movie",
+            ),
+        ] {
+            let data = parse(raw);
+            assert!(
+                !data.parsed_title.is_empty(),
+                "{raw} parsed to an empty title"
+            );
+            assert!(
+                title_matches(&data, correct, None, &aliases, &settings),
+                "{raw} must match {correct}"
+            );
+        }
     }
 
     #[test]
