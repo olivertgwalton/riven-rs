@@ -22,7 +22,18 @@ use tokio::sync::broadcast;
 use crate::application::process_media_item::{fan_out_to_children, push_requested_seasons};
 use crate::context;
 use crate::lifecycle::{LibraryOrchestrator, sync_item_request_state};
-use crate::{IndexJob, JobQueue, ProcessMediaItemJob, ProcessStep};
+use crate::{IndexJob, JobQueue, ProcessMediaItemJob, ProcessStep, scheduled_index_task_id};
+
+/// Outcome of [`MainOrchestrator::needs_reindex`]'s eligibility check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReindexNeed {
+    Needed,
+    NotNeeded,
+    /// The eligibility lookup itself failed (e.g. a DB error) — callers must
+    /// not treat this as `NotNeeded`, since that would tear down a
+    /// legitimately scheduled job over a transient failure.
+    Unknown,
+}
 
 /// Owns the queue and dispatches events to typed actor calls.
 pub struct MainOrchestrator {
@@ -157,24 +168,57 @@ impl MainOrchestrator {
         };
         sync_item_request_state(&item).await;
 
-        let needs_reindex = match item.item_type {
-            MediaItemType::Show => {
-                item.show_status == Some(ShowStatus::Continuing)
-                    || repo::get_next_unreleased_air_date_for_show(item.id)
-                        .await
-                        .ok()
-                        .flatten()
-                        .is_some()
-            }
-            _ => item.state == MediaItemState::Unreleased,
-        };
-        if needs_reindex {
-            self.schedule_reindex(&item).await;
-        } else {
-            self.queue.clear_scheduled_index(item.id).await;
+        match self.needs_reindex(&item).await {
+            ReindexNeed::Needed => self.schedule_reindex(&item).await,
+            ReindexNeed::NotNeeded => self.queue.clear_scheduled_index(item.id).await,
+            // Lookup failed — leave whatever schedule already exists alone
+            // rather than guessing; we'll get another chance at the next
+            // index or reconcile pass.
+            ReindexNeed::Unknown => {}
         }
         if item.state != MediaItemState::Unreleased && item.is_requested {
             self.process_media_item(&item).await;
+        }
+    }
+
+    /// Whether `item` should have a pending scheduled reindex: a continuing
+    /// show, a show with a known next unreleased air date (covers a show
+    /// that hasn't settled into `Continuing` yet, e.g. right after its first
+    /// index), or any non-show item still `Unreleased`. Shared between
+    /// `handle_index_success` (decides right after a fresh index) and
+    /// `reconcile_scheduled_reindexes` (checks Redis still has what it
+    /// should) so the two can never drift apart.
+    ///
+    /// Returns `Unknown` rather than collapsing a failed eligibility lookup
+    /// to `NotNeeded` — a transient DB error must never look like "this show
+    /// has no upcoming episode" and cause an existing schedule to be torn
+    /// down.
+    async fn needs_reindex(&self, item: &MediaItem) -> ReindexNeed {
+        match item.item_type {
+            MediaItemType::Show => {
+                if item.show_status == Some(ShowStatus::Continuing) {
+                    return ReindexNeed::Needed;
+                }
+                match repo::get_next_unreleased_air_date_for_show(item.id).await {
+                    Ok(Some(_)) => ReindexNeed::Needed,
+                    Ok(None) => ReindexNeed::NotNeeded,
+                    Err(error) => {
+                        tracing::error!(
+                            %error,
+                            item_id = item.id,
+                            "could not look up next air date; leaving its scheduled reindex as-is"
+                        );
+                        ReindexNeed::Unknown
+                    }
+                }
+            }
+            _ => {
+                if item.state == MediaItemState::Unreleased {
+                    ReindexNeed::Needed
+                } else {
+                    ReindexNeed::NotNeeded
+                }
+            }
         }
     }
 
@@ -264,9 +308,104 @@ impl MainOrchestrator {
         schedule_datetime(target_date, offset_minutes, fallback_days)
     }
 
+    /// Recreates any scheduled-reindex entry the `index` queue's Redis-backed
+    /// schedule has lost — e.g. a restart without persistence, an eviction,
+    /// or a bug — but that Postgres still says should exist (a continuing
+    /// show, or an unreleased item). Without this, a lost schedule is
+    /// permanent: nothing else in the system would ever notice or recheck
+    /// that item again. Runs once at startup (the scheduler's first
+    /// `retry_library` tick) and on every subsequent tick, so a gap closes
+    /// within one sweep interval rather than persisting indefinitely.
+    /// Gated by `reconcile_scheduled_reindexes` (default on).
+    async fn reconcile_scheduled_reindexes(&self) {
+        if !self
+            .queue
+            .reindex_config
+            .read()
+            .await
+            .reconcile_scheduled_reindexes
+        {
+            return;
+        }
+
+        let candidate_ids = match repo::get_reindex_schedule_candidates().await {
+            Ok(ids) => ids,
+            Err(error) => {
+                tracing::error!(
+                    %error,
+                    "reconcile: could not list items that might need a scheduled reindex, skipping this pass"
+                );
+                return;
+            }
+        };
+        if candidate_ids.is_empty() {
+            return;
+        }
+
+        let scheduled_set = self
+            .queue
+            .index_storage
+            .get_config()
+            .scheduled_jobs_set()
+            .to_string();
+        let mut conn = self.queue.redis.clone();
+        let existing: Vec<String> = match redis::cmd("ZRANGE")
+            .arg(&scheduled_set)
+            .arg(0)
+            .arg(-1)
+            .query_async(&mut conn)
+            .await
+        {
+            Ok(members) => members,
+            Err(error) => {
+                tracing::error!(
+                    %error,
+                    "reconcile: could not read the index queue's scheduled set, skipping this pass"
+                );
+                return;
+            }
+        };
+        let existing: std::collections::HashSet<String> = existing.into_iter().collect();
+
+        let missing_ids: Vec<i64> = candidate_ids
+            .into_iter()
+            .filter(|id| !existing.contains(&scheduled_index_task_id(*id).to_string()))
+            .collect();
+        if missing_ids.is_empty() {
+            return;
+        }
+
+        // `get_reindex_schedule_candidates` is a deliberately loose superset
+        // (SQL-cheap; can't express "has a known next air date" without a
+        // per-show query); `needs_reindex` is the real predicate, so it's
+        // applied here per candidate rather than trusting the SQL filter
+        // alone — otherwise a non-`Continuing` show with no upcoming episode
+        // would get rescheduled every single sweep for no reason.
+        let mut rescheduled = Vec::new();
+        for id in missing_ids {
+            let Some(item) = self.load_item(id).await else {
+                continue;
+            };
+            if matches!(self.needs_reindex(&item).await, ReindexNeed::Needed) {
+                self.schedule_reindex(&item).await;
+                rescheduled.push(id);
+            }
+        }
+        if !rescheduled.is_empty() {
+            tracing::warn!(
+                count = rescheduled.len(),
+                ids = ?rescheduled,
+                "reconcile: found item(s) that should have a scheduled reindex but don't \
+                 (likely a prior Redis restart/eviction) — rescheduled them now"
+            );
+        }
+    }
+
     /// Retry-library actor. Periodically called by the worker to nudge items
     /// stuck in retryable states.
     pub async fn retry_library(&self) {
+        self.reconcile_scheduled_reindexes().await;
+
         match repo::get_ongoing_container_ids().await {
             Ok(ids) => {
                 if let Err(error) = repo::force_recompute(&ids).await {
