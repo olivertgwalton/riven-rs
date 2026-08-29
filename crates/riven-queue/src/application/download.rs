@@ -58,7 +58,7 @@ pub enum ManualDownloadErrorKind {
 #[derive(Debug, Clone)]
 pub struct ManualDownloadError {
     pub kind: ManualDownloadErrorKind,
-    pub item: Option<MediaItem>,
+    pub item: Option<Box<MediaItem>>,
     pub message: String,
 }
 
@@ -66,7 +66,7 @@ impl ManualDownloadError {
     fn incorrect_state(item: MediaItem) -> Self {
         Self {
             kind: ManualDownloadErrorKind::IncorrectState,
-            item: Some(item),
+            item: Some(Box::new(item)),
             message: "media item is not in a downloadable state".to_string(),
         }
     }
@@ -74,7 +74,7 @@ impl ManualDownloadError {
     fn download_error(item: Option<MediaItem>, message: impl Into<String>) -> Self {
         Self {
             kind: ManualDownloadErrorKind::DownloadError,
-            item,
+            item: item.map(Box::new),
             message: message.into(),
         }
     }

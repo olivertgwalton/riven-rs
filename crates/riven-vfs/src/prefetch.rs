@@ -577,7 +577,7 @@ impl Actor {
             inflight_units = self.active.len(),
             "read-ahead window reset"
         );
-        for request in self.pending.drain(..).collect::<Vec<_>>() {
+        for request in std::mem::take(&mut self.pending) {
             self.spawn_direct(request);
         }
         self.cursor = position;
