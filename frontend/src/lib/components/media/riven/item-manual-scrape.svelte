@@ -4,7 +4,9 @@
     import { gqlClient } from "$lib/graphql-client";
     import { toast } from "svelte-sonner";
     import type { Snippet } from "svelte";
+    import { SvelteSet } from "svelte/reactivity";
     import * as Dialog from "$lib/components/ui/dialog/index.js";
+    import * as DropdownMenu from "$lib/components/ui/dropdown-menu/index.js";
     import { Button } from "$lib/components/ui/button/index.js";
     import { Label } from "$lib/components/ui/label/index.js";
     import { Badge } from "$lib/components/ui/badge/index.js";
@@ -15,6 +17,7 @@
     import HardDrive from "@lucide/svelte/icons/hard-drive";
     import Newspaper from "@lucide/svelte/icons/newspaper";
     import Magnet from "@lucide/svelte/icons/magnet";
+    import Filter from "@lucide/svelte/icons/filter";
     import SeasonSelector, { type SeasonInfo } from "./season-selector.svelte";
     import { page } from "$app/state";
 
@@ -52,6 +55,11 @@
         itemType: "MOVIE" | "SEASON" | "EPISODE";
         seasonNumber?: number | null;
         episodeNumber?: number | null;
+        /** Client-only: set only on a card built from a manual NZB
+         * preview (paste or upload), never present on a real scrape
+         * result. Lets `downloadStream` route to `downloadExplicitNzb`
+         * instead of `downloadDiscoveredStream` for these cards. */
+        manualNzbUrl?: string;
     }
 
     /**
@@ -86,6 +94,42 @@
         downloadDiscoveredStream(itemType: $itemType, title: $title, imdbId: $imdbId, tmdbId: $tmdbId, tvdbId: $tvdbId, seasonNumber: $seasonNumber, episodeNumber: $episodeNumber, seasons: $seasons, infoHash: $infoHash, magnet: $magnet, parsedData: $parsedData, rank: $rank)
     }`;
 
+    const DOWNLOAD_EXPLICIT_NZB_MUTATION = `mutation($itemType: MediaItemType!, $title: String!, $imdbId: String, $tmdbId: String, $tvdbId: String, $seasonNumber: Int, $episodeNumber: Int, $seasons: [Int!], $nzbUrl: String!) {
+        downloadExplicitNzb(itemType: $itemType, title: $title, imdbId: $imdbId, tmdbId: $tmdbId, tvdbId: $tvdbId, seasonNumber: $seasonNumber, episodeNumber: $episodeNumber, seasons: $seasons, nzbUrl: $nzbUrl)
+    }`;
+
+    const PREVIEW_MANUAL_MAGNET_MUTATION = `mutation($itemType: MediaItemType!, $infoHash: String!, $magnet: String!, $seasonNumber: Int, $episodeNumber: Int) {
+        previewManualMagnet(itemType: $itemType, infoHash: $infoHash, magnet: $magnet, seasonNumber: $seasonNumber, episodeNumber: $episodeNumber) {
+            key
+            title
+            infoHash
+            magnet
+            parsedData
+            rank
+            fileSizeBytes
+            isCached
+            itemType
+            seasonNumber
+            episodeNumber
+        }
+    }`;
+
+    const PREVIEW_MANUAL_NZB_MUTATION = `mutation($itemType: MediaItemType!, $nzbUrl: String!, $seasonNumber: Int, $episodeNumber: Int) {
+        previewManualNzb(itemType: $itemType, nzbUrl: $nzbUrl, seasonNumber: $seasonNumber, episodeNumber: $episodeNumber) {
+            key
+            title
+            infoHash
+            magnet
+            parsedData
+            rank
+            fileSizeBytes
+            isCached
+            itemType
+            seasonNumber
+            episodeNumber
+        }
+    }`;
+
     let {
         title,
         itemId,
@@ -109,6 +153,20 @@
     let customTmdbId = $state("");
     let customTvdbId = $state("");
     let explicitHash = $state("");
+    let nzbUrl = $state("");
+    let uploadingNzb = $state(false);
+    let previewingManual = $state(false);
+    let nzbFileInput = $state<HTMLInputElement | undefined>(undefined);
+    let searchQuery = $state("");
+    let providerFilter = $state({ torrent: true, usenet: true });
+    // Every checkbox in the Filter dropdown starts checked (nothing
+    // excluded) — tracking *excluded* values rather than *included* ones is
+    // what makes that true by construction, with no sync step needed: a
+    // resolution/quality that doesn't exist yet (a stream not previewed/
+    // discovered yet) is, by definition, not in this set, so it starts
+    // included the moment it appears.
+    const excludedResolutions = new SvelteSet<string>();
+    const excludedQualities = new SvelteSet<string>();
     let streams = $state<StreamCandidate[]>([]);
     let downloadingKey = $state<string | null>(null);
 
@@ -117,7 +175,49 @@
         mediaType === "tv" && seasons.length > 0 && !isEpisodeMode
     );
     const visibleStreams = $derived(
-        cachedOnly ? streams.filter((stream) => stream.isCached) : streams
+        (() => {
+            const query = searchQuery.trim().toLowerCase();
+            return streams
+                .filter((stream) => !cachedOnly || stream.isCached)
+                .filter((stream) => !query || stream.title.toLowerCase().includes(query))
+                .filter((stream) =>
+                    isUsenet(stream.infoHash) ? providerFilter.usenet : providerFilter.torrent
+                )
+                .filter(
+                    (stream) =>
+                        !stream.parsedData?.resolution ||
+                        !excludedResolutions.has(stream.parsedData.resolution)
+                )
+                .filter(
+                    (stream) =>
+                        !stream.parsedData?.quality ||
+                        !excludedQualities.has(stream.parsedData.quality)
+                );
+        })()
+    );
+    const disabledProviderCount = $derived(
+        (providerFilter.torrent ? 0 : 1) + (providerFilter.usenet ? 0 : 1)
+    );
+    const activeFilterCount = $derived(
+        disabledProviderCount + excludedResolutions.size + excludedQualities.size
+    );
+    const availableResolutions = $derived(
+        Array.from(
+            new Set(
+                streams
+                    .map((stream) => stream.parsedData?.resolution)
+                    .filter((value): value is string => Boolean(value))
+            )
+        ).sort()
+    );
+    const availableQualities = $derived(
+        Array.from(
+            new Set(
+                streams
+                    .map((stream) => stream.parsedData?.quality)
+                    .filter((value): value is string => Boolean(value))
+            )
+        ).sort()
     );
     const resolvedTmdbId = $derived(
         mediaType === "movie" ? (clean(customTmdbId) ?? externalId) : null
@@ -136,6 +236,13 @@
             if (/^[0-9a-fA-F]{40}$/.test(trimmed) || /^[0-9a-fA-F]{64}$/.test(trimmed))
                 return trimmed.toLowerCase();
             return null;
+        })()
+    );
+    const cleanedNzbUrl = $derived(
+        (() => {
+            const trimmed = nzbUrl.trim();
+            if (!trimmed) return null;
+            return /^https?:\/\//i.test(trimmed) ? trimmed : null;
         })()
     );
     const hadExistingItem = $derived(Boolean(itemId));
@@ -162,6 +269,17 @@
             : [...selectedSeasons, seasonNumber].sort((a, b) => a - b);
     }
 
+    /** Clears only what the Filter dropdown itself controls (provider,
+     * resolution, quality) — matches `activeFilterCount`, which the dropdown's
+     * own Reset button is enabled/disabled by. The separate search box is
+     * cleared by `reset()`, not here, so Reset's enabled state always
+     * reflects exactly what it's about to clear. */
+    function resetFilters() {
+        providerFilter = { torrent: true, usenet: true };
+        excludedResolutions.clear();
+        excludedQualities.clear();
+    }
+
     function reset() {
         loading = false;
         error = null;
@@ -170,6 +288,11 @@
         customTmdbId = "";
         customTvdbId = "";
         explicitHash = "";
+        nzbUrl = "";
+        uploadingNzb = false;
+        previewingManual = false;
+        searchQuery = "";
+        resetFilters();
         advancedOpen = false;
         selectedSeasons = seasons
             .filter((season) => season.status !== "Available")
@@ -177,40 +300,14 @@
             .sort((a, b) => a - b);
     }
 
-    async function submitDownload(
-        key: string,
-        vars: {
-            itemType: "MOVIE" | "SEASON" | "EPISODE";
-            seasonNumber: number | null;
-            episodeNumber?: number | null;
-            seasons?: number[] | null;
-            infoHash: string;
-            magnet: string;
-            parsedData?: StreamCandidate["parsedData"];
-            rank?: number | null;
-        }
-    ) {
+    /** Shared by every mutation this dialog can fire: track the in-flight key,
+     * surface errors, and on success close the dialog and refresh the page. */
+    async function runDownload(key: string, mutation: string, variables: Record<string, unknown>) {
         downloadingKey = key;
         error = null;
 
         try {
-            await gqlClient<{ downloadDiscoveredStream: string }>(
-                DOWNLOAD_DISCOVERED_STREAM_MUTATION,
-                {
-                    itemType: vars.itemType,
-                    title: title ?? "Unknown",
-                    imdbId: null,
-                    tmdbId: resolvedTmdbId,
-                    tvdbId: resolvedTvdbId,
-                    seasonNumber: vars.seasonNumber,
-                    episodeNumber: vars.episodeNumber ?? null,
-                    seasons: vars.seasons ?? null,
-                    infoHash: vars.infoHash,
-                    magnet: vars.magnet,
-                    parsedData: vars.parsedData ?? null,
-                    rank: vars.rank ?? null
-                }
-            );
+            await gqlClient(mutation, variables);
 
             toast.success(
                 hadExistingItem
@@ -225,6 +322,35 @@
         } finally {
             downloadingKey = null;
         }
+    }
+
+    function submitDownload(
+        key: string,
+        vars: {
+            itemType: "MOVIE" | "SEASON" | "EPISODE";
+            seasonNumber: number | null;
+            episodeNumber?: number | null;
+            seasons?: number[] | null;
+            infoHash: string;
+            magnet: string;
+            parsedData?: StreamCandidate["parsedData"];
+            rank?: number | null;
+        }
+    ) {
+        return runDownload(key, DOWNLOAD_DISCOVERED_STREAM_MUTATION, {
+            itemType: vars.itemType,
+            title: title ?? "Unknown",
+            imdbId: null,
+            tmdbId: resolvedTmdbId,
+            tvdbId: resolvedTvdbId,
+            seasonNumber: vars.seasonNumber,
+            episodeNumber: vars.episodeNumber ?? null,
+            seasons: vars.seasons ?? null,
+            infoHash: vars.infoHash,
+            magnet: vars.magnet,
+            parsedData: vars.parsedData ?? null,
+            rank: vars.rank ?? null
+        });
     }
 
     async function discoverStreams() {
@@ -260,6 +386,90 @@
         }
     }
 
+    /** Uploads a raw .nzb file and, on success, drops the resulting (loopback)
+     * URL straight into `nzbUrl` — everything downstream (validation, the
+     * download button, the mutation itself) is exactly what pasting a URL
+     * already drives, with no separate upload-specific download path. Once
+     * uploaded, the URL is already known-good — straight into
+     * `previewManualNzb` rather than making the user click a second,
+     * redundant "add it" button for a file they just picked. */
+    async function uploadNzbFile(file: File) {
+        uploadingNzb = true;
+        error = null;
+
+        try {
+            const formData = new FormData();
+            formData.append("file", file);
+            const response = await fetch("/internal/nzb-upload", {
+                method: "POST",
+                credentials: "include",
+                body: formData
+            });
+            if (!response.ok) {
+                const message = await response.text();
+                throw new Error(message || `Upload failed (${response.status})`);
+            }
+            const data: { url: string } = await response.json();
+            nzbUrl = data.url;
+            toast.success(`${file.name} uploaded`);
+        } catch (e) {
+            error = e instanceof Error ? e.message : "Failed to upload NZB file";
+            toast.error(error);
+            return;
+        } finally {
+            uploadingNzb = false;
+        }
+
+        await previewManualNzb();
+    }
+
+    function handleNzbFileSelected(e: Event) {
+        const file = (e.target as HTMLInputElement).files?.[0];
+        if (file) uploadNzbFile(file);
+        // Cleared so selecting the same file again still fires `change`.
+        if (nzbFileInput) nzbFileInput.value = "";
+    }
+
+    /** Inserted at the top (most-recently-added is most visible) rather than
+     * appended; re-previewing the same release replaces its existing card in
+     * place instead of duplicating it. Also drops the "Cached only" filter
+     * when the new card is uncached — that filter defaults on, and without
+     * this a manually-added uncached release would vanish from view the
+     * instant it's added, with only the success toast as a clue why. */
+    function addOrReplaceStream(candidate: StreamCandidate) {
+        const idx = streams.findIndex((s) => s.key === candidate.key);
+        if (idx >= 0) {
+            streams = streams.map((s, i) => (i === idx ? candidate : s));
+        } else {
+            streams = [candidate, ...streams];
+        }
+        if (!candidate.isCached) cachedOnly = false;
+    }
+
+    function manualTargetSeasonNumber() {
+        if (isEpisodeMode) return seasonNumber;
+        return mediaType === "tv" ? (selectedSeasons[0] ?? null) : null;
+    }
+
+    /** `false` means a season/episode precondition failed and an error toast
+     * was already shown — the caller just bails without going further. */
+    function validateManualTarget(): boolean {
+        if (isEpisodeMode) {
+            if (seasonNumber == null) {
+                error = "No season number available for this episode";
+                toast.error(error);
+                return false;
+            }
+            return true;
+        }
+        if (mediaType === "tv" && selectedSeasons.length === 0) {
+            error = "Select at least one season first";
+            toast.error(error);
+            return false;
+        }
+        return true;
+    }
+
     function downloadStream(stream: StreamCandidate) {
         // A pack that parses to multiple seasons fills every one it contains;
         // the backend links it to the show rather than a single season. Not
@@ -268,6 +478,21 @@
         const packSeasons = isEpisodeMode
             ? []
             : (stream.parsedData?.seasons?.filter((n) => n > 0) ?? []);
+
+        if (stream.manualNzbUrl) {
+            return runDownload(stream.key, DOWNLOAD_EXPLICIT_NZB_MUTATION, {
+                itemType: stream.itemType,
+                title: title ?? "Unknown",
+                imdbId: null,
+                tmdbId: resolvedTmdbId,
+                tvdbId: resolvedTvdbId,
+                seasonNumber: stream.seasonNumber ?? null,
+                episodeNumber: stream.episodeNumber ?? null,
+                seasons: packSeasons.length ? packSeasons : null,
+                nzbUrl: stream.manualNzbUrl
+            });
+        }
+
         return submitDownload(stream.key, {
             itemType: stream.itemType,
             seasonNumber: stream.seasonNumber ?? null,
@@ -280,43 +505,79 @@
         });
     }
 
-    function downloadExplicitHash() {
+    /** Turns a pasted magnet/hash into a full stream-candidate card (same
+     * badges a real scrape result gets) instead of downloading it
+     * sight-unseen — the card's own "Download This" is what actually queues
+     * it, via `downloadStream` above. */
+    async function previewManualMagnet() {
         if (!cleanedHash) {
             error = "Enter a valid 40-char info hash or paste a magnet link";
-            return;
-        }
-
-        if (isEpisodeMode) {
-            if (seasonNumber == null) {
-                error = "No season number available for this episode";
-                toast.error(error);
-                return;
-            }
-            return submitDownload(`manual:${cleanedHash}`, {
-                itemType: "EPISODE",
-                seasonNumber,
-                episodeNumber,
-                seasons: null,
-                infoHash: cleanedHash,
-                magnet: `magnet:?xt=urn:btih:${cleanedHash}`,
-                parsedData: null
-            });
-        }
-
-        if (mediaType === "tv" && selectedSeasons.length === 0) {
-            error = "Select at least one season before downloading an explicit hash";
             toast.error(error);
             return;
         }
+        if (!validateManualTarget()) return;
 
-        return submitDownload(`manual:${cleanedHash}`, {
-            itemType: mediaType === "movie" ? "MOVIE" : "SEASON",
-            seasonNumber: mediaType === "tv" ? selectedSeasons[0] : null,
-            seasons: mediaType === "tv" ? selectedSeasons : null,
-            infoHash: cleanedHash,
-            magnet: `magnet:?xt=urn:btih:${cleanedHash}`,
-            parsedData: null
-        });
+        const trimmed = explicitHash.trim();
+        const magnet = trimmed.toLowerCase().startsWith("magnet:")
+            ? trimmed
+            : `magnet:?xt=urn:btih:${cleanedHash}`;
+
+        previewingManual = true;
+        error = null;
+        try {
+            const data = await gqlClient<{ previewManualMagnet: StreamCandidate }>(
+                PREVIEW_MANUAL_MAGNET_MUTATION,
+                {
+                    itemType: isEpisodeMode ? "EPISODE" : mediaType === "movie" ? "MOVIE" : "SEASON",
+                    infoHash: cleanedHash,
+                    magnet,
+                    seasonNumber: manualTargetSeasonNumber(),
+                    episodeNumber: isEpisodeMode ? episodeNumber : null
+                }
+            );
+            addOrReplaceStream(data.previewManualMagnet);
+            explicitHash = "";
+            toast.success("Added to stream candidates");
+        } catch (e) {
+            error = e instanceof Error ? e.message : "Failed to preview magnet";
+            toast.error(error);
+        } finally {
+            previewingManual = false;
+        }
+    }
+
+    /** NZB equivalent of `previewManualMagnet` — same "add a card, download
+     * from the list" flow, for either a pasted URL or one handed back by
+     * `uploadNzbFile`. */
+    async function previewManualNzb() {
+        if (!cleanedNzbUrl) {
+            error = "Enter a valid NZB URL (must start with http:// or https://)";
+            toast.error(error);
+            return;
+        }
+        if (!validateManualTarget()) return;
+
+        previewingManual = true;
+        error = null;
+        try {
+            const data = await gqlClient<{ previewManualNzb: StreamCandidate }>(
+                PREVIEW_MANUAL_NZB_MUTATION,
+                {
+                    itemType: isEpisodeMode ? "EPISODE" : mediaType === "movie" ? "MOVIE" : "SEASON",
+                    nzbUrl: cleanedNzbUrl,
+                    seasonNumber: manualTargetSeasonNumber(),
+                    episodeNumber: isEpisodeMode ? episodeNumber : null
+                }
+            );
+            addOrReplaceStream({ ...data.previewManualNzb, manualNzbUrl: cleanedNzbUrl });
+            nzbUrl = "";
+            toast.success("Added to stream candidates");
+        } catch (e) {
+            error = e instanceof Error ? e.message : "Failed to preview NZB";
+            toast.error(error);
+        } finally {
+            previewingManual = false;
+        }
     }
 
     $effect(() => {
@@ -423,7 +684,7 @@
                         {/if}
 
                         {#if advancedOpen}
-                            <div class="mt-4 grid gap-3 md:grid-cols-2">
+                            <div class="mt-4 grid gap-3 md:grid-cols-3">
                                 <div class="space-y-2">
                                     <Label
                                         >{mediaType === "movie"
@@ -436,23 +697,76 @@
                                             placeholder={externalId} />{/if}
                                 </div>
                                 <div class="space-y-2">
-                                    <Label>Explicit Stream Hash</Label>
+                                    <Label class="flex items-center gap-1.5">
+                                        <Magnet class="h-3.5 w-3.5" />
+                                        Magnet link or info hash
+                                    </Label>
                                     <Input
                                         bind:value={explicitHash}
-                                        placeholder="40-char info hash" />
+                                        placeholder="magnet:?xt=urn:btih:... or 40-char hash" />
+                                    {#if explicitHash.trim()}
+                                        <Button
+                                            size="sm"
+                                            onclick={previewManualMagnet}
+                                            disabled={previewingManual || !cleanedHash}>
+                                            {#if previewingManual}
+                                                <LoaderCircle class="mr-2 h-4 w-4 animate-spin" />
+                                            {/if}
+                                            Add to Candidates
+                                        </Button>
+                                        {#if !cleanedHash}
+                                            <p class="text-xs text-amber-400">
+                                                Enter a valid 40-char info hash or paste a magnet
+                                                link.
+                                            </p>
+                                        {/if}
+                                    {/if}
                                 </div>
-                            </div>
-                        {/if}
-                        {#if cleanedHash}
-                            <div class="mt-4 flex justify-end">
-                                <Button
-                                    variant="outline"
-                                    onclick={downloadExplicitHash}
-                                    disabled={downloadingKey !== null}>
-                                    {#if downloadingKey === `manual:${cleanedHash}`}<LoaderCircle
-                                            class="mr-2 h-4 w-4 animate-spin" />{/if}
-                                    Download Explicit Hash
-                                </Button>
+                                <div class="space-y-2">
+                                    <Label class="flex items-center gap-1.5">
+                                        <Newspaper class="h-3.5 w-3.5" />
+                                        NZB URL
+                                    </Label>
+                                    <Input
+                                        bind:value={nzbUrl}
+                                        placeholder="https://.../release.nzb" />
+                                    <p class="text-center text-[0.65rem] text-zinc-500">or</p>
+                                    <input
+                                        bind:this={nzbFileInput}
+                                        type="file"
+                                        accept=".nzb,application/x-nzb,text/xml"
+                                        class="hidden"
+                                        onchange={handleNzbFileSelected} />
+                                    <div class="flex flex-wrap gap-2">
+                                        <Button
+                                            variant="outline"
+                                            size="sm"
+                                            disabled={uploadingNzb}
+                                            onclick={() => nzbFileInput?.click()}>
+                                            {#if uploadingNzb}
+                                                <LoaderCircle class="mr-2 h-4 w-4 animate-spin" />
+                                            {/if}
+                                            Upload NZB file
+                                        </Button>
+                                        {#if nzbUrl.trim()}
+                                            <Button
+                                                size="sm"
+                                                onclick={previewManualNzb}
+                                                disabled={previewingManual || !cleanedNzbUrl}>
+                                                {#if previewingManual}
+                                                    <LoaderCircle class="mr-2 h-4 w-4 animate-spin" />
+                                                {/if}
+                                                Add to Candidates
+                                            </Button>
+                                        {/if}
+                                    </div>
+                                    {#if nzbUrl.trim() && !cleanedNzbUrl}
+                                        <p class="text-xs text-amber-400">
+                                            Enter a valid NZB URL (must start with http:// or
+                                            https://).
+                                        </p>
+                                    {/if}
+                                </div>
                             </div>
                         {/if}
                     </div>
@@ -468,12 +782,101 @@
                             <Badge variant="outline">{visibleStreams.length} found</Badge>
                         </div>
 
+                        {#if streams.length}
+                            <div class="mb-4 flex gap-2">
+                                <Input
+                                    class="flex-1"
+                                    bind:value={searchQuery}
+                                    placeholder="Filter by title, release group, resolution..." />
+                                <DropdownMenu.Root>
+                                    <DropdownMenu.Trigger>
+                                        {#snippet child({ props })}
+                                            <Button {...props} variant="outline" class="shrink-0">
+                                                <Filter class="h-3.5 w-3.5" />
+                                                Filter
+                                                {#if activeFilterCount > 0}
+                                                    <Badge
+                                                        variant="outline"
+                                                        class="ml-1 h-4 px-1 text-[0.65rem]"
+                                                        >{activeFilterCount}</Badge>
+                                                {/if}
+                                            </Button>
+                                        {/snippet}
+                                    </DropdownMenu.Trigger>
+                                    <DropdownMenu.Content
+                                        align="end"
+                                        class="max-h-80 overflow-y-auto rounded-2xl border border-white/10 bg-zinc-950/95 shadow-2xl shadow-black/50 backdrop-blur-2xl">
+                                        <div class="flex items-center justify-between gap-3 px-1.5 py-1">
+                                            <DropdownMenu.Label class="p-0"
+                                                >Filters</DropdownMenu.Label>
+                                            <button
+                                                type="button"
+                                                class="text-xs text-zinc-400 transition hover:text-zinc-200 disabled:cursor-not-allowed disabled:opacity-50"
+                                                onclick={resetFilters}
+                                                disabled={activeFilterCount === 0}>
+                                                Reset
+                                            </button>
+                                        </div>
+                                        <DropdownMenu.Separator />
+                                        <DropdownMenu.Label>Download provider</DropdownMenu.Label>
+                                        <DropdownMenu.Separator />
+                                        <DropdownMenu.CheckboxItem
+                                            bind:checked={providerFilter.torrent}
+                                            closeOnSelect={false}>
+                                            <Magnet class="h-3.5 w-3.5 text-amber-400" />
+                                            Torrent
+                                        </DropdownMenu.CheckboxItem>
+                                        <DropdownMenu.CheckboxItem
+                                            bind:checked={providerFilter.usenet}
+                                            closeOnSelect={false}>
+                                            <Newspaper class="h-3.5 w-3.5 text-sky-400" />
+                                            Usenet
+                                        </DropdownMenu.CheckboxItem>
+                                        {#if availableResolutions.length}
+                                            <DropdownMenu.Separator />
+                                            <DropdownMenu.Label>Resolution</DropdownMenu.Label>
+                                            {#each availableResolutions as resolution (resolution)}
+                                                <DropdownMenu.CheckboxItem
+                                                    checked={!excludedResolutions.has(resolution)}
+                                                    onCheckedChange={(checked) =>
+                                                        checked
+                                                            ? excludedResolutions.delete(resolution)
+                                                            : excludedResolutions.add(resolution)}
+                                                    closeOnSelect={false}>
+                                                    {resolution}
+                                                </DropdownMenu.CheckboxItem>
+                                            {/each}
+                                        {/if}
+                                        {#if availableQualities.length}
+                                            <DropdownMenu.Separator />
+                                            <DropdownMenu.Label>Quality</DropdownMenu.Label>
+                                            {#each availableQualities as quality (quality)}
+                                                <DropdownMenu.CheckboxItem
+                                                    checked={!excludedQualities.has(quality)}
+                                                    onCheckedChange={(checked) =>
+                                                        checked
+                                                            ? excludedQualities.delete(quality)
+                                                            : excludedQualities.add(quality)}
+                                                    closeOnSelect={false}>
+                                                    {quality}
+                                                </DropdownMenu.CheckboxItem>
+                                            {/each}
+                                        {/if}
+                                    </DropdownMenu.Content>
+                                </DropdownMenu.Root>
+                            </div>
+                        {/if}
+
                         {#if !visibleStreams.length}
                             <div
                                 class="rounded-xl border border-dashed border-white/15 px-6 py-12 text-center text-sm text-zinc-400">
                                 {#if loading}
                                     <LoaderCircle class="mx-auto mb-3 h-5 w-5 animate-spin" />
                                     Waiting for backend results...
+                                {:else if streams.length && searchQuery.trim()}
+                                    No streams matched "{searchQuery.trim()}".
+                                {:else if streams.length && activeFilterCount > 0}
+                                    No streams matched the current filter.
                                 {:else if streams.length && cachedOnly}
                                     No cached streams matched the current filter.
                                 {:else}
@@ -482,7 +885,12 @@
                             </div>
                         {:else}
                             <div
-                                class="max-h-[48vh] overflow-y-auto rounded-xl pr-1 sm:max-h-[52vh]">
+                                style="scrollbar-width: thin;"
+                                class="max-h-[48vh] overflow-y-auto rounded-xl pr-1 sm:max-h-[52vh]
+                                    [&::-webkit-scrollbar]:block [&::-webkit-scrollbar]:w-1.5
+                                    [&::-webkit-scrollbar-thumb]:rounded-full
+                                    [&::-webkit-scrollbar-thumb]:bg-white/15
+                                    [&::-webkit-scrollbar-track]:bg-transparent">
                                 <div class="space-y-3">
                                     {#each visibleStreams as stream (stream.key)}
                                         <div

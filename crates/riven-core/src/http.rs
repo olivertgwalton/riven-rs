@@ -4,6 +4,7 @@ pub mod profiles;
 mod rate_limit;
 mod response;
 mod retry;
+pub mod ssrf_guard;
 
 pub use client::HttpClient;
 pub use profiles::HttpServiceProfile;

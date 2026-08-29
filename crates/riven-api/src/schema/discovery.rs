@@ -340,7 +340,14 @@ pub async fn discover_streams(
     Ok(discovered)
 }
 
-async fn apply_cache_status(registry: &PluginRegistry, streams: &mut [DiscoveredStream]) {
+/// `pub(crate)`: also used by `mutations::streams` to check cache status for a
+/// single manually-pasted/uploaded release, not just a batch of scrape
+/// results — the dispatch itself doesn't care where its `info_hash`es came
+/// from.
+pub(crate) async fn apply_cache_status(
+    registry: &PluginRegistry,
+    streams: &mut [DiscoveredStream],
+) {
     if streams.is_empty() {
         return;
     }

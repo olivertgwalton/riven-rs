@@ -42,6 +42,7 @@ fn media_item(item_type: MediaItemType, title: &str) -> MediaItem {
         runtime: None,
         item_request_id: None,
         active_stream_id: None,
+        manual_scrape_only: false,
     }
 }
 

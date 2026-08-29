@@ -43,6 +43,7 @@ fn sample_movie(title: &str, year: Option<i32>, tmdb_id: Option<&str>) -> MediaI
         runtime: None,
         item_request_id: None,
         active_stream_id: None,
+        manual_scrape_only: false,
     }
 }
 

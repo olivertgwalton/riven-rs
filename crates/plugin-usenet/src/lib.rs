@@ -490,6 +490,17 @@ impl Plugin for UsenetPlugin {
             riven_core::indexer_stats::record_successful_grab(&indexer);
         }
 
+        // If this release came from Manual Scrape's "upload an NZB" entry
+        // point rather than a real indexer, the ingested article data (just
+        // written to the DB/usenet cache above) is now the durable copy —
+        // the temp file this URL points at has done its job and can go.
+        // `uploaded_nzb_filename` is a no-op for any real external NZB URL.
+        if let Some(url) = nzb_url_for_hash(info_hash, ctx).await
+            && let Some(filename) = riven_core::nzb::uploaded_nzb_filename(&url)
+        {
+            riven_core::nzb::delete_nzb_upload(&filename).await;
+        }
+
         Ok(HookResponse::Download(Box::new(DownloadResult {
             info_hash: info_hash.to_string(),
             files,
@@ -554,6 +565,17 @@ async fn nzb_indexer_for_hash(info_hash: &str, ctx: &PluginContext) -> Option<St
 /// which the caller must surface as a deferral, never as unavailability.
 /// Other transport errors stay `Ok(None)`, matching the behaviour this
 /// function has always had for them.
+///
+/// A manually-supplied URL (`downloadExplicitNzb`, tagged `"manual"` in
+/// [`nzb_indexer_for_hash`]) was already validated once when it was
+/// enqueued, but that check can be up to 30 days before this deferred fetch
+/// actually runs — long enough for DNS to answer differently, or for this
+/// very fetch to follow a redirect the earlier check never saw. Everything
+/// else (a real indexer's own URL, chosen by the admin rather than a
+/// GraphQL caller) keeps going through the ordinary shared client
+/// unchanged; re-running the public-address check against every indexer
+/// fetch would incorrectly reject a self-hosted indexer on an internal
+/// address, which was never the threat this exists for.
 async fn fetch_nzb_xml(
     info_hash: &str,
     ctx: &PluginContext,
@@ -564,28 +586,80 @@ async fn fetch_nzb_xml(
     let Some(nzb_url) = nzb_url_for_hash(info_hash, ctx).await else {
         return Ok(None);
     };
-    let resp = match ctx
-        .http
-        .send_data(PROFILE, Some(nzb_url.clone()), |client| {
-            client.get(&nzb_url)
-        })
-        .await
-    {
-        Ok(resp) => resp,
-        Err(error) if error.is::<riven_core::http::RateLimitedError>() => return Err(error),
-        Err(error) => {
-            tracing::debug!(info_hash, %error, "nzb fetch failed");
+
+    let is_manual = nzb_indexer_for_hash(info_hash, ctx).await.as_deref() == Some("manual");
+    // The loopback temp-upload shape is exempt even on the manual path: it
+    // was already strictly validated (including its port) at write time in
+    // `validate_nzb_fetch_target`, and it points at this process's own
+    // upload endpoint rather than attacker-influenced DNS, so there's
+    // nothing for a re-check here to catch.
+    let xml = if is_manual && riven_core::nzb::uploaded_nzb_filename(&nzb_url).is_none() {
+        match fetch_pinned_manual_nzb_xml(&nzb_url).await {
+            Ok(Some(xml)) => xml,
+            Ok(None) => {
+                tracing::debug!(
+                    info_hash,
+                    "manual nzb url no longer resolves to a public address"
+                );
+                return Ok(None);
+            }
+            Err(error) => {
+                tracing::debug!(info_hash, %error, "manual nzb fetch failed");
+                return Ok(None);
+            }
+        }
+    } else {
+        let resp = match ctx
+            .http
+            .send_data(PROFILE, Some(nzb_url.clone()), |client| {
+                client.get(&nzb_url)
+            })
+            .await
+        {
+            Ok(resp) => resp,
+            Err(error) if error.is::<riven_core::http::RateLimitedError>() => return Err(error),
+            Err(error) => {
+                tracing::debug!(info_hash, %error, "nzb fetch failed");
+                return Ok(None);
+            }
+        };
+        if !resp.status().is_success() {
+            tracing::debug!(info_hash, status = %resp.status(), "nzb fetch returned non-success");
             return Ok(None);
         }
+        let Ok(xml) = resp.text() else {
+            return Ok(None);
+        };
+        xml
     };
-    if !resp.status().is_success() {
-        tracing::debug!(info_hash, status = %resp.status(), "nzb fetch returned non-success");
-        return Ok(None);
-    }
-    let Ok(xml) = resp.text() else {
-        return Ok(None);
-    };
+
     let arc = Arc::new(xml);
     nzb_body_cache().put(info_hash.to_string(), arc.clone(), arc.len() as u64);
     Ok(Some(arc))
+}
+
+/// Re-resolves and re-validates a manually-supplied external NZB URL right
+/// before fetching it (see [`fetch_nzb_xml`]'s doc comment for why the
+/// enqueue-time check alone isn't enough for a fetch this deferred), then
+/// fetches it through a client pinned to exactly that address with
+/// redirects disabled — mirroring `riven-api`'s `validate_nzb_fetch_target`
+/// / `fetch_capped_nzb_text` for the synchronous preview path. `Ok(None)`
+/// covers both "doesn't resolve" and "resolves somewhere non-public";
+/// [`fetch_nzb_xml`] treats either the same as any other unavailable NZB.
+async fn fetch_pinned_manual_nzb_xml(nzb_url: &str) -> anyhow::Result<Option<String>> {
+    let parsed = url::Url::parse(nzb_url)?;
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| anyhow::anyhow!("nzb url has no host"))?;
+    let port = parsed.port_or_known_default().unwrap_or(80);
+    let Some(addr) = riven_core::http::ssrf_guard::resolve_public_target(host, port).await? else {
+        return Ok(None);
+    };
+    let client = riven_core::http::ssrf_guard::build_pinned_client(host, addr)?;
+    let response = client.get(nzb_url).send().await?;
+    match riven_core::http::ssrf_guard::read_capped_text(response).await {
+        Ok(xml) => Ok(Some(xml)),
+        Err(riven_core::http::ssrf_guard::CappedReadError::NotSuccess(_)) => Ok(None),
+        Err(error) => Err(error.into()),
+    }
 }

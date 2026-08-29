@@ -684,6 +684,7 @@ dependencies = [
  "matchit",
  "memchr",
  "mime",
+ "multer",
  "percent-encoding",
  "pin-project-lite",
  "serde_core",
@@ -3822,6 +3823,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing",
+ "url",
 ]
 
 [[package]]
@@ -4368,6 +4370,7 @@ dependencies = [
  "plugin-dashboard",
  "plugin-seerr",
  "rand_core 0.6.4",
+ "redis",
  "reqwest",
  "riven-core",
  "riven-db",
@@ -4454,6 +4457,7 @@ dependencies = [
  "tracing-opentelemetry",
  "tracing-subscriber",
  "url",
+ "uuid",
 ]
 
 [[package]]
