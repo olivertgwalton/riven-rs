@@ -1044,12 +1044,7 @@ fn tvdb_credit(character: &Value) -> Option<PersonCredit> {
             .and_then(|year| year.parse().ok())
             .or_else(|| year_of(release_date.as_deref())),
         release_date,
-        media_type: if movie.is_some() || character.get("movieId").is_some() {
-            "movie"
-        } else {
-            "tv"
-        }
-        .to_owned(),
+        media_type: if movie.is_some() { "movie" } else { "tv" }.to_owned(),
         vote_average: score,
         vote_count: None,
         popularity: character.get("sort").and_then(Value::as_f64).or(score),
@@ -1483,6 +1478,16 @@ mod tests {
         .expect("a credit");
         assert_eq!(movie.media_type, "movie");
         assert_eq!(movie.year, Some(2020));
+
+        // TVDB's real payload carries both `movieId` and `seriesId` keys on
+        // every row, with the inapplicable one set to null rather than
+        // omitted — a null `movieId` must not force this into "movie".
+        let series_with_null_movie_id = credit(json!({
+            "seriesId": 91, "movieId": null, "name": "Role",
+            "series": { "id": 91, "name": "Another Show", "firstAired": "2010-01-01" },
+        }))
+        .expect("a credit");
+        assert_eq!(series_with_null_movie_id.media_type, "tv");
 
         // Nothing identifiable yields nothing rather than a blank row.
         assert!(credit(json!({ "name": "Nobody" })).is_none());

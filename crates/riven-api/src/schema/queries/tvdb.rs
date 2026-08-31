@@ -138,6 +138,37 @@ pub async fn resolve_tmdb_to_tvdb_id(ctx: &Context<'_>, tmdb_id: &str) -> Result
     }
 }
 
+/// The reverse of [`resolve_tmdb_to_tvdb_id`]: TVDB's `/movies/{id}/extended`
+/// and `/series/{id}/extended` both carry a `remoteIds` array (the same one
+/// `MediaDetails::ids` reads for the show detail page) with a `TheMovieDB.com`
+/// entry when TVDB knows the mapping.
+pub async fn resolve_tvdb_to_tmdb_id(
+    ctx: &Context<'_>,
+    tvdb_id: &str,
+    media_type: &str,
+) -> Result<Option<String>> {
+    let token = get_tvdb_token(ctx).await?;
+    let kind = if media_type == "movie" { "movies" } else { "series" };
+    let extended = tvdb_get_value(ctx, &token, &format!("/{kind}/{tvdb_id}/extended"), None).await?;
+
+    Ok(extended
+        .pointer("/data/remoteIds")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|remotes| {
+            remotes.iter().find_map(|remote| {
+                let source = remote.get("sourceName").and_then(serde_json::Value::as_str)?;
+                if source.eq_ignore_ascii_case("themoviedb.com") {
+                    remote
+                        .get("id")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned)
+                } else {
+                    None
+                }
+            })
+        }))
+}
+
 async fn fetch_tmdb_external_ids(ctx: &Context<'_>, tmdb_id: &str) -> Result<TmdbExternalIds> {
     let registry = ctx.data::<Arc<PluginRegistry>>()?;
     let http = ctx.data::<HttpClient>()?;

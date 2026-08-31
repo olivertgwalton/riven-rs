@@ -46,9 +46,27 @@ export const load = (async ({ params, url }) => {
 
 	try {
 		if (mediaType === "movie") {
+			// The route carries a TVDB id when it came from a TVDB-sourced credit
+			// (e.g. a person's filmography); movies are always fetched by TMDB id.
+			let tmdbId = id;
+			if (url.searchParams.get("indexer") === "tvdb") {
+				const resolved = await resolveExternalId({
+					from: "tvdb",
+					to: "tmdb",
+					id,
+					mediaType: "movie",
+				}).catch(() => null);
+
+				if (!resolved?.resolved) {
+					logger.error(`Failed to resolve TVDB ID ${id} to TMDB ID`);
+					error(502, "Unable to resolve movie ID. Please try again later.");
+				}
+				tmdbId = resolved.id;
+			}
+
 			const [details, riven] = await Promise.all([
-				fetchMovieDetails(Number(id)),
-				rivenState(MEDIA_ITEM_STATE_BY_TMDB_QUERY, { tmdbId: id }),
+				fetchMovieDetails(Number(tmdbId)),
+				rivenState(MEDIA_ITEM_STATE_BY_TMDB_QUERY, { tmdbId }),
 			]);
 
 			return {

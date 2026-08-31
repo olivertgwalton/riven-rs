@@ -10,7 +10,7 @@ use crate::schema::helpers::{key, parse_id, required_media_type};
 use crate::schema::metadata::{TMDB_API_BASE, get_tmdb_api_key};
 
 use super::anilist::fetch_anilist_mappings;
-use super::tvdb::resolve_tmdb_to_tvdb_id;
+use super::tvdb::{resolve_tmdb_to_tvdb_id, resolve_tvdb_to_tmdb_id};
 
 #[derive(Default)]
 pub struct CoreExternalIdsQuery;
@@ -58,6 +58,9 @@ async fn resolve_external_id(
             } else {
                 None
             }
+        }
+        ("tvdb", "tmdb") => {
+            resolve_tvdb_to_tmdb_id(ctx, id, required_media_type(media_type)?).await?
         }
         ("tmdb", "imdb") => tmdb_external_ids(ctx, required_media_type(media_type)?, id)
             .await?
