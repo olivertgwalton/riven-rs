@@ -112,7 +112,7 @@ bytes = "1"
 tokio-util = { version = "0.7", features = ["io"] }
 # Pinned to apalis-redis's ulid: riven-queue passes `Ulid` into apalis `Task`,
 # so the two must be the same type. Cannot advance until apalis does.
-ulid = "1"
+ulid = "3"
 hmac = "0.13"
 sha2 = "0.11"
 hex = "0.4"
