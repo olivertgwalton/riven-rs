@@ -14,10 +14,15 @@ use riven_core::plugin::{Plugin, PluginContext};
 use riven_core::settings::PluginSettings;
 use riven_core::types::*;
 
+/// TVDB v4 does not document a rate limit or a reliable way to react to one —
+/// no consistent status/header contract, so unlike everything else in this
+/// codebase this profile keeps a conservative proactive cap as a safety net
+/// rather than relying on reactive-only handling.
 pub const PROFILE: HttpServiceProfile =
     HttpServiceProfile::new("tvdb").with_rate_limit(25, Duration::from_secs(1));
-pub(crate) const TVMAZE_PROFILE: HttpServiceProfile =
-    HttpServiceProfile::new("tvmaze").with_rate_limit(20, Duration::from_secs(10));
+/// TVmaze's own docs document 20 calls/10s and explicitly recommend sending
+/// without pacing and backing off on the 429 they return — reactive-only.
+pub(crate) const TVMAZE_PROFILE: HttpServiceProfile = HttpServiceProfile::new("tvmaze");
 
 const TVDB_BASE_URL: &str = "https://api4.thetvdb.com/v4/";
 const TVMAZE_BASE_URL: &str = "https://api.tvmaze.com/";

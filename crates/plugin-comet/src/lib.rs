@@ -1,6 +1,5 @@
 use async_trait::async_trait;
 use serde::Deserialize;
-use std::time::Duration;
 
 use riven_core::events::{EventType, HookResponse, ScrapeRequest};
 use riven_core::http::{HttpServiceProfile, RateLimitedError};
@@ -10,8 +9,7 @@ use riven_core::types::*;
 
 const DEFAULT_URL: &str = "https://comet.feels.legal";
 
-pub(crate) const PROFILE: HttpServiceProfile =
-    HttpServiceProfile::new("comet").with_rate_limit(150, Duration::from_secs(60));
+pub(crate) const PROFILE: HttpServiceProfile = HttpServiceProfile::new("comet");
 
 #[derive(Default)]
 pub struct CometPlugin;
@@ -85,17 +83,22 @@ impl Plugin for CometPlugin {
             .await
         {
             Ok(resp) => resp,
+            // The HTTP layer itself deferred (a pause is registered against
+            // this service from an earlier 429): propagate as-is rather than
+            // swallowing it as "no streams", which would lose the retry.
+            Err(e) if e.is::<RateLimitedError>() => return Err(e),
             Err(e) => {
                 tracing::warn!(error = %e, imdb_id, title = request.title, "comet request failed");
                 return Ok(HookResponse::Scrape(ScrapeResponse::new()));
             }
         };
         let status = resp_data.status();
-        if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+        if is_deferred_status(status) {
             tracing::warn!(
+                status = %status,
                 imdb_id,
                 title = request.title,
-                "comet rate limited (429); deferring to job-level retry"
+                "comet temporarily unavailable; deferring to job-level retry"
             );
             return Err(RateLimitedError.into());
         }
@@ -138,6 +141,20 @@ impl Plugin for CometPlugin {
         );
         Ok(HookResponse::Scrape(results))
     }
+}
+
+/// A status worth deferring the job over rather than treating as "no
+/// streams": either an explicit 429, or one of the gateway/overload statuses
+/// a Comet instance (or an indexer/debrid service behind it) bounces back
+/// under load.
+fn is_deferred_status(status: reqwest::StatusCode) -> bool {
+    matches!(
+        status,
+        reqwest::StatusCode::TOO_MANY_REQUESTS
+            | reqwest::StatusCode::BAD_GATEWAY
+            | reqwest::StatusCode::SERVICE_UNAVAILABLE
+            | reqwest::StatusCode::GATEWAY_TIMEOUT
+    )
 }
 
 #[derive(Deserialize)]

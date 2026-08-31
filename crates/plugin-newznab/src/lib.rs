@@ -14,15 +14,12 @@ use riven_core::plugin::{FieldType, Plugin, PluginContext, SettingField};
 use riven_core::settings::PluginSettings;
 use riven_core::types::{MediaItemType, ScrapeEntry, ScrapeResponse};
 
-/// Per-indexer rate-limit profile. Each configured indexer gets its own token
-/// bucket keyed by name, so N indexers provide N× the budget instead of all
-/// sharing one global "newznab" bucket (which funnelled the entire library
-/// through a single 60/min limiter and was the dominant scrape-throughput cap).
-/// Newznab indexers enforce limits per API key, so isolating them per indexer
-/// matches reality and lets throughput scale with indexer count.
+/// Per-indexer HTTP profile. Each configured indexer gets its own reactive
+/// pause state keyed by name, so a 429 or spent-quota 500 from one indexer
+/// never holds back requests to another. No proactive throttling: an indexer
+/// that isn't currently telling us to slow down never waits.
 fn indexer_profile(indexer: &Indexer) -> HttpServiceProfile {
     HttpServiceProfile::new_owned(format!("newznab:{}", indexer.name))
-        .with_rate_limit(60, Duration::from_secs(60))
 }
 
 /// Results asked for per request. Newznab's own default is 100 and most

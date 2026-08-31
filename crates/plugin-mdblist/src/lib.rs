@@ -6,13 +6,11 @@ use riven_core::settings::PluginSettings;
 use riven_core::types::*;
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
-use std::time::Duration;
 use url::Url;
 
 const MDBLIST_BASE_URL: &str = "https://api.mdblist.com/";
 
-pub(crate) const PROFILE: HttpServiceProfile =
-    HttpServiceProfile::new("mdblist").with_rate_limit(50, Duration::from_secs(1));
+pub(crate) const PROFILE: HttpServiceProfile = HttpServiceProfile::new("mdblist");
 
 #[derive(Default)]
 pub struct MdblistPlugin;

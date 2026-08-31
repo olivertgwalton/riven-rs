@@ -25,7 +25,7 @@ const STORE_SCORE_TTL_SECS: u64 = 60 * 60 * 24 * 7;
 const NEWZ_POLL_TIMEOUT_SECS: u64 = 1800;
 
 pub(crate) const PROFILE: HttpServiceProfile =
-    HttpServiceProfile::new("stremthru").with_rate_limit(1, Duration::from_secs(1));
+    HttpServiceProfile::new("stremthru");
 
 pub(crate) fn debrid_service(store: &str) -> HttpServiceProfile {
     match store {

@@ -5,12 +5,10 @@ use riven_core::plugin::{ContentCollection, Plugin, PluginContext, validate_api_
 use riven_core::settings::PluginSettings;
 use riven_core::types::*;
 use serde::Deserialize;
-use std::time::Duration;
 
 const DEFAULT_URL: &str = "http://localhost:5055";
 
-pub(crate) const PROFILE: HttpServiceProfile =
-    HttpServiceProfile::new("seerr").with_rate_limit(20, Duration::from_secs(1));
+pub(crate) const PROFILE: HttpServiceProfile = HttpServiceProfile::new("seerr");
 const DEFAULT_FILTER: &str = "approved";
 const PAGE_SIZE: u32 = 20;
 

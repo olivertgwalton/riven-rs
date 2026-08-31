@@ -1,6 +1,5 @@
 use async_trait::async_trait;
 use serde::Deserialize;
-use std::time::Duration;
 
 use riven_core::events::{EventType, HookResponse};
 use riven_core::http::HttpServiceProfile;
@@ -11,8 +10,7 @@ use riven_core::types::*;
 const TRAKT_BASE_URL: &str = "https://api.trakt.tv";
 const TRAKT_API_VERSION: &str = "2";
 
-pub const PROFILE: HttpServiceProfile =
-    HttpServiceProfile::new("trakt").with_rate_limit(1000, Duration::from_secs(300));
+pub const PROFILE: HttpServiceProfile = HttpServiceProfile::new("trakt");
 
 #[derive(Default)]
 pub struct TraktPlugin;

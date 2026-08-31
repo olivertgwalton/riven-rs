@@ -5,12 +5,10 @@ use riven_core::plugin::{ContentCollection, Plugin, PluginContext, validate_api_
 use riven_core::settings::PluginSettings;
 use riven_core::types::*;
 use serde::Deserialize;
-use std::time::Duration;
 
 const LISTRR_BASE_URL: &str = "https://listrr.pro/api/";
 
-pub(crate) const PROFILE: HttpServiceProfile =
-    HttpServiceProfile::new("listrr").with_rate_limit(50, Duration::from_secs(1));
+pub(crate) const PROFILE: HttpServiceProfile = HttpServiceProfile::new("listrr");
 
 #[derive(Default)]
 pub struct ListrrPlugin;

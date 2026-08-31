@@ -739,6 +739,12 @@ async fn run_downloads(
         .into_iter()
         .collect();
     let mut any_success = false;
+    // A candidate deferred (rate-limited) rather than genuinely failing says
+    // nothing about the *other* candidates — they may come from an entirely
+    // different indexer or provider that isn't limited at all right now. So
+    // a deferral no longer aborts the walk; it only ever changes what happens
+    // if nothing else works out (see the `!any_success` branch below).
+    let mut any_deferred = false;
     let mut attempted: HashSet<(String, String, Option<String>)> = HashSet::new();
     let attempt_unknown = queue
         .downloader_config
@@ -803,6 +809,12 @@ async fn run_downloads(
                 continue;
             }
 
+            // Whether *this* stream hit a deferral on every provider it was
+            // offered to. A deferred provider taught us nothing about the
+            // stream, so unlike a genuine failure it must not count toward
+            // blacklisting the stream below.
+            let mut stream_deferred = false;
+
             for (plugin, provider) in plugin_providers {
                 let key = (stream.info_hash.clone(), plugin.clone(), provider.clone());
                 if attempted.contains(&key) {
@@ -820,7 +832,15 @@ async fn run_downloads(
                     .await
                 {
                     Ok(files) => files,
-                    Err(WalkDeferred) => return DownloadWalkOutcome::Deferred,
+                    // This provider/indexer is rate-limited right now — try
+                    // the next provider or stream rather than abandoning the
+                    // whole walk, since it may come from an entirely
+                    // different, non-limited source.
+                    Err(WalkDeferred) => {
+                        any_deferred = true;
+                        stream_deferred = true;
+                        continue;
+                    }
                 };
 
                 let is_cached = cached_files.is_some();
@@ -853,10 +873,10 @@ async fn run_downloads(
                     DownloadAttemptOutcome::Failed => {
                         attempted.insert(key);
                     }
-                    // Returning from inside the provider loop also skips the
-                    // per-stream permanent blacklist below — deliberately, as
-                    // nothing was learned about this stream.
-                    DownloadAttemptOutcome::Deferred => return DownloadWalkOutcome::Deferred,
+                    DownloadAttemptOutcome::Deferred => {
+                        any_deferred = true;
+                        stream_deferred = true;
+                    }
                     DownloadAttemptOutcome::TerminalHandled | DownloadAttemptOutcome::Succeeded => {
                         done_profiles.insert(profile_name.clone());
                         any_success = true;
@@ -872,6 +892,13 @@ async fn run_downloads(
                         continue 'streams;
                     }
                 }
+            }
+
+            // A stream that only ever hit deferrals taught us nothing —
+            // skip the blacklist so it gets a fair try again once whatever
+            // paused it clears, exactly as the old whole-walk deferral did.
+            if stream_deferred {
+                continue;
             }
 
             // Every configured (plugin, provider) combination was either not
@@ -894,6 +921,21 @@ async fn run_downloads(
                 );
             }
         }
+    }
+
+    if !any_success && any_deferred {
+        // At least one candidate was only ever rate-limited, never actually
+        // judged — requeue the whole job on the shared rate-limit ladder,
+        // same as a whole-walk deferral used to, rather than recording this
+        // as a real failure against the item.
+        tracing::debug!(
+            id,
+            title = %item.title,
+            candidates = streams.len(),
+            attempts = attempted.len(),
+            "download: every remaining candidate was rate-limited; requeueing rather than judging"
+        );
+        return DownloadWalkOutcome::Deferred;
     }
 
     if !any_success {

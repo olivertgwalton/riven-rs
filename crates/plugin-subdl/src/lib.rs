@@ -14,14 +14,12 @@ use riven_core::settings::PluginSettings;
 use riven_core::types::MediaItemType;
 use riven_db::entities::FileSystemEntry;
 use serde::Deserialize;
-use std::time::Duration;
 
 const DEFAULT_BASE_URL: &str = "https://api.subdl.com/api/v1/";
 const DEFAULT_DL_BASE: &str = "https://dl.subdl.com";
 const DEFAULT_LANGUAGES: &str = "en";
 
-pub(crate) const PROFILE: HttpServiceProfile =
-    HttpServiceProfile::new("subdl").with_rate_limit(5, Duration::from_secs(1));
+pub(crate) const PROFILE: HttpServiceProfile = HttpServiceProfile::new("subdl");
 
 #[derive(Default)]
 pub struct SubdlPlugin;

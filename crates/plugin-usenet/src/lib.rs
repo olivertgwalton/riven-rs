@@ -11,8 +11,9 @@
 use async_trait::async_trait;
 use redis::AsyncCommands;
 use riven_core::cache::{ByteLru, NZB_BODY};
+use reqwest::StatusCode;
 use riven_core::events::{EventType, HookResponse};
-use riven_core::http::HttpServiceProfile;
+use riven_core::http::{HttpServiceProfile, RateLimitedError};
 use riven_core::plugin::{FieldType, Plugin, PluginContext, SettingField};
 use riven_core::settings::PluginSettings;
 use riven_core::types::StreamLinkResponse;
@@ -22,7 +23,6 @@ use riven_core::types::{
 use riven_usenet::nntp::{NntpProvider, NntpServerConfig};
 use riven_usenet::{NntpConfig, UsenetStreamer};
 use std::sync::{Arc, OnceLock};
-use std::time::Duration;
 
 mod health_check;
 
@@ -36,8 +36,21 @@ fn nzb_body_cache() -> &'static ByteLru<String, Arc<String>> {
     C.get_or_init(|| ByteLru::with_budget(NZB_BODY))
 }
 
-pub(crate) const PROFILE: HttpServiceProfile =
-    HttpServiceProfile::new("usenet-nzb-fetch").with_rate_limit(30, Duration::from_secs(60));
+/// Global fallback profile, used only when a hash's originating indexer is
+/// unknown (its Redis mapping expired). Never used when the indexer is
+/// known — see [`nzb_fetch_profile`].
+pub(crate) const PROFILE: HttpServiceProfile = HttpServiceProfile::new("usenet-nzb-fetch");
+
+/// A rate-limit pause is keyed purely by profile name, so a single shared
+/// "usenet-nzb-fetch" profile would let one indexer's real 429 pause every
+/// other indexer's NZB fetches too — the same isolation newznab's own
+/// `indexer_profile` already gives the search side, just missing here.
+fn nzb_fetch_profile(indexer: Option<&str>) -> HttpServiceProfile {
+    match indexer {
+        Some(indexer) => HttpServiceProfile::new_owned(format!("usenet-nzb-fetch:{indexer}")),
+        None => PROFILE,
+    }
+}
 
 pub(crate) use riven_core::nzb::{is_nzb_info_hash, nzb_indexer_redis_key, nzb_url_redis_key};
 
@@ -564,20 +577,31 @@ async fn fetch_nzb_xml(
     let Some(nzb_url) = nzb_url_for_hash(info_hash, ctx).await else {
         return Ok(None);
     };
+    let indexer = nzb_indexer_for_hash(info_hash, ctx).await;
+    let profile = nzb_fetch_profile(indexer.as_deref());
     let resp = match ctx
         .http
-        .send_data(PROFILE, Some(nzb_url.clone()), |client| {
+        .send_data(profile, Some(nzb_url.clone()), |client| {
             client.get(&nzb_url)
         })
         .await
     {
         Ok(resp) => resp,
-        Err(error) if error.is::<riven_core::http::RateLimitedError>() => return Err(error),
+        Err(error) if error.is::<RateLimitedError>() => return Err(error),
         Err(error) => {
             tracing::debug!(info_hash, %error, "nzb fetch failed");
             return Ok(None);
         }
     };
+    // A 429 here already paused this indexer's profile for future callers
+    // (the HTTP layer registers that generically); surface it as a deferral
+    // for *this* call too rather than falling through to "cannot be had",
+    // which would wrongly blacklist a release we simply haven't asked for
+    // yet — see the doc comment above.
+    if resp.status() == StatusCode::TOO_MANY_REQUESTS {
+        tracing::debug!(info_hash, ?indexer, "nzb fetch rate limited (429)");
+        return Err(RateLimitedError.into());
+    }
     if !resp.status().is_success() {
         tracing::debug!(info_hash, status = %resp.status(), "nzb fetch returned non-success");
         return Ok(None);
