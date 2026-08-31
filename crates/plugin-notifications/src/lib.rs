@@ -22,8 +22,10 @@ const TMDB_BASE_URL: &str = "https://api.themoviedb.org/3";
 const TVDB_BASE_URL: &str = "https://api4.thetvdb.com/v4";
 const TVDB_DEFAULT_API_KEY: &str = "6be85335-5c4f-4d8d-b945-d3ed0eb8cdce";
 
-const TMDB_PROFILE: HttpServiceProfile =
-    HttpServiceProfile::new("tmdb").with_rate_limit(40, Duration::from_secs(1));
+const TMDB_PROFILE: HttpServiceProfile = HttpServiceProfile::new("tmdb");
+// Must match plugin-tvdb's and riven-api's "tvdb" profile: whichever one
+// first creates this named service's shared state wins for the process
+// lifetime, so an inconsistent rate_limit here would silently defeat the cap.
 const TVDB_PROFILE: HttpServiceProfile =
     HttpServiceProfile::new("tvdb").with_rate_limit(25, Duration::from_secs(1));
 

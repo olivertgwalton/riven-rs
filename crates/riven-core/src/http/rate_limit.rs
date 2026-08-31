@@ -5,6 +5,10 @@ use tokio::time::sleep;
 
 use super::HttpServiceProfile;
 
+/// A proactive cap, for the rare service whose own signaling is too
+/// undocumented or unreliable to react to — see [`HttpServiceProfile::with_rate_limit`].
+/// Every other service is reactive-only: paced purely by pauses registered
+/// from an actual 429/Retry-After or a provider-specific quota signal.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RateLimit {
     pub max: u32,
@@ -24,10 +28,11 @@ impl RateLimit {
     }
 }
 
-/// Longest a caller will block waiting for a token before being told to
-/// requeue. Short enough to stay far inside the tightest job deadline (the
-/// plugin-hook worker's 180s), long enough that ordinary sub-second pacing
-/// still resolves in-place rather than churning the queue.
+/// Longest a caller will block waiting for a token, or waiting out a reactive
+/// pause, before being told to requeue. Short enough to stay far inside the
+/// tightest job deadline (the plugin-hook worker's 180s), long enough that
+/// ordinary sub-second pacing or a short `Retry-After` still resolves
+/// in-place rather than churning the queue.
 const MAX_LIMITER_WAIT: Duration = Duration::from_secs(10);
 
 #[derive(Debug)]
@@ -45,8 +50,12 @@ impl ServiceState {
     }
 
     /// Take a token, or report that the caller should hand its job back to the
-    /// queue. `false` means no token was available and waiting for one would
-    /// cost more than [`MAX_LIMITER_WAIT`].
+    /// queue. `false` means either a reactive pause (set by an actual
+    /// 429/Retry-After or a provider-specific quota signal) or, for the
+    /// handful of profiles configured with `with_rate_limit`, a proactive
+    /// token-bucket wait would cost more than [`MAX_LIMITER_WAIT`]. A profile
+    /// with no proactive limit and no pause registered against it never waits
+    /// at all, however many requests are in flight.
     ///
     /// riven-ts never has to make this choice: BullMQ's limiter is queue-level,
     /// so a worker does not *pick up* a job while the queue is limited and a
@@ -76,19 +85,17 @@ impl ServiceState {
     }
 }
 
-/// Token-bucket limiter. Unlike a strict `min_interval` gate (one request every
-/// `per/max`, fully serial), the bucket lets up to `max` requests through in a
-/// burst and then refills continuously at `max/per`. This is what lets the many
-/// concurrent flow workers (e.g. every episode of a season fanned out at once)
-/// actually run in parallel within a service's budget instead of being pinned
-/// to one-at-a-time. The long-run average still tracks the configured rate.
+/// Reactive by default: nothing is throttled unless the service has actually
+/// told us to back off. `tokens`/`last_refill` stay `None` and are never
+/// consulted for a profile with no `rate_limit` configured — only
+/// `paused_until` gates those. For the few profiles that do carry a
+/// `rate_limit` (a proactive token bucket, letting up to `max` requests burst
+/// through before pacing at `max/per`), it layers on top of the same reactive
+/// pause.
 #[derive(Debug, Default)]
 struct LimiterState {
-    /// Available tokens. `None` until the first request seeds a full bucket.
     tokens: Option<f64>,
-    /// Last time `tokens` was refilled.
     last_refill: Option<Instant>,
-    /// Hard pause set by a `Retry-After` response header.
     paused_until: Option<Instant>,
 }
 

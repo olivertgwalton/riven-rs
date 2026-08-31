@@ -3814,6 +3814,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "redis",
+ "reqwest",
  "riven-core",
  "riven-db",
  "riven-usenet",

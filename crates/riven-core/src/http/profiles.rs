@@ -41,6 +41,11 @@ impl HttpServiceProfile {
         self
     }
 
+    /// A proactive cap on top of reactive handling. Reserve this for a
+    /// service whose own rate-limit signal is too undocumented or
+    /// inconsistent to react to — every other service should stay
+    /// reactive-only (no `rate_limit` set) and rely purely on 429/Retry-After
+    /// or a provider-specific quota pause.
     pub const fn with_rate_limit(mut self, max: u32, per: Duration) -> Self {
         self.rate_limit = Some(RateLimit { max, per });
         self

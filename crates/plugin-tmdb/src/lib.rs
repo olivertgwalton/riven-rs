@@ -2,7 +2,6 @@ use async_trait::async_trait;
 use chrono::NaiveDate;
 use riven_core::entities::helpers::{Artwork, artwork_url};
 use serde::Deserialize;
-use std::time::Duration;
 
 use riven_core::events::{EventType, HookResponse, IndexRequest};
 use riven_core::http::HttpServiceProfile;
@@ -12,8 +11,7 @@ use riven_core::types::*;
 
 const TMDB_BASE_URL: &str = "https://api.themoviedb.org/3/";
 
-pub const PROFILE: HttpServiceProfile =
-    HttpServiceProfile::new("tmdb").with_rate_limit(40, Duration::from_secs(1));
+pub const PROFILE: HttpServiceProfile = HttpServiceProfile::new("tmdb");
 
 #[derive(Default)]
 pub struct TmdbPlugin;

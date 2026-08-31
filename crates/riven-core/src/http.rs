@@ -43,6 +43,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::{Duration, Instant};
 
+    use axum::response::IntoResponse;
     use axum::{Json, Router, routing::get};
     use serde_json::json;
     use tokio::net::TcpListener;
@@ -98,8 +99,11 @@ mod tests {
         Ok(())
     }
 
+    /// The rare profile configured with `with_rate_limit` (reserved for a
+    /// service whose own signal is too undocumented to react to) still
+    /// proactively paces requests to its configured window.
     #[tokio::test]
-    async fn enforces_rate_limit_windows() -> anyhow::Result<()> {
+    async fn enforces_a_configured_proactive_rate_limit() -> anyhow::Result<()> {
         let counter = Arc::new(AtomicUsize::new(0));
         let (addr, handle) = spawn_json_server(Arc::clone(&counter)).await?;
         let http = HttpClient::new(reqwest::Client::new());
@@ -131,25 +135,93 @@ mod tests {
         Ok(())
     }
 
-    /// The congestion-collapse guard: when the wait for a token is longer than
-    /// a job can afford, the call must hand back `RateLimitedError` promptly so
-    /// the caller can requeue, rather than sitting on its worker slot until the
-    /// job's own deadline kills it having made no request at all.
+    /// No request is ever throttled unless the service has actually told us
+    /// to back off — with nothing registered against a profile, back-to-back
+    /// calls run immediately, however many there are.
     #[tokio::test]
-    async fn defers_instead_of_waiting_out_a_long_rate_limit() -> anyhow::Result<()> {
+    async fn never_throttles_without_a_reactive_pause() -> anyhow::Result<()> {
         let counter = Arc::new(AtomicUsize::new(0));
         let (addr, handle) = spawn_json_server(Arc::clone(&counter)).await?;
         let http = HttpClient::new(reqwest::Client::new());
         let url = format!("http://{addr}/value");
-        // One token per minute: the second caller would have to wait ~60s,
-        // far past what the limiter is willing to block for.
-        let profile =
-            HttpServiceProfile::new("test-defer").with_rate_limit(1, Duration::from_secs(60));
+        let profile = HttpServiceProfile::new("test-no-throttle");
 
-        http.get_json::<serde_json::Value, _>(profile.clone(), format!("{url}?a=1"), |client| {
-            client.get(format!("{url}?a=1"))
-        })
-        .await?;
+        let started = Instant::now();
+        let first = http
+            .get_json::<serde_json::Value, _>(profile.clone(), format!("{url}?a=1"), |client| {
+                client.get(format!("{url}?a=1"))
+            })
+            .await?;
+        let second = http
+            .get_json::<serde_json::Value, _>(profile, format!("{url}?a=2"), |client| {
+                client.get(format!("{url}?a=2"))
+            })
+            .await?;
+
+        assert_eq!(first, json!({ "ok": true }));
+        assert_eq!(second, json!({ "ok": true }));
+        assert_eq!(counter.load(Ordering::SeqCst), 2);
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "neither call should have waited for anything"
+        );
+
+        handle.abort();
+        Ok(())
+    }
+
+    /// The congestion-collapse guard: once a real 429 has registered a long
+    /// reactive pause, a later call under the same profile must hand back
+    /// `RateLimitedError` promptly so the caller can requeue, rather than
+    /// sitting on its worker slot until the job's own deadline kills it having
+    /// made no request at all.
+    #[tokio::test]
+    async fn defers_instead_of_waiting_out_a_long_reactive_pause() -> anyhow::Result<()> {
+        let counter = Arc::new(AtomicUsize::new(0));
+        let app = Router::new().route(
+            "/value",
+            get({
+                let counter = Arc::clone(&counter);
+                move || {
+                    let counter = Arc::clone(&counter);
+                    async move {
+                        let seen = counter.fetch_add(1, Ordering::SeqCst);
+                        if seen == 0 {
+                            // Far past what the limiter is willing to block for.
+                            return (
+                                axum::http::StatusCode::TOO_MANY_REQUESTS,
+                                [("Retry-After", "60")],
+                                Json(json!({ "error": "slow down" })),
+                            )
+                                .into_response();
+                        }
+                        Json(json!({ "ok": true })).into_response()
+                    }
+                }
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("test server should run");
+        });
+
+        let http = HttpClient::new(reqwest::Client::new());
+        let url = format!("http://{addr}/value");
+        let profile = HttpServiceProfile::new("test-defer");
+
+        // First call hits the 429 and registers the reactive pause.
+        let first = http
+            .get_json::<serde_json::Value, _>(profile.clone(), format!("{url}?a=1"), |client| {
+                client.get(format!("{url}?a=1"))
+            })
+            .await;
+        assert!(
+            first.is_err_and(|e| e.is::<super::RateLimitedError>()),
+            "the 429 itself should surface as RateLimitedError"
+        );
 
         let started = Instant::now();
         let deferred = http

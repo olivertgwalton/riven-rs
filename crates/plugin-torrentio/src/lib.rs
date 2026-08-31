@@ -6,12 +6,10 @@ use riven_core::plugin::{Plugin, PluginContext};
 use riven_core::stremio::StremioScrapeConfig;
 use riven_core::types::{ScrapeEntry, ScrapeResponse};
 use serde::Deserialize;
-use std::time::Duration;
 
 const TORRENTIO_BASE_URL: &str = "http://torrentio.strem.fun/";
 
-pub(crate) const PROFILE: HttpServiceProfile =
-    HttpServiceProfile::new("torrentio").with_rate_limit(150, Duration::from_secs(60));
+pub(crate) const PROFILE: HttpServiceProfile = HttpServiceProfile::new("torrentio");
 const DEFAULT_FILTER: &str = "sort=qualitysize%7Cqualityfilter=threed,480p,scr,cam";
 const PEER_COUNT_MARKER: &str = "\u{1F464}";
 
