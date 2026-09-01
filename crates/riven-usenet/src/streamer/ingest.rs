@@ -397,13 +397,23 @@ impl UsenetStreamer {
         par2_blob: Option<&[u8]>,
     ) -> Result<Option<Vec<NzbMetaFile>>, StreamerError> {
         let mut groups = detect_rar_volume_groups(files);
+        // Populated only by the PAR2-name-recovery fallback below: the real
+        // volume filenames, positionally aligned with `files`, so the PAR2
+        // verification step in `build_rar_group_virtual_files` has something
+        // that actually matches its checksum index's keys (see there).
+        let mut recovered_names: Option<Vec<String>> = None;
         if groups.is_empty() {
             // Every subject in the NZB may be fully obfuscated — not just an
             // obfuscated *name* with the extension intact, but no dot at all
             // — leaving nothing for the subject-based heuristic above to key
             // off. The release's own PAR2 set still names its volumes in
             // cleartext, so recover those and retry grouping by name.
-            groups = self.recover_rar_groups_from_par2(files, par2_blob).await;
+            let (recovered_groups, names) =
+                self.recover_rar_groups_from_par2(files, par2_blob).await;
+            if !recovered_groups.is_empty() {
+                recovered_names = Some(names);
+            }
+            groups = recovered_groups;
         }
         if groups.is_empty() {
             return Ok(None);
@@ -418,6 +428,7 @@ impl UsenetStreamer {
                     ordered_indices,
                     password,
                     par2_index.as_ref(),
+                    recovered_names.as_deref(),
                 )
                 .await
             {
@@ -460,6 +471,7 @@ impl UsenetStreamer {
         ordered_indices: &[usize],
         password: Option<&str>,
         par2_index: Option<&Par2Index>,
+        recovered_names: Option<&[String]>,
     ) -> Result<Option<Vec<NzbMetaFile>>, StreamerError> {
         if ordered_indices.is_empty() {
             return Ok(None);
@@ -471,7 +483,15 @@ impl UsenetStreamer {
             if f.segments.is_empty() {
                 return Ok(None);
             }
-            parts.push(build_rar_part(f));
+            let mut part = build_rar_part(f);
+            // Subjects are obfuscated on this path, so `part.filename` is
+            // otherwise a hash with nothing to do with the volume's real
+            // name — the PAR2 verification lookup a few lines down needs
+            // the recovered name to have any chance of matching.
+            if let Some(names) = recovered_names {
+                part.filename = names[nzb_idx].clone();
+            }
+            parts.push(part);
         }
 
         let header_fetch_concurrency = super::VOLUME_DISCOVERY_FANOUT;
@@ -1064,12 +1084,15 @@ impl UsenetStreamer {
     /// already relies on), and retries grouping keyed by the recovered
     /// names instead of the subjects. Returns an empty `Vec` — same as "no
     /// groups found" — on any mismatch, so the caller's existing
-    /// direct-file fallback is unaffected.
+    /// direct-file fallback is unaffected. The second element is the same
+    /// positional name mapping used for grouping, handed back so the caller
+    /// can key later PAR2 content verification off the recovered real names
+    /// rather than the still-obfuscated subjects.
     async fn recover_rar_groups_from_par2(
         &self,
         files: &[NzbFile],
         prefetched_blob: Option<&[u8]>,
-    ) -> Vec<Vec<usize>> {
+    ) -> (Vec<Vec<usize>>, Vec<String>) {
         let owned_buf;
         let buf = match prefetched_blob {
             Some(b) => b,
@@ -1078,14 +1101,14 @@ impl UsenetStreamer {
                     owned_buf = b;
                     &owned_buf
                 }
-                None => return Vec::new(),
+                None => return (Vec::new(), Vec::new()),
             },
         };
         let descs: Vec<Par2FileDesc> = match parse_file_descriptors(buf) {
             Ok(d) => d,
             Err(error) => {
                 tracing::debug!(error = %error, "par2 FileDesc parse failed");
-                return Vec::new();
+                return (Vec::new(), Vec::new());
             }
         };
         let archive_names: Vec<String> = descs
@@ -1094,7 +1117,7 @@ impl UsenetStreamer {
             .filter(|n| rar_volume_info(n).is_some())
             .collect();
         if archive_names.is_empty() {
-            return Vec::new();
+            return (Vec::new(), Vec::new());
         }
 
         let non_par2_indices: Vec<usize> = files
@@ -1109,7 +1132,7 @@ impl UsenetStreamer {
                 recovered = archive_names.len(),
                 "par2 FileDesc count differs from non-par2 file count; skipping rar rescue"
             );
-            return Vec::new();
+            return (Vec::new(), Vec::new());
         }
 
         let mut names: Vec<String> = files
@@ -1127,7 +1150,7 @@ impl UsenetStreamer {
                  (subjects were fully obfuscated)"
             );
         }
-        groups
+        (groups, names)
     }
 }
 
