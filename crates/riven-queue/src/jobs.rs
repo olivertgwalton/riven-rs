@@ -176,6 +176,13 @@ pub struct DownloadJob {
     pub magnet: String,
     #[serde(default)]
     pub preferred_info_hash: Option<String>,
+    /// Which ranking profile a manually chosen stream (`preferred_info_hash`)
+    /// should be attributed to — tags the resulting file's path and
+    /// `ranking_profile_name` so it coexists with other profiles' files
+    /// instead of upserting onto whichever file already occupies the
+    /// untagged path. Ignored when `preferred_info_hash` is `None`.
+    #[serde(default)]
+    pub preferred_profile_name: Option<String>,
     /// How many times this job has been requeued because a download plugin
     /// was rate-limited mid-walk. Drives the same escalating backoff the
     /// scrape flow uses; `serde(default)` keeps jobs serialized before the
@@ -189,6 +196,9 @@ pub struct RankStreamsJob {
     pub id: i64,
     #[serde(default)]
     pub preferred_info_hash: Option<String>,
+    /// See `DownloadJob::preferred_profile_name`.
+    #[serde(default)]
+    pub preferred_profile_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

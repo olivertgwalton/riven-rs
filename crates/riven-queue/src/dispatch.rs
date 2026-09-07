@@ -238,6 +238,7 @@ impl JobQueue {
         self.push_rank_streams(RankStreamsJob {
             id,
             preferred_info_hash: None,
+            preferred_profile_name: None,
         })
         .await;
         true

@@ -1131,6 +1131,7 @@ export type MutationRootDownloadDiscoveredStreamArgs = {
   itemType: MediaItemType;
   magnet: Scalars['String']['input'];
   parsedData?: InputMaybe<Scalars['JSON']['input']>;
+  profileName?: InputMaybe<Scalars['String']['input']>;
   rank?: InputMaybe<Scalars['Int']['input']>;
   seasonNumber?: InputMaybe<Scalars['Int']['input']>;
   seasons?: InputMaybe<Array<Scalars['Int']['input']>>;

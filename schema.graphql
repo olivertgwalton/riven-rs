@@ -1130,7 +1130,12 @@ type MutationRoot {
 	to that season; a multi-season pack links to the **show** so the download
 	flow can fill every season it contains.
 	"""
-	downloadDiscoveredStream(itemType: MediaItemType!, title: String!, imdbId: String, tmdbId: String, tvdbId: String, seasonNumber: Int, episodeNumber: Int, seasons: [Int!], infoHash: String!, magnet: String!, parsedData: JSON, rank: Int): String!
+	downloadDiscoveredStream(		itemType: MediaItemType!,		title: String!,		imdbId: String,		tmdbId: String,		tvdbId: String,		seasonNumber: Int,		episodeNumber: Int,		seasons: [Int!],		infoHash: String!,		magnet: String!,		parsedData: JSON,		rank: Int,
+		"""
+		Which ranking profile (e.g. "hd", "ultra_hd") this manually chosen stream should be attributed to. When set, the resulting file gets a profile-tagged path so it coexists alongside other profiles' files instead of overwriting whichever file already occupies the item's default path.
+		"""
+		profileName: String
+	): String!
 	"""
 	Re-acquire a usenet title whose release is broken (missing data) or was
 	never ingested. The item is "completed" only because it still has a

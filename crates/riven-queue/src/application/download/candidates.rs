@@ -76,7 +76,6 @@ pub fn rank_streams_for_profile<'a>(
     profile: &RankSettings,
     title_ctx: &TitleMatchContext,
 ) -> Vec<&'a Stream> {
-    let download_profile = build_download_candidate_profile(profile);
     let model = riven_rank::RankingModel::default();
 
     let mut scored: Vec<(&'a Stream, i64, i64)> = streams
@@ -118,7 +117,7 @@ pub fn rank_streams_for_profile<'a>(
                 &title_ctx.correct_title,
                 title_ctx.item_country.as_deref(),
                 &title_ctx.aliases,
-                &download_profile,
+                profile,
             ) {
                 tracing::debug!(
                     item_id = item.id,
@@ -145,7 +144,7 @@ pub fn rank_streams_for_profile<'a>(
                 return None;
             }
 
-            let (fetch, failed_checks) = riven_rank::rank::check_fetch(&parsed, &download_profile);
+            let (fetch, failed_checks) = riven_rank::rank::check_fetch(&parsed, profile);
             if !fetch {
                 tracing::debug!(
                     item_id = item.id,
@@ -164,68 +163,20 @@ pub fn rank_streams_for_profile<'a>(
             }
 
             let score =
-                riven_rank::rank::scores::get_rank_total(&parsed, &download_profile, &model);
+                riven_rank::rank::scores::get_rank_total(&parsed, profile, &model);
             Some((stream, score, pack_preference(item, &parsed)))
         })
         .collect();
 
     scored.sort_by(|(a, sa, pa), (b, sb, pb)| {
         sb.cmp(sa).then_with(|| pb.cmp(pa)).then_with(|| {
-            let ra = download_profile
-                .resolution_ranks
-                .rank_for(stream_resolution(a));
-            let rb = download_profile
-                .resolution_ranks
-                .rank_for(stream_resolution(b));
+            let ra = profile.resolution_ranks.rank_for(stream_resolution(a));
+            let rb = profile.resolution_ranks.rank_for(stream_resolution(b));
             rb.cmp(&ra)
         })
     });
 
     scored.into_iter().map(|(s, _, _)| s).collect()
-}
-
-fn build_download_candidate_profile(profile: &RankSettings) -> RankSettings {
-    let mut download_profile = profile.clone();
-
-    download_profile.custom_ranks.quality.av1.fetch = true;
-    download_profile.custom_ranks.quality.remux.fetch = true;
-    download_profile.custom_ranks.rips.bdrip.fetch = true;
-    download_profile.custom_ranks.rips.dvdrip.fetch = true;
-    download_profile.custom_ranks.rips.tvrip.fetch = true;
-    download_profile.custom_ranks.rips.uhdrip.fetch = true;
-    download_profile.custom_ranks.rips.webdlrip.fetch = true;
-    download_profile.custom_ranks.hdr.dolby_vision.fetch = true;
-    download_profile.custom_ranks.extras.documentary.fetch = true;
-    download_profile.custom_ranks.extras.site.fetch = true;
-
-    download_profile.custom_ranks.quality.hdtv.fetch = true;
-    download_profile.custom_ranks.quality.dvd.fetch = true;
-    download_profile.custom_ranks.audio.mono.fetch = true;
-    download_profile.custom_ranks.audio.mp3.fetch = true;
-    download_profile.custom_ranks.audio.stereo.fetch = true;
-    download_profile.custom_ranks.hdr.sdr.fetch = true;
-    download_profile.custom_ranks.hdr.bit10.fetch = true;
-
-    if download_profile.custom_ranks.audio.stereo.rank.is_none() {
-        download_profile.custom_ranks.audio.stereo.rank = Some(0);
-    }
-    if download_profile.custom_ranks.audio.mono.rank.is_none() {
-        download_profile.custom_ranks.audio.mono.rank = Some(-250);
-    }
-    if download_profile.custom_ranks.audio.mp3.rank.is_none() {
-        download_profile.custom_ranks.audio.mp3.rank = Some(-250);
-    }
-    if download_profile.custom_ranks.hdr.sdr.rank.is_none() {
-        download_profile.custom_ranks.hdr.sdr.rank = Some(0);
-    }
-    if download_profile.custom_ranks.quality.hdtv.rank.is_none() {
-        download_profile.custom_ranks.quality.hdtv.rank = Some(-5000);
-    }
-    if download_profile.custom_ranks.quality.dvd.rank.is_none() {
-        download_profile.custom_ranks.quality.dvd.rank = Some(-10000);
-    }
-
-    download_profile
 }
 
 fn pack_preference(item: &MediaItem, parsed: &ParsedData) -> i64 {
@@ -389,6 +340,74 @@ mod tests {
 
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].info_hash, "hashoriginal");
+    }
+
+    #[test]
+    fn profile_disabled_codecs_are_not_download_candidates() {
+        let mut profile = RankSettings::default();
+        profile.custom_ranks.quality.av1.fetch = false;
+        let ctx = title_ctx("You", None);
+
+        let av1 = stream(1, "hashav1", "You.S04E01.1080p.NF.WEB-DL.AV1-GROUP");
+        let h264 = stream(2, "hashh264", "You.S04E01.1080p.NF.WEB-DL.H264-GROUP");
+        let streams = [av1, h264];
+
+        let candidates = rank_streams_for_profile(&streams, &media_item(), &profile, &ctx);
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].info_hash, "hashh264");
+    }
+
+    #[test]
+    fn every_profile_fetch_toggle_is_honoured_at_download_time() {
+        // The download gate re-runs the profile as-is: no category is quietly
+        // re-enabled here after the profile turned it off at scrape time.
+        let ctx = title_ctx("You", None);
+        let cases: [(&str, fn(&mut RankSettings), &str); 6] = [
+            (
+                "remux",
+                |s| s.custom_ranks.quality.remux.fetch = false,
+                "You.S04E01.2160p.BluRay.REMUX.HEVC-GROUP",
+            ),
+            (
+                "dolby_vision",
+                |s| s.custom_ranks.hdr.dolby_vision.fetch = false,
+                "You.S04E01.2160p.WEB-DL.DV.HEVC-GROUP",
+            ),
+            (
+                "bdrip",
+                |s| s.custom_ranks.rips.bdrip.fetch = false,
+                "You.S04E01.1080p.BDRip.x264-GROUP",
+            ),
+            (
+                "hdtv",
+                |s| s.custom_ranks.quality.hdtv.fetch = false,
+                "You.S04E01.1080p.HDTV.x264-GROUP",
+            ),
+            (
+                "mp3",
+                |s| s.custom_ranks.audio.mp3.fetch = false,
+                "You.S04E01.1080p.WEB-DL.MP3.x264-GROUP",
+            ),
+            (
+                "bit10",
+                |s| s.custom_ranks.hdr.bit10.fetch = false,
+                "You.S04E01.1080p.WEB-DL.10bit.x264-GROUP",
+            ),
+        ];
+
+        for (label, disable, raw_title) in cases {
+            let mut profile = RankSettings::default();
+            disable(&mut profile);
+            let streams = [stream(1, "hashexcluded", raw_title)];
+
+            let candidates = rank_streams_for_profile(&streams, &media_item(), &profile, &ctx);
+
+            assert!(
+                candidates.is_empty(),
+                "{label} is disabled in the profile but {raw_title} was still a download candidate"
+            );
+        }
     }
 
     #[test]

@@ -82,8 +82,8 @@
         }
     }`;
 
-    const DOWNLOAD_DISCOVERED_STREAM_MUTATION = `mutation($itemType: MediaItemType!, $title: String!, $imdbId: String, $tmdbId: String, $tvdbId: String, $seasonNumber: Int, $episodeNumber: Int, $seasons: [Int!], $infoHash: String!, $magnet: String!, $parsedData: JSON, $rank: Int) {
-        downloadDiscoveredStream(itemType: $itemType, title: $title, imdbId: $imdbId, tmdbId: $tmdbId, tvdbId: $tvdbId, seasonNumber: $seasonNumber, episodeNumber: $episodeNumber, seasons: $seasons, infoHash: $infoHash, magnet: $magnet, parsedData: $parsedData, rank: $rank)
+    const DOWNLOAD_DISCOVERED_STREAM_MUTATION = `mutation($itemType: MediaItemType!, $title: String!, $imdbId: String, $tmdbId: String, $tvdbId: String, $seasonNumber: Int, $episodeNumber: Int, $seasons: [Int!], $infoHash: String!, $magnet: String!, $parsedData: JSON, $rank: Int, $profileName: String) {
+        downloadDiscoveredStream(itemType: $itemType, title: $title, imdbId: $imdbId, tmdbId: $tmdbId, tvdbId: $tvdbId, seasonNumber: $seasonNumber, episodeNumber: $episodeNumber, seasons: $seasons, infoHash: $infoHash, magnet: $magnet, parsedData: $parsedData, rank: $rank, profileName: $profileName)
     }`;
 
     let {
@@ -109,6 +109,7 @@
     let customTmdbId = $state("");
     let customTvdbId = $state("");
     let explicitHash = $state("");
+    let profileName = $state("");
     let streams = $state<StreamCandidate[]>([]);
     let downloadingKey = $state<string | null>(null);
 
@@ -170,6 +171,7 @@
         customTmdbId = "";
         customTvdbId = "";
         explicitHash = "";
+        profileName = "";
         advancedOpen = false;
         selectedSeasons = seasons
             .filter((season) => season.status !== "Available")
@@ -208,7 +210,8 @@
                     infoHash: vars.infoHash,
                     magnet: vars.magnet,
                     parsedData: vars.parsedData ?? null,
-                    rank: vars.rank ?? null
+                    rank: vars.rank ?? null,
+                    profileName: clean(profileName)
                 }
             );
 
@@ -440,6 +443,12 @@
                                     <Input
                                         bind:value={explicitHash}
                                         placeholder="40-char info hash" />
+                                </div>
+                                <div class="space-y-2">
+                                    <Label>Profile</Label>
+                                    <Input
+                                        bind:value={profileName}
+                                        placeholder="e.g. hd, ultra_hd (leave blank to use the default file)" />
                                 </div>
                             </div>
                         {/if}

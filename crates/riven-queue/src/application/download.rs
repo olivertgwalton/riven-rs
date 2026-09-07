@@ -93,9 +93,17 @@ pub async fn persist_manual_download(
         ));
     };
 
+    // A manually supplied torrent is an explicit user override: unlike the
+    // automatic pipeline (which treats `Completed` as terminal, see
+    // `main_orchestrator.rs`'s `process_media_item`), it's allowed to add a
+    // download to an already-`Completed` item so a second profile/version can
+    // be supplied alongside the first without discarding it.
     if !matches!(
         item.state,
-        MediaItemState::Scraped | MediaItemState::Ongoing | MediaItemState::PartiallyCompleted
+        MediaItemState::Scraped
+            | MediaItemState::Ongoing
+            | MediaItemState::PartiallyCompleted
+            | MediaItemState::Completed
     ) {
         queue
             .notify(RivenEvent::MediaItemDownloadErrorIncorrectState { id })
@@ -180,15 +188,23 @@ pub async fn run_rank_streams(id: i64, job: &RankStreamsJob, queue: &JobQueue) {
         "download: picking which stream to try"
     );
 
+    // `Completed` is only allowed through when the caller asked for a
+    // specific stream (`preferred_info_hash` set): that's an explicit manual
+    // pick (e.g. `downloadDiscoveredStream`), not the automatic best-stream
+    // path, and it's how a second profile/version gets added to an item that
+    // already has one. The automatic pipeline still treats `Completed` as
+    // terminal (see `process_media_item`), so an unattended re-run here would
+    // otherwise fight that design decision.
     if !matches!(
         item.state,
         MediaItemState::Scraped | MediaItemState::Ongoing | MediaItemState::PartiallyCompleted
-    ) {
+    ) && !(item.state == MediaItemState::Completed && job.preferred_info_hash.is_some())
+    {
         tracing::debug!(
             id,
             title = %item.title,
             state = ?item.state,
-            "download: skipped, the item is not waiting for a download (needs Scraped/Ongoing/PartiallyCompleted)"
+            "download: skipped, the item is not waiting for a download (needs Scraped/Ongoing/PartiallyCompleted, or Completed with a manually chosen stream)"
         );
         queue
             .notify(RivenEvent::MediaItemDownloadErrorIncorrectState { id })
@@ -217,6 +233,7 @@ pub async fn run_rank_streams(id: i64, job: &RankStreamsJob, queue: &JobQueue) {
         info_hash: preferred.clone().unwrap_or_default(),
         magnet: magnet_for_preferred.unwrap_or_default(),
         preferred_info_hash: preferred,
+        preferred_profile_name: job.preferred_profile_name.clone(),
         rate_limit_retries: 0,
     };
     queue.push_download(download_job).await;
@@ -251,15 +268,21 @@ pub async fn run(id: i64, job: &DownloadJob, queue: &JobQueue) {
         return;
     };
 
+    // Same `Completed` carve-out as `run_rank_streams` above: only a manually
+    // chosen stream (`preferred_info_hash`) may add a download to an item
+    // that's already `Completed`, so a second profile/version can be added
+    // alongside the first. The automatic best-stream path stays blocked,
+    // matching `process_media_item`'s treatment of `Completed` as terminal.
     if !matches!(
         item.state,
         MediaItemState::Scraped | MediaItemState::Ongoing | MediaItemState::PartiallyCompleted
-    ) {
+    ) && !(item.state == MediaItemState::Completed && job.preferred_info_hash.is_some())
+    {
         tracing::debug!(
             id,
             title = %item.title,
             state = ?item.state,
-            "download: skipped, the item is not waiting for a download (needs Scraped/Ongoing/PartiallyCompleted)"
+            "download: skipped, the item is not waiting for a download (needs Scraped/Ongoing/PartiallyCompleted, or Completed with a manually chosen stream)"
         );
         queue
             .notify(RivenEvent::MediaItemDownloadErrorIncorrectState { id })
@@ -329,6 +352,7 @@ pub async fn run(id: i64, job: &DownloadJob, queue: &JobQueue) {
             queue,
             start_time,
             preferred_info_hash,
+            job.preferred_profile_name.as_deref(),
             &all_streams,
             &plugin_providers,
             &mut cache,
@@ -636,6 +660,7 @@ async fn run_preferred_stream(
     queue: &JobQueue,
     start_time: Instant,
     preferred_info_hash: &str,
+    preferred_profile_name: Option<&str>,
     streams: &[Stream],
     plugin_providers: &[(String, Option<String>)],
     cache: &mut CacheMemo,
@@ -687,7 +712,16 @@ async fn run_preferred_stream(
         let stores = stores_for_attempt(provider, cached_files);
 
         match attempt_download(
-            id, item, queue, stream, stores, None, None, start_time, hierarchy, None,
+            id,
+            item,
+            queue,
+            stream,
+            stores,
+            preferred_profile_name,
+            preferred_profile_name,
+            start_time,
+            hierarchy,
+            None,
         )
         .await
         {
