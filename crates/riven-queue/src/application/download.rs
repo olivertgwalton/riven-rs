@@ -651,6 +651,18 @@ async fn run_downloads(
                 return DownloadWalkOutcome::Finished;
             }
 
+            if profile_satisfied_mid_walk(id, item.item_type, profile_name).await {
+                tracing::debug!(
+                    id,
+                    title = %item.title,
+                    profile = profile_name,
+                    "download: this quality profile was satisfied mid-walk, stopping"
+                );
+                done_profiles.insert(profile_name.clone());
+                any_success = true;
+                break;
+            }
+
             if let Some(size) = stream.file_size_bytes
                 && size >= 0
                 && !passes_size_bounds(size.unsigned_abs(), max_size_bytes, min_size_bytes)
@@ -880,6 +892,30 @@ fn passes_size_bounds(size: u64, max_size_bytes: Option<u64>, min_size_bytes: Op
         return false;
     }
     true
+}
+
+async fn profile_satisfied_mid_walk(id: i64, item_type: MediaItemType, profile: &str) -> bool {
+    match item_type {
+        MediaItemType::Season => fetch_done_profiles(id, item_type)
+            .await
+            .iter()
+            .any(|p| p == profile),
+        MediaItemType::Show => {
+            let Ok(seasons) = repo::list_seasons_excluding_specials(id).await else {
+                return false;
+            };
+            let season_ids: Vec<i64> = seasons.iter().map(|s| s.id).collect();
+            let (Ok(episodes), Ok(have)) = (
+                repo::list_episodes_for_seasons(&season_ids).await,
+                repo::get_episode_ids_with_profile_for_show(id, profile).await,
+            ) else {
+                return false;
+            };
+            let mut episodes = episodes.values().flatten().peekable();
+            episodes.peek().is_some() && episodes.all(|ep| have.contains(&ep.id))
+        }
+        _ => false,
+    }
 }
 
 async fn fetch_done_profiles(id: i64, item_type: MediaItemType) -> Vec<String> {
