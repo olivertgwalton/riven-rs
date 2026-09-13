@@ -1,51 +1,6 @@
-use std::borrow::Cow;
-
-use super::{ContentCollection, FieldType, SettingField};
+use super::ContentCollection;
 use crate::events::HookResponse;
 use crate::types::ExternalIds;
-
-#[test]
-fn setting_field_builder_populates_optional_metadata() {
-    let field = SettingField::new("quality", "Quality", FieldType::Select)
-        .required()
-        .with_default("1080p")
-        .with_placeholder("Choose quality")
-        .with_description("Preferred quality")
-        .with_options(&["720p", "1080p"])
-        .with_fields(vec![SettingField::new("nested", "Nested", FieldType::Text)])
-        .with_item_fields(vec![SettingField::new("item", "Item", FieldType::Text)])
-        .with_key_placeholder("provider")
-        .with_add_label("Add provider");
-
-    assert!(field.required);
-    assert_eq!(field.default_value.as_deref(), Some("1080p"));
-    assert_eq!(field.placeholder.as_deref(), Some("Choose quality"));
-    assert_eq!(field.description.as_deref(), Some("Preferred quality"));
-    assert_eq!(
-        field.options,
-        Some(vec![Cow::Borrowed("720p"), Cow::Borrowed("1080p")])
-    );
-    assert_eq!(field.fields.as_ref().map(Vec::len), Some(1));
-    assert_eq!(field.item_fields.as_ref().map(Vec::len), Some(1));
-    assert_eq!(field.key_placeholder.as_deref(), Some("provider"));
-    assert_eq!(field.add_label.as_deref(), Some("Add provider"));
-}
-
-#[test]
-fn setting_field_builder_accepts_dynamic_options() {
-    let field = SettingField::new("genre", "Genre", FieldType::FilterArray)
-        .with_dynamic_options(vec!["Science Fiction".to_string(), "TV Movie".to_string()])
-        .allow_custom_options();
-
-    assert_eq!(
-        field.options,
-        Some(vec![
-            Cow::Owned("Science Fiction".to_string()),
-            Cow::Owned("TV Movie".to_string()),
-        ])
-    );
-    assert_eq!(field.allow_custom_options, Some(true));
-}
 
 #[test]
 fn content_collection_deduplicates_movies_and_shows_by_preferred_keys() {

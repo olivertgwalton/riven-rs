@@ -49,5 +49,5 @@ fn content_rating_falls_back_to_non_us_valid_certification() {
 
 #[test]
 fn content_rating_rejects_unknown_values() {
-    assert_eq!(parse_content_rating("BBFC-15"), None);
+    assert_eq!(ContentRating::parse("BBFC-15"), None);
 }

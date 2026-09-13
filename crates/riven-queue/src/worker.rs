@@ -10,12 +10,17 @@ use crate::main_orchestrator::MainOrchestrator;
 /// Periodic scheduler.
 pub struct Scheduler {
     job_queue: Arc<JobQueue>,
+    orchestrator: MainOrchestrator,
     cancel: CancellationToken,
 }
 
 impl Scheduler {
     pub fn new(job_queue: Arc<JobQueue>, cancel: CancellationToken) -> Self {
-        Self { job_queue, cancel }
+        Self {
+            orchestrator: MainOrchestrator::new(Arc::clone(&job_queue)),
+            job_queue,
+            cancel,
+        }
     }
 
     pub async fn run(self) {
@@ -25,7 +30,7 @@ impl Scheduler {
             Self::retry_wait_duration(self.job_queue.retry_interval_secs.load(Ordering::SeqCst));
         let mut retry_sleep = std::pin::pin!(tokio::time::sleep(retry_wait));
 
-        self.retry_library().await;
+        self.orchestrator.retry_library().await;
 
         loop {
             tokio::select! {
@@ -37,10 +42,10 @@ impl Scheduler {
                     // Awaits the whole fan-in (bounded by the hook-collect
                     // timeout); a slow content sync just delays the next tick.
                     crate::application::request_content::run(&self.job_queue).await;
-                    self.transition_newly_aired().await;
+                    self.orchestrator.transition_newly_aired().await;
                 }
                 _ = &mut retry_sleep           => {
-                    self.retry_library().await;
+                    self.orchestrator.retry_library().await;
                     let next_wait = Self::retry_wait_duration(
                         self.job_queue.retry_interval_secs.load(Ordering::SeqCst),
                     );
@@ -70,19 +75,5 @@ impl Scheduler {
             Ok(removed) => tracing::info!(removed, "pruned orphan streams"),
             Err(error) => tracing::error!(%error, "failed to prune orphan streams"),
         }
-    }
-
-    /// Retry-library actor. Delegated to `MainOrchestrator`, which is the
-    /// single owner of the retry policy.
-    async fn retry_library(&self) {
-        MainOrchestrator::new(Arc::clone(&self.job_queue))
-            .retry_library()
-            .await;
-    }
-
-    async fn transition_newly_aired(&self) {
-        MainOrchestrator::new(Arc::clone(&self.job_queue))
-            .transition_newly_aired()
-            .await;
     }
 }

@@ -1,104 +1,73 @@
 <script lang="ts">
-    import * as Form from "$lib/components/ui/form/index.js";
-    import type { SuperValidated } from "sveltekit-superforms";
-    import { changeUserDataSchema, type ChangeUserDataSchema } from "$lib/schemas/auth";
-    import { superForm } from "sveltekit-superforms";
-    import { untrack } from "svelte";
-    import { zod4Client } from "sveltekit-superforms/adapters";
+    import { changeUserDataSchema } from "$lib/schemas/auth";
+    import { Button } from "$lib/components/ui/button/index.js";
     import { Input } from "$lib/components/ui/input/index.js";
+    import { Label } from "$lib/components/ui/label/index.js";
     import { toast } from "svelte-sonner";
     import LoaderCircle from "@lucide/svelte/icons/loader-circle";
     import { invalidateAll } from "$app/navigation";
     import { authClient } from "$lib/auth-client";
     import FormBase from "./form-base.svelte";
+    import { validateForm } from "./validate";
 
-    let {
-        data
-    }: {
-        data: SuperValidated<ChangeUserDataSchema>;
-    } = $props();
+    let errors = $state<Record<string, string>>({});
+    let submitting = $state(false);
 
-    const form = untrack(() =>
-        superForm(data, {
-            SPA: true,
-            validators: zod4Client(changeUserDataSchema),
-            onUpdate: async ({ form }) => {
-                if (!form.valid) return;
+    async function onsubmit(event: SubmitEvent & { currentTarget: HTMLFormElement }) {
+        event.preventDefault();
+        const result = validateForm(changeUserDataSchema, event.currentTarget);
+        errors = result.errors ?? {};
+        if (!result.data) return;
 
-                // Blank means "leave this alone", so the payload is built from
-                // the filled fields only. `/update-user` rejects an empty body.
-                const payload: { username?: string; image?: string } = {};
-                if (form.data.newUsername.trim()) payload.username = form.data.newUsername.trim();
-                if (form.data.newAvatar.trim()) payload.image = form.data.newAvatar.trim();
+        // Blank means "leave this alone", so the payload is built from
+        // the filled fields only. `/update-user` rejects an empty body.
+        const payload: { username?: string; image?: string } = {};
+        if (result.data.newUsername.trim()) payload.username = result.data.newUsername.trim();
+        if (result.data.newAvatar.trim()) payload.image = result.data.newAvatar.trim();
 
-                if (Object.keys(payload).length === 0) {
-                    form.valid = false;
-                    toast.error("Fill in at least one field.");
-                    return;
-                }
+        if (Object.keys(payload).length === 0) {
+            toast.error("Fill in at least one field.");
+            return;
+        }
 
-                const { error } = await authClient.updateUser(payload);
+        submitting = true;
+        const { error } = await authClient.updateUser(payload);
+        submitting = false;
 
-                if (error) {
-                    form.valid = false;
-                    toast.error(error.message);
-                    return;
-                }
+        if (error) {
+            toast.error(error.message);
+            return;
+        }
 
-                await invalidateAll();
-                toast.success("User data updated successfully.");
-            }
-        })
-    );
-
-    const { form: formData, enhance, delayed } = form;
+        await invalidateAll();
+        toast.success("User data updated successfully.");
+    }
 </script>
 
-<FormBase
-    title="Update Profile"
-    description="Update your username and avatar.">
-    {#snippet content()}
-        <form method="POST" use:enhance>
-            <Form.Field {form} name="newUsername">
-                <Form.Control>
-                    {#snippet children({ props })}
-                        <Form.Label for="newUsername">Username</Form.Label>
-                        <Input
-                            placeholder="Your new username"
-                            {...props}
-                            bind:value={$formData.newUsername} />
-                    {/snippet}
-                </Form.Control>
-                <Form.FieldErrors />
-            </Form.Field>
+{#snippet field(name: "newUsername" | "newAvatar", label: string, placeholder: string)}
+    <div class="space-y-2">
+        <Label for={name} class={errors[name] && "text-destructive"}>{label}</Label>
+        <Input id={name} {name} {placeholder} aria-invalid={!!errors[name]} />
+        {#if errors[name]}
+            <p class="text-destructive text-sm font-medium">{errors[name]}</p>
+        {/if}
+    </div>
+{/snippet}
 
-            <Form.Field {form} name="newAvatar">
-                <Form.Control>
-                    {#snippet children({ props })}
-                        <Form.Label for="newAvatar">Avatar</Form.Label>
-                        <Input
-                            placeholder="Your new avatar URL"
-                            {...props}
-                            bind:value={$formData.newAvatar} />
-                    {/snippet}
-                </Form.Control>
-                <Form.FieldErrors />
-            </Form.Field>
+<FormBase title="Update Profile" description="Update your username and avatar.">
+    {#snippet content()}
+        <form id="update-user-form" novalidate {onsubmit}>
+            {@render field("newUsername", "Username", "Your new username")}
+            {@render field("newAvatar", "Avatar", "Your new avatar URL")}
         </form>
     {/snippet}
 
     {#snippet footer()}
-        <Form.Button
-            variant="secondary"
-            size="sm"
-            disabled={$delayed}
-            onclick={() => {
-                form.submit();
-            }}>
-            {#if $delayed}
+        <Button type="submit" form="update-user-form" variant="secondary" size="sm" disabled={submitting}>
+            {#if submitting}
                 <LoaderCircle class="mr-2 h-5 w-5 animate-spin" />
             {/if}
             Update profile
-        </Form.Button>
+        </Button>
     {/snippet}
 </FormBase>

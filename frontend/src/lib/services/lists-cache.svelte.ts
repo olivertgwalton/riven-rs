@@ -1,6 +1,6 @@
 import { browser } from "$app/environment";
-import { PersistedState } from "runed";
 import { createScopedLogger } from "$lib/logger";
+import { deduplicateById } from "$lib/utils";
 
 const logger = createScopedLogger("lists-cache");
 
@@ -10,22 +10,17 @@ interface CachedData<T> {
 }
 
 type TimeWindow = "day" | "week";
-type MediaListLoader = (
+type MediaListLoader<T> = (
 	page: number,
 	timeWindow: TimeWindow | null,
-) => Promise<unknown>;
-
-interface MediaListState {
-	timeWindow: TimeWindow;
-}
+) => Promise<T[]>;
 
 interface MediaListStoreOptions<T> {
 	key: string;
-	apiPath?: string;
 	initialTimeWindow?: TimeWindow;
 	noCache?: boolean;
 	initialData?: T[];
-	loader?: MediaListLoader;
+	loader: MediaListLoader<T>;
 }
 
 /**
@@ -43,58 +38,15 @@ export interface BaseListItem {
 
 const CACHE_DURATION = 5 * 60 * 1000; // 5 minutes cache validity
 
-/**
- * Extracts items from various API response formats
- */
-function extractItems<T>(data: unknown): T[] {
-	let items: T[] = [];
-
-	if (Array.isArray(data)) {
-		items = data;
-	} else if (data && typeof data === "object") {
-		const obj = data as Record<string, unknown>;
-		if (Array.isArray(obj.results)) {
-			items = obj.results;
-		} else if (Array.isArray(obj.items)) {
-			items = obj.items;
-		} else if (obj.data && typeof obj.data === "object") {
-			const pageData = obj.data as Record<string, unknown>;
-			if (pageData.Page && typeof pageData.Page === "object") {
-				const page = pageData.Page as Record<string, unknown>;
-				if (Array.isArray(page.media)) {
-					items = page.media;
-				}
-			}
-		}
-	}
-
-	return items;
-}
-
-/**
- * Deduplicates items by their id property
- */
-function deduplicateById<T extends { id?: unknown }>(items: T[]): T[] {
-	const seenIds: unknown[] = [];
-	return items.filter((item) => {
-		if (item.id === undefined || seenIds.includes(item.id)) {
-			return false;
-		}
-		seenIds.push(item.id);
-		return true;
-	});
-}
-
 export class MediaListStore<T = unknown> {
 	readonly #key: string;
-	readonly #apiPath?: string;
 	readonly #supportsTimeWindow: boolean;
 	readonly #defaultTimeWindow: TimeWindow;
 	readonly #noCache: boolean;
-	readonly #loader?: MediaListLoader;
+	readonly #loader: MediaListLoader<T>;
 
-	// Use PersistedState for time window preference (persists across sessions)
-	#timeWindowState: PersistedState<MediaListState> | null = null;
+	// Time window preference, persisted in sessionStorage.
+	#timeWindow = $state<TimeWindow>("day");
 
 	// Runtime state (non-persisted)
 	#items = $state<T[]>([]);
@@ -106,18 +58,19 @@ export class MediaListStore<T = unknown> {
 
 	constructor(options: MediaListStoreOptions<T>) {
 		this.#key = options.key;
-		this.#apiPath = options.apiPath;
 		this.#supportsTimeWindow = options.initialTimeWindow !== undefined;
 		this.#defaultTimeWindow = options.initialTimeWindow ?? "day";
 		this.#noCache = options.noCache ?? false;
 		this.#loader = options.loader;
 
+		this.#timeWindow = this.#defaultTimeWindow;
 		if (browser && this.#supportsTimeWindow) {
-			this.#timeWindowState = new PersistedState<MediaListState>(
-				`${options.key}_preferences`,
-				{ timeWindow: this.#defaultTimeWindow },
-				{ storage: "session", syncTabs: false },
-			);
+			try {
+				const stored = sessionStorage.getItem(this.#preferencesKey);
+				if (stored) this.#timeWindow = JSON.parse(stored).timeWindow;
+			} catch {
+				// ignore malformed preference
+			}
 		}
 
 		// Initialize with initialData if provided, otherwise empty
@@ -141,7 +94,11 @@ export class MediaListStore<T = unknown> {
 
 	get timeWindow(): TimeWindow | null {
 		if (!this.#supportsTimeWindow) return null;
-		return this.#timeWindowState?.current.timeWindow ?? this.#defaultTimeWindow;
+		return this.#timeWindow;
+	}
+
+	get #preferencesKey(): string {
+		return `${this.#key}_preferences`;
 	}
 
 	get loading(): boolean {
@@ -163,18 +120,6 @@ export class MediaListStore<T = unknown> {
 	#getStorageKey(): string {
 		const tw = this.timeWindow;
 		return tw ? `${this.#key}_${tw}_cache` : `${this.#key}_cache`;
-	}
-
-	#getApiUrl(page: number = 1): string {
-		if (!this.#apiPath) {
-			throw new Error(
-				`MediaListStore "${this.#key}" requires either an apiPath or loader`,
-			);
-		}
-
-		const tw = this.timeWindow;
-		const baseUrl = tw ? `${this.#apiPath}/${tw}/trending` : this.#apiPath;
-		return `${baseUrl}?page=${page}`;
 	}
 
 	#getCachedData(): CachedData<T> | null {
@@ -234,8 +179,14 @@ export class MediaListStore<T = unknown> {
 	async changeTimeWindow(window: TimeWindow): Promise<void> {
 		if (!this.#supportsTimeWindow || this.timeWindow === window) return;
 
-		if (this.#timeWindowState) {
-			this.#timeWindowState.current = { timeWindow: window };
+		this.#timeWindow = window;
+		try {
+			sessionStorage.setItem(
+				this.#preferencesKey,
+				JSON.stringify({ timeWindow: window }),
+			);
+		} catch {
+			// storage unavailable; preference lasts for this page only
 		}
 
 		// Reset pagination and reload
@@ -266,10 +217,11 @@ export class MediaListStore<T = unknown> {
 			this.#loading = true;
 			this.#error = null;
 
-			const result = await this.#loadPage(this.#page);
 			const items = deduplicateById(
-				extractItems<T & { id?: unknown }>(result),
-			) as T[];
+				(await this.#loader(this.#page, this.timeWindow)) as (T & {
+					id?: unknown;
+				})[],
+			);
 
 			this.#items = items;
 			this.#initialized = true;
@@ -290,8 +242,7 @@ export class MediaListStore<T = unknown> {
 			this.#error = null;
 			this.#page += 1;
 
-			const result = await this.#loadPage(this.#page);
-			const newItems = extractItems<T & { id?: unknown }>(result);
+			const newItems = await this.#loader(this.#page, this.timeWindow);
 
 			if (newItems.length === 0) {
 				this.#hasMore = false;
@@ -321,21 +272,6 @@ export class MediaListStore<T = unknown> {
 		this.#page = 1;
 		this.#hasMore = true;
 		await this.#fetchFromApi();
-	}
-
-	async #loadPage(page: number): Promise<unknown> {
-		if (this.#loader) {
-			return this.#loader(page, this.timeWindow);
-		}
-
-		const response = await fetch(this.#getApiUrl(page));
-		if (!response.ok) {
-			throw new Error(
-				`Failed to fetch data: ${response.status} ${response.statusText}`,
-			);
-		}
-
-		return response.json();
 	}
 
 	clearCache(): void {

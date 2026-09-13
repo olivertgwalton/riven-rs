@@ -26,14 +26,12 @@ tokio = { workspace = true }
 tokio-util = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-bytes = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 sea-orm = { workspace = true }
 futures = { workspace = true }
 chrono = { workspace = true }
 reqwest = { workspace = true }
-hmac = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
 scrypt = { version = "0.12", default-features = false }
@@ -44,7 +42,6 @@ rand_core = { version = "0.6", features = ["getrandom"] }
 subtle = "2"
 unicode-normalization = "0.1"
 argon2 = "0.5"
-async-trait = { workspace = true }
 url = "2"
 
 [dev-dependencies]

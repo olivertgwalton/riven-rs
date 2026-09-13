@@ -30,10 +30,9 @@ use tower_http::services::{ServeDir, ServeFile};
 use apalis_board_api::framework::{ApiBuilder, RegisterRoute};
 use apalis_board_api::ui::ServeUI;
 
-use crate::schema::build_schema;
+use crate::schema::{AppSchema, build_schema};
 use crate::vfs_mount::VfsMountManager;
-
-pub use state::ApiState;
+use authn::AuthService;
 
 pub struct StartServerConfig {
     pub host: String,
@@ -45,7 +44,6 @@ pub struct StartServerConfig {
     pub log_directory: String,
     pub log_tx: broadcast::Sender<String>,
     pub notification_tx: broadcast::Sender<String>,
-    pub downloader_config: Arc<tokio::sync::RwLock<riven_core::downloader::DownloaderConfig>>,
     pub log_control: Arc<LogControl>,
     pub stream_client: reqwest::Client,
     pub link_request_tx: tokio::sync::mpsc::Sender<LinkRequest>,
@@ -61,31 +59,25 @@ pub struct StartServerConfig {
     pub oidc_providers: Vec<riven_core::settings::OidcProviderSettings>,
 }
 
-mod state {
-    use std::sync::Arc;
+#[derive(Clone)]
+pub struct ApiState {
+    pub schema: AppSchema,
+    pub job_queue: Arc<JobQueue>,
+    pub api_key: Option<String>,
+    pub log_tx: broadcast::Sender<String>,
+    pub notification_tx: broadcast::Sender<String>,
+    pub stream_client: reqwest::Client,
+    pub link_request_tx: tokio::sync::mpsc::Sender<LinkRequest>,
+    pub runtime: tokio::runtime::Handle,
+    pub auth: Arc<AuthService>,
+    /// Held here as well as in the schema so the artwork proxy can dispatch
+    /// to media-server plugins without going through GraphQL.
+    pub registry: Arc<PluginRegistry>,
+}
 
-    use riven_core::stream_link::LinkRequest;
-    use riven_queue::JobQueue;
-    use tokio::sync::broadcast;
-
-    use crate::schema::AppSchema;
-    use crate::server::authn::AuthService;
-
-    #[derive(Clone)]
-    pub struct ApiState {
-        pub schema: AppSchema,
-        pub job_queue: Arc<JobQueue>,
-        pub api_key: Option<String>,
-        pub log_tx: broadcast::Sender<String>,
-        pub notification_tx: broadcast::Sender<String>,
-        pub stream_client: reqwest::Client,
-        pub link_request_tx: tokio::sync::mpsc::Sender<LinkRequest>,
-        pub runtime: tokio::runtime::Handle,
-        pub auth: Arc<AuthService>,
-        /// Held here as well as in the schema so the artwork proxy can dispatch
-        /// to media-server plugins without going through GraphQL.
-        pub registry: Arc<riven_core::plugin::PluginRegistry>,
-    }
+/// Form-encode a single query value (`a b&c` → `a+b%26c`).
+fn urlencoding_encode(value: &str) -> String {
+    url::form_urlencoded::byte_serialize(value.as_bytes()).collect()
 }
 
 pub async fn start_server(config: StartServerConfig) -> Result<()> {
@@ -99,7 +91,6 @@ pub async fn start_server(config: StartServerConfig) -> Result<()> {
         log_directory,
         log_tx,
         notification_tx,
-        downloader_config,
         log_control,
         stream_client,
         link_request_tx,
@@ -117,7 +108,6 @@ pub async fn start_server(config: StartServerConfig) -> Result<()> {
         job_queue.clone(),
         http_client,
         log_directory,
-        downloader_config,
         log_control,
         log_tx.clone(),
         vfs_mount_manager,

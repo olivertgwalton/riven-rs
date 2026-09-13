@@ -8,9 +8,13 @@ pub async fn fetch_user_info(
     api_key: &str,
 ) -> anyhow::Result<riven_core::types::DebridUserInfo> {
     let url = format!("{base_url}v0/store/user");
-    let response = send_store_data(http, redis, store, format!("{store}:{url}"), |client| {
-        client.get(&url).store_headers(store, api_key)
-    })
+    let response = send_store(
+        http,
+        redis,
+        store,
+        Some(format!("{store}:{url}")),
+        |client| store_headers(client.get(&url), store, api_key),
+    )
     .await?;
     if !response.status().is_success() {
         anyhow::bail!(

@@ -1,8 +1,7 @@
 <script lang="ts">
     import * as Chart from "$lib/components/ui/chart/index.js";
-    import ResponsiveChartContainer from "$lib/components/media/riven/responsive-chart-container.svelte";
     import { BarChart } from "layerchart";
-    import type { IndexerStats } from "./types";
+    import type { IndexerStats } from "$lib/gql/schema";
 
     let { stats }: { stats: IndexerStats[] } = $props();
 
@@ -52,7 +51,7 @@
         {#if queryRows.length === 0}
             <p class="mt-6 text-sm text-neutral-400">No indexer queries recorded yet.</p>
         {:else}
-            <ResponsiveChartContainer
+            <Chart.Container
                 config={queryConfig}
                 class="mt-6 w-full"
                 style="height: {chartHeight}">
@@ -75,7 +74,7 @@
                         <Chart.Tooltip />
                     {/snippet}
                 </BarChart>
-            </ResponsiveChartContainer>
+            </Chart.Container>
         {/if}
     </div>
 
@@ -85,7 +84,7 @@
         {#if grabRows.length === 0}
             <p class="mt-6 text-sm text-neutral-400">No grabs recorded yet.</p>
         {:else}
-            <ResponsiveChartContainer
+            <Chart.Container
                 config={grabConfig}
                 class="mt-6 w-full"
                 style="height: {chartHeight}">
@@ -106,7 +105,7 @@
                         <Chart.Tooltip />
                     {/snippet}
                 </BarChart>
-            </ResponsiveChartContainer>
+            </Chart.Container>
         {/if}
     </div>
 </section>

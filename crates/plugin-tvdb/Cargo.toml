@@ -13,7 +13,6 @@ anyhow = { workspace = true }
 tracing = { workspace = true }
 chrono = { workspace = true }
 chrono-tz = { workspace = true }
-parking_lot = { workspace = true }
 
 [lints]
 workspace = true

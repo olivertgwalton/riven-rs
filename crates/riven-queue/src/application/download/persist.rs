@@ -4,7 +4,7 @@ use std::time::Instant;
 use riven_core::events::RivenEvent;
 use riven_core::settings::{FilesystemContentType, FilesystemItemMetadata};
 use riven_core::types::*;
-use riven_db::entities::{MediaItem, Stream};
+use riven_db::entities::MediaItem;
 use riven_db::repo;
 
 /// Returns true when the error is a FK violation caused by the media item being
@@ -20,18 +20,15 @@ fn is_item_deleted_fk_error(err: &anyhow::Error) -> bool {
 
 use super::helpers::{
     episode_vfs_path, handle_bitrate_failure, is_persistable_video_file, looks_obfuscated,
-    matches_episode_lookup, parse_file_path, select_episode_files, stream_raw_title,
-    stream_resolution,
+    matches_episode_lookup, parse_file_path, select_episode_files,
 };
 use crate::JobQueue;
 
 mod packs;
 mod single;
-mod supplied;
 
 pub use packs::{persist_season, persist_show};
 pub use single::{persist_episode, persist_movie};
-pub use supplied::persist_supplied_download;
 
 /// A file is persistable only when the VFS can eventually fetch bytes from it.
 /// `stream_url` is used directly; `download_url` is the input the VFS hands to
@@ -39,14 +36,11 @@ pub use supplied::persist_supplied_download;
 /// either, the row produces a phantom entry in the VFS — `ls` shows the file
 /// but `read()` fails, which surfaces as Plex seeing the title without ever
 /// scanning media or opening a connection to a download provider.
-///
-/// The `matched:{id}` sentinel used by show-supplied downloads carries a real
-/// `download_url`, so it passes this check.
 fn has_playable_url(file: &DownloadFile) -> bool {
     file.download_url.as_deref().is_some_and(|s| !s.is_empty())
         || file.stream_url.as_deref().is_some_and(|s| !s.is_empty())
 }
-use crate::context::{DownloadHierarchyContext, load_download_hierarchy_context};
+use crate::context::DownloadHierarchyContext;
 use crate::lifecycle::sync_item_request_state;
 pub enum SeasonPersistOutcome {
     Failed,
@@ -55,21 +49,8 @@ pub enum SeasonPersistOutcome {
 }
 
 pub(crate) fn metadata_from_show_context(ctx: &DownloadHierarchyContext) -> FilesystemItemMetadata {
-    let genres = ctx
-        .show_genres
-        .as_ref()
-        .and_then(|value| value.as_array())
-        .map(|values| {
-            values
-                .iter()
-                .filter_map(|value| value.as_str())
-                .map(str::to_ascii_lowercase)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-
     FilesystemItemMetadata {
-        genres,
+        genres: riven_core::entities::helpers::lowercase_json_strings(ctx.show_genres.as_ref()),
         network: ctx.show_network.clone(),
         content_rating: ctx.show_content_rating,
         language: ctx.show_language.clone(),

@@ -8,7 +8,6 @@ use riven_core::http::{HttpServiceProfile, profiles};
 use riven_core::plugin::{Plugin, PluginContext};
 use riven_core::settings::PluginSettings;
 use riven_core::types::*;
-use std::time::Duration;
 
 mod dispatch;
 mod metadata;
@@ -16,18 +15,11 @@ mod metadata;
 use dispatch::dispatch_webhooks;
 #[cfg(test)]
 use dispatch::{NotificationService, build_simple_embed, format_duration, parse_notification_url};
-use metadata::{fetch_tmdb_overview, fetch_tvdb_slug};
+use metadata::fetch_tmdb_overview;
 
 const TMDB_BASE_URL: &str = "https://api.themoviedb.org/3";
-const TVDB_BASE_URL: &str = "https://api4.thetvdb.com/v4";
-const TVDB_DEFAULT_API_KEY: &str = "6be85335-5c4f-4d8d-b945-d3ed0eb8cdce";
 
 const TMDB_PROFILE: HttpServiceProfile = HttpServiceProfile::new("tmdb");
-// Must match plugin-tvdb's and riven-api's "tvdb" profile: whichever one
-// first creates this named service's shared state wins for the process
-// lifetime, so an inconsistent rate_limit here would silently defeat the cap.
-const TVDB_PROFILE: HttpServiceProfile =
-    HttpServiceProfile::new("tvdb").with_rate_limit(25, Duration::from_secs(1));
 
 #[derive(Default)]
 pub struct NotificationsPlugin;
@@ -103,20 +95,14 @@ impl Plugin for NotificationsPlugin {
             is_anime: false,
             rating: None,
             overview: None,
-            tvdb_slug: None,
         };
 
         if !rewrite_for_request_root(ctx, info.id, &mut payload).await? {
             return Ok(HookResponse::Empty);
         }
 
-        if detailed {
-            if let Some(api_key) = ctx.settings.get("tmdb_api_key") {
-                payload.overview = fetch_tmdb_overview(&ctx.http, api_key, &payload).await;
-            }
-            if let Some(ref tvdb_id) = payload.tvdb_id.clone() {
-                payload.tvdb_slug = fetch_tvdb_slug(&ctx.http, tvdb_id).await;
-            }
+        if detailed && let Some(api_key) = ctx.settings.get("tmdb_api_key") {
+            payload.overview = fetch_tmdb_overview(&ctx.http, api_key, &payload).await;
         }
 
         dispatch_webhooks(ctx, &urls, &payload, detailed).await;
@@ -194,8 +180,6 @@ struct NotificationPayload {
     is_anime: bool,
     rating: Option<f64>,
     overview: Option<String>,
-    #[serde(skip)]
-    tvdb_slug: Option<String>,
 }
 
 async fn mark_request_notification_sent(

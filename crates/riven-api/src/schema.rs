@@ -2,12 +2,10 @@ use crate::vfs_mount::VfsMountManager;
 use async_graphql::{MergedObject, Schema};
 use plugin_calendar::CalendarQuery;
 use plugin_dashboard::DashboardQuery;
-use riven_core::downloader::DownloaderConfig;
 use riven_core::http::HttpClient;
 use riven_core::logging::LogControl;
 use riven_core::plugin::PluginRegistry;
 use std::sync::Arc;
-use tokio::sync::RwLock;
 
 pub(crate) mod auth;
 pub mod discovery;
@@ -16,17 +14,14 @@ mod metadata;
 mod mutations;
 mod queries;
 mod subscriptions;
-pub mod typed_items;
 pub mod types;
-mod vfs;
 
 pub use mutations::MutationRoot;
 pub use queries::CoreQuery;
 pub use subscriptions::SubscriptionRoot;
-pub use vfs::VfsQuery;
 
 #[derive(MergedObject, Default)]
-pub struct QueryRoot(CoreQuery, DashboardQuery, CalendarQuery, VfsQuery);
+pub struct QueryRoot(CoreQuery, DashboardQuery, CalendarQuery);
 
 pub type AppSchema = Schema<QueryRoot, MutationRoot, SubscriptionRoot>;
 
@@ -47,7 +42,6 @@ pub fn build_schema(
     job_queue: Arc<riven_queue::JobQueue>,
     http_client: HttpClient,
     log_directory: String,
-    downloader_config: Arc<RwLock<DownloaderConfig>>,
     log_control: Arc<LogControl>,
     log_tx: tokio::sync::broadcast::Sender<String>,
     vfs_mount_manager: Arc<VfsMountManager>,
@@ -61,12 +55,11 @@ pub fn build_schema(
     .data(registry)
     .data(job_queue)
     .data(http_client)
-    .data(downloader_config)
     .data(log_control)
     .data(log_tx)
     .data(vfs_mount_manager)
-    .data(stremio_addon_token);
-    let builder = queries::logs::register_with_schema(builder, log_directory);
+    .data(stremio_addon_token)
+    .data(queries::logs::LogDirectory(log_directory));
     let builder = plugin_dashboard::register_with_schema(builder);
     builder
         .limit_depth(MAX_QUERY_DEPTH)
@@ -74,11 +67,10 @@ pub fn build_schema(
         .finish()
 }
 
-/// The type graph is cyclic — `Show.seasons → Season.show → Show.seasons`, and
-/// the same through `Season.episodes → Episode.season` — and every hop is a
-/// database round trip. Without a ceiling, one authenticated request at modest
-/// nesting expands into an exponential number of queries, which is a denial of
-/// service available to the lowest role on the instance.
+/// Resolvers fan out into database and upstream round trips. Without a
+/// ceiling, one authenticated request at modest nesting can expand into an
+/// exponential amount of work, which is a denial of service available to the
+/// lowest role on the instance.
 ///
 /// Both limits are set well above what the frontend actually asks for: the
 /// deepest real query is the media-detail page at roughly eight levels. They are
@@ -122,9 +114,6 @@ mod tests {
         ("requestShow", "RequestItems"),
         ("requestItems", "RequestItems"),
         ("seerrHandleWebhook", "RequestItems"),
-        // Adding straight to the library.
-        ("addItem", "AddItems"),
-        ("discoverItem", "AddItems"),
         // Item actions.
         ("pauseItems", "PauseItems"),
         ("unpauseItems", "PauseItems"),
@@ -134,12 +123,8 @@ mod tests {
         ("deleteFilesystemEntry", "DeleteItems"),
         ("blacklistFilesystemEntry", "DeleteItems"),
         // Finding and committing a release.
-        ("scrapeItem", "ScrapeItems"),
-        ("scrapeMediaItem", "ScrapeItems"),
-        ("downloadMediaItem", "ScrapeItems"),
         ("discoverStreams", "ScrapeItems"),
         ("downloadDiscoveredStream", "ScrapeItems"),
-        ("saveStreamUrl", "ScrapeItems"),
         ("rescanUsenetHealth", "ScrapeItems"),
         // Deletes *and* re-scrapes, so it requires both.
         ("regrabUsenetTitle", "DeleteItems+ScrapeItems"),
@@ -149,13 +134,8 @@ mod tests {
         ("deleteCustomProfile", "ManageSettings"),
         ("setProfileEnabled", "ManageSettings"),
         ("updateProfileSettings", "ManageSettings"),
-        ("updateRankSettings", "ManageSettings"),
-        ("updateAllSettings", "ManageSettings"),
         ("updateSettings", "ManageSettings"),
         ("completeInitialSetup", "ManageSettings"),
-        ("rematchFilesystemLibraryProfiles", "ManageSettings"),
-        ("indexMovie", "ManageSettings"),
-        ("indexShow", "ManageSettings"),
     ];
 
     /// Field names on `MutationRoot`, read from the SDL rather than from source,
@@ -181,7 +161,8 @@ mod tests {
                 }
                 continue;
             }
-            if in_description || trimmed.is_empty() {
+            // Arguments of a multi-line field sit one indent deeper than fields.
+            if in_description || trimmed.is_empty() || line.starts_with("\t\t") {
                 continue;
             }
             let name: String = trimmed

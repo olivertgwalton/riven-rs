@@ -5,7 +5,7 @@ use apalis::layers::WorkerBuilderExt;
 use apalis::prelude::*;
 
 use riven_core::events::{DispatchStrategy, EventType, HookResponse, RivenEvent};
-use riven_core::http::{RateLimitedError, RetryLaterError};
+use riven_core::http::RateLimitedError;
 
 use crate::context::{is_scrapeable, load_media_item_or_log};
 use crate::dedup::DedupGuard;
@@ -130,7 +130,7 @@ async fn handle_fan_in(job: &PluginHookJob, q: &JobQueue) -> HookOutcome {
         .await
     {
         Some(Ok(response)) => HookOutcome::Response(extract_fan_in_response(event_type, response)),
-        Some(Err(ref error)) if error.is::<RateLimitedError>() || error.is::<RetryLaterError>() => {
+        Some(Err(ref error)) if error.is::<RateLimitedError>() => {
             tracing::warn!(
                 plugin = %job.plugin_name,
                 ?event_type,

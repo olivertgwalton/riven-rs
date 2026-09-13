@@ -46,6 +46,27 @@ export type GqlFilesystemEntry = Pick<
 	| "mediaMetadata"
 >;
 
+/** "1080p (Best Remux)"-style label for a version picker, else `fallback`. */
+export function getFilesystemEntryLabel(
+	entry: GqlFilesystemEntry | undefined,
+	fallback: string,
+): string {
+	const height = entry?.mediaMetadata?.video?.resolutionHeight;
+	const resolution = !height
+		? null
+		: height >= 2160
+			? "4K"
+			: `${[1440, 1080, 720, 480].find((h) => height >= h) ?? height}p`;
+	const profile = entry?.rankingProfileName
+		?.split(/[_-]+/)
+		.filter(Boolean)
+		.map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+		.join(" ");
+
+	if (resolution && profile) return `${resolution} (${profile})`;
+	return resolution ?? (profile || fallback);
+}
+
 export type GqlEpisodeFull = Pick<
 	EpisodeFull,
 	"id" | "episodeNumber" | "state"
@@ -263,18 +284,3 @@ export const MEDIA_ITEM_STATE_BY_TVDB_QUERY = `query($tvdbId: String!) {
         ${MEDIA_ITEM_STATE_FIELDS}
     }
 }`;
-
-/// Both queries already return the shape the page reads — these exist so the
-/// call sites can keep saying what they mean, and so a null response becomes a
-/// null item rather than `undefined`.
-export function mapMediaItemFull(
-	raw: GqlMediaItemFull | null | undefined,
-): RivenMediaItem | null {
-	return raw ?? null;
-}
-
-export function mapMediaItemStateTree(
-	raw: GqlMediaItemStateTree | null | undefined,
-): RivenMediaItem | null {
-	return raw ?? null;
-}

@@ -89,31 +89,13 @@ pub struct UsenetStreamingHealth {
     pub active_streams: i32,
 }
 
-/// Lifetime download total for one provider.
-#[derive(SimpleObject)]
-pub struct UsenetProviderTraffic {
-    pub host: String,
-    pub bytes_downloaded: i64,
-    pub articles_downloaded: i64,
-}
-
-/// One provider's traffic on one day (for the usage-trend chart).
-#[derive(SimpleObject)]
-pub struct UsenetDailyTraffic {
-    /// `YYYY-MM-DD`.
-    pub day: String,
-    pub host: String,
-    pub bytes_downloaded: i64,
-    pub articles_downloaded: i64,
-}
-
 /// Download-traffic accounting across all usenet providers.
 #[derive(SimpleObject)]
 pub struct UsenetTraffic {
     /// Lifetime totals per provider, busiest first.
-    pub providers: Vec<UsenetProviderTraffic>,
+    pub providers: Vec<riven_db::repo::ProviderTrafficTotal>,
     /// Per-provider per-day series over the last two weeks (oldest first).
-    pub daily: Vec<UsenetDailyTraffic>,
+    pub daily: Vec<riven_db::repo::DailyTraffic>,
     pub total_bytes_downloaded: i64,
     pub total_articles_downloaded: i64,
 }
@@ -387,23 +369,8 @@ impl UsenetHealthQuery {
         let total_bytes_downloaded = totals.iter().map(|t| t.bytes_downloaded).sum();
         let total_articles_downloaded = totals.iter().map(|t| t.articles_downloaded).sum();
         Ok(UsenetTraffic {
-            providers: totals
-                .into_iter()
-                .map(|t| UsenetProviderTraffic {
-                    host: t.host,
-                    bytes_downloaded: t.bytes_downloaded,
-                    articles_downloaded: t.articles_downloaded,
-                })
-                .collect(),
-            daily: daily
-                .into_iter()
-                .map(|d| UsenetDailyTraffic {
-                    day: d.day,
-                    host: d.host,
-                    bytes_downloaded: d.bytes_downloaded,
-                    articles_downloaded: d.articles_downloaded,
-                })
-                .collect(),
+            providers: totals,
+            daily,
             total_bytes_downloaded,
             total_articles_downloaded,
         })

@@ -4,7 +4,7 @@ use redis::AsyncCommands;
 
 use riven_core::events::{EventType, HookResponse};
 use riven_core::plugin::{Plugin, PluginContext};
-use riven_core::types::{MediaItemState, MediaItemType};
+use riven_core::types::MediaItemType;
 use riven_db::entities::MediaItem;
 use riven_db::repo;
 
@@ -210,32 +210,19 @@ impl CalendarQuery {
         let entries = rows
             .into_iter()
             .map(|r| {
-                let item_type = match r.item_type {
-                    MediaItemType::Movie => "movie",
-                    MediaItemType::Show => "show",
-                    MediaItemType::Season => "season",
-                    MediaItemType::Episode => "episode",
-                };
-                let last_state = match r.state {
-                    MediaItemState::Completed => "Completed",
-                    MediaItemState::Indexed => "Indexed",
-                    MediaItemState::Scraped => "Scraped",
-                    MediaItemState::Ongoing => "Ongoing",
-                    MediaItemState::PartiallyCompleted => "PartiallyCompleted",
-                    MediaItemState::Unreleased => "Unreleased",
-                    MediaItemState::Paused => "Paused",
-                    MediaItemState::Failed => "Failed",
-                };
+                // Variant names: "movie"/"show"/..., "Completed"/"PartiallyCompleted"/...
+                let item_type = format!("{:?}", r.item_type).to_lowercase();
+                let last_state = format!("{:?}", r.state);
                 CalendarEntry {
                     item_id: r.id,
                     show_title: r.show_title,
-                    item_type: item_type.to_string(),
+                    item_type,
                     aired_at: r.aired_at.map(|d| d.to_string()),
                     season: r.season_number,
                     episode: r.episode_number,
                     tmdb_id: r.tmdb_id,
                     tvdb_id: r.tvdb_id,
-                    last_state: last_state.to_string(),
+                    last_state,
                 }
             })
             .collect();

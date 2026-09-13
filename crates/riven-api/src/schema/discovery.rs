@@ -105,32 +105,48 @@ pub fn build_discovery_targets(
         .clone()
         .unwrap_or_else(|| requested_title.to_string());
     let aliases = indexed.aliases.clone().unwrap_or_default();
-
-    match item_type {
-        MediaItemType::Movie => Ok(vec![DiscoveryTarget {
-            item_type: MediaItemType::Movie,
-            season_number: None,
-            episode_number: None,
+    let target = |item_type: MediaItemType,
+                  season_number: Option<i32>,
+                  episode_number: Option<i32>,
+                  absolute_number: Option<i32>,
+                  season_episodes: Vec<(i32, Option<i32>)>| {
+        // A movie's year is its own; an episode or season inherits the show's.
+        let is_movie = item_type == MediaItemType::Movie;
+        DiscoveryTarget {
+            item_type,
+            season_number,
+            episode_number,
             scrape_title: correct_title.clone(),
             parse_ctx: ParseContext {
-                item_type: MediaItemType::Movie,
-                season_number: None,
-                episode_number: None,
-                absolute_number: None,
-                item_year: indexed.year,
-                parent_year: None,
+                item_type,
+                season_number,
+                episode_number,
+                absolute_number,
+                item_year: if is_movie { indexed.year } else { None },
+                parent_year: if is_movie { None } else { indexed.year },
                 item_country: indexed.country.clone(),
-                season_episodes: vec![],
+                season_episodes,
                 show_season_numbers: vec![],
                 show_status: indexed.status,
                 item_title: correct_title.clone(),
                 item_aired_at: None,
-                correct_title,
-                aliases,
-                profiles,
+                correct_title: correct_title.clone(),
+                aliases: aliases.clone(),
+                profiles: profiles.clone(),
                 dubbed_anime_only,
             },
-        }]),
+        }
+    };
+    let season_episodes = |season: &IndexedSeason| -> Vec<(i32, Option<i32>)> {
+        season
+            .episodes
+            .iter()
+            .map(|episode| (episode.number, episode.absolute_number))
+            .collect()
+    };
+
+    match item_type {
+        MediaItemType::Movie => Ok(vec![target(MediaItemType::Movie, None, None, None, vec![])]),
         MediaItemType::Show => {
             let all_seasons = indexed.seasons.clone().unwrap_or_default();
             let selected: Vec<i32> = if let Some(numbers) = seasons {
@@ -180,36 +196,14 @@ pub fn build_discovery_targets(
                             "Episode {episode_number} is not available in season {number}"
                         ))
                     })?;
-                let absolute_number = episode.absolute_number;
 
-                return Ok(vec![DiscoveryTarget {
-                    item_type: MediaItemType::Episode,
-                    season_number: Some(number),
-                    episode_number: Some(episode_number),
-                    scrape_title: correct_title.clone(),
-                    parse_ctx: ParseContext {
-                        item_type: MediaItemType::Episode,
-                        season_number: Some(number),
-                        episode_number: Some(episode_number),
-                        absolute_number,
-                        item_year: None,
-                        parent_year: indexed.year,
-                        item_country: indexed.country.clone(),
-                        season_episodes: season
-                            .episodes
-                            .iter()
-                            .map(|episode| (episode.number, episode.absolute_number))
-                            .collect(),
-                        show_season_numbers: vec![],
-                        show_status: indexed.status,
-                        item_title: correct_title.clone(),
-                        item_aired_at: None,
-                        correct_title,
-                        aliases,
-                        profiles,
-                        dubbed_anime_only,
-                    },
-                }]);
+                return Ok(vec![target(
+                    MediaItemType::Episode,
+                    Some(number),
+                    Some(episode_number),
+                    episode.absolute_number,
+                    season_episodes(season),
+                )]);
             }
 
             let mut targets = Vec::new();
@@ -221,34 +215,13 @@ pub fn build_discovery_targets(
                         Error::new(format!("Season {number} is not available from index data"))
                     })?;
 
-                targets.push(DiscoveryTarget {
-                    item_type: MediaItemType::Season,
-                    season_number: Some(number),
-                    episode_number: None,
-                    scrape_title: correct_title.clone(),
-                    parse_ctx: ParseContext {
-                        item_type: MediaItemType::Season,
-                        season_number: Some(number),
-                        episode_number: None,
-                        absolute_number: None,
-                        item_year: None,
-                        parent_year: indexed.year,
-                        item_country: indexed.country.clone(),
-                        season_episodes: season
-                            .episodes
-                            .iter()
-                            .map(|episode| (episode.number, episode.absolute_number))
-                            .collect(),
-                        show_season_numbers: vec![],
-                        show_status: indexed.status,
-                        item_title: correct_title.clone(),
-                        item_aired_at: None,
-                        correct_title: correct_title.clone(),
-                        aliases: aliases.clone(),
-                        profiles: profiles.clone(),
-                        dubbed_anime_only,
-                    },
-                });
+                targets.push(target(
+                    MediaItemType::Season,
+                    Some(number),
+                    None,
+                    None,
+                    season_episodes(season),
+                ));
             }
             Ok(targets)
         }

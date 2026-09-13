@@ -39,9 +39,9 @@ fn extract_english_name_prefers_english_translation() {
 
 #[test]
 fn parse_content_rating_maps_tvdb_certifications() {
-    assert_eq!(parse_content_rating("TV-14"), Some(ContentRating::Tv14));
-    assert_eq!(parse_content_rating("PG"), Some(ContentRating::Pg));
-    assert_eq!(parse_content_rating("Unrated"), None);
+    assert_eq!(ContentRating::parse("TV-14"), Some(ContentRating::Tv14));
+    assert_eq!(ContentRating::parse("PG"), Some(ContentRating::Pg));
+    assert_eq!(ContentRating::parse("Unrated"), None);
 }
 
 #[test]

@@ -341,7 +341,7 @@ const fn default_remove_ranks_under() -> i64 {
 /// Custom rank for a specific attribute.
 ///
 /// `rank` is optional: `None` means "use the built-in default score from
-/// `crate::defaults`"; `Some(n)` overrides it with `n`.
+/// `crate::defaults::DEFAULT_SCORES`"; `Some(n)` overrides it with `n`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CustomRank {
     #[serde(default = "default_true")]
@@ -355,7 +355,7 @@ impl CustomRank {
         Self { fetch, rank: None }
     }
 
-    const fn scored(fetch: bool, rank: i64) -> Self {
+    pub(crate) const fn scored(fetch: bool, rank: i64) -> Self {
         Self {
             fetch,
             rank: Some(rank),

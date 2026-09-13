@@ -21,7 +21,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use common::corpus;
 use riven_rank::rank::{RankError, check_fetch, scores::get_rank_total};
-use riven_rank::{QualityProfile, RankSettings, RankingModel, parse, rank_torrent};
+use riven_rank::{QualityProfile, RankSettings, parse, rank_torrent};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -144,8 +144,6 @@ fn fetch_decisions() {
 
 #[test]
 fn profiles_rank_releases_best_first() {
-    let model = RankingModel::default();
-
     let failures: Vec<String> = cases()
         .order
         .iter()
@@ -157,11 +155,7 @@ fn profiles_rank_releases_best_first() {
                 .map(|title| {
                     let data = parse(title);
                     let (fetch, _) = check_fetch(&data, &settings);
-                    (
-                        title.as_str(),
-                        get_rank_total(&data, &settings, &model),
-                        fetch,
-                    )
+                    (title.as_str(), get_rank_total(&data, &settings), fetch)
                 })
                 .collect();
 
@@ -254,14 +248,13 @@ struct Selection {
 
 fn selection(profile: QualityProfile) -> Selection {
     let settings = profile.base_settings().prepare();
-    let model = RankingModel::default();
 
     let mut accepted: Vec<(i64, &str)> = Vec::new();
     let mut rejected = BTreeMap::new();
     for data in corpus().iter().map(|(_, actual)| actual) {
         let (fetch, failed) = check_fetch(data, &settings);
         if fetch {
-            accepted.push((get_rank_total(data, &settings, &model), &data.raw_title));
+            accepted.push((get_rank_total(data, &settings), &data.raw_title));
         } else {
             rejected.insert(data.raw_title.clone(), failed);
         }

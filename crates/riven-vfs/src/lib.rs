@@ -2,7 +2,6 @@ pub mod filesystem;
 pub mod path_info;
 pub mod prefetch;
 pub mod query;
-pub mod readdir;
 pub mod source;
 mod state;
 pub mod symlink;
@@ -17,6 +16,8 @@ use tokio::sync::RwLock;
 use tokio::sync::mpsc;
 
 use crate::filesystem::RivenFs;
+
+pub use fuser::BackgroundSession;
 
 /// Whether a FUSE filesystem already occupies `path`.
 ///
@@ -92,16 +93,6 @@ fn release_stale_mount(path: &str) -> Result<()> {
     )
 }
 
-pub struct FuseSession {
-    session: fuser::BackgroundSession,
-}
-
-impl FuseSession {
-    pub fn join(self) {
-        let _result = self.session.join();
-    }
-}
-
 /// Start the FUSE virtual filesystem.
 ///
 /// Returns `Ok(None)` if `mount_path` does not exist — the caller treats this
@@ -113,8 +104,8 @@ pub fn mount(
     filesystem_settings_revision: Arc<AtomicU64>,
     stream_client: reqwest::Client,
     link_request_tx: mpsc::Sender<riven_core::stream_link::LinkRequest>,
-    local_source: Option<Arc<dyn riven_core::local_source::LocalByteSource>>,
-) -> Result<Option<FuseSession>> {
+    usenet: Option<riven_usenet::UsenetStreamer>,
+) -> Result<Option<BackgroundSession>> {
     let mount_path = Path::new(mount_path);
 
     if !mount_path.exists() {
@@ -145,7 +136,7 @@ pub fn mount(
         filesystem_settings_revision,
         stream_client,
         link_request_tx,
-        local_source,
+        usenet,
     );
 
     let mut config = fuser::Config::default();
@@ -171,5 +162,5 @@ pub fn mount(
     let session = fuser::spawn_mount(fs, mount_path, &config)?;
     tracing::info!(path = %mount_path.display(), "VFS mounted");
 
-    Ok(Some(FuseSession { session }))
+    Ok(Some(session))
 }

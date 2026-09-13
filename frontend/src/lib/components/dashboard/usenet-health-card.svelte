@@ -1,7 +1,8 @@
 <script lang="ts">
     import { Badge } from "$lib/components/ui/badge/index.js";
     import { gqlClient } from "$lib/graphql-client";
-    import type { UsenetTitleHealth, UsenetTitleHealthSummary } from "./types";
+    import { relativeTime } from "$lib/helpers";
+    import type { UsenetTitleHealth, UsenetTitleHealthSummary } from "$lib/gql/schema";
 
     let { titles, summary }: { titles: UsenetTitleHealth[]; summary: UsenetTitleHealthSummary } =
         $props();
@@ -34,26 +35,6 @@
     const problems = $derived(titles.filter((t) => t.status !== "healthy"));
 
 
-    function relativeTime(unixSeconds: number | null) {
-        if (!unixSeconds) return "never checked";
-        const secs = Math.max(0, Math.floor(Date.now() / 1000 - unixSeconds));
-        if (secs < 90) return "just now";
-        const mins = Math.floor(secs / 60);
-        if (mins < 60) return `${mins}m ago`;
-        const hours = Math.floor(mins / 60);
-        if (hours < 24) return `${hours}h ago`;
-        return `${Math.floor(hours / 24)}d ago`;
-    }
-
-    function untilTime(unixSeconds: number | null) {
-        if (!unixSeconds) return null;
-        const secs = Math.floor(unixSeconds - Date.now() / 1000);
-        if (secs <= 0) return "now";
-        const mins = Math.ceil(secs / 60);
-        if (mins < 60) return `${mins}m`;
-        return `${Math.round(mins / 60)}h`;
-    }
-
     function statusBadge(status: string) {
         if (status === "unhealthy")
             return { label: "Missing data", variant: "destructive" as const };
@@ -65,7 +46,7 @@
 
     async function regrab(t: UsenetTitleHealth) {
         const key = rowKey(t);
-        if (t.mediaItemId === null || action[key] === "working") return;
+        if (t.mediaItemId == null || action[key] === "working") return;
         action = { ...action, [key]: "working" };
         try {
             await gqlClient<{ regrabUsenetTitle: string }>(REGRAB_MUTATION, {
@@ -144,7 +125,7 @@
                             <p class="truncate text-[11px] text-neutral-400">{t.subtitle}</p>
                         {/if}
                         <p class="mt-0.5 text-[11px] text-neutral-500">
-                            checked {relativeTime(t.checkedAt)}
+                            checked {t.checkedAt ? relativeTime(t.checkedAt * 1000) : "never"}
                             {#if t.status === "unhealthy" && t.sampledSegments > 0}
                                 · {t.missingPct.toFixed(1)}% of {t.sampledSegments} sampled missing
                             {:else if t.status === "not_ingested"}
@@ -153,8 +134,8 @@
                                 · couldn't verify ({t.errorSegments}/{t.sampledSegments} probes errored)
                             {/if}
                             {#if t.repairAttempts > 0}
-                                · auto-repair {t.repairAttempts}×{#if untilTime(t.nextRepairAt)},
-                                    next in {untilTime(t.nextRepairAt)}{/if}
+                                · auto-repair {t.repairAttempts}×{#if t.nextRepairAt},
+                                    next {relativeTime(Math.max(t.nextRepairAt * 1000, Date.now()))}{/if}
                             {/if}
                         </p>
                     </div>
@@ -162,7 +143,7 @@
                     <Badge variant={badge.variant} class="shrink-0 text-[10px]"
                         >{badge.label}</Badge>
 
-                    {#if needsRegrab(t.status) && t.mediaItemId !== null}
+                    {#if needsRegrab(t.status) && t.mediaItemId != null}
                         <button
                             type="button"
                             class="shrink-0 rounded-md border border-white/10 px-2.5 py-1 text-[11px] font-medium text-neutral-200 transition hover:bg-white/[0.06] disabled:opacity-50"

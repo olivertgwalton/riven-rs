@@ -45,7 +45,12 @@ impl JobQueue {
         let _result: Result<(), _> = pipe.query_async(&mut conn).await;
 
         for config in self.orchestrator_queue_configs() {
-            if let Err(error) = self.purge_queue_for_ids(config, &id_set).await {
+            let purged = self
+                .purge_queue_with_id_extractor(config, &id_set, |value| {
+                    value.get("id").and_then(serde_json::Value::as_i64)
+                })
+                .await;
+            if let Err(error) = purged {
                 tracing::warn!(error = %error, queue = %config.job_data_hash(), "failed to purge queue");
             }
         }
@@ -58,7 +63,16 @@ impl JobQueue {
                 continue;
             }
             let config = storage.get_config().clone();
-            if let Err(error) = self.purge_plugin_hook_queue_for_ids(&config, &id_set).await {
+            // Hook payloads are `PluginHookJob`: the media item id is `event.id`.
+            let purged = self
+                .purge_queue_with_id_extractor(&config, &id_set, |value| {
+                    value
+                        .get("event")
+                        .and_then(|e| e.get("id"))
+                        .and_then(serde_json::Value::as_i64)
+                })
+                .await;
+            if let Err(error) = purged {
                 tracing::warn!(error = %error, queue = %config.job_data_hash(), "failed to purge plugin-hook queue");
             }
         }
@@ -74,34 +88,8 @@ impl JobQueue {
         }
     }
 
-    /// Same as `purge_queue_for_ids` but reads the media item id from
-    /// `event.id` instead of the job's top-level `id`. Used for the
-    /// per-(plugin, event) hook queues whose payload is `PluginHookJob`.
-    async fn purge_plugin_hook_queue_for_ids(
-        &self,
-        config: &apalis_redis::RedisConfig,
-        ids: &std::collections::HashSet<i64>,
-    ) -> redis::RedisResult<()> {
-        self.purge_queue_with_id_extractor(config, ids, |value| {
-            value
-                .get("event")
-                .and_then(|e| e.get("id"))
-                .and_then(serde_json::Value::as_i64)
-        })
-        .await
-    }
-
-    async fn purge_queue_for_ids(
-        &self,
-        config: &apalis_redis::RedisConfig,
-        ids: &std::collections::HashSet<i64>,
-    ) -> redis::RedisResult<()> {
-        self.purge_queue_with_id_extractor(config, ids, |value| {
-            value.get("id").and_then(serde_json::Value::as_i64)
-        })
-        .await
-    }
-
+    /// Purge every task in `config`'s queue whose payload id (read by
+    /// `extract_id`) is in `ids`.
     async fn purge_queue_with_id_extractor<F>(
         &self,
         config: &apalis_redis::RedisConfig,

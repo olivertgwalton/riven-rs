@@ -143,16 +143,15 @@
 
     <div>
         {#if hasCredentialProvider}
-            <PasswordChangeForm data={data.passwordChangeForm} />
+            <PasswordChangeForm />
         {/if}
-        <EmailChangeForm data={data.emailChangeForm} />
+        <EmailChangeForm />
 
-        <UpdateUserForm data={data.changeUserDataForm} />
+        <UpdateUserForm />
     </div>
 
     {#if data.canManageUsers}
         <UserManagement
-            formData={data.createUserForm}
             users={data.managedUsers}
             currentUserId={data.user?.id ?? ""} />
     {/if}

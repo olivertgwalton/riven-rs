@@ -1,5 +1,5 @@
 use chrono::NaiveDate;
-use riven_core::entities::helpers::build_filesystem_metadata;
+use riven_core::entities::helpers::lowercase_json_strings;
 use riven_core::settings::{FilesystemContentType, FilesystemItemMetadata};
 use riven_core::types::*;
 use serde::{Deserialize, Serialize};
@@ -81,7 +81,7 @@ pub struct CalendarRow {
 pub struct FilesystemProfileEntryCandidate {
     pub id: i64,
     pub library_profiles: Option<serde_json::Value>,
-    pub content_type: String,
+    pub is_movie: bool,
     pub genres: Option<serde_json::Value>,
     pub network: Option<String>,
     pub content_rating: Option<ContentRating>,
@@ -92,14 +92,9 @@ pub struct FilesystemProfileEntryCandidate {
     pub is_anime: bool,
 }
 
+/// A VFS directory or file name with its library-profile membership.
 #[derive(Debug, Clone, sea_orm::FromQueryResult)]
-pub struct VfsDirName {
-    pub name: Option<String>,
-    pub library_profiles: Option<serde_json::Value>,
-}
-
-#[derive(Debug, Clone, sea_orm::FromQueryResult)]
-pub struct VfsFileName {
+pub struct VfsName {
     pub name: Option<String>,
     pub library_profiles: Option<serde_json::Value>,
 }
@@ -115,22 +110,23 @@ pub struct VfsEntryPath {
 
 impl FilesystemProfileEntryCandidate {
     pub fn filesystem_content_type(&self) -> FilesystemContentType {
-        match self.content_type.as_str() {
-            "movie" => FilesystemContentType::Movie,
-            _ => FilesystemContentType::Show,
+        if self.is_movie {
+            FilesystemContentType::Movie
+        } else {
+            FilesystemContentType::Show
         }
     }
 
     pub fn filesystem_metadata(&self) -> FilesystemItemMetadata {
-        build_filesystem_metadata(
-            self.genres.as_ref(),
-            self.network.clone(),
-            self.content_rating,
-            self.language.clone(),
-            self.country.clone(),
-            self.year,
-            self.rating,
-            self.is_anime,
-        )
+        FilesystemItemMetadata {
+            genres: lowercase_json_strings(self.genres.as_ref()),
+            network: self.network.clone(),
+            content_rating: self.content_rating,
+            language: self.language.clone(),
+            country: self.country.clone(),
+            year: self.year,
+            rating: self.rating,
+            is_anime: self.is_anime,
+        }
     }
 }

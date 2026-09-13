@@ -16,6 +16,7 @@ tracing = { workspace = true }
 futures = { workspace = true }
 chrono = { workspace = true }
 redis = { workspace = true }
+url = "2"
 
 [lints]
 workspace = true

@@ -1,6 +1,6 @@
 <script lang="ts">
     import { Badge } from "$lib/components/ui/badge/index.js";
-    import type { ActivePlaybackSession } from "./types";
+    import type { ActivePlaybackSession } from "$lib/gql/schema";
 
     let { sessions }: { sessions: ActivePlaybackSession[] } = $props();
 
@@ -31,8 +31,8 @@
     const cards = $derived.by(() =>
         sessions.map((session) => {
             const progress =
-                session.positionSeconds !== null &&
-                session.durationSeconds !== null &&
+                session.positionSeconds != null &&
+                session.durationSeconds != null &&
                 session.durationSeconds > 0
                     ? Math.max(
                           0,
@@ -40,8 +40,8 @@
                       )
                     : 0;
             const remaining =
-                session.positionSeconds !== null &&
-                session.durationSeconds !== null &&
+                session.positionSeconds != null &&
+                session.durationSeconds != null &&
                 session.durationSeconds > session.positionSeconds
                     ? formatTime(session.durationSeconds - session.positionSeconds)
                     : null;
@@ -51,7 +51,7 @@
                 key: `${session.server}:${session.userName ?? "unknown"}:${session.itemTitle}`,
                 displayTitle: session.parentTitle ?? session.itemTitle,
                 episodeCode:
-                    session.seasonNumber !== null && session.episodeNumber !== null
+                    session.seasonNumber != null && session.episodeNumber != null
                         ? `S${String(session.seasonNumber).padStart(2, "0")}E${String(session.episodeNumber).padStart(2, "0")}`
                         : null,
                 playbackLabel:

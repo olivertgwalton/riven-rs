@@ -1,10 +1,10 @@
 use async_trait::async_trait;
 use chrono::{NaiveDate, NaiveTime, TimeZone};
 use chrono_tz::Tz;
-use parking_lot::Mutex;
 use serde::{Deserialize, Deserializer};
 use std::collections::HashMap;
 use std::str::FromStr;
+use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use riven_core::entities::helpers::{Artwork, artwork_url};
@@ -40,7 +40,7 @@ impl TvdbPlugin {
         api_key: &str,
     ) -> anyhow::Result<String> {
         {
-            let guard = self.token.lock();
+            let guard = self.token.lock().unwrap_or_else(PoisonError::into_inner);
             if let Some((ref token, ref created)) = *guard
                 && created.elapsed() < TOKEN_EXPIRY
             {
@@ -60,7 +60,8 @@ impl TvdbPlugin {
             .await?;
 
         let token = resp.data.token;
-        *self.token.lock() = Some((token.clone(), Instant::now()));
+        *self.token.lock().unwrap_or_else(PoisonError::into_inner) =
+            Some((token.clone(), Instant::now()));
         Ok(token)
     }
 }
@@ -190,7 +191,7 @@ async fn fetch_series(
         ratings
             .iter()
             .find(|r| r.country.as_deref() == Some("usa"))
-            .and_then(|r| parse_content_rating(r.name.as_deref().unwrap_or("")))
+            .and_then(|r| ContentRating::parse(r.name.as_deref().unwrap_or("")))
     });
 
     let tz: Option<Tz> = network_timezone
@@ -338,23 +339,6 @@ fn extract_english_name(series: &TvdbSeries) -> Option<String> {
         .and_then(|t| t.name_translations.as_ref())
         .and_then(|nt| nt.iter().find(|t| t.language == "eng"))
         .map(|t| t.name.clone())
-}
-
-fn parse_content_rating(rating: &str) -> Option<ContentRating> {
-    match rating {
-        "G" => Some(ContentRating::G),
-        "PG" => Some(ContentRating::Pg),
-        "PG-13" => Some(ContentRating::Pg13),
-        "R" => Some(ContentRating::R),
-        "NC-17" => Some(ContentRating::Nc17),
-        "TV-Y" => Some(ContentRating::TvY),
-        "TV-Y7" => Some(ContentRating::TvY7),
-        "TV-G" => Some(ContentRating::TvG),
-        "TV-PG" => Some(ContentRating::TvPg),
-        "TV-14" => Some(ContentRating::Tv14),
-        "TV-MA" => Some(ContentRating::TvMa),
-        _ => None,
-    }
 }
 
 #[derive(Deserialize)]

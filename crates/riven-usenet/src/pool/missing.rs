@@ -31,20 +31,16 @@ pub struct MissingCache {
 
 impl Default for MissingCache {
     fn default() -> Self {
-        Self::new(DEFAULT_CAPACITY)
+        Self::with_capacity(DEFAULT_CAPACITY)
     }
 }
 
 impl MissingCache {
-    pub fn new(capacity: usize) -> Self {
-        Self::with_ttl(capacity, MISSING_TTL)
-    }
-
-    pub fn with_ttl(capacity: usize, ttl: Duration) -> Self {
+    fn with_capacity(capacity: usize) -> Self {
         let capacity = NonZeroUsize::new(capacity).unwrap_or(NonZeroUsize::MIN);
         Self {
             inner: Mutex::new(LruCache::new(capacity)),
-            ttl,
+            ttl: MISSING_TTL,
         }
     }
 
@@ -91,7 +87,7 @@ mod tests {
 
     #[test]
     fn evicts_oldest_beyond_capacity() {
-        let cache = MissingCache::new(2);
+        let cache = MissingCache::with_capacity(2);
         cache.insert("a");
         cache.insert("b");
         assert!(cache.contains("a"));
@@ -105,7 +101,8 @@ mod tests {
     /// for a live article must not mark it dead until the process restarts.
     #[tokio::test(start_paused = true)]
     async fn a_missing_id_is_probed_again_once_its_ttl_expires() {
-        let cache = MissingCache::with_ttl(8, Duration::from_secs(600));
+        let cache = MissingCache::with_capacity(8);
+        assert_eq!(MISSING_TTL, Duration::from_secs(600));
         cache.insert("blip@test");
         assert!(cache.contains("blip@test"));
         assert_eq!(cache.len(), 1);

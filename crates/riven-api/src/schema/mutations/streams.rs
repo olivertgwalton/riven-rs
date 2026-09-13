@@ -67,10 +67,12 @@ impl StreamsMutations {
         magnet: String,
         parsed_data: Option<serde_json::Value>,
         rank: Option<i64>,
-        #[graphql(desc = "Which ranking profile (e.g. \"hd\", \"ultra_hd\") this manually \
+        #[graphql(
+            desc = "Which ranking profile (e.g. \"hd\", \"ultra_hd\") this manually \
             chosen stream should be attributed to. When set, the resulting file gets a \
             profile-tagged path so it coexists alongside other profiles' files instead of \
-            overwriting whichever file already occupies the item's default path.")]
+            overwriting whichever file already occupies the item's default path."
+        )]
         profile_name: Option<String>,
     ) -> Result<String> {
         require(ctx, Capability::ScrapeItems)?;

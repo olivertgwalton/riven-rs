@@ -1,17 +1,3 @@
-/// Runtime-configurable downloader settings.
-#[derive(Clone, Default)]
-pub struct DownloaderConfig {
-    pub attempt_unknown_downloads: bool,
-}
-
-impl From<&crate::settings::RivenSettings> for DownloaderConfig {
-    fn from(s: &crate::settings::RivenSettings) -> Self {
-        Self {
-            attempt_unknown_downloads: s.attempt_unknown_downloads,
-        }
-    }
-}
-
 /// Minimum/maximum average-bitrate limits for a single ranking profile.
 ///
 /// Each limit is expressed in Mbps and is optional (`None` = no limit). The

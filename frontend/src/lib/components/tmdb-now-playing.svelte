@@ -3,37 +3,27 @@
     import { fly } from "svelte/transition";
     import { cubicOut } from "svelte/easing";
     import type { CarouselAPI } from "$lib/components/ui/carousel/context.js";
-    import Autoplay from "embla-carousel-autoplay";
     import type { TmdbListItem } from "$lib/gql/schema";
     import { gqlClient } from "$lib/graphql-client";
     import { getSeasonAndYear } from "$lib/utils/date";
     import { Button } from "$lib/components/ui/button/index.js";
     import { Skeleton } from "$lib/components/ui/skeleton/index.js";
     import { getRatings } from "$lib/stores/ratings";
-    import { Star } from "@lucide/svelte";
-
+    import { ChevronLeft, ChevronRight, Star } from "@lucide/svelte";
 
     interface Props {
         data?: TmdbListItem[];
-        showRequestButton?: boolean;
         alignment?: "left" | "center" | "right";
         heightClass?: string;
     }
 
     let {
         data = [],
-        showRequestButton = true,
         alignment = "left",
         heightClass = "h-[350px] md:h-[420px]"
     }: Props = $props();
 
     let api = $state<CarouselAPI>();
-    const autoplayDelay = 5000;
-    let autoplayPlugin = Autoplay({
-        delay: autoplayDelay,
-        stopOnInteraction: false
-    });
-
     let currentIndex = $state(0);
     let logos = $state<Record<number, string | null>>({});
     let ratings = $state<
@@ -62,6 +52,15 @@
         return () => {
             api?.off("select", onSelect);
         };
+    });
+
+    // Autoplay: advance 5s after every slide change (restarts on manual navigation,
+    // in step with the 5s progress animation).
+    $effect(() => {
+        if (!api) return;
+        void currentIndex;
+        const timer = setTimeout(() => api?.scrollNext(), 5000);
+        return () => clearTimeout(timer);
     });
 
     async function loadItemData(item: TmdbListItem) {
@@ -148,37 +147,16 @@
         return () => clearTimeout(timer);
     });
 
-    function getAlignmentClasses(
-        align: "left" | "center" | "right",
-        type: "container" | "flex"
-    ): string {
-        if (type === "container") {
-            switch (align) {
-                case "right":
-                    return "items-end text-right";
-                case "center":
-                    return "items-center text-center";
-                default:
-                    return "items-start text-left";
-            }
-        } else {
-            switch (align) {
-                case "right":
-                    return "justify-end";
-                case "center":
-                    return "justify-center";
-                default:
-                    return "justify-start";
-            }
-        }
-    }
+    const alignmentClasses = {
+        container: { left: "items-start text-left", center: "items-center text-center", right: "items-end text-right" },
+        flex: { left: "justify-start", center: "justify-center", right: "justify-end" }
+    };
 </script>
 
 {#if Array.isArray(data) && data.length > 0}
     <section class="border-border/50 relative overflow-hidden rounded-2xl border shadow-2xl">
         <Carousel.Root
             setApi={(emblaApi) => (api = emblaApi)}
-            plugins={[autoplayPlugin]}
             opts={{ loop: true }}
             class="relative"
             aria-label="Now playing movies carousel">
@@ -204,10 +182,7 @@
                         <!-- Text Content with Netflix-style reveal -->
                         {#key currentIndex === index ? currentIndex : -1}
                             <div
-                                class="absolute top-0 right-0 bottom-0 left-0 z-10 flex flex-col justify-end px-8 pt-2 pb-24 md:px-32 md:pt-8 md:pb-16 lg:right-0 lg:left-0 {getAlignmentClasses(
-                                    alignment,
-                                    'container'
-                                )}">
+                                class="absolute top-0 right-0 bottom-0 left-0 z-10 flex flex-col justify-end px-8 pt-2 pb-24 md:px-32 md:pt-8 md:pb-16 lg:right-0 lg:left-0 {alignmentClasses.container[alignment]}">
                                 <div
                                     class="flex w-full max-w-3xl flex-col {alignment === 'right'
                                         ? 'items-end'
@@ -216,10 +191,7 @@
                                           : 'items-start'}">
                                     <!-- Title / Logo -->
                                     <div
-                                        class="mb-4 flex h-24 items-end {getAlignmentClasses(
-                                            alignment,
-                                            'flex'
-                                        )}">
+                                        class="mb-4 flex h-24 items-end {alignmentClasses.flex[alignment]}">
                                         {#if logos[item.id]}
                                             <img
                                                 src={logos[item.id]}
@@ -258,10 +230,7 @@
                                             delay: 200,
                                             easing: cubicOut
                                         }}
-                                        class="mt-2 flex flex-wrap items-center gap-4 text-xs font-medium text-white md:mt-4 md:text-sm {getAlignmentClasses(
-                                            alignment,
-                                            'flex'
-                                        )}">
+                                        class="mt-2 flex flex-wrap items-center gap-4 text-xs font-medium text-white md:mt-4 md:text-sm {alignmentClasses.flex[alignment]}">
                                         <span
                                             class="flex items-center justify-center rounded-md border border-white/20 bg-white/10 px-2 py-1 text-[10px] leading-none font-bold tracking-wider uppercase backdrop-blur-md md:text-xs">
                                             {isTV ? "Series" : "Movie"}
@@ -338,10 +307,7 @@
                                                 delay: 400,
                                                 easing: cubicOut
                                             }}
-                                            class="mt-4 flex flex-wrap gap-2 md:mt-6 {getAlignmentClasses(
-                                                alignment,
-                                                'flex'
-                                            )}">
+                                            class="mt-4 flex flex-wrap gap-2 md:mt-6 {alignmentClasses.flex[alignment]}">
                                             {#each item.genres.slice(0, 4) as genre (genre)}
                                                 <div
                                                     class="rounded-full border border-white/20 bg-white/10 px-3 py-1 text-xs font-medium text-white backdrop-blur-md transition-colors hover:bg-white/20">
@@ -359,19 +325,7 @@
                                             delay: 500,
                                             easing: cubicOut
                                         }}
-                                        class="mt-6 flex flex-wrap gap-4 md:mt-8 {getAlignmentClasses(
-                                            alignment,
-                                            'flex'
-                                        )}">
-                                        {#if showRequestButton}
-                                            <Button
-                                                href="/watch/{item.id}"
-                                                variant="default"
-                                                size="lg"
-                                                class="bg-primary text-primary-foreground hover:bg-primary/90 flex h-10 items-center justify-center rounded-md px-8 text-sm font-bold shadow-sm transition-all hover:scale-[1.02] md:h-12 md:text-base">
-                                                Play Now
-                                            </Button>
-                                        {/if}
+                                        class="mt-6 flex flex-wrap gap-4 md:mt-8 {alignmentClasses.flex[alignment]}">
                                         <Button
                                             variant="secondary"
                                             size="lg"
@@ -395,35 +349,13 @@
                 class="pointer-events-auto hidden h-12 w-12 items-center justify-center rounded-full border border-white/10 bg-black/20 text-white/70 backdrop-blur-md transition-all hover:scale-110 hover:bg-black/40 hover:text-white md:flex"
                 onclick={() => api?.scrollPrev()}
                 aria-label="Previous slide">
-                <svg
-                    xmlns="http://www.w3.org/2000/svg"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    stroke-width="2"
-                    stroke-linecap="round"
-                    stroke-linejoin="round"
-                    class="h-6 w-6">
-					<title>Previous slide</title>
-                    <polyline points="15 18 9 12 15 6"></polyline>
-                </svg>
+                <ChevronLeft class="h-6 w-6" />
             </button>
             <button type="button"
                 class="pointer-events-auto hidden h-12 w-12 items-center justify-center rounded-full border border-white/10 bg-black/20 text-white/70 backdrop-blur-md transition-all hover:scale-110 hover:bg-black/40 hover:text-white md:flex"
                 onclick={() => api?.scrollNext()}
                 aria-label="Next slide">
-                <svg
-                    xmlns="http://www.w3.org/2000/svg"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    stroke-width="2"
-                    stroke-linecap="round"
-                    stroke-linejoin="round"
-                    class="h-6 w-6">
-					<title>Next slide</title>
-                    <polyline points="9 18 15 12 9 6"></polyline>
-                </svg>
+                <ChevronRight class="h-6 w-6" />
             </button>
         </div>
 

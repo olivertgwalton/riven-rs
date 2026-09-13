@@ -17,8 +17,6 @@ fn mk_slice(part_index: usize) -> NzbRarSlice {
 fn primary_media_index_picks_largest_media() {
     let mk = |subject: &str, total: u64| NzbFile {
         subject: subject.into(),
-        poster: String::new(),
-        groups: vec![],
         segments: [NzbSegment {
             bytes: total,
             message_id: "x".into(),

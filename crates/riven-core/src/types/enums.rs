@@ -141,6 +141,13 @@ pub enum ContentRating {
     TvMa,
 }
 
+impl ContentRating {
+    /// Parse an exact rating string (`"PG-13"`, `"TV-MA"`, ...).
+    pub fn parse(s: &str) -> Option<Self> {
+        serde_json::from_value(serde_json::Value::String(s.to_owned())).ok()
+    }
+}
+
 #[derive(
     Debug,
     Clone,

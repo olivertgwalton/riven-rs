@@ -1,7 +1,7 @@
 [
   {
     "profile": "ultra_hd",
-    "accepted": 193,
+    "accepted": 192,
     "top_ranked": [
       "Godzilla.x.Kong.The.New.Empire.2024.2160p.BluRay.REMUX.DV.P7.HDR.ENG.LATINO.GER.ITA.FRE.HINDI.CHINESE.TrueHD.Atmos.7.1.H265-BEN.THE.MEN",
       "Movie.Title.2024.2160p.BluRay.REMUX.DV.HDR.HEVC.TrueHD.Atmos-GROUP",
@@ -336,7 +336,7 @@
   },
   {
     "profile": "hd",
-    "accepted": 169,
+    "accepted": 168,
     "top_ranked": [
       "Warcraft 2016 1080p Blu-ray Remux AVC TrueHD Atmos-KRaLiMaRKo",
       "Movie.Title.2024.1080p.BluRay.REMUX.SDR.AVC.TrueHD.7.1-GROUP",
@@ -879,7 +879,6 @@
       "Movie.Title.EXTENDED.1080p.BluRay": ["resolution"],
       "Movie.Title.EXTENDED.2022.2160p.BluRay-GROUP": ["resolution"],
       "Movie.Title.English.1080p.BluRay": ["resolution"],
-      "Movie.Title.English.JPN.1080p.BluRay.MULTI": ["resolution"],
       "Movie.Title.Full.HD.BluRay": ["resolution"],
       "Movie.Title.German.1080p.BluRay": ["resolution"],
       "Movie.Title.HC.1080p.WEBRip": ["resolution"],

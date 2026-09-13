@@ -6,8 +6,8 @@
 //! `application/`. Events are the only public input.
 //!
 //! Request persistence and state synchronization are queue-independent
-//! lifecycle functions. `LibraryOrchestrator` retains only the follow-up work
-//! that actually needs a queue, such as enqueueing and retrying requests.
+//! lifecycle functions, alongside the follow-up work that needs a queue, such
+//! as enqueueing and retrying requests.
 
 use std::sync::Arc;
 
@@ -21,7 +21,7 @@ use tokio::sync::broadcast;
 
 use crate::application::process_media_item::{fan_out_to_children, push_requested_seasons};
 use crate::context;
-use crate::lifecycle::{LibraryOrchestrator, sync_item_request_state};
+use crate::lifecycle::{enqueue_after_request_action, retry_item_request, sync_item_request_state};
 use crate::{IndexJob, JobQueue, ProcessMediaItemJob, ProcessStep};
 
 /// Owns the queue and dispatches events to typed actor calls.
@@ -142,9 +142,7 @@ impl MainOrchestrator {
         let Some(item) = self.load_item(item_id).await else {
             return;
         };
-        LibraryOrchestrator::new(&self.queue)
-            .enqueue_after_request_action(&item, action, requested_seasons)
-            .await;
+        enqueue_after_request_action(&self.queue, &item, action, requested_seasons).await;
     }
 
     /// `media-item.index.success` handler. Routes by release status:
@@ -269,7 +267,7 @@ impl MainOrchestrator {
     pub async fn retry_library(&self) {
         match repo::get_ongoing_container_ids().await {
             Ok(ids) => {
-                if let Err(error) = repo::force_recompute(&ids).await {
+                if let Err(error) = repo::recompute(&ids).await {
                     tracing::error!(
                         %error,
                         items = ids.len(),
@@ -296,13 +294,9 @@ impl MainOrchestrator {
             }
         };
         let request_count = requests.len();
-        let lib = LibraryOrchestrator::new(&self.queue);
         stream::iter(requests)
-            .for_each_concurrent(32, |request| {
-                let lib = &lib;
-                async move {
-                    lib.retry_item_request(&request).await;
-                }
+            .for_each_concurrent(32, |request| async move {
+                retry_item_request(&self.queue, &request).await;
             })
             .await;
 

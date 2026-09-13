@@ -1,20 +1,8 @@
-use async_graphql::{Context, Error, Object, Result as GqlResult, SchemaBuilder, SimpleObject};
+use async_graphql::{Context, Error, Object, Result as GqlResult, SimpleObject};
 
 use crate::schema::auth::require_settings_access;
 
 pub struct LogDirectory(pub String);
-
-pub fn register_with_schema<Q, M, S>(
-    builder: SchemaBuilder<Q, M, S>,
-    log_directory: String,
-) -> SchemaBuilder<Q, M, S>
-where
-    Q: async_graphql::ObjectType + 'static,
-    M: async_graphql::ObjectType + 'static,
-    S: async_graphql::SubscriptionType + 'static,
-{
-    builder.data(LogDirectory(log_directory))
-}
 
 #[derive(SimpleObject)]
 pub struct LogEntry {

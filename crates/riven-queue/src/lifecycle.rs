@@ -115,72 +115,62 @@ pub async fn sync_item_request_state(item: &MediaItem) {
     }
 }
 
-pub struct LibraryOrchestrator<'a> {
-    queue: &'a JobQueue,
+pub async fn enqueue_after_request_action(
+    queue: &JobQueue,
+    item: &MediaItem,
+    action: ItemRequestUpsertAction,
+    requested_seasons: Option<&[i32]>,
+) {
+    match item.item_type {
+        MediaItemType::Movie if action == ItemRequestUpsertAction::Created => {
+            queue.push_index(IndexJob::from_item(item)).await;
+        }
+        MediaItemType::Movie => {}
+        MediaItemType::Show => match action {
+            ItemRequestUpsertAction::Created => {
+                queue.push_index(IndexJob::from_item(item)).await;
+            }
+            ItemRequestUpsertAction::Updated => {
+                let requested_specific_seasons =
+                    requested_seasons.is_some_and(|seasons| !seasons.is_empty());
+
+                if item.imdb_id.is_none() || requested_specific_seasons {
+                    queue.push_index(IndexJob::from_item(item)).await;
+                } else {
+                    queue
+                        .push_process_media_item(ProcessMediaItemJob::new(item.id))
+                        .await;
+                }
+            }
+            ItemRequestUpsertAction::Unchanged => {}
+        },
+        _ => {}
+    }
 }
 
-impl<'a> LibraryOrchestrator<'a> {
-    pub fn new(queue: &'a JobQueue) -> Self {
-        Self { queue }
-    }
+pub async fn retry_item_request(queue: &JobQueue, request: &ItemRequest) {
+    let item = match request.request_type {
+        ItemRequestType::Movie => repo::find_existing_media_item(
+            MediaItemType::Movie,
+            request.imdb_id.as_deref(),
+            request.tmdb_id.as_deref(),
+            None,
+        )
+        .await
+        .ok()
+        .flatten(),
+        ItemRequestType::Show => repo::find_existing_media_item(
+            MediaItemType::Show,
+            request.imdb_id.as_deref(),
+            None,
+            request.tvdb_id.as_deref(),
+        )
+        .await
+        .ok()
+        .flatten(),
+    };
 
-    pub async fn enqueue_after_request_action(
-        &self,
-        item: &MediaItem,
-        action: ItemRequestUpsertAction,
-        requested_seasons: Option<&[i32]>,
-    ) {
-        match item.item_type {
-            MediaItemType::Movie if action == ItemRequestUpsertAction::Created => {
-                self.queue.push_index(IndexJob::from_item(item)).await;
-            }
-            MediaItemType::Movie => {}
-            MediaItemType::Show => match action {
-                ItemRequestUpsertAction::Created => {
-                    self.queue.push_index(IndexJob::from_item(item)).await;
-                }
-                ItemRequestUpsertAction::Updated => {
-                    let requested_specific_seasons =
-                        requested_seasons.is_some_and(|seasons| !seasons.is_empty());
-
-                    if item.imdb_id.is_none() || requested_specific_seasons {
-                        self.queue.push_index(IndexJob::from_item(item)).await;
-                    } else {
-                        self.queue
-                            .push_process_media_item(ProcessMediaItemJob::new(item.id))
-                            .await;
-                    }
-                }
-                ItemRequestUpsertAction::Unchanged => {}
-            },
-            _ => {}
-        }
-    }
-
-    pub async fn retry_item_request(&self, request: &ItemRequest) {
-        let item = match request.request_type {
-            ItemRequestType::Movie => repo::find_existing_media_item(
-                MediaItemType::Movie,
-                request.imdb_id.as_deref(),
-                request.tmdb_id.as_deref(),
-                None,
-            )
-            .await
-            .ok()
-            .flatten(),
-            ItemRequestType::Show => repo::find_existing_media_item(
-                MediaItemType::Show,
-                request.imdb_id.as_deref(),
-                None,
-                request.tvdb_id.as_deref(),
-            )
-            .await
-            .ok()
-            .flatten(),
-        };
-
-        if let Some(item) = item {
-            self.queue.push_index(IndexJob::from_item(&item)).await;
-        }
+    if let Some(item) = item {
+        queue.push_index(IndexJob::from_item(&item)).await;
     }
 }

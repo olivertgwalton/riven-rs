@@ -3,8 +3,8 @@
 //! Holds the NNTP pool and exposes two operations:
 //!   - `ingest(info_hash, nzb_xml)` — parse an NZB, build the right virtual-file
 //!     metadata (direct or RAR-contained), and persist segment maps to Redis.
-//!   - `read_range(info_hash, file_index, start, end)` — fetch the NNTP
-//!     articles covering `[start, end]`, decode yEnc, and return the bytes.
+//!   - `open_file(info_hash, file_index)` then `read_range(start, end)` — fetch
+//!     the NNTP articles covering `[start, end]`, decode yEnc, and return the bytes.
 //!
 //! Segment offsets are *approximate* for direct sources — we use the encoded
 //! `bytes` from the NZB as a stand-in for decoded size (right to within ~2%).
@@ -319,15 +319,6 @@ impl UsenetStreamer {
     /// the `decoded_seg_size` backfill. Both need the whole release, so neither
     /// belongs on a read. Instead a file that looks like it needs either kicks
     /// one background `load_meta`, claimed once per release.
-    pub async fn load_file(
-        &self,
-        info_hash: &str,
-        file_index: usize,
-    ) -> Result<Arc<FileMeta>, StreamerError> {
-        let meta = self.fetch_file_meta(info_hash, file_index).await?;
-        Ok(meta)
-    }
-
     async fn fetch_file_meta(
         &self,
         info_hash: &str,
@@ -383,7 +374,7 @@ impl UsenetStreamer {
         file_index: usize,
         sample_percent: usize,
     ) -> Result<AvailabilityScan, StreamerError> {
-        let file = self.load_file(info_hash, file_index).await?;
+        let file = self.fetch_file_meta(info_hash, file_index).await?;
 
         let message_ids: Vec<String> = match &file.source {
             NzbMetaSource::Direct { segments, .. } => {
@@ -503,7 +494,7 @@ impl Drop for MetaLoadGuard {
 /// resolved on first read rather than at `open` because `fuser`'s `open` is
 /// synchronous; after that every read is a field access rather than a hash
 /// probe and an LRU promote under a process-wide mutex.
-struct UsenetOpenFile {
+pub struct UsenetOpenFile {
     streamer: UsenetStreamer,
     info_hash: Arc<str>,
     file_index: usize,
@@ -519,11 +510,9 @@ impl UsenetOpenFile {
             })
             .await
     }
-}
 
-#[async_trait::async_trait]
-impl riven_core::local_source::LocalOpenFile for UsenetOpenFile {
-    async fn layout(&self) -> Option<riven_core::local_source::SourceLayout> {
+    /// The file's natural fetch unit: one article's decoded size.
+    pub async fn chunk_size(&self) -> Option<u64> {
         let file = self.meta().await.ok()?;
         // Both arms report the article size and nothing else. Read-ahead sizes
         // its cushion in bytes from it; whether the post is a RAR set says
@@ -536,10 +525,17 @@ impl riven_core::local_source::LocalOpenFile for UsenetOpenFile {
                 .iter()
                 .find_map(|part| part.decoded_seg_size.filter(|size| *size > 0))?,
         };
-        (chunk_size > 0).then_some(riven_core::local_source::SourceLayout { chunk_size })
+        (chunk_size > 0).then_some(chunk_size)
     }
 
-    async fn read_range(&self, start: u64, end_inclusive: u64) -> anyhow::Result<bytes::Bytes> {
+    /// Read the inclusive byte range `[start, end_inclusive]`. The result may be
+    /// slightly shorter than requested at the tail of a segment; callers must
+    /// tolerate a short read.
+    pub async fn read_range(
+        &self,
+        start: u64,
+        end_inclusive: u64,
+    ) -> Result<bytes::Bytes, StreamerError> {
         let meta = self.meta().await?;
         let slices = self
             .streamer
@@ -625,13 +621,6 @@ fn direct_offsets_look_approximate(offsets: &[u64]) -> bool {
     false
 }
 
-/// Public accessor: registry of currently-streaming items. The VFS
-/// `UsenetSession` registers a stream on first read and removes it when the
-/// file handle is dropped (via the `LocalByteSource` stream hooks).
-pub fn active_streams() -> Arc<crate::state::ActiveStreams> {
-    crate::state::global_active_streams()
-}
-
 /// Process-wide cache of the shared streamer keyed by NNTP config fingerprint.
 /// Lifted to module scope so [`UsenetStreamer::existing_shared`] can peek it
 /// without the create-on-miss side effect of [`UsenetStreamer::shared`].
@@ -665,7 +654,7 @@ pub struct StreamingHealth {
 pub fn streaming_health() -> StreamingHealth {
     let Some(streamer) = UsenetStreamer::existing_shared() else {
         return StreamingHealth {
-            active_streams: active_streams().count() as u64,
+            active_streams: crate::state::global_active_streams().count() as u64,
             ..StreamingHealth::default()
         };
     };
@@ -679,7 +668,7 @@ pub fn streaming_health() -> StreamingHealth {
         bytes_decoded: pool.metrics().bytes_decoded(),
         in_flight: pool.in_flight() as u64,
         dead_segments: pool.missing().len() as u64,
-        active_streams: active_streams().count() as u64,
+        active_streams: crate::state::global_active_streams().count() as u64,
     }
 }
 
@@ -704,26 +693,28 @@ fn nntp_config_fingerprint(cfg: &NntpConfig) -> u64 {
     h.finish()
 }
 
-#[async_trait::async_trait]
-impl riven_core::local_source::LocalByteSource for UsenetStreamer {
-    fn open_file(
-        &self,
-        info_hash: &str,
-        file_index: usize,
-    ) -> Arc<dyn riven_core::local_source::LocalOpenFile> {
-        Arc::new(UsenetOpenFile {
+/// Serving hooks for the VFS. The unit is the open file: the segment map is
+/// resolved once per handle and held for that handle's life, rather than per
+/// read or behind a cache whose eviction policy would be a guess.
+impl UsenetStreamer {
+    /// Begin serving one file. Returns immediately — `fuser`'s `open` is
+    /// synchronous — and the handle resolves its map on first use.
+    pub fn open_file(&self, info_hash: &str, file_index: usize) -> UsenetOpenFile {
+        UsenetOpenFile {
             streamer: self.clone(),
             info_hash: Arc::from(info_hash),
             file_index,
             meta: tokio::sync::OnceCell::new(),
-        })
+        }
     }
 
-    fn stream_register(&self, key: &str, info_hash: &str, filename: &str, file_size: u64) {
+    /// Active-stream registry hooks, driving the dashboard's "now playing"
+    /// view. `key` uniquely identifies an open handle.
+    pub fn stream_register(&self, key: &str, info_hash: &str, filename: &str, file_size: u64) {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_secs() as i64);
-        active_streams().register(
+        crate::state::global_active_streams().register(
             key.to_string(),
             crate::state::ActiveStream {
                 info_hash: info_hash.to_string(),
@@ -736,14 +727,14 @@ impl riven_core::local_source::LocalByteSource for UsenetStreamer {
         );
     }
 
-    fn stream_touch(&self, key: &str) {
+    pub fn stream_touch(&self, key: &str) {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_secs() as i64);
-        active_streams().touch(key, now);
+        crate::state::global_active_streams().touch(key, now);
     }
 
-    fn stream_unregister(&self, key: &str) {
-        active_streams().unregister(key);
+    pub fn stream_unregister(&self, key: &str) {
+        crate::state::global_active_streams().unregister(key);
     }
 }

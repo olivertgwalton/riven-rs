@@ -4,7 +4,7 @@ use crate::nntp::NntpError;
 use crate::segments::SegmentList;
 
 use super::salvage::ReadSalvage;
-use super::{NzbMetaSource, StreamerError, UsenetStreamer, concat_slices};
+use super::{NzbMetaSource, StreamerError, UsenetStreamer};
 
 /// Articles past the anchor that one read may start up front.
 ///
@@ -16,50 +16,10 @@ use super::{NzbMetaSource, StreamerError, UsenetStreamer, concat_slices};
 const WARM_SPAN_MAX: usize = 16;
 
 impl UsenetStreamer {
-    /// Read `[start, end_inclusive]` from `file_index` as a single contiguous
-    /// buffer. Buffered HTTP responses and the RAR decrypt path need one
-    /// buffer; the VFS should prefer [`read_range_slices`] and avoid the
-    /// concatenation.
-    pub async fn read_range(
-        &self,
-        info_hash: &str,
-        file_index: usize,
-        start: u64,
-        end_inclusive: u64,
-    ) -> Result<Bytes, StreamerError> {
-        let slices = self
-            .read_range_slices(info_hash, file_index, start, end_inclusive)
-            .await?;
-        let mut buf = concat_slices(slices, start, end_inclusive);
-        let want = (end_inclusive - start + 1) as usize;
-        if buf.len() > want {
-            buf.truncate(want);
-        }
-        Ok(buf)
-    }
-
-    /// Same as [`read_range`] but returns the per-segment decoded slices
-    /// instead of concatenating them, so a single-segment read is served by
-    /// slicing the cached `Bytes` with no copy.
-    ///
-    /// Both demand and speculative calls come from the one unified VFS window;
-    /// there is no nested Usenet scheduler.
-    pub async fn read_range_slices(
-        &self,
-        info_hash: &str,
-        file_index: usize,
-        start: u64,
-        end_inclusive: u64,
-    ) -> Result<Vec<Bytes>, StreamerError> {
-        let loaded = self.load_file(info_hash, file_index).await?;
-        self.read_range_slices_of(&loaded, info_hash, file_index, start, end_inclusive)
-            .await
-    }
-
     /// The read itself, against an already-resolved file map.
     ///
-    /// Split out so the FUSE handle can resolve the map once at open and hand
-    /// it in on every read — see [`LocalByteSource`](riven_core::local_source::LocalByteSource).
+    /// The FUSE handle resolves the map once at open and hands it in on every
+    /// read — see `UsenetOpenFile`.
     pub(crate) async fn read_range_slices_of(
         &self,
         loaded: &super::FileMeta,

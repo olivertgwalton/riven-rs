@@ -18,12 +18,11 @@
     import Search from "@lucide/svelte/icons/search";
     import Library from "@lucide/svelte/icons/library";
     import User from "@lucide/svelte/icons/user";
-    import { getContext } from "svelte";
     import Tooltip from "./tooltip.svelte";
     import ThemeSwitcher from "./theme-switcher.svelte";
     import { fly } from "svelte/transition";
     import { cubicOut } from "svelte/easing";
-    import type { createSidebarStore } from "$lib/stores/global.svelte";
+    import { sidebar } from "$lib/stores/global.svelte";
 
     const navItems: Array<{
         href:
@@ -59,7 +58,6 @@
         navItems.filter((item) => !item.adminOnly || can(page.data.permissions, "MANAGE_SETTINGS"))
     );
 
-    const SidebarStore = getContext<createSidebarStore>("sidebarStore");
 </script>
 
 <aside
@@ -143,15 +141,15 @@
     </div>
 </aside>
 
-{#if SidebarStore.isOpen}
+{#if sidebar.open}
     <!-- Backdrop -->
     <button
         type="button"
         aria-label="Close sidebar"
-        onclick={() => SidebarStore.toggle()}
+        onclick={() => (sidebar.open = false)}
         onkeydown={(e) => {
             if (e.key === "Enter" || e.key === " ") {
-                SidebarStore.toggle();
+                sidebar.open = false;
             }
         }}
         class="fixed inset-0 z-40 cursor-default md:hidden">
@@ -167,7 +165,7 @@
                     <a
                         href={resolve("/auth")}
                         class="flex items-center gap-3"
-                        onclick={() => SidebarStore.toggle()}>
+                        onclick={() => (sidebar.open = false)}>
                         <Avatar.Root class="size-8">
                             {#if user.image}
                                 <Avatar.Image src={user.image} alt={handle} />
@@ -211,7 +209,7 @@
                 {#each visibleNavItems as item (item.href)}
                     <a
                         href={resolve(item.href)}
-                        onclick={() => SidebarStore.toggle()}
+                        onclick={() => (sidebar.open = false)}
                         class="hover:text-foreground flex w-full items-center gap-3 rounded-xl px-4 py-2.5 text-sm font-medium transition-colors hover:bg-white/10
 						{page.url.pathname === item.href ? 'text-primary bg-white/10' : 'text-muted-foreground'}"
                         aria-current={page.url.pathname === item.href ? "page" : undefined}>

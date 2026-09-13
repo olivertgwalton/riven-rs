@@ -344,10 +344,3 @@ pub async fn unpause_items(ids: &[i64]) -> Result<()> {
         .await?;
     recompute(ids).await
 }
-
-/// Re-derive state for the given ids. Application writes already recompute via
-/// the repo layer; this exists for admin tools and one-off backfills after data
-/// fix-ups.
-pub async fn force_recompute(ids: &[i64]) -> Result<()> {
-    recompute(ids).await
-}

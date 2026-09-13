@@ -14,8 +14,8 @@ use std::time::Duration;
 
 use crate::client::{
     AddTorrentOutcome, GeneratedLink, StoreRateLimited, add_newz, add_torrent, check_cache,
-    download_result_from_newz, download_result_from_torz, fetch_user_info, generate_link,
-    scrape_torznab, store_cooldown_remaining,
+    download_result_from_files, fetch_user_info, generate_link, scrape_torznab,
+    store_cooldown_remaining,
 };
 use crate::newznab::{is_nzb_info_hash, nzb_url_redis_key, scrape_newznab};
 
@@ -24,18 +24,10 @@ const STORE_SCORE_TTL_SECS: u64 = 60 * 60 * 24 * 7;
 
 const NEWZ_POLL_TIMEOUT_SECS: u64 = 1800;
 
-pub(crate) const PROFILE: HttpServiceProfile =
-    HttpServiceProfile::new("stremthru");
+pub(crate) const PROFILE: HttpServiceProfile = HttpServiceProfile::new("stremthru");
 
 pub(crate) fn debrid_service(store: &str) -> HttpServiceProfile {
-    match store {
-        "realdebrid" => HttpServiceProfile::new("realdebrid"),
-        "torbox" => HttpServiceProfile::new("torbox"),
-        "alldebrid" => HttpServiceProfile::new("alldebrid"),
-        "debridlink" => HttpServiceProfile::new("debridlink"),
-        "premiumize" => HttpServiceProfile::new("premiumize"),
-        _ => HttpServiceProfile::new_owned(store.to_owned()),
-    }
+    HttpServiceProfile::new_owned(store.to_owned())
 }
 
 const STORE_NAMES: &[&str] = &[
@@ -283,8 +275,8 @@ impl Plugin for StremthruPlugin {
             file_count: usize,
         }
 
-        let attempts: Vec<StoreAttempt<'_>> = if !cached_stores.is_empty() {
-            let mut v: Vec<StoreAttempt<'_>> = cached_stores
+        let mut attempts: Vec<StoreAttempt<'_>> = if !cached_stores.is_empty() {
+            cached_stores
                 .iter()
                 .filter_map(|entry| {
                     stores
@@ -296,15 +288,7 @@ impl Plugin for StremthruPlugin {
                             file_count: entry.files.len(),
                         })
                 })
-                .collect();
-            v.sort_by(|a, b| {
-                let sa = score_map.get(a.store).copied().unwrap_or_default();
-                let sb = score_map.get(b.store).copied().unwrap_or_default();
-                sb.cmp(&sa)
-                    .then_with(|| b.file_count.cmp(&a.file_count))
-                    .then_with(|| a.store.cmp(b.store))
-            });
-            v
+                .collect()
         } else if ctx.settings.get_or("checkdebridcache", "true") != "false" {
             let hashes = vec![info_hash.to_lowercase()];
             let checks = futures::future::join_all(stores.iter().map(|(s, k)| async {
@@ -344,40 +328,27 @@ impl Plugin for StremthruPlugin {
                         if handled_rate_limit(store, &error) {
                             continue;
                         }
-                        if error
-                            .downcast_ref::<reqwest::Error>()
-                            .is_some_and(|e| e.is_connect() || e.is_timeout() || e.is_request())
-                        {
-                            any_network_error = true;
-                        }
+                        any_network_error |= is_network_error(&error);
                         tracing::warn!(store, error = %error, "stremthru cache check failed");
                     }
                 }
             }
-            v.sort_by(|a, b| {
-                let sa = score_map.get(a.store).copied().unwrap_or_default();
-                let sb = score_map.get(b.store).copied().unwrap_or_default();
-                sb.cmp(&sa)
-                    .then_with(|| b.file_count.cmp(&a.file_count))
-                    .then_with(|| a.store.cmp(b.store))
-            });
             v
         } else {
-            let mut v: Vec<StoreAttempt<'_>> = stores
+            stores
                 .iter()
                 .map(|(s, k)| StoreAttempt {
                     store: s,
                     api_key: k.as_str(),
                     file_count: 0,
                 })
-                .collect();
-            v.sort_by(|a, b| {
-                let sa = score_map.get(a.store).copied().unwrap_or_default();
-                let sb = score_map.get(b.store).copied().unwrap_or_default();
-                sb.cmp(&sa).then_with(|| a.store.cmp(b.store))
-            });
-            v
+                .collect()
         };
+        attempts.sort_by(|a, b| {
+            by_score(&score_map, a.store, b.store)
+                .then_with(|| b.file_count.cmp(&a.file_count))
+                .then_with(|| a.store.cmp(b.store))
+        });
 
         for attempt in attempts {
             match add_torrent(
@@ -399,7 +370,7 @@ impl Plugin for StremthruPlugin {
                         files = torz.files.len(),
                         "torrent added"
                     );
-                    let download = download_result_from_torz(attempt.store, info_hash, torz);
+                    let download = download_result_from_files(attempt.store, info_hash, torz.files);
                     return Ok(HookResponse::Download(Box::new(download)));
                 }
                 Ok(AddTorrentOutcome::Unavailable) => {
@@ -434,12 +405,7 @@ impl Plugin for StremthruPlugin {
                         continue;
                     }
                     adjust_store_score(&ctx.redis, attempt.store, -1).await;
-                    if error
-                        .downcast_ref::<reqwest::Error>()
-                        .is_some_and(|e| e.is_connect() || e.is_timeout() || e.is_request())
-                    {
-                        any_network_error = true;
-                    }
+                    any_network_error |= is_network_error(&error);
                     tracing::warn!(store = attempt.store, error = %error, "stremthru add_torrent failed");
                 }
             }
@@ -550,9 +516,7 @@ impl Plugin for StremthruPlugin {
             if pinned_a != pinned_b {
                 return pinned_b.cmp(&pinned_a);
             }
-            let score_a = score_map.get(*store_a).copied().unwrap_or_default();
-            let score_b = score_map.get(*store_b).copied().unwrap_or_default();
-            score_b.cmp(&score_a).then_with(|| store_a.cmp(store_b))
+            by_score(&score_map, store_a, store_b).then_with(|| store_a.cmp(store_b))
         });
 
         let mut saw_dead = false;
@@ -608,41 +572,28 @@ impl Plugin for StremthruPlugin {
     }
 }
 
-/// Release name from a magnet's `dn=` parameter, for log fields only. Decodes
-/// just enough (percent escapes and `+`) to be readable; a malformed escape is
-/// left as-is rather than failing, since this only ever feeds a log line.
+/// Release name from a magnet's `dn=` parameter, for log fields only.
 fn magnet_display_name(magnet: &str) -> Option<String> {
-    let raw = magnet
-        .split(['?', '&'])
-        .find_map(|part| part.strip_prefix("dn="))
-        .filter(|value| !value.is_empty())?;
+    url::Url::parse(magnet)
+        .ok()?
+        .query_pairs()
+        .find(|(key, _)| key == "dn")
+        .map(|(_, value)| value.into_owned())
+        .filter(|value| !value.is_empty())
+}
 
-    let bytes = raw.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'+' => {
-                out.push(b' ');
-                i += 1;
-            }
-            b'%' if i + 2 < bytes.len() => match u8::from_str_radix(&raw[i + 1..i + 3], 16) {
-                Ok(decoded) => {
-                    out.push(decoded);
-                    i += 3;
-                }
-                Err(_) => {
-                    out.push(bytes[i]);
-                    i += 1;
-                }
-            },
-            b => {
-                out.push(b);
-                i += 1;
-            }
-        }
-    }
-    Some(String::from_utf8_lossy(&out).into_owned())
+/// Higher store score first.
+fn by_score(score_map: &HashMap<String, i64>, a: &str, b: &str) -> std::cmp::Ordering {
+    let score = |store: &str| score_map.get(store).copied().unwrap_or_default();
+    score(b).cmp(&score(a))
+}
+
+/// Whether a store call failed to reach the store at all (as opposed to the
+/// store answering with an error).
+fn is_network_error(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<reqwest::Error>()
+        .is_some_and(|e| e.is_connect() || e.is_timeout() || e.is_request())
 }
 
 async fn handle_newz_download(
@@ -670,11 +621,7 @@ async fn handle_newz_download(
         .iter()
         .map(|(store, api_key)| (*store, api_key.as_str()))
         .collect();
-    ordered.sort_by(|(a, _), (b, _)| {
-        let sa = score_map.get(*a).copied().unwrap_or_default();
-        let sb = score_map.get(*b).copied().unwrap_or_default();
-        sb.cmp(&sa).then_with(|| a.cmp(b))
-    });
+    ordered.sort_by(|(a, _), (b, _)| by_score(score_map, a, b).then_with(|| a.cmp(b)));
 
     let poll_timeout = Duration::from_secs(NEWZ_POLL_TIMEOUT_SECS);
     let mut any_network_error = false;
@@ -693,7 +640,7 @@ async fn handle_newz_download(
             Ok(Some(newz)) => {
                 adjust_store_score(&ctx.redis, store, 5).await;
                 tracing::debug!(store, info_hash, files = newz.files.len(), "newz added");
-                let download = download_result_from_newz(store, info_hash, newz);
+                let download = download_result_from_files(store, info_hash, newz.files);
                 return Ok(HookResponse::Download(Box::new(download)));
             }
             Ok(None) => {
@@ -705,12 +652,7 @@ async fn handle_newz_download(
                     continue;
                 }
                 adjust_store_score(&ctx.redis, store, -1).await;
-                if error
-                    .downcast_ref::<reqwest::Error>()
-                    .is_some_and(|e| e.is_connect() || e.is_timeout() || e.is_request())
-                {
-                    any_network_error = true;
-                }
+                any_network_error |= is_network_error(&error);
                 tracing::warn!(store, error = %error, "stremthru add_newz failed");
             }
         }

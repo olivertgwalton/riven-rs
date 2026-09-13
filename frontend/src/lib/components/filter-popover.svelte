@@ -117,13 +117,13 @@
                         <span class="text-muted-foreground text-xs">From</span>
                         <DatePicker
                             bind:value={filterStore.releaseDateFrom}
-                            placeholder="Pick a date" />
+                            aria-label="Release date from" />
                     </div>
                     <div class="space-y-1">
                         <span class="text-muted-foreground text-xs">To</span>
                         <DatePicker
                             bind:value={filterStore.releaseDateTo}
-                            placeholder="Pick a date" />
+                            aria-label="Release date to" />
                     </div>
                 </div>
             </div>

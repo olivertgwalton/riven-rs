@@ -1,274 +1,109 @@
-/// Flat default scores for every `CustomRank` field.
-///
-/// A single source of truth for all
-/// default scores.  Scoring functions call `model.quality_score(q)` etc. and
-/// fall back to the value here when no custom override is set.
-#[derive(Debug, Clone)]
-pub struct RankingModel {
-    pub av1: i64,
-    pub avc: i64,
-    pub bluray: i64,
-    pub dvd: i64,
-    pub hdtv: i64,
-    pub hevc: i64,
-    pub mpeg: i64,
-    pub remux: i64,
-    pub vhs: i64,
-    pub web: i64,
-    pub webdl: i64,
-    pub webmux: i64,
-    pub xvid: i64,
-    pub bdrip: i64,
-    pub brrip: i64,
-    pub dvdrip: i64,
-    pub hdrip: i64,
-    pub ppvrip: i64,
-    pub satrip: i64,
-    pub tvrip: i64,
-    pub uhdrip: i64,
-    pub vhsrip: i64,
-    pub webdlrip: i64,
-    pub webrip: i64,
-    pub bit10: i64,
-    pub dolby_vision: i64,
-    pub hdr: i64,
-    pub hdr10plus: i64,
-    pub sdr: i64,
-    pub aac: i64,
-    pub atmos: i64,
-    pub dolby_digital: i64,
-    pub dolby_digital_plus: i64,
-    pub dts_lossy: i64,
-    pub dts_lossless: i64,
-    pub flac: i64,
-    pub mono: i64,
-    pub mp3: i64,
-    pub stereo: i64,
-    pub surround: i64,
-    pub truehd: i64,
-    pub three_d: i64,
-    pub converted: i64,
-    pub commentary: i64,
-    pub documentary: i64,
-    pub dubbed: i64,
-    pub edition: i64,
-    pub hardcoded: i64,
-    pub network: i64,
-    pub proper: i64,
-    pub repack: i64,
-    pub retail: i64,
-    pub site: i64,
-    pub subbed: i64,
-    pub upscaled: i64,
-    pub scene: i64,
-    pub uncensored: i64,
-    pub cam: i64,
-    pub clean_audio: i64,
-    pub pdtv: i64,
-    pub r5: i64,
-    pub screener: i64,
-    pub size: i64,
-    pub telecine: i64,
-    pub telesync: i64,
+//! Built-in default scores for every `CustomRank` field.
+
+use crate::settings::{
+    AudioRanks, CustomRank, CustomRanksConfig, ExtrasRanks, HdrRanks, QualityRanks, RipsRanks,
+    TrashRanks,
+};
+
+const fn score(rank: i64) -> CustomRank {
+    CustomRank::scored(true, rank)
 }
 
-impl Default for RankingModel {
-    fn default() -> Self {
-        Self {
-            av1: 500,
-            avc: 500,
-            bluray: 100,
-            dvd: -5000,
-            hdtv: -5000,
-            hevc: 500,
-            mpeg: -1000,
-            remux: 10000,
-            vhs: -10000,
-            web: 100,
-            webdl: 200,
-            webmux: -10000,
-            xvid: -10000,
-            bdrip: -5000,
-            brrip: -10000,
-            dvdrip: -5000,
-            hdrip: -10000,
-            ppvrip: -10000,
-            satrip: -10000,
-            tvrip: -10000,
-            uhdrip: -5000,
-            vhsrip: -10000,
-            webdlrip: -10000,
-            webrip: -1000,
-            bit10: 100,
-            dolby_vision: 3000,
-            hdr: 2000,
-            hdr10plus: 2100,
-            sdr: 0,
-            aac: 100,
-            atmos: 1000,
-            dolby_digital: 50,
-            dolby_digital_plus: 150,
-            dts_lossy: 100,
-            dts_lossless: 2000,
-            flac: 0,
-            mono: 0,
-            mp3: -1000,
-            stereo: 0,
-            surround: 0,
-            truehd: 2000,
-            three_d: -10000,
-            converted: -1000,
-            commentary: 0,
-            documentary: -250,
-            dubbed: -1000,
-            edition: 100,
-            hardcoded: 0,
-            network: 0,
-            proper: 20,
-            repack: 20,
-            retail: 0,
-            site: -10000,
-            subbed: 0,
-            upscaled: -10000,
-            scene: 0,
-            uncensored: 0,
-            cam: -10000,
-            clean_audio: -10000,
-            pdtv: -10000,
-            r5: -10000,
-            screener: -10000,
-            size: -10000,
-            telecine: -10000,
-            telesync: -10000,
+/// The score each `CustomRank` falls back to when a profile leaves `rank`
+/// unset. Only `rank` is meaningful here; `fetch` is unused.
+pub static DEFAULT_SCORES: CustomRanksConfig = CustomRanksConfig {
+    quality: QualityRanks {
+        av1: score(500),
+        avc: score(500),
+        bluray: score(100),
+        dvd: score(-5000),
+        hdtv: score(-5000),
+        hevc: score(500),
+        mpeg: score(-1000),
+        remux: score(10000),
+        vhs: score(-10000),
+        web: score(100),
+        webdl: score(200),
+        webmux: score(-10000),
+        xvid: score(-10000),
+    },
+    rips: RipsRanks {
+        bdrip: score(-5000),
+        brrip: score(-10000),
+        dvdrip: score(-5000),
+        hdrip: score(-10000),
+        ppvrip: score(-10000),
+        satrip: score(-10000),
+        tvrip: score(-10000),
+        uhdrip: score(-5000),
+        vhsrip: score(-10000),
+        webdlrip: score(-10000),
+        webrip: score(-1000),
+    },
+    hdr: HdrRanks {
+        bit10: score(100),
+        dolby_vision: score(3000),
+        hdr: score(2000),
+        hdr10plus: score(2100),
+        sdr: score(0),
+    },
+    audio: AudioRanks {
+        aac: score(100),
+        atmos: score(1000),
+        dolby_digital: score(50),
+        dolby_digital_plus: score(150),
+        dts_lossy: score(100),
+        dts_lossless: score(2000),
+        flac: score(0),
+        mono: score(0),
+        mp3: score(-1000),
+        stereo: score(0),
+        surround: score(0),
+        truehd: score(2000),
+    },
+    extras: ExtrasRanks {
+        three_d: score(-10000),
+        converted: score(-1000),
+        commentary: score(0),
+        documentary: score(-250),
+        dubbed: score(-1000),
+        edition: score(100),
+        hardcoded: score(0),
+        network: score(0),
+        proper: score(20),
+        repack: score(20),
+        retail: score(0),
+        site: score(-10000),
+        subbed: score(0),
+        upscaled: score(-10000),
+        scene: score(0),
+        uncensored: score(0),
+    },
+    trash: TrashRanks {
+        cam: score(-10000),
+        clean_audio: score(-10000),
+        pdtv: score(-10000),
+        r5: score(-10000),
+        screener: score(-10000),
+        size: score(-10000),
+        telecine: score(-10000),
+        telesync: score(-10000),
+    },
+};
+
+/// Nested JSON matching `custom_ranks` structure, used to inject `"default": N`
+/// into each `CustomRank` entry in the GraphQL `rankSettings` response.
+#[must_use]
+pub fn default_category_map() -> serde_json::Value {
+    let mut map = serde_json::to_value(&DEFAULT_SCORES).unwrap_or_default();
+    for category in map.as_object_mut().into_iter().flat_map(|m| m.values_mut()) {
+        for entry in category
+            .as_object_mut()
+            .into_iter()
+            .flat_map(|m| m.values_mut())
+        {
+            *entry = entry["rank"].take();
         }
     }
-}
-
-impl RankingModel {
-    /// Default score for a quality/rip/trash quality string.
-    #[inline]
-    #[must_use]
-    pub fn quality_score(&self, q: &str) -> i64 {
-        match q {
-            "WEB" => self.web,
-            "WEB-DL" => self.webdl,
-            "BluRay" => self.bluray,
-            "HDTV" => self.hdtv,
-            "VHS" => self.vhs,
-            "WEBMux" => self.webmux,
-            "BluRay REMUX" | "REMUX" => self.remux,
-            "DVD" => self.dvd,
-            "WEBRip" => self.webrip,
-            "WEB-DLRip" => self.webdlrip,
-            "UHDRip" => self.uhdrip,
-            "HDRip" => self.hdrip,
-            "DVDRip" => self.dvdrip,
-            "BDRip" => self.bdrip,
-            "BRRip" => self.brrip,
-            "VHSRip" => self.vhsrip,
-            "PPVRip" => self.ppvrip,
-            "SATRip" => self.satrip,
-            "TVRip" => self.tvrip,
-            "TeleCine" => self.telecine,
-            "TeleSync" => self.telesync,
-            "SCR" => self.screener,
-            "R5" => self.r5,
-            "CAM" => self.cam,
-            "PDTV" => self.pdtv,
-            _ => 0,
-        }
-    }
-
-    /// Default score for a codec string.
-    #[inline]
-    #[must_use]
-    pub fn codec_score(&self, codec: &str) -> i64 {
-        match codec {
-            "avc" => self.avc,
-            "hevc" => self.hevc,
-            "xvid" => self.xvid,
-            "av1" => self.av1,
-            "mpeg" => self.mpeg,
-            _ => 0,
-        }
-    }
-
-    /// Default score for an audio string.
-    #[inline]
-    #[must_use]
-    pub fn audio_score(&self, audio: &str) -> i64 {
-        match audio {
-            "AAC" => self.aac,
-            "Atmos" => self.atmos,
-            "Dolby Digital" => self.dolby_digital,
-            "Dolby Digital Plus" => self.dolby_digital_plus,
-            "DTS Lossy" => self.dts_lossy,
-            "DTS Lossless" => self.dts_lossless,
-            "FLAC" => self.flac,
-            "MP3" => self.mp3,
-            "TrueHD" => self.truehd,
-            "HQ Clean Audio" => self.clean_audio,
-            _ => 0,
-        }
-    }
-
-    /// Default score for an HDR string.
-    #[inline]
-    #[must_use]
-    pub fn hdr_score(&self, hdr: &str) -> i64 {
-        match hdr {
-            "DV" => self.dolby_vision,
-            "HDR" => self.hdr,
-            "HDR10+" => self.hdr10plus,
-            "SDR" => self.sdr,
-            _ => 0,
-        }
-    }
-
-    /// Nested JSON matching `custom_ranks` structure, used to inject `"default": N`
-    /// into each `CustomRank` entry in the GraphQL `rankSettings` response.
-    #[must_use]
-    pub fn to_category_map(&self) -> serde_json::Value {
-        serde_json::json!({
-            "quality": {
-                "av1": self.av1, "avc": self.avc, "bluray": self.bluray,
-                "dvd": self.dvd, "hdtv": self.hdtv, "hevc": self.hevc,
-                "mpeg": self.mpeg, "remux": self.remux, "vhs": self.vhs,
-                "web": self.web, "webdl": self.webdl, "webmux": self.webmux,
-                "xvid": self.xvid,
-            },
-            "rips": {
-                "bdrip": self.bdrip, "brrip": self.brrip, "dvdrip": self.dvdrip,
-                "hdrip": self.hdrip, "ppvrip": self.ppvrip, "satrip": self.satrip,
-                "tvrip": self.tvrip, "uhdrip": self.uhdrip, "vhsrip": self.vhsrip,
-                "webdlrip": self.webdlrip, "webrip": self.webrip,
-            },
-            "hdr": {
-                "bit10": self.bit10, "dolby_vision": self.dolby_vision,
-                "hdr": self.hdr, "hdr10plus": self.hdr10plus, "sdr": self.sdr,
-            },
-            "audio": {
-                "aac": self.aac, "atmos": self.atmos,
-                "dolby_digital": self.dolby_digital,
-                "dolby_digital_plus": self.dolby_digital_plus,
-                "dts_lossy": self.dts_lossy, "dts_lossless": self.dts_lossless,
-                "flac": self.flac, "mono": self.mono, "mp3": self.mp3,
-                "stereo": self.stereo, "surround": self.surround, "truehd": self.truehd,
-            },
-            "extras": {
-                "three_d": self.three_d, "converted": self.converted,
-                "commentary": self.commentary, "documentary": self.documentary,
-                "dubbed": self.dubbed, "edition": self.edition,
-                "hardcoded": self.hardcoded, "network": self.network,
-                "proper": self.proper, "repack": self.repack, "retail": self.retail,
-                "site": self.site, "subbed": self.subbed, "upscaled": self.upscaled,
-                "scene": self.scene, "uncensored": self.uncensored,
-            },
-            "trash": {
-                "cam": self.cam, "clean_audio": self.clean_audio, "pdtv": self.pdtv,
-                "r5": self.r5, "screener": self.screener, "size": self.size,
-                "telecine": self.telecine, "telesync": self.telesync,
-            },
-        })
-    }
+    map
 }

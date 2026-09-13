@@ -7,6 +7,7 @@ rust-version.workspace = true
 [dependencies]
 riven-core = { path = "../riven-core" }
 riven-db = { path = "../riven-db" }
+riven-usenet = { path = "../riven-usenet" }
 fuser = { workspace = true }
 tokio = { workspace = true }
 reqwest = { workspace = true }
@@ -14,26 +15,10 @@ anyhow = { workspace = true }
 tracing = { workspace = true }
 dashmap = { workspace = true }
 parking_lot = { workspace = true }
-lru = { workspace = true }
-futures = { workspace = true }
 bytes = { workspace = true }
 async-trait = { workspace = true }
-tokio-util = { workspace = true }
 chrono = { workspace = true }
 serde_json = { workspace = true }
-
-[dev-dependencies]
-async-trait = { workspace = true }
-# `stream_bench` drives the real usenet path end to end. Dev-only, so the
-# production dependency direction (riven-usenet knows nothing of the VFS)
-# is unchanged.
-riven-usenet = { path = "../riven-usenet" }
-sea-orm = { workspace = true }
-tracing-subscriber = { workspace = true }
-
-[[example]]
-name = "stream_bench"
-path = "examples/stream_bench.rs"
 
 [lints]
 workspace = true

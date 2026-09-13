@@ -198,10 +198,7 @@ pub trait Plugin: Send + Sync + 'static {
         }
         match event {
             RivenEvent::CoreStarted => self.on_core_started(ctx).await,
-            RivenEvent::CoreShutdown => Ok(HookResponse::Empty),
             RivenEvent::ContentServiceRequested => self.on_content_service_requested(ctx).await,
-            RivenEvent::ItemRequestCreated { .. } => Ok(HookResponse::Empty),
-            RivenEvent::ItemRequestUpdated { .. } => Ok(HookResponse::Empty),
             RivenEvent::MediaItemIndexRequested {
                 id,
                 item_type,
@@ -223,8 +220,6 @@ pub trait Plugin: Send + Sync + 'static {
                 title,
                 item_type,
             } => self.on_index_success(*id, title, *item_type, ctx).await,
-            RivenEvent::MediaItemIndexError { .. } => Ok(HookResponse::Empty),
-            RivenEvent::MediaItemIndexErrorIncorrectState { .. } => Ok(HookResponse::Empty),
             RivenEvent::MediaItemScrapeRequested {
                 id,
                 item_type,
@@ -245,10 +240,6 @@ pub trait Plugin: Send + Sync + 'static {
                 };
                 self.on_scrape_requested(&req, ctx).await
             }
-            RivenEvent::MediaItemScrapeSuccess { .. } => Ok(HookResponse::Empty),
-            RivenEvent::MediaItemScrapeError { .. } => Ok(HookResponse::Empty),
-            RivenEvent::MediaItemScrapeErrorIncorrectState { .. } => Ok(HookResponse::Empty),
-            RivenEvent::MediaItemScrapeErrorNoNewStreams { .. } => Ok(HookResponse::Empty),
             RivenEvent::MediaItemDownloadRequested {
                 id,
                 info_hash,
@@ -262,9 +253,6 @@ pub trait Plugin: Send + Sync + 'static {
                 self.on_download_cache_check_requested(hashes, provider.as_deref(), ctx)
                     .await
             }
-            RivenEvent::MediaItemDownloadError { .. } => Ok(HookResponse::Empty),
-            RivenEvent::MediaItemDownloadErrorIncorrectState { .. } => Ok(HookResponse::Empty),
-            RivenEvent::MediaItemDownloadPartialSuccess { .. } => Ok(HookResponse::Empty),
             RivenEvent::MediaItemDownloadProviderListRequested => {
                 self.on_download_provider_list_requested(ctx).await
             }
@@ -320,6 +308,7 @@ pub trait Plugin: Send + Sync + 'static {
             RivenEvent::ArtworkRequested { server, reference } => {
                 self.on_artwork_requested(server, reference, ctx).await
             }
+            _ => Ok(HookResponse::Empty),
         }
     }
 }

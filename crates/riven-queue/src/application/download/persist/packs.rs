@@ -14,27 +14,14 @@ pub async fn persist_season(
     start_time: Instant,
     stream_id: Option<i64>,
     raw_title: &str,
-    path_tag: Option<&str>,
-    profile_name: Option<&str>,
+    profile: Option<&str>,
 ) -> SeasonPersistOutcome {
     let id = item.id;
 
-    let show_id = match hierarchy.show_id {
-        Some(sid) => sid,
-        None => {
-            tracing::error!(id, "season has no parent show");
-            queue
-                .notify(RivenEvent::MediaItemDownloadError {
-                    id,
-                    title: item.title.clone(),
-                    item_type: item.item_type,
-                    error: "season has no parent show".into(),
-                    tmdb_id: item.tmdb_id.clone(),
-                    tvdb_id: crate::context::notification_tvdb_id(item, Some(hierarchy)),
-                })
-                .await;
-            return SeasonPersistOutcome::Failed;
-        }
+    let Some(show_id) = hierarchy.show_id else {
+        tracing::error!(id, "season has no parent show");
+        notify_download_error(queue, item, hierarchy, "season has no parent show".into()).await;
+        return SeasonPersistOutcome::Failed;
     };
 
     let show = match repo::get_media_item(show_id).await {
@@ -49,16 +36,13 @@ pub async fn persist_season(
         }
         Err(error) => {
             tracing::error!(id, show_id, %error, "failed to load parent show");
-            queue
-                .notify(RivenEvent::MediaItemDownloadError {
-                    id,
-                    title: item.title.clone(),
-                    item_type: item.item_type,
-                    error: format!("failed to load parent show: {error}"),
-                    tmdb_id: item.tmdb_id.clone(),
-                    tvdb_id: crate::context::notification_tvdb_id(item, Some(hierarchy)),
-                })
-                .await;
+            notify_download_error(
+                queue,
+                item,
+                hierarchy,
+                format!("failed to load parent show: {error}"),
+            )
+            .await;
             return SeasonPersistOutcome::Failed;
         }
     };
@@ -66,16 +50,7 @@ pub async fn persist_season(
     let episodes = match repo::list_episodes(id).await {
         Ok(eps) => eps,
         Err(e) => {
-            queue
-                .notify(RivenEvent::MediaItemDownloadError {
-                    id,
-                    title: item.title.clone(),
-                    item_type: item.item_type,
-                    error: e.to_string(),
-                    tmdb_id: item.tmdb_id.clone(),
-                    tvdb_id: crate::context::notification_tvdb_id(item, Some(hierarchy)),
-                })
-                .await;
+            notify_download_error(queue, item, hierarchy, e.to_string()).await;
             return SeasonPersistOutcome::Failed;
         }
     };
@@ -200,53 +175,24 @@ pub async fn persist_season(
     // would get stuck forever re-persisting the same already-done episode
     // that keeps winning the rank tie-break, never reaching the streams for
     // episodes that are actually still missing.
-    let already_satisfied: HashSet<i64> = match profile_name {
+    let already_satisfied: HashSet<i64> = match profile {
         Some(name) => repo::get_episode_ids_with_profile_for_season(id, name)
             .await
             .unwrap_or_default(),
         None => HashSet::new(),
     };
 
-    let mut completed_episode_ids: Vec<i64> = Vec::new();
-
-    for (ep, matched) in &episode_matches {
-        if already_satisfied.contains(&ep.id) {
-            continue;
-        }
-        let episode_number = ep.episode_number.unwrap_or(1);
-        for (file, part) in select_episode_files(matched) {
-            let path = episode_vfs_path(&show_name, season_number, episode_number, part, path_tag);
-            match repo::create_media_entry(repo::MediaEntryInput {
-                media_item_id: ep.id,
-                path: &path,
-                file_size: file.file_size as i64,
-                original_filename: &file.filename,
-                download_url: file.download_url.as_deref(),
-                stream_url: file.stream_url.as_deref(),
-                plugin: &dl.plugin_name,
-                provider: dl.provider.as_deref(),
-                stream_id,
-                resolution: None,
-                ranking_profile_name: profile_name,
-                library_profiles: Some(&library_profiles_json),
-                usenet_info_hash: file.usenet_info_hash.as_deref(),
-                usenet_file_index: file.usenet_file_index,
-            })
-            .await
-            {
-                Ok(_) => {
-                    completed_episode_ids.push(ep.id);
-                }
-                Err(e) => {
-                    if is_item_deleted_fk_error(&e) {
-                        tracing::debug!(ep_id = ep.id, "episode was deleted mid-persist, skipping");
-                    } else {
-                        tracing::error!(error = %e, ep_id = ep.id, "failed to create media entry for episode");
-                    }
-                }
-            }
-        }
-    }
+    let completed_episode_ids = persist_matched_episodes(
+        &episode_matches,
+        &already_satisfied,
+        &show_name,
+        season_number,
+        &dl,
+        stream_id,
+        profile,
+        &library_profiles_json,
+    )
+    .await;
 
     if completed_episode_ids.is_empty() {
         tracing::warn!(
@@ -324,24 +270,14 @@ pub async fn persist_show(
     hierarchy: &crate::context::DownloadHierarchyContext,
     start_time: Instant,
     stream_id: Option<i64>,
-    path_tag: Option<&str>,
-    profile_name: Option<&str>,
+    profile: Option<&str>,
 ) -> SeasonPersistOutcome {
     let id = item.id;
 
     let seasons = match repo::list_seasons_excluding_specials(id).await {
         Ok(seasons) => seasons,
         Err(e) => {
-            queue
-                .notify(RivenEvent::MediaItemDownloadError {
-                    id,
-                    title: item.title.clone(),
-                    item_type: item.item_type,
-                    error: e.to_string(),
-                    tmdb_id: item.tmdb_id.clone(),
-                    tvdb_id: item.tvdb_id.clone(),
-                })
-                .await;
+            notify_download_error(queue, item, hierarchy, e.to_string()).await;
             return SeasonPersistOutcome::Failed;
         }
     };
@@ -364,7 +300,7 @@ pub async fn persist_show(
 
     // See the equivalent lookup in `persist_season` for why episodes already
     // holding this profile must be excluded rather than just re-persisted.
-    let already_satisfied: HashSet<i64> = match profile_name {
+    let already_satisfied: HashSet<i64> = match profile {
         Some(name) => repo::get_episode_ids_with_profile_for_show(id, name)
             .await
             .unwrap_or_default(),
@@ -382,16 +318,7 @@ pub async fn persist_show(
         Ok(grouped) => grouped,
         Err(e) => {
             tracing::error!(id, error = %e, "failed to load episodes for seasons");
-            queue
-                .notify(RivenEvent::MediaItemDownloadError {
-                    id,
-                    title: item.title.clone(),
-                    item_type: item.item_type,
-                    error: e.to_string(),
-                    tmdb_id: item.tmdb_id.clone(),
-                    tvdb_id: item.tvdb_id.clone(),
-                })
-                .await;
+            notify_download_error(queue, item, hierarchy, e.to_string()).await;
             return SeasonPersistOutcome::Failed;
         }
     };
@@ -402,57 +329,39 @@ pub async fn persist_show(
             continue;
         };
 
-        for ep in episodes {
-            if already_satisfied.contains(&ep.id) {
-                continue;
-            }
-            let episode_number = ep.episode_number.unwrap_or(1);
-            let matched: Vec<(&DownloadFile, riven_rank::ParsedData)> = parsed_video_files
+        let episode_matches: Vec<(&MediaItem, Vec<(&DownloadFile, riven_rank::ParsedData)>)> =
+            episodes
                 .iter()
-                .filter(|(_, p)| {
-                    matches_episode_lookup(p, season_number, episode_number, ep.absolute_number)
+                .map(|ep| {
+                    let episode_number = ep.episode_number.unwrap_or(1);
+                    let matched = parsed_video_files
+                        .iter()
+                        .filter(|(_, p)| {
+                            matches_episode_lookup(
+                                p,
+                                season_number,
+                                episode_number,
+                                ep.absolute_number,
+                            )
+                        })
+                        .map(|(f, p)| (*f, p.clone()))
+                        .collect();
+                    (ep, matched)
                 })
-                .map(|(f, p)| (*f, p.clone()))
                 .collect();
-            if matched.is_empty() {
-                continue;
-            }
-
-            for (file, part) in select_episode_files(&matched) {
-                let path =
-                    episode_vfs_path(&show_name, season_number, episode_number, part, path_tag);
-                match repo::create_media_entry(repo::MediaEntryInput {
-                    media_item_id: ep.id,
-                    path: &path,
-                    file_size: file.file_size as i64,
-                    original_filename: &file.filename,
-                    download_url: file.download_url.as_deref(),
-                    stream_url: file.stream_url.as_deref(),
-                    plugin: &dl.plugin_name,
-                    provider: dl.provider.as_deref(),
-                    stream_id,
-                    resolution: None,
-                    ranking_profile_name: profile_name,
-                    library_profiles: Some(&library_profiles_json),
-                    usenet_info_hash: file.usenet_info_hash.as_deref(),
-                    usenet_file_index: file.usenet_file_index,
-                })
-                .await
-                {
-                    Ok(_) => completed_episode_ids.push(ep.id),
-                    Err(e) => {
-                        if is_item_deleted_fk_error(&e) {
-                            tracing::debug!(
-                                ep_id = ep.id,
-                                "episode was deleted mid-persist, skipping"
-                            );
-                        } else {
-                            tracing::error!(error = %e, ep_id = ep.id, "failed to create media entry for episode");
-                        }
-                    }
-                }
-            }
-        }
+        completed_episode_ids.extend(
+            persist_matched_episodes(
+                &episode_matches,
+                &already_satisfied,
+                &show_name,
+                season_number,
+                &dl,
+                stream_id,
+                profile,
+                &library_profiles_json,
+            )
+            .await,
+        );
     }
 
     if completed_episode_ids.is_empty() {
@@ -519,4 +428,74 @@ pub async fn persist_show(
         "show pack download flow completed"
     );
     SeasonPersistOutcome::Complete
+}
+
+async fn notify_download_error(
+    queue: &JobQueue,
+    item: &MediaItem,
+    hierarchy: &DownloadHierarchyContext,
+    error: String,
+) {
+    queue
+        .notify(RivenEvent::MediaItemDownloadError {
+            id: item.id,
+            title: item.title.clone(),
+            item_type: item.item_type,
+            error,
+            tmdb_id: item.tmdb_id.clone(),
+            tvdb_id: crate::context::notification_tvdb_id(item, Some(hierarchy)),
+        })
+        .await;
+}
+
+/// Create filesystem entries for each matched episode of one season, skipping
+/// episodes that already hold this profile. Returns one episode id per created
+/// entry.
+async fn persist_matched_episodes(
+    episode_matches: &[(&MediaItem, Vec<(&DownloadFile, riven_rank::ParsedData)>)],
+    already_satisfied: &HashSet<i64>,
+    show_name: &str,
+    season_number: i32,
+    dl: &DownloadResult,
+    stream_id: Option<i64>,
+    profile: Option<&str>,
+    library_profiles_json: &serde_json::Value,
+) -> Vec<i64> {
+    let mut completed_episode_ids = Vec::new();
+    for (ep, matched) in episode_matches {
+        if already_satisfied.contains(&ep.id) {
+            continue;
+        }
+        let episode_number = ep.episode_number.unwrap_or(1);
+        for (file, part) in select_episode_files(matched) {
+            let path = episode_vfs_path(show_name, season_number, episode_number, part, profile);
+            match repo::create_media_entry(repo::MediaEntryInput {
+                media_item_id: ep.id,
+                path: &path,
+                file_size: file.file_size as i64,
+                original_filename: &file.filename,
+                download_url: file.download_url.as_deref(),
+                stream_url: file.stream_url.as_deref(),
+                plugin: &dl.plugin_name,
+                provider: dl.provider.as_deref(),
+                stream_id,
+                resolution: None,
+                ranking_profile_name: profile,
+                library_profiles: Some(library_profiles_json),
+                usenet_info_hash: file.usenet_info_hash.as_deref(),
+                usenet_file_index: file.usenet_file_index,
+            })
+            .await
+            {
+                Ok(_) => completed_episode_ids.push(ep.id),
+                Err(e) if is_item_deleted_fk_error(&e) => {
+                    tracing::debug!(ep_id = ep.id, "episode was deleted mid-persist, skipping");
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, ep_id = ep.id, "failed to create media entry for episode");
+                }
+            }
+        }
+    }
+    completed_episode_ids
 }

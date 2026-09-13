@@ -11,7 +11,7 @@ pub async fn register_plugins(
     vfs_mount_path: String,
     settings: &RivenSettings,
 ) -> Arc<PluginRegistry> {
-    let registry = PluginRegistry::new();
+    let registry = PluginRegistry::default();
     let plugins = all_plugins();
 
     tracing::info!(count = plugins.len(), "discovered plugins");

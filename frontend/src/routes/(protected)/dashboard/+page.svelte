@@ -15,254 +15,67 @@
     import IndexerStatsCard from "$lib/components/dashboard/indexer-stats-card.svelte";
     import type {
         ActivePlaybackSession,
-        DownloaderService,
-        DashboardStatistics,
-        IndexerStats,
-        NntpProviderHealth,
-        UsenetStreamingHealth,
-        UsenetTitleHealth,
-        UsenetTitleHealthSummary,
-        UsenetTraffic
-    } from "$lib/components/dashboard/types";
+        DebridUserInfo,
+        IndexerStats
+    } from "$lib/gql/schema";
+    import {
+        ACTIVE_PLAYBACK_QUERY,
+        EMPTY_TITLE_SUMMARY,
+        INDEXER_STATS_QUERY,
+        STATS_QUERY,
+        USENET_HEALTH_QUERY,
+        type ActivePlaybackResult,
+        type DashboardStats,
+        type IndexerStatsResult,
+        type UsenetHealthResult
+    } from "./queries";
     import { onMount } from "svelte";
     import { subscribeToRivenMediaEvents } from "$lib/services/riven-live-updates";
 
     let { data }: { data: PageData } = $props();
 
     let activePlaybackSessions = $state<ActivePlaybackSession[]>([]);
-    let downloaderServices = $state<DownloaderService[]>([]);
-    let statistics = $state<DashboardStatistics | undefined>(undefined);
-    let usenetProviders = $state<NntpProviderHealth[]>([]);
-    let usenetStreaming = $state<UsenetStreamingHealth | null>(null);
-    let usenetTitles = $state<UsenetTitleHealth[]>([]);
-    const EMPTY_HEALTH_SUMMARY: UsenetTitleHealthSummary = {
-        healthy: 0,
-        unhealthy: 0,
-        notIngested: 0,
-        unknown: 0,
-        total: 0
-    };
-    let usenetTitleSummary = $state<UsenetTitleHealthSummary>(EMPTY_HEALTH_SUMMARY);
-    let usenetTraffic = $state<UsenetTraffic | null>(null);
+    let downloaderServices = $state<DebridUserInfo[]>([]);
+    let statistics = $state<DashboardStats | undefined>(undefined);
+    let usenet = $state<UsenetHealthResult>({
+        nntpProviders: [],
+        usenetStreamingHealth: null,
+        usenetTitleHealth: [],
+        usenetTitleHealthSummary: EMPTY_TITLE_SUMMARY,
+        usenetTraffic: null
+    });
     let indexerStats = $state<IndexerStats[]>([]);
 
     const serviceStatuses = $derived(
         (data as PageData & { services?: Record<string, boolean | null> }).services ?? null
     );
-    const completionRate = $derived(
-        statistics ? `${statistics.completion_rate.toFixed(2)}%` : "0%"
-    );
     const kpiCards = $derived.by(() => [
         {
             title: "Total Items",
-            value: statistics?.total_items.toLocaleString()
+            value: statistics?.stats.totalItems.toLocaleString()
         },
         {
             title: "Completed",
-            value: statistics?.states.Completed?.toLocaleString()
+            value: statistics?.stats.completed.toLocaleString()
         },
         {
             title: "Incomplete",
-            value: statistics?.incomplete_items.toLocaleString(),
+            value: statistics?.stats.incompleteItems.toLocaleString(),
             tone: "warning" as const
         },
         {
             title: "Completion Rate",
-            value: completionRate
+            value: statistics ? `${statistics.stats.completionRate.toFixed(2)}%` : "0%"
         }
     ]);
 
-    const ACTIVE_PLAYBACK_QUERY = `
-        query {
-            activePlaybackSessions {
-                server
-                userName
-                parentTitle
-                itemTitle
-                itemType
-                seasonNumber
-                episodeNumber
-                playbackState
-                playbackMethod
-                positionSeconds
-                durationSeconds
-                deviceName
-                clientName
-                imageUrl
-            }
-        }
-    `;
-
-    const USENET_HEALTH_QUERY = `
-        query {
-            nntpProviders {
-                host
-                port
-                priority
-                isBackup
-                maxConnections
-                openConnections
-                idleConnections
-                activeConnections
-                demoted
-                consecutiveNotFound
-            }
-            usenetStreamingHealth {
-                caches {
-                    name
-                    bytesUsed
-                    bytesMax
-                    entries
-                    hits
-                    misses
-                    hitRate
-                }
-                cacheHitRate
-                fetchesOk
-                fetchesFailed
-                fetchSuccessRate
-                bytesDecoded
-                inFlight
-                deadSegments
-                activeStreams
-            }
-            usenetTitleHealth {
-                infoHash
-                fileIndex
-                mediaItemId
-                status
-                totalSegments
-                sampledSegments
-                missingSegments
-                errorSegments
-                missingPct
-                checkedAt
-                repairAttempts
-                nextRepairAt
-                title
-                subtitle
-                posterPath
-                mediaType
-            }
-            usenetTitleHealthSummary {
-                healthy
-                unhealthy
-                notIngested
-                unknown
-                total
-            }
-            usenetTraffic {
-                totalBytesDownloaded
-                totalArticlesDownloaded
-                providers {
-                    host
-                    bytesDownloaded
-                    articlesDownloaded
-                }
-                daily {
-                    day
-                    host
-                    bytesDownloaded
-                    articlesDownloaded
-                }
-            }
-        }
-    `;
-
-    const INDEXER_STATS_QUERY = `
-        query {
-            indexerStats {
-                indexer
-                searchQueries
-                capsQueries
-                successfulGrabs
-            }
-        }
-    `;
-
-    const STATS_QUERY = `
-        query DashboardStats {
-            stats {
-                totalMovies
-                totalShows
-                totalSeasons
-                totalEpisodes
-                totalItems
-                incompleteItems
-                completionRate
-                completed
-                scraped
-                indexed
-                failed
-                paused
-                ongoing
-                partiallyCompleted
-                unreleased
-            }
-            activity
-            yearReleases {
-                year
-                count
-            }
-        }
-    `;
-
-    type GqlDashboardStats = {
-        stats: {
-            totalMovies: number;
-            totalShows: number;
-            totalSeasons: number;
-            totalEpisodes: number;
-            totalItems: number;
-            incompleteItems: number;
-            completionRate: number;
-            completed: number;
-            scraped: number;
-            indexed: number;
-            failed: number;
-            paused: number;
-            ongoing: number;
-            partiallyCompleted: number;
-            unreleased: number;
-        };
-        activity: Record<string, number>;
-        yearReleases: { year: number; count: number }[];
-    };
-
-    function mapDashboardStats(result: GqlDashboardStats): DashboardStatistics {
-        const s = result.stats;
-
-        return {
-            total_movies: s.totalMovies,
-            total_shows: s.totalShows,
-            total_seasons: s.totalSeasons,
-            total_episodes: s.totalEpisodes,
-            total_items: s.totalItems,
-            incomplete_items: s.incompleteItems,
-            completion_rate: s.completionRate,
-            states: {
-                Completed: s.completed,
-                Scraped: s.scraped,
-                Indexed: s.indexed,
-                Failed: s.failed,
-                Paused: s.paused,
-                Ongoing: s.ongoing,
-                PartiallyCompleted: s.partiallyCompleted,
-                Unreleased: s.unreleased
-            },
-            activity: result.activity ?? {},
-            media_year_releases: result.yearReleases ?? []
-        };
-    }
-
     async function refreshDashboardStats() {
-        const result = await gqlClient<GqlDashboardStats>(STATS_QUERY);
-        statistics = mapDashboardStats(result);
+        statistics = await gqlClient<DashboardStats>(STATS_QUERY);
     }
 
-    // Resolve streamed Promises from the server load into local state.
+    // Resolve streamed Promises from the load into local state.
     // data.statistics / activePlaybackSessions / downloaderServices are Promises —
-    // returning them un-awaited from the server load lets SvelteKit transition
+    // returning them un-awaited from the load lets SvelteKit transition
     // immediately while data arrives in the background.
     $effect(() => {
         let cancelled = false;
@@ -280,13 +93,7 @@
             if (!cancelled) indexerStats = rows ?? [];
         });
         Promise.resolve(data.usenetHealth).then((health) => {
-            if (!cancelled && health) {
-                usenetProviders = health.providers ?? [];
-                usenetStreaming = health.streaming ?? null;
-                usenetTitles = health.titles ?? [];
-                usenetTitleSummary = health.titleSummary ?? EMPTY_HEALTH_SUMMARY;
-                usenetTraffic = health.traffic ?? null;
-            }
+            if (!cancelled && health) usenet = health;
         });
 
         return () => {
@@ -301,44 +108,34 @@
     onMount(() => {
         let cancelled = false;
 
+        // Each poll keeps the last successful snapshot on transient failures.
         const refresh = async () => {
             try {
-                const result = await gqlClient<{ activePlaybackSessions: ActivePlaybackSession[] }>(
-                    ACTIVE_PLAYBACK_QUERY
-                );
-                if (!cancelled) {
-                    activePlaybackSessions = result.activePlaybackSessions ?? [];
-                }
+                const result = await gqlClient<ActivePlaybackResult>(ACTIVE_PLAYBACK_QUERY);
+                if (!cancelled) activePlaybackSessions = result.activePlaybackSessions ?? [];
             } catch {
-                // Keep the last successful snapshot on transient dashboard polling failures.
+                // keep the last snapshot
             }
             try {
-                const health = await gqlClient<{
-                    nntpProviders: NntpProviderHealth[];
-                    usenetStreamingHealth: UsenetStreamingHealth;
-                    usenetTitleHealth: UsenetTitleHealth[];
-                    usenetTitleHealthSummary: UsenetTitleHealthSummary;
-                    usenetTraffic: UsenetTraffic;
-                }>(USENET_HEALTH_QUERY);
+                const health = await gqlClient<UsenetHealthResult>(USENET_HEALTH_QUERY);
                 if (!cancelled) {
-                    usenetProviders = health.nntpProviders ?? [];
-                    usenetStreaming = health.usenetStreamingHealth ?? null;
-                    usenetTitles = health.usenetTitleHealth ?? [];
-                    usenetTitleSummary = health.usenetTitleHealthSummary ?? EMPTY_HEALTH_SUMMARY;
-                    usenetTraffic = health.usenetTraffic ?? null;
+                    usenet = {
+                        nntpProviders: health.nntpProviders ?? [],
+                        usenetStreamingHealth: health.usenetStreamingHealth ?? null,
+                        usenetTitleHealth: health.usenetTitleHealth ?? [],
+                        usenetTitleHealthSummary:
+                            health.usenetTitleHealthSummary ?? EMPTY_TITLE_SUMMARY,
+                        usenetTraffic: health.usenetTraffic ?? null
+                    };
                 }
             } catch {
-                // Keep the last successful usenet-health snapshot on transient failures.
+                // keep the last snapshot
             }
             try {
-                const result = await gqlClient<{ indexerStats: IndexerStats[] }>(
-                    INDEXER_STATS_QUERY
-                );
-                if (!cancelled) {
-                    indexerStats = result.indexerStats ?? [];
-                }
+                const result = await gqlClient<IndexerStatsResult>(INDEXER_STATS_QUERY);
+                if (!cancelled) indexerStats = result.indexerStats ?? [];
             } catch {
-                // Keep the last successful indexer-stats snapshot on transient failures.
+                // keep the last snapshot
             }
         };
 
@@ -387,17 +184,17 @@
     </section>
 
     <ActivityCard activity={statistics?.activity ?? {}} />
-    <LibraryChartsCard {statistics} />
-    <ReleaseYearCard data={statistics?.media_year_releases ?? []} />
+    <LibraryChartsCard stats={statistics?.stats} />
+    <ReleaseYearCard data={statistics?.yearReleases ?? []} />
     <ServiceStatusCard statuses={serviceStatuses} />
     <DownloaderServicesGrid services={downloaderServices} />
     {#if indexerStats.length > 0}
         <IndexerStatsCard stats={indexerStats} />
     {/if}
     <WatchingNowCard sessions={activePlaybackSessions} />
-    {#if usenetProviders.length > 0}
-        <UsenetProvidersCard providers={usenetProviders} />
-        <UsenetActivityCard health={usenetStreaming} traffic={usenetTraffic} />
-        <UsenetHealthCard titles={usenetTitles} summary={usenetTitleSummary} />
+    {#if usenet.nntpProviders.length > 0}
+        <UsenetProvidersCard providers={usenet.nntpProviders} />
+        <UsenetActivityCard health={usenet.usenetStreamingHealth} traffic={usenet.usenetTraffic} />
+        <UsenetHealthCard titles={usenet.usenetTitleHealth} summary={usenet.usenetTitleHealthSummary} />
     {/if}
 </PageShell>

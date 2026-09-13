@@ -2,7 +2,7 @@
     import * as Accordion from "$lib/components/ui/accordion/index.js";
     import { Button } from "$lib/components/ui/button/index.js";
     import * as Card from "$lib/components/ui/card/index.js";
-    import SetupGeneralField from "./setup-general-field.svelte";
+    import SettingFieldEditor from "./setting-field-editor.svelte";
     import type { SetupGeneralSection, SetupProfileView } from "./types";
 
     let {
@@ -68,7 +68,7 @@
                 <Accordion.Content class="pb-5">
                     <div class="grid gap-4 lg:grid-cols-2">
                         {#each section.fields as field (field.key)}
-                            <SetupGeneralField {field} bind:general />
+                            <SettingFieldEditor {field} bind:value={general[field.key]} />
                         {/each}
                     </div>
                 </Accordion.Content>

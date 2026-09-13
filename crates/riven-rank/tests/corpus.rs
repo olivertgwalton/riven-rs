@@ -100,9 +100,6 @@ fn bless_corpus() {
                 "raw_title".to_owned(),
                 fields.remove("raw_title").unwrap_or_default(),
             );
-            if case.translate_languages {
-                head.insert("translate_languages".to_owned(), Value::Bool(true));
-            }
             fields.retain(|key, value| {
                 defaults.get(key) != Some(&*value)
                     && (key.as_str() != "resolution" || *value != "unknown")

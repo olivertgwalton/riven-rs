@@ -1,15 +1,6 @@
 use super::*;
 
 #[test]
-fn deferred_statuses_cover_torrentio_overload_responses() {
-    assert!(is_deferred_status(StatusCode::TOO_MANY_REQUESTS));
-    assert!(is_deferred_status(StatusCode::BAD_GATEWAY));
-    assert!(is_deferred_status(StatusCode::SERVICE_UNAVAILABLE));
-    assert!(is_deferred_status(StatusCode::GATEWAY_TIMEOUT));
-    assert!(!is_deferred_status(StatusCode::NOT_FOUND));
-}
-
-#[test]
 fn response_mapping_uses_first_title_line_before_peer_count() {
     let resp: TorrentioResponse = serde_json::from_value(serde_json::json!({
         "streams": [

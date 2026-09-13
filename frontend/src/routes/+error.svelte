@@ -81,13 +81,13 @@
             </Badge>
 
             <div
-                class="font-heading text-foreground/90 font-mono text-[8rem] leading-none font-bold sm:text-[10rem]">
+                class="text-foreground/90 font-mono text-[8rem] leading-none font-bold sm:text-[10rem]">
                 {status}
             </div>
 
             <div>
                 <h1
-                    class="font-heading text-foreground text-4xl font-black tracking-tight sm:text-5xl lg:text-6xl">
+                    class="text-foreground text-4xl font-black tracking-tight sm:text-5xl lg:text-6xl">
                     {title}
                 </h1>
                 <div class="bg-primary mt-3 h-1 w-16 rounded-full"></div>

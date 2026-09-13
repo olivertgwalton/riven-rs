@@ -3,7 +3,7 @@ use riven_core::http::profiles::HttpServiceProfile;
 use serde::Deserialize;
 
 use super::RatingScore;
-use super::util::{optional_http, score_item};
+use super::util::score_item;
 
 const RT_ALGOLIA_API_KEY: &str = "175588f6e5f8319b27702e4cc4013561";
 const RT_ALGOLIA_APP_ID: &str = "79FRDP12PN";
@@ -20,7 +20,7 @@ pub(super) async fn scores(
     let Some(title) = title.filter(|title| !title.trim().is_empty()) else {
         return Vec::new();
     };
-    let Some(http) = optional_http(ctx, "Rotten Tomatoes lookup") else {
+    let Some(http) = ctx.data::<riven_core::http::HttpClient>().ok().cloned() else {
         return Vec::new();
     };
 

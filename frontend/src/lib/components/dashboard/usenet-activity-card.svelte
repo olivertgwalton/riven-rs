@@ -1,10 +1,10 @@
 <script lang="ts">
     import { untrack } from "svelte";
+    import { formatBytes } from "$lib/helpers";
     import * as Chart from "$lib/components/ui/chart/index.js";
-    import ResponsiveChartContainer from "$lib/components/media/riven/responsive-chart-container.svelte";
     import { LineChart } from "layerchart";
     import { curveCatmullRom } from "d3-shape";
-    import type { UsenetStreamingHealth, UsenetTraffic } from "./types";
+    import type { UsenetStreamingHealth, UsenetTraffic } from "$lib/gql/schema";
 
     let {
         health,
@@ -14,12 +14,6 @@
     // Stable provider colour palette (busiest-first order from `traffic.providers`).
     const PALETTE = ["#10b981", "#3b82f6", "#8b5cf6", "#f59e0b", "#ef4444", "#14b8a6", "#ec4899"];
 
-    function formatBytes(n: number) {
-        if (n <= 0) return "0 B";
-        const units = ["B", "KB", "MB", "GB", "TB", "PB"];
-        const i = Math.min(units.length - 1, Math.floor(Math.log(n) / Math.log(1024)));
-        return `${(n / 1024 ** i).toFixed(i <= 1 ? 0 : 1)} ${units[i]}`;
-    }
     const pct = (x: number) => `${(x * 100).toFixed(1)}%`;
     let width = $state(0);
 
@@ -201,7 +195,7 @@
                     Daily download volume ({daily.unit}, last 2 weeks)
                 </p>
                 <div bind:clientWidth={width} class="min-w-0">
-                    <ResponsiveChartContainer config={{}} class="h-52 w-full">
+                    <Chart.Container config={{}} class="h-52 w-full">
                         <LineChart
                             x="idx"
                             data={daily.data}
@@ -221,7 +215,7 @@
                                 <Chart.Tooltip />
                             {/snippet}
                         </LineChart>
-                    </ResponsiveChartContainer>
+                    </Chart.Container>
                 </div>
             </div>
         {/if}

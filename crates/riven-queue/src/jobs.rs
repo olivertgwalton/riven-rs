@@ -44,14 +44,10 @@ pub type HookAck = Result<HookOutcome, String>;
 /// Each step is a separate job execution; after enqueueing children (scrape /
 /// rank-streams) the worker exits, and the child flow's finalize hook
 /// re-pushes this job at the next step.
-///
-/// `next_scrape_attempt_at` is set by `Validate` after a download failure to
-/// defer the next scrape by 30 minutes.
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProcessStep {
-    /// Trigger scrape children. If `next_scrape_attempt_at` is in the future,
-    /// the job re-pushes itself at that time instead.
+    /// Trigger scrape children.
     Scrape,
     /// Trigger download children (rank-streams + find-valid-torrent + persist).
     Download,
@@ -65,9 +61,6 @@ pub enum ProcessStep {
 pub struct ProcessMediaItemJob {
     pub id: i64,
     pub step: ProcessStep,
-    /// Wall-clock to gate the next Scrape attempt. None means "scrape immediately".
-    #[serde(default)]
-    pub next_scrape_attempt_at: Option<DateTime<Utc>>,
     /// First-push timestamp; preserved across step re-pushes so the final
     /// "completed in Xh" log measures the real wall-clock cost.
     pub started_at: DateTime<Utc>,
@@ -78,18 +71,12 @@ impl ProcessMediaItemJob {
         Self {
             id,
             step: ProcessStep::Scrape,
-            next_scrape_attempt_at: None,
             started_at: Utc::now(),
         }
     }
 
     pub fn at_step(mut self, step: ProcessStep) -> Self {
         self.step = step;
-        self
-    }
-
-    pub fn with_next_scrape_attempt(mut self, at: DateTime<Utc>) -> Self {
-        self.next_scrape_attempt_at = Some(at);
         self
     }
 }

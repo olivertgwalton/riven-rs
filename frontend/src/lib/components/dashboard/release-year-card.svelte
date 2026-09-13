@@ -1,6 +1,5 @@
 <script lang="ts">
     import * as Chart from "$lib/components/ui/chart/index.js";
-    import ResponsiveChartContainer from "$lib/components/media/riven/responsive-chart-container.svelte";
     import { LineChart } from "layerchart";
     import { curveCatmullRom } from "d3-shape";
 
@@ -32,7 +31,7 @@
     </div>
 
     <div bind:clientWidth={width} class="min-w-0">
-        <ResponsiveChartContainer config={{}} class="h-52 w-full">
+        <Chart.Container config={{}} class="h-52 w-full">
             <LineChart
                 x="year"
                 {data}
@@ -52,6 +51,6 @@
                     <Chart.Tooltip />
                 {/snippet}
             </LineChart>
-        </ResponsiveChartContainer>
+        </Chart.Container>
     </div>
 </section>

@@ -11,7 +11,6 @@ serde_json = { workspace = true }
 async-trait = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
-url = "2"
 
 [lints]
 workspace = true

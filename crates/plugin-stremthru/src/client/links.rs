@@ -24,25 +24,22 @@ pub async fn generate_link(
     };
     let url = format!("{base_url}v0/store/{kind}/link/generate");
     tracing::debug!(store, kind, url = %url, "generating stremthru link");
-    let response = match send_store(http, redis, store, |client| {
-        client
-            .post(&url)
-            .store_headers(store, api_key)
+    let response = send_store(http, redis, store, None, |client| {
+        store_headers(client.post(&url), store, api_key)
             .json(&serde_json::json!({ "link": magnet }))
     })
-    .await?
-    {
-        StoreSend::Ok(response) => response,
-        StoreSend::Rejected { status, body } => {
-            if riven_core::stream_link::is_fatal_status_code(status.as_u16()) {
-                tracing::warn!(store, %status, "store reports torrent is dead");
-                return Ok(GeneratedLink::Dead);
-            }
-            anyhow::bail!("store rejected link generation: HTTP {} - {}", status, body);
+    .await?;
+    let status = response.status();
+    if !status.is_success() {
+        if riven_core::stream_link::is_fatal_status_code(status.as_u16()) {
+            tracing::warn!(store, %status, "store reports torrent is dead");
+            return Ok(GeneratedLink::Dead);
         }
-    };
+        let body = response.text().unwrap_or_default();
+        anyhow::bail!("store rejected link generation: HTTP {} - {}", status, body);
+    }
 
-    let text = response.text().await?;
+    let text = response.text()?;
     let resp: StremthruResponse<StremthruLink> = serde_json::from_str(&text)
         .map_err(|error| anyhow::anyhow!("invalid generate-link response: {error}; body={text}"))?;
 
@@ -54,24 +51,11 @@ pub async fn generate_link(
 }
 
 pub(super) fn describe_empty_link_response(body: &str) -> String {
-    match serde_json::from_str::<serde_json::Value>(body) {
-        Ok(value) => {
-            let code = value
-                .pointer("/error/code")
-                .and_then(serde_json::Value::as_str);
-            let message = value
-                .pointer("/error/message")
-                .and_then(serde_json::Value::as_str);
-
-            match (code, message) {
-                (Some(code), Some(message)) => {
-                    format!("store returned no link data: {code} - {message}")
-                }
-                (Some(code), None) => format!("store returned no link data: {code}; body={body}"),
-                (None, Some(message)) => format!("store returned no link data: {message}"),
-                (None, None) => format!("store returned no link data; body={body}"),
-            }
-        }
-        Err(_) => format!("store returned no link data; body={body}"),
+    let error = StremthruErrorResponse::parse(body).error;
+    match (error.code.as_str(), error.message.as_str()) {
+        ("", "") => format!("store returned no link data; body={body}"),
+        (code, "") => format!("store returned no link data: {code}; body={body}"),
+        ("", message) => format!("store returned no link data: {message}"),
+        (code, message) => format!("store returned no link data: {code} - {message}"),
     }
 }

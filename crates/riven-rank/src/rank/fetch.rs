@@ -39,41 +39,18 @@ fn adult_handler(data: &ParsedData, settings: &RankSettings, failed: &mut Vec<St
 /// Returns `true` if a required pattern matches the raw title.
 ///   `fetch: failed.size === 0 || checkRequired(data, settings)`
 fn required_matches(data: &ParsedData, settings: &RankSettings) -> bool {
-    if settings.require.is_empty() {
-        return false;
-    }
-    if settings.require_compiled.is_empty() {
-        debug_assert!(
-            false,
-            "RankSettings::prepare() was not called — regex compiled per-torrent"
-        );
-        settings
-            .require
-            .iter()
-            .filter_map(|p| regex::Regex::new(p).ok())
-            .any(|re| re.is_match(&data.raw_title))
-    } else {
-        settings
-            .require_compiled
-            .iter()
-            .any(|re| re.is_match(&data.raw_title))
-    }
+    settings
+        .require_compiled
+        .iter()
+        .any(|re| re.is_match(&data.raw_title))
 }
 
 fn check_exclude(data: &ParsedData, settings: &RankSettings, failed: &mut Vec<String>) -> bool {
-    let excluded = if settings.exclude_compiled.is_empty() {
-        settings
-            .exclude
-            .iter()
-            .filter_map(|p| regex::Regex::new(p).ok())
-            .any(|re| re.is_match(&data.raw_title))
-    } else {
-        settings
-            .exclude_compiled
-            .iter()
-            .any(|re| re.is_match(&data.raw_title))
-    };
-    if excluded {
+    if settings
+        .exclude_compiled
+        .iter()
+        .any(|re| re.is_match(&data.raw_title))
+    {
         failed.push("excluded_pattern".into());
         return false;
     }
@@ -213,28 +190,8 @@ fn fetch_other(data: &ParsedData, settings: &RankSettings, failed: &mut Vec<Stri
     let cr = &settings.custom_ranks;
     let speed = settings.options.fetch.enable_fetch_speed_mode;
 
-    let checks: &[(bool, &crate::settings::CustomRank, &str)] = &[
-        (data.three_d, &cr.extras.three_d, "three_d"),
-        (data.converted, &cr.extras.converted, "converted"),
-        (data.commentary, &cr.extras.commentary, "commentary"),
-        (data.documentary, &cr.extras.documentary, "documentary"),
-        (data.dubbed, &cr.extras.dubbed, "dubbed"),
-        (data.edition.is_some(), &cr.extras.edition, "edition"),
-        (data.hardcoded, &cr.extras.hardcoded, "hardcoded"),
-        (data.network.is_some(), &cr.extras.network, "network"),
-        (data.proper, &cr.extras.proper, "proper"),
-        (data.repack, &cr.extras.repack, "repack"),
-        (data.retail, &cr.extras.retail, "retail"),
-        (data.subbed, &cr.extras.subbed, "subbed"),
-        (data.upscaled, &cr.extras.upscaled, "upscaled"),
-        (data.site.is_some(), &cr.extras.site, "site"),
-        (data.scene, &cr.extras.scene, "scene"),
-        (data.uncensored, &cr.extras.uncensored, "uncensored"),
-        (data.size.is_some(), &cr.trash.size, "size"),
-    ];
-
     let initial_len = failed.len();
-    for &(cond, rank, name) in checks {
+    for (cond, rank, name) in super::scores::extras(data, cr) {
         if cond && !rank.fetch {
             failed.push(name.into());
             if speed {

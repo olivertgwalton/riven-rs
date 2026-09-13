@@ -266,6 +266,17 @@ impl<V> TtlMap<V> {
         key
     }
 
+    /// Read without consuming — for a handle that is polled repeatedly until
+    /// its flow concludes, then [`take`](Self::take)n.
+    pub fn peek(&self, key: &str) -> Option<V>
+    where
+        V: Clone,
+    {
+        let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let (created, value) = inner.get(key)?;
+        (created.elapsed() < self.ttl).then(|| value.clone())
+    }
+
     /// Remove and return — single-use by construction, so a challenge or
     /// state value can never be replayed.
     pub fn take(&self, key: &str) -> Option<V> {
@@ -292,6 +303,7 @@ mod tests {
     fn ttl_map_entries_are_single_use_and_expire() {
         let map = TtlMap::new(Duration::from_secs(60));
         let key = map.insert(42);
+        assert_eq!(map.peek(&key), Some(42), "peeking leaves the entry");
         assert_eq!(map.take(&key), Some(42));
         assert_eq!(map.take(&key), None);
 

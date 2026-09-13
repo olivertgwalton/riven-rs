@@ -1,9 +1,8 @@
 use async_trait::async_trait;
-use reqwest::StatusCode;
 use riven_core::events::{EventType, HookResponse, ScrapeRequest};
-use riven_core::http::{HttpServiceProfile, RetryLaterError};
+use riven_core::http::{HttpServiceProfile, RateLimitedError};
 use riven_core::plugin::{Plugin, PluginContext};
-use riven_core::stremio::StremioScrapeConfig;
+use riven_core::stremio::{StremioScrapeConfig, is_deferred_status};
 use riven_core::types::{ScrapeEntry, ScrapeResponse};
 use serde::Deserialize;
 
@@ -79,7 +78,7 @@ impl Plugin for TorrentioPlugin {
                     title = request.title,
                     "torrentio temporarily unavailable; deferring scrape"
                 );
-                return Err(RetryLaterError.into());
+                return Err(RateLimitedError.into());
             }
             anyhow::bail!(
                 "torrentio returned HTTP {status}: {}",
@@ -112,16 +111,6 @@ struct TorrentioStream {
     title: Option<String>,
     #[serde(rename = "infoHash")]
     info_hash: Option<String>,
-}
-
-fn is_deferred_status(status: StatusCode) -> bool {
-    matches!(
-        status,
-        StatusCode::TOO_MANY_REQUESTS
-            | StatusCode::BAD_GATEWAY
-            | StatusCode::SERVICE_UNAVAILABLE
-            | StatusCode::GATEWAY_TIMEOUT
-    )
 }
 
 fn scrape_results_from_response(resp: TorrentioResponse) -> ScrapeResponse {

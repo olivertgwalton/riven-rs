@@ -8,7 +8,7 @@ use tokio_util::sync::CancellationToken;
 
 use riven_core::events::RivenEvent;
 use riven_core::reindex::ReindexConfig;
-use riven_queue::{DownloaderConfig, JobQueue};
+use riven_queue::JobQueue;
 
 mod runtime;
 mod setup;
@@ -114,19 +114,23 @@ fn is_unspecified_host(host: &str) -> bool {
         .is_ok_and(|ip| ip.is_unspecified())
 }
 
-/// The host component of a URL, without scheme, port or path.
-fn url_host(url: &str) -> Option<&str> {
-    let after_scheme = url.split_once("://").map(|(_, rest)| rest).unwrap_or(url);
-    let authority = after_scheme
-        .split(['/', '?', '#'])
-        .next()
-        .unwrap_or(after_scheme);
-    // An IPv6 literal keeps its brackets, so only split a port off after them.
-    let host = match authority.rsplit_once(']') {
-        Some((bracketed, _)) => &authority[..bracketed.len() + 1],
-        None => authority.split(':').next().unwrap_or(authority),
+/// Whether a configured URL's host is a wildcard bind address. A bare
+/// `host[:port]` is read as though it carried an `http://` scheme.
+fn has_wildcard_host(value: &str) -> bool {
+    let wildcard = |url: url::Url| match url.host()? {
+        url::Host::Ipv4(ip) => Some(ip.is_unspecified()),
+        url::Host::Ipv6(ip) => Some(ip.is_unspecified()),
+        url::Host::Domain(domain) => Some(is_unspecified_host(domain)),
     };
-    (!host.is_empty()).then_some(host)
+    url::Url::parse(value)
+        .ok()
+        .and_then(wildcard)
+        .or_else(|| {
+            url::Url::parse(&format!("http://{value}"))
+                .ok()
+                .and_then(wildcard)
+        })
+        .unwrap_or(false)
 }
 
 /// The public origin browsers reach riven at.
@@ -156,7 +160,7 @@ fn resolve_public_url(
             continue;
         }
         anyhow::ensure!(
-            !url_host(value).is_some_and(is_unspecified_host),
+            !has_wildcard_host(value),
             "{source} is set to `{value}`, whose host is a wildcard bind address. \
              It must be the origin a browser reaches riven at — passkeys are bound \
              to this hostname and will not register against a wildcard."
@@ -196,11 +200,8 @@ async fn main() -> Result<()> {
         settings.apply_general_db_override(&general_settings);
     }
 
-    let log_settings = riven_core::logging::LogSettings::from(&settings);
     let (log_tx, _) = broadcast::channel::<String>(1024);
-    let observability =
-        riven_core::logging::init_logging(&log_settings, &settings.log_directory, log_tx.clone())?;
-    let log_control = observability.log_control.clone();
+    let log_control = riven_core::logging::init_logging(&settings, log_tx.clone())?;
     tracing::info!("riven starting up");
 
     if settings.unsafe_wipe_database_on_startup {
@@ -260,7 +261,7 @@ async fn main() -> Result<()> {
             &settings.redis_url,
             registry.clone(),
             notification_tx.clone(),
-            DownloaderConfig::from(&settings),
+            settings.attempt_unknown_downloads,
             ReindexConfig::from(&settings),
             settings.filesystem.clone(),
             settings.retry_interval_secs,
@@ -291,17 +292,13 @@ async fn main() -> Result<()> {
     let (link_tx, mut link_rx) = tokio::sync::mpsc::channel(64);
 
     let vfs_mount_path = settings.filesystem.mount_path.clone();
-    let usenet_local_source: Option<Arc<dyn riven_core::local_source::LocalByteSource>> =
-        usenet_streamer
-            .clone()
-            .map(|s| Arc::new(s) as Arc<dyn riven_core::local_source::LocalByteSource>);
     let vfs_mount_manager = Arc::new(riven_api::vfs_mount::VfsMountManager::new(
         &vfs_mount_path,
         job_queue.vfs_layout.clone(),
         job_queue.filesystem_settings_revision.clone(),
         stream_http_client.clone(),
         link_tx.clone(),
-        usenet_local_source,
+        usenet_streamer.clone(),
     )?);
 
     usenet::spawn_background_tasks(
@@ -402,7 +399,6 @@ async fn main() -> Result<()> {
                 log_directory: log_dir,
                 log_tx,
                 notification_tx: notif_tx,
-                downloader_config: jq.downloader_config.clone(),
                 log_control,
                 stream_client: stream_http_client.clone(),
                 link_request_tx: link_tx.clone(),
@@ -434,7 +430,6 @@ async fn main() -> Result<()> {
     runtime_tasks.drain(gql_handle).await;
 
     vfs_mount_manager.unmount().await;
-    observability.shutdown();
 
     tracing::info!("riven shutdown complete");
     Ok(())
@@ -442,7 +437,7 @@ async fn main() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{resolve_public_url, url_host, validate_auth_settings};
+    use super::{has_wildcard_host, resolve_public_url, validate_auth_settings};
     use riven_core::settings::RivenSettings;
 
     fn settings(api_key: &str) -> RivenSettings {
@@ -505,14 +500,24 @@ mod tests {
     }
 
     #[test]
-    fn url_hosts_are_extracted_without_scheme_port_or_path() {
-        assert_eq!(
-            url_host("https://riven.example.com/x?y"),
-            Some("riven.example.com")
-        );
-        assert_eq!(url_host("http://0.0.0.0:8080"), Some("0.0.0.0"));
-        assert_eq!(url_host("https://[::1]:8443/a"), Some("[::1]"));
-        assert_eq!(url_host("riven.example.com"), Some("riven.example.com"));
+    fn wildcard_hosts_are_found_with_or_without_a_scheme() {
+        for wildcard in [
+            "http://0.0.0.0:8080",
+            "https://[::]/a",
+            "http://[0:0:0:0:0:0:0:0]",
+            "0.0.0.0:8080",
+            "[::]:8080",
+        ] {
+            assert!(has_wildcard_host(wildcard), "{wildcard}");
+        }
+        for real in [
+            "https://riven.example.com/x?y",
+            "https://[::1]:8443/a",
+            "riven.example.com",
+            "localhost:8080",
+        ] {
+            assert!(!has_wildcard_host(real), "{real}");
+        }
     }
 
     #[test]

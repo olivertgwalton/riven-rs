@@ -3,7 +3,7 @@
     import { Button } from "$lib/components/ui/button/index.js";
     import { Separator } from "$lib/components/ui/separator/index.js";
     import SettingFieldEditor from "./setting-field-editor.svelte";
-    import { pluginStatus } from "./helpers";
+    import { groupPluginsByCategory, pluginStatus } from "./helpers";
     import type { SettingsSection, SetupGroup } from "./types";
 
     let {
@@ -20,25 +20,7 @@
     let saving = $state(false);
     const selected = $derived(sections.find((s) => s.id === selectedId) ?? sections[0] ?? null);
 
-    // Group plugins by their backend category, in the backend-defined group
-    // order (media → sources → services), each sorted by name. Anything with an
-    // unknown/missing category lands in a trailing "Other" group.
-    const grouped = $derived.by(() => {
-        const byName = (a: SettingsSection, b: SettingsSection) => a.title.localeCompare(b.title);
-        const knownIds = new Set(groups.map((group) => group.id));
-
-        const result = groups
-            .map((group) => ({
-                title: group.title,
-                sections: sections.filter((s) => s.category === group.id).sort(byName)
-            }))
-            .filter((group) => group.sections.length > 0);
-
-        const other = sections.filter((s) => !s.category || !knownIds.has(s.category)).sort(byName);
-        if (other.length > 0) result.push({ title: "Other", sections: other });
-
-        return result;
-    });
+    const grouped = $derived(groupPluginsByCategory(sections, groups));
 
     async function savePlugin() {
         if (!selected) return;

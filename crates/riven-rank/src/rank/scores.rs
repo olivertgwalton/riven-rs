@@ -1,130 +1,119 @@
-use std::collections::HashMap;
-
-use crate::defaults::RankingModel;
+use crate::defaults::DEFAULT_SCORES;
 use crate::parse::ParsedData;
-use crate::settings::RankSettings;
+use crate::settings::{CustomRank, CustomRanksConfig, RankSettings};
 
-const SCORE_PARTS_CAPACITY: usize = 8;
+/// `rank`'s custom score, falling back to the built-in `default`.
+fn resolve(rank: &CustomRank, default: &CustomRank) -> i64 {
+    rank.resolve(default.rank.unwrap_or(0))
+}
 
-fn calculate_quality_rank(data: &ParsedData, settings: &RankSettings, model: &RankingModel) -> i64 {
+/// Resolve a looked-up rank against the same lookup on the built-in defaults;
+/// 0 when the lookup does not recognise the value.
+fn resolve_lookup<'a>(
+    settings: &'a RankSettings,
+    lookup: impl Fn(&'a CustomRanksConfig) -> Option<&'a CustomRank>,
+) -> i64 {
+    lookup(&settings.custom_ranks)
+        .zip(lookup(&DEFAULT_SCORES))
+        .map_or(0, |(rank, default)| resolve(rank, default))
+}
+
+/// The boolean extras flags with the rank that applies to each, as
+/// `(present, rank, settings key)`. Shared by scoring and fetch checks.
+pub(super) fn extras<'a>(
+    data: &ParsedData,
+    cr: &'a CustomRanksConfig,
+) -> [(bool, &'a CustomRank, &'static str); 17] {
+    [
+        (data.three_d, &cr.extras.three_d, "three_d"),
+        (data.converted, &cr.extras.converted, "converted"),
+        (data.commentary, &cr.extras.commentary, "commentary"),
+        (data.documentary, &cr.extras.documentary, "documentary"),
+        (data.dubbed, &cr.extras.dubbed, "dubbed"),
+        (data.edition.is_some(), &cr.extras.edition, "edition"),
+        (data.hardcoded, &cr.extras.hardcoded, "hardcoded"),
+        (data.network.is_some(), &cr.extras.network, "network"),
+        (data.proper, &cr.extras.proper, "proper"),
+        (data.repack, &cr.extras.repack, "repack"),
+        (data.retail, &cr.extras.retail, "retail"),
+        (data.subbed, &cr.extras.subbed, "subbed"),
+        (data.upscaled, &cr.extras.upscaled, "upscaled"),
+        (data.site.is_some(), &cr.extras.site, "site"),
+        (data.scene, &cr.extras.scene, "scene"),
+        (data.uncensored, &cr.extras.uncensored, "uncensored"),
+        (data.size.is_some(), &cr.trash.size, "size"),
+    ]
+}
+
+fn calculate_quality_rank(data: &ParsedData, settings: &RankSettings) -> i64 {
     let Some(q) = data.quality.as_deref() else {
         return 0;
     };
-    settings
-        .custom_ranks
-        .quality_rank(q)
-        .map_or(0, |cr| cr.resolve(model.quality_score(q)))
+    resolve_lookup(settings, |cr| cr.quality_rank(q))
 }
 
-fn calculate_codec_rank(data: &ParsedData, settings: &RankSettings, model: &RankingModel) -> i64 {
+fn calculate_codec_rank(data: &ParsedData, settings: &RankSettings) -> i64 {
     let Some(codec) = data.codec.as_deref() else {
         return 0;
     };
-    settings
-        .custom_ranks
-        .codec_rank(codec)
-        .map_or(0, |cr| cr.resolve(model.codec_score(codec)))
+    resolve_lookup(settings, |cr| cr.codec_rank(codec))
 }
 
-fn calculate_hdr_rank(data: &ParsedData, settings: &RankSettings, model: &RankingModel) -> i64 {
-    let cr = &settings.custom_ranks;
+fn calculate_hdr_rank(data: &ParsedData, settings: &RankSettings) -> i64 {
     let mut score: i64 = data
         .hdr
         .iter()
-        .map(|h| {
-            cr.hdr_rank(h)
-                .map_or(0, |cr| cr.resolve(model.hdr_score(h)))
-        })
+        .map(|h| resolve_lookup(settings, |cr| cr.hdr_rank(h)))
         .sum();
     if data.bit_depth.is_some() {
-        score += cr.hdr.bit10.resolve(model.bit10);
+        score += resolve(&settings.custom_ranks.hdr.bit10, &DEFAULT_SCORES.hdr.bit10);
     }
     score
 }
 
-fn calculate_audio_rank(data: &ParsedData, settings: &RankSettings, model: &RankingModel) -> i64 {
-    let cr = &settings.custom_ranks;
+fn calculate_audio_rank(data: &ParsedData, settings: &RankSettings) -> i64 {
     data.audio
         .iter()
-        .map(|a| {
-            cr.audio_rank(a)
-                .map_or(0, |cr| cr.resolve(model.audio_score(a)))
-        })
+        .map(|a| resolve_lookup(settings, |cr| cr.audio_rank(a)))
         .sum()
 }
 
-fn calculate_channels_rank(
-    data: &ParsedData,
-    settings: &RankSettings,
-    model: &RankingModel,
-) -> i64 {
-    let cr = &settings.custom_ranks;
+fn calculate_channels_rank(data: &ParsedData, settings: &RankSettings) -> i64 {
+    let cr = &settings.custom_ranks.audio;
+    let d = &DEFAULT_SCORES.audio;
     data.channels
         .iter()
         .map(|c| match c.as_str() {
-            "5.1" | "7.1" => cr.audio.surround.resolve(model.surround),
-            "stereo" | "2.0" => cr.audio.stereo.resolve(model.stereo),
-            "mono" => cr.audio.mono.resolve(model.mono),
+            "5.1" | "7.1" => resolve(&cr.surround, &d.surround),
+            "stereo" | "2.0" => resolve(&cr.stereo, &d.stereo),
+            "mono" => resolve(&cr.mono, &d.mono),
             _ => 0,
         })
         .sum()
 }
 
-fn calculate_extra_ranks(data: &ParsedData, settings: &RankSettings, model: &RankingModel) -> i64 {
-    let cr = &settings.custom_ranks;
-    let checks: &[(bool, &crate::settings::CustomRank, i64)] = &[
-        (data.three_d, &cr.extras.three_d, model.three_d),
-        (data.converted, &cr.extras.converted, model.converted),
-        (data.commentary, &cr.extras.commentary, model.commentary),
-        (data.documentary, &cr.extras.documentary, model.documentary),
-        (data.dubbed, &cr.extras.dubbed, model.dubbed),
-        (data.edition.is_some(), &cr.extras.edition, model.edition),
-        (data.hardcoded, &cr.extras.hardcoded, model.hardcoded),
-        (data.network.is_some(), &cr.extras.network, model.network),
-        (data.proper, &cr.extras.proper, model.proper),
-        (data.repack, &cr.extras.repack, model.repack),
-        (data.retail, &cr.extras.retail, model.retail),
-        (data.subbed, &cr.extras.subbed, model.subbed),
-        (data.upscaled, &cr.extras.upscaled, model.upscaled),
-        (data.site.is_some(), &cr.extras.site, model.site),
-        (data.size.is_some(), &cr.trash.size, model.size),
-        (data.scene, &cr.extras.scene, model.scene),
-        (data.uncensored, &cr.extras.uncensored, model.uncensored),
-    ];
-    checks
-        .iter()
-        .filter(|(cond, _, _)| *cond)
-        .map(|(_, rank, default)| rank.resolve(*default))
+fn calculate_extra_ranks(data: &ParsedData, settings: &RankSettings) -> i64 {
+    extras(data, &settings.custom_ranks)
+        .into_iter()
+        .zip(extras(data, &DEFAULT_SCORES))
+        .filter(|((present, _, _), _)| *present)
+        .map(|((_, rank, _), (_, default, _))| resolve(rank, default))
         .sum()
 }
 
 fn calculate_preferred(data: &ParsedData, settings: &RankSettings) -> i64 {
-    if settings.preferred.is_empty() {
-        return 0;
-    }
-    let matches = if settings.preferred_compiled.is_empty() {
-        debug_assert!(
-            false,
-            "RankSettings::prepare() was not called — preferred regex compiled per-torrent"
-        );
-        settings
-            .preferred
-            .iter()
-            .filter_map(|p| regex::Regex::new(p).ok())
-            .any(|re| re.is_match(&data.raw_title))
+    if settings
+        .preferred_compiled
+        .iter()
+        .any(|re| re.is_match(&data.raw_title))
+    {
+        10000
     } else {
-        settings
-            .preferred_compiled
-            .iter()
-            .any(|re| re.is_match(&data.raw_title))
-    };
-    if matches { 10000 } else { 0 }
+        0
+    }
 }
 
 fn calculate_preferred_langs(data: &ParsedData, settings: &RankSettings) -> i64 {
-    if settings.languages.preferred.is_empty() {
-        return 0;
-    }
     if data
         .languages
         .iter()
@@ -136,60 +125,16 @@ fn calculate_preferred_langs(data: &ParsedData, settings: &RankSettings) -> i64 
     }
 }
 
-fn compute_rank(
-    data: &ParsedData,
-    settings: &RankSettings,
-    model: &RankingModel,
-    mut parts: Option<&mut HashMap<String, i64>>,
-) -> i64 {
-    let mut rank: i64 = 0;
-
-    let categories: &[(&str, i64)] = &[
-        ("quality", calculate_quality_rank(data, settings, model)),
-        ("hdr", calculate_hdr_rank(data, settings, model)),
-        ("channels", calculate_channels_rank(data, settings, model)),
-        ("audio", calculate_audio_rank(data, settings, model)),
-        ("codec", calculate_codec_rank(data, settings, model)),
-        ("extras", calculate_extra_ranks(data, settings, model)),
-    ];
-
-    for &(name, score) in categories {
-        if let Some(parts) = parts.as_deref_mut() {
-            parts.insert(name.into(), score);
-        }
-        rank += score;
-    }
-
-    for (name, score) in [
-        ("preferred_patterns", calculate_preferred(data, settings)),
-        (
-            "preferred_languages",
-            calculate_preferred_langs(data, settings),
-        ),
-    ] {
-        if let Some(parts) = parts.as_deref_mut()
-            && score != 0
-        {
-            parts.insert(name.into(), score);
-        }
-        rank += score;
-    }
-
-    rank
-}
-
+/// Total rank score for a parsed release. `settings` must have been
+/// [`RankSettings::prepare`]d so its pattern lists are compiled.
 #[must_use]
-pub fn get_rank_total(data: &ParsedData, settings: &RankSettings, model: &RankingModel) -> i64 {
-    compute_rank(data, settings, model, None)
-}
-
-#[must_use]
-pub fn get_rank(
-    data: &ParsedData,
-    settings: &RankSettings,
-    model: &RankingModel,
-) -> (i64, HashMap<String, i64>) {
-    let mut parts = HashMap::with_capacity(SCORE_PARTS_CAPACITY);
-    let rank = compute_rank(data, settings, model, Some(&mut parts));
-    (rank, parts)
+pub fn get_rank_total(data: &ParsedData, settings: &RankSettings) -> i64 {
+    calculate_quality_rank(data, settings)
+        + calculate_hdr_rank(data, settings)
+        + calculate_channels_rank(data, settings)
+        + calculate_audio_rank(data, settings)
+        + calculate_codec_rank(data, settings)
+        + calculate_extra_ranks(data, settings)
+        + calculate_preferred(data, settings)
+        + calculate_preferred_langs(data, settings)
 }

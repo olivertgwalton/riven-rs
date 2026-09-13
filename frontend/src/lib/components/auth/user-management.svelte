@@ -1,20 +1,17 @@
 <script lang="ts">
-    import * as Form from "$lib/components/ui/form/index.js";
     import { Input } from "$lib/components/ui/input/index.js";
+    import { Label } from "$lib/components/ui/label/index.js";
     import { Button } from "$lib/components/ui/button/index.js";
     import * as Table from "$lib/components/ui/table/index.js";
     import { Badge } from "$lib/components/ui/badge/index.js";
-    import type { SuperValidated } from "sveltekit-superforms";
-    import { superForm } from "sveltekit-superforms";
-    import { untrack } from "svelte";
-    import { zod4Client } from "sveltekit-superforms/adapters";
     import { toast } from "svelte-sonner";
     import LoaderCircle from "@lucide/svelte/icons/loader-circle";
     import { invalidateAll } from "$app/navigation";
     import { authClient } from "$lib/auth-client";
-    import { createUserSchema, type CreateUserSchema } from "$lib/schemas/auth";
+    import { createUserSchema } from "$lib/schemas/auth";
     import * as dateUtils from "$lib/utils/date";
     import FormBase from "./form-base.svelte";
+    import { validateForm } from "./validate";
 
     type ManagedUser = {
         id: string;
@@ -26,43 +23,42 @@
     };
 
     let {
-        formData: initialForm,
         users,
         currentUserId
     }: {
-        formData: SuperValidated<CreateUserSchema>;
         users: ManagedUser[];
         currentUserId: string;
     } = $props();
 
-    const form = untrack(() =>
-        superForm(initialForm, {
-            SPA: true,
-            validators: zod4Client(createUserSchema),
-            resetForm: true,
-            onUpdate: async ({ form }) => {
-                if (!form.valid) return;
+    let errors = $state<Record<string, string>>({});
+    let submitting = $state(false);
 
-                const { error } = await authClient.admin.createUser({
-                    username: form.data.username,
-                    email: form.data.email,
-                    password: form.data.password,
-                    role: form.data.role
-                });
+    async function onsubmit(event: SubmitEvent & { currentTarget: HTMLFormElement }) {
+        event.preventDefault();
+        const form = event.currentTarget;
+        const result = validateForm(createUserSchema, form);
+        errors = result.errors ?? {};
+        if (!result.data) return;
 
-                if (error) {
-                    form.valid = false;
-                    toast.error(error.message);
-                    return;
-                }
+        submitting = true;
+        const { error } = await authClient.admin.createUser({
+            username: result.data.username,
+            email: result.data.email,
+            password: result.data.password,
+            role: result.data.role
+        });
+        submitting = false;
 
-                await invalidateAll();
-                toast.success("User created successfully.");
-            }
-        })
-    );
+        if (error) {
+            toast.error(error.message);
+            return;
+        }
 
-    const { form: formData, enhance, delayed } = form;
+        form.reset();
+        await invalidateAll();
+        toast.success("User created successfully.");
+    }
+
     let deletingId = $state<string | null>(null);
     let changingRoleId = $state<string | null>(null);
 
@@ -106,83 +102,56 @@
     }
 </script>
 
+{#snippet field(
+    name: "username" | "email" | "password" | "confirmPassword",
+    label: string,
+    attrs: { type?: string; placeholder?: string; autocomplete?: "new-password" }
+)}
+    <div class="space-y-2">
+        <Label for={name} class={errors[name] && "text-destructive"}>{label}</Label>
+        <Input id={name} {name} {...attrs} aria-invalid={!!errors[name]} />
+        {#if errors[name]}
+            <p class="text-destructive text-sm font-medium">{errors[name]}</p>
+        {/if}
+    </div>
+{/snippet}
+
 <FormBase
     title="User Management"
     description="Create local credential users and choose their access role."
     class="pb-8 md:grid-cols-[12rem_minmax(0,1fr)]">
     {#snippet content()}
-        <form method="POST" use:enhance class="grid max-w-2xl gap-4 md:grid-cols-2">
-            <Form.Field {form} name="username">
-                <Form.Control>
-                    {#snippet children({ props })}
-                        <Form.Label for="username">Username</Form.Label>
-                        <Input placeholder="new_user" {...props} bind:value={$formData.username} />
-                    {/snippet}
-                </Form.Control>
-                <Form.FieldErrors />
-            </Form.Field>
+        <form
+            id="create-user-form"
+            novalidate
+            {onsubmit}
+            class="grid max-w-2xl gap-4 md:grid-cols-2">
+            {@render field("username", "Username", { placeholder: "new_user" })}
+            {@render field("email", "Email", { type: "email", placeholder: "user@example.com" })}
+            {@render field("password", "Password", { type: "password", autocomplete: "new-password" })}
+            {@render field("confirmPassword", "Confirm Password", {
+                type: "password",
+                autocomplete: "new-password"
+            })}
 
-            <Form.Field {form} name="email">
-                <Form.Control>
-                    {#snippet children({ props })}
-                        <Form.Label for="email">Email</Form.Label>
-                        <Input
-                            type="email"
-                            placeholder="user@example.com"
-                            {...props}
-                            bind:value={$formData.email} />
-                    {/snippet}
-                </Form.Control>
-                <Form.FieldErrors />
-            </Form.Field>
-
-            <Form.Field {form} name="password">
-                <Form.Control>
-                    {#snippet children({ props })}
-                        <Form.Label for="password">Password</Form.Label>
-                        <Input
-                            type="password"
-                            autocomplete="new-password"
-                            {...props}
-                            bind:value={$formData.password} />
-                    {/snippet}
-                </Form.Control>
-                <Form.FieldErrors />
-            </Form.Field>
-
-            <Form.Field {form} name="confirmPassword">
-                <Form.Control>
-                    {#snippet children({ props })}
-                        <Form.Label for="confirmPassword">Confirm Password</Form.Label>
-                        <Input
-                            type="password"
-                            autocomplete="new-password"
-                            {...props}
-                            bind:value={$formData.confirmPassword} />
-                    {/snippet}
-                </Form.Control>
-                <Form.FieldErrors />
-            </Form.Field>
-
-            <Form.Field {form} name="role" class="md:col-span-2">
-                <Form.Control>
-                    {#snippet children({ props })}
-                        <Form.Label for="role">Role</Form.Label>
-                        <select
-                            {...props}
-                            bind:value={$formData.role}
-                            class="border-input bg-background ring-offset-background placeholder:text-muted-foreground focus-visible:ring-ring flex h-9 w-full max-w-48 rounded-md border px-3 py-2 text-sm focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-50">
-                            <option value="user">User</option>
-                            <option value="manager">Manager</option>
-                            <option value="admin">Admin</option>
-                        </select>
-                    {/snippet}
-                </Form.Control>
-                <Form.Description>
+            <div class="space-y-2 md:col-span-2">
+                <Label for="role" class={errors.role && "text-destructive"}>Role</Label>
+                <select
+                    id="role"
+                    name="role"
+                    aria-describedby="role-description"
+                    class="border-input bg-background ring-offset-background placeholder:text-muted-foreground focus-visible:ring-ring flex h-9 w-full max-w-48 rounded-md border px-3 py-2 text-sm focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-50">
+                    <option value="user">User</option>
+                    <option value="manager">Manager</option>
+                    <option value="admin">Admin</option>
+                </select>
+                <p id="role-description" class="text-muted-foreground text-sm">
                     Managers can maintain the library. Admins can also access settings and users.
-                </Form.Description>
-                <Form.FieldErrors />
-            </Form.Field>
+                </p>
+                {#if errors.role}
+                    <p class="text-destructive text-sm font-medium">{errors.role}</p>
+                {/if}
+            </div>
         </form>
 
         <div class="border-border/60 mt-6 overflow-x-auto border-y">
@@ -246,17 +215,16 @@
     {/snippet}
 
     {#snippet footer()}
-        <Form.Button
+        <Button
+            type="submit"
+            form="create-user-form"
             variant="secondary"
             size="sm"
-            disabled={$delayed}
-            onclick={() => {
-                form.submit();
-            }}>
-            {#if $delayed}
+            disabled={submitting}>
+            {#if submitting}
                 <LoaderCircle class="mr-2 h-5 w-5 animate-spin" />
             {/if}
             Create user
-        </Form.Button>
+        </Button>
     {/snippet}
 </FormBase>

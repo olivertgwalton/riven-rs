@@ -21,54 +21,39 @@ anything outside the markers survives regeneration. -->
 
 | Variable | Kind | Read at |
 | --- | --- | --- |
-| `RIVEN_SETTING__SETUP_COMPLETED` | variable | `crates/riven-api/src/schema/queries/settings.rs:117` |
-| `RIVEN_STATIC_DIR` | variable | `crates/riven-api/src/server.rs:145` |
+| `RIVEN_SETTING__SETUP_COMPLETED` | variable | `crates/riven-api/src/schema/queries/settings.rs:111` |
+| `RIVEN_STATIC_DIR` | variable | `crates/riven-api/src/server.rs:135` |
 
 ### `riven-app`
 
 | Variable | Kind | Read at |
 | --- | --- | --- |
-| `ORIGIN` | variable | `crates/riven-app/src/main.rs:346`<br>`crates/riven-app/src/main.rs:364` |
-| `RIVEN_SETTING__API_KEY` | variable | `crates/riven-app/src/main.rs:522` |
-| `RIVEN_SETTING__PUBLIC_URL` | variable | `crates/riven-app/src/main.rs:152` |
-| `RIVEN_USENET_AUTO_REPAIR` | variable | `crates/riven-app/src/usenet.rs:160` |
-| `RIVEN_USENET_DISABLE_META_COMPACTION` | variable | `crates/riven-app/src/usenet.rs:93` |
-| `RIVEN_USENET_HEALTH_SCAN_BATCH` | variable | `crates/riven-app/src/usenet.rs:157` |
-| `RIVEN_USENET_HEALTH_SCAN_INTERVAL_SECS` | variable | `crates/riven-app/src/usenet.rs:154` |
-| `RIVEN_USENET_REPAIR_BASE_INTERVAL_SECS` | variable | `crates/riven-app/src/usenet.rs:161` |
-| `RIVEN_USENET_REPAIR_MAX_COOLDOWN_SECS` | variable | `crates/riven-app/src/usenet.rs:164` |
+| `ORIGIN` | variable | `crates/riven-app/src/main.rs:357`<br>`crates/riven-app/src/main.rs:375` |
+| `RIVEN_SETTING__API_KEY` | variable | `crates/riven-app/src/main.rs:541` |
+| `RIVEN_SETTING__PUBLIC_URL` | variable | `crates/riven-app/src/main.rs:156` |
+| `RIVEN_USENET_AUTO_REPAIR` | variable | `crates/riven-app/src/usenet.rs:151` |
+| `RIVEN_USENET_DISABLE_META_COMPACTION` | variable | `crates/riven-app/src/usenet.rs:84` |
+| `RIVEN_USENET_HEALTH_SCAN_BATCH` | variable | `crates/riven-app/src/usenet.rs:148` |
+| `RIVEN_USENET_HEALTH_SCAN_INTERVAL_SECS` | variable | `crates/riven-app/src/usenet.rs:145` |
+| `RIVEN_USENET_REPAIR_BASE_INTERVAL_SECS` | variable | `crates/riven-app/src/usenet.rs:152` |
+| `RIVEN_USENET_REPAIR_MAX_COOLDOWN_SECS` | variable | `crates/riven-app/src/usenet.rs:155` |
 
 ### `riven-core`
 
 | Variable | Kind | Read at |
 | --- | --- | --- |
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | variable | `crates/riven-core/src/logging.rs:198` |
-| `OTEL_SERVICE_NAME` | variable | `crates/riven-core/src/logging.rs:202` |
-| `RIVEN_MEMORY_LIMIT_MB` | variable | `crates/riven-core/src/cache.rs:175` |
+| `RIVEN_MEMORY_LIMIT_MB` | variable | `crates/riven-core/src/cache.rs:148` |
 | `RIVEN_READ_AHEAD_CACHE_BYTES` | variable | `crates/riven-core/src/cache.rs:58` |
 | `RIVEN_SETTING__` | prefix | `crates/riven-core/src/settings/app.rs:144` |
-| `RIVEN_USENET_CACHE_BYTES` | variable | `crates/riven-core/src/cache.rs:122` |
-| `RIVEN_USENET_FILE_CACHE_BYTES` | variable | `crates/riven-core/src/cache.rs:108` |
-| `RIVEN_USENET_META_CACHE_BYTES` | variable | `crates/riven-core/src/cache.rs:92` |
-| `RIVEN_USENET_NZB_CACHE_BYTES` | variable | `crates/riven-core/src/cache.rs:110` |
-| `RIVEN_USENET_SEGMENT_SIZE_CACHE_BYTES` | variable | `crates/riven-core/src/cache.rs:141` |
-| `SENTRY_DSN` | variable | `crates/riven-core/src/logging.rs:183` |
-| `SENTRY_ENVIRONMENT` | variable | `crates/riven-core/src/logging.rs:186` |
+| `RIVEN_USENET_CACHE_BYTES` | variable | `crates/riven-core/src/cache.rs:95` |
+| `RIVEN_USENET_META_CACHE_BYTES` | variable | `crates/riven-core/src/cache.rs:81` |
+| `RIVEN_USENET_NZB_CACHE_BYTES` | variable | `crates/riven-core/src/cache.rs:83` |
+| `RIVEN_USENET_SEGMENT_SIZE_CACHE_BYTES` | variable | `crates/riven-core/src/cache.rs:114` |
 
 ### `riven-db`
 
 | Variable | Kind | Read at |
 | --- | --- | --- |
 | `MIGRATION_TEST_DATABASE_URL` | variable | `crates/riven-db/examples/run_migrations.rs:22` |
-
-### `riven-vfs`
-
-| Variable | Kind | Read at |
-| --- | --- | --- |
-| `RIVEN_BENCH_DB` | variable | `crates/riven-vfs/examples/stream_bench.rs:169` |
-| `RIVEN_BENCH_NNTP_HOST` | variable | `crates/riven-vfs/examples/stream_bench.rs:174` |
-| `RIVEN_BENCH_NNTP_PASS` | variable | `crates/riven-vfs/examples/stream_bench.rs:172` |
-| `RIVEN_BENCH_NNTP_PORT` | variable | `crates/riven-vfs/examples/stream_bench.rs:175` |
-| `RIVEN_BENCH_NNTP_USER` | variable | `crates/riven-vfs/examples/stream_bench.rs:171` |
 <!-- END GENERATED -->
 

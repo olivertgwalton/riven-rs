@@ -8,14 +8,20 @@
     import Tv from "@lucide/svelte/icons/tv";
     import type { PageData } from "./$types";
     import { cn } from "$lib/utils";
-    import { IsMobile } from "$lib/hooks/is-mobile.svelte";
+    import { MediaQuery } from "svelte/reactivity";
     import * as dateUtils from "$lib/utils/date";
-    import { CalendarDate } from "@internationalized/date";
+    import {
+        type CalendarDate,
+        endOfMonth,
+        getDayOfWeek,
+        getLocalTimeZone,
+        startOfMonth
+    } from "@internationalized/date";
     import PageShell from "$lib/components/page-shell.svelte";
     import { resolve } from "$app/paths";
 
     let { data }: { data: PageData } = $props();
-    const isMobile = $state(new IsMobile(1280));
+    const isMobile = new MediaQuery("max-width: 1279px");
 
     interface EntertainmentItem {
         item_id: number;
@@ -75,20 +81,12 @@
         return undefined;
     }
 
-    const monthNames = [
-        "January",
-        "February",
-        "March",
-        "April",
-        "May",
-        "June",
-        "July",
-        "August",
-        "September",
-        "October",
-        "November",
-        "December"
-    ];
+    const monthFormat = new Intl.DateTimeFormat("en-US", { month: "long" });
+    const dayTitleFormat = new Intl.DateTimeFormat("en-US", {
+        weekday: "short",
+        month: "long",
+        day: "numeric"
+    });
     const dayNames = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
     const today = dateUtils.getToday();
@@ -135,16 +133,17 @@
     }
 
     const calendarDays: CalendarDay[] = $derived.by(() => {
-        const { year, month } = currentDate;
-        const firstDay = dateUtils.getFirstDayOfMonth(year, month);
-        const lastDay = dateUtils.getLastDayOfMonth(year, month);
-        const startOffset = dateUtils.getDayOfWeek(firstDay);
-        const totalDays = startOffset + lastDay.day + (6 - dateUtils.getDayOfWeek(lastDay));
+        const { month } = currentDate;
+        const firstDay = startOfMonth(currentDate);
+        const lastDay = endOfMonth(currentDate);
+        // Weeks start on Sunday (en-US).
+        const startOffset = getDayOfWeek(firstDay, "en-US");
+        const totalDays = startOffset + lastDay.day + (6 - getDayOfWeek(lastDay, "en-US"));
         const daysToShow = Math.ceil(totalDays / 7) * 7;
 
         const days: CalendarDay[] = [];
         for (let i = 0; i < daysToShow; i++) {
-            const currentDay = dateUtils.addDays(firstDay, i - startOffset);
+            const currentDay = firstDay.add({ days: i - startOffset });
             const dateKey = dateUtils.toISODate(currentDay);
             days.push({
                 date: currentDay,
@@ -160,21 +159,11 @@
     const visibleMonthDays = $derived(currentMonthDays.filter((day) => day.items.length > 0));
 
     function navigateMonth(direction: "prev" | "next") {
-        const delta = direction === "prev" ? -1 : 1;
-        let newMonth = currentDate.month + delta;
-        let newYear = currentDate.year;
-        if (newMonth < 1) {
-            newMonth = 12;
-            newYear--;
-        } else if (newMonth > 12) {
-            newMonth = 1;
-            newYear++;
-        }
-        currentDate = new CalendarDate(newYear, newMonth, 1);
+        currentDate = startOfMonth(currentDate).add({ months: direction === "prev" ? -1 : 1 });
     }
 
     function formatDayTitle(date: CalendarDate) {
-        return `${dayNames[dateUtils.getDayOfWeek(date)]}, ${monthNames[date.month - 1]} ${date.day}`;
+        return dayTitleFormat.format(date.toDate(getLocalTimeZone()));
     }
 </script>
 
@@ -335,7 +324,7 @@
     <header
         class="border-border/60 flex flex-col gap-4 border-b pb-5 md:flex-row md:items-end md:justify-between">
         <h1 class="truncate text-3xl font-bold tracking-tight">
-            {monthNames[currentDate.month - 1]}
+            {monthFormat.format(currentDate.toDate(getLocalTimeZone()))}
             {currentDate.year}
         </h1>
 

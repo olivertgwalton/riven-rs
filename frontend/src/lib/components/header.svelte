@@ -9,11 +9,10 @@
     import { goto, afterNavigate } from "$app/navigation";
     import { resolve } from "$app/paths";
     import { page } from "$app/state";
-    import type { createSidebarStore } from "$lib/stores/global.svelte";
+    import { sidebar } from "$lib/stores/global.svelte";
     import type { SearchStore } from "$lib/services/search-store.svelte";
     import { parseSearchQuery } from "$lib/search-parser";
 
-    const SidebarStore = getContext<createSidebarStore>("sidebarStore");
     const searchStore = getContext<SearchStore>("searchStore");
 
     // Detect modifier key client-side only to avoid hydration mismatch
@@ -139,7 +138,7 @@
             <Button
                 variant="ghost"
                 class="bg-background/60 size-10 rounded-xl backdrop-blur-md md:hidden"
-                onclick={() => SidebarStore.toggle()}>
+                onclick={() => (sidebar.open = !sidebar.open)}>
                 <Menu class="size-5" />
             </Button>
         </div>

@@ -13,163 +13,18 @@ use riven_core::types::*;
 use riven_db::entities::{MediaItem, Stream};
 use riven_db::repo;
 use riven_rank::RankSettings;
-use serde::Deserialize;
 
 use crate::context::{
-    DownloadHierarchyContext, load_download_hierarchy_context, notification_tvdb_id,
+    DownloadHierarchyContext, load_download_hierarchy_context, load_media_item_or_log,
+    notification_tvdb_id,
 };
 use crate::discovery::load_active_profiles;
 use crate::{DownloadJob, JobQueue, RankStreamsJob};
 
-use self::helpers::load_item_or_err;
-use self::persist::{finalize_download_success, persist_supplied_download};
+use self::persist::finalize_download_success;
 
 use self::candidates::{TitleMatchContext, rank_streams_for_profile};
 use self::execute::{DownloadAttemptOutcome, attempt_download};
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ManualDownloadFileInput {
-    pub name: String,
-    pub size: u64,
-    #[serde(default)]
-    pub link: Option<String>,
-    #[serde(default)]
-    pub matched_media_item_id: Option<i64>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ManualDownloadTorrentInput {
-    pub info_hash: String,
-    pub files: Vec<ManualDownloadFileInput>,
-    #[serde(default)]
-    pub provider: Option<String>,
-    #[serde(default)]
-    pub torrent_id: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ManualDownloadErrorKind {
-    IncorrectState,
-    DownloadError,
-}
-
-#[derive(Debug, Clone)]
-pub struct ManualDownloadError {
-    pub kind: ManualDownloadErrorKind,
-    pub item: Option<Box<MediaItem>>,
-    pub message: String,
-}
-
-impl ManualDownloadError {
-    fn incorrect_state(item: MediaItem) -> Self {
-        Self {
-            kind: ManualDownloadErrorKind::IncorrectState,
-            item: Some(Box::new(item)),
-            message: "media item is not in a downloadable state".to_string(),
-        }
-    }
-
-    fn download_error(item: Option<MediaItem>, message: impl Into<String>) -> Self {
-        Self {
-            kind: ManualDownloadErrorKind::DownloadError,
-            item: item.map(Box::new),
-            message: message.into(),
-        }
-    }
-}
-
-pub async fn persist_manual_download(
-    id: i64,
-    torrent: ManualDownloadTorrentInput,
-    processed_by: &str,
-    queue: &JobQueue,
-) -> Result<MediaItem, ManualDownloadError> {
-    let Some(item) = load_item_or_err(id, queue, "media item not found for download").await else {
-        return Err(ManualDownloadError::download_error(
-            None,
-            "media item not found for download",
-        ));
-    };
-
-    // A manually supplied torrent is an explicit user override: unlike the
-    // automatic pipeline (which treats `Completed` as terminal, see
-    // `main_orchestrator.rs`'s `process_media_item`), it's allowed to add a
-    // download to an already-`Completed` item so a second profile/version can
-    // be supplied alongside the first without discarding it.
-    if !matches!(
-        item.state,
-        MediaItemState::Scraped
-            | MediaItemState::Ongoing
-            | MediaItemState::PartiallyCompleted
-            | MediaItemState::Completed
-    ) {
-        queue
-            .notify(RivenEvent::MediaItemDownloadErrorIncorrectState { id })
-            .await;
-        return Err(ManualDownloadError::incorrect_state(item));
-    }
-
-    let streams = repo::get_streams_for_item(id).await.map_err(|error| {
-        ManualDownloadError::download_error(Some(item.clone()), error.to_string())
-    })?;
-    let Some(stream) = streams
-        .into_iter()
-        .find(|stream| stream.info_hash.eq_ignore_ascii_case(&torrent.info_hash))
-    else {
-        return Err(ManualDownloadError::download_error(
-            Some(item),
-            format!("no linked stream found for info hash {}", torrent.info_hash),
-        ));
-    };
-
-    if let Err(error) = repo::set_active_stream(id, stream.id).await {
-        return Err(ManualDownloadError::download_error(
-            Some(item),
-            error.to_string(),
-        ));
-    }
-
-    let start_time = Instant::now();
-    let download = DownloadResult {
-        info_hash: torrent.info_hash.clone(),
-        files: torrent
-            .files
-            .iter()
-            .map(|file| DownloadFile {
-                filename: file.name.clone(),
-                file_size: file.size,
-                download_url: file.link.clone(),
-                stream_url: file
-                    .matched_media_item_id
-                    .map(|episode_id| format!("matched:{episode_id}")),
-                usenet_info_hash: None,
-                usenet_file_index: None,
-            })
-            .collect(),
-        provider: torrent.provider.clone(),
-        plugin_name: processed_by.to_string(),
-    };
-
-    match persist_supplied_download(&item, &stream, download, queue, start_time).await {
-        Ok(()) => repo::get_media_item(id)
-            .await
-            .map_err(|error| {
-                ManualDownloadError::download_error(Some(item.clone()), error.to_string())
-            })?
-            .ok_or_else(|| {
-                ManualDownloadError::download_error(
-                    Some(item),
-                    "media item disappeared after download persist",
-                )
-            }),
-        Err(error) => Err(ManualDownloadError::download_error(
-            Some(item),
-            error.to_string(),
-        )),
-    }
-}
 
 /// Step 1 of the download flow: validate the item is in a processable state
 /// and hand off to `download::run`. Cache-check used to live here (bulk
@@ -177,7 +32,7 @@ pub async fn persist_manual_download(
 /// `download::run`'s per-iteration loop so an early hit on the first provider
 /// short-circuits slower providers.
 pub async fn run_rank_streams(id: i64, job: &RankStreamsJob, queue: &JobQueue) {
-    let Some(item) = load_item_silently(id, "rank-streams").await else {
+    let Some(item) = load_media_item_or_log(id, "rank-streams").await else {
         return;
     };
 
@@ -264,7 +119,7 @@ async fn record_download_failure(id: i64) {
 pub async fn run(id: i64, job: &DownloadJob, queue: &JobQueue) {
     let start_time = Instant::now();
 
-    let Some(item) = load_item_silently(id, "download").await else {
+    let Some(item) = load_media_item_or_log(id, "download").await else {
         return;
     };
 
@@ -444,31 +299,6 @@ pub async fn has_realistic_download_candidate(item: &MediaItem, queue: &JobQueue
     active_profiles.iter().any(|(_, settings)| {
         !rank_streams_for_profile(&streams, item, settings, &title_ctx).is_empty()
     })
-}
-
-/// Load the media item; return `None` (without emitting a user-visible event)
-/// when it's gone
-async fn load_item_silently(id: i64, phase: &str) -> Option<MediaItem> {
-    match repo::get_media_item(id).await {
-        Ok(Some(item)) => Some(item),
-        Ok(None) => {
-            tracing::debug!(
-                id,
-                step = phase,
-                "download: item no longer exists (deleted or unrequested), abandoning this step"
-            );
-            None
-        }
-        Err(error) => {
-            tracing::error!(
-                id,
-                step = phase,
-                %error,
-                "download: could not read the item from the database, abandoning this step"
-            );
-            None
-        }
-    }
 }
 
 /// Memoizes cache-check results per `(plugin, provider)` so the same provider
@@ -690,10 +520,8 @@ async fn run_preferred_stream(
     };
 
     let attempt_unknown = queue
-        .downloader_config
-        .read()
-        .await
-        .attempt_unknown_downloads;
+        .attempt_unknown_downloads
+        .load(std::sync::atomic::Ordering::SeqCst);
 
     for (plugin, provider) in plugin_providers {
         let cached_files = match cache
@@ -713,11 +541,9 @@ async fn run_preferred_stream(
 
         match attempt_download(
             id,
-            item,
             queue,
             stream,
             stores,
-            preferred_profile_name,
             preferred_profile_name,
             start_time,
             hierarchy,
@@ -781,10 +607,8 @@ async fn run_downloads(
     let mut any_deferred = false;
     let mut attempted: HashSet<(String, String, Option<String>)> = HashSet::new();
     let attempt_unknown = queue
-        .downloader_config
-        .read()
-        .await
-        .attempt_unknown_downloads;
+        .attempt_unknown_downloads
+        .load(std::sync::atomic::Ordering::SeqCst);
     let title_ctx = TitleMatchContext::new(item, hierarchy);
 
     for (profile_name, profile_settings) in profiles {
@@ -892,11 +716,9 @@ async fn run_downloads(
 
                 match attempt_download(
                     id,
-                    item,
                     queue,
                     stream,
                     stores,
-                    Some(profile_name.as_str()),
                     Some(profile_name.as_str()),
                     start_time,
                     hierarchy,

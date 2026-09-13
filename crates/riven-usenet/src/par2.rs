@@ -50,12 +50,6 @@ pub struct Par2FileDesc {
     /// 16-byte File ID (the MD5 hash the rest of the par2 set uses to refer
     /// to this file). Useful as a stable key.
     pub file_id: [u8; 16],
-    /// MD5 of the full file contents.
-    pub md5_full: [u8; 16],
-    /// MD5 of the first 16 KiB of the file. Lets a caller identify which
-    /// downloaded (often obfuscated) file maps to which FileDesc without
-    /// reading the whole thing.
-    pub md5_16k: [u8; 16],
     /// File length in bytes.
     pub length: u64,
     /// UTF-8 filename. Length-prefix is implicit (`packet_length` minus the
@@ -83,9 +77,10 @@ where
             cursor += 1;
             continue;
         }
-        let mut len_bytes = [0u8; 8];
-        len_bytes.copy_from_slice(&par2[cursor + 8..cursor + 16]);
-        let packet_length = u64::from_le_bytes(len_bytes);
+        // At least 64 bytes remain, so the 8-byte length field is present.
+        let packet_length = par2[cursor + 8..]
+            .first_chunk()
+            .map_or(0, |len| u64::from_le_bytes(*len));
         if packet_length < 64 {
             return Err(Par2Error::BadLength(packet_length));
         }
@@ -107,62 +102,45 @@ where
 }
 
 fn decode_file_desc(body: &[u8], at: usize) -> Result<Par2FileDesc, Par2Error> {
-    if body.len() < 56 {
+    // File ID, full MD5, 16K MD5, then the length; only the ID, length and
+    // name are used.
+    let (Some(file_id), Some(length)) = (
+        body.first_chunk::<16>(),
+        body.get(48..).and_then(|rest| rest.first_chunk::<8>()),
+    ) else {
         return Err(Par2Error::Truncated(at));
-    }
-    let mut file_id = [0u8; 16];
-    file_id.copy_from_slice(&body[0..16]);
-    let mut md5_full = [0u8; 16];
-    md5_full.copy_from_slice(&body[16..32]);
-    let mut md5_16k = [0u8; 16];
-    md5_16k.copy_from_slice(&body[32..48]);
-    let mut len_bytes = [0u8; 8];
-    len_bytes.copy_from_slice(&body[48..56]);
-    let length = u64::from_le_bytes(len_bytes);
+    };
     let name_raw = &body[56..];
     let trimmed = match name_raw.iter().rposition(|&b| b != 0) {
         Some(p) => &name_raw[..=p],
         None => &name_raw[..0],
     };
     Ok(Par2FileDesc {
-        file_id,
-        md5_full,
-        md5_16k,
-        length,
+        file_id: *file_id,
+        length: u64::from_le_bytes(*length),
         filename: String::from_utf8_lossy(trimmed).into_owned(),
     })
 }
 
 fn decode_slice_size(body: &[u8], at: usize) -> Result<u64, Par2Error> {
-    if body.len() < 8 {
-        return Err(Par2Error::Truncated(at));
-    }
-    let mut sz = [0u8; 8];
-    sz.copy_from_slice(&body[0..8]);
-    Ok(u64::from_le_bytes(sz))
+    body.first_chunk()
+        .map(|size| u64::from_le_bytes(*size))
+        .ok_or(Par2Error::Truncated(at))
 }
 
 fn decode_ifsc(body: &[u8], at: usize) -> Result<([u8; 16], Vec<Par2Block>), Par2Error> {
-    if body.len() < 16 {
+    let Some((file_id, rest)) = body.split_first_chunk::<16>() else {
         return Err(Par2Error::Truncated(at));
-    }
-    let mut file_id = [0u8; 16];
-    file_id.copy_from_slice(&body[0..16]);
-    let rest = &body[16..];
-    let mut blocks = Vec::with_capacity(rest.len() / 20);
-    let mut i = 0usize;
-    while i + 20 <= rest.len() {
-        let mut md5 = [0u8; 16];
-        md5.copy_from_slice(&rest[i..i + 16]);
-        let mut crc_bytes = [0u8; 4];
-        crc_bytes.copy_from_slice(&rest[i + 16..i + 20]);
-        blocks.push(Par2Block {
-            md5,
-            crc32: u32::from_le_bytes(crc_bytes),
-        });
-        i += 20;
-    }
-    Ok((file_id, blocks))
+    };
+    // Each entry is a 16-byte MD5 (unused) followed by a 4-byte CRC32.
+    let (entries, _) = rest.as_chunks::<20>();
+    let blocks = entries
+        .iter()
+        .map(|entry| Par2Block {
+            crc32: u32::from_le_bytes([entry[16], entry[17], entry[18], entry[19]]),
+        })
+        .collect();
+    Ok((*file_id, blocks))
 }
 
 /// Walk a PAR2 blob and return every `FileDesc` packet found. Duplicate
@@ -193,14 +171,11 @@ pub fn looks_like_par2(filename: &str) -> bool {
     lower.ends_with(".par2")
 }
 
-/// One PAR2 slice's checksums from an `IFSC` packet. `crc32` is used for the
+/// One PAR2 slice's checksum from an `IFSC` packet. `crc32` is used for the
 /// actual verification (already a workspace dependency via `crc32fast`,
-/// consistent with a strong-enough integrity check, not a security check);
-/// `md5` is kept since it's on the wire at no extra parse cost and useful for
-/// a caller that wants belt-and-suspenders confirmation.
+/// consistent with a strong-enough integrity check, not a security check).
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub struct Par2Block {
-    pub md5: [u8; 16],
     pub crc32: u32,
 }
 
@@ -362,7 +337,7 @@ mod tests {
         let mut body = Vec::new();
         body.extend_from_slice(&file_id);
         for b in blocks {
-            body.extend_from_slice(&b.md5);
+            body.extend_from_slice(&[0u8; 16]);
             body.extend_from_slice(&b.crc32.to_le_bytes());
         }
         let packet_length: u64 = 64 + body.len() as u64;
@@ -389,14 +364,8 @@ mod tests {
 
     fn sample_blocks() -> Vec<Par2Block> {
         vec![
-            Par2Block {
-                md5: [1u8; 16],
-                crc32: 0xdead_beef,
-            },
-            Par2Block {
-                md5: [2u8; 16],
-                crc32: 0x1234_5678,
-            },
+            Par2Block { crc32: 0xdead_beef },
+            Par2Block { crc32: 0x1234_5678 },
         ]
     }
 
@@ -435,14 +404,8 @@ mod tests {
 
     #[test]
     fn parse_set_keeps_first_main_and_first_ifsc_on_duplicate() {
-        let first = vec![Par2Block {
-            md5: [1u8; 16],
-            crc32: 1,
-        }];
-        let second = vec![Par2Block {
-            md5: [2u8; 16],
-            crc32: 2,
-        }];
+        let first = vec![Par2Block { crc32: 1 }];
+        let second = vec![Par2Block { crc32: 2 }];
         let mut blob = make_full_set(1024, "Movie.mkv", &first);
         // A second, conflicting mirror of both packets later in the set.
         blob.extend(make_main_packet(4096, &[[0u8; 16]]));

@@ -98,12 +98,6 @@ impl CoreSettingsQuery {
         Ok(serde_json::to_value(profiles)?)
     }
 
-    /// Get all stored settings as a JSON object.
-    async fn all_settings(&self, ctx: &Context<'_>) -> Result<serde_json::Value> {
-        require_settings_access(ctx)?;
-        Ok(repo::get_all_settings().await?)
-    }
-
     /// Return instance-level status flags used by frontend bootstrap flows.
     /// Owns the setup-readiness rule so the UI never has to recompute it.
     async fn instance_status(&self, ctx: &Context<'_>) -> Result<InstanceStatus> {

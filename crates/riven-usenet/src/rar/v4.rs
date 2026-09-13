@@ -26,17 +26,12 @@ pub(super) fn parse_volume_header_v4(bytes: &[u8]) -> Result<RarVolumeHeader, Ra
 
         match common.head_type {
             MAIN_HEAD => {
-                out.is_volume = (common.head_flags & 0x0001) != 0;
                 cursor.set_position(pos_block_start + common.head_size as u64);
             }
             FILE_HEAD => {
-                let entry =
-                    match read_file_head(&mut cursor, &common, pos_block_start, bytes.len() as u64)
-                    {
-                        Ok(Some(e)) => e,
-                        Ok(None) => break,
-                        Err(_) => break,
-                    };
+                let Some(entry) = read_file_head(&mut cursor, &common, pos_block_start) else {
+                    break;
+                };
 
                 let data_end = entry.data_offset.saturating_add(entry.packed_size);
                 out.files.push(entry);
@@ -96,28 +91,29 @@ fn read_common_header(cur: &mut Cursor<&[u8]>, total_len: u64) -> Option<CommonH
     })
 }
 
+/// `None` when the header is malformed (no `LONG_BLOCK`) or runs past the
+/// bytes available; the caller stops walking the volume either way.
 fn read_file_head(
     cur: &mut Cursor<&[u8]>,
     common: &CommonHeader,
     block_start: u64,
-    total_len: u64,
-) -> Result<Option<RarVolumeFileEntry>, RarError> {
+) -> Option<RarVolumeFileEntry> {
     if (common.head_flags & FLAG_LONG_BLOCK) == 0 {
-        return Err(RarError::InvalidBlock("FILE_HEAD without LONG_BLOCK"));
+        return None;
     }
     let pack_lo = common.add_size;
-    let unp_lo = read_u32(cur).ok_or(truncated(4, total_len, cur.position()))?;
-    let _host_os = read_u8(cur).ok_or(truncated(1, total_len, cur.position()))?;
-    let _file_crc = read_u32(cur).ok_or(truncated(4, total_len, cur.position()))?;
-    let _ftime = read_u32(cur).ok_or(truncated(4, total_len, cur.position()))?;
-    let _unp_ver = read_u8(cur).ok_or(truncated(1, total_len, cur.position()))?;
-    let method = read_u8(cur).ok_or(truncated(1, total_len, cur.position()))?;
-    let name_size = read_u16(cur).ok_or(truncated(2, total_len, cur.position()))?;
-    let _attr = read_u32(cur).ok_or(truncated(4, total_len, cur.position()))?;
+    let unp_lo = read_u32(cur)?;
+    let _host_os = read_u8(cur)?;
+    let _file_crc = read_u32(cur)?;
+    let _ftime = read_u32(cur)?;
+    let _unp_ver = read_u8(cur)?;
+    let method = read_u8(cur)?;
+    let name_size = read_u16(cur)?;
+    let _attr = read_u32(cur)?;
 
     let (pack_size, unpacked_size) = if (common.head_flags & FILE_FLAG_HIGH_SIZE) != 0 {
-        let high_pack = read_u32(cur).ok_or(truncated(4, total_len, cur.position()))?;
-        let high_unp = read_u32(cur).ok_or(truncated(4, total_len, cur.position()))?;
+        let high_pack = read_u32(cur)?;
+        let high_unp = read_u32(cur)?;
         (
             ((high_pack as u64) << 32) | (pack_lo as u64),
             ((high_unp as u64) << 32) | (unp_lo as u64),
@@ -127,9 +123,7 @@ fn read_file_head(
     };
 
     let mut name_bytes = vec![0u8; name_size as usize];
-    if cur.read_exact(&mut name_bytes).is_err() {
-        return Ok(None);
-    }
+    cur.read_exact(&mut name_bytes).ok()?;
     let name = decode_filename(&name_bytes, common.head_flags & FILE_FLAG_UNICODE != 0);
 
     if (common.head_flags & FILE_FLAG_SALT) != 0 {
@@ -138,14 +132,14 @@ fn read_file_head(
 
     let data_offset = block_start + common.head_size as u64;
 
-    Ok(Some(RarVolumeFileEntry {
+    Some(RarVolumeFileEntry {
         name,
         data_offset,
         packed_size: pack_size,
         unpacked_size,
         method,
         encryption: None,
-    }))
+    })
 }
 
 /// Layout of one block at offset 0 of `bytes`: returns `(header_size,
@@ -189,9 +183,4 @@ fn read_u32(cur: &mut Cursor<&[u8]>) -> Option<u32> {
     let mut buf = [0u8; 4];
     cur.read_exact(&mut buf).ok()?;
     Some(u32::from_le_bytes(buf))
-}
-
-fn truncated(needed: usize, total: u64, pos: u64) -> RarError {
-    let available = total.saturating_sub(pos) as usize;
-    RarError::Truncated { needed, available }
 }

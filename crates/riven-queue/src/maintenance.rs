@@ -41,24 +41,11 @@ fn worker_metadata_key(workers_set: &str, worker_name: &str) -> String {
 
 const QUEUE_REGISTRY_KEY: &str = "core::apalis::queues::list";
 
-/// The apalis-redis configuration for one riven queue.
-///
-/// Every storage in [`crate::JobQueue`] and every maintenance pass builds its
-/// config here, so the two can never disagree about a queue. That matters
-/// beyond tidiness: the stale-worker rescue derives its cutoff from
-/// `get_keep_alive()`, which is only a correct reading of "this worker stopped
-/// heartbeating" if it comes from the same config the worker registered with.
-/// Tuning a queue means changing it here, once, and the maintenance passes
-/// follow automatically.
-pub(crate) fn queue_config(namespace: &str) -> RedisConfig {
-    RedisConfig::new(namespace)
-}
-
 /// Walk the apalis queue registry, find workers_sets whose queue is not in
 /// `live_queues`, and drop them along with their metadata hashes. Cleans up
 /// zombie worker registrations left by queues that have since been removed
 /// (e.g. `riven:scrape-plugin` after the per-(plugin) hook-queue refactor).
-/// `clear_worker_registrations` only walks the live queue list, so without
+/// `rescue_workers` only walks the live queue list, so without
 /// this pass the dashboard would keep showing pre-deploy workers indefinitely.
 pub async fn purge_orphaned_worker_sets(
     redis: &mut redis::aio::ConnectionManager,
@@ -66,7 +53,7 @@ pub async fn purge_orphaned_worker_sets(
 ) {
     let live: HashSet<String> = live_queues
         .iter()
-        .map(|q| queue_config(q).workers_set())
+        .map(|q| RedisConfig::new(q).workers_set())
         .collect();
 
     let registered: Vec<String> = match redis::cmd("ZRANGE")
@@ -120,26 +107,6 @@ const FAILED_JOB_MAX_AGE_SECS: i64 = 60 * 60 * 24;
 const COMPLETED_JOB_MAX_COUNT: isize = 500;
 const FAILED_JOB_MAX_COUNT: isize = 5_000;
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct RecoveryReport {
-    pub workers: u64,
-    pub jobs: u64,
-}
-
-/// Re-enqueue every inflight job and clear every worker registration.
-///
-/// Startup only: nothing this process owns is running yet, so every
-/// registration and claim in Redis belongs to a previous incarnation of the
-/// process (a hard kill, an OOM, a `docker restart`) and is safe to sweep
-/// wholesale. While the process is alive, per-worker recovery happens at
-/// worker-restart time instead — see [`clear_dead_incarnation`].
-pub async fn clear_worker_registrations(
-    redis: &mut redis::aio::ConnectionManager,
-    queues: &[String],
-) -> redis::RedisResult<RecoveryReport> {
-    rescue_workers(redis, queues).await
-}
-
 /// Clear a dead worker incarnation out of the way of its replacement:
 /// requeue everything it was holding and remove its registration.
 ///
@@ -188,7 +155,7 @@ pub async fn clear_dead_incarnation(
         return moved
     "#;
 
-    let config = queue_config(queue_name);
+    let config = RedisConfig::new(queue_name);
     // The workers-zset member IS the inflight-set name, and the metadata key
     // is that member appended to `{ns}:workers:metadata` — both per
     // apalis-redis's own registration (lib.rs heartbeat + register_worker.lua).
@@ -213,37 +180,35 @@ pub async fn clear_dead_incarnation(
     Ok(moved)
 }
 
-async fn rescue_workers(
-    redis: &mut redis::aio::ConnectionManager,
-    queues: &[String],
-) -> redis::RedisResult<RecoveryReport> {
-    let mut report = RecoveryReport::default();
+/// Re-enqueue every inflight job and clear every worker registration.
+///
+/// Startup only: nothing this process owns is running yet, so every
+/// registration and claim in Redis belongs to a previous incarnation of the
+/// process (a hard kill, an OOM, a `docker restart`) and is safe to sweep
+/// wholesale. While the process is alive, per-worker recovery happens at
+/// worker-restart time instead — see [`clear_dead_incarnation`].
+pub async fn rescue_workers(redis: &mut redis::aio::ConnectionManager, queues: &[String]) {
     // Per-queue isolation: one queue failing must not abandon the sweep for
     // the rest. An abandoned sweep leaves stale registrations behind, and
     // every worker whose registration survives fails its first register
     // ("worker is still active within threshold") — one error here used to
     // cascade into a restart wave across every queue.
     for queue_name in queues {
-        match rescue_queue(redis, queue_name).await {
-            Ok((workers, jobs)) => {
-                report.workers += workers;
-                report.jobs += jobs;
-            }
-            Err(error) => tracing::error!(
+        if let Err(error) = rescue_queue(redis, queue_name).await {
+            tracing::error!(
                 queue = queue_name,
                 %error,
                 "could not sweep the previous incarnation's workers; replacements on this queue will each recover individually"
-            ),
+            );
         }
     }
-    Ok(report)
 }
 
 async fn rescue_queue(
     redis: &mut redis::aio::ConnectionManager,
     queue_name: &str,
-) -> redis::RedisResult<(u64, u64)> {
-    let config = queue_config(queue_name);
+) -> redis::RedisResult<()> {
+    let config = RedisConfig::new(queue_name);
     let workers: Vec<String> = redis::cmd("ZRANGE")
         .arg(config.workers_set())
         .arg(0i64)
@@ -251,7 +216,7 @@ async fn rescue_queue(
         .query_async(redis)
         .await?;
     if workers.is_empty() {
-        return Ok((0, 0));
+        return Ok(());
     }
 
     let worker_jobs: Vec<Vec<String>> = {
@@ -308,15 +273,13 @@ async fn rescue_queue(
     }
     transaction.query_async::<()>(redis).await?;
 
-    let worker_count = workers.len() as u64;
-    let job_count = rescued.len() as u64;
     tracing::info!(
         queue = queue_name,
-        workers = worker_count,
-        jobs = job_count,
+        workers = workers.len(),
+        jobs = rescued.len(),
         "recovered previous incarnation's workers"
     );
-    Ok((worker_count, job_count))
+    Ok(())
 }
 
 /// Remove job IDs from each queue's active list that have no corresponding
@@ -328,7 +291,7 @@ pub async fn purge_orphaned_active_jobs(
     queues: &[String],
 ) {
     for queue_name in queues {
-        let config = queue_config(queue_name);
+        let config = RedisConfig::new(queue_name);
         let active_key = config.active_jobs_list();
         let data_key = config.job_data_hash();
 
@@ -383,7 +346,7 @@ const DEDUP_KEY_PATTERN: &str = "riven:dedup:*";
 /// Delete all `riven:dedup:*` keys left over by `DedupGuard::drop`, which only
 /// *attempts* an async cleanup and can lose the race against process exit on
 /// a hard restart. Safe to run unconditionally here for the same reason
-/// `clear_worker_registrations` unconditionally rescues jobs at this point:
+/// `rescue_workers` unconditionally rescues jobs at this point:
 /// anything holding a dedup key before this pass is presumed dead.
 pub async fn purge_stale_dedup_keys(redis: &mut redis::aio::ConnectionManager) {
     let mut cursor: u64 = 0;
@@ -426,14 +389,9 @@ pub async fn purge_stale_dedup_keys(redis: &mut redis::aio::ConnectionManager) {
 /// cutoff, does it via `HGETALL` of the entire data hash (which blocks Redis
 /// for the duration on a large one), and exposes no public way to call it
 /// anyway.
-/// Hand-rolled history retention, kept deliberately: apalis-redis rc.8 ships
-/// `vacuum.lua`, but it deletes *every* terminal task with no age or count
-/// cutoff, does it via `HGETALL` of the entire data hash (which blocks Redis
-/// for the duration on a large one), and exposes no public way to call it
-/// anyway.
 pub async fn prune_queue_history(redis: &mut redis::aio::ConnectionManager, queues: &[String]) {
     for queue in queues {
-        let config = queue_config(queue);
+        let config = RedisConfig::new(queue);
         let data = config.job_data_hash();
         let meta = config.job_meta_hash();
         let done = prune_set(
@@ -530,7 +488,7 @@ async fn prune_set(
 
 #[cfg(test)]
 mod tests {
-    use super::queue_config;
+    use apalis_redis::RedisConfig;
 
     /// The restart cleanup and apalis's registration must address the same
     /// keys, or restarts would silently clear nothing — or worse, leave the
@@ -541,7 +499,7 @@ mod tests {
     /// reconstruction of all three.
     #[test]
     fn dead_incarnation_keys_match_apalis_layout() {
-        let config = queue_config("riven:download");
+        let config = RedisConfig::new("riven:download");
         let inflight = format!("{}:{}", config.inflight_jobs_set(), "riven-download");
         assert_eq!(inflight, "riven:download:inflight:riven-download");
         let metadata = format!("{}:workers:metadata{inflight}", "riven:download");
@@ -549,17 +507,5 @@ mod tests {
             metadata,
             "riven:download:workers:metadatariven:download:inflight:riven-download"
         );
-    }
-
-    /// Maintenance must read the same config the workers registered with —
-    /// `queue_config` being the single constructor is what guarantees the
-    /// requeue script and the worker agree on every key name.
-    #[test]
-    fn every_queue_builds_a_config() {
-        for queue in ["riven:download", "riven:scrape", "riven:plugin-hook:x:y"] {
-            let config = queue_config(queue);
-            assert!(config.get_keep_alive().as_secs() > 0);
-            assert!(config.inflight_jobs_set().starts_with(queue));
-        }
     }
 }

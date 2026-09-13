@@ -33,7 +33,7 @@
                 RECENT_ITEMS_QUERY,
                 getRecentItemsVariables(page)
             );
-            return mapRecentItemsPage(recentData);
+            return mapRecentItemsPage(recentData).items;
         }
     });
     const TRENDING_QUERY = `query TrendingTmdb($type: String!, $timeWindow: String!, $page: Int) {

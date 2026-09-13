@@ -183,21 +183,17 @@ pub async fn add_torrent(
     let url = format!("{base_url}v0/store/torz");
     tracing::debug!(store, url = %url, "adding torrent via stremthru torz endpoint");
 
-    let response = match send_store(http, redis, store, |client| {
-        client
-            .post(&url)
-            .store_headers(store, api_key)
+    let response = send_store(http, redis, store, None, |client| {
+        store_headers(client.post(&url), store, api_key)
             .json(&serde_json::json!({ "link": magnet }))
     })
-    .await?
-    {
-        StoreSend::Ok(response) => response,
-        StoreSend::Rejected { status, body } => {
-            return Ok(classify_add_torrent_rejection(status, &body));
-        }
-    };
+    .await?;
+    if !response.status().is_success() {
+        let body = response.text().unwrap_or_default();
+        return Ok(classify_add_torrent_rejection(response.status(), &body));
+    }
 
-    let text = response.text().await?;
+    let text = response.text()?;
     let resp: StremthruResponse<StremthruTorz> = serde_json::from_str(&text)
         .map_err(|e| anyhow::anyhow!("invalid torz response: {e}; body={text}"))?;
 
@@ -246,21 +242,20 @@ pub async fn add_newz(
     let url = format!("{base_url}v0/store/newz");
     tracing::debug!(store, url = %url, "adding newz via stremthru");
 
-    let response = match send_store(http, redis, store, |client| {
-        client
-            .post(&url)
-            .store_headers(store, api_key)
+    let response = send_store(http, redis, store, None, |client| {
+        store_headers(client.post(&url), store, api_key)
             .json(&serde_json::json!({ "link": nzb_url }))
     })
-    .await?
-    {
-        StoreSend::Ok(response) => response,
-        StoreSend::Rejected { status, body } => {
-            anyhow::bail!("store newz add rejected: HTTP {} - {}", status, body)
-        }
-    };
+    .await?;
+    if !response.status().is_success() {
+        anyhow::bail!(
+            "store newz add rejected: HTTP {} - {}",
+            response.status(),
+            response.text().unwrap_or_default()
+        );
+    }
 
-    let text = response.text().await?;
+    let text = response.text()?;
     let resp: StremthruResponse<StremthruNewzAdd> = serde_json::from_str(&text)
         .map_err(|e| anyhow::anyhow!("invalid newz add response: {e}; body={text}"))?;
     let Some(added) = resp.data else {
@@ -292,18 +287,19 @@ async fn poll_newz(
     let started = std::time::Instant::now();
     let mut interval = std::time::Duration::from_secs(3);
     loop {
-        let response = match send_store(http, redis, store, |client| {
-            client.get(&url).store_headers(store, api_key)
+        let response = send_store(http, redis, store, None, |client| {
+            store_headers(client.get(&url), store, api_key)
         })
-        .await?
-        {
-            StoreSend::Ok(response) => response,
-            StoreSend::Rejected { status, body } => {
-                anyhow::bail!("store newz get rejected: HTTP {} - {}", status, body)
-            }
-        };
+        .await?;
+        if !response.status().is_success() {
+            anyhow::bail!(
+                "store newz get rejected: HTTP {} - {}",
+                response.status(),
+                response.text().unwrap_or_default()
+            );
+        }
 
-        let text = response.text().await?;
+        let text = response.text()?;
         let resp: StremthruResponse<StremthruNewz> = serde_json::from_str(&text)
             .map_err(|e| anyhow::anyhow!("invalid newz get response: {e}; body={text}"))?;
         let Some(data) = resp.data else {
@@ -335,17 +331,9 @@ async fn poll_newz(
     }
 }
 
-pub fn download_result_from_newz(
-    store: &str,
-    info_hash: &str,
-    newz: StremthruNewz,
-) -> DownloadResult {
-    download_result_from_files(store, info_hash, newz.files)
-}
-
 /// Build a `DownloadResult` from the file list shared by the torz and newz
 /// store endpoints.
-fn download_result_from_files(
+pub fn download_result_from_files(
     store: &str,
     info_hash: &str,
     files: Vec<StremthruFile>,
@@ -389,16 +377,17 @@ async fn fetch_cache_check(
         .join(",");
     let url = format!("{base_url}v0/store/torz/check");
     tracing::debug!(store, url = %url, "requesting stremthru torz cache check");
-    let response = send_store_data(
+    let response = send_store(
         http,
         redis,
         store,
-        format!("{store}:{url}?hash={hash_str}"),
+        Some(format!("{store}:{url}?hash={hash_str}")),
         |client| {
-            client
-                .get(&url)
-                .query(&[("hash", hash_str.as_str())])
-                .store_headers(store, api_key)
+            store_headers(
+                client.get(&url).query(&[("hash", hash_str.as_str())]),
+                store,
+                api_key,
+            )
         },
     )
     .await?;
@@ -422,7 +411,7 @@ async fn fetch_cache_check(
     Ok(items
         .into_iter()
         .map(|item| {
-            let status = parse_torrent_status(&item.status);
+            let status = item.status;
             let files = item
                 .files
                 .into_iter()
@@ -461,26 +450,20 @@ async fn delete_torrent(
     torrent_id: &str,
 ) -> anyhow::Result<()> {
     let url = format!("{base_url}v0/store/torz/{torrent_id}");
-    match send_store(http, redis, store, |client| {
-        client.delete(&url).store_headers(store, api_key)
+    let response = send_store(http, redis, store, None, |client| {
+        store_headers(client.delete(&url), store, api_key)
     })
-    .await?
-    {
-        StoreSend::Ok(_) => Ok(()),
-        StoreSend::Rejected { status, body } => {
-            anyhow::bail!("store torz delete rejected: HTTP {} - {}", status, body)
-        }
+    .await?;
+    if !response.status().is_success() {
+        anyhow::bail!(
+            "store torz delete rejected: HTTP {} - {}",
+            response.status(),
+            response.text().unwrap_or_default()
+        );
     }
+    Ok(())
 }
 
 pub(super) fn cache_check_key(store: &str, hash: &str) -> String {
     format!("plugin:stremthru:cache-check:{store}:{hash}")
-}
-
-pub fn download_result_from_torz(
-    store: &str,
-    info_hash: &str,
-    torz: StremthruTorz,
-) -> DownloadResult {
-    download_result_from_files(store, info_hash, torz.files)
 }

@@ -18,7 +18,7 @@ mod storage;
 use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, AtomicU64};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64};
 
 use anyhow::Result;
 use apalis::prelude::{TaskBuilder, TaskId, TaskSink, WaitForCompletion};
@@ -31,7 +31,7 @@ use serde::de::DeserializeOwned;
 use tokio::sync::{RwLock, broadcast};
 use ulid::Ulid;
 
-pub use riven_core::downloader::{BitrateLimits, DownloaderConfig};
+pub use riven_core::downloader::BitrateLimits;
 use riven_core::events::{DispatchStrategy, EventType, RivenEvent};
 use riven_core::plugin::PluginRegistry;
 use riven_core::reindex::ReindexConfig;
@@ -44,11 +44,9 @@ pub use jobs::{
     DownloadJob, HookAck, HookOutcome, IndexJob, ParseScrapeResultsJob, PluginHookJob,
     ProcessMediaItemJob, ProcessStep, RankStreamsJob, ScrapeJob,
 };
-pub(crate) use maintenance::queue_config;
 pub use maintenance::{
-    RecoveryReport, clear_dead_incarnation, clear_worker_registrations, prune_queue_history,
-    purge_orphaned_active_jobs, purge_orphaned_worker_sets, purge_stale_dedup_keys,
-    reconcile_library_profiles,
+    clear_dead_incarnation, prune_queue_history, purge_orphaned_active_jobs,
+    purge_orphaned_worker_sets, purge_stale_dedup_keys, reconcile_library_profiles, rescue_workers,
 };
 pub use workers::start_workers;
 
@@ -85,7 +83,8 @@ pub struct JobQueue {
     pub registry: Arc<PluginRegistry>,
     pub event_tx: broadcast::Sender<RivenEvent>,
     pub notification_tx: broadcast::Sender<String>,
-    pub downloader_config: Arc<RwLock<DownloaderConfig>>,
+    /// Include torrents with unknown cache status as download candidates.
+    pub attempt_unknown_downloads: Arc<AtomicBool>,
     pub reindex_config: Arc<RwLock<ReindexConfig>>,
     pub filesystem_settings: Arc<RwLock<FilesystemSettings>>,
     pub vfs_layout: Arc<RwLock<VfsLibraryLayout>>,

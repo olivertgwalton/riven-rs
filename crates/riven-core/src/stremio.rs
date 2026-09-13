@@ -29,9 +29,14 @@ pub fn addon_token(api_key: &str) -> Option<String> {
     if api_key.is_empty() {
         return None;
     }
-    let mut mac = Hmac::<Sha256>::new_from_slice(api_key.as_bytes()).ok()?;
-    mac.update(ADDON_TOKEN_CONTEXT);
-    Some(hex::encode(mac.finalize().into_bytes()))
+    Some(hmac_sha256_hex(api_key.as_bytes(), ADDON_TOKEN_CONTEXT))
+}
+
+/// Hex-encoded HMAC-SHA256 of `msg` under `key`.
+pub fn hmac_sha256_hex(key: &[u8], msg: &[u8]) -> String {
+    let mut mac = Hmac::<Sha256>::new_from_slice(key).expect("HMAC accepts keys of any length");
+    mac.update(msg);
+    hex::encode(mac.finalize().into_bytes())
 }
 
 /// Verify a token taken from an addon URL. Comparison goes through
@@ -70,6 +75,19 @@ pub fn manifest_url(base_url: &str, token: Option<&str>) -> Option<String> {
         Some(token) if !token.is_empty() => format!("{base}/stremio/{token}/manifest.json"),
         _ => format!("{base}/stremio/manifest.json"),
     })
+}
+
+/// A status worth deferring a scrape over rather than treating as a hard
+/// failure: an explicit 429, or one of the gateway/overload statuses a Stremio
+/// addon (or a debrid store behind it) bounces back under load.
+pub fn is_deferred_status(status: reqwest::StatusCode) -> bool {
+    matches!(
+        status,
+        reqwest::StatusCode::TOO_MANY_REQUESTS
+            | reqwest::StatusCode::BAD_GATEWAY
+            | reqwest::StatusCode::SERVICE_UNAVAILABLE
+            | reqwest::StatusCode::GATEWAY_TIMEOUT
+    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -148,6 +166,16 @@ mod tests {
             season,
             episode,
         }
+    }
+
+    #[test]
+    fn deferred_statuses_cover_overload_responses() {
+        use reqwest::StatusCode;
+        assert!(is_deferred_status(StatusCode::TOO_MANY_REQUESTS));
+        assert!(is_deferred_status(StatusCode::BAD_GATEWAY));
+        assert!(is_deferred_status(StatusCode::SERVICE_UNAVAILABLE));
+        assert!(is_deferred_status(StatusCode::GATEWAY_TIMEOUT));
+        assert!(!is_deferred_status(StatusCode::NOT_FOUND));
     }
 
     #[test]

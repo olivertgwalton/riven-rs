@@ -11,16 +11,26 @@ pub(crate) fn setting_u64(json: &Option<serde_json::Value>, key: &str) -> Option
         .or_else(|| v.as_str().and_then(|s| s.trim().parse().ok()))
 }
 
+/// `Some(true)` for "1"/"true"/"yes"/"on", `Some(false)` for
+/// "0"/"false"/"no"/"off" (case-insensitive, trimmed), `None` for anything else.
+fn truthy(value: &str) -> Option<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => None,
+    }
+}
+
+/// A settings flag as a JSON bool or a truthy string; `None` when absent or
+/// unrecognised.
+fn setting_bool(json: &Option<serde_json::Value>, key: &str) -> Option<bool> {
+    let value = json.as_ref()?.get(key)?;
+    value.as_bool().or_else(|| value.as_str().and_then(truthy))
+}
+
 /// Truthy plugin-settings flag: a JSON bool or a "1"/"true"/"yes"/"on" string.
 fn setting_flag(json: &Option<serde_json::Value>, key: &str) -> bool {
-    json.as_ref().and_then(|j| j.get(key)).is_some_and(|v| {
-        v.as_bool().unwrap_or_else(|| {
-            matches!(
-                v.as_str().map(|s| s.trim().to_ascii_lowercase()).as_deref(),
-                Some("1" | "true" | "yes" | "on")
-            )
-        })
-    })
+    setting_bool(json, key) == Some(true)
 }
 
 /// A settings flag whose default is on: only an explicit false turns it off.
@@ -32,31 +42,12 @@ fn setting_flag(json: &Option<serde_json::Value>, key: &str) -> bool {
 /// is read; [`setting_flag`] would read "absent" as off and silently disable it
 /// for every install that has never touched the setting.
 fn setting_flag_on_by_default(json: &Option<serde_json::Value>, key: &str) -> bool {
-    let Some(value) = json.as_ref().and_then(|j| j.get(key)) else {
-        return true;
-    };
-    if let Some(flag) = value.as_bool() {
-        return flag;
-    }
-    !matches!(
-        value
-            .as_str()
-            .map(|s| s.trim().to_ascii_lowercase())
-            .as_deref(),
-        Some("0" | "false" | "no" | "off")
-    )
+    setting_bool(json, key) != Some(false)
 }
 
 /// Truthy env flag, in the same spelling the settings flags accept.
 fn env_flag(name: &str) -> bool {
-    std::env::var(name)
-        .map(|v| {
-            matches!(
-                v.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
-        })
-        .unwrap_or(false)
+    std::env::var(name).ok().as_deref().and_then(truthy) == Some(true)
 }
 
 /// Parse an env var, treating unset/unparseable as `None`.
@@ -206,45 +197,15 @@ pub(crate) fn spawn_background_tasks(
                     }
                 };
                 for file in due {
-                    let file_index = usize::try_from(file.file_index).unwrap_or(0);
-                    let (status, total, sampled, missing, errors) = match streamer
-                        .scan_availability(&file.info_hash, file_index, effective_sample_percent)
-                        .await
-                    {
-                        Ok(scan) => (
-                            scan.status(),
-                            scan.total_segments as i32,
-                            scan.sampled_segments as i32,
-                            scan.missing_segments as i32,
-                            scan.error_segments as i32,
-                        ),
-                        Err(riven_usenet::StreamerError::NotIngested(_)) => {
-                            ("not_ingested", 0, 0, 0, 0)
-                        }
-                        Err(error) => {
-                            tracing::debug!(
-                                info_hash = %file.info_hash,
-                                file = %file.path,
-                                %error,
-                                "usenet health: scan failed"
-                            );
-                            ("unknown", 0, 0, 0, 0)
-                        }
-                    };
-                    if let Err(error) = riven_db::repo::upsert_usenet_file_health(
-                        riven_db::repo::UsenetHealthUpdate {
-                            info_hash: &file.info_hash,
-                            file_index: file.file_index,
-                            media_item_id: file.media_item_id,
-                            status,
-                            total_segments: total,
-                            sampled_segments: sampled,
-                            missing_segments: missing,
-                            error_segments: errors,
-                        },
+                    let (status, saved) = riven_api::usenet_health::rescan_file(
+                        &streamer,
+                        &file.info_hash,
+                        file.file_index,
+                        file.media_item_id,
+                        effective_sample_percent,
                     )
-                    .await
-                    {
+                    .await;
+                    if let Err(error) = saved {
                         tracing::debug!(%error, file = %file.path, "usenet health: upsert failed");
                     }
 
@@ -277,7 +238,9 @@ pub(crate) fn spawn_background_tasks(
                             // waits. Checked before `usenet_repair_due` so a
                             // deferral does not burn a repair attempt or
                             // advance the backoff — the next tick retries.
-                            if riven_usenet::active_streams().is_streaming(&file.info_hash) {
+                            if riven_usenet::state::global_active_streams()
+                                .is_streaming(&file.info_hash)
+                            {
                                 tracing::debug!(
                                     info_hash = %file.info_hash,
                                     file = %file.path,

@@ -29,24 +29,6 @@
 use bytes::Bytes;
 use memchr::memchr3;
 
-#[derive(Debug, Clone, Default)]
-pub struct YencInfo {
-    /// Total decoded size of the *whole file* (from `=ybegin size=`). For
-    /// single-part articles this matches the article's payload size; for
-    /// multi-part it's the size after all segments are stitched.
-    pub total_size: Option<u64>,
-    pub name: Option<String>,
-    /// Multipart range within the original file, 1-based inclusive. `None`
-    /// for single-part articles.
-    pub part_begin: Option<u64>,
-    pub part_end: Option<u64>,
-    /// Per-part decoded size declared in `=yend`.
-    pub part_size: Option<u64>,
-    /// CRC32 declared in `=yend pcrc32=`. Compared against the computed CRC.
-    pub declared_pcrc32: Option<u32>,
-    pub computed_pcrc32: Option<u32>,
-}
-
 #[derive(Debug, thiserror::Error)]
 pub enum YencError {
     #[error("no =ybegin marker found in article body")]
@@ -56,28 +38,13 @@ pub enum YencError {
 }
 
 /// Decode a yEnc-encoded NNTP article body. Input is the raw body bytes
-/// (CRLF-separated lines). Returns the decoded payload as `Bytes` plus
-/// parsed headers.
-pub fn decode(body: &[u8]) -> Result<(Bytes, YencInfo), YencError> {
-    let mut info = YencInfo::default();
-
+/// (CRLF-separated lines). Returns the decoded payload; the `=ybegin` and
+/// `=ypart` header lines are skipped, and `=yend`'s `pcrc32` is checked.
+pub fn decode(body: &[u8]) -> Result<Bytes, YencError> {
     let begin_idx = find_line_starting_with(body, b"=ybegin").ok_or(YencError::MissingBegin)?;
-    let after_begin = line_end(body, begin_idx);
-    parse_kv(&body[begin_idx..after_begin], &mut |k, v| match k {
-        "size" => info.total_size = v.parse().ok(),
-        "name" => info.name = Some(v.to_string()),
-        _ => {}
-    });
-
-    let mut payload_start = after_begin;
+    let mut payload_start = line_end(body, begin_idx);
     if body[payload_start..].starts_with(b"=ypart") {
-        let part_end = line_end(body, payload_start);
-        parse_kv(&body[payload_start..part_end], &mut |k, v| match k {
-            "begin" => info.part_begin = v.parse().ok(),
-            "end" => info.part_end = v.parse().ok(),
-            _ => {}
-        });
-        payload_start = part_end;
+        payload_start = line_end(body, payload_start);
     }
 
     let yend_idx = if body[payload_start..].starts_with(b"=yend") {
@@ -88,40 +55,34 @@ pub fn decode(body: &[u8]) -> Result<(Bytes, YencInfo), YencError> {
             .map(|n| payload_start + n + 1)
             .ok_or(YencError::Truncated)?
     };
-    let yend_line_end = line_end(body, yend_idx);
-    parse_kv(&body[yend_idx..yend_line_end], &mut |k, v| match k {
-        "size" => info.part_size = v.parse().ok(),
-        "pcrc32" => info.declared_pcrc32 = u32::from_str_radix(v, 16).ok(),
-        _ => {}
-    });
+    let declared_pcrc32 = declared_pcrc32(&body[yend_idx..line_end(body, yend_idx)]);
 
     let payload = &body[payload_start..yend_idx];
     // Decoding only ever shrinks, so the encoded length is an upper bound the
     // decode loop can never outgrow — one allocation, no realloc mid-decode.
     let mut out = Vec::with_capacity(payload.len());
-    decode_payload(payload, &mut info, &mut out);
+    decode_payload(payload, &mut out);
 
-    if let (Some(declared), Some(computed)) = (info.declared_pcrc32, info.computed_pcrc32)
+    // CRC32 in a single pass over the decoded output rather than via
+    // `Hasher::update` per memchr3-found chunk during the loop — profiling
+    // showed ~2 % of CPU in `Hasher::update`'s dispatch around the ~50 small
+    // per-chunk updates per segment. A single `crc32fast::hash` call lets the
+    // ARMv8 CRC32 instruction run in its most-unrolled inner loop; the extra
+    // pass over ~700 KB of just-written (cache-hot) bytes costs ~30 µs.
+    let computed = crc32fast::hash(&out);
+    if let Some(declared) = declared_pcrc32
         && declared != computed
     {
         tracing::warn!(declared, computed, "yEnc pcrc32 mismatch");
     }
 
-    Ok((Bytes::from(out), info))
+    Ok(Bytes::from(out))
 }
 
 /// Decode the yEnc payload bytes (everything between `=ybegin`/`=ypart` and
-/// `=yend`, CRLF terminators included). CRC32 is computed in a single
-/// pass over the decoded output AFTER the decode loop completes, rather
-/// than via `Hasher::update` per memchr3-found chunk during the loop —
-/// profiling showed ~2 % of CPU was being spent in `Hasher::update`'s
-/// dispatch around the ~50 small per-chunk updates per segment. A single
-/// `crc32fast::hash` call lets the ARMv8 CRC32 instruction run in its
-/// most-unrolled inner loop with no per-call setup; the extra pass over
-/// ~700 KB of just-written (cache-hot) bytes costs ~30 µs at memory
-/// speed. Writes into the caller-provided `out` so the buffer can be
-/// reused from the process-wide pool — `out` must be empty on entry.
-fn decode_payload(payload: &[u8], info: &mut YencInfo, out: &mut Vec<u8>) {
+/// `=yend`, CRLF terminators included) into `out`, which must be empty on
+/// entry.
+fn decode_payload(payload: &[u8], out: &mut Vec<u8>) {
     debug_assert!(out.is_empty());
     let mut i = 0;
 
@@ -152,8 +113,6 @@ fn decode_payload(payload: &[u8], info: &mut YencInfo, out: &mut Vec<u8>) {
             }
         }
     }
-
-    info.computed_pcrc32 = Some(crc32fast::hash(out));
 }
 
 /// Index of the first occurrence of `marker` that begins a line — either at
@@ -177,30 +136,13 @@ fn line_end(body: &[u8], start: usize) -> usize {
     }
 }
 
-/// Parse `key=value key2="value 2"` style keyword args from a yEnc header line.
-/// Quoted values aren't actually used by yEnc but are tolerated.
-fn parse_kv(line: &[u8], cb: &mut dyn FnMut(&str, &str)) {
-    let s = match std::str::from_utf8(line) {
-        Ok(s) => s.trim_end_matches(['\r', '\n']),
-        Err(_) => return,
-    };
-    let mut iter = s.splitn(2, char::is_whitespace);
-    let _ = iter.next();
-    let rest = iter.next().unwrap_or("");
-
-    let prefix: &str = if let Some(idx) = rest.find("name=") {
-        let (before, name_part) = rest.split_at(idx);
-        cb("name", name_part[5..].trim());
-        before
-    } else {
-        rest
-    };
-
-    for tok in prefix.split_ascii_whitespace() {
-        if let Some((k, v)) = tok.split_once('=') {
-            cb(k, v);
-        }
-    }
+/// The `pcrc32=` value of a `=yend` line, if it declares one.
+fn declared_pcrc32(line: &[u8]) -> Option<u32> {
+    let line = std::str::from_utf8(line).ok()?;
+    line.split_ascii_whitespace()
+        .skip(1)
+        .find_map(|tok| tok.strip_prefix("pcrc32="))
+        .and_then(|v| u32::from_str_radix(v, 16).ok())
 }
 
 #[cfg(test)]
@@ -235,18 +177,15 @@ pub(crate) mod tests {
     fn round_trip_simple() {
         let payload: Vec<u8> = (0..=255u8).collect();
         let encoded = encode_single(&payload, "test.bin");
-        let (decoded, info) = decode(&encoded).unwrap();
+        let decoded = decode(&encoded).unwrap();
         assert_eq!(decoded.as_ref(), payload.as_slice());
-        assert_eq!(info.total_size, Some(256));
-        assert_eq!(info.name.as_deref(), Some("test.bin"));
-        assert_eq!(info.declared_pcrc32, info.computed_pcrc32);
     }
 
     #[test]
     fn round_trip_with_escapes() {
         let payload: Vec<u8> = vec![214, 222, 223, 19];
         let encoded = encode_single(&payload, "x");
-        let (decoded, _) = decode(&encoded).unwrap();
+        let decoded = decode(&encoded).unwrap();
         assert_eq!(decoded.as_ref(), payload.as_slice());
     }
 
@@ -257,14 +196,12 @@ pub(crate) mod tests {
             payload.push((i & 0xff) as u8);
         }
         let encoded = encode_single(&payload, "big.bin");
-        let (decoded, info) = decode(&encoded).unwrap();
+        let decoded = decode(&encoded).unwrap();
         assert_eq!(decoded.as_ref(), payload.as_slice());
-        assert_eq!(info.declared_pcrc32, info.computed_pcrc32);
-        assert_eq!(info.part_size, Some(64 * 1024));
     }
 
     #[test]
-    fn multipart_parses_ypart() {
+    fn multipart_skips_ypart() {
         let data = b"hello world";
         let mut encoded = Vec::new();
         encoded.extend_from_slice(b"=ybegin part=1 line=128 size=11 name=hello.bin\r\n");
@@ -277,11 +214,8 @@ pub(crate) mod tests {
         encoded
             .extend_from_slice(format!("=yend size=11 part=1 pcrc32={:08x}\r\n", crc).as_bytes());
 
-        let (decoded, info) = decode(&encoded).unwrap();
+        let decoded = decode(&encoded).unwrap();
         assert_eq!(decoded.as_ref(), data.as_slice());
-        assert_eq!(info.part_begin, Some(1));
-        assert_eq!(info.part_end, Some(11));
-        assert_eq!(info.declared_pcrc32, info.computed_pcrc32);
     }
 
     #[test]
@@ -290,7 +224,16 @@ pub(crate) mod tests {
         let body = encode_single(payload, "x");
         let mut with_preamble = b"222 0 <foo@bar>\r\n".to_vec();
         with_preamble.extend_from_slice(&body);
-        let (decoded, _) = decode(&with_preamble).unwrap();
+        let decoded = decode(&with_preamble).unwrap();
         assert_eq!(decoded.as_ref(), payload.as_slice());
+    }
+
+    #[test]
+    fn reads_declared_pcrc32() {
+        assert_eq!(
+            declared_pcrc32(b"=yend size=11 part=1 pcrc32=0000abcd\r\n"),
+            Some(0xabcd)
+        );
+        assert_eq!(declared_pcrc32(b"=yend size=11\r\n"), None);
     }
 }

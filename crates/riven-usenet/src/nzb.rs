@@ -14,8 +14,6 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NzbFile {
     pub subject: String,
-    pub poster: String,
-    pub groups: Vec<String>,
     pub segments: crate::segments::SegmentList,
 }
 
@@ -85,13 +83,6 @@ pub enum NzbError {
     Xml(#[from] quick_xml::Error),
     #[error("malformed NZB: {0}")]
     Malformed(&'static str),
-}
-
-/// Parse an NZB document. Tolerant: ignores unknown elements, skips files with
-/// no segments rather than failing the whole document. Drops head metadata —
-/// callers that need it should use [`parse_nzb_document`] instead.
-pub fn parse_nzb(xml: &str) -> Result<Vec<NzbFile>, NzbError> {
-    parse_nzb_document(xml).map(|d| d.files)
 }
 
 /// Release title without parsing the whole document — for log lines only.
@@ -166,8 +157,9 @@ fn title_from_meta(meta: &HashMap<String, String>) -> Option<String> {
         .cloned()
 }
 
-/// Full NZB parse: head `<meta>` entries plus per-file segments. Tolerant in
-/// the same way as [`parse_nzb`]; head metadata is best-effort and missing
+/// Full NZB parse: head `<meta>` entries plus per-file segments. Tolerant:
+/// ignores unknown elements and skips files with no segments rather than
+/// failing the whole document; head metadata is best-effort and missing
 /// entries don't fail the parse.
 pub fn parse_nzb_document(xml: &str) -> Result<NzbDocument, NzbError> {
     let mut reader = Reader::from_str(xml);
@@ -180,7 +172,6 @@ pub fn parse_nzb_document(xml: &str) -> Result<NzbDocument, NzbError> {
     let mut cur_segment: Option<ParsedSegment> = None;
     // Ordered on `</file>`, then converted to the stored form.
     let mut cur_segments: Vec<ParsedSegment> = Vec::new();
-    let mut in_group = false;
     let mut text_target: Option<&'static str> = None;
 
     loop {
@@ -190,19 +181,13 @@ pub fn parse_nzb_document(xml: &str) -> Result<NzbDocument, NzbError> {
                 b"file" => {
                     let mut f = NzbFile {
                         subject: String::new(),
-                        poster: String::new(),
-                        groups: Vec::new(),
                         segments: crate::segments::SegmentList::default(),
                     };
                     for attr in e.attributes().flatten() {
-                        let val = attr
-                            .normalized_value(quick_xml::XmlVersion::Implicit1_0)
-                            .ok()
-                            .map(std::borrow::Cow::into_owned);
-                        match (attr.key.as_ref(), val) {
-                            (b"subject", Some(v)) => f.subject = v,
-                            (b"poster", Some(v)) => f.poster = v,
-                            _ => {}
+                        if attr.key.as_ref() == b"subject"
+                            && let Ok(v) = attr.normalized_value(quick_xml::XmlVersion::Implicit1_0)
+                        {
+                            f.subject = v.into_owned();
                         }
                     }
                     cur_file = Some(f);
@@ -227,10 +212,6 @@ pub fn parse_nzb_document(xml: &str) -> Result<NzbDocument, NzbError> {
                     cur_segment = Some(s);
                     text_target = Some("segment");
                 }
-                b"group" => {
-                    in_group = true;
-                    text_target = Some("group");
-                }
                 b"meta" => {
                     for attr in e.attributes().flatten() {
                         if attr.key.as_ref() == b"type"
@@ -246,39 +227,9 @@ pub fn parse_nzb_document(xml: &str) -> Result<NzbDocument, NzbError> {
                 }
                 _ => {}
             },
-            Event::Text(t) => {
-                let bytes = t.into_inner();
-                let text = String::from_utf8_lossy(&bytes).into_owned();
-                match text_target.take() {
-                    Some("segment") => {
-                        if let Some(seg) = cur_segment.as_mut() {
-                            seg.message_id = text
-                                .trim()
-                                .trim_matches(|c| c == '<' || c == '>')
-                                .to_string();
-                        }
-                    }
-                    Some("group") if in_group => {
-                        if let Some(file) = cur_file.as_mut() {
-                            let g = text.trim().to_string();
-                            if !g.is_empty() {
-                                file.groups.push(g);
-                            }
-                        }
-                    }
-                    Some("meta") => {
-                        if let Some(key) = cur_meta_type.take() {
-                            let val = text.trim().to_string();
-                            if !val.is_empty() {
-                                meta.insert(key, val);
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            Event::CData(c) => {
-                let text = String::from_utf8_lossy(c.as_ref()).into_owned();
+            event @ (Event::Text(_) | Event::CData(_)) => {
+                // Both dereference to their raw content bytes.
+                let text = String::from_utf8_lossy(&event);
                 match text_target.take() {
                     Some("segment") => {
                         if let Some(seg) = cur_segment.as_mut() {
@@ -306,10 +257,6 @@ pub fn parse_nzb_document(xml: &str) -> Result<NzbDocument, NzbError> {
                     {
                         cur_segments.push(seg);
                     }
-                    text_target = None;
-                }
-                b"group" => {
-                    in_group = false;
                     text_target = None;
                 }
                 b"meta" => {
@@ -482,11 +429,10 @@ mod tests {
             </segments>
           </file>
         </nzb>"#;
-        let files = parse_nzb(xml).unwrap();
+        let files = parse_nzb_document(xml).unwrap().files;
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].segments.len(), 2);
         assert_eq!(files[0].segments.id(0), Some("abc@host"));
-        assert_eq!(files[0].groups, vec!["alt.binaries.movies"]);
     }
 
     #[test]
@@ -498,7 +444,7 @@ mod tests {
               <segment bytes="1" number="1">a@h</segment>
             </segments>
         </file></nzb>"#;
-        let files = parse_nzb(xml).unwrap();
+        let files = parse_nzb_document(xml).unwrap().files;
         // `number` is gone from the stored form; ordering is what it bought,
         // so ordering is what this asserts. The document lists them 2 then 1.
         assert_eq!(files[0].segments.id(0), Some("a@h"));
@@ -509,8 +455,6 @@ mod tests {
     fn detects_media_extension() {
         let mut f = NzbFile {
             subject: "Some.Movie.2024.1080p.mkv".into(),
-            poster: String::new(),
-            groups: vec![],
             segments: crate::segments::SegmentList::default(),
         };
         assert!(looks_like_media(&f));
@@ -548,8 +492,6 @@ mod tests {
     fn detects_multiple_rar_groups_for_season_pack() {
         let mk = |s: &str| NzbFile {
             subject: format!(r#""{s}" yEnc"#),
-            poster: String::new(),
-            groups: vec![],
             segments: crate::segments::SegmentList::default(),
         };
         let files = vec![
@@ -581,8 +523,6 @@ mod tests {
         // just the hash, so `rar_volume_info` has nothing to parse.
         let mk = |s: &str| NzbFile {
             subject: format!(r#""{s}" yEnc (01/68)"#),
-            poster: String::new(),
-            groups: vec![],
             segments: crate::segments::SegmentList::default(),
         };
         let files = vec![

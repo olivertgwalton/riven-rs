@@ -2,11 +2,8 @@
     // Fonts are imported once, in the root layout.
     import oxanium400Woff2 from "@fontsource/oxanium/files/oxanium-latin-400-normal.woff2?url";
 
-    import { afterNavigate, onNavigate, beforeNavigate } from "$app/navigation";
+    import { onNavigate } from "$app/navigation";
     import { Toaster } from "$lib/components/ui/sonner/index.js";
-    import { ModeWatcher } from "mode-watcher";
-    import NProgress from "nprogress";
-    import "../../app.css";
     import type { LayoutProps } from "./$types";
 
     let { children }: LayoutProps = $props();
@@ -21,16 +18,6 @@
             });
         });
     });
-
-    NProgress.configure({
-        showSpinner: false
-    });
-    beforeNavigate(() => {
-        NProgress.start();
-    });
-    afterNavigate(() => {
-        NProgress.done();
-    });
 </script>
 
 <svelte:head>
@@ -43,7 +30,6 @@
         crossorigin="anonymous" />
 </svelte:head>
 
-<ModeWatcher defaultMode="dark" defaultTheme="darkmatter" />
 <Toaster richColors closeButton />
 
 <div class="bg-background h-screen overflow-hidden">

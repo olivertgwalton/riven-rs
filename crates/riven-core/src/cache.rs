@@ -78,34 +78,7 @@ pub const READ_AHEAD_PER_STREAM: u64 = 10 * MIB;
 /// not a population. Sizing it for the title in flight rather than for every
 /// title recently touched is what makes it affordable; a miss here costs a
 /// query and a deserialize, never a wire fetch.
-///
-/// **No longer on the read path.** Reads resolve through [`NZB_FILE`], which
-/// holds the one file being played rather than the pack containing it, so what
-/// is left here is ingest, backfill and the health scanner — none of them
-/// latency-critical, and a miss costs them a query and a deserialise.
-///
-/// Sized accordingly. It was 24 MiB while reads depended on it; leaving it
-/// there once `NZB_FILE` existed simply added the two budgets together, and
-/// measuring that is what caught it: the same title at the same position went
-/// from 250 MB allocated to 314 MB, because a 32 MiB cache had been added and
-/// nothing taken away.
 pub const NZB_META: Pool = Pool::new("nzb-meta", "RIVEN_USENET_META_CACHE_BYTES", 8 * MIB);
-/// One *file's* segment map, which is what a read actually needs.
-///
-/// [`NZB_META`] caches whole releases, and a release is the wrong unit: this
-/// library's largest row holds 520 files in 90 MB, so playing one episode of a
-/// season pack pulled in all of them, and 15 rows are individually larger than
-/// the whole `nzb-meta` budget. Keyed per `(info_hash, file_index)`, the entries
-/// are the size of the file being played rather than the pack containing it, so
-/// the same budget holds far more of what is actually being read.
-///
-/// 16 MiB with `NZB_META` at 8 is the 24 MiB `NZB_META` used to hold on its
-/// own — deliberately, because adding a cache without taking the superseded
-/// budget away is exactly what regressed this: measured at the same title and
-/// position, allocated memory went 250 MB → 314 MB. One packed file of a
-/// 100 GB title is ~6 MB, so this holds two or three concurrent streams where
-/// the old budget held a single season-pack meta.
-pub const NZB_FILE: Pool = Pool::new("nzb-file", "RIVEN_USENET_FILE_CACHE_BYTES", 16 * MIB);
 /// Raw NZB documents, as fetched from the indexer.
 pub const NZB_BODY: Pool = Pool::new("nzb-body", "RIVEN_USENET_NZB_CACHE_BYTES", 8 * MIB);
 /// Decoded article bodies: staging between a warm fetch landing and the walk

@@ -134,9 +134,7 @@ pub async fn delete_items_by_ids(ids: Vec<i64>) -> Result<u64> {
     // release silently reuses whatever was parsed before — skipping every
     // ingest-time check, including PAR2 block verification — instead of
     // re-validating it.
-    // Carries the entry path alongside the hash so the cleanup log below can
-    // name what it is dropping.
-    let info_hashes: Vec<(String, String)> = orm()
+    let info_hashes: Vec<String> = orm()
         .query_all_raw(Statement::from_sql_and_values(
             DbBackend::Postgres,
             "WITH RECURSIVE descendants AS ( \
@@ -145,21 +143,15 @@ pub async fn delete_items_by_ids(ids: Vec<i64>) -> Result<u64> {
                  SELECT mi.id FROM media_items mi \
                  JOIN descendants d ON mi.parent_id = d.id \
              ) \
-             SELECT DISTINCT ON (fe.usenet_info_hash) \
-                    fe.usenet_info_hash AS info_hash, fe.path \
+             SELECT DISTINCT fe.usenet_info_hash AS info_hash \
              FROM filesystem_entries fe \
              JOIN descendants d ON fe.media_item_id = d.id \
-             WHERE fe.usenet_info_hash IS NOT NULL \
-             ORDER BY fe.usenet_info_hash, fe.path",
+             WHERE fe.usenet_info_hash IS NOT NULL",
             [ids.clone().into()],
         ))
         .await?
         .into_iter()
-        .filter_map(|row| {
-            let info_hash = row.try_get::<String>("", "info_hash").ok()?;
-            let path = row.try_get::<String>("", "path").unwrap_or_default();
-            Some((info_hash, path))
-        })
+        .filter_map(|row| row.try_get::<String>("", "info_hash").ok())
         .collect();
 
     let result = media_items::Entity::delete_many()
@@ -167,15 +159,12 @@ pub async fn delete_items_by_ids(ids: Vec<i64>) -> Result<u64> {
         .exec(orm())
         .await?;
 
-    for (info_hash, path) in &info_hashes {
-        if let Err(e) = streams::delete_orphaned_usenet_meta(info_hash).await {
-            tracing::warn!(
-                info_hash,
-                file = %path,
-                error = %e,
-                "failed to clean up orphaned usenet_meta"
-            );
-        }
+    if let Err(e) = streams::delete_orphaned_usenet_metas(&info_hashes).await {
+        tracing::warn!(
+            hashes = info_hashes.len(),
+            error = %e,
+            "failed to clean up orphaned usenet_meta"
+        );
     }
 
     // Prune item_requests no longer referenced by any media_item. The
@@ -193,7 +182,7 @@ pub async fn delete_items_by_ids(ids: Vec<i64>) -> Result<u64> {
         tracing::warn!(error = %e, "failed to prune orphaned item_requests");
     }
 
-    state::force_recompute(&parent_ids).await?;
+    state::recompute(&parent_ids).await?;
 
     Ok(result.rows_affected)
 }

@@ -33,30 +33,19 @@ pub fn derive_key(password: &str, salt: &[u8; 16], log2_count: u8) -> [u8; 32] {
 
 /// Decrypt `ciphertext` (whose length must be a multiple of `AES_BLOCK`)
 /// using AES-256-CBC with the given key and `iv`. The decrypted plaintext
-/// is written back into `ciphertext` in place.
-pub fn decrypt_blocks_in_place(
-    key: &[u8; 32],
-    iv: &[u8; 16],
-    ciphertext: &mut [u8],
-) -> Result<(), CryptoError> {
+/// is written back into `ciphertext` in place. `None` when the length is not
+/// block-aligned.
+pub fn decrypt_blocks_in_place(key: &[u8; 32], iv: &[u8; 16], ciphertext: &mut [u8]) -> Option<()> {
     if !ciphertext.len().is_multiple_of(AES_BLOCK) {
-        return Err(CryptoError::UnalignedCiphertext {
-            len: ciphertext.len(),
-        });
+        return None;
     }
     if ciphertext.is_empty() {
-        return Ok(());
+        return Some(());
     }
     let mut dec = Decryptor::<Aes256>::new(key.into(), iv.into());
     let (blocks, _tail) = AesBlock::slice_as_chunks_mut(ciphertext);
     dec.decrypt_blocks(blocks);
-    Ok(())
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum CryptoError {
-    #[error("ciphertext length {len} is not a multiple of {AES_BLOCK}")]
-    UnalignedCiphertext { len: usize },
+    Some(())
 }
 
 #[cfg(test)]
@@ -89,7 +78,6 @@ mod tests {
         let key = [0u8; 32];
         let iv = [0u8; 16];
         let mut data = vec![0u8; 17];
-        let err = decrypt_blocks_in_place(&key, &iv, &mut data).unwrap_err();
-        assert!(matches!(err, CryptoError::UnalignedCiphertext { len: 17 }));
+        assert!(decrypt_blocks_in_place(&key, &iv, &mut data).is_none());
     }
 }

@@ -5,6 +5,7 @@ use riven_core::events::{EventType, HookResponse, ScrapeRequest};
 use riven_core::http::{HttpServiceProfile, RateLimitedError};
 use riven_core::plugin::{FieldType, Plugin, PluginContext, SettingField};
 use riven_core::settings::PluginSettings;
+use riven_core::stremio::is_deferred_status;
 use riven_core::types::*;
 
 const DEFAULT_URL: &str = "https://comet.feels.legal";
@@ -141,20 +142,6 @@ impl Plugin for CometPlugin {
         );
         Ok(HookResponse::Scrape(results))
     }
-}
-
-/// A status worth deferring the job over rather than treating as "no
-/// streams": either an explicit 429, or one of the gateway/overload statuses
-/// a Comet instance (or an indexer/debrid service behind it) bounces back
-/// under load.
-fn is_deferred_status(status: reqwest::StatusCode) -> bool {
-    matches!(
-        status,
-        reqwest::StatusCode::TOO_MANY_REQUESTS
-            | reqwest::StatusCode::BAD_GATEWAY
-            | reqwest::StatusCode::SERVICE_UNAVAILABLE
-            | reqwest::StatusCode::GATEWAY_TIMEOUT
-    )
 }
 
 #[derive(Deserialize)]

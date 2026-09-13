@@ -10,7 +10,7 @@ use std::sync::LazyLock;
 use detect::{
     detect_anime, detect_network, detect_scene, detect_trash, is_anime_group, is_false_group,
 };
-use languages::{LANG_PATTERNS, translate_langs};
+use languages::LANG_PATTERNS;
 use patterns::{
     RE_3D, RE_ADULT, RE_AUDIO_AAC, RE_AUDIO_ATMOS, RE_AUDIO_DD, RE_AUDIO_DD_PLUS,
     RE_AUDIO_DTS_LOSSLESS, RE_AUDIO_DTS_LOSSY, RE_AUDIO_FLAC, RE_AUDIO_HQ_CLEAN, RE_AUDIO_MP3,
@@ -99,11 +99,6 @@ pub struct ParsedData {
     pub extras: Vec<String>,
     pub torrent: bool,
     pub scene: bool,
-}
-
-#[derive(Debug, Clone, Copy, Default)]
-pub struct ParseOptions {
-    pub translate_languages: bool,
 }
 
 impl ParsedData {
@@ -734,10 +729,6 @@ fn detect_bitrate(raw: &str) -> Option<String> {
 
 #[must_use]
 pub fn parse(raw_title: &str) -> ParsedData {
-    parse_with_options(raw_title, ParseOptions::default())
-}
-
-pub fn parse_with_options(raw_title: &str, options: ParseOptions) -> ParsedData {
     let mut data = ParsedData {
         raw_title: raw_title.to_string(),
         resolution: "unknown".to_string(),
@@ -1032,10 +1023,6 @@ pub fn parse_with_options(raw_title: &str, options: ParseOptions) -> ParsedData 
 
     // Anime detection must run after group/episode_code/extras are populated.
     data.anime = detect_anime(raw, &data);
-
-    if options.translate_languages {
-        data.languages = translate_langs(&data.languages);
-    }
 
     data
 }

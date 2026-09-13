@@ -193,11 +193,6 @@ pub enum RivenEvent {
 }
 
 impl RivenEvent {
-    /// Returns true for events that should be shown as UI notifications.
-    pub fn is_notable(&self) -> bool {
-        self.event_type().is_notable()
-    }
-
     /// The media item id this event references, if any. Used by the
     /// plugin-hook worker to short-circuit children for items that were
     /// deleted while their fan-in jobs were queued, and by `cancel_items`

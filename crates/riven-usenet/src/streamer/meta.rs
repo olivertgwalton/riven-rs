@@ -217,13 +217,6 @@ impl NzbMeta {
             .or_else(|| self.files.first())
             .map_or(UNKNOWN_FILE_LABEL, |f| f.filename.as_str())
     }
-
-    /// Name of the file at `file_index`, for log fields.
-    pub fn file_label(&self, file_index: usize) -> &str {
-        self.files
-            .get(file_index)
-            .map_or(UNKNOWN_FILE_LABEL, |f| f.filename.as_str())
-    }
 }
 
 impl std::fmt::Debug for NzbMeta {

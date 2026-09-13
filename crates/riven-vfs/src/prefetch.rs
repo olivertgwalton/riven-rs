@@ -22,12 +22,11 @@ use std::sync::OnceLock;
 
 use bytes::{Bytes, BytesMut};
 use riven_core::cache::{ByteLru, CacheStats, READ_AHEAD};
-use riven_core::local_source::SourceLayout;
 use tokio::runtime::Handle;
 use tokio::sync::{mpsc, oneshot};
-use tokio::task::JoinHandle;
+use tokio::task::{JoinHandle, JoinSet};
 
-use crate::source::ByteSource;
+use crate::source::{ByteSource, SourceLayout};
 
 const MIB: u64 = 1024 * 1024;
 /// The range request we impose on a plain ranged HTTP origin, which has no
@@ -227,7 +226,6 @@ struct Fill {
 }
 
 struct Direct {
-    id: u64,
     request: ReadRequest,
     result: io::Result<Bytes>,
     /// Whole units the fetch covered, ready for the shared cache. Empty on the
@@ -239,7 +237,6 @@ struct Direct {
 /// then aborts every outstanding range request.
 pub struct Prefetcher {
     commands: mpsc::UnboundedSender<Command>,
-    size: u64,
 }
 
 impl Prefetcher {
@@ -264,8 +261,7 @@ impl Prefetcher {
                 file,
                 cache: shared_unit_cache(),
                 active: BTreeMap::new(),
-                direct_active: BTreeMap::new(),
-                next_direct_id: 1,
+                direct_active: JoinSet::new(),
                 pending: Vec::new(),
                 held: BTreeSet::new(),
             }
@@ -273,12 +269,7 @@ impl Prefetcher {
         );
         Self {
             commands: command_tx,
-            size,
         }
-    }
-
-    pub fn size(&self) -> u64 {
-        self.size
     }
 
     pub async fn read(&self, start: u64, len: usize) -> io::Result<Bytes> {
@@ -317,8 +308,7 @@ struct Actor {
     file: FileKey,
     cache: &'static UnitCache,
     active: BTreeMap<u64, JoinHandle<()>>,
-    direct_active: BTreeMap<u64, JoinHandle<()>>,
-    next_direct_id: u64,
+    direct_active: JoinSet<()>,
     pending: Vec<ReadRequest>,
     /// Unit starts this actor has put into the shared cache and not yet
     /// released. The actor evicts only its own keys, so trimming one stream
@@ -409,7 +399,7 @@ impl Actor {
         }
 
         self.abort_active();
-        self.abort_direct();
+        self.direct_active.abort_all();
         for request in self.pending.drain(..) {
             request.respond(Err(io::Error::new(
                 io::ErrorKind::BrokenPipe,
@@ -495,7 +485,9 @@ impl Actor {
     }
 
     fn on_direct(&mut self, direct: Direct) {
-        self.direct_active.remove(&direct.id);
+        // Reap whatever has finished; the sender may not have exited yet, in
+        // which case a later reply (or the actor's end) collects it.
+        while self.direct_active.try_join_next().is_some() {}
         // Published to the shared cache but deliberately *not* recorded in
         // `held`. `held` is what this stream's window owns and what
         // `trim_to_window` is entitled to evict — and it would evict these
@@ -587,12 +579,6 @@ impl Actor {
 
     fn abort_active(&mut self) {
         for (_, task) in std::mem::take(&mut self.active) {
-            task.abort();
-        }
-    }
-
-    fn abort_direct(&mut self) {
-        for (_, task) in std::mem::take(&mut self.direct_active) {
             task.abort();
         }
     }
@@ -690,9 +676,7 @@ impl Actor {
         let source = self.source.clone();
         let sender = self.direct_tx.clone();
         let size = self.size;
-        let id = self.next_direct_id;
-        self.next_direct_id = self.next_direct_id.wrapping_add(1);
-        let task = tokio::spawn(async move {
+        self.direct_active.spawn(async move {
             let span = read_exact(source, size, first, (end - first) as usize).await;
             let (result, units) = match span {
                 Ok(bytes) => {
@@ -714,13 +698,11 @@ impl Actor {
                 Err(error) => (Err(error), Vec::new()),
             };
             drop(sender.send(Direct {
-                id,
                 request,
                 result,
                 units,
             }));
         });
-        self.direct_active.insert(id, task);
     }
 
     /// Serve a read as the bytes it asked for and nothing more. For ranges the
@@ -730,18 +712,14 @@ impl Actor {
         let source = self.source.clone();
         let sender = self.direct_tx.clone();
         let size = self.size;
-        let id = self.next_direct_id;
-        self.next_direct_id = self.next_direct_id.wrapping_add(1);
-        let task = tokio::spawn(async move {
+        self.direct_active.spawn(async move {
             let result = read_exact(source, size, request.start, request.len).await;
             drop(sender.send(Direct {
-                id,
                 request,
                 result,
                 units: Vec::new(),
             }));
         });
-        self.direct_active.insert(id, task);
     }
 
     fn serve_pending(&mut self) {
