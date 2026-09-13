@@ -24,7 +24,7 @@ services:
             retries: 5
 
     jellyfin:
-        image: jellyfin/jellyfin:preview
+        image: jellyfin/jellyfin:latest
         env_file: .env
         depends_on:
             riven:
