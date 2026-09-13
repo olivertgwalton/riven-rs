@@ -7,7 +7,6 @@ use riven_core::settings::PluginSettings;
 use riven_core::types::{ActivePlaybackSession, PlaybackMethod, PlaybackState, artwork_path};
 use riven_db::repo;
 use serde::Deserialize;
-use serde::Serialize;
 
 pub(crate) const EMBY_PROFILE: HttpServiceProfile = HttpServiceProfile::new("emby");
 pub(crate) const JELLYFIN_PROFILE: HttpServiceProfile = HttpServiceProfile::new("jellyfin");
@@ -20,29 +19,19 @@ fn server_profile(plugin: &str) -> HttpServiceProfile {
     }
 }
 
-#[derive(Default)]
-pub struct EmbyPlugin;
+/// One media-server plugin; registered once per server kind.
+pub struct MediaServerPlugin {
+    name: &'static str,
+}
 
-#[derive(Default)]
-pub struct JellyfinPlugin;
+impl MediaServerPlugin {
+    pub const EMBY: Self = Self { name: "emby" };
+    pub const JELLYFIN: Self = Self { name: "jellyfin" };
+}
 
 /// Legacy header understood by Emby, and by Jellyfin servers older than 12.0
 /// (as a fallback, when legacy auth hasn't been disabled).
 const EMBY_TOKEN_HEADER: &str = "X-Emby-Token";
-
-#[derive(Serialize)]
-struct LibraryUpdate<'a> {
-    #[serde(rename = "Updates")]
-    updates: Vec<PathUpdate<'a>>,
-}
-
-#[derive(Serialize)]
-struct PathUpdate<'a> {
-    #[serde(rename = "Path")]
-    path: &'a str,
-    #[serde(rename = "UpdateType")]
-    update_type: &'a str,
-}
 
 /// Builds an authenticated request for a media server.
 /// Jellyfin 12.0 disabled the legacy headers i.e. X-Emby-Token by default.
@@ -74,16 +63,13 @@ pub(crate) async fn notify_paths(
     plugin: &'static str,
 ) -> anyhow::Result<()> {
     let url = format!("{base_url}/Library/Media/Updated");
-    let updates = paths
+    let updates: Vec<serde_json::Value> = paths
         .iter()
-        .map(|p| PathUpdate {
-            path: p,
-            update_type,
-        })
+        .map(|path| serde_json::json!({ "Path": path, "UpdateType": update_type }))
         .collect();
 
     tracing::debug!(plugin, target_url = %url, path_count = paths.len(), update_type, "notifying media server about updated library paths");
-    let body = LibraryUpdate { updates };
+    let body = serde_json::json!({ "Updates": updates });
     let resp = http
         .send(server_profile(plugin), |client| {
             media_server_request(client, Method::POST, &url, api_key, plugin).json(&body)
@@ -133,16 +119,21 @@ fn media_server_settings_schema() -> Vec<SettingField> {
     ]
 }
 
+/// The server base URL (without a trailing slash) and API key.
+fn creds(ctx: &PluginContext) -> anyhow::Result<(String, &str)> {
+    let url = ctx
+        .require_setting("url")?
+        .trim_end_matches('/')
+        .to_string();
+    Ok((url, ctx.require_setting("apikey")?))
+}
+
 async fn notify_download_success(
     plugin: &'static str,
     info: &DownloadSuccessInfo<'_>,
     ctx: &PluginContext,
 ) -> anyhow::Result<HookResponse> {
-    let url = ctx
-        .require_setting("url")?
-        .trim_end_matches('/')
-        .to_string();
-    let api_key = ctx.require_setting("apikey")?;
+    let (url, api_key) = creds(ctx)?;
     let library_path = ctx.settings.get_or("librarypath", "/mount");
 
     let raw_paths = repo::get_media_entry_paths_for_items(&[info.id]).await?;
@@ -174,11 +165,7 @@ async fn notify_items_deleted(
     if deleted_paths.is_empty() {
         return Ok(HookResponse::Empty);
     }
-    let url = ctx
-        .require_setting("url")?
-        .trim_end_matches('/')
-        .to_string();
-    let api_key = ctx.require_setting("apikey")?;
+    let (url, api_key) = creds(ctx)?;
     let library_path = ctx.settings.get_or("librarypath", "/mount");
 
     if plugin == "jellyfin" {
@@ -199,94 +186,79 @@ fn rewrite_media_path(library_path: &str, media_path: &str) -> String {
     format!("{library_path}/{media_path}")
 }
 
-macro_rules! impl_media_server_plugin {
-    ($plugin_ty:ident, $name:literal) => {
-        #[async_trait]
-        impl Plugin for $plugin_ty {
-            fn name(&self) -> &'static str {
-                $name
-            }
+#[async_trait]
+impl Plugin for MediaServerPlugin {
+    fn name(&self) -> &'static str {
+        self.name
+    }
 
-            fn category(&self) -> &'static str {
-                "media"
-            }
+    fn category(&self) -> &'static str {
+        "media"
+    }
 
-            fn subscribed_events(&self) -> &[EventType] {
-                &[
-                    EventType::MediaItemDownloadSuccess,
-                    EventType::MediaItemsDeleted,
-                    EventType::ActivePlaybackSessionsRequested,
-                    EventType::ArtworkRequested,
-                ]
-            }
+    fn subscribed_events(&self) -> &[EventType] {
+        &[
+            EventType::MediaItemDownloadSuccess,
+            EventType::MediaItemsDeleted,
+            EventType::ActivePlaybackSessionsRequested,
+            EventType::ArtworkRequested,
+        ]
+    }
 
-            async fn validate(
-                &self,
-                settings: &PluginSettings,
-                _http: &riven_core::http::HttpClient,
-            ) -> anyhow::Result<bool> {
-                Ok(settings.has("url") && settings.has("apikey"))
-            }
+    async fn validate(
+        &self,
+        settings: &PluginSettings,
+        _http: &riven_core::http::HttpClient,
+    ) -> anyhow::Result<bool> {
+        Ok(settings.has("url") && settings.has("apikey"))
+    }
 
-            fn settings_schema(&self) -> Vec<SettingField> {
-                media_server_settings_schema()
-            }
+    fn settings_schema(&self) -> Vec<SettingField> {
+        media_server_settings_schema()
+    }
 
-            async fn on_active_playback_sessions_requested(
-                &self,
-                ctx: &PluginContext,
-            ) -> anyhow::Result<HookResponse> {
-                let url = ctx
-                    .require_setting("url")?
-                    .trim_end_matches('/')
-                    .to_string();
-                let api_key = ctx.require_setting("apikey")?;
-                let sessions = get_active_sessions(&ctx.http, &url, api_key, $name).await?;
-                Ok(HookResponse::ActivePlaybackSessions(sessions))
-            }
+    async fn on_active_playback_sessions_requested(
+        &self,
+        ctx: &PluginContext,
+    ) -> anyhow::Result<HookResponse> {
+        let (url, api_key) = creds(ctx)?;
+        let sessions = get_active_sessions(&ctx.http, &url, api_key, self.name).await?;
+        Ok(HookResponse::ActivePlaybackSessions(sessions))
+    }
 
-            async fn on_artwork_requested(
-                &self,
-                server: &str,
-                reference: &str,
-                ctx: &PluginContext,
-            ) -> anyhow::Result<HookResponse> {
-                if server != $name {
-                    return Ok(HookResponse::Empty);
-                }
-                let url = ctx
-                    .require_setting("url")?
-                    .trim_end_matches('/')
-                    .to_string();
-                let api_key = ctx.require_setting("apikey")?;
-                Ok(HookResponse::Artwork(
-                    get_artwork(&ctx.http, &url, api_key, $name, reference).await?,
-                ))
-            }
-
-            async fn on_download_success(
-                &self,
-                info: &DownloadSuccessInfo<'_>,
-                ctx: &PluginContext,
-            ) -> anyhow::Result<HookResponse> {
-                notify_download_success($name, info, ctx).await
-            }
-
-            async fn on_items_deleted(
-                &self,
-                _item_ids: &[i64],
-                _external_request_ids: &[String],
-                deleted_paths: &[String],
-                ctx: &PluginContext,
-            ) -> anyhow::Result<HookResponse> {
-                notify_items_deleted($name, deleted_paths, ctx).await
-            }
+    async fn on_artwork_requested(
+        &self,
+        server: &str,
+        reference: &str,
+        ctx: &PluginContext,
+    ) -> anyhow::Result<HookResponse> {
+        if server != self.name {
+            return Ok(HookResponse::Empty);
         }
-    };
-}
+        let (url, api_key) = creds(ctx)?;
+        Ok(HookResponse::Artwork(
+            get_artwork(&ctx.http, &url, api_key, self.name, reference).await?,
+        ))
+    }
 
-impl_media_server_plugin!(EmbyPlugin, "emby");
-impl_media_server_plugin!(JellyfinPlugin, "jellyfin");
+    async fn on_download_success(
+        &self,
+        info: &DownloadSuccessInfo<'_>,
+        ctx: &PluginContext,
+    ) -> anyhow::Result<HookResponse> {
+        notify_download_success(self.name, info, ctx).await
+    }
+
+    async fn on_items_deleted(
+        &self,
+        _item_ids: &[i64],
+        _external_request_ids: &[String],
+        deleted_paths: &[String],
+        ctx: &PluginContext,
+    ) -> anyhow::Result<HookResponse> {
+        notify_items_deleted(self.name, deleted_paths, ctx).await
+    }
+}
 
 /// The largest artwork riven will relay — see the Plex counterpart. Only exists
 /// so a misbehaving upstream cannot stream an unbounded body through riven.

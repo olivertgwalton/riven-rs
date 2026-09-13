@@ -25,16 +25,4 @@ where
         .map_err(|_e| Error::new(format!("{label} ID must be numeric")))
 }
 
-pub(super) fn episode_lookup_keys(item: &riven_db::entities::MediaItem) -> Vec<String> {
-    item.absolute_number
-        .map(|number| format!("abs:{number}"))
-        .into_iter()
-        .chain(
-            item.season_number
-                .zip(item.episode_number)
-                .map(|(season, episode)| format!("{season}:{episode}")),
-        )
-        .collect()
-}
-
 pub use riven_rank::derive_media_metadata;

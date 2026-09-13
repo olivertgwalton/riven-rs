@@ -99,9 +99,7 @@ async fn run_worker_monitor(
 
     while !cancel.is_cancelled() {
         let maintenance = async {
-            if let Err(error) = riven_queue::clear_worker_registrations(&mut redis, &queues).await {
-                tracing::error!(%error, "failed to recover startup worker registrations");
-            }
+            riven_queue::rescue_workers(&mut redis, &queues).await;
             riven_queue::purge_orphaned_worker_sets(&mut redis, &queues).await;
             riven_queue::purge_orphaned_active_jobs(&mut redis, &queues).await;
             riven_queue::purge_stale_dedup_keys(&mut redis).await;

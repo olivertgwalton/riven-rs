@@ -10,31 +10,12 @@ pub use profiles::HttpServiceProfile;
 pub use rate_limit::RateLimit;
 pub use response::HttpResponseData;
 
-/// Returned by [`HttpClient::get_json`] on HTTP 429. The worker slot is freed
+/// Returned by [`HttpClient::get_json`] on HTTP 429, and by plugins when an
+/// upstream service is temporarily unable to answer. The worker slot is freed
 /// immediately; callers should re-queue with backoff rather than retrying inline.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
+#[error("rate limited (429)")]
 pub struct RateLimitedError;
-
-impl std::fmt::Display for RateLimitedError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "rate limited (429)")
-    }
-}
-
-impl std::error::Error for RateLimitedError {}
-
-/// Returned by scraper plugins when an upstream service is temporarily unable
-/// to answer and the parent job should retry later.
-#[derive(Debug)]
-pub struct RetryLaterError;
-
-impl std::fmt::Display for RetryLaterError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "temporarily unavailable; retry later")
-    }
-}
-
-impl std::error::Error for RetryLaterError {}
 
 #[cfg(test)]
 mod tests {

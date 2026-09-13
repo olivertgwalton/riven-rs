@@ -6,10 +6,15 @@
     import StatusBadge from "$lib/components/media/status-badge.svelte";
     import ItemAction from "$lib/components/media/riven/item-action.svelte";
     import ItemManualScrape from "$lib/components/media/riven/item-manual-scrape.svelte";
-    import { IsMobile } from "$lib/hooks/is-mobile.svelte";
+    import { isMobile } from "$lib/stores/global.svelte";
     import type { EpisodeSummary } from "$lib/gql/schema";
     import type { MediaMetadata, Maybe } from "$lib/gql/schema";
-    import type { GqlEpisodeFull, GqlFilesystemEntry } from "$lib/services/riven-media";
+    import { formatBytes } from "$lib/helpers";
+    import {
+        getFilesystemEntryLabel,
+        type GqlEpisodeFull,
+        type GqlFilesystemEntry
+    } from "$lib/services/riven-media";
     import { untrack } from "svelte";
     import RotateCcw from "@lucide/svelte/icons/rotate-ccw";
     import RefreshCw from "@lucide/svelte/icons/refresh-cw";
@@ -22,7 +27,6 @@
         showTitle?: string | null;
         stateByEpisodeNumber: Map<number, Pick<GqlEpisodeFull, "id" | "episodeNumber" | "state">>;
         detailsByEpisodeNumber: Map<number, GqlEpisodeFull>;
-        formatSize: (bytes: number) => string;
         onDeleteFilesystemEntry: (id: number, label: string) => void | Promise<void>;
         onBlacklistFilesystemEntry: (id: number, label: string) => void | Promise<void>;
         onItemActionSuccess?: () => void | Promise<void>;
@@ -40,7 +44,6 @@
         showTitle,
         stateByEpisodeNumber,
         detailsByEpisodeNumber,
-        formatSize,
         onDeleteFilesystemEntry,
         onBlacklistFilesystemEntry,
         onItemActionSuccess,
@@ -48,7 +51,6 @@
         showExternalId = ""
     }: Props = $props();
 
-    const isMobile = new IsMobile();
     let openEpisodeOverride = $state<number | null | "unset">(untrack(() => "unset"));
     const openEpisodeNumber = $derived.by<number | null>(() => {
         if (openEpisodeOverride !== "unset") return openEpisodeOverride;
@@ -74,39 +76,11 @@
         openEpisodeOverride = open ? episodeNumber : null;
     }
 
-    function humanizeProfileName(name: Maybe<string> | undefined) {
-        if (!name) return null;
-        return name
-            .split(/[_-]+/)
-            .filter(Boolean)
-            .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-            .join(" ");
-    }
-
-    function getMetadataResolutionLabel(metadata: Maybe<MediaMetadata> | undefined): string | null {
-        const height = metadata?.video?.resolutionHeight;
-        if (!height) return null;
-        if (height >= 2160) return "4K";
-        if (height >= 1440) return "1440p";
-        if (height >= 1080) return "1080p";
-        if (height >= 720) return "720p";
-        if (height >= 480) return "480p";
-        return `${height}p`;
-    }
-
     function getFsLabel(
         entry: GqlFilesystemEntry | undefined,
         episodeNumber: number | null | undefined
     ) {
-        const resolutionLabel = getMetadataResolutionLabel(entry?.mediaMetadata);
-        const profileLabel = humanizeProfileName(entry?.rankingProfileName);
-        const fallback = episodeNumber ? `Episode ${episodeNumber}` : "Episode";
-
-        if (resolutionLabel && profileLabel) {
-            return `${resolutionLabel} (${profileLabel})`;
-        }
-
-        return resolutionLabel ?? profileLabel ?? fallback;
+        return getFilesystemEntryLabel(entry, episodeNumber ? `Episode ${episodeNumber}` : "Episode");
     }
 </script>
 
@@ -344,7 +318,7 @@
                         {#if fs?.fileSize}
                             <div class="flex items-center gap-2">
                                 <span class="text-muted-foreground text-xs">Size</span>
-                                <span class="font-mono text-xs">{formatSize(fs.fileSize)}</span>
+                                <span class="font-mono text-xs">{formatBytes(fs.fileSize)}</span>
                             </div>
                         {/if}
                         {#if meta?.bitrate}
@@ -501,7 +475,7 @@
                 <Drawer.Content class="max-h-[85vh] overflow-hidden outline-none">
                     <div class="mx-auto flex w-full min-h-0 max-w-4xl flex-1 flex-col px-4 pb-6 md:px-6">
                         <Drawer.Header class="shrink-0 px-0 pt-2 pb-0 text-left">
-                            <Drawer.Title class="font-heading text-2xl font-bold tracking-tight">
+                            <Drawer.Title class="text-2xl font-bold tracking-tight">
                                 S{episode.seasonNumber}E{episode.number} - {episode.name}
                             </Drawer.Title>
                             {@render episodeMetadata(episode, rivenEpisode)}
@@ -522,7 +496,7 @@
                     style="width: min(calc(100vw - 1rem), 46rem); max-width: min(calc(100vw - 1rem), 46rem);"
                     class="data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[side=right]:data-[state=open]:slide-in-from-right-10 data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[side=right]:data-[state=closed]:slide-out-to-right-10 flex h-full w-full max-w-[min(100vw-1rem,46rem)] flex-col overflow-hidden border-l border-white/10 bg-zinc-950/95 backdrop-blur-2xl duration-300 ease-out">
                     <Sheet.Header class="px-6 pt-6">
-                        <Sheet.Title class="font-heading text-2xl font-bold tracking-tight">
+                        <Sheet.Title class="text-2xl font-bold tracking-tight">
                             S{episode.seasonNumber}E{episode.number} - {episode.name}
                         </Sheet.Title>
                         {@render episodeMetadata(episode, rivenEpisode)}

@@ -7,7 +7,7 @@
     import { toast } from "svelte-sonner";
     import { gqlClient } from "$lib/graphql-client";
     import { createScopedLogger } from "$lib/logger";
-    import { isMobileStore } from "$lib/stores/global.svelte";
+    import { isMobile } from "$lib/stores/global.svelte";
     import type { Snippet } from "svelte";
     import { resolve } from "$app/paths";
     import { page } from "$app/state";
@@ -48,7 +48,7 @@
     let error = $state<string | null>(null);
 
     function closeOnMobile() {
-        if (isMobileStore.isMobile) open = false;
+        if (isMobile.current) open = false;
     }
 
     async function fetchCollection() {

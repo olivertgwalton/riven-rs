@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use sea_orm::ActiveEnum;
 use serde::{Deserialize, Serialize};
 
 use crate::types::ContentRating;
@@ -151,7 +152,14 @@ impl FilesystemFilterRules {
             && matches_text_filter(metadata.network.as_deref(), &self.networks)
             && matches_text_filter(metadata.language.as_deref(), &self.languages)
             && matches_text_filter(metadata.country.as_deref(), &self.countries)
-            && matches_content_rating_filter(metadata.content_rating, &self.content_ratings)
+            && matches_text_filter(
+                metadata
+                    .content_rating
+                    .as_ref()
+                    .map(ActiveEnum::to_value)
+                    .as_deref(),
+                &self.content_ratings,
+            )
             && within_bounds(metadata.year, self.min_year, self.max_year)
             && within_bounds(metadata.rating, self.min_rating, self.max_rating)
             && self
@@ -165,20 +173,13 @@ impl FilesystemFilterRules {
 }
 
 fn matches_text_filter(value: Option<&str>, filters: &FilesystemFilterSelection) -> bool {
-    match value.map(str::trim).filter(|value| !value.is_empty()) {
-        Some(v) => matches_token_filter(&[v], filters),
-        None => matches_token_filter(&[], filters),
-    }
-}
-
-fn matches_content_rating_filter(
-    rating: Option<ContentRating>,
-    filters: &FilesystemFilterSelection,
-) -> bool {
-    match rating.map(content_rating_key) {
-        Some(v) => matches_token_filter(&[v], filters),
-        None => matches_token_filter(&[], filters),
-    }
+    matches_token_filter(
+        value
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .as_slice(),
+        filters,
+    )
 }
 
 fn matches_token_filter(values: &[&str], filters: &FilesystemFilterSelection) -> bool {
@@ -213,20 +214,4 @@ where
 {
     min.is_none_or(|min| value.is_some_and(|value| value >= min))
         && max.is_none_or(|max| value.is_some_and(|value| value <= max))
-}
-
-fn content_rating_key(rating: ContentRating) -> &'static str {
-    match rating {
-        ContentRating::G => "g",
-        ContentRating::Pg => "pg",
-        ContentRating::Pg13 => "pg-13",
-        ContentRating::R => "r",
-        ContentRating::Nc17 => "nc-17",
-        ContentRating::TvY => "tv-y",
-        ContentRating::TvY7 => "tv-y7",
-        ContentRating::TvG => "tv-g",
-        ContentRating::TvPg => "tv-pg",
-        ContentRating::Tv14 => "tv-14",
-        ContentRating::TvMa => "tv-ma",
-    }
 }

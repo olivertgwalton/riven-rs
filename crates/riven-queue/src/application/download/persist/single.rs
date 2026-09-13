@@ -4,8 +4,8 @@ use super::*;
 ///
 /// `stream_id` links the created entry to the source stream for version tracking.
 /// `resolution` is stored in the DB for metadata.
-/// `path_tag` is embedded in the VFS filename when `Some` (active profile mode).
-/// `profile_name` is stored on the entry for version-profile tracking.
+/// `profile` is embedded in the VFS filename and stored on the entry for
+/// version-profile tracking when `Some` (active profile mode).
 pub async fn persist_movie(
     item: &MediaItem,
     dl: &DownloadResult,
@@ -13,8 +13,7 @@ pub async fn persist_movie(
     queue: &JobQueue,
     stream_id: Option<i64>,
     resolution: Option<&str>,
-    path_tag: Option<&str>,
-    profile_name: Option<&str>,
+    profile: Option<&str>,
     bitrate: Option<riven_core::downloader::BitrateLimits>,
 ) -> bool {
     let id = item.id;
@@ -89,7 +88,7 @@ pub async fn persist_movie(
         .rfind('.')
         .filter(|&i| i > 0)
         .map_or("mkv", |i| &file.filename[i + 1..]);
-    let tag_suffix = path_tag.map(|t| format!(" [{t}]")).unwrap_or_default();
+    let tag_suffix = profile.map(|t| format!(" [{t}]")).unwrap_or_default();
     let base_name = item.pretty_name();
     let vfs_name = format!("{base_name}{tag_suffix}.{ext}");
     let path = format!("/movies/{base_name}/{vfs_name}");
@@ -111,7 +110,7 @@ pub async fn persist_movie(
         provider: dl.provider.as_deref(),
         stream_id,
         resolution,
-        ranking_profile_name: profile_name,
+        ranking_profile_name: profile,
         library_profiles: Some(&library_profiles_json),
         usenet_info_hash: file.usenet_info_hash.as_deref(),
         usenet_file_index: file.usenet_file_index,
@@ -149,8 +148,7 @@ pub async fn persist_episode(
     stream_id: Option<i64>,
     raw_title: &str,
     resolution: Option<&str>,
-    path_tag: Option<&str>,
-    profile_name: Option<&str>,
+    profile: Option<&str>,
     bitrate: Option<riven_core::downloader::BitrateLimits>,
 ) -> bool {
     let id = item.id;
@@ -280,7 +278,7 @@ pub async fn persist_episode(
 
     let show_name = pretty_show_name(hierarchy, &item.title);
     for (file, part) in select_episode_files(&matched) {
-        let path = episode_vfs_path(&show_name, season_number, episode_number, part, path_tag);
+        let path = episode_vfs_path(&show_name, season_number, episode_number, part, profile);
         if let Err(e) = repo::create_media_entry(repo::MediaEntryInput {
             media_item_id: id,
             path: &path,
@@ -292,7 +290,7 @@ pub async fn persist_episode(
             provider: dl.provider.as_deref(),
             stream_id,
             resolution,
-            ranking_profile_name: profile_name,
+            ranking_profile_name: profile,
             library_profiles: Some(&library_profiles_json),
             usenet_info_hash: file.usenet_info_hash.as_deref(),
             usenet_file_index: file.usenet_file_index,

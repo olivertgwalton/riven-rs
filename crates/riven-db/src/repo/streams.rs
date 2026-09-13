@@ -1,5 +1,5 @@
 use anyhow::Result;
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use riven_core::entities::{
     filesystem_entries, media_item_blacklisted_streams, media_item_streams, media_items, streams,
 };
@@ -379,7 +379,8 @@ pub async fn get_media_entries(media_item_id: i64) -> Result<Vec<FileSystemEntry
 /// Like `get_media_entries` but walks the full media tree rooted at `root_id`.
 /// Needed for season-level IDs where entries are stored on child episodes.
 pub async fn get_media_entries_recursive(root_id: i64) -> Result<Vec<FileSystemEntry>> {
-    // Raw Statement: recursive CTE walking the media tree.
+    // Raw Statement: recursive CTE walking the media tree. The enum column is
+    // re-aliased as ::text (last duplicate name wins) so it decodes.
     Ok(
         FileSystemEntry::find_by_statement(Statement::from_sql_and_values(
             DbBackend::Postgres,
@@ -390,13 +391,7 @@ pub async fn get_media_entries_recursive(root_id: i64) -> Result<Vec<FileSystemE
              FROM media_items child
              INNER JOIN media_tree parent ON child.parent_id = parent.id
          )
-         SELECT fe.id, fe.file_size, fe.created_at, fe.updated_at, fe.media_item_id,
-                fe.entry_type::text AS entry_type, fe.path, fe.original_filename, fe.download_url,
-                fe.stream_url, fe.plugin, fe.provider, fe.provider_download_id, fe.library_profiles,
-                fe.media_metadata, fe.language, fe.parent_original_filename, fe.subtitle_content,
-                fe.file_hash, fe.video_file_size, fe.opensubtitles_id, fe.source_provider,
-                fe.source_id, fe.stream_id, fe.resolution, fe.ranking_profile_name,
-                fe.usenet_info_hash, fe.usenet_file_index
+         SELECT fe.*, fe.entry_type::text AS entry_type
          FROM filesystem_entries fe
          INNER JOIN media_tree mt ON fe.media_item_id = mt.id
          WHERE fe.entry_type = 'media'",
@@ -437,15 +432,6 @@ pub async fn get_media_entry_paths_for_items(root_ids: &[i64]) -> Result<Vec<Str
         paths.push(row.try_get::<String>("", "path")?);
     }
     Ok(paths)
-}
-
-pub async fn get_media_entry_by_path(path: &str) -> Result<Option<FileSystemEntry>> {
-    Ok(filesystem_entries::Entity::find()
-        .filter(filesystem_entries::Column::Path.eq(path))
-        .filter(filesystem_entries::Column::EntryType.eq(FileSystemEntryType::Media))
-        .into_model::<FileSystemEntry>()
-        .one(orm())
-        .await?)
 }
 
 /// Look up a filesystem entry by VFS path regardless of entry_type. Used by
@@ -525,18 +511,12 @@ pub async fn get_media_entry_by_id(entry_id: i64) -> Result<Option<FileSystemEnt
 /// Movies and non-episodic items return `None`.
 pub async fn get_next_playback_entry(entry_id: i64) -> Result<Option<FileSystemEntry>> {
     // Raw Statement: multi-table self-join across episodes/seasons with the
-    // next-episode ordering logic.
-    Ok(FileSystemEntry::find_by_statement(Statement::from_sql_and_values(
-        DbBackend::Postgres,
-        r#"SELECT next_fe.id, next_fe.file_size, next_fe.created_at, next_fe.updated_at,
-                  next_fe.media_item_id, next_fe.entry_type::text AS entry_type, next_fe.path,
-                  next_fe.original_filename, next_fe.download_url, next_fe.stream_url, next_fe.plugin,
-                  next_fe.provider, next_fe.provider_download_id, next_fe.library_profiles,
-                  next_fe.media_metadata, next_fe.language, next_fe.parent_original_filename,
-                  next_fe.subtitle_content, next_fe.file_hash, next_fe.video_file_size,
-                  next_fe.opensubtitles_id, next_fe.source_provider, next_fe.source_id,
-                  next_fe.stream_id, next_fe.resolution, next_fe.ranking_profile_name,
-                  next_fe.usenet_info_hash, next_fe.usenet_file_index
+    // next-episode ordering logic. The enum column is re-aliased as ::text
+    // (last duplicate name wins) so it decodes.
+    Ok(
+        FileSystemEntry::find_by_statement(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            r#"SELECT next_fe.*, next_fe.entry_type::text AS entry_type
            FROM filesystem_entries current_fe
            INNER JOIN media_items current_ep
                ON current_ep.id = current_fe.media_item_id
@@ -567,10 +547,11 @@ pub async fn get_next_playback_entry(entry_id: i64) -> Result<Option<FileSystemE
                next_ep.episode_number ASC NULLS LAST,
                next_fe.id ASC
            LIMIT 1"#,
-        [entry_id.into()],
-    ))
-    .one(orm())
-    .await?)
+            [entry_id.into()],
+        ))
+        .one(orm())
+        .await?,
+    )
 }
 
 pub async fn list_filesystem_profile_entry_candidates()
@@ -583,10 +564,7 @@ pub async fn list_filesystem_profile_entry_candidates()
         r#"SELECT
                fe.id,
                fe.library_profiles,
-               CASE
-                   WHEN item.item_type = 'movie' THEN 'movie'
-                   ELSE 'show'
-               END AS content_type,
+               item.item_type = 'movie' AS is_movie,
                CASE
                    WHEN item.item_type = 'movie' THEN item.genres
                    ELSE show_item.genres
@@ -903,7 +881,7 @@ pub async fn create_media_entry(input: MediaEntryInput<'_>) -> Result<FileSystem
 
 use riven_rank::derive_media_metadata as parse_filename_metadata;
 
-pub async fn list_vfs_dir_names(pattern: &str, depth: u32) -> Result<Vec<VfsDirName>> {
+pub async fn list_vfs_dir_names(pattern: &str, depth: u32) -> Result<Vec<VfsName>> {
     // Raw Statement: split_part with interpolated depth.
     let sql = format!(
         "SELECT split_part(path, '/', {depth}) AS name, library_profiles \
@@ -911,32 +889,28 @@ pub async fn list_vfs_dir_names(pattern: &str, depth: u32) -> Result<Vec<VfsDirN
          WHERE path LIKE $1 AND entry_type = 'media' \
          ORDER BY 1"
     );
-    Ok(
-        VfsDirName::find_by_statement(Statement::from_sql_and_values(
-            DbBackend::Postgres,
-            sql,
-            [pattern.into()],
-        ))
-        .all(orm())
-        .await?,
-    )
+    Ok(VfsName::find_by_statement(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        sql,
+        [pattern.into()],
+    ))
+    .all(orm())
+    .await?)
 }
 
-pub async fn list_vfs_file_names(dir_path: &str) -> Result<Vec<VfsFileName>> {
+pub async fn list_vfs_file_names(dir_path: &str) -> Result<Vec<VfsName>> {
     // Raw Statement: split_part over an array_length expression.
     let sql = "SELECT split_part(path, '/', array_length(string_to_array(trim(both '/' from $1), '/'), 1) + 2) AS name, library_profiles \
          FROM filesystem_entries \
          WHERE path LIKE ($1 || '/%') AND entry_type IN ('media', 'subtitle') \
          ORDER BY 1";
-    Ok(
-        VfsFileName::find_by_statement(Statement::from_sql_and_values(
-            DbBackend::Postgres,
-            sql,
-            [dir_path.into()],
-        ))
-        .all(orm())
-        .await?,
-    )
+    Ok(VfsName::find_by_statement(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        sql,
+        [dir_path.into()],
+    ))
+    .all(orm())
+    .await?)
 }
 
 /// Every media/subtitle entry path in the library, in one pass.
@@ -960,55 +934,8 @@ pub async fn list_vfs_entry_paths() -> Result<Vec<VfsEntryPath>> {
     )
 }
 
-/// Aggregate stat (timestamps + entry count) for all media entries under `path_prefix`.
-/// A `path_prefix` of `""` covers all entries; `/movies` covers only movies, etc.
-#[derive(sea_orm::FromQueryResult)]
-pub struct VfsDirStatResult {
-    pub ctime: Option<DateTime<Utc>>,
-    pub mtime: Option<DateTime<Utc>>,
-    pub entry_count: i64,
-}
-
-pub async fn get_vfs_dir_stat(path_prefix: &str) -> Result<VfsDirStatResult> {
-    // Raw Statement: aggregate over MIN/MAX/COUNT with COALESCE.
-    let pattern = format!("{path_prefix}/%");
-    VfsDirStatResult::find_by_statement(Statement::from_sql_and_values(
-        DbBackend::Postgres,
-        "SELECT \
-           MIN(created_at) AS ctime, \
-           MAX(COALESCE(updated_at, created_at)) AS mtime, \
-           COUNT(*) AS entry_count \
-         FROM filesystem_entries \
-         WHERE path LIKE $1 AND entry_type = 'media'",
-        [pattern.into()],
-    ))
-    .one(orm())
-    .await?
-    .ok_or_else(|| anyhow::anyhow!("get_vfs_dir_stat returned no row"))
-}
-
-/// Count distinct directory names at `depth` (1-based split_part index) for entries
-/// matching `pattern`.
-pub async fn count_vfs_distinct_dirs(pattern: &str, depth: u32) -> Result<i64> {
-    // Raw Statement: COUNT(DISTINCT split_part(...)) with interpolated depth.
-    let sql = format!(
-        "SELECT COUNT(DISTINCT split_part(path, '/', {depth})) AS count \
-         FROM filesystem_entries \
-         WHERE path LIKE $1 AND entry_type = 'media'"
-    );
-    let row = orm()
-        .query_one_raw(Statement::from_sql_and_values(
-            DbBackend::Postgres,
-            sql,
-            [pattern.into()],
-        ))
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("count_vfs_distinct_dirs returned no row"))?;
-    Ok(row.try_get::<i64>("", "count")?)
-}
-
-/// Deletes the `usenet_meta` row for `info_hash` — but only if no
-/// `filesystem_entries` row still references it. A single info_hash's
+/// Deletes the `usenet_meta` rows for `info_hashes` — but only those no
+/// `filesystem_entries` row still references. A single info_hash's
 /// segment map can back multiple media items at once (a season-pack NZB's
 /// shared RAR volumes span several episodes' virtual files), so this must
 /// never remove data a sibling entry still depends on.
@@ -1020,11 +947,6 @@ pub async fn count_vfs_distinct_dirs(pattern: &str, depth: u32) -> Result<i64> {
 /// validation — segment availability, RAR structure, PAR2 block checks —
 /// instead of `UsenetStreamer::ingest`'s idempotency fast path silently
 /// reusing a stale, possibly already-known-bad, cached parse.
-pub async fn delete_orphaned_usenet_meta(info_hash: &str) -> Result<bool> {
-    Ok(delete_orphaned_usenet_metas(&[info_hash.to_owned()]).await? > 0)
-}
-
-/// Batch form of [`delete_orphaned_usenet_meta`].
 pub async fn delete_orphaned_usenet_metas(info_hashes: &[String]) -> Result<u64> {
     if info_hashes.is_empty() {
         return Ok(0);

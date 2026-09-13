@@ -8,30 +8,6 @@
 
     const logger = createScopedLogger("logs-page");
 
-    const {
-        logs,
-        historicalLogs,
-        isLoadingHistorical,
-        activeTab,
-        error,
-        historicalError,
-        connectionStatus,
-        hasConnected,
-        reconnectAttempts,
-        maxReconnectAttempts
-    } = $derived({
-        logs: logStore.logs,
-        historicalLogs: logStore.historicalLogs,
-        isLoadingHistorical: logStore.isLoadingHistorical,
-        activeTab: logStore.activeTab,
-        error: logStore.error,
-        historicalError: logStore.historicalError,
-        connectionStatus: logStore.connectionStatus,
-        hasConnected: logStore.hasConnected,
-        reconnectAttempts: logStore.reconnectAttempts,
-        maxReconnectAttempts: logStore.maxReconnectAttempts
-    });
-
     onMount(() => {
         logStore.connect();
     });
@@ -41,7 +17,7 @@
     });
 
     function getStatusColor() {
-        switch (connectionStatus) {
+        switch (logStore.connectionStatus) {
             case "connected":
                 return "bg-green-500";
             case "connecting":
@@ -56,12 +32,12 @@
     }
 
     function getStatusText() {
-        switch (connectionStatus) {
+        switch (logStore.connectionStatus) {
             case "connected":
                 return "Connected";
             case "connecting":
-                return reconnectAttempts > 0
-                    ? `Reconnecting... (${reconnectAttempts}/${maxReconnectAttempts})`
+                return logStore.reconnectAttempts > 0
+                    ? `Reconnecting... (${logStore.reconnectAttempts}/${logStore.maxReconnectAttempts})`
                     : "Connecting...";
             case "disconnected":
                 return "Disconnected";
@@ -153,7 +129,7 @@
 {#snippet statusIndicator()}
     <div class="flex items-center gap-2">
         <div
-            class="{getStatusColor()} h-2 w-2 rounded-full {connectionStatus === 'connecting'
+            class="{getStatusColor()} h-2 w-2 rounded-full {logStore.connectionStatus === 'connecting'
                 ? 'animate-pulse'
                 : ''}">
         </div>
@@ -175,18 +151,18 @@
 {/snippet}
 
 <PageShell class="h-full">
-    {#if error && connectionStatus === "error" && reconnectAttempts >= maxReconnectAttempts}
+    {#if logStore.error && logStore.connectionStatus === "error" && logStore.reconnectAttempts >= logStore.maxReconnectAttempts}
         <div class="bg-destructive/10 border-destructive/20 rounded-lg border p-6">
             <h3 class="text-destructive mb-3 text-lg font-semibold">Connection Failed</h3>
             <pre
-                class="text-destructive/80 bg-destructive/5 mb-4 overflow-x-auto rounded border p-3 font-mono text-sm">{error}</pre>
+                class="text-destructive/80 bg-destructive/5 mb-4 overflow-x-auto rounded border p-3 font-mono text-sm">{logStore.error}</pre>
             <button type="button"
                 class="bg-primary hover:bg-primary/90 text-primary-foreground rounded-lg px-4 py-2 font-medium transition-colors"
                 onclick={() => logStore.reconnect()}>
                 Try Again
             </button>
         </div>
-    {:else if logs.length > 0 || historicalLogs.length > 0 || connectionStatus !== "disconnected" || isLoadingHistorical}
+    {:else if logStore.logs.length > 0 || logStore.historicalLogs.length > 0 || logStore.connectionStatus !== "disconnected" || logStore.isLoadingHistorical}
         <div class="flex h-full min-h-0 flex-col">
             <div class="mb-6 flex flex-col items-start justify-between gap-4 md:flex-row">
                 <div>
@@ -197,7 +173,7 @@
                     <Button variant="secondary" onclick={handleUploadLogs}>Upload Logs</Button>
                     <div
                         class="bg-primary/10 text-primary border-primary/20 rounded-lg border px-4 py-2 font-medium">
-                        {activeTab === "live" ? logs.length : historicalLogs.length} entries
+                        {logStore.activeTab === "live" ? logStore.logs.length : logStore.historicalLogs.length} entries
                     </div>
                 </div>
             </div>
@@ -206,17 +182,17 @@
                 <div
                     class="bg-muted/30 flex shrink-0 flex-col items-center justify-between gap-4 border-b px-6 py-3 md:flex-row">
                     <div class="flex items-center gap-2">
-                        {@render tabButton("Live Logs", activeTab === "live", () =>
+                        {@render tabButton("Live Logs", logStore.activeTab === "live", () =>
                             logStore.setActiveTab("live")
                         )}
-                        {@render tabButton("Historical Logs", activeTab === "historical", () =>
+                        {@render tabButton("Historical Logs", logStore.activeTab === "historical", () =>
                             logStore.setActiveTab("historical")
                         )}
                     </div>
                     <div class="flex items-center gap-4">
-                        {#if activeTab === "live"}
+                        {#if logStore.activeTab === "live"}
                             {@render statusIndicator()}
-                            {#if connectionStatus === "error" && reconnectAttempts < maxReconnectAttempts}
+                            {#if logStore.connectionStatus === "error" && logStore.reconnectAttempts < logStore.maxReconnectAttempts}
                                 <button type="button"
                                     class="bg-primary/10 hover:bg-primary/20 text-primary border-primary/20 rounded border px-3 py-1 text-sm font-medium transition-colors"
                                     onclick={() => logStore.reconnect()}>
@@ -227,42 +203,42 @@
                             <button type="button"
                                 class="bg-primary/10 hover:bg-primary/20 text-primary border-primary/20 rounded border px-3 py-1 text-sm font-medium transition-colors"
                                 onclick={() => logStore.fetchHistoricalLogs()}
-                                disabled={isLoadingHistorical}>
-                                {isLoadingHistorical ? "Loading..." : "Refresh"}
+                                disabled={logStore.isLoadingHistorical}>
+                                {logStore.isLoadingHistorical ? "Loading..." : "Refresh"}
                             </button>
                         {/if}
                     </div>
                 </div>
 
                 <div class="min-h-0 flex-1 overflow-y-auto">
-                    {#if activeTab === "live"}
-                        {#if logs.length > 0}
-                            {#each logs.slice().reverse() as line, i (i)}
+                    {#if logStore.activeTab === "live"}
+                        {#if logStore.logs.length > 0}
+                            {#each logStore.logs.slice().reverse() as line, i (i)}
                                 {@render liveLine(line)}
                             {/each}
-                        {:else if connectionStatus === "connecting"}
+                        {:else if logStore.connectionStatus === "connecting"}
                             {@render loadingSpinner(getStatusText())}
-                        {:else if connectionStatus === "connected" || hasConnected}
+                        {:else if logStore.connectionStatus === "connected" || logStore.hasConnected}
                             {@render emptyState("Connected. Waiting for live logs...")}
-                        {:else if error}
+                        {:else if logStore.error}
                             <div class="p-8">
                                 {@render errorDisplay(
-                                    error,
+                                    logStore.error,
                                     () => logStore.reconnect(),
                                     "Reconnect"
                                 )}
                             </div>
                         {/if}
-                    {:else if isLoadingHistorical}
+                    {:else if logStore.isLoadingHistorical}
                         {@render loadingSpinner("Loading historical logs...")}
-                    {:else if historicalError}
+                    {:else if logStore.historicalError}
                         <div class="p-8">
-                            {@render errorDisplay(historicalError, () =>
+                            {@render errorDisplay(logStore.historicalError, () =>
                                 logStore.fetchHistoricalLogs()
                             )}
                         </div>
-                    {:else if historicalLogs.length > 0}
-                        {#each historicalLogs.slice().reverse() as log, i (i)}
+                    {:else if logStore.historicalLogs.length > 0}
+                        {#each logStore.historicalLogs.slice().reverse() as log, i (i)}
                             {@render logEntry(log)}
                         {/each}
                     {:else}

@@ -2,7 +2,6 @@ mod fetch;
 pub mod scores;
 
 use std::collections::HashMap;
-use std::sync::LazyLock;
 
 use thiserror::Error;
 
@@ -10,10 +9,7 @@ use crate::parse::{ParsedData, parse};
 use crate::settings::RankSettings;
 
 pub use fetch::check_fetch;
-pub use scores::{get_rank, get_rank_total};
-
-static DEFAULT_MODEL: LazyLock<crate::defaults::RankingModel> =
-    LazyLock::new(crate::defaults::RankingModel::default);
+pub use scores::get_rank_total;
 
 #[derive(Debug, Error)]
 pub enum RankError {
@@ -34,9 +30,6 @@ pub struct RankedTorrent {
     pub data: ParsedData,
     pub hash: String,
     pub rank: i64,
-    pub fetch: bool,
-    pub failed_checks: Vec<String>,
-    pub score_parts: HashMap<String, i64>,
     pub lev_ratio: f64,
 }
 
@@ -297,13 +290,11 @@ fn prepare_torrent(
 }
 
 /// Shared back half of the pipeline: runs fetch checks and the rank threshold.
-///
-/// Returns the fetch outcome and the failed-check list on success.
 fn finalize_torrent(
     data: &ParsedData,
     total_score: i64,
     settings: &RankSettings,
-) -> Result<(bool, Vec<String>), RankError> {
+) -> Result<(), RankError> {
     let (fetch, failed_checks) = check_fetch(data, settings);
 
     if !fetch {
@@ -319,11 +310,11 @@ fn finalize_torrent(
         });
     }
 
-    Ok((fetch, failed_checks))
+    Ok(())
 }
 
-/// Full ranking pipeline for a single torrent, including the per-category score
-/// breakdown ([`RankedTorrent::score_parts`]).
+/// Full ranking pipeline for a single torrent. `settings` must have been
+/// [`RankSettings::prepare`]d.
 ///
 /// # Errors
 ///
@@ -346,54 +337,13 @@ pub fn rank_torrent(
         aliases,
         settings,
     )?;
-    let (total_score, score_parts) = get_rank(&data, settings, &DEFAULT_MODEL);
-    let (fetch, failed_checks) = finalize_torrent(&data, total_score, settings)?;
-
-    Ok(RankedTorrent {
-        data,
-        hash: hash.to_lowercase(),
-        rank: total_score,
-        fetch,
-        failed_checks,
-        score_parts,
-        lev_ratio,
-    })
-}
-
-/// Ranking pipeline variant that skips score-part materialization.
-///
-/// This is intended for internal hot paths that only need the final rank and
-/// fetch outcome, not the per-category score breakdown.
-///
-/// # Errors
-///
-/// Same conditions as [`rank_torrent`].
-pub fn rank_torrent_fast(
-    raw_title: &str,
-    hash: &str,
-    correct_title: &str,
-    item_country: Option<&str>,
-    aliases: &HashMap<String, Vec<String>>,
-    settings: &RankSettings,
-) -> Result<RankedTorrent, RankError> {
-    let (data, lev_ratio) = prepare_torrent(
-        raw_title,
-        hash,
-        correct_title,
-        item_country,
-        aliases,
-        settings,
-    )?;
-    let total_score = get_rank_total(&data, settings, &DEFAULT_MODEL);
+    let total_score = get_rank_total(&data, settings);
     finalize_torrent(&data, total_score, settings)?;
 
     Ok(RankedTorrent {
         data,
         hash: hash.to_lowercase(),
         rank: total_score,
-        fetch: true,
-        failed_checks: Vec::new(),
-        score_parts: HashMap::new(),
         lev_ratio,
     })
 }

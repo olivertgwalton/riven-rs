@@ -36,11 +36,6 @@ impl HttpServiceProfile {
         }
     }
 
-    pub const fn with_attempts(mut self, attempts: u32) -> Self {
-        self.attempts = attempts;
-        self
-    }
-
     /// A proactive cap on top of reactive handling. Reserve this for a
     /// service whose own rate-limit signal is too undocumented or
     /// inconsistent to react to — every other service should stay

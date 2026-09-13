@@ -259,15 +259,11 @@ pub async fn set_setting(key: &str, value: serde_json::Value) -> Result<()> {
 }
 
 pub async fn get_plugin_enabled(name: &str) -> Result<bool> {
-    Ok(get_plugin_enabled_setting(name).await?.unwrap_or(false))
-}
-
-pub async fn get_plugin_enabled_setting(name: &str) -> Result<Option<bool>> {
     let key = format!("plugin_enabled.{name}");
-    Ok(match get_setting(&key).await? {
-        Some(serde_json::Value::Bool(enabled)) => Some(enabled),
-        _ => None,
-    })
+    Ok(matches!(
+        get_setting(&key).await?,
+        Some(serde_json::Value::Bool(true))
+    ))
 }
 
 pub async fn set_plugin_enabled(name: &str, enabled: bool) -> Result<()> {
@@ -385,26 +381,4 @@ pub async fn delete_ranking_profile(id: i32) -> Result<bool> {
         .exec(orm())
         .await?;
     Ok(result.rows_affected > 0)
-}
-
-pub async fn get_all_settings() -> Result<serde_json::Value> {
-    let rows: Vec<(String, serde_json::Value)> = settings::Entity::find()
-        .select_only()
-        .column(settings::Column::Key)
-        .column(settings::Column::Value)
-        .into_tuple()
-        .all(orm())
-        .await?;
-    Ok(serde_json::Value::Object(rows.into_iter().collect()))
-}
-
-pub async fn set_all_settings(settings: serde_json::Value) -> Result<serde_json::Value> {
-    if let serde_json::Value::Object(ref map) = settings {
-        for (key, value) in map {
-            set_setting(key, value.clone()).await?;
-        }
-        Ok(settings)
-    } else {
-        Err(anyhow::anyhow!("Settings must be a JSON object"))
-    }
 }

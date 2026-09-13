@@ -65,7 +65,7 @@ pub async fn run(job: &ProcessMediaItemJob, queue: &JobQueue) {
     );
 
     match job.step {
-        ProcessStep::Scrape => handle_scrape(job, &item, queue).await,
+        ProcessStep::Scrape => handle_scrape(&item, queue).await,
         ProcessStep::Download => handle_download(job, &item, queue).await,
         ProcessStep::Validate => handle_validate(job, &item, queue).await,
     }
@@ -74,20 +74,7 @@ pub async fn run(job: &ProcessMediaItemJob, queue: &JobQueue) {
 /// Step 1: enqueue scrape children. The scrape flow's finalize advances us
 /// to `Download` on success or stops on no-new-streams (the per-item failure
 /// counter handles backoff via `FAILED_ATTEMPTS_COOLDOWN_SQL`).
-async fn handle_scrape(job: &ProcessMediaItemJob, item: &MediaItem, queue: &JobQueue) {
-    if let Some(at) = job.next_scrape_attempt_at
-        && at > Utc::now()
-    {
-        tracing::debug!(
-            id = item.id,
-            title = %item.title,
-            retry_at = %at,
-            "pipeline: too soon to scrape again after the last failure, re-queued for later"
-        );
-        queue.push_process_media_item_at(job.clone(), at).await;
-        return;
-    }
-
+async fn handle_scrape(item: &MediaItem, queue: &JobQueue) {
     if item.state == MediaItemState::Scraped {
         if has_realistic_download_candidate(item, queue).await {
             if queue.push_download_from_best_stream(item.id).await {
@@ -166,7 +153,8 @@ async fn handle_validate(job: &ProcessMediaItemJob, item: &MediaItem, queue: &Jo
             // job-level re-push doesn't go through `get_pending_items_for_retry`,
             // so without this it would keep retrying every 30 minutes forever
             // regardless of how many times the item has already failed.
-            let at = Utc::now() + repo::cooldown_for_failed_attempts(item.failed_attempts);
+            let cooldown = repo::cooldown_for_failed_attempts(item.failed_attempts);
+            let at = Utc::now() + cooldown;
             tracing::debug!(
                 id = item.id,
                 title = %item.title,
@@ -176,11 +164,9 @@ async fn handle_validate(job: &ProcessMediaItemJob, item: &MediaItem, queue: &Jo
                 "pipeline: item still isn't complete after the download step; scheduling another scrape once its cooldown expires"
             );
             queue
-                .push_process_media_item_at(
-                    job.clone()
-                        .at_step(ProcessStep::Scrape)
-                        .with_next_scrape_attempt(at),
-                    at,
+                .push_process_media_item_after(
+                    job.clone().at_step(ProcessStep::Scrape),
+                    cooldown.to_std().unwrap_or_default(),
                 )
                 .await;
         }

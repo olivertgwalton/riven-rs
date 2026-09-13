@@ -8,7 +8,7 @@ use tokio::sync::{Mutex, RwLock, mpsc};
 
 struct MountedVfs {
     path: String,
-    session: riven_vfs::FuseSession,
+    session: riven_vfs::BackgroundSession,
 }
 
 struct VfsMountConfig {
@@ -16,7 +16,7 @@ struct VfsMountConfig {
     filesystem_settings_revision: Arc<AtomicU64>,
     stream_client: reqwest::Client,
     link_request_tx: mpsc::Sender<LinkRequest>,
-    local_source: Option<Arc<dyn riven_core::local_source::LocalByteSource>>,
+    usenet: Option<riven_usenet::UsenetStreamer>,
 }
 
 /// Owns the active FUSE session and lets runtime settings changes remount it.
@@ -32,14 +32,14 @@ impl VfsMountManager {
         filesystem_settings_revision: Arc<AtomicU64>,
         stream_client: reqwest::Client,
         link_request_tx: mpsc::Sender<LinkRequest>,
-        local_source: Option<Arc<dyn riven_core::local_source::LocalByteSource>>,
+        usenet: Option<riven_usenet::UsenetStreamer>,
     ) -> Result<Self> {
         let config = VfsMountConfig {
             vfs_layout,
             filesystem_settings_revision,
             stream_client,
             link_request_tx,
-            local_source,
+            usenet,
         };
         let mounted = mount_with_config(initial_path, &config)?;
 
@@ -88,7 +88,7 @@ fn mount_with_config(mount_path: &str, config: &VfsMountConfig) -> Result<Option
         config.filesystem_settings_revision.clone(),
         config.stream_client.clone(),
         config.link_request_tx.clone(),
-        config.local_source.clone(),
+        config.usenet.clone(),
     )?
     else {
         return Ok(None);

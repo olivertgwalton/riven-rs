@@ -10,7 +10,7 @@
 //!
 //! The public surface is `UsenetStreamer`, constructed once at process
 //! startup and consumed by both the ingest path (`plugin-usenet`) and the
-//! serving path (riven-vfs, in-process via `LocalByteSource`).
+//! serving path (riven-vfs, in-process via `UsenetStreamer::open_file`).
 
 pub mod nntp;
 pub mod nzb;
@@ -26,9 +26,9 @@ pub(crate) mod rar;
 pub(crate) mod yenc;
 
 pub use nntp::{DEFAULT_DOWNLOAD_WORKERS, NntpConfig};
-pub use nzb::{NzbDocument, NzbFile, parse_nzb, parse_nzb_document, peek_release_title};
+pub use nzb::{NzbDocument, NzbFile, parse_nzb_document, peek_release_title};
 pub use pool::SegmentPool;
 pub use streamer::{
     DEFAULT_AVAILABILITY_SAMPLE_PERCENT, NzbMeta, NzbMetaFile, NzbMetaSource, StreamerError,
-    UNKNOWN_FILE_LABEL, UsenetStreamer, active_streams, set_degraded_playback,
+    UNKNOWN_FILE_LABEL, UsenetStreamer, set_degraded_playback,
 };

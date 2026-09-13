@@ -3,10 +3,10 @@ use std::time::Instant;
 use anyhow::Result;
 use riven_core::events::{HookResponse, RivenEvent};
 use riven_core::types::{CachedStoreEntry, DownloadResult, MediaItemType};
-use riven_db::entities::{MediaItem, Stream};
+use riven_db::entities::Stream;
 use riven_db::repo;
 
-use super::helpers::stream_resolution;
+use super::helpers::{stream_raw_title, stream_resolution};
 use super::persist::{
     SeasonPersistOutcome, persist_episode, persist_movie, persist_season, persist_show,
 };
@@ -37,12 +37,10 @@ pub enum DownloadAttemptOutcome {
 
 pub async fn attempt_download(
     id: i64,
-    _item: &MediaItem,
     queue: &JobQueue,
     stream: &Stream,
     stores: Vec<CachedStoreEntry>,
-    path_tag: Option<&str>,
-    profile_name: Option<&str>,
+    profile: Option<&str>,
     start_time: Instant,
     hierarchy: Option<&DownloadHierarchyContext>,
     bitrate: Option<riven_core::downloader::BitrateLimits>,
@@ -51,19 +49,14 @@ pub async fn attempt_download(
     let stream_id = Some(stream.id);
     let resolution = stream_resolution(stream).to_owned();
     let resolution_ref: Option<&str> = Some(resolution.as_str());
-    let raw_title = stream
-        .parsed_data
-        .as_ref()
-        .and_then(|parsed| parsed.get("raw_title"))
-        .and_then(|value| value.as_str())
-        .unwrap_or("");
+    let raw_title = stream_raw_title(stream);
 
     tracing::debug!(
         id,
         info_hash,
         raw_title,
         resolution,
-        profile = profile_name,
+        profile,
         "download: offering this release to the download plugins"
     );
 
@@ -230,8 +223,7 @@ pub async fn attempt_download(
                 queue,
                 stream_id,
                 resolution_ref,
-                path_tag,
-                profile_name,
+                profile,
                 bitrate,
             )
             .await
@@ -263,8 +255,7 @@ pub async fn attempt_download(
                 stream_id,
                 raw_title,
                 resolution_ref,
-                path_tag,
-                profile_name,
+                profile,
                 bitrate,
             )
             .await
@@ -296,8 +287,7 @@ pub async fn attempt_download(
                 start_time,
                 stream_id,
                 raw_title,
-                path_tag,
-                profile_name,
+                profile,
             )
             .await
             {
@@ -339,8 +329,7 @@ pub async fn attempt_download(
                 hierarchy.expect("show downloads require hierarchy context"),
                 start_time,
                 stream_id,
-                path_tag,
-                profile_name,
+                profile,
             )
             .await
             {

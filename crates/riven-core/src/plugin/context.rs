@@ -8,20 +8,6 @@ pub struct PluginContext {
 }
 
 impl PluginContext {
-    pub fn new(
-        settings: PluginSettings,
-        http: crate::http::HttpClient,
-        redis: redis::aio::ConnectionManager,
-        vfs_mount_path: String,
-    ) -> Self {
-        Self {
-            settings,
-            http,
-            redis,
-            vfs_mount_path,
-        }
-    }
-
     pub fn require_setting(&self, key: &str) -> anyhow::Result<&str> {
         self.settings
             .get(key)

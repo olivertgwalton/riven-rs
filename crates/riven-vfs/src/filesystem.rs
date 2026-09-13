@@ -1,4 +1,3 @@
-use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -19,13 +18,13 @@ use riven_core::stream_link::request_stream_url_blocking;
 use riven_core::types::FileSystemEntryType;
 use riven_core::vfs_layout::VfsLibraryLayout;
 use riven_db::repo;
+use riven_usenet::UsenetStreamer;
 
 use crate::path_info::{CanonicalPath, PathTarget, parse_path};
 use crate::prefetch::Prefetcher;
-use crate::readdir::{DirEntry, populate_entries};
+use crate::query::directory_entry_paths;
 use crate::source::{ByteSource, HttpSource, LinkRefresher, UsenetSource};
-use crate::state::{CachedEntry, MOVIES_INO, OpenedFile, ROOT_INO, SHOWS_INO, VfsState};
-use riven_core::local_source::parse_usenet_url;
+use crate::state::{CachedEntry, DirEntry, MOVIES_INO, OpenedFile, ROOT_INO, SHOWS_INO, VfsState};
 
 const TTL: Duration = Duration::from_secs(300);
 
@@ -67,6 +66,58 @@ fn dir_attr(ino: u64) -> FileAttr {
 
 fn file_attr(ino: u64, size: u64, mtime: SystemTime) -> FileAttr {
     make_attr(ino, FileType::RegularFile, size, mtime)
+}
+
+/// Parse a `usenet://{info_hash}/{file_index}` stream marker into
+/// `(info_hash, file_index)`. Returns `None` for anything else (e.g. a debrid
+/// CDN link). This is only the fallback for rows whose explicit
+/// `usenet_info_hash`/`usenet_file_index` columns aren't populated; entries
+/// are normally identified by those columns directly.
+fn parse_usenet_url(url: &str) -> Option<(String, usize)> {
+    let rest = url.strip_prefix("usenet://")?;
+    let rest = rest.split(['?', '#']).next().unwrap_or(rest);
+    let mut parts = rest.split('/');
+    let info_hash = parts.next()?;
+    let file_index = parts.next()?.parse::<usize>().ok()?;
+    if info_hash.is_empty() || parts.next().is_some() {
+        return None;
+    }
+    Some((info_hash.to_string(), file_index))
+}
+
+/// Append the children of directory `ino` to `entries`.
+fn populate_entries(
+    state: &VfsState,
+    ino: u64,
+    runtime: &tokio::runtime::Handle,
+    layout: &VfsLibraryLayout,
+    entries: &mut Vec<DirEntry>,
+) {
+    let path = state.path(ino);
+    let path = path.as_deref().unwrap_or("/");
+    let target = parse_path(layout, path);
+    if matches!(target, PathTarget::Invalid) {
+        return;
+    }
+
+    let file_type = if matches!(
+        target,
+        PathTarget::Canonical {
+            path: CanonicalPath::MovieDir { .. } | CanonicalPath::SeasonDir { .. },
+            ..
+        }
+    ) {
+        FileType::RegularFile
+    } else {
+        FileType::Directory
+    };
+    let Ok(names) = runtime.block_on(directory_entry_paths(layout, path)) else {
+        return;
+    };
+    for name in names {
+        let child = format!("{}/{name}", path.trim_end_matches('/'));
+        entries.push((state.get_or_create_ino(&child), file_type, name));
+    }
 }
 
 /// Inner state shared via `Arc` so FUSE handlers can hand the heavy I/O work
@@ -198,7 +249,7 @@ struct RivenFsInner {
     read_semaphore: Arc<Semaphore>,
     fuse_stats: Arc<FuseStats>,
     link_refresh_locks: DashMap<i64, Arc<Mutex<()>>>,
-    local_source: Option<Arc<dyn riven_core::local_source::LocalByteSource>>,
+    usenet: Option<UsenetStreamer>,
 }
 
 pub struct RivenFs {
@@ -211,45 +262,29 @@ impl RivenFs {
         filesystem_settings_revision: Arc<AtomicU64>,
         stream_client: reqwest::Client,
         link_request_tx: mpsc::Sender<riven_core::stream_link::LinkRequest>,
-        local_source: Option<Arc<dyn riven_core::local_source::LocalByteSource>>,
+        usenet: Option<UsenetStreamer>,
     ) -> Self {
         Self {
-            inner: Arc::new(RivenFsInner::new(
+            inner: Arc::new(RivenFsInner {
                 vfs_layout,
                 filesystem_settings_revision,
                 stream_client,
                 link_request_tx,
-                local_source,
-            )),
+                runtime: tokio::runtime::Handle::current(),
+                state: VfsState::new(),
+                // Backstop only. Reads are async; HTTP handles have a bounded byte
+                // buffer and Usenet handles have a bounded segment window. This
+                // prevents pathological analyser fan-out across many open files.
+                read_semaphore: Arc::new(Semaphore::new(32)),
+                fuse_stats: Arc::new(FuseStats::default()),
+                link_refresh_locks: DashMap::new(),
+                usenet,
+            }),
         }
     }
 }
 
 impl RivenFsInner {
-    fn new(
-        vfs_layout: Arc<RwLock<VfsLibraryLayout>>,
-        filesystem_settings_revision: Arc<AtomicU64>,
-        stream_client: reqwest::Client,
-        link_request_tx: mpsc::Sender<riven_core::stream_link::LinkRequest>,
-        local_source: Option<Arc<dyn riven_core::local_source::LocalByteSource>>,
-    ) -> Self {
-        Self {
-            vfs_layout,
-            filesystem_settings_revision,
-            stream_client,
-            link_request_tx,
-            runtime: tokio::runtime::Handle::current(),
-            state: VfsState::new(),
-            // Backstop only. Reads are async; HTTP handles have a bounded byte
-            // buffer and Usenet handles have a bounded segment window. This
-            // prevents pathological analyser fan-out across many open files.
-            read_semaphore: Arc::new(Semaphore::new(32)),
-            fuse_stats: Arc::new(FuseStats::default()),
-            link_refresh_locks: DashMap::new(),
-            local_source,
-        }
-    }
-
     fn current_layout(&self) -> VfsLibraryLayout {
         self.vfs_layout.blocking_read().clone()
     }
@@ -404,7 +439,6 @@ impl Filesystem for RivenFs {
                 profile_key,
                 path: canonical,
             } => match canonical {
-                CanonicalPath::Root => reply.entry(&TTL, &dir_attr(ROOT_INO), Generation(0)),
                 CanonicalPath::AllMovies => {
                     let ino = if profile_key.is_some() {
                         s.state.get_or_create_ino(&path)
@@ -443,7 +477,6 @@ impl Filesystem for RivenFs {
                         None => reply.error(Errno::ENOENT),
                     }
                 }
-                CanonicalPath::Invalid => reply.error(Errno::ENOENT),
             },
             PathTarget::Invalid => reply.error(Errno::ENOENT),
         }
@@ -499,25 +532,10 @@ impl Filesystem for RivenFs {
                 (ino, FileType::Directory, ".".into()),
                 (ino, FileType::Directory, "..".into()),
             ];
-            let ino_to_path = s.state.path(ino);
-            let mut get_ino = |path: &str| s.state.get_or_create_ino(path);
             let layout = s.current_layout();
-            populate_entries(
-                ino,
-                ino_to_path.as_deref(),
-                &s.runtime,
-                &layout,
-                &mut entries,
-                &mut get_ino,
-            );
-
-            let mut seen = HashSet::new();
-            let deduped: Vec<DirEntry> = entries
-                .into_iter()
-                .filter(|(_, _, n)| seen.insert(n.clone()))
-                .collect();
-            s.state.cache_directory_entries(ino, deduped.clone());
-            deduped
+            populate_entries(&s.state, ino, &s.runtime, &layout, &mut entries);
+            s.state.cache_directory_entries(ino, entries.clone());
+            entries
         };
 
         for (i, (entry_ino, kind, name)) in entries.iter().enumerate().skip(offset as usize) {
@@ -561,7 +579,7 @@ impl Filesystem for RivenFs {
                 .or(entry.download_url.as_deref())
                 .and_then(parse_usenet_url),
         };
-        if let (Some(source), Some((info_hash, file_index))) = (s.local_source.clone(), usenet_id) {
+        if let (Some(source), Some((info_hash, file_index))) = (s.usenet.clone(), usenet_id) {
             let filename: Arc<str> = Arc::from(path.rsplit('/').next().unwrap_or(&path));
             let byte_source: Arc<dyn ByteSource> = Arc::new(UsenetSource::new(
                 source,
@@ -659,8 +677,7 @@ impl Filesystem for RivenFs {
                     reply.error(Errno::EBADF);
                     return;
                 };
-                let guard = entry.lock();
-                match &*guard {
+                match &*entry {
                     OpenedFile::Subtitle { content } => Ok(Arc::clone(content)),
                     OpenedFile::Streamed { prefetcher, path } => {
                         Err((Arc::clone(prefetcher), Arc::clone(path)))
@@ -760,5 +777,33 @@ impl Filesystem for RivenFs {
         // servers do not fall back after an ENOSYS response from fuser's
         // default handler.
         reply.poll(PollEvents::POLLIN);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_usenet_url() {
+        assert_eq!(
+            parse_usenet_url("usenet://nzb-abc123/0"),
+            Some(("nzb-abc123".to_string(), 0))
+        );
+        assert_eq!(
+            parse_usenet_url("usenet://nzb-deadbeef/3?x=1"),
+            Some(("nzb-deadbeef".to_string(), 3))
+        );
+    }
+
+    #[test]
+    fn rejects_non_usenet_url() {
+        assert_eq!(
+            parse_usenet_url("https://debrid.example/dl/token/file.mkv"),
+            None
+        );
+        assert_eq!(parse_usenet_url("usenet://onlyhash"), None);
+        assert_eq!(parse_usenet_url("usenet://hash/0/extra"), None);
+        assert_eq!(parse_usenet_url("usenet://hash/notanumber"), None);
     }
 }

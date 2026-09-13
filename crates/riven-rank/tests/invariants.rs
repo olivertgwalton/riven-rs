@@ -201,7 +201,6 @@ fn resolution_is_from_the_known_set() {
 fn languages_are_iso_codes() {
     let found: Vec<(&str, String)> = corpus()
         .iter()
-        .filter(|(case, _)| !case.translate_languages)
         .map(|(_, d)| d)
         .filter_map(|d| {
             let mut deduped = d.languages.clone();

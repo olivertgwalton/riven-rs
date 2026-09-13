@@ -29,65 +29,29 @@ const LOG_LINES_SUBSCRIPTION = `subscription {
 }`;
 
 class LogStore {
-	#logs = $state<LiveLogLine[]>([]);
-	#historicalLogs = $state<LogEntry[]>([]);
-	#isLoadingHistorical = $state<boolean>(false);
-	#activeTab = $state<"live" | "historical">("live");
-	#error = $state<string | null>(null);
-	#historicalError = $state<string | null>(null);
-	#connectionStatus = $state<
+	logs = $state<LiveLogLine[]>([]);
+	historicalLogs = $state<LogEntry[]>([]);
+	isLoadingHistorical = $state(false);
+	error = $state<string | null>(null);
+	historicalError = $state<string | null>(null);
+	connectionStatus = $state<
 		"connecting" | "connected" | "disconnected" | "error"
 	>("disconnected");
+	reconnectAttempts = $state(0);
+	readonly maxReconnectAttempts = 5;
+	hasConnected = $state(false);
+	#activeTab = $state<"live" | "historical">("live");
 	#unsubscribe: (() => void) | null = null;
 
-	#reconnectAttempts = $state<number>(0);
-	#maxReconnectAttempts = 5;
-	#hasConnected = $state<boolean>(false);
-
-	get reconnectAttempts() {
-		return this.#reconnectAttempts;
-	}
-
-	get maxReconnectAttempts() {
-		return this.#maxReconnectAttempts;
-	}
-
-	get hasConnected() {
-		return this.#hasConnected;
-	}
-
-	get logs(): LiveLogLine[] {
-		return this.#logs;
-	}
-
-	get historicalLogs() {
-		return this.#historicalLogs;
-	}
-
-	get isLoadingHistorical() {
-		return this.#isLoadingHistorical;
-	}
-
+	// Read-only: switching tabs goes through setActiveTab (lazy-loads history).
 	get activeTab() {
 		return this.#activeTab;
 	}
 
-	get error() {
-		return this.#error;
-	}
-
-	get historicalError() {
-		return this.#historicalError;
-	}
-
-	get connectionStatus() {
-		return this.#connectionStatus;
-	}
-
 	async fetchHistoricalLogs(limit = 500, level?: string) {
 		try {
-			this.#isLoadingHistorical = true;
-			this.#historicalError = null;
+			this.isLoadingHistorical = true;
+			this.historicalError = null;
 
 			const data = await gqlClient<{ logs: LogEntry[] }>(
 				HISTORICAL_LOGS_QUERY,
@@ -97,13 +61,13 @@ class LogStore {
 				},
 			);
 
-			this.#historicalLogs = data.logs;
+			this.historicalLogs = data.logs;
 		} catch (e: unknown) {
 			const message = e instanceof Error ? e.message : "Unknown error";
 			logger.error("Failed to fetch historical logs:", e);
-			this.#historicalError = `Failed to fetch logs: ${message}`;
+			this.historicalError = `Failed to fetch logs: ${message}`;
 		} finally {
-			this.#isLoadingHistorical = false;
+			this.isLoadingHistorical = false;
 		}
 	}
 
@@ -112,43 +76,43 @@ class LogStore {
 			return;
 		}
 
-		this.#connectionStatus = "connecting";
-		this.#error = null;
-		this.#hasConnected = false;
-		this.#reconnectAttempts = 0;
+		this.connectionStatus = "connecting";
+		this.error = null;
+		this.hasConnected = false;
+		this.reconnectAttempts = 0;
 
 		this.#unsubscribe = gqlSubscribeClient<{ logLines: string }>(
 			LOG_LINES_SUBSCRIPTION,
 			undefined,
 			{
 				onData: (payload) => {
-					this.#connectionStatus = "connected";
-					this.#hasConnected = true;
-					this.#reconnectAttempts = 0;
-					this.#error = null;
+					this.connectionStatus = "connected";
+					this.hasConnected = true;
+					this.reconnectAttempts = 0;
+					this.error = null;
 
 					const raw = payload.logLines;
 					if (!raw?.trim()) return;
-					this.#logs.push(raw);
+					this.logs.push(raw);
 				},
 				onError: (error) => {
 					const streamEnded = error.message === "Stream ended";
 
 					if (!streamEnded) {
 						logger.error("Log subscription error:", error);
-						this.#reconnectAttempts += 1;
+						this.reconnectAttempts += 1;
 					}
 
 					if (
 						!streamEnded &&
-						this.#reconnectAttempts >= this.#maxReconnectAttempts
+						this.reconnectAttempts >= this.maxReconnectAttempts
 					) {
-						this.#connectionStatus = "error";
-						this.#error = "Log stream disconnected";
+						this.connectionStatus = "error";
+						this.error = "Log stream disconnected";
 						return;
 					}
 
-					this.#connectionStatus = "connecting";
+					this.connectionStatus = "connecting";
 					this.disconnect();
 					setTimeout(() => this.connect(), streamEnded ? 500 : 1000);
 				},
@@ -157,8 +121,8 @@ class LogStore {
 	}
 
 	disconnect() {
-		this.#connectionStatus = "disconnected";
-		this.#hasConnected = false;
+		this.connectionStatus = "disconnected";
+		this.hasConnected = false;
 		if (this.#unsubscribe) {
 			this.#unsubscribe();
 			this.#unsubscribe = null;
@@ -172,7 +136,7 @@ class LogStore {
 
 	setActiveTab(tab: "live" | "historical") {
 		this.#activeTab = tab;
-		if (tab === "historical" && this.#historicalLogs.length === 0) {
+		if (tab === "historical" && this.historicalLogs.length === 0) {
 			this.fetchHistoricalLogs();
 		}
 	}

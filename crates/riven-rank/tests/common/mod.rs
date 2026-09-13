@@ -7,7 +7,7 @@
 
 use std::sync::LazyLock;
 
-use riven_rank::{ParseOptions, ParsedData, parse, parse_with_options};
+use riven_rank::{ParsedData, parse};
 use serde::Deserialize;
 
 pub const CORPUS_JSON: &str = include_str!("../fixtures/release_titles.json");
@@ -18,9 +18,6 @@ pub const CORPUS_PATH: &str = concat!(
 
 #[derive(Deserialize)]
 pub struct Case {
-    /// Parse with language translation enabled instead of ISO codes.
-    #[serde(default)]
-    pub translate_languages: bool,
     #[serde(flatten)]
     pub expected: ParsedData,
 }
@@ -31,16 +28,7 @@ impl Case {
     }
 
     pub fn parse(&self) -> ParsedData {
-        if self.translate_languages {
-            parse_with_options(
-                self.raw(),
-                ParseOptions {
-                    translate_languages: true,
-                },
-            )
-        } else {
-            parse(self.raw())
-        }
+        parse(self.raw())
     }
 }
 

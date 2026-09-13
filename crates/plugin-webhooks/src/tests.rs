@@ -1,4 +1,5 @@
-use super::{should_deliver, sign};
+use super::should_deliver;
+use riven_core::stremio::hmac_sha256_hex;
 
 #[test]
 fn empty_filter_delivers_everything() {
@@ -17,7 +18,7 @@ fn non_empty_filter_is_an_allowlist() {
 
 #[test]
 fn sign_matches_rfc4231_test_case_2() {
-    let sig = sign("Jefe", b"what do ya want for nothing?");
+    let sig = hmac_sha256_hex(b"Jefe", b"what do ya want for nothing?");
     assert_eq!(
         sig,
         "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"
@@ -27,6 +28,12 @@ fn sign_matches_rfc4231_test_case_2() {
 #[test]
 fn sign_is_deterministic_for_same_input() {
     let body = br#"{"id":"abc","event":"riven.media-item.download.success"}"#;
-    assert_eq!(sign("secret", body), sign("secret", body));
-    assert_ne!(sign("secret", body), sign("other", body));
+    assert_eq!(
+        hmac_sha256_hex(b"secret", body),
+        hmac_sha256_hex(b"secret", body)
+    );
+    assert_ne!(
+        hmac_sha256_hex(b"secret", body),
+        hmac_sha256_hex(b"other", body)
+    );
 }

@@ -38,9 +38,6 @@ pub enum UserRole {
 pub enum Capability {
     /// Ask for something to be added. The only action an ordinary user has.
     RequestItems,
-    /// Put an item straight into the library, bypassing the request queue.
-    /// No riven-ts counterpart — `addItem`/`discoverItem` are riven-rs's.
-    AddItems,
     PauseItems,
     RetryItems,
     ResetItems,
@@ -55,9 +52,8 @@ pub enum Capability {
 impl Capability {
     /// Every capability. Kept in step with the enum by
     /// `tests::every_capability_is_advertised`.
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 7] = [
         Self::RequestItems,
-        Self::AddItems,
         Self::PauseItems,
         Self::RetryItems,
         Self::ResetItems,
@@ -71,8 +67,7 @@ impl Capability {
     pub const fn minimum_role(self) -> UserRole {
         match self {
             Self::RequestItems => UserRole::User,
-            Self::AddItems
-            | Self::PauseItems
+            Self::PauseItems
             | Self::RetryItems
             | Self::ResetItems
             | Self::ScrapeItems

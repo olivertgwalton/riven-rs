@@ -1,4 +1,5 @@
-use std::time::Duration;
+use std::str::FromStr;
+use std::time::{Duration, SystemTime};
 
 use reqwest::StatusCode;
 use reqwest::header::HeaderMap;
@@ -44,19 +45,15 @@ fn is_transient(e: &reqwest::Error) -> bool {
 
 fn with_jitter(d: Duration) -> Duration {
     let secs = d.as_secs_f64();
-    let jitter = secs * JITTER * (rand() * 2.0 - 1.0);
+    // Sub-second clock noise in [0, 1) is random enough for backoff jitter.
+    let rand = f64::from(
+        SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .subsec_nanos(),
+    ) / 1e9;
+    let jitter = secs * JITTER * (rand * 2.0 - 1.0);
     Duration::from_secs_f64((secs + jitter).max(0.0))
-}
-
-/// Minimal xorshift RNG - avoids pulling in the `rand` crate.
-fn rand() -> f64 {
-    use std::time::SystemTime;
-    let seed = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap_or_default()
-        .subsec_nanos() as u64;
-    let x = seed ^ (seed << 13) ^ (seed >> 7) ^ (seed << 17);
-    (x & 0xFFFFFF) as f64 / 0x1000000 as f64
 }
 
 /// Parse the `Retry-After` header as a duration. Supports both delay-seconds
@@ -110,21 +107,17 @@ fn parse_trakt_rate_limit_pause(headers: &HeaderMap) -> Option<Duration> {
     None
 }
 
-fn parse_header_u64(headers: &HeaderMap, name: &str) -> Option<u64> {
-    headers.get(name)?.to_str().ok()?.trim().parse().ok()
-}
-
-fn parse_header_f64(headers: &HeaderMap, name: &str) -> Option<f64> {
+fn parse_header<T: FromStr>(headers: &HeaderMap, name: &str) -> Option<T> {
     headers.get(name)?.to_str().ok()?.trim().parse().ok()
 }
 
 fn parse_discord_rate_limit_pause(headers: &HeaderMap) -> Option<Duration> {
-    let remaining = parse_header_u64(headers, "X-RateLimit-Remaining")?;
+    let remaining = parse_header::<u64>(headers, "X-RateLimit-Remaining")?;
     if remaining > 0 {
         return None;
     }
 
-    let reset_after = parse_header_f64(headers, "X-RateLimit-Reset-After")?;
+    let reset_after = parse_header::<f64>(headers, "X-RateLimit-Reset-After")?;
     if reset_after <= 0.0 {
         return None;
     }

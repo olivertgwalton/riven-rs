@@ -1,6 +1,3 @@
-import { superValidate } from "sveltekit-superforms/server";
-import { zod4 } from "sveltekit-superforms/adapters";
-import { searchSchema } from "$lib/schemas/search";
 import type { PageLoad } from "./$types";
 import { parseSearchQuery } from "$lib/search-parser";
 import type { TmdbListItem } from "$lib/gql/schema";
@@ -11,9 +8,7 @@ import {
 } from "$lib/services/backend-metadata";
 
 export const load: PageLoad = async ({ url }) => {
-	// Parse and validate search params from the URL
-	const form = await superValidate(url.searchParams, zod4(searchSchema));
-	const parsed = parseSearchQuery(form.data.query || "");
+	const parsed = parseSearchQuery(url.searchParams.get("query") ?? "");
 
 	// Fetch trending content for search examples and hero
 	let heroItems: TmdbListItem[] = [];
@@ -59,28 +54,19 @@ export const load: PageLoad = async ({ url }) => {
 			}),
 		]);
 
-		const heroMovieResults = trendingMovies;
-		const heroTvResults = trendingTV;
-
-		const popularMovieResults = popularMovies;
-		const popularTvResults = popularTV;
-
-		const topRatedMovieResults = topRatedMovies;
-		const topRatedTvResults = topRatedTV;
-
 		// Hero items: Top trending
 		heroItems = shuffleArray([
-			...heroMovieResults.slice(0, 5),
-			...heroTvResults.slice(0, 5),
+			...trendingMovies.slice(0, 5),
+			...trendingTV.slice(0, 5),
 		]);
 
 		// Feeling Lucky: Massive pool of random high-quality content
 		feelingLuckyItems = shuffleArray([
 			...heroItems,
-			...popularMovieResults,
-			...popularTvResults,
-			...topRatedMovieResults,
-			...topRatedTvResults,
+			...popularMovies,
+			...popularTV,
+			...topRatedMovies,
+			...topRatedTV,
 		]);
 
 		// Extract titles for search examples from hero items
@@ -92,7 +78,6 @@ export const load: PageLoad = async ({ url }) => {
 	}
 
 	return {
-		form,
 		parsed,
 		searchExamples,
 		heroItems,

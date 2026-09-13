@@ -11,6 +11,7 @@ pub enum TorrentStatus {
     Uploading,
     Failed,
     Invalid,
+    #[serde(other)]
     Unknown,
 }
 

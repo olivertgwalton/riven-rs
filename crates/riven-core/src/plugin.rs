@@ -6,7 +6,7 @@ mod traits;
 
 pub use collection::ContentCollection;
 pub use context::{PluginContext, validate_api_key};
-pub use registry::{ActivePlugin, PLUGIN_ENABLED_PREFIX, PluginInfo, PluginRegistry};
+pub use registry::{ActivePlugin, PluginInfo, PluginRegistry};
 pub use schema::{Display, FieldType, SettingField};
 pub use traits::Plugin;
 

@@ -13,7 +13,8 @@ pub(super) async fn rating_details(
     media_type: &str,
     id: i64,
 ) -> Result<TmdbRatingDetails> {
-    let (http, api_key) = backend(ctx).await?;
+    let http = ctx.data::<HttpClient>()?;
+    let api_key = get_tmdb_api_key(ctx.data::<Arc<PluginRegistry>>()?).await?;
     http.get_json(
         TMDB,
         format!("tmdb:rating_details:{media_type}:{id}"),
@@ -26,14 +27,6 @@ pub(super) async fn rating_details(
     )
     .await
     .map_err(|e| Error::new(format!("TMDB ratings request failed: {e}")))
-}
-
-async fn backend(ctx: &Context<'_>) -> Result<(HttpClient, String)> {
-    let registry = ctx.data::<Arc<PluginRegistry>>()?;
-    Ok((
-        ctx.data::<HttpClient>()?.clone(),
-        get_tmdb_api_key(registry).await?,
-    ))
 }
 
 #[derive(Deserialize)]

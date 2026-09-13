@@ -1,13 +1,12 @@
 use async_graphql::*;
-use riven_core::entities::{filesystem_entries, media_items};
+use riven_core::entities::filesystem_entries;
 use riven_core::types::*;
 use riven_db::entities::*;
 use riven_db::orm;
 use riven_db::repo;
-use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 
-use crate::schema::helpers::{derive_media_metadata, episode_lookup_keys};
-use crate::schema::typed_items::MediaItemUnion;
+use crate::schema::helpers::derive_media_metadata;
 use crate::schema::types::*;
 
 /// Group items that are pre-sorted by their group key into consecutive runs.
@@ -74,48 +73,6 @@ pub struct MediaQuery;
 
 #[Object]
 impl MediaQuery {
-    async fn media_item_by_id(
-        &self,
-        _ctx: &Context<'_>,
-        id: i64,
-    ) -> Result<Option<MediaItemUnion>> {
-        Ok(repo::get_media_item(id).await?.map(MediaItemUnion::from))
-    }
-
-    async fn media_items(&self, _ctx: &Context<'_>) -> Result<Vec<MediaItemUnion>> {
-        let items = media_items::Entity::find()
-            .order_by_desc(media_items::Column::CreatedAt)
-            .limit(25)
-            .into_model::<MediaItem>()
-            .all(orm())
-            .await?;
-        Ok(items.into_iter().map(MediaItemUnion::from).collect())
-    }
-
-    async fn media_item_by_imdb(
-        &self,
-        _ctx: &Context<'_>,
-        imdb_id: String,
-    ) -> Result<Option<MediaItem>> {
-        Ok(repo::get_media_item_by_imdb(&imdb_id).await?)
-    }
-
-    async fn media_item_by_tmdb(
-        &self,
-        _ctx: &Context<'_>,
-        tmdb_id: String,
-    ) -> Result<Option<MediaItem>> {
-        Ok(repo::get_media_item_by_tmdb(&tmdb_id).await?)
-    }
-
-    async fn media_item_by_tvdb(
-        &self,
-        _ctx: &Context<'_>,
-        tvdb_id: String,
-    ) -> Result<Option<MediaItem>> {
-        Ok(repo::get_media_item_by_tvdb(&tvdb_id).await?)
-    }
-
     async fn media_item_full_by_tmdb(
         &self,
         _ctx: &Context<'_>,
@@ -132,13 +89,6 @@ impl MediaQuery {
     ) -> Result<Option<MediaItemFull>> {
         let item = repo::get_media_item_by_tvdb(&tvdb_id).await?;
         self.media_item_full_for(item).await
-    }
-
-    async fn media_item_full(&self, _ctx: &Context<'_>, id: i64) -> Result<Option<MediaItemFull>> {
-        let Some(item) = repo::get_media_item(id).await? else {
-            return Ok(None);
-        };
-        self.media_item_full_inner(item).await.map(Some)
     }
 
     async fn media_item_state_by_tmdb(
@@ -191,48 +141,6 @@ impl MediaQuery {
             .collect())
     }
 
-    async fn movies(&self, _ctx: &Context<'_>) -> Result<Vec<MediaItem>> {
-        Ok(repo::list_movies().await?)
-    }
-
-    async fn shows(&self, _ctx: &Context<'_>) -> Result<Vec<MediaItem>> {
-        Ok(repo::list_shows().await?)
-    }
-
-    async fn seasons(
-        &self,
-        _ctx: &Context<'_>,
-        show_id: i64,
-        include_specials: Option<bool>,
-    ) -> Result<Vec<MediaItem>> {
-        if include_specials == Some(false) {
-            Ok(repo::list_seasons_excluding_specials(show_id).await?)
-        } else {
-            Ok(repo::list_seasons(show_id).await?)
-        }
-    }
-
-    async fn episodes(&self, _ctx: &Context<'_>, season_id: i64) -> Result<Vec<MediaItem>> {
-        Ok(repo::list_episodes(season_id).await?)
-    }
-
-    async fn filesystem_entries(
-        &self,
-        _ctx: &Context<'_>,
-        media_item_id: i64,
-    ) -> Result<Vec<FileSystemEntry>> {
-        Ok(repo::get_filesystem_entries(media_item_id).await?)
-    }
-
-    async fn items_by_state(
-        &self,
-        _ctx: &Context<'_>,
-        state: MediaItemState,
-        item_type: MediaItemType,
-    ) -> Result<Vec<MediaItem>> {
-        Ok(repo::get_items_by_state(state, item_type).await?)
-    }
-
     async fn items(
         &self,
         _ctx: &Context<'_>,
@@ -263,41 +171,6 @@ impl MediaQuery {
             total_items,
             total_pages,
         })
-    }
-
-    async fn episode_by_tvdb(
-        &self,
-        _ctx: &Context<'_>,
-        tvdb_id: String,
-        episode_number: i32,
-        season_number: Option<i32>,
-    ) -> Result<Option<MediaItem>> {
-        Ok(repo::find_episode_by_show_tvdb(&tvdb_id, episode_number, season_number).await?)
-    }
-
-    /// Return the number of media files expected for a media item:
-    /// - Movie / Episode → 1
-    /// - Season → total episode count
-    /// - Show → total processable episode count (continuing shows exclude the last season)
-    async fn expected_file_count(&self, _ctx: &Context<'_>, id: i64) -> Result<i64> {
-        let item = repo::get_media_item(id)
-            .await?
-            .ok_or_else(|| Error::new("Item not found"))?;
-        let count = match item.item_type {
-            MediaItemType::Movie | MediaItemType::Episode => 1,
-            MediaItemType::Season => repo::count_episodes_in_season(id).await?,
-            MediaItemType::Show => repo::count_expected_files_for_show(id).await?,
-        };
-        Ok(count)
-    }
-
-    /// Return lookup key strings for an episode:
-    /// `["abs:{absolute_number}", "{season_number}:{episode_number}"]`.
-    async fn lookup_keys(&self, _ctx: &Context<'_>, id: i64) -> Result<Vec<String>> {
-        let item = repo::get_media_item(id)
-            .await?
-            .ok_or_else(|| Error::new("Item not found"))?;
-        Ok(episode_lookup_keys(&item))
     }
 }
 

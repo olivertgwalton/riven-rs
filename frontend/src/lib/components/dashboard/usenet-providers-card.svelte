@@ -1,6 +1,6 @@
 <script lang="ts">
     import { Badge } from "$lib/components/ui/badge/index.js";
-    import type { NntpProviderHealth } from "./types";
+    import type { NntpProviderHealth } from "$lib/gql/schema";
 
     let { providers }: { providers: NntpProviderHealth[] } = $props();
 

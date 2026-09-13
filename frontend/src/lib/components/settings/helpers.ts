@@ -5,7 +5,6 @@ import type {
 	SetupData,
 	SetupGeneralSection,
 	SetupGroup,
-	SetupPluginCardView,
 	SetupPluginSection,
 	Step,
 } from "./types";
@@ -64,52 +63,51 @@ export function createSetupState(data: SetupData): SetupState {
 }
 
 /**
- * Group plugin sections into setup sections using the backend `setupGroups`
- * (order + labels) and each section's own `category`. Sections whose category
- * isn't a known group fall into a trailing "Other" group.
+ * Group plugin sections by their backend `category`, in the backend-defined
+ * `setupGroups` order, each sorted by title. Sections with an unknown/missing
+ * category land in a trailing "Other" group; empty groups are dropped.
  */
+export function groupPluginsByCategory(
+	plugins: SettingsSection[],
+	groups: SetupGroup[],
+): (SetupGroup & { sections: SettingsSection[] })[] {
+	const byTitle = (a: SettingsSection, b: SettingsSection) =>
+		a.title.localeCompare(b.title);
+	const knownIds = new Set(groups.map((group) => group.id));
+	const other = plugins.filter((s) => !s.category || !knownIds.has(s.category));
+
+	return [
+		...groups.map((group) => ({
+			...group,
+			sections: plugins.filter((s) => s.category === group.id),
+		})),
+		{
+			id: "other",
+			title: "Other",
+			description: "Additional plugins.",
+			sections: other,
+		},
+	]
+		.map((group) => ({ ...group, sections: group.sections.sort(byTitle) }))
+		.filter((group) => group.sections.length > 0);
+}
+
+/** Plugin groups as setup steps, each plugin carrying its status badge + saving flag. */
 export function buildPluginSections(
 	plugins: SettingsSection[],
 	savingMap: Record<string, boolean>,
 	groups: SetupGroup[],
 ): SetupPluginSection[] {
-	const cardFor = (section: SettingsSection): SetupPluginCardView => ({
-		section,
-		badge: pluginStatus(section),
-		saving: savingMap[section.id] ?? false,
-	});
-
-	const knownIds = new Set(groups.map((group) => group.id));
-	const byCategory = new Map<string, SetupPluginCardView[]>();
-	for (const section of plugins) {
-		const category =
-			section.category && knownIds.has(section.category)
-				? section.category
-				: "other";
-		const bucket = byCategory.get(category) ?? [];
-		bucket.push(cardFor(section));
-		byCategory.set(category, bucket);
-	}
-
-	const byName = (a: SetupPluginCardView, b: SetupPluginCardView) =>
-		a.section.id.localeCompare(b.section.id);
-
-	const sections: SetupPluginSection[] = groups.map((group) => ({
-		...group,
-		plugins: (byCategory.get(group.id) ?? []).sort(byName),
-	}));
-
-	const leftovers = byCategory.get("other") ?? [];
-	if (leftovers.length > 0) {
-		sections.push({
-			id: "other",
-			title: "Other",
-			description: "Additional plugins.",
-			plugins: leftovers.sort(byName),
-		});
-	}
-
-	return sections.filter((section) => section.plugins.length > 0);
+	return groupPluginsByCategory(plugins, groups).map(
+		({ sections, ...group }) => ({
+			...group,
+			plugins: sections.map((section) => ({
+				section,
+				badge: pluginStatus(section),
+				saving: savingMap[section.id] ?? false,
+			})),
+		}),
+	);
 }
 
 /** Group general-settings fields by their backend-provided `section` label. */

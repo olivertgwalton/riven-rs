@@ -10,14 +10,18 @@ use sea_orm::{DbBackend, EntityTrait, FromQueryResult, QueryOrder, Statement};
 
 use crate::orm;
 
-#[derive(Debug, Clone, FromQueryResult)]
+/// Lifetime download total for one provider.
+#[derive(Debug, Clone, FromQueryResult, async_graphql::SimpleObject)]
+#[graphql(name = "UsenetProviderTraffic")]
 pub struct ProviderTrafficTotal {
     pub host: String,
     pub bytes_downloaded: i64,
     pub articles_downloaded: i64,
 }
 
-#[derive(Debug, Clone, FromQueryResult)]
+/// One provider's traffic on one day (for the usage-trend chart).
+#[derive(Debug, Clone, FromQueryResult, async_graphql::SimpleObject)]
+#[graphql(name = "UsenetDailyTraffic")]
 pub struct DailyTraffic {
     /// `YYYY-MM-DD`.
     pub day: String,

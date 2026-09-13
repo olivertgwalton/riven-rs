@@ -1,6 +1,5 @@
 use async_trait::async_trait;
 use serde::Deserialize;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 
@@ -25,16 +24,9 @@ const SECTIONS_CACHE_TTL: Duration = Duration::from_secs(300);
 
 pub(crate) const PROFILE: HttpServiceProfile = HttpServiceProfile::new("plex");
 
+#[derive(Default)]
 pub struct PlexPlugin {
-    sections_cache: Arc<RwLock<Option<(Instant, Vec<PlexSection>)>>>,
-}
-
-impl Default for PlexPlugin {
-    fn default() -> Self {
-        Self {
-            sections_cache: Arc::new(RwLock::new(None)),
-        }
-    }
+    sections_cache: RwLock<Option<(Instant, Vec<PlexSection>)>>,
 }
 
 #[async_trait]

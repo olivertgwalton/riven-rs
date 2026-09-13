@@ -56,37 +56,15 @@ impl UsenetHealthMutations {
             .one(orm())
             .await?;
 
-        let idx = usize::try_from(file_index).unwrap_or(0);
-        let (status, total, sampled, missing, errors) = match streamer
-            .scan_availability(
-                &info_hash,
-                idx,
-                riven_usenet::DEFAULT_AVAILABILITY_SAMPLE_PERCENT,
-            )
-            .await
-        {
-            Ok(scan) => (
-                scan.status(),
-                scan.total_segments as i32,
-                scan.sampled_segments as i32,
-                scan.missing_segments as i32,
-                scan.error_segments as i32,
-            ),
-            Err(riven_usenet::StreamerError::NotIngested(_)) => ("not_ingested", 0, 0, 0, 0),
-            Err(_) => ("unknown", 0, 0, 0, 0),
-        };
-
-        riven_db::repo::upsert_usenet_file_health(riven_db::repo::UsenetHealthUpdate {
-            info_hash: &info_hash,
+        let (status, saved) = crate::usenet_health::rescan_file(
+            &streamer,
+            &info_hash,
             file_index,
             media_item_id,
-            status,
-            total_segments: total,
-            sampled_segments: sampled,
-            missing_segments: missing,
-            error_segments: errors,
-        })
-        .await?;
+            riven_usenet::DEFAULT_AVAILABILITY_SAMPLE_PERCENT,
+        )
+        .await;
+        saved?;
 
         Ok(status.to_string())
     }

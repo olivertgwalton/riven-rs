@@ -3,9 +3,14 @@
     import { Badge } from "$lib/components/ui/badge/index.js";
     import { formatBytes, getServiceDisplayName } from "$lib/helpers";
     import { formatDate } from "$lib/utils/date";
-    import type { DownloaderService } from "./types";
+    import type { DebridUserInfo } from "$lib/gql/schema";
 
-    let { services }: { services: DownloaderService[] } = $props();
+    let { services }: { services: DebridUserInfo[] } = $props();
+
+    function daysLeft(premiumUntil: string | null | undefined): number | null {
+        const ms = premiumUntil ? new Date(premiumUntil).getTime() : NaN;
+        return Number.isNaN(ms) ? null : Math.ceil((ms - Date.now()) / 86_400_000);
+    }
 
     const premiumMeta = {
         premium: {
@@ -46,18 +51,20 @@
     </div>
 
     <div class="grid gap-x-8 gap-y-6 md:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-4">
-        {#each services as downloader (downloader.service)}
+        {#each services as downloader (downloader.store)}
+            {@const premiumDaysLeft = daysLeft(downloader.premiumUntil)}
             {@const premium =
                 premiumMeta[
-                    downloader.premium_status === "premium" || downloader.premium_status === "trial"
-                        ? downloader.premium_status
+                    downloader.subscriptionStatus === "premium" ||
+                    downloader.subscriptionStatus === "trial"
+                        ? downloader.subscriptionStatus
                         : "expired"
                 ]}
 
             <div class="border-border/60 border-b pb-5">
                 <div class="flex items-center justify-between gap-3">
                     <h3 class="text-base font-semibold text-neutral-50">
-                        {getServiceDisplayName(downloader.service)}
+                        {getServiceDisplayName(downloader.store)}
                     </h3>
                     <Badge variant={premium.variant} class={premium.class}>{premium.label}</Badge>
                 </div>
@@ -70,23 +77,23 @@
                         })}
                     {/if}
 
-                    {#if downloader.premium_status === "premium" && (downloader.premium_expires_at || downloader.premium_days_left !== null)}
+                    {#if downloader.subscriptionStatus === "premium" && (downloader.premiumUntil || premiumDaysLeft !== null)}
                         <div class="grid grid-cols-2 gap-3">
-                            {#if downloader.premium_expires_at}
+                            {#if downloader.premiumUntil}
                                 {@render Field({
                                     label: "Expires",
-                                    value: formatDate(downloader.premium_expires_at) ?? "Unknown"
+                                    value: formatDate(downloader.premiumUntil) ?? "Unknown"
                                 })}
                             {/if}
-                            {#if downloader.premium_days_left !== null}
+                            {#if premiumDaysLeft !== null}
                                 {@render Field({
                                     label: "Days Left",
-                                    value: downloader.premium_days_left,
+                                    value: premiumDaysLeft,
                                     valueClass: cn(
                                         "mt-0.5 text-sm font-semibold",
-                                        downloader.premium_days_left < 7
+                                        premiumDaysLeft < 7
                                             ? "text-red-400"
-                                            : downloader.premium_days_left < 30
+                                            : premiumDaysLeft < 30
                                               ? "text-amber-300"
                                               : "text-green-400"
                                     )
@@ -102,18 +109,18 @@
                                 value: downloader.points.toLocaleString()
                             })}
                         {/if}
-                        {#if downloader.total_downloaded_bytes !== null}
+                        {#if downloader.totalDownloadedBytes != null}
                             {@render Field({
                                 label: "Downloaded",
-                                value: formatBytes(downloader.total_downloaded_bytes)
+                                value: formatBytes(downloader.totalDownloadedBytes)
                             })}
                         {/if}
                     </div>
 
-                    {#if downloader.cooldown_until}
+                    {#if downloader.cooldownUntil}
                         <div
                             class="rounded-md bg-amber-600/20 p-2 text-xs font-medium text-amber-300">
-                            Cooldown until {formatDate(downloader.cooldown_until)}
+                            Cooldown until {formatDate(downloader.cooldownUntil)}
                         </div>
                     {/if}
                 </div>

@@ -2,7 +2,8 @@
     import { browser } from "$app/environment";
     import { page } from "$app/state";
     import type { PageProps } from "./$types";
-    import type { Maybe, MediaDetails, TmdbListItem } from "$lib/gql/schema";
+    import type { MediaDetails, TmdbListItem } from "$lib/gql/schema";
+    import { formatBytes } from "$lib/helpers";
     import { fade, fly } from "svelte/transition";
     import { cubicOut } from "svelte/easing";
     import * as Carousel from "$lib/components/ui/carousel/index.js";
@@ -41,8 +42,7 @@
         MEDIA_ITEM_STATE_UPDATES_BY_TMDB_SUBSCRIPTION,
         MEDIA_ITEM_STATE_UPDATES_BY_TVDB_SUBSCRIPTION,
         SHOW_INDEXED_SUBSCRIPTION,
-        mapMediaItemStateTree,
-        mapMediaItemFull,
+        getFilesystemEntryLabel,
         type GqlMediaItemFull,
         type GqlMediaItemStateTree,
         type GqlIndexedShow
@@ -163,42 +163,6 @@
             : item?.filesystemEntry
               ? [item.filesystemEntry]
               : [];
-    }
-
-    function humanizeProfileName(name: Maybe<string> | undefined) {
-        if (!name) return null;
-        return name
-            .split(/[_-]+/)
-            .filter(Boolean)
-            .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-            .join(" ");
-    }
-
-    function getMetadataResolutionLabel(
-        metadata: NonNullable<RivenMediaItem['filesystemEntry']>['mediaMetadata'] | undefined
-    ): string | null {
-        const height = metadata?.video?.resolutionHeight;
-        if (!height) return null;
-        if (height >= 2160) return "4K";
-        if (height >= 1440) return "1440p";
-        if (height >= 1080) return "1080p";
-        if (height >= 720) return "720p";
-        if (height >= 480) return "480p";
-        return `${height}p`;
-    }
-
-    function getFilesystemEntryLabel(
-        entry: NonNullable<RivenMediaItem['filesystemEntry']> | undefined,
-        fallback: string
-    ) {
-        const resolutionLabel = getMetadataResolutionLabel(entry?.mediaMetadata);
-        const profileLabel = humanizeProfileName(entry?.rankingProfileName);
-
-        if (resolutionLabel && profileLabel) {
-            return `${resolutionLabel} (${profileLabel})`;
-        }
-
-        return resolutionLabel ?? profileLabel ?? fallback;
     }
 
     async function deleteFilesystemEntry(id: number, label: string) {
@@ -396,7 +360,6 @@
             currency: "USD",
             maximumFractionDigits: 0
         }).format(n);
-    const formatSize = (b: number) => `${(b / 1073741824).toFixed(2)} GB`;
 
     const details = $derived(
         [
@@ -544,7 +507,7 @@
                 mediaItemFullByTmdb?: GqlMediaItemFull | null;
                 mediaItemFullByTvdb?: GqlMediaItemFull | null;
             }>(request.query, request.variables);
-            const full = mapMediaItemFull(payload[request.resultKey]) ?? undefined;
+            const full = payload[request.resultKey] ?? undefined;
 
             if (full) {
                 hydratedRiven = full;
@@ -593,7 +556,7 @@
     }
 
     function applyLiveState(raw: GqlMediaItemStateTree | null | undefined) {
-        const nextState = mapMediaItemStateTree(raw) ?? undefined;
+        const nextState: RivenMediaItem | undefined = raw ?? undefined;
 
         if (nextState && raw) {
             liveRiven = nextState;
@@ -1161,7 +1124,6 @@
                             showTitle={data.mediaDetails.details.title}
                             stateByEpisodeNumber={selectedRivenEpisodesByNumber}
                             detailsByEpisodeNumber={selectedHydratedEpisodesByNumber}
-                            {formatSize}
                             onDeleteFilesystemEntry={deleteFilesystemEntry}
                             onBlacklistFilesystemEntry={blacklistFilesystemEntry}
                             onItemActionSuccess={hydrateInitialState}
@@ -1508,7 +1470,7 @@
                                                                 class="text-muted-foreground text-xs"
                                                                 >Size</span>
                                                             <span class="text-foreground font-mono"
-                                                                >{formatSize(fs.fileSize)}</span>
+                                                                >{formatBytes(fs.fileSize)}</span>
                                                         </div>
                                                     {/if}
                                                     {#if meta?.bitrate}

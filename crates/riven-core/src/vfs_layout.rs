@@ -1,4 +1,3 @@
-use std::borrow::Cow;
 use std::collections::BTreeSet;
 
 use crate::settings::FilesystemSettings;
@@ -47,35 +46,35 @@ impl VfsLibraryLayout {
     }
 
     pub fn root_entries(&self) -> Vec<String> {
-        let mut entries: BTreeSet<Cow<'static, str>> = self
+        let mut entries: BTreeSet<&str> = self
             .profiles
             .iter()
             .filter_map(|profile| profile.segments.first())
-            .map(|s| Cow::Owned(s.clone()))
+            .map(String::as_str)
             .collect();
-        entries.insert(Cow::Borrowed("movies"));
-        entries.insert(Cow::Borrowed("shows"));
-        entries.into_iter().map(Cow::into_owned).collect()
+        entries.insert("movies");
+        entries.insert("shows");
+        entries.into_iter().map(String::from).collect()
     }
 
     pub fn profile_prefix_children(&self, path: &str) -> Vec<String> {
         let current = split_path(path);
-        let mut entries: BTreeSet<Cow<'static, str>> = BTreeSet::new();
+        let mut entries: BTreeSet<&str> = BTreeSet::new();
         for profile in &self.profiles {
             if !is_prefix(&current, &profile.segments) {
                 continue;
             }
             match profile.segments.get(current.len()) {
                 Some(next) => {
-                    entries.insert(Cow::Owned(next.clone()));
+                    entries.insert(next);
                 }
                 None => {
-                    entries.insert(Cow::Borrowed("movies"));
-                    entries.insert(Cow::Borrowed("shows"));
+                    entries.insert("movies");
+                    entries.insert("shows");
                 }
             }
         }
-        entries.into_iter().map(Cow::into_owned).collect()
+        entries.into_iter().map(String::from).collect()
     }
 
     /// Returns the keys of all enabled exclusive profiles.
@@ -110,7 +109,7 @@ pub fn split_path(path: &str) -> Vec<&str> {
         .collect()
 }
 
-pub fn is_prefix<A, B>(prefix: &[A], full: &[B]) -> bool
+fn is_prefix<A, B>(prefix: &[A], full: &[B]) -> bool
 where
     A: AsRef<str>,
     B: AsRef<str>,

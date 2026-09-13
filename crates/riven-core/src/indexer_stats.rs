@@ -7,7 +7,9 @@
 //! front of every page of every scrape.
 
 use std::collections::HashMap;
-use std::sync::{Mutex, OnceLock};
+use std::sync::OnceLock;
+
+use parking_lot::Mutex;
 
 /// What an indexer was asked. Disjoint on purpose: a request is one kind or
 /// the other, so the two can be stacked in a chart without double-counting.
@@ -49,10 +51,7 @@ fn bump(indexer: &str, apply: impl FnOnce(&mut IndexerCounters)) {
     if indexer.is_empty() {
         return;
     }
-    let Ok(mut map) = counters().lock() else {
-        return;
-    };
-    apply(map.entry(indexer.to_owned()).or_default());
+    apply(counters().lock().entry(indexer.to_owned()).or_default());
 }
 
 /// Record one request issued to an indexer.
@@ -71,10 +70,11 @@ pub fn record_successful_grab(indexer: &str) {
 
 /// Take everything accumulated so far, leaving the counters empty.
 pub fn drain() -> Vec<(String, IndexerCounters)> {
-    let Ok(mut map) = counters().lock() else {
-        return Vec::new();
-    };
-    map.drain().filter(|(_, c)| !c.is_empty()).collect()
+    counters()
+        .lock()
+        .drain()
+        .filter(|(_, c)| !c.is_empty())
+        .collect()
 }
 
 /// Put a drained delta back after a failed flush, so a database blip loses
@@ -89,9 +89,9 @@ mod tests {
 
     /// Serialised because the counters are process-global: two tests draining
     /// concurrently would each see the other's writes.
-    fn lock() -> std::sync::MutexGuard<'static, ()> {
+    fn lock() -> parking_lot::MutexGuard<'static, ()> {
         static TEST_LOCK: Mutex<()> = Mutex::new(());
-        TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+        TEST_LOCK.lock()
     }
 
     #[test]

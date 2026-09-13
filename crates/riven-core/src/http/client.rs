@@ -1,7 +1,8 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use dashmap::DashMap;
+use parking_lot::Mutex;
 use reqwest::StatusCode;
 use serde::de::DeserializeOwned;
 
@@ -14,16 +15,16 @@ use super::{HttpServiceProfile, RateLimitedError};
 #[derive(Clone)]
 pub struct HttpClient {
     inner: reqwest::Client,
-    services: Arc<DashMap<String, Arc<ServiceState>>>,
-    inflight: Arc<DashMap<String, Arc<InFlightRequest>>>,
+    services: Arc<Mutex<HashMap<String, Arc<ServiceState>>>>,
+    inflight: Arc<Mutex<HashMap<String, Arc<InFlightRequest>>>>,
 }
 
 impl HttpClient {
     pub fn new(inner: reqwest::Client) -> Self {
         Self {
             inner,
-            services: Arc::new(DashMap::new()),
-            inflight: Arc::new(DashMap::new()),
+            services: Arc::default(),
+            inflight: Arc::default(),
         }
     }
 
@@ -68,18 +69,16 @@ impl HttpClient {
             return Ok(Arc::new(HttpResponseData::from_response(response).await?));
         };
 
-        let (state, is_leader) = if let Some(existing) = self.inflight.get(&dedupe_key) {
-            (existing.clone(), false)
-        } else {
-            let candidate = Arc::new(InFlightRequest::new());
-            match self.inflight.entry(dedupe_key.clone()) {
-                dashmap::mapref::entry::Entry::Occupied(entry) => (entry.get().clone(), false),
-                dashmap::mapref::entry::Entry::Vacant(entry) => {
-                    entry.insert(candidate.clone());
-                    (candidate, true)
-                }
-            }
-        };
+        let mut is_leader = false;
+        let state = self
+            .inflight
+            .lock()
+            .entry(dedupe_key.clone())
+            .or_insert_with(|| {
+                is_leader = true;
+                Arc::new(InFlightRequest::new())
+            })
+            .clone();
 
         if is_leader {
             // RAII guard: a cancelled leader (caller future dropped mid-send)
@@ -87,7 +86,7 @@ impl HttpClient {
             // future call with this key blocks on `state.wait()` forever.
             struct InflightGuard {
                 state: Arc<InFlightRequest>,
-                inflight: Arc<DashMap<String, Arc<InFlightRequest>>>,
+                inflight: Arc<Mutex<HashMap<String, Arc<InFlightRequest>>>>,
                 key: String,
                 completed: bool,
             }
@@ -98,7 +97,7 @@ impl HttpClient {
                             "inflight leader cancelled before completing request",
                         )));
                     }
-                    self.inflight.remove(&self.key);
+                    self.inflight.lock().remove(&self.key);
                 }
             }
 
@@ -167,6 +166,7 @@ impl HttpClient {
 
     fn service_state(&self, profile: &HttpServiceProfile) -> Arc<ServiceState> {
         self.services
+            .lock()
             .entry(profile.name.as_ref().to_owned())
             .or_insert_with(|| Arc::new(ServiceState::new(profile.clone())))
             .clone()

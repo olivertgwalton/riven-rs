@@ -3,7 +3,7 @@ use riven_core::http::profiles::HttpServiceProfile;
 use serde::Deserialize;
 
 use super::RatingScore;
-use super::util::{decimal, optional_http, score_item};
+use super::util::{decimal, score_item};
 
 const RADARR_IMDB_URL: &str = "https://api.radarr.video/v1/movie/imdb";
 pub(super) const RADARR: HttpServiceProfile = HttpServiceProfile::new("radarr_public");
@@ -18,7 +18,7 @@ pub(super) async fn rating(
     }
 
     let imdb_id = imdb_id?;
-    let http = optional_http(ctx, "IMDb rating lookup")?;
+    let http = ctx.data::<riven_core::http::HttpClient>().ok().cloned()?;
     let movies: Vec<RadarrImdbResponse> = match http
         .get_json(RADARR, format!("radarr:imdb:{imdb_id}"), |client| {
             client

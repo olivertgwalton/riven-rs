@@ -15,7 +15,7 @@ use tokio::io::BufReader;
 use tokio::net::TcpStream;
 use tokio_rustls::rustls::pki_types::ServerName;
 
-use super::{NntpError, NntpServerConfig, NntpStream, NntpTransport, build_tls_connector};
+use super::{NntpError, NntpServerConfig, NntpStream, Transport, build_tls_connector};
 
 /// Dial + greeting + authentication budget.
 const DIAL_TIMEOUT: Duration = Duration::from_secs(30);
@@ -397,10 +397,6 @@ impl NntpClient {
         Ok(out)
     }
 
-    pub async fn quit(&mut self) {
-        drop(self.send("QUIT\r\n").await);
-    }
-
     pub fn is_poisoned(&self) -> bool {
         self.poisoned
     }
@@ -432,7 +428,7 @@ impl NntpClient {
 async fn dial(config: &NntpServerConfig) -> Result<NntpStream, NntpError> {
     /// Read buffer per connection. `fill_into` asks for 64 KiB at a time, so a
     /// larger one batches nothing it was not already batching — see
-    /// [`NntpTransport`] for what was measured. Was 512 KiB, times the 100
+    /// [`Transport`] for what was measured. Was 512 KiB, times the 100
     /// connections a provider allows.
     const READ_BUF: usize = 64 * 1024;
 
@@ -447,21 +443,20 @@ async fn dial(config: &NntpServerConfig) -> Result<NntpStream, NntpError> {
         }
     };
     drop(tcp.set_nodelay(true));
-    if !config.use_tls {
-        return Ok(NntpStream::new(NntpTransport::Plain(
-            BufReader::with_capacity(READ_BUF, tcp),
-        )));
-    }
-    let connector = build_tls_connector()?;
-    let server_name =
-        ServerName::try_from(config.host.clone()).map_err(|e| NntpError::Tls(e.to_string()))?;
-    let tls = connector
-        .connect(server_name, tcp)
-        .await
-        .map_err(|e| NntpError::Tls(e.to_string()))?;
-    Ok(NntpStream::new(NntpTransport::Tls(Box::new(
-        BufReader::with_capacity(READ_BUF, tls),
-    ))))
+    let transport: Box<dyn Transport> = if config.use_tls {
+        let server_name =
+            ServerName::try_from(config.host.clone()).map_err(|e| NntpError::Tls(e.to_string()))?;
+        let tls = build_tls_connector()
+            .connect(server_name, tcp)
+            .await
+            .map_err(|e| NntpError::Tls(e.to_string()))?;
+        Box::new(tls)
+    } else {
+        Box::new(tcp)
+    };
+    Ok(NntpStream::new(BufReader::with_capacity(
+        READ_BUF, transport,
+    )))
 }
 
 fn wrap_id(message_id: &str) -> String {

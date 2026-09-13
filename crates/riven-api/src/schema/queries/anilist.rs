@@ -25,15 +25,11 @@ pub struct AnilistPage {
     pub page: i64,
 }
 
-#[derive(SimpleObject)]
 pub struct AnilistRating {
-    pub id: i64,
     pub score: Option<f64>,
 }
 
-#[derive(SimpleObject)]
 pub struct AnilistMappings {
-    pub anilist_id: i64,
     pub tmdb_id: Option<i64>,
     pub tvdb_id: Option<i64>,
 }
@@ -111,14 +107,6 @@ impl CoreAnilistQuery {
             page: i64::from(page),
         })
     }
-
-    async fn anilist_rating(&self, ctx: &Context<'_>, id: i32) -> Result<AnilistRating> {
-        fetch_anilist_rating(ctx, id).await
-    }
-
-    async fn anilist_mappings(&self, ctx: &Context<'_>, id: i32) -> Result<AnilistMappings> {
-        fetch_anilist_mappings(ctx, id).await
-    }
 }
 
 pub async fn fetch_anilist_rating(ctx: &Context<'_>, id: i32) -> Result<AnilistRating> {
@@ -150,10 +138,7 @@ pub async fn fetch_anilist_rating(ctx: &Context<'_>, id: i32) -> Result<AnilistR
         .and_then(|item| item.average_score.or(item.mean_score))
         .map(|raw| raw / 10.0);
 
-    Ok(AnilistRating {
-        id: i64::from(id),
-        score,
-    })
+    Ok(AnilistRating { score })
 }
 
 pub async fn fetch_anilist_mappings(ctx: &Context<'_>, id: i32) -> Result<AnilistMappings> {
@@ -170,7 +155,6 @@ pub async fn fetch_anilist_mappings(ctx: &Context<'_>, id: i32) -> Result<Anilis
         .map_err(|e| Error::new(format!("AniZip mappings request failed: {e}")))?;
 
     Ok(AnilistMappings {
-        anilist_id: i64::from(id),
         tmdb_id: response
             .themoviedb_id
             .as_ref()

@@ -3,17 +3,11 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use chrono::Local;
-use log::LevelFilter;
-use opentelemetry::KeyValue;
-use opentelemetry::trace::TracerProvider as _;
-use opentelemetry_otlp::WithExportConfig;
-use opentelemetry_sdk::Resource;
-use opentelemetry_sdk::trace::SdkTracerProvider;
-use sentry::ClientInitGuard;
 use tokio::sync::broadcast;
 use tracing::{Event, Subscriber};
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_appender::rolling::{RollingFileAppender, Rotation};
+use tracing_log::log::{self, LevelFilter};
 use tracing_subscriber::{
     EnvFilter, Layer, Registry,
     filter::filter_fn,
@@ -25,39 +19,6 @@ use tracing_subscriber::{
 
 use crate::settings::RivenSettings;
 
-#[derive(Debug, Clone)]
-pub struct LogSettings {
-    pub enabled: bool,
-    pub level: String,
-    pub rotation: String,
-    pub max_files: usize,
-    pub vfs_debug_logging: bool,
-}
-
-impl Default for LogSettings {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            level: "info".to_string(),
-            rotation: "hourly".to_string(),
-            max_files: 5,
-            vfs_debug_logging: false,
-        }
-    }
-}
-
-impl From<&RivenSettings> for LogSettings {
-    fn from(core: &RivenSettings) -> Self {
-        Self {
-            enabled: core.logging_enabled,
-            level: core.log_level.clone(),
-            rotation: core.log_rotation.clone(),
-            max_files: core.log_max_files.max(1),
-            vfs_debug_logging: core.vfs_debug_logging,
-        }
-    }
-}
-
 pub struct LogControl {
     handle: reload::Handle<EnvFilter, Registry>,
     enabled: Arc<AtomicBool>,
@@ -65,8 +26,9 @@ pub struct LogControl {
 }
 
 impl LogControl {
-    pub fn apply(&self, settings: &LogSettings) -> anyhow::Result<()> {
-        self.enabled.store(settings.enabled, Ordering::Relaxed);
+    pub fn apply(&self, settings: &RivenSettings) -> anyhow::Result<()> {
+        self.enabled
+            .store(settings.logging_enabled, Ordering::Relaxed);
         self.handle
             .reload(build_level_filter(settings)?)
             .map_err(|error| anyhow::anyhow!("failed to reload log filter: {error}"))?;
@@ -75,38 +37,12 @@ impl LogControl {
     }
 }
 
-/// Held for the lifetime of the process. Dropping the Sentry guard flushes
-/// pending events; calling `shutdown` on the OTEL provider flushes spans.
-pub struct ObservabilityHandles {
-    pub log_control: Arc<LogControl>,
-    pub sentry: Option<ClientInitGuard>,
-    pub otel_provider: Option<SdkTracerProvider>,
-}
-
-impl ObservabilityHandles {
-    pub fn shutdown(&self) {
-        if let Some(provider) = &self.otel_provider
-            && let Err(e) = provider.shutdown()
-        {
-            tracing::warn!(error = %e, "OTEL provider shutdown error");
-        }
-    }
-}
-
-/// Initialize Sentry, OTEL, and the tracing subscriber.
-///
-/// Sentry activates when `SENTRY_DSN` is set; OTEL activates when
-/// `OTEL_EXPORTER_OTLP_ENDPOINT` is set. Service name comes from
-/// `OTEL_SERVICE_NAME`, defaulting to `riven`.
+/// Install the tracing subscriber and the `log` bridge.
 pub fn init_logging(
-    settings: &LogSettings,
-    log_directory: &str,
+    settings: &RivenSettings,
     log_tx: broadcast::Sender<String>,
-) -> anyhow::Result<ObservabilityHandles> {
-    let sentry_guard = init_sentry();
-    let otel_provider = init_otel()?;
-
-    let enabled = Arc::new(AtomicBool::new(settings.enabled));
+) -> anyhow::Result<Arc<LogControl>> {
+    let enabled = Arc::new(AtomicBool::new(settings.logging_enabled));
     let (filter_layer, handle) = reload::Layer::new(build_level_filter(settings)?);
 
     let gate = |enabled: &Arc<AtomicBool>| {
@@ -117,7 +53,7 @@ pub fn init_logging(
     let console_layer = tracing_subscriber::fmt::layer()
         .event_format(RivenFormatter)
         .with_filter(gate(&enabled));
-    let file_appender = build_file_appender(settings, log_directory)?;
+    let file_appender = build_file_appender(settings)?;
     let (file_writer, file_guard) = tracing_appender::non_blocking(file_appender);
     let file_layer = tracing_subscriber::fmt::layer()
         .with_writer(file_writer)
@@ -130,17 +66,8 @@ pub fn init_logging(
         .with_writer(BroadcastMakeWriter { tx: log_tx })
         .with_filter(gate(&enabled));
 
-    let sentry_layer = sentry_guard
-        .as_ref()
-        .map(|_| sentry::integrations::tracing::layer());
-    let otel_layer = otel_provider
-        .as_ref()
-        .map(|provider| tracing_opentelemetry::layer().with_tracer(provider.tracer("riven")));
-
     let subscriber = tracing_subscriber::registry()
         .with(filter_layer)
-        .with(sentry_layer)
-        .with(otel_layer)
         .with(console_layer)
         .with(file_layer)
         .with(broadcast_layer);
@@ -166,63 +93,18 @@ pub fn init_logging(
         );
     }
 
-    log::set_max_level(log_max_level(settings));
-
-    Ok(ObservabilityHandles {
-        log_control: Arc::new(LogControl {
-            handle,
-            enabled,
-            _file_guard: file_guard,
-        }),
-        sentry: sentry_guard,
-        otel_provider,
-    })
+    Ok(Arc::new(LogControl {
+        handle,
+        enabled,
+        _file_guard: file_guard,
+    }))
 }
 
-fn init_sentry() -> Option<ClientInitGuard> {
-    let dsn = std::env::var("SENTRY_DSN")
-        .ok()
-        .filter(|v| !v.trim().is_empty())?;
-    let environment = std::env::var("SENTRY_ENVIRONMENT").ok().map(Into::into);
-    // `ClientOptions` is `#[non_exhaustive]` as of sentry 0.49, so it has to be
-    // built by mutating the default rather than by struct expression.
-    let mut options = sentry::ClientOptions::default();
-    options.release = sentry::release_name!();
-    options.environment = environment;
-    options.attach_stacktrace = true;
-    let guard = sentry::init((dsn, options));
-    Some(guard)
-}
-
-fn init_otel() -> anyhow::Result<Option<SdkTracerProvider>> {
-    let endpoint = match std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT") {
-        Ok(v) if !v.trim().is_empty() => v,
-        _ => return Ok(None),
-    };
-    let service_name = std::env::var("OTEL_SERVICE_NAME").unwrap_or_else(|_| "riven".into());
-
-    let exporter = opentelemetry_otlp::SpanExporter::builder()
-        .with_tonic()
-        .with_endpoint(endpoint)
-        .build()?;
-
-    let resource = Resource::builder()
-        .with_attribute(KeyValue::new("service.name", service_name))
-        .build();
-
-    let provider = SdkTracerProvider::builder()
-        .with_batch_exporter(exporter)
-        .with_resource(resource)
-        .build();
-
-    Ok(Some(provider))
-}
-
-fn log_max_level(settings: &LogSettings) -> LevelFilter {
-    if !settings.enabled {
+fn log_max_level(settings: &RivenSettings) -> LevelFilter {
+    if !settings.logging_enabled {
         return LevelFilter::Off;
     }
-    match settings.level.as_str() {
+    match settings.log_level.as_str() {
         "trace" => LevelFilter::Trace,
         "debug" => LevelFilter::Debug,
         "warn" => LevelFilter::Warn,
@@ -251,7 +133,7 @@ const NOISY_TRACING_TARGETS: [&str; 7] = [
     "h2",
 ];
 
-fn build_level_filter(settings: &LogSettings) -> anyhow::Result<EnvFilter> {
+fn build_level_filter(settings: &RivenSettings) -> anyhow::Result<EnvFilter> {
     // An explicit `RUST_LOG` is a deliberate act — hand it over untouched so it
     // can be used to turn any of the defaults below back on.
     if let Ok(filter) = EnvFilter::try_from_default_env() {
@@ -264,9 +146,9 @@ fn build_level_filter(settings: &LogSettings) -> anyhow::Result<EnvFilter> {
 /// Construct Riven's built-in directives without consulting process-global
 /// environment. Kept separate so tests remain deterministic when the caller
 /// running `cargo test` has set `RUST_LOG`.
-fn build_default_level_filter(settings: &LogSettings) -> anyhow::Result<EnvFilter> {
-    let mut filter = EnvFilter::try_new(&settings.level)
-        .map_err(|error| anyhow::anyhow!("invalid log level '{}': {error}", settings.level))?;
+fn build_default_level_filter(settings: &RivenSettings) -> anyhow::Result<EnvFilter> {
+    let mut filter = EnvFilter::try_new(&settings.log_level)
+        .map_err(|error| anyhow::anyhow!("invalid log level '{}': {error}", settings.log_level))?;
 
     for target in NOISY_TRACING_TARGETS {
         filter = filter.add_directive(format!("{target}=info").parse()?);
@@ -282,11 +164,8 @@ fn build_default_level_filter(settings: &LogSettings) -> anyhow::Result<EnvFilte
     Ok(filter)
 }
 
-fn build_file_appender(
-    settings: &LogSettings,
-    log_directory: &str,
-) -> anyhow::Result<RollingFileAppender> {
-    let rotation = match settings.rotation.to_ascii_lowercase().as_str() {
+fn build_file_appender(settings: &RivenSettings) -> anyhow::Result<RollingFileAppender> {
+    let rotation = match settings.log_rotation.to_ascii_lowercase().as_str() {
         "daily" => Rotation::DAILY,
         "hourly" => Rotation::HOURLY,
         other => anyhow::bail!("invalid log rotation '{other}'"),
@@ -295,8 +174,8 @@ fn build_file_appender(
     tracing_appender::rolling::RollingFileAppender::builder()
         .rotation(rotation)
         .filename_prefix("riven.log")
-        .max_log_files(settings.max_files)
-        .build(log_directory)
+        .max_log_files(settings.log_max_files.max(1))
+        .build(&settings.log_directory)
         .map_err(|error| anyhow::anyhow!("failed to initialize log file appender: {error}"))
 }
 
@@ -404,17 +283,18 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for BroadcastMakeWriter {
 
 #[cfg(test)]
 mod tests {
-    use super::{LogSettings, build_default_level_filter};
+    use super::build_default_level_filter;
+    use crate::settings::RivenSettings;
 
-    fn directives(settings: &LogSettings) -> String {
+    fn directives(settings: &RivenSettings) -> String {
         build_default_level_filter(settings).unwrap().to_string()
     }
 
     #[test]
     fn noisy_third_party_targets_stay_at_info_when_riven_goes_to_debug() {
-        let settings = LogSettings {
-            level: "debug".into(),
-            ..LogSettings::default()
+        let settings = RivenSettings {
+            log_level: "debug".into(),
+            ..RivenSettings::default()
         };
         let directives = directives(&settings);
 
@@ -432,10 +312,10 @@ mod tests {
 
     #[test]
     fn vfs_debug_logging_keeps_the_log_bridge_verbose() {
-        let settings = LogSettings {
-            level: "debug".into(),
+        let settings = RivenSettings {
+            log_level: "debug".into(),
             vfs_debug_logging: true,
-            ..LogSettings::default()
+            ..RivenSettings::default()
         };
         let directives = directives(&settings);
 

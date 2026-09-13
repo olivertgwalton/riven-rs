@@ -133,7 +133,8 @@ impl UsenetStreamer {
         };
 
         let cipher_offset = if need_predecessor { AES_BLOCK } else { 0 };
-        decrypt_blocks_in_place(&key, &iv, &mut fetched[cipher_offset..])?;
+        decrypt_blocks_in_place(&key, &iv, &mut fetched[cipher_offset..])
+            .ok_or(StreamerError::BadRange)?;
 
         let plain_offset = cipher_offset + (plain_lo - block_lo * block) as usize;
         let end = plain_offset + (plain_hi - plain_lo + 1) as usize;

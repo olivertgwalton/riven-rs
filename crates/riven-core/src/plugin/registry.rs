@@ -6,8 +6,6 @@ use super::{FieldType, Plugin, PluginContext, SettingField};
 use crate::events::{EventType, HookResponse, RivenEvent};
 use crate::settings::PluginSettings;
 
-pub const PLUGIN_ENABLED_PREFIX: &str = "plugin_enabled.";
-
 pub struct PluginInfo {
     pub name: String,
     pub version: String,
@@ -26,23 +24,12 @@ pub struct ActivePlugin {
     update_lock: Arc<Mutex<()>>,
 }
 
+#[derive(Default)]
 pub struct PluginRegistry {
     plugins: RwLock<Vec<ActivePlugin>>,
 }
 
-impl Default for PluginRegistry {
-    fn default() -> Self {
-        Self {
-            plugins: RwLock::new(Vec::new()),
-        }
-    }
-}
-
 impl PluginRegistry {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
     pub async fn register(
         &self,
         plugin: Box<dyn Plugin>,
@@ -70,7 +57,12 @@ impl PluginRegistry {
             "validation failed, skipping",
         );
 
-        let context = Arc::new(PluginContext::new(settings, http, redis, vfs_mount_path));
+        let context = Arc::new(PluginContext {
+            settings,
+            http,
+            redis,
+            vfs_mount_path,
+        });
         self.plugins.write().await.push(ActivePlugin {
             plugin,
             context,
@@ -138,12 +130,12 @@ impl PluginRegistry {
             );
             return active.valid;
         }
-        active.context = Arc::new(PluginContext::new(
-            new_settings,
+        active.context = Arc::new(PluginContext {
+            settings: new_settings,
             http,
             redis,
             vfs_mount_path,
-        ));
+        });
         active.enabled = enabled;
         active.valid = valid;
         log_plugin_state(

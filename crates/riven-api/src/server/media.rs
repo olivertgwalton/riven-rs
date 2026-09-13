@@ -1,7 +1,6 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use anyhow::Result;
 use axum::{
     body::Body,
     extract::{Path, Query, State},
@@ -22,7 +21,7 @@ use riven_vfs::source::{ByteSource, UsenetSource};
 use super::ApiState;
 use super::auth::{authorize_request, check_stremio_token, has_valid_api_key};
 
-const MEDIA_RESPONSE_HEADERS: [HeaderName; 7] = [
+const MEDIA_RESPONSE_HEADERS: [HeaderName; 8] = [
     ACCEPT_RANGES,
     CACHE_CONTROL,
     CONTENT_DISPOSITION,
@@ -30,9 +29,8 @@ const MEDIA_RESPONSE_HEADERS: [HeaderName; 7] = [
     CONTENT_RANGE,
     CONTENT_TYPE,
     ETAG,
+    LAST_MODIFIED,
 ];
-
-const MEDIA_OPTIONAL_HEADERS: [HeaderName; 1] = [LAST_MODIFIED];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct RequestedRange {
@@ -47,16 +45,8 @@ enum RangeHeaderError {
     Unsatisfiable,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum UpstreamRangeError {
-    MissingPartialContent,
-}
-
 fn copy_response_headers(from: &reqwest::header::HeaderMap, to: &mut HeaderMap) {
-    for name in MEDIA_RESPONSE_HEADERS
-        .iter()
-        .chain(MEDIA_OPTIONAL_HEADERS.iter())
-    {
+    for name in &MEDIA_RESPONSE_HEADERS {
         if let Some(value) = from.get(name)
             && let Ok(cloned) = HeaderValue::from_bytes(value.as_bytes())
         {
@@ -148,18 +138,15 @@ fn is_seek_request(range: Option<RequestedRange>) -> bool {
     }
 }
 
-fn validate_upstream_range_response(
+/// A range was asked for but the upstream answered with neither partial
+/// content nor an unsatisfiable-range status.
+fn upstream_ignored_range(
     requested_range: Option<RequestedRange>,
     upstream_status: reqwest::StatusCode,
-) -> Result<(), UpstreamRangeError> {
-    if requested_range.is_some()
+) -> bool {
+    requested_range.is_some()
         && upstream_status != reqwest::StatusCode::PARTIAL_CONTENT
         && upstream_status != reqwest::StatusCode::RANGE_NOT_SATISFIABLE
-    {
-        return Err(UpstreamRangeError::MissingPartialContent);
-    }
-
-    Ok(())
 }
 
 fn build_media_request(
@@ -260,23 +247,6 @@ fn maybe_spawn_next_prewarm(
             }
         }
     });
-}
-
-async fn fetch_media_response(
-    state: &ApiState,
-    method: Method,
-    stream_url: &str,
-    request_headers: &HeaderMap,
-) -> Result<reqwest::Response> {
-    Ok(
-        build_media_request(&state.stream_client, method, stream_url, request_headers)
-            .send()
-            .await?,
-    )
-}
-
-async fn load_media_entry(entry_id: i64) -> Result<Option<riven_db::entities::FileSystemEntry>> {
-    riven_db::repo::get_media_entry_by_id(entry_id).await
 }
 
 /// Query string for the media bridge. `?download=1` (any value) flips the
@@ -476,7 +446,7 @@ async fn serve_usenet_media(
     // Read through the same [`Prefetcher`] the FUSE mount uses, rather than
     // walking articles here.
     //
-    // This path used to call `LocalByteSource::read_range` itself from a
+    // This path used to call the streamer's `read_range` itself from a
     // `stream::unfold`, which is strictly sequential: every 8 MiB chunk started
     // with nothing on the wire, blocked on the slowest article it spanned, then
     // left the wire idle through the concatenation and the whole client write
@@ -487,7 +457,7 @@ async fn serve_usenet_media(
     // worse copy of it here.
     let filename = entry.path.rsplit('/').next().unwrap_or(&entry.path);
     let source: Arc<dyn ByteSource> = Arc::new(UsenetSource::new(
-        Arc::new(streamer),
+        streamer,
         Arc::from(info_hash.as_str()),
         file_index,
         file_size,
@@ -520,7 +490,7 @@ async fn serve_usenet_media(
                 Ok(bytes) if !bytes.is_empty() => {
                     let next = pos + bytes.len() as u64;
                     Some((
-                        Ok::<bytes::Bytes, std::io::Error>(bytes),
+                        Ok::<axum::body::Bytes, std::io::Error>(bytes),
                         (reader, entry_path, next, end),
                     ))
                 }
@@ -581,7 +551,9 @@ async fn media_credential_ok(state: &ApiState, headers: &HeaderMap, query: &Medi
     let encoded = query
         .api_key
         .as_deref()
-        .map(|api_key| format!("api_key={}", urlencoding_encode(api_key)));
+        // `has_valid_api_key` parses a form-encoded query, so the already-decoded
+        // value is re-encoded before being handed back to it.
+        .map(|api_key| format!("api_key={}", super::urlencoding_encode(api_key)));
     if has_valid_api_key(state, headers, encoded.as_deref()) {
         return true;
     }
@@ -597,13 +569,6 @@ async fn media_credential_ok(state: &ApiState, headers: &HeaderMap, query: &Medi
         .is_ok()
 }
 
-/// `has_valid_api_key` parses its `query` argument as a form-encoded string, so a
-/// value lifted out of an already-decoded `MediaQuery` has to be re-encoded
-/// before being handed back to it.
-fn urlencoding_encode(value: &str) -> String {
-    url::form_urlencoded::byte_serialize(value.as_bytes()).collect()
-}
-
 pub(super) async fn media_bridge_handler(
     State(state): State<ApiState>,
     Path(entry_id): Path<i64>,
@@ -617,7 +582,7 @@ pub(super) async fn media_bridge_handler(
         return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
     }
 
-    let entry = match load_media_entry(entry_id).await {
+    let entry = match riven_db::repo::get_media_entry_by_id(entry_id).await {
         Ok(Some(entry)) => entry,
         Ok(None) => return StatusCode::NOT_FOUND.into_response(),
         Err(error) => {
@@ -665,40 +630,51 @@ pub(super) async fn media_bridge_handler(
         return StatusCode::BAD_GATEWAY.into_response();
     };
 
-    let mut upstream =
-        match fetch_media_response(&state, method.clone(), &initial_stream_url, &headers).await {
-            Ok(response) => response,
-            Err(error) => {
-                tracing::warn!(entry_id, error = %error, "initial media request failed");
-                let Some(refreshed) = resolve_media_stream_url(&state, &entry).await else {
-                    return StatusCode::BAD_GATEWAY.into_response();
-                };
-                refreshed_stream_url = true;
+    let mut upstream = match build_media_request(
+        &state.stream_client,
+        method.clone(),
+        &initial_stream_url,
+        &headers,
+    )
+    .send()
+    .await
+    {
+        Ok(response) => response,
+        Err(error) => {
+            tracing::warn!(entry_id, error = %error, "initial media request failed");
+            let Some(refreshed) = resolve_media_stream_url(&state, &entry).await else {
+                return StatusCode::BAD_GATEWAY.into_response();
+            };
+            refreshed_stream_url = true;
 
-                match fetch_media_response(&state, method.clone(), &refreshed, &headers).await {
-                    Ok(response) => response,
-                    Err(error) => {
-                        tracing::error!(entry_id, error = %error, "refreshed media request failed");
-                        return StatusCode::BAD_GATEWAY.into_response();
-                    }
+            match build_media_request(&state.stream_client, method.clone(), &refreshed, &headers)
+                .send()
+                .await
+            {
+                Ok(response) => response,
+                Err(error) => {
+                    tracing::error!(entry_id, error = %error, "refreshed media request failed");
+                    return StatusCode::BAD_GATEWAY.into_response();
                 }
             }
-        };
+        }
+    };
 
-    let mut upstream_range_error =
-        validate_upstream_range_response(requested_range, upstream.status()).err();
+    let mut range_ignored = upstream_ignored_range(requested_range, upstream.status());
 
-    if is_expired_stream_status(upstream.status()) || upstream_range_error.is_some() {
+    if is_expired_stream_status(upstream.status()) || range_ignored {
         let Some(refreshed) = resolve_media_stream_url(&state, &entry).await else {
             return StatusCode::BAD_GATEWAY.into_response();
         };
         refreshed_stream_url = true;
 
-        match fetch_media_response(&state, method.clone(), &refreshed, &headers).await {
+        match build_media_request(&state.stream_client, method.clone(), &refreshed, &headers)
+            .send()
+            .await
+        {
             Ok(response) => {
                 upstream = response;
-                upstream_range_error =
-                    validate_upstream_range_response(requested_range, upstream.status()).err();
+                range_ignored = upstream_ignored_range(requested_range, upstream.status());
             }
             Err(error) => {
                 tracing::error!(
@@ -711,7 +687,7 @@ pub(super) async fn media_bridge_handler(
         }
     }
 
-    if upstream_range_error.is_some() {
+    if range_ignored {
         tracing::warn!(
             entry_id,
             status = %upstream.status(),
@@ -930,15 +906,12 @@ mod tests {
 
     #[test]
     fn rejects_range_requests_when_upstream_returns_full_content() {
-        assert_eq!(
-            validate_upstream_range_response(
-                Some(RequestedRange {
-                    start: Some(0),
-                    end: Some(1023),
-                }),
-                reqwest::StatusCode::OK
-            ),
-            Err(UpstreamRangeError::MissingPartialContent)
-        );
+        assert!(upstream_ignored_range(
+            Some(RequestedRange {
+                start: Some(0),
+                end: Some(1023),
+            }),
+            reqwest::StatusCode::OK
+        ));
     }
 }

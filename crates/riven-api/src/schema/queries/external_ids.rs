@@ -46,7 +46,10 @@ async fn resolve_external_id(
     let to = key(to);
 
     if from == to {
-        return Ok(resolution(id.to_owned(), true));
+        return Ok(IdResolution {
+            id: id.to_owned(),
+            resolved: true,
+        });
     }
 
     let resolved = match (from.as_str(), to.as_str()) {
@@ -73,9 +76,9 @@ async fn resolve_external_id(
         _ => None,
     };
 
-    Ok(match resolved {
-        Some(id) => resolution(id, true),
-        None => resolution(id.to_owned(), false),
+    Ok(IdResolution {
+        resolved: resolved.is_some(),
+        id: resolved.unwrap_or_else(|| id.to_owned()),
     })
 }
 
@@ -118,10 +121,6 @@ async fn riven_external_id(_ctx: &Context<'_>, id: &str, field: &str) -> Result<
         "tvdb_id" => item.tvdb_id,
         _ => None,
     }))
-}
-
-fn resolution(id: String, resolved: bool) -> IdResolution {
-    IdResolution { id, resolved }
 }
 
 #[derive(Deserialize)]

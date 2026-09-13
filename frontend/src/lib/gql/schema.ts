@@ -56,20 +56,9 @@ export type AnilistListItem = {
   year: Scalars['String']['output'];
 };
 
-export type AnilistMappings = {
-  anilistId: Scalars['Int']['output'];
-  tmdbId?: Maybe<Scalars['Int']['output']>;
-  tvdbId?: Maybe<Scalars['Int']['output']>;
-};
-
 export type AnilistPage = {
   page: Scalars['Int']['output'];
   results: Array<AnilistListItem>;
-};
-
-export type AnilistRating = {
-  id: Scalars['Int']['output'];
-  score?: Maybe<Scalars['Float']['output']>;
 };
 
 export type AudioTrack = {
@@ -120,11 +109,6 @@ export type CalendarEntry = {
  * is nothing to disagree with.
  */
 export type Capability =
-  /**
-   * Put an item straight into the library, bypassing the request queue.
-   * No riven-ts counterpart — `addItem`/`discoverItem` are riven-rs's.
-   */
-  | 'ADD_ITEMS'
   | 'DELETE_ITEMS'
   /** Settings, profiles, indexing and setup — riven-ts's `adminAc` statements. */
   | 'MANAGE_SETTINGS'
@@ -184,77 +168,6 @@ export type DiscoveredStream = {
   rank?: Maybe<Scalars['Int']['output']>;
   seasonNumber?: Maybe<Scalars['Int']['output']>;
   title: Scalars['String']['output'];
-};
-
-export type DownloadMediaItemMutationInput = {
-  id: Scalars['Int']['input'];
-  processedBy: Scalars['String']['input'];
-  torrent: Scalars['JSON']['input'];
-};
-
-export type DownloadMediaItemMutationResponse = {
-  item?: Maybe<MediaItemUnion>;
-  message: Scalars['String']['output'];
-  statusText: MutationStatusText;
-  success: Scalars['Boolean']['output'];
-};
-
-export type Episode = {
-  absoluteNumber?: Maybe<Scalars['Int']['output']>;
-  activeStreamId?: Maybe<Scalars['Int']['output']>;
-  airedAt?: Maybe<Scalars['NaiveDate']['output']>;
-  airedAtUtc?: Maybe<Scalars['DateTime']['output']>;
-  aliases?: Maybe<Scalars['JSON']['output']>;
-  contentRating?: Maybe<ContentRating>;
-  country?: Maybe<Scalars['String']['output']>;
-  createdAt: Scalars['DateTime']['output'];
-  episodeNumber?: Maybe<Scalars['Int']['output']>;
-  /** Always 1 — an episode has exactly one expected media file. */
-  expectedFileCount: Scalars['Int']['output'];
-  failedAttempts: Scalars['Int']['output'];
-  fullTitle?: Maybe<Scalars['String']['output']>;
-  genres?: Maybe<Scalars['JSON']['output']>;
-  id: Scalars['Int']['output'];
-  imdbId?: Maybe<Scalars['String']['output']>;
-  indexedAt?: Maybe<Scalars['DateTime']['output']>;
-  isAnime: Scalars['Boolean']['output'];
-  isRequested: Scalars['Boolean']['output'];
-  isSpecial?: Maybe<Scalars['Boolean']['output']>;
-  itemRequestId?: Maybe<Scalars['Int']['output']>;
-  itemType: MediaItemType;
-  language?: Maybe<Scalars['String']['output']>;
-  lastScrapeAttemptAt?: Maybe<Scalars['DateTime']['output']>;
-  /** Lookup keys: `["abs:{absoluteNumber}", "{seasonNumber}:{episodeNumber}"]`. */
-  lookupKeys: Array<Scalars['String']['output']>;
-  network?: Maybe<Scalars['String']['output']>;
-  networkTimezone?: Maybe<Scalars['String']['output']>;
-  parentId?: Maybe<Scalars['Int']['output']>;
-  /**
-   * Absolute artwork URL. The column holds a bare path for anything indexed
-   * before the plugins normalised what they wrote, so it is resolved here
-   * rather than in each client.
-   */
-  posterPath?: Maybe<Scalars['String']['output']>;
-  rating?: Maybe<Scalars['Float']['output']>;
-  runtime?: Maybe<Scalars['Int']['output']>;
-  scrapedAt?: Maybe<Scalars['DateTime']['output']>;
-  scrapedTimes: Scalars['Int']['output'];
-  /** The parent season for this episode. */
-  season: Season;
-  seasonNumber?: Maybe<Scalars['Int']['output']>;
-  showStatus?: Maybe<ShowStatus>;
-  state: MediaItemState;
-  streams: Array<Stream>;
-  title: Scalars['String']['output'];
-  tmdbId?: Maybe<Scalars['String']['output']>;
-  tvdbId?: Maybe<Scalars['String']['output']>;
-  updatedAt?: Maybe<Scalars['DateTime']['output']>;
-  year?: Maybe<Scalars['Int']['output']>;
-};
-
-
-export type EpisodeStreamsArgs = {
-  infoHashes?: InputMaybe<Array<Scalars['String']['input']>>;
 };
 
 /** Episode with its primary filesystem entry (media file only). */
@@ -384,77 +297,6 @@ export type Genre = {
 export type IdResolution = {
   id: Scalars['String']['output'];
   resolved: Scalars['Boolean']['output'];
-};
-
-export type IndexEpisodeInput = {
-  absoluteNumber?: InputMaybe<Scalars['Int']['input']>;
-  /** ISO date string (YYYY-MM-DD). */
-  airedAt?: InputMaybe<Scalars['String']['input']>;
-  contentRating?: InputMaybe<ContentRating>;
-  number: Scalars['Int']['input'];
-  posterPath?: InputMaybe<Scalars['String']['input']>;
-  runtime?: InputMaybe<Scalars['Int']['input']>;
-  title: Scalars['String']['input'];
-};
-
-/** Input for the `indexMovie` mutation. */
-export type IndexMovieInput = {
-  /** Locale → title aliases, e.g. `{"de": ["Titel"]}`. */
-  aliases?: InputMaybe<Scalars['JSON']['input']>;
-  contentRating?: InputMaybe<ContentRating>;
-  country?: InputMaybe<Scalars['String']['input']>;
-  genres: Array<Scalars['String']['input']>;
-  /** ID of the `ItemRequest` being indexed. */
-  id: Scalars['Int']['input'];
-  imdbId?: InputMaybe<Scalars['String']['input']>;
-  language?: InputMaybe<Scalars['String']['input']>;
-  posterUrl?: InputMaybe<Scalars['String']['input']>;
-  rating?: InputMaybe<Scalars['Float']['input']>;
-  /** ISO date string (YYYY-MM-DD) for the theatrical release. */
-  releaseDate?: InputMaybe<Scalars['String']['input']>;
-  runtime?: InputMaybe<Scalars['Int']['input']>;
-  title: Scalars['String']['input'];
-};
-
-/** Structured response returned by `indexMovie`. */
-export type IndexMovieMutationResponse = {
-  message: Scalars['String']['output'];
-  movie?: Maybe<Movie>;
-  statusText: MutationStatusText;
-  success: Scalars['Boolean']['output'];
-};
-
-export type IndexSeasonInput = {
-  episodes: Array<IndexEpisodeInput>;
-  number: Scalars['Int']['input'];
-  title?: InputMaybe<Scalars['String']['input']>;
-};
-
-/** Input for the `indexShow` mutation. */
-export type IndexShowInput = {
-  /** Locale → title aliases, e.g. `{"de": ["Titel"]}`. */
-  aliases?: InputMaybe<Scalars['JSON']['input']>;
-  contentRating?: InputMaybe<ContentRating>;
-  country?: InputMaybe<Scalars['String']['input']>;
-  genres: Array<Scalars['String']['input']>;
-  /** ID of the `ItemRequest` being indexed. */
-  id: Scalars['Int']['input'];
-  imdbId?: InputMaybe<Scalars['String']['input']>;
-  language?: InputMaybe<Scalars['String']['input']>;
-  network?: InputMaybe<Scalars['String']['input']>;
-  posterUrl?: InputMaybe<Scalars['String']['input']>;
-  rating?: InputMaybe<Scalars['Float']['input']>;
-  seasons: Array<IndexSeasonInput>;
-  status: ShowStatus;
-  title: Scalars['String']['input'];
-};
-
-/** Structured response returned by `indexShow`. */
-export type IndexShowMutationResponse = {
-  message: Scalars['String']['output'];
-  show?: Maybe<Show>;
-  statusText: MutationStatusText;
-  success: Scalars['Boolean']['output'];
 };
 
 /** Lifetime totals for one configured indexer. */
@@ -805,9 +647,6 @@ export type MediaItemType =
   | 'SEASON'
   | 'SHOW';
 
-/** Discriminated union of all concrete media item types. */
-export type MediaItemUnion = Episode | Movie | Season | Show;
-
 /**
  * The `media_metadata` document, derived from a release filename by
  * `riven_rank::derive_media_metadata` and stored as JSON on the entry.
@@ -836,60 +675,6 @@ export type MediaMetadata = {
   year?: Maybe<Scalars['Int']['output']>;
 };
 
-export type Movie = {
-  absoluteNumber?: Maybe<Scalars['Int']['output']>;
-  activeStreamId?: Maybe<Scalars['Int']['output']>;
-  airedAt?: Maybe<Scalars['NaiveDate']['output']>;
-  airedAtUtc?: Maybe<Scalars['DateTime']['output']>;
-  aliases?: Maybe<Scalars['JSON']['output']>;
-  contentRating?: Maybe<ContentRating>;
-  country?: Maybe<Scalars['String']['output']>;
-  createdAt: Scalars['DateTime']['output'];
-  episodeNumber?: Maybe<Scalars['Int']['output']>;
-  /** Always 1 — a movie has exactly one expected media file. */
-  expectedFileCount: Scalars['Int']['output'];
-  failedAttempts: Scalars['Int']['output'];
-  fullTitle?: Maybe<Scalars['String']['output']>;
-  genres?: Maybe<Scalars['JSON']['output']>;
-  id: Scalars['Int']['output'];
-  imdbId?: Maybe<Scalars['String']['output']>;
-  indexedAt?: Maybe<Scalars['DateTime']['output']>;
-  isAnime: Scalars['Boolean']['output'];
-  isRequested: Scalars['Boolean']['output'];
-  isSpecial?: Maybe<Scalars['Boolean']['output']>;
-  itemRequestId?: Maybe<Scalars['Int']['output']>;
-  itemType: MediaItemType;
-  language?: Maybe<Scalars['String']['output']>;
-  lastScrapeAttemptAt?: Maybe<Scalars['DateTime']['output']>;
-  network?: Maybe<Scalars['String']['output']>;
-  networkTimezone?: Maybe<Scalars['String']['output']>;
-  parentId?: Maybe<Scalars['Int']['output']>;
-  /**
-   * Absolute artwork URL. The column holds a bare path for anything indexed
-   * before the plugins normalised what they wrote, so it is resolved here
-   * rather than in each client.
-   */
-  posterPath?: Maybe<Scalars['String']['output']>;
-  rating?: Maybe<Scalars['Float']['output']>;
-  runtime?: Maybe<Scalars['Int']['output']>;
-  scrapedAt?: Maybe<Scalars['DateTime']['output']>;
-  scrapedTimes: Scalars['Int']['output'];
-  seasonNumber?: Maybe<Scalars['Int']['output']>;
-  showStatus?: Maybe<ShowStatus>;
-  state: MediaItemState;
-  streams: Array<Stream>;
-  title: Scalars['String']['output'];
-  tmdbId?: Maybe<Scalars['String']['output']>;
-  tvdbId?: Maybe<Scalars['String']['output']>;
-  updatedAt?: Maybe<Scalars['DateTime']['output']>;
-  year?: Maybe<Scalars['Int']['output']>;
-};
-
-
-export type MovieStreamsArgs = {
-  infoHashes?: InputMaybe<Array<Scalars['String']['input']>>;
-};
-
 /** The franchise a movie belongs to, when TMDB says it belongs to one. */
 export type MovieCollection = {
   backdropPath?: Maybe<Scalars['String']['output']>;
@@ -912,12 +697,6 @@ export type MovieRequestInput = {
 
 export type MutationRoot = {
   /**
-   * Add a new media item to track and immediately queue it for indexing.
-   * For shows, `seasons` is an optional list of season numbers to request.
-   * If omitted, all non-special seasons are requested.
-   */
-  addItem: MediaItem;
-  /**
    * Reject a downloaded file: permanently blacklist the release behind it
    * and remove its tracked entry, then clear the owning item's retry
    * backoff so a replacement is searched for on the next scheduler pass.
@@ -935,8 +714,6 @@ export type MutationRoot = {
    * `filesystem_entries` recomputes the owning item's state automatically.
    */
   deleteFilesystemEntry: Scalars['Boolean']['output'];
-  /** Create or reuse a non-requested media item, then index/scrape it so streams can be inspected. */
-  discoverItem: MediaItem;
   /** Discover stream candidates without creating or mutating media items. */
   discoverStreams: Array<DiscoveredStream>;
   /**
@@ -948,22 +725,6 @@ export type MutationRoot = {
    * flow can fill every season it contains.
    */
   downloadDiscoveredStream: Scalars['String']['output'];
-  downloadMediaItem: DownloadMediaItemMutationResponse;
-  /**
-   * Persist indexer data for a movie and advance it to the scraping stage.
-   *
-   * Called by the indexer plugin after it has resolved metadata (title,
-   * content rating, release date, etc.) for a movie item request.
-   */
-  indexMovie: IndexMovieMutationResponse;
-  /**
-   * Persist indexer data for a show (including seasons and episodes) and
-   * advance it to the scraping stage.
-   *
-   * Called by the indexer plugin after it has resolved metadata for a show
-   * item request.
-   */
-  indexShow: IndexShowMutationResponse;
   /** Pause items. */
   pauseItems: Scalars['Int']['output'];
   /**
@@ -975,8 +736,6 @@ export type MutationRoot = {
    * complete one is picked.
    */
   regrabUsenetTitle: Scalars['String']['output'];
-  /** Recompute stored library-profile matches for every existing media entry. */
-  rematchFilesystemLibraryProfiles: Scalars['Int']['output'];
   /** Remove items by ID. */
   removeItems: Scalars['Int']['output'];
   /**
@@ -1024,20 +783,6 @@ export type MutationRoot = {
    */
   saveCustomProfile: Scalars['JSON']['output'];
   /**
-   * Save a stream URL on a filesystem entry (media entry).
-   *
-   * Used by players and integrations to store the resolved playback URL
-   * alongside the downloaded file record.
-   */
-  saveStreamUrl: SaveStreamUrlMutationResponse;
-  /**
-   * Trigger a scrape for an existing item by entering its
-   * per-item state machine. For shows, optionally provide season_numbers
-   * to mark additional seasons requested before processing.
-   */
-  scrapeItem: Scalars['String']['output'];
-  scrapeMediaItem: ScrapeMediaItemMutationResponse;
-  /**
    * Accepts Seerr's webhook payload (wrapped in a GraphQL envelope by the
    * JSON payload template `validate_webhook_settings` configures on Seerr)
    * and either acknowledges a `TEST_NOTIFICATION` ping or upserts the
@@ -1053,8 +798,6 @@ export type MutationRoot = {
   setProfileEnabled: Scalars['Boolean']['output'];
   /** Unpause items (derives next state from current facts). */
   unpauseItems: Scalars['Int']['output'];
-  /** Update all settings. Accepts a JSON object of key/value pairs. */
-  updateAllSettings: Scalars['JSON']['output'];
   /**
    * Update settings for any profile (built-in or custom) by name.
    * For built-in profiles these are stored as overrides that get merged on
@@ -1062,28 +805,12 @@ export type MutationRoot = {
    */
   updateProfileSettings: Scalars['Boolean']['output'];
   /**
-   * Update rank settings. Deserialises into [`RankSettings`] (applying
-   * serde defaults for any missing fields), then re-serialises the
-   * canonical form — ensuring the Rust schema is the source of truth.
-   */
-  updateRankSettings: Scalars['JSON']['output'];
-  /**
    * The single write entry point for settings: the "general" section or any
    * plugin (by name). Persists the section's values, reconciles its side
    * effects (general → logging/downloader/VFS; plugin → revalidate), and
    * returns the updated section so the UI gets fresh enabled/valid state.
    */
   updateSettings: SettingsSection;
-};
-
-
-export type MutationRootAddItemArgs = {
-  imdbId?: InputMaybe<Scalars['String']['input']>;
-  itemType: MediaItemType;
-  seasons?: InputMaybe<Array<Scalars['Int']['input']>>;
-  title: Scalars['String']['input'];
-  tmdbId?: InputMaybe<Scalars['String']['input']>;
-  tvdbId?: InputMaybe<Scalars['String']['input']>;
 };
 
 
@@ -1099,16 +826,6 @@ export type MutationRootDeleteCustomProfileArgs = {
 
 export type MutationRootDeleteFilesystemEntryArgs = {
   id: Scalars['Int']['input'];
-};
-
-
-export type MutationRootDiscoverItemArgs = {
-  imdbId?: InputMaybe<Scalars['String']['input']>;
-  itemType: MediaItemType;
-  seasons?: InputMaybe<Array<Scalars['Int']['input']>>;
-  title: Scalars['String']['input'];
-  tmdbId?: InputMaybe<Scalars['String']['input']>;
-  tvdbId?: InputMaybe<Scalars['String']['input']>;
 };
 
 
@@ -1138,21 +855,6 @@ export type MutationRootDownloadDiscoveredStreamArgs = {
   title: Scalars['String']['input'];
   tmdbId?: InputMaybe<Scalars['String']['input']>;
   tvdbId?: InputMaybe<Scalars['String']['input']>;
-};
-
-
-export type MutationRootDownloadMediaItemArgs = {
-  input: DownloadMediaItemMutationInput;
-};
-
-
-export type MutationRootIndexMovieArgs = {
-  input: IndexMovieInput;
-};
-
-
-export type MutationRootIndexShowArgs = {
-  input: IndexShowInput;
 };
 
 
@@ -1211,23 +913,6 @@ export type MutationRootSaveCustomProfileArgs = {
 };
 
 
-export type MutationRootSaveStreamUrlArgs = {
-  id: Scalars['Int']['input'];
-  url: Scalars['String']['input'];
-};
-
-
-export type MutationRootScrapeItemArgs = {
-  id: Scalars['Int']['input'];
-  seasonNumbers?: InputMaybe<Array<Scalars['Int']['input']>>;
-};
-
-
-export type MutationRootScrapeMediaItemArgs = {
-  input: ScrapeMediaItemMutationInput;
-};
-
-
 export type MutationRootSeerrHandleWebhookArgs = {
   payload: Scalars['JSON']['input'];
 };
@@ -1244,18 +929,8 @@ export type MutationRootUnpauseItemsArgs = {
 };
 
 
-export type MutationRootUpdateAllSettingsArgs = {
-  settings: Scalars['JSON']['input'];
-};
-
-
 export type MutationRootUpdateProfileSettingsArgs = {
   name: Scalars['String']['input'];
-  settings: Scalars['JSON']['input'];
-};
-
-
-export type MutationRootUpdateRankSettingsArgs = {
   settings: Scalars['JSON']['input'];
 };
 
@@ -1369,10 +1044,6 @@ export type QueryRoot = {
    * Returns a JSON object mapping ISO date strings (YYYY-MM-DD) to counts.
    */
   activity: Scalars['JSON']['output'];
-  /** Get all stored settings as a JSON object. */
-  allSettings: Scalars['JSON']['output'];
-  anilistMappings: AnilistMappings;
-  anilistRating: AnilistRating;
   /** Get upcoming unreleased items (calendar feed), with show title resolved in a single query. */
   calendar: Array<CalendarEntry>;
   companyDetails: PersonDetails;
@@ -1381,16 +1052,6 @@ export type QueryRoot = {
   /** Get debrid account information for all configured stores. */
   debridAccountInfo: Array<DebridUserInfo>;
   defaultRankProfile: Scalars['JSON']['output'];
-  episodeByTvdb?: Maybe<MediaItem>;
-  episodes: Array<MediaItem>;
-  /**
-   * Return the number of media files expected for a media item:
-   * - Movie / Episode → 1
-   * - Season → total episode count
-   * - Show → total processable episode count (continuing shows exclude the last season)
-   */
-  expectedFileCount: Scalars['Int']['output'];
-  filesystemEntries: Array<FileSystemEntry>;
   /**
    * Query and grab totals per indexer, busiest first. Counters are flushed
    * from memory once a minute, so the newest activity can lag by that much.
@@ -1402,18 +1063,7 @@ export type QueryRoot = {
    */
   instanceStatus: InstanceStatus;
   items: ItemsPage;
-  itemsByState: Array<MediaItem>;
   logs: Array<LogEntry>;
-  /**
-   * Return lookup key strings for an episode:
-   * `["abs:{absolute_number}", "{season_number}:{episode_number}"]`.
-   */
-  lookupKeys: Array<Scalars['String']['output']>;
-  mediaItemById?: Maybe<MediaItemUnion>;
-  mediaItemByImdb?: Maybe<MediaItem>;
-  mediaItemByTmdb?: Maybe<MediaItem>;
-  mediaItemByTvdb?: Maybe<MediaItem>;
-  mediaItemFull?: Maybe<MediaItemFull>;
   mediaItemFullByTmdb?: Maybe<MediaItemFull>;
   mediaItemFullByTvdb?: Maybe<MediaItemFull>;
   mediaItemStateByTmdb?: Maybe<MediaItemStateTree>;
@@ -1430,13 +1080,11 @@ export type QueryRoot = {
    * counterpart to `mediaItemStatusesByTmdbIds`, same batching rationale.
    */
   mediaItemStatusesByTvdbIds: Array<MediaItemStatus>;
-  mediaItems: Array<MediaItemUnion>;
   /**
    * Everything the movie detail page renders, in one shape shared with
    * `showDetails`.
    */
   movieDetails: MediaDetails;
-  movies: Array<MediaItem>;
   /**
    * Per-provider NNTP health (connections + demotion state). Empty when
    * usenet isn't configured.
@@ -1455,9 +1103,7 @@ export type QueryRoot = {
   rankSettingsSchema: Scalars['JSON']['output'];
   ratings: RatingsResponse;
   resolveExternalId: IdResolution;
-  resolveTmdbToTvdb?: Maybe<Scalars['Int']['output']>;
   searchTmdb: TmdbPage;
-  seasons: Array<MediaItem>;
   /**
    * Every configurable settings surface — the instance-wide "general"
    * section plus one section per plugin — each with the schema to render it
@@ -1475,7 +1121,6 @@ export type QueryRoot = {
    * Trakt for related titles when the page was reached from a TMDB id.
    */
   showDetails: MediaDetails;
-  shows: Array<MediaItem>;
   stats: LibraryStats;
   tmdbCategory: TmdbPage;
   tmdbCollectionDetails: TmdbCollectionDetails;
@@ -1500,25 +1145,9 @@ export type QueryRoot = {
    * the usage-trend chart.
    */
   usenetTraffic: UsenetTraffic;
-  /** List child entry names (file or directory names) directly under a VFS path. */
-  vfsDirectoryEntryPaths: Array<Scalars['String']['output']>;
-  /** Get the filesystem entry (media file record) for a VFS file path. */
-  vfsEntry?: Maybe<FileSystemEntry>;
-  /** Get filesystem stat info for a VFS path (file or directory). */
-  vfsEntryStat: VfsEntryStat;
   viewer: Viewer;
   /** Count of movies and shows per release year. */
   yearReleases: Array<YearRelease>;
-};
-
-
-export type QueryRootAnilistMappingsArgs = {
-  id: Scalars['Int']['input'];
-};
-
-
-export type QueryRootAnilistRatingArgs = {
-  id: Scalars['Int']['input'];
 };
 
 
@@ -1532,28 +1161,6 @@ export type QueryRootCompanyDetailsArgs = {
 };
 
 
-export type QueryRootEpisodeByTvdbArgs = {
-  episodeNumber: Scalars['Int']['input'];
-  seasonNumber?: InputMaybe<Scalars['Int']['input']>;
-  tvdbId: Scalars['String']['input'];
-};
-
-
-export type QueryRootEpisodesArgs = {
-  seasonId: Scalars['Int']['input'];
-};
-
-
-export type QueryRootExpectedFileCountArgs = {
-  id: Scalars['Int']['input'];
-};
-
-
-export type QueryRootFilesystemEntriesArgs = {
-  mediaItemId: Scalars['Int']['input'];
-};
-
-
 export type QueryRootItemsArgs = {
   limit?: InputMaybe<Scalars['Int']['input']>;
   page?: InputMaybe<Scalars['Int']['input']>;
@@ -1564,45 +1171,9 @@ export type QueryRootItemsArgs = {
 };
 
 
-export type QueryRootItemsByStateArgs = {
-  itemType: MediaItemType;
-  state: MediaItemState;
-};
-
-
 export type QueryRootLogsArgs = {
   level?: InputMaybe<Scalars['String']['input']>;
   limit?: InputMaybe<Scalars['Int']['input']>;
-};
-
-
-export type QueryRootLookupKeysArgs = {
-  id: Scalars['Int']['input'];
-};
-
-
-export type QueryRootMediaItemByIdArgs = {
-  id: Scalars['Int']['input'];
-};
-
-
-export type QueryRootMediaItemByImdbArgs = {
-  imdbId: Scalars['String']['input'];
-};
-
-
-export type QueryRootMediaItemByTmdbArgs = {
-  tmdbId: Scalars['String']['input'];
-};
-
-
-export type QueryRootMediaItemByTvdbArgs = {
-  tvdbId: Scalars['String']['input'];
-};
-
-
-export type QueryRootMediaItemFullArgs = {
-  id: Scalars['Int']['input'];
 };
 
 
@@ -1662,21 +1233,10 @@ export type QueryRootResolveExternalIdArgs = {
 };
 
 
-export type QueryRootResolveTmdbToTvdbArgs = {
-  tmdbId: Scalars['String']['input'];
-};
-
-
 export type QueryRootSearchTmdbArgs = {
   params?: InputMaybe<Scalars['JSON']['input']>;
   searchMode?: InputMaybe<Scalars['String']['input']>;
   type: Scalars['String']['input'];
-};
-
-
-export type QueryRootSeasonsArgs = {
-  includeSpecials?: InputMaybe<Scalars['Boolean']['input']>;
-  showId: Scalars['Int']['input'];
 };
 
 
@@ -1721,21 +1281,6 @@ export type QueryRootTrendingTmdbArgs = {
   page?: InputMaybe<Scalars['Int']['input']>;
   timeWindow: Scalars['String']['input'];
   type: Scalars['String']['input'];
-};
-
-
-export type QueryRootVfsDirectoryEntryPathsArgs = {
-  path: Scalars['String']['input'];
-};
-
-
-export type QueryRootVfsEntryArgs = {
-  path: Scalars['String']['input'];
-};
-
-
-export type QueryRootVfsEntryStatArgs = {
-  path: Scalars['String']['input'];
 };
 
 export type RatingScore = {
@@ -1792,93 +1337,6 @@ export type RivenNotification = {
   tmdbId?: Maybe<Scalars['String']['output']>;
   tvdbId?: Maybe<Scalars['String']['output']>;
   year?: Maybe<Scalars['Int']['output']>;
-};
-
-/** Structured response returned by `saveStreamUrl`. */
-export type SaveStreamUrlMutationResponse = {
-  item?: Maybe<FileSystemEntry>;
-  message: Scalars['String']['output'];
-  statusText: MutationStatusText;
-  success: Scalars['Boolean']['output'];
-};
-
-export type ScrapeMediaItemMutationErrorCode =
-  | 'INCORRECT_STATE'
-  | 'NO_NEW_STREAMS'
-  | 'SCRAPE_ERROR';
-
-export type ScrapeMediaItemMutationInput = {
-  id: Scalars['Int']['input'];
-  results: Scalars['JSON']['input'];
-};
-
-export type ScrapeMediaItemMutationResponse = {
-  errorCode?: Maybe<ScrapeMediaItemMutationErrorCode>;
-  item?: Maybe<MediaItemUnion>;
-  message: Scalars['String']['output'];
-  newStreamsCount?: Maybe<Scalars['Int']['output']>;
-  statusText: MutationStatusText;
-  success: Scalars['Boolean']['output'];
-};
-
-export type Season = {
-  absoluteNumber?: Maybe<Scalars['Int']['output']>;
-  activeStreamId?: Maybe<Scalars['Int']['output']>;
-  airedAt?: Maybe<Scalars['NaiveDate']['output']>;
-  airedAtUtc?: Maybe<Scalars['DateTime']['output']>;
-  aliases?: Maybe<Scalars['JSON']['output']>;
-  contentRating?: Maybe<ContentRating>;
-  country?: Maybe<Scalars['String']['output']>;
-  createdAt: Scalars['DateTime']['output'];
-  episodeNumber?: Maybe<Scalars['Int']['output']>;
-  /** All episodes in this season. */
-  episodes: Array<Episode>;
-  /** Expected number of episode files to download (equals total episodes). */
-  expectedFileCount: Scalars['Int']['output'];
-  failedAttempts: Scalars['Int']['output'];
-  fullTitle?: Maybe<Scalars['String']['output']>;
-  genres?: Maybe<Scalars['JSON']['output']>;
-  id: Scalars['Int']['output'];
-  imdbId?: Maybe<Scalars['String']['output']>;
-  indexedAt?: Maybe<Scalars['DateTime']['output']>;
-  isAnime: Scalars['Boolean']['output'];
-  isRequested: Scalars['Boolean']['output'];
-  isSpecial?: Maybe<Scalars['Boolean']['output']>;
-  itemRequestId?: Maybe<Scalars['Int']['output']>;
-  itemType: MediaItemType;
-  language?: Maybe<Scalars['String']['output']>;
-  lastScrapeAttemptAt?: Maybe<Scalars['DateTime']['output']>;
-  network?: Maybe<Scalars['String']['output']>;
-  networkTimezone?: Maybe<Scalars['String']['output']>;
-  parentId?: Maybe<Scalars['Int']['output']>;
-  /**
-   * Absolute artwork URL. The column holds a bare path for anything indexed
-   * before the plugins normalised what they wrote, so it is resolved here
-   * rather than in each client.
-   */
-  posterPath?: Maybe<Scalars['String']['output']>;
-  rating?: Maybe<Scalars['Float']['output']>;
-  runtime?: Maybe<Scalars['Int']['output']>;
-  scrapedAt?: Maybe<Scalars['DateTime']['output']>;
-  scrapedTimes: Scalars['Int']['output'];
-  seasonNumber?: Maybe<Scalars['Int']['output']>;
-  /** The parent show for this season. */
-  show: Show;
-  showStatus?: Maybe<ShowStatus>;
-  state: MediaItemState;
-  streams: Array<Stream>;
-  title: Scalars['String']['output'];
-  tmdbId?: Maybe<Scalars['String']['output']>;
-  /** Total number of episodes in this season. */
-  totalEpisodes: Scalars['Int']['output'];
-  tvdbId?: Maybe<Scalars['String']['output']>;
-  updatedAt?: Maybe<Scalars['DateTime']['output']>;
-  year?: Maybe<Scalars['Int']['output']>;
-};
-
-
-export type SeasonStreamsArgs = {
-  infoHashes?: InputMaybe<Array<Scalars['String']['input']>>;
 };
 
 /** Season with its episodes and their file info. */
@@ -1980,70 +1438,6 @@ export type SetupGroup = {
   title: Scalars['String']['output'];
 };
 
-export type Show = {
-  absoluteNumber?: Maybe<Scalars['Int']['output']>;
-  activeStreamId?: Maybe<Scalars['Int']['output']>;
-  airedAt?: Maybe<Scalars['NaiveDate']['output']>;
-  airedAtUtc?: Maybe<Scalars['DateTime']['output']>;
-  aliases?: Maybe<Scalars['JSON']['output']>;
-  contentRating?: Maybe<ContentRating>;
-  country?: Maybe<Scalars['String']['output']>;
-  createdAt: Scalars['DateTime']['output'];
-  episodeNumber?: Maybe<Scalars['Int']['output']>;
-  /**
-   * Total expected downloadable episode files.
-   * For continuing shows the currently-airing season is excluded.
-   */
-  expectedFileCount: Scalars['Int']['output'];
-  failedAttempts: Scalars['Int']['output'];
-  fullTitle?: Maybe<Scalars['String']['output']>;
-  genres?: Maybe<Scalars['JSON']['output']>;
-  id: Scalars['Int']['output'];
-  imdbId?: Maybe<Scalars['String']['output']>;
-  indexedAt?: Maybe<Scalars['DateTime']['output']>;
-  isAnime: Scalars['Boolean']['output'];
-  isRequested: Scalars['Boolean']['output'];
-  isSpecial?: Maybe<Scalars['Boolean']['output']>;
-  itemRequestId?: Maybe<Scalars['Int']['output']>;
-  itemType: MediaItemType;
-  language?: Maybe<Scalars['String']['output']>;
-  lastScrapeAttemptAt?: Maybe<Scalars['DateTime']['output']>;
-  network?: Maybe<Scalars['String']['output']>;
-  networkTimezone?: Maybe<Scalars['String']['output']>;
-  parentId?: Maybe<Scalars['Int']['output']>;
-  /**
-   * Absolute artwork URL. The column holds a bare path for anything indexed
-   * before the plugins normalised what they wrote, so it is resolved here
-   * rather than in each client.
-   */
-  posterPath?: Maybe<Scalars['String']['output']>;
-  rating?: Maybe<Scalars['Float']['output']>;
-  runtime?: Maybe<Scalars['Int']['output']>;
-  scrapedAt?: Maybe<Scalars['DateTime']['output']>;
-  scrapedTimes: Scalars['Int']['output'];
-  seasonNumber?: Maybe<Scalars['Int']['output']>;
-  /** Seasons for this show. Excludes season 0 (specials) by default. */
-  seasons: Array<Season>;
-  showStatus?: Maybe<ShowStatus>;
-  state: MediaItemState;
-  streams: Array<Stream>;
-  title: Scalars['String']['output'];
-  tmdbId?: Maybe<Scalars['String']['output']>;
-  tvdbId?: Maybe<Scalars['String']['output']>;
-  updatedAt?: Maybe<Scalars['DateTime']['output']>;
-  year?: Maybe<Scalars['Int']['output']>;
-};
-
-
-export type ShowSeasonsArgs = {
-  includeSpecials?: Scalars['Boolean']['input'];
-};
-
-
-export type ShowStreamsArgs = {
-  infoHashes?: InputMaybe<Array<Scalars['String']['input']>>;
-};
-
 /** Input for requesting a show (and optionally specific seasons) to be tracked. */
 export type ShowRequestInput = {
   /** External request ID for correlation with the originating content service. */
@@ -2068,17 +1462,6 @@ export type SpokenLanguage = {
   name?: Maybe<Scalars['String']['output']>;
 };
 
-export type Stream = {
-  createdAt: Scalars['DateTime']['output'];
-  fileSizeBytes?: Maybe<Scalars['Int']['output']>;
-  id: Scalars['Int']['output'];
-  infoHash: Scalars['String']['output'];
-  magnet: Scalars['String']['output'];
-  parsedData?: Maybe<Scalars['JSON']['output']>;
-  rank?: Maybe<Scalars['Int']['output']>;
-  updatedAt?: Maybe<Scalars['DateTime']['output']>;
-};
-
 export type SubscriptionRoot = {
   /** Fires when a media item transitions to the completed state. */
   itemDownloaded: Scalars['Int']['output'];
@@ -2100,7 +1483,7 @@ export type SubscriptionRoot = {
   /** Stream of all UI-notable Riven events. Replaces the `/notifications/stream` SSE endpoint. */
   notifications: RivenNotification;
   /** Fires when a show has been indexed (metadata and episode structure persisted). */
-  showIndexed: Show;
+  showIndexed: MediaItem;
   /** Fires when an existing show item request is updated (e.g. new seasons added). */
   showRequestUpdated: ItemRequest;
   /** Fires when a new show item request is created. */
@@ -2285,21 +1668,6 @@ export type UserRole =
   | 'ADMIN'
   | 'MANAGER'
   | 'USER';
-
-/** Filesystem stat metadata for a VFS path. */
-export type VfsEntryStat = {
-  atime: Scalars['DateTime']['output'];
-  ctime: Scalars['DateTime']['output'];
-  gid: Scalars['Int']['output'];
-  /** Unix file mode (e.g. 0o040755 for directory, 0o100644 for regular file). */
-  mode: Scalars['Int']['output'];
-  mtime: Scalars['DateTime']['output'];
-  /** Number of hard links. */
-  nlink: Scalars['Int']['output'];
-  /** File size in bytes (0 for directories). */
-  size: Scalars['Int']['output'];
-  uid: Scalars['Int']['output'];
-};
 
 export type VideoMetadata = {
   bitDepth?: Maybe<Scalars['Int']['output']>;

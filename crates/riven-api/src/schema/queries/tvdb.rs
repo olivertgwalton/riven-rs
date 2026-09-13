@@ -3,8 +3,7 @@ use riven_core::http::HttpClient;
 use riven_core::plugin::PluginRegistry;
 
 use crate::profiles::{TMDB, TVDB};
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::schema::metadata::details::{MediaDetails, PersonDetails, Source, TvdbPerson};
@@ -14,7 +13,7 @@ use crate::schema::queries::trakt;
 const TVDB_API_BASE: &str = "https://api4.thetvdb.com/v4";
 const TVDB_TOKEN_EXPIRY: Duration = Duration::from_secs(25 * 24 * 60 * 60);
 
-static TVDB_TOKEN_CACHE: OnceLock<Mutex<Option<(String, Instant)>>> = OnceLock::new();
+static TVDB_TOKEN_CACHE: Mutex<Option<(String, Instant)>> = Mutex::new(None);
 
 #[derive(Default)]
 pub struct CoreTvdbQuery;
@@ -31,7 +30,6 @@ impl CoreTvdbQuery {
         tmdb_id: Option<String>,
     ) -> Result<MediaDetails> {
         let token = get_tvdb_token(ctx).await?;
-        let page = HashMap::from([("page".to_string(), "0".to_string())]);
 
         // Ask TVDB for the English record rather than for every translation and
         // picking one here — `/translations/eng` and `/episodes/official/eng`
@@ -42,7 +40,7 @@ impl CoreTvdbQuery {
         let (series, translation, episodes) = futures::join!(
             tvdb_get_value(ctx, &token, &extended, None),
             tvdb_get_value(ctx, &token, &translations, None),
-            tvdb_get_value(ctx, &token, &english_episodes, Some(&page)),
+            tvdb_get_value(ctx, &token, &english_episodes, Some(&[("page", "0")])),
         );
 
         let mut data = series?
@@ -80,14 +78,6 @@ impl CoreTvdbQuery {
             .await
             .unwrap_or_default();
         Ok(details)
-    }
-
-    async fn resolve_tmdb_to_tvdb(
-        &self,
-        ctx: &Context<'_>,
-        tmdb_id: String,
-    ) -> Result<Option<i64>> {
-        resolve_tmdb_to_tvdb_id(ctx, &tmdb_id).await
     }
 }
 
@@ -148,15 +138,22 @@ pub async fn resolve_tvdb_to_tmdb_id(
     media_type: &str,
 ) -> Result<Option<String>> {
     let token = get_tvdb_token(ctx).await?;
-    let kind = if media_type == "movie" { "movies" } else { "series" };
-    let extended = tvdb_get_value(ctx, &token, &format!("/{kind}/{tvdb_id}/extended"), None).await?;
+    let kind = if media_type == "movie" {
+        "movies"
+    } else {
+        "series"
+    };
+    let extended =
+        tvdb_get_value(ctx, &token, &format!("/{kind}/{tvdb_id}/extended"), None).await?;
 
     Ok(extended
         .pointer("/data/remoteIds")
         .and_then(serde_json::Value::as_array)
         .and_then(|remotes| {
             remotes.iter().find_map(|remote| {
-                let source = remote.get("sourceName").and_then(serde_json::Value::as_str)?;
+                let source = remote
+                    .get("sourceName")
+                    .and_then(serde_json::Value::as_str)?;
                 if source.eq_ignore_ascii_case("themoviedb.com") {
                     remote
                         .get("id")
@@ -198,8 +195,10 @@ async fn fetch_tmdb_external_ids(ctx: &Context<'_>, tmdb_id: &str) -> Result<Tmd
 }
 
 async fn get_tvdb_token(ctx: &Context<'_>) -> Result<String> {
-    let cache = TVDB_TOKEN_CACHE.get_or_init(|| Mutex::new(None));
-    if let Some((token, created_at)) = cache.lock().expect("tvdb token cache poisoned").clone()
+    if let Some((token, created_at)) = TVDB_TOKEN_CACHE
+        .lock()
+        .expect("tvdb token cache poisoned")
+        .clone()
         && created_at.elapsed() < TVDB_TOKEN_EXPIRY
     {
         return Ok(token);
@@ -225,19 +224,19 @@ async fn get_tvdb_token(ctx: &Context<'_>) -> Result<String> {
         .map(str::to_owned)
         .ok_or_else(|| Error::new("TVDB login response missing token"))?;
 
-    *cache.lock().expect("tvdb token cache poisoned") = Some((token.clone(), Instant::now()));
+    *TVDB_TOKEN_CACHE.lock().expect("tvdb token cache poisoned") =
+        Some((token.clone(), Instant::now()));
     Ok(token)
 }
 
 /// A TVDB person, for the shared `personDetails` resolver in `tmdb.rs`.
 pub(super) async fn person_details(ctx: &Context<'_>, id: i64) -> Result<PersonDetails> {
     let token = get_tvdb_token(ctx).await?;
-    let short = HashMap::from([("short".to_string(), "false".to_string())]);
 
     let extended = format!("/people/{id}/extended");
     let translations = format!("/people/{id}/translations/eng");
     let (person, translation) = futures::join!(
-        tvdb_get_value(ctx, &token, &extended, Some(&short)),
+        tvdb_get_value(ctx, &token, &extended, Some(&[("short", "false")])),
         tvdb_get_value(ctx, &token, &translations, None),
     );
 
@@ -262,7 +261,7 @@ async fn tvdb_get_value(
     ctx: &Context<'_>,
     token: &str,
     path: &str,
-    query: Option<&HashMap<String, String>>,
+    query: Option<&[(&str, &str)]>,
 ) -> Result<serde_json::Value> {
     let http = ctx.data::<HttpClient>()?;
     let dedupe_key = format!("tvdb:{path}:{query:?}");

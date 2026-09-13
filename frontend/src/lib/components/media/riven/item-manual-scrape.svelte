@@ -1,5 +1,6 @@
 <script lang="ts">
     import { can } from "$lib/permissions";
+    import { formatBytes } from "$lib/helpers";
     import { invalidateAll } from "$app/navigation";
     import { gqlClient } from "$lib/graphql-client";
     import { toast } from "svelte-sonner";
@@ -140,13 +141,6 @@
         })()
     );
     const hadExistingItem = $derived(Boolean(itemId));
-
-    function formatBytes(value?: number | null) {
-        if (!value) return "Unknown size";
-        return value >= 1024 ** 3
-            ? `${(value / 1024 ** 3).toFixed(2)} GB`
-            : `${(value / 1024 ** 2).toFixed(0)} MB`;
-    }
 
     function shortHash(value: string) {
         return value.length > 14 ? `${value.slice(0, 8)}...${value.slice(-6)}` : value;
@@ -553,7 +547,7 @@
                                                     class="flex flex-wrap gap-2 text-xs text-zinc-400 md:justify-end">
                                                     <span class="inline-flex items-center gap-1">
                                                         <HardDrive class="h-3.5 w-3.5" />
-                                                        {formatBytes(stream.fileSizeBytes)}
+                                                        {stream.fileSizeBytes ? formatBytes(stream.fileSizeBytes) : "Unknown size"}
                                                     </span>
                                                     {#if stream.parsedData?.audio?.length}
                                                         <span

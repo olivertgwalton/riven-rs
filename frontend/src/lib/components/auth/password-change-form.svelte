@@ -1,142 +1,114 @@
 <script lang="ts">
-    import * as Form from "$lib/components/ui/form/index.js";
     import * as ButtonGroup from "$lib/components/ui/button-group/index.js";
     import { Button } from "$lib/components/ui/button/index.js";
-    import type { SuperValidated } from "sveltekit-superforms";
-    import { passwordChangeSchema, type PasswordChangeSchema } from "$lib/schemas/auth";
-    import { setError, superForm } from "sveltekit-superforms";
-    import { zod4Client } from "sveltekit-superforms/adapters";
+    import { passwordChangeSchema } from "$lib/schemas/auth";
     import { Input } from "$lib/components/ui/input/index.js";
+    import { Label } from "$lib/components/ui/label/index.js";
     import Eye from "@lucide/svelte/icons/eye";
     import EyeOff from "@lucide/svelte/icons/eye-off";
     import { Switch } from "$lib/components/ui/switch/index.js";
     import { toast } from "svelte-sonner";
-    import type { FsSuperForm } from "formsnap";
     import LoaderCircle from "@lucide/svelte/icons/loader-circle";
     import { authClient } from "$lib/auth-client";
     import FormBase from "./form-base.svelte";
+    import { validateForm } from "./validate";
 
-    let {
-        data
-    }: {
-        data: SuperValidated<PasswordChangeSchema>;
-    } = $props();
+    type PasswordFieldName = "oldPassword" | "newPassword" | "confirmNewPassword";
 
-    // SPA mode: there is no server action behind this bundle, so `onUpdate` is
-    // where the request happens once the client-side validators have passed.
-    // svelte-ignore state_referenced_locally
-    const form = superForm(data, {
-        SPA: true,
-        validators: zod4Client(passwordChangeSchema),
-        resetForm: true,
-        onUpdate: async ({ form }) => {
-            if (!form.valid) return;
-
-            if (form.data.oldPassword === form.data.newPassword) {
-                setError(form, "newPassword", "New password must be different from old password.");
-                return;
-            }
-
-            const { error } = await authClient.changePassword({
-                current_password: form.data.oldPassword,
-                new_password: form.data.newPassword,
-                revoke_other_sessions: form.data.revokeSessions
-            });
-
-            if (error) {
-                form.valid = false;
-                toast.error(error.message);
-                return;
-            }
-
-            toast.success("Password changed successfully.");
-        }
-    });
-
-    const { form: formData, enhance, delayed } = form;
-
+    let errors = $state<Record<string, string>>({});
+    let submitting = $state(false);
     const passwordVisibility = $state({
         oldPassword: false,
         newPassword: false,
         confirmNewPassword: false
     });
 
-    type PasswordFieldName = "oldPassword" | "newPassword" | "confirmNewPassword";
+    async function onsubmit(event: SubmitEvent & { currentTarget: HTMLFormElement }) {
+        event.preventDefault();
+        const form = event.currentTarget;
+        const result = validateForm(passwordChangeSchema, form);
+        errors = result.errors ?? {};
+        if (!result.data) return;
 
-    function togglePasswordVisibility(field: keyof typeof passwordVisibility) {
-        passwordVisibility[field] = !passwordVisibility[field];
+        if (result.data.oldPassword === result.data.newPassword) {
+            errors = { newPassword: "New password must be different from old password." };
+            return;
+        }
+
+        submitting = true;
+        const { error } = await authClient.changePassword({
+            current_password: result.data.oldPassword,
+            new_password: result.data.newPassword,
+            revoke_other_sessions: result.data.revokeSessions
+        });
+        submitting = false;
+
+        if (error) {
+            toast.error(error.message);
+            return;
+        }
+
+        form.reset();
+        toast.success("Password changed successfully.");
     }
 </script>
 
-{#snippet passwordFormField(
-    form: FsSuperForm<PasswordChangeSchema>,
-    name: PasswordFieldName,
-    title: string
-)}
-    <Form.Field {form} {name}>
-        <Form.Control>
-            {#snippet children({ props })}
-                <Form.Label>{title}</Form.Label>
-                <ButtonGroup.Root class="w-full">
-                    <Input
-                        type={passwordVisibility[name] ? "text" : "password"}
-                        autocomplete={name === "oldPassword" ? "current-password" : "new-password"}
-                        {...props}
-                        bind:value={$formData[name]} />
-                    <Button
-                        type="button"
-                        onclick={() => togglePasswordVisibility(name)}
-                        variant="outline"
-                        size="icon"
-                        aria-label="toggle password visibility">
-                        {#if passwordVisibility[name]}
-                            <EyeOff />
-                        {:else}
-                            <Eye />
-                        {/if}
-                    </Button>
-                </ButtonGroup.Root>
-            {/snippet}
-        </Form.Control>
-        <Form.FieldErrors />
-    </Form.Field>
+{#snippet passwordFormField(name: PasswordFieldName, title: string)}
+    <div class="space-y-2">
+        <Label for={name} class={errors[name] && "text-destructive"}>{title}</Label>
+        <ButtonGroup.Root class="w-full">
+            <Input
+                id={name}
+                {name}
+                type={passwordVisibility[name] ? "text" : "password"}
+                autocomplete={name === "oldPassword" ? "current-password" : "new-password"}
+                aria-invalid={!!errors[name]} />
+            <Button
+                type="button"
+                onclick={() => (passwordVisibility[name] = !passwordVisibility[name])}
+                variant="outline"
+                size="icon"
+                aria-label="toggle password visibility">
+                {#if passwordVisibility[name]}
+                    <EyeOff />
+                {:else}
+                    <Eye />
+                {/if}
+            </Button>
+        </ButtonGroup.Root>
+        {#if errors[name]}
+            <p class="text-destructive text-sm font-medium">{errors[name]}</p>
+        {/if}
+    </div>
 {/snippet}
 
 <FormBase
     title="Change Password"
     description="Update your account password to keep your account secure.">
     {#snippet content()}
-        <form method="POST" use:enhance>
-            {@render passwordFormField(form, "oldPassword", "Current Password")}
-            {@render passwordFormField(form, "newPassword", "New Password")}
-            {@render passwordFormField(form, "confirmNewPassword", "Confirm New Password")}
+        <form id="password-change-form" novalidate {onsubmit}>
+            {@render passwordFormField("oldPassword", "Current Password")}
+            {@render passwordFormField("newPassword", "New Password")}
+            {@render passwordFormField("confirmNewPassword", "Confirm New Password")}
 
-            <Form.Field {form} name="revokeSessions" class="mt-4">
-                <Form.Control>
-                    {#snippet children({ props })}
-                        <div class="flex items-center gap-2">
-                            <Switch {...props} bind:checked={$formData.revokeSessions} />
-                            <Form.Label for="revokeSessions">Revoke all other sessions</Form.Label>
-                        </div>
-                    {/snippet}
-                </Form.Control>
-                <Form.FieldErrors />
-            </Form.Field>
+            <div class="mt-4 flex items-center gap-2">
+                <Switch id="revokeSessions" name="revokeSessions" />
+                <Label for="revokeSessions">Revoke all other sessions</Label>
+            </div>
         </form>
     {/snippet}
 
     {#snippet footer()}
-        <Form.Button
+        <Button
+            type="submit"
+            form="password-change-form"
             variant="secondary"
             size="sm"
-            disabled={$delayed}
-            onclick={() => {
-                form.submit();
-            }}>
-            {#if $delayed}
+            disabled={submitting}>
+            {#if submitting}
                 <LoaderCircle class="mr-2 h-5 w-5 animate-spin" />
             {/if}
             Change Password
-        </Form.Button>
+        </Button>
     {/snippet}
 </FormBase>

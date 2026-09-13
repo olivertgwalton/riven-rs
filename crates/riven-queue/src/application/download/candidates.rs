@@ -1,13 +1,9 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use riven_db::entities::{MediaItem, Stream};
 use riven_rank::{ParsedData, RankSettings};
 
 use super::helpers::stream_resolution;
-
-fn year_candidates(year: i32) -> [i32; 3] {
-    [year - 1, year, year + 1]
-}
 
 /// The item-side facts needed to re-validate a persisted stream's title
 /// against the item it is linked to.
@@ -53,17 +49,9 @@ impl TitleMatchContext {
     /// item's year (and its parent show's year), mirroring the scrape-time
     /// check in `discovery::validate`. A release with no parsed year passes.
     fn year_mismatch(&self, parsed: &ParsedData) -> bool {
-        let Some(py) = parsed.year else {
-            return false;
-        };
-        let mut candidates: HashSet<i32> = HashSet::new();
-        if let Some(y) = self.item_year {
-            candidates.extend(year_candidates(y));
-        }
-        if let Some(y) = self.parent_year {
-            candidates.extend(year_candidates(y));
-        }
-        !candidates.is_empty() && !candidates.contains(&py)
+        parsed
+            .year
+            .is_some_and(|py| crate::discovery::year_mismatch(py, self.item_year, self.parent_year))
     }
 }
 
@@ -76,8 +64,6 @@ pub fn rank_streams_for_profile<'a>(
     profile: &RankSettings,
     title_ctx: &TitleMatchContext,
 ) -> Vec<&'a Stream> {
-    let model = riven_rank::RankingModel::default();
-
     let mut scored: Vec<(&'a Stream, i64, i64)> = streams
         .iter()
         .filter_map(|stream| {
@@ -162,8 +148,7 @@ pub fn rank_streams_for_profile<'a>(
                 return None;
             }
 
-            let score =
-                riven_rank::rank::scores::get_rank_total(&parsed, profile, &model);
+            let score = riven_rank::rank::scores::get_rank_total(&parsed, profile);
             Some((stream, score, pack_preference(item, &parsed)))
         })
         .collect();

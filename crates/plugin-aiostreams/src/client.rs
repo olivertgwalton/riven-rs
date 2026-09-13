@@ -1,24 +1,11 @@
 use reqwest::StatusCode;
 use riven_core::events::ScrapeRequest;
 use riven_core::http::{HttpClient, RateLimitedError};
+use riven_core::stremio::is_deferred_status;
 use riven_core::types::{MediaItemType, ScrapeEntry, ScrapeResponse};
 
 use crate::PROFILE;
 use crate::models::AioStreamsResponse;
-
-/// A status worth deferring the job over rather than treating as a hard
-/// scrape failure: either an explicit 429, or one of the gateway/overload
-/// statuses an aggregator like AIOStreams (or a debrid store behind it)
-/// bounces back under load.
-fn is_deferred_status(status: StatusCode) -> bool {
-    matches!(
-        status,
-        StatusCode::TOO_MANY_REQUESTS
-            | StatusCode::BAD_GATEWAY
-            | StatusCode::SERVICE_UNAVAILABLE
-            | StatusCode::GATEWAY_TIMEOUT
-    )
-}
 
 pub async fn validate_search(
     http: &HttpClient,

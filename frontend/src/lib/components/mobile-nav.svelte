@@ -5,16 +5,14 @@
     import { Button } from "$lib/components/ui/button/index.js";
     import NotificationCenter from "$lib/components/notification-center.svelte";
     import SearchModal from "$lib/components/search-modal.svelte";
-    import { getContext } from "svelte";
     import { goto } from "$app/navigation";
     import { resolve } from "$app/paths";
     import Search from "@lucide/svelte/icons/search";
     import { page } from "$app/state";
-    import type { createSidebarStore } from "$lib/stores/global.svelte";
+    import { sidebar } from "$lib/stores/global.svelte";
     import { fly } from "svelte/transition";
     import { cubicOut } from "svelte/easing";
 
-    const SidebarStore = getContext<createSidebarStore>("sidebarStore");
 
     const MAIN_PAGES = [
         "/",
@@ -81,20 +79,20 @@
                 variant="ghost"
                 size="icon"
                 class="flex h-9 w-9 items-center justify-center rounded-full text-white/50 transition-all hover:bg-white/10 hover:text-white"
-                onclick={() => SidebarStore.toggle()}>
+                onclick={() => (sidebar.open = !sidebar.open)}>
                 <div class="relative flex size-5 items-center justify-center">
                     <div
                         class="absolute inset-0 flex items-center justify-center transition-all duration-300 ease-in-out"
-                        class:opacity-0={SidebarStore.isOpen}
-                        class:rotate-90={SidebarStore.isOpen}
-                        class:scale-0={SidebarStore.isOpen}>
+                        class:opacity-0={sidebar.open}
+                        class:rotate-90={sidebar.open}
+                        class:scale-0={sidebar.open}>
                         <Menu class="size-5" />
                     </div>
                     <div
                         class="absolute inset-0 flex items-center justify-center transition-all duration-300 ease-in-out"
-                        class:opacity-0={!SidebarStore.isOpen}
-                        class:-rotate-90={!SidebarStore.isOpen}
-                        class:scale-0={!SidebarStore.isOpen}>
+                        class:opacity-0={!sidebar.open}
+                        class:-rotate-90={!sidebar.open}
+                        class:scale-0={!sidebar.open}>
                         <X class="size-5" />
                     </div>
                 </div>

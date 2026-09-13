@@ -1,6 +1,6 @@
 import { gqlSubscribeClient } from "$lib/graphql-client";
 import { createScopedLogger } from "$lib/logger";
-import { SvelteMap, SvelteSet } from "svelte/reactivity";
+import { SvelteSet } from "svelte/reactivity";
 
 const logger = createScopedLogger("notifications");
 
@@ -180,16 +180,6 @@ function rivenNotificationToNotification(
 	}
 }
 
-const scheduleFlush =
-	typeof requestAnimationFrame !== "undefined"
-		? (cb: () => void) => requestAnimationFrame(cb)
-		: (cb: () => void) => setTimeout(cb, 16) as unknown as number;
-
-const cancelFlush =
-	typeof cancelAnimationFrame !== "undefined"
-		? (h: number) => cancelAnimationFrame(h)
-		: (h: number) => clearTimeout(h);
-
 class NotificationStore {
 	#notifications = $state<Notification[]>([]);
 	#unreadCount = $state(0);
@@ -205,9 +195,9 @@ class NotificationStore {
 	#pending: Array<Omit<Notification, "id" | "read" | "count">> = [];
 	#flushHandle: number | null = null;
 	// dedupeKey → notification id (fast merge lookup)
-	#dedupeIndex = new SvelteMap<string, string>();
+	#dedupeIndex = new Map<string, string>();
 	// notification id → dedupeKey (fast cleanup on remove)
-	#idToDedupeKey = new SvelteMap<string, string>();
+	#idToDedupeKey = new Map<string, string>();
 
 	onBatchAdded: ((batch: readonly Notification[]) => void) | null = null;
 
@@ -226,7 +216,7 @@ class NotificationStore {
 	add(notification: Omit<Notification, "id" | "read" | "count">) {
 		this.#pending.push(notification);
 		if (this.#flushHandle === null) {
-			this.#flushHandle = scheduleFlush(() => {
+			this.#flushHandle = requestAnimationFrame(() => {
 				this.#flushHandle = null;
 				this.#flush();
 			});
@@ -278,13 +268,8 @@ class NotificationStore {
 		}
 
 		if (newItems.length > 0) {
-			const current = this.#notifications;
-			const next = new Array<Notification>(newItems.length + current.length);
-			let idx = 0;
-			// Iterate batch in reverse so the last-arrived item lands at index 0.
-			for (let i = newItems.length - 1; i >= 0; i--) next[idx++] = newItems[i];
-			for (let i = 0; i < current.length; i++) next[idx++] = current[i];
-			this.#notifications = next;
+			// Last-arrived item lands at index 0.
+			this.#notifications = [...newItems.reverse(), ...this.#notifications];
 			this.#unreadCount += newItems.length;
 		}
 
@@ -335,7 +320,7 @@ class NotificationStore {
 			this.#unsubscribe = null;
 		}
 		if (this.#flushHandle !== null) {
-			cancelFlush(this.#flushHandle);
+			cancelAnimationFrame(this.#flushHandle);
 			this.#flushHandle = null;
 			if (this.#pending.length > 0) this.#flush();
 		}

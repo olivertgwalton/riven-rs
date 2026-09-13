@@ -275,7 +275,6 @@
   {"raw_title":"Movie.Title.E-AC3-S78.1080p.WEB-DL","anime":true,"audio":["Dolby Digital Plus"],"normalized_title":"movie title","parsed_title":"Movie Title","quality":"WEB-DL","resolution":"1080p"},
   {"raw_title":"Movie.Title.EAC3.WEB-DL","audio":["Dolby Digital Plus"],"normalized_title":"movie title","parsed_title":"Movie Title","quality":"WEB-DL"},
   {"raw_title":"Movie.Title.English.1080p.BluRay","languages":["en"],"normalized_title":"movie title english","parsed_title":"Movie Title English","quality":"BluRay","resolution":"1080p"},
-  {"raw_title":"Movie.Title.English.JPN.1080p.BluRay.MULTI","translate_languages":true,"dubbed":true,"languages":["English","Japanese"],"normalized_title":"movie title english jpn","parsed_title":"Movie Title English JPN","quality":"BluRay","resolution":"1080p"},
   {"raw_title":"Movie.Title.EXTENDED.1080p.BluRay","edition":"Extended Edition","extended":true,"normalized_title":"movie title","parsed_title":"Movie Title","quality":"BluRay","resolution":"1080p"},
   {"raw_title":"Movie.Title.EXTENDED.2022.2160p.BluRay-GROUP","edition":"Extended Edition","extended":true,"group":"GROUP","normalized_title":"movie title","parsed_title":"Movie Title","quality":"BluRay","resolution":"2160p","year":2022},
   {"raw_title":"Movie.Title.FLAC.BluRay","audio":["FLAC"],"normalized_title":"movie title flac","parsed_title":"Movie Title FLAC","quality":"BluRay"},

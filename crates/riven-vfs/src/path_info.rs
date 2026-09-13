@@ -2,7 +2,6 @@ use riven_core::vfs_layout::{VfsLibraryLayout, split_path};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CanonicalPath {
-    Root,
     AllMovies,
     MovieDir { actual_dir: String },
     MovieFile { actual_path: String },
@@ -10,7 +9,6 @@ pub enum CanonicalPath {
     ShowDir { actual_dir: String },
     SeasonDir { actual_dir: String },
     EpisodeFile { actual_path: String },
-    Invalid,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -36,25 +34,18 @@ pub fn parse_path(layout: &VfsLibraryLayout, path: &str) -> PathTarget {
         }
 
         let remainder = &segments[profile.segments.len()..];
-        return PathTarget::Canonical {
-            profile_key: Some(profile.key.clone()),
-            path: parse_canonical_segments(remainder),
-        };
+        return canonical(Some(profile.key.clone()), remainder);
     }
 
     if layout.is_profile_prefix(path) {
         return PathTarget::ProfilePrefixDir;
     }
 
-    PathTarget::Canonical {
-        profile_key: None,
-        path: parse_canonical_segments(&segments),
-    }
+    canonical(None, &segments)
 }
 
-fn parse_canonical_segments(segments: &[&str]) -> CanonicalPath {
-    match segments {
-        [] => CanonicalPath::Root,
+fn canonical(profile_key: Option<String>, segments: &[&str]) -> PathTarget {
+    let path = match segments {
         [first] if *first == "movies" => CanonicalPath::AllMovies,
         [first, dir] if *first == "movies" => CanonicalPath::MovieDir {
             actual_dir: format!("/movies/{dir}"),
@@ -72,8 +63,9 @@ fn parse_canonical_segments(segments: &[&str]) -> CanonicalPath {
         [first, dir, season, file] if *first == "shows" => CanonicalPath::EpisodeFile {
             actual_path: format!("/shows/{dir}/{season}/{file}"),
         },
-        _ => CanonicalPath::Invalid,
-    }
+        _ => return PathTarget::Invalid,
+    };
+    PathTarget::Canonical { profile_key, path }
 }
 
 #[cfg(test)]

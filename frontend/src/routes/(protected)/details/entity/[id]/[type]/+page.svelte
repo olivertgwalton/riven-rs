@@ -268,7 +268,6 @@
                 <TmdbNowPlaying
                     data={carouselItems}
                     alignment="right"
-                    showRequestButton={false}
                     heightClass="h-[350px] sm:h-[400px] md:h-[500px]" />
             </div>
         {/if}
@@ -335,7 +334,7 @@
                                     easing: cubicOut
                                 }}>
                                 <h1
-                                    class="font-heading text-foreground text-4xl font-black tracking-tight drop-shadow-md sm:text-5xl lg:text-7xl">
+                                    class="text-foreground text-4xl font-black tracking-tight drop-shadow-md sm:text-5xl lg:text-7xl">
                                     {data.entity.name}
                                 </h1>
 
@@ -364,7 +363,7 @@
                                     delay: 150,
                                     easing: cubicOut
                                 }}>
-                                <h3 class="font-heading text-foreground text-xl font-bold">
+                                <h3 class="text-foreground text-xl font-bold">
                                     Biography
                                 </h3>
                                 <div class="relative">
@@ -450,7 +449,7 @@
     {#if credits.length > 0}
         <section in:fly|global={{ y: 20, duration: 400, delay, easing: cubicOut }}>
             <div class="mb-6 flex items-baseline gap-3">
-                <h2 class="font-heading text-foreground text-3xl font-bold tracking-tight">
+                <h2 class="text-foreground text-3xl font-bold tracking-tight">
                     {title}
                 </h2>
                 <span class="font-mono text-lg font-medium text-zinc-400">({credits.length})</span>

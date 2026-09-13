@@ -203,7 +203,7 @@ pub(super) fn build_rank_settings_schema() -> Vec<SettingField> {
             ]),
     );
 
-    let defaults = riven_rank::RankingModel::default().to_category_map();
+    let defaults = riven_rank::defaults::default_category_map();
     if let Some(categories) = defaults.as_object() {
         let category_fields: Vec<SettingField> = categories
             .iter()
@@ -253,7 +253,7 @@ pub(super) fn strip_zero_ranks(json: &mut serde_json::Value) {
 /// Inject `"default": N` into every `CustomRank` entry so the UI always has
 /// the built-in score available without a separate query.
 pub(super) fn inject_rank_defaults(json: &mut serde_json::Value) {
-    let defaults = riven_rank::defaults::RankingModel::default().to_category_map();
+    let defaults = riven_rank::defaults::default_category_map();
     let (Some(custom_ranks), Some(def_obj)) = (
         json.get_mut("custom_ranks").and_then(|v| v.as_object_mut()),
         defaults.as_object(),

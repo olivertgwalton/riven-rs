@@ -13,7 +13,6 @@ use std::time::Duration;
 use crate::models::{
     StremthruCacheCheck, StremthruErrorResponse, StremthruFile, StremthruLink, StremthruNewz,
     StremthruNewzAdd, StremthruResponse, StremthruTorz, StremthruTorznabResponse, StremthruUser,
-    parse_torrent_status,
 };
 use crate::{PROFILE, debrid_service};
 
@@ -25,8 +24,7 @@ mod torznab;
 pub use account::fetch_user_info;
 use downloads::parse_quota_interval;
 pub use downloads::{
-    AddTorrentOutcome, add_newz, add_torrent, check_cache, download_result_from_newz,
-    download_result_from_torz,
+    AddTorrentOutcome, add_newz, add_torrent, check_cache, download_result_from_files,
 };
 #[cfg(test)]
 use downloads::{cache_check_key, classify_add_torrent_rejection};
@@ -37,18 +35,17 @@ pub use torznab::scrape_torznab;
 
 /// Attach StremThru's per-store routing headers (`x-stremthru-store-name` and
 /// the `Bearer` authorization) to a request builder.
-trait StoreHeaders {
-    fn store_headers(self, store: &str, api_key: &str) -> Self;
+fn store_headers(
+    request: reqwest::RequestBuilder,
+    store: &str,
+    api_key: &str,
+) -> reqwest::RequestBuilder {
+    request.header("x-stremthru-store-name", store).header(
+        "x-stremthru-store-authorization",
+        format!("Bearer {api_key}"),
+    )
 }
 
-impl StoreHeaders for reqwest::RequestBuilder {
-    fn store_headers(self, store: &str, api_key: &str) -> Self {
-        self.header("x-stremthru-store-name", store).header(
-            "x-stremthru-store-authorization",
-            format!("Bearer {api_key}"),
-        )
-    }
-}
 /// Default per-store cooldown when a 429 carries no parseable quota message.
 /// Longer than the HTTP layer's 10 s service pause because store 429s here are
 /// quota-style (e.g. TorBox's 60 adds/hour), not burst throttles.
@@ -112,17 +109,6 @@ impl std::fmt::Display for StoreRateLimited {
 
 impl std::error::Error for StoreRateLimited {}
 
-/// A store-scoped response that cleared the rate-limit gate.
-enum StoreSend {
-    /// 2xx — body not yet consumed.
-    Ok(reqwest::Response),
-    /// Non-2xx, non-rate-limit; body already read for diagnostics.
-    Rejected {
-        status: reqwest::StatusCode,
-        body: String,
-    },
-}
-
 /// Detect a rate-limit rejection and compute its cooldown. Matches both a
 /// 429 status and the proxied `TOO_MANY_REQUESTS` error code, since StremThru
 /// relays the upstream store's envelope:
@@ -140,51 +126,14 @@ fn rate_limit_cooldown(status: reqwest::StatusCode, body: &str) -> Option<Durati
 
 /// Gate every store-scoped request behind the per-store rate-limit cooldown:
 /// skip the call while the store is cooling down, and start a cooldown when
-/// the store answers with a quota rejection.
+/// the store answers with a quota rejection. Other non-2xx responses are
+/// returned for the caller to interpret. `dedupe_key` shares one in-flight
+/// request between identical cacheable GETs.
 async fn send_store<F>(
     http: &HttpClient,
     redis: &redis::aio::ConnectionManager,
     store: &str,
-    make_request: F,
-) -> anyhow::Result<StoreSend>
-where
-    F: Fn(&reqwest::Client) -> reqwest::RequestBuilder,
-{
-    if let Some(remaining) = store_cooldown_remaining(redis, store).await {
-        return Err(StoreRateLimited {
-            retry_after: Duration::from_secs(remaining),
-            fresh: false,
-        }
-        .into());
-    }
-
-    let response = http.send(PROFILE, make_request).await?;
-    if response.status().is_success() {
-        return Ok(StoreSend::Ok(response));
-    }
-
-    let status = response.status();
-    let body = response.text().await.unwrap_or_default();
-    if let Some(retry_after) = rate_limit_cooldown(status, &body) {
-        set_store_cooldown(redis, store, retry_after).await;
-        return Err(StoreRateLimited {
-            retry_after,
-            fresh: true,
-        }
-        .into());
-    }
-
-    Ok(StoreSend::Rejected { status, body })
-}
-
-/// Dedupe-keyed variant of [`send_store`] for cacheable GETs. Non-2xx,
-/// non-rate-limit responses are returned for the caller to interpret, same
-/// as before the gate existed.
-async fn send_store_data<F>(
-    http: &HttpClient,
-    redis: &redis::aio::ConnectionManager,
-    store: &str,
-    dedupe_key: String,
+    dedupe_key: Option<String>,
     make_request: F,
 ) -> anyhow::Result<Arc<HttpResponseData>>
 where
@@ -198,9 +147,7 @@ where
         .into());
     }
 
-    let response = http
-        .send_data(PROFILE, Some(dedupe_key), make_request)
-        .await?;
+    let response = http.send_data(PROFILE, dedupe_key, make_request).await?;
     if !response.status().is_success()
         && let Some(retry_after) =
             rate_limit_cooldown(response.status(), &response.text().unwrap_or_default())

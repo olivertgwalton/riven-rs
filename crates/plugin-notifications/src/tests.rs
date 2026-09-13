@@ -18,7 +18,6 @@ fn payload() -> NotificationPayload {
         is_anime: false,
         rating: Some(8.25),
         overview: Some("Short overview".to_string()),
-        tvdb_slug: None,
     }
 }
 

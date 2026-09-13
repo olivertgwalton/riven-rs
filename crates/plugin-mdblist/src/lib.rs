@@ -5,8 +5,6 @@ use riven_core::plugin::{ContentCollection, Plugin, PluginContext};
 use riven_core::settings::PluginSettings;
 use riven_core::types::*;
 use serde::Deserialize;
-use std::collections::{HashMap, HashSet};
-use url::Url;
 
 const MDBLIST_BASE_URL: &str = "https://api.mdblist.com/";
 
@@ -73,65 +71,24 @@ async fn fetch_and_build_content(
     raw_lists: &[String],
 ) -> anyhow::Result<ContentCollection> {
     let mut content = ContentCollection::default();
-    let mut seen_movie_ids = HashSet::new();
-    let mut seen_show_ids = HashSet::new();
-
     for raw_list in raw_lists {
         let Some(list_name) = normalize_list_name(raw_list) else {
             tracing::warn!(list = raw_list, "invalid MDBList list reference");
             continue;
         };
-        let items = fetch_list_items(http, api_key, &list_name).await?;
-
-        for item in items.movies {
-            let Some(dedupe_key) = item
-                .id
-                .map(|id| id.to_string())
-                .or_else(|| item.tmdb_id().map(|id| id.to_string()))
-                .or_else(|| item.imdb_id())
-            else {
-                continue;
-            };
-            if !seen_movie_ids.insert(dedupe_key) {
-                continue;
-            }
-            content.insert_movie(ExternalIds {
-                imdb_id: item.imdb_id(),
-                tmdb_id: item.tmdb_id().map(|id| id.to_string()),
-                tvdb_id: item.tvdb_id().map(|id| id.to_string()),
-                ..Default::default()
-            });
-        }
-
-        for item in items.shows {
-            let Some(dedupe_key) = item
-                .id
-                .map(|id| id.to_string())
-                .or_else(|| item.tvdb_id().map(|id| id.to_string()))
-                .or_else(|| item.imdb_id())
-            else {
-                continue;
-            };
-            if !seen_show_ids.insert(dedupe_key) {
-                continue;
-            }
-            content.insert_show(ExternalIds {
-                imdb_id: item.imdb_id(),
-                tvdb_id: item.tvdb_id().map(|id| id.to_string()),
-                ..Default::default()
-            });
-        }
+        fetch_list_items(http, api_key, &list_name, &mut content).await?;
     }
     Ok(content)
 }
 
+/// Page through one list, inserting its items into `content` (which dedupes
+/// by external id).
 async fn fetch_list_items(
     http: &riven_core::http::HttpClient,
     api_key: &str,
     list_name: &str,
-) -> anyhow::Result<MdblistListItems> {
-    let mut movie_ids = HashMap::new();
-    let mut show_ids = HashMap::new();
+    content: &mut ContentCollection,
+) -> anyhow::Result<()> {
     let mut offset = 0;
 
     loop {
@@ -151,16 +108,25 @@ async fn fetch_list_items(
         let mut count = 0;
 
         for item in items.movies.unwrap_or_default() {
-            if let Some(id) = item.id.or(item.tmdb_id()) {
+            if item.id.or(item.tmdb_id()).is_some() {
                 count += 1;
-                movie_ids.entry(id).or_insert(item);
+                content.insert_movie(ExternalIds {
+                    imdb_id: item.imdb_id(),
+                    tmdb_id: item.tmdb_id().map(|id| id.to_string()),
+                    tvdb_id: item.tvdb_id().map(|id| id.to_string()),
+                    ..Default::default()
+                });
             }
         }
 
         for item in items.shows.unwrap_or_default() {
-            if let Some(id) = item.id.or(item.tvdb_id()) {
+            if item.id.or(item.tvdb_id()).is_some() {
                 count += 1;
-                show_ids.entry(id).or_insert(item);
+                content.insert_show(ExternalIds {
+                    imdb_id: item.imdb_id(),
+                    tvdb_id: item.tvdb_id().map(|id| id.to_string()),
+                    ..Default::default()
+                });
             }
         }
 
@@ -170,10 +136,7 @@ async fn fetch_list_items(
         offset += count;
     }
 
-    Ok(MdblistListItems {
-        movies: movie_ids.into_values().collect(),
-        shows: show_ids.into_values().collect(),
-    })
+    Ok(())
 }
 
 fn normalize_list_name(value: &str) -> Option<String> {
@@ -182,13 +145,15 @@ fn normalize_list_name(value: &str) -> Option<String> {
         return None;
     }
 
-    if !trimmed.contains("://") {
+    let Some((_, rest)) = trimmed.split_once("://") else {
         return Some(trimmed.to_string());
-    }
+    };
 
-    let parsed = Url::parse(trimmed).ok()?;
-    let segments = parsed
-        .path_segments()?
+    // Drop the host, query and fragment; keep the non-empty path segments.
+    let path = rest.split(['?', '#']).next()?;
+    let segments = path
+        .split('/')
+        .skip(1)
         .filter(|segment| !segment.is_empty())
         .collect::<Vec<_>>();
 
@@ -204,11 +169,6 @@ fn normalize_list_name(value: &str) -> Option<String> {
 struct MdblistListItemsResponse {
     movies: Option<Vec<MdblistItem>>,
     shows: Option<Vec<MdblistItem>>,
-}
-
-struct MdblistListItems {
-    movies: Vec<MdblistItem>,
-    shows: Vec<MdblistItem>,
 }
 
 /// A single movie/show entry from the list-items endpoint.

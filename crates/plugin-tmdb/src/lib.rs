@@ -159,7 +159,7 @@ fn parse_content_rating_from_release_dates(
         let certification = result.certification.trim();
         (!certification.is_empty())
             .then_some(certification)
-            .and_then(parse_content_rating)
+            .and_then(|c| ContentRating::parse(&c.to_ascii_uppercase()))
     };
 
     release_dates
@@ -173,23 +173,6 @@ fn parse_content_rating_from_release_dates(
                 .iter()
                 .find_map(|entry| entry.release_dates.iter().find_map(parse_result))
         })
-}
-
-fn parse_content_rating(rating: &str) -> Option<ContentRating> {
-    match rating.trim().to_ascii_uppercase().as_str() {
-        "G" => Some(ContentRating::G),
-        "PG" => Some(ContentRating::Pg),
-        "PG-13" => Some(ContentRating::Pg13),
-        "R" => Some(ContentRating::R),
-        "NC-17" => Some(ContentRating::Nc17),
-        "TV-Y" => Some(ContentRating::TvY),
-        "TV-Y7" => Some(ContentRating::TvY7),
-        "TV-G" => Some(ContentRating::TvG),
-        "TV-PG" => Some(ContentRating::TvPg),
-        "TV-14" => Some(ContentRating::Tv14),
-        "TV-MA" => Some(ContentRating::TvMa),
-        _ => None,
-    }
 }
 
 #[derive(Deserialize)]

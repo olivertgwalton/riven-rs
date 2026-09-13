@@ -344,5 +344,3 @@ export const authClient = {
 		},
 	},
 };
-
-export const { signIn, signOut, getSession } = authClient;

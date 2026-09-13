@@ -28,6 +28,7 @@ redis = { workspace = true }
 reqwest = { workspace = true }
 serde_json = { workspace = true }
 mimalloc = { workspace = true }
+url = "2"
 
 [lints]
 workspace = true

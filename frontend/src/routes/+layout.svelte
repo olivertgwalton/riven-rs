@@ -21,6 +21,7 @@
     import "@fontsource/jetbrains-mono/latin-700.css";
     import "@fontsource/merriweather/latin-400.css";
     import "@fontsource/merriweather/latin-500.css";
+    import { navigating } from "$app/state";
     import { ModeWatcher } from "mode-watcher";
     import type { Snippet } from "svelte";
 
@@ -28,4 +29,7 @@
 </script>
 
 <ModeWatcher defaultMode="dark" defaultTheme="darkmatter" />
+{#if navigating.to}
+    <div class="bg-primary pointer-events-none fixed top-0 left-0 z-50 h-0.5 w-full animate-pulse"></div>
+{/if}
 {@render children()}

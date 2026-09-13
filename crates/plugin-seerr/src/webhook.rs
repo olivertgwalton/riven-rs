@@ -3,7 +3,9 @@ use std::sync::Arc;
 use async_graphql::{Context, Object};
 use riven_core::auth::{Capability, require};
 use riven_queue::JobQueue;
-use riven_queue::lifecycle::{LibraryOrchestrator, upsert_requested_movie, upsert_requested_show};
+use riven_queue::lifecycle::{
+    enqueue_after_request_action, upsert_requested_movie, upsert_requested_show,
+};
 use serde::Deserialize;
 
 #[derive(Default)]
@@ -82,7 +84,6 @@ async fn handle_notification(job_queue: &Arc<JobQueue>, n: NotificationPayload) 
         .as_ref()
         .and_then(|r| r.requested_by_email.clone());
 
-    let orchestrator = LibraryOrchestrator::new(job_queue);
     let result = match media_type {
         "movie" => {
             let title = imdb_id.or(tmdb_id).unwrap_or("Unknown");
@@ -121,13 +122,13 @@ async fn handle_notification(job_queue: &Arc<JobQueue>, n: NotificationPayload) 
             if let Some(event) = outcome.lifecycle_event(requested_seasons.as_deref()) {
                 job_queue.notify(event).await;
             }
-            orchestrator
-                .enqueue_after_request_action(
-                    &outcome.item,
-                    outcome.action,
-                    requested_seasons.as_deref(),
-                )
-                .await;
+            enqueue_after_request_action(
+                job_queue,
+                &outcome.item,
+                outcome.action,
+                requested_seasons.as_deref(),
+            )
+            .await;
             tracing::info!(
                 item_id = outcome.item.id,
                 kind = %n.notification_type,

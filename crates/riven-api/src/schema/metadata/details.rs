@@ -302,15 +302,12 @@ impl MediaDetails {
     }
 
     fn items(&self, path: &[&str]) -> &[Value] {
-        path.iter()
-            .fold(self.at(path[0]), |value, key| {
-                if std::ptr::eq(*key, path[0]) {
-                    value
-                } else {
-                    value.get(key).unwrap_or(&Value::Null)
-                }
-            })
-            .as_array()
+        let Some((first, rest)) = path.split_first() else {
+            return &[];
+        };
+        rest.iter()
+            .try_fold(self.at(first), |value, key| value.get(key))
+            .and_then(Value::as_array)
             .map(Vec::as_slice)
             .unwrap_or_default()
     }

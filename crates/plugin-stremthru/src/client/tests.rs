@@ -22,7 +22,7 @@ fn download_result_prefers_file_path_and_clamps_negative_sizes() {
         ],
     };
 
-    let result = download_result_from_torz("realdebrid", "ABCDEF", torz);
+    let result = download_result_from_files("realdebrid", "ABCDEF", torz.files);
 
     assert_eq!(result.provider, Some("realdebrid".to_string()));
     assert_eq!(result.plugin_name, "stremthru");
@@ -144,7 +144,7 @@ fn add_torrent_accepts_cached_status_for_torbox_instant_downloads() {
             link: "https://cdn.torbox.app/movie.mkv".to_string(),
         }],
     };
-    let result = download_result_from_torz("torbox", "ABCDEF", torz_cached);
+    let result = download_result_from_files("torbox", "ABCDEF", torz_cached.files);
     assert_eq!(result.provider, Some("torbox".to_string()));
     assert_eq!(result.files[0].file_size, 2048);
     assert_eq!(

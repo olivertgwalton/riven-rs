@@ -1,5 +1,3 @@
-import { createConsola } from "consola";
-
 /**
  * Browser console logger.
  *
@@ -24,18 +22,28 @@ function resolveLevel(): number {
 	return Number.isFinite(level) ? level : DEFAULT_LEVEL;
 }
 
-export const logger = createConsola({ level: resolveLevel() });
+const level = resolveLevel();
 
-/**
- * Create a scoped logger with a specific tag.
- * Useful for categorizing logs by module/feature.
- *
- * @example
- * const authLogger = createScopedLogger('auth');
- * authLogger.info('User logged in');
- */
-export function createScopedLogger(tag: string) {
-	return logger.withTag(tag);
+function makeLogger(tag?: string) {
+	const prefix = tag ? [`[${tag}]`] : [];
+	const at =
+		(min: number, fn: (...args: unknown[]) => void) =>
+		(...args: unknown[]) => {
+			if (level >= min) fn(...prefix, ...args);
+		};
+	return {
+		error: at(0, console.error),
+		warn: at(1, console.warn),
+		log: at(2, console.log),
+		info: at(3, console.info),
+		debug: at(4, console.debug),
+		trace: at(5, console.trace),
+	};
 }
 
-export default logger;
+export const logger = makeLogger();
+
+/** Create a logger whose output is prefixed with `[tag]`. */
+export function createScopedLogger(tag: string) {
+	return makeLogger(tag);
+}

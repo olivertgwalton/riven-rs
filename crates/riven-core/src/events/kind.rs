@@ -123,8 +123,7 @@ impl EventType {
     }
 
     /// The user-facing state transitions worth surfacing — UI notifications
-    /// and outbound webhooks both subscribe to this set. Keep in sync with
-    /// `is_notable`; the `notable_set_matches_predicate` test enforces it.
+    /// and outbound webhooks both subscribe to this set.
     pub const NOTABLE: &'static [EventType] = &[
         Self::MediaItemDownloadSuccess,
         Self::MediaItemScrapeSuccess,
@@ -136,22 +135,8 @@ impl EventType {
         Self::ItemRequestUpdated,
     ];
 
-    pub const fn is_notable(self) -> bool {
-        matches!(
-            self,
-            Self::MediaItemDownloadSuccess
-                | Self::MediaItemScrapeSuccess
-                | Self::MediaItemIndexSuccess
-                | Self::MediaItemDownloadError
-                | Self::MediaItemScrapeError
-                | Self::MediaItemScrapeErrorNoNewStreams
-                | Self::ItemRequestCreated
-                | Self::ItemRequestUpdated
-        )
-    }
-
-    pub const fn is_ui_streamed(self) -> bool {
-        self.is_notable()
+    pub fn is_ui_streamed(self) -> bool {
+        Self::NOTABLE.contains(&self)
             || matches!(
                 self,
                 Self::MediaItemIndexRequested
@@ -197,88 +182,6 @@ impl EventType {
             | Self::MediaItemDownloadPartialSuccess
             | Self::MediaItemDownloadSuccess
             | Self::MediaItemsDeleted => Broadcast,
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::EventType;
-
-    /// Every variant. Kept here (not in the public API) purely so the drift
-    /// guards below stay exhaustive — the compiler forces this match to list
-    /// every variant, so adding one without updating it fails to compile.
-    fn all_variants() -> Vec<EventType> {
-        use EventType::*;
-        let all = [
-            CoreStarted,
-            CoreShutdown,
-            ContentServiceRequested,
-            ItemRequestCreated,
-            ItemRequestUpdated,
-            MediaItemIndexRequested,
-            MediaItemIndexSuccess,
-            MediaItemIndexError,
-            MediaItemIndexErrorIncorrectState,
-            MediaItemScrapeRequested,
-            MediaItemScrapeSuccess,
-            MediaItemScrapeError,
-            MediaItemScrapeErrorIncorrectState,
-            MediaItemScrapeErrorNoNewStreams,
-            MediaItemDownloadRequested,
-            MediaItemDownloadCacheCheckRequested,
-            MediaItemDownloadError,
-            MediaItemDownloadErrorIncorrectState,
-            MediaItemDownloadPartialSuccess,
-            MediaItemDownloadProviderListRequested,
-            MediaItemDownloadSuccess,
-            MediaItemStreamLinkRequested,
-            MediaItemsDeleted,
-            DebridUserInfoRequested,
-            ActivePlaybackSessionsRequested,
-            ArtworkRequested,
-        ];
-        for variant in all {
-            match variant {
-                CoreStarted
-                | CoreShutdown
-                | ContentServiceRequested
-                | ItemRequestCreated
-                | ItemRequestUpdated
-                | MediaItemIndexRequested
-                | MediaItemIndexSuccess
-                | MediaItemIndexError
-                | MediaItemIndexErrorIncorrectState
-                | MediaItemScrapeRequested
-                | MediaItemScrapeSuccess
-                | MediaItemScrapeError
-                | MediaItemScrapeErrorIncorrectState
-                | MediaItemScrapeErrorNoNewStreams
-                | MediaItemDownloadRequested
-                | MediaItemDownloadCacheCheckRequested
-                | MediaItemDownloadError
-                | MediaItemDownloadErrorIncorrectState
-                | MediaItemDownloadPartialSuccess
-                | MediaItemDownloadProviderListRequested
-                | MediaItemDownloadSuccess
-                | MediaItemStreamLinkRequested
-                | MediaItemsDeleted
-                | DebridUserInfoRequested
-                | ActivePlaybackSessionsRequested
-                | ArtworkRequested => {}
-            }
-        }
-        all.to_vec()
-    }
-
-    #[test]
-    fn notable_set_matches_predicate() {
-        for variant in all_variants() {
-            assert_eq!(
-                EventType::NOTABLE.contains(&variant),
-                variant.is_notable(),
-                "{variant:?}: NOTABLE membership disagrees with is_notable()"
-            );
         }
     }
 }

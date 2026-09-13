@@ -5,7 +5,6 @@ use std::str::FromStr;
 /// Prefix: RIVEN_PLUGIN_SETTING__{PLUGIN_PREFIX}__{KEY}
 #[derive(Debug, Clone)]
 pub struct PluginSettings {
-    prefix: String,
     values: HashMap<String, String>,
 }
 
@@ -15,19 +14,16 @@ impl PluginSettings {
         let values = std::env::vars()
             .filter_map(|(key, value)| {
                 key.strip_prefix(&env_prefix)
-                    .map(|suffix| (normalize_key(suffix), value))
+                    .map(|suffix| (suffix.to_lowercase(), value))
             })
             .collect();
 
-        Self {
-            prefix: prefix.to_string(),
-            values,
-        }
+        Self { values }
     }
 
     pub fn get(&self, key: &str) -> Option<&str> {
         self.values
-            .get(&normalize_key(key))
+            .get(&key.to_lowercase())
             .map(|s| s.trim())
             .filter(|s| !s.is_empty())
     }
@@ -41,18 +37,13 @@ impl PluginSettings {
             .is_some_and(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
     }
 
-    pub fn get_parsed<T>(&self, key: &str) -> Option<T>
-    where
-        T: FromStr,
-    {
-        self.get(key).and_then(|v| v.parse().ok())
-    }
-
     pub fn get_parsed_or<T>(&self, key: &str, default: T) -> T
     where
         T: FromStr,
     {
-        self.get_parsed(key).unwrap_or(default)
+        self.get(key)
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(default)
     }
 
     pub fn get_list(&self, key: &str) -> Vec<String> {
@@ -62,10 +53,6 @@ impl PluginSettings {
                     .unwrap_or_else(|_| v.split(',').map(|s| s.trim().to_string()).collect())
             })
             .unwrap_or_default()
-    }
-
-    pub fn prefix(&self) -> &str {
-        &self.prefix
     }
 
     pub fn has(&self, key: &str) -> bool {
@@ -88,7 +75,7 @@ impl PluginSettings {
         };
 
         for (key, value) in obj {
-            let normalized = normalize_key(key);
+            let normalized = key.to_lowercase();
             match setting_value_to_string(value) {
                 Some(v) => {
                     self.values.insert(normalized, v);
@@ -112,19 +99,14 @@ impl PluginSettings {
 
 #[cfg(test)]
 impl PluginSettings {
-    pub(super) fn from_pairs(prefix: &str, values: &[(&str, &str)]) -> Self {
+    pub(super) fn from_pairs(values: &[(&str, &str)]) -> Self {
         Self {
-            prefix: prefix.to_string(),
             values: values
                 .iter()
-                .map(|(key, value)| (normalize_key(key), value.to_string()))
+                .map(|(key, value)| (key.to_lowercase(), value.to_string()))
                 .collect(),
         }
     }
-}
-
-fn normalize_key(key: &str) -> String {
-    key.to_lowercase()
 }
 
 fn setting_value_to_string(value: &serde_json::Value) -> Option<String> {

@@ -1,11 +1,8 @@
 use std::collections::BTreeMap;
 
 use riven_core::types::DownloadFile;
-use riven_db::entities::{MediaItem, Stream};
+use riven_db::entities::Stream;
 use riven_db::repo;
-
-use crate::JobQueue;
-use crate::context::load_media_item_or_download_error;
 
 /// The parsed resolution of a stream, falling back to `"unknown"` when the
 /// `parsed_data` is missing or has no `resolution` field.
@@ -27,11 +24,6 @@ pub(crate) fn stream_raw_title(stream: &Stream) -> &str {
         .and_then(|parsed| parsed.get("raw_title"))
         .and_then(|value| value.as_str())
         .unwrap_or("")
-}
-
-/// Load a media item by id, or send a `MediaItemDownloadError` event and return `None`.
-pub async fn load_item_or_err(id: i64, queue: &JobQueue, error_msg: &str) -> Option<MediaItem> {
-    load_media_item_or_download_error(queue, id, error_msg).await
 }
 
 /// Log a bitrate failure and store the file size so the next download attempt can
@@ -92,50 +84,19 @@ pub fn is_persistable_video_file(filename: &str) -> bool {
 
 pub use riven_core::filename::looks_obfuscated;
 
-pub fn episode_lookup_keys(season: i32, ep: i32, abs: Option<i32>) -> Vec<String> {
-    let mut keys = Vec::with_capacity(2);
-    if let Some(abs) = abs {
-        keys.push(format!("abs:{abs}"));
-    }
-    keys.push(format!("{season}:{ep}"));
-    keys
-}
-
-pub fn file_lookup_keys(parsed: &riven_rank::ParsedData) -> Vec<String> {
-    if parsed.episodes.is_empty() {
-        return Vec::new();
-    }
-
-    if parsed.seasons.is_empty() {
-        return parsed
-            .episodes
-            .iter()
-            .map(|episode| format!("abs:{episode}"))
-            .collect();
-    }
-
-    parsed
-        .seasons
-        .iter()
-        .flat_map(|season| {
-            parsed
-                .episodes
-                .iter()
-                .map(move |episode| format!("{season}:{episode}"))
-        })
-        .collect()
-}
-
+/// Whether a parsed file names this episode: by season+episode when the file
+/// carries seasons, otherwise by absolute number.
 pub fn matches_episode_lookup(
     parsed: &riven_rank::ParsedData,
     season: i32,
     ep: i32,
     abs: Option<i32>,
 ) -> bool {
-    let lookups = episode_lookup_keys(season, ep, abs);
-    file_lookup_keys(parsed)
-        .iter()
-        .any(|key| lookups.iter().any(|lookup| lookup == key))
+    if parsed.seasons.is_empty() {
+        abs.is_some_and(|abs| parsed.episodes.contains(&abs))
+    } else {
+        parsed.seasons.contains(&season) && parsed.episodes.contains(&ep)
+    }
 }
 
 /// Parse a file path by merging metadata from all path segments.
@@ -210,7 +171,25 @@ pub fn select_episode_files<'a>(
 
 #[cfg(test)]
 mod tests {
-    use super::{is_persistable_video_file, is_sample_file};
+    use super::{is_persistable_video_file, is_sample_file, matches_episode_lookup};
+
+    #[test]
+    fn episode_lookup_matches_season_episode_or_absolute() {
+        let mut parsed = riven_rank::ParsedData {
+            seasons: vec![1, 2],
+            episodes: vec![3],
+            ..Default::default()
+        };
+        assert!(matches_episode_lookup(&parsed, 2, 3, None));
+        assert!(!matches_episode_lookup(&parsed, 3, 3, Some(3)));
+
+        parsed.seasons.clear();
+        assert!(matches_episode_lookup(&parsed, 1, 1, Some(3)));
+        assert!(!matches_episode_lookup(&parsed, 1, 3, None));
+
+        parsed.episodes.clear();
+        assert!(!matches_episode_lookup(&parsed, 1, 3, Some(3)));
+    }
 
     #[test]
     fn sample_files_are_detected_and_excluded() {

@@ -30,10 +30,6 @@ use v5::parse_volume_header_v5;
 pub enum RarError {
     #[error("not a RAR archive")]
     NotRar,
-    #[error("truncated header: needed {needed} bytes, had {available}")]
-    Truncated { needed: usize, available: usize },
-    #[error("invalid block: {0}")]
-    InvalidBlock(&'static str),
 }
 
 pub(crate) const METHOD_STORE: u8 = 0x30;
@@ -100,7 +96,6 @@ pub enum RarFormat {
 /// Parser output for one volume's leading bytes.
 #[derive(Debug, Default)]
 pub struct RarVolumeHeader {
-    pub is_volume: bool,
     pub files: Vec<RarVolumeFileEntry>,
     /// `Some` when the volume's signature was recognised. Used by callers
     /// that later need to parse a single block (not a whole volume) starting

@@ -1,12 +1,10 @@
 <script lang="ts">
     // Fonts are imported once, in the root layout.
     import oxanium400Woff2 from "@fontsource/oxanium/files/oxanium-latin-400-normal.woff2?url";
-    import { afterNavigate, beforeNavigate } from "$app/navigation";
+    import { afterNavigate } from "$app/navigation";
     import Sidebar from "$lib/components/sidebar.svelte";
     import { Toaster } from "$lib/components/ui/sonner/index.js";
-    import NProgress from "nprogress";
     import type { LayoutProps } from "./$types";
-    import { SidebarStore, isMobileStore } from "$lib/stores/global.svelte";
     import { setContext } from "svelte";
     import Header from "$lib/components/header.svelte";
     import MobileNav from "$lib/components/mobile-nav.svelte";
@@ -21,19 +19,10 @@
     const searchStore = new SearchStore();
     const filterStore = new FilterStore();
 
-    NProgress.configure({
-        showSpinner: false
-    });
-    beforeNavigate(() => {
-        NProgress.start();
-    });
     afterNavigate(() => {
-        NProgress.done();
         if (mainContent) mainContent.scrollTop = 0;
     });
 
-    setContext("sidebarStore", SidebarStore);
-    setContext("ismobilestore", isMobileStore);
     setContext("searchStore", searchStore);
     setContext("filterStore", filterStore);
 

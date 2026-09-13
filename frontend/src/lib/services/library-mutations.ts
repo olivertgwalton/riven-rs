@@ -7,11 +7,20 @@
 
 import { gqlClient } from "$lib/graphql-client";
 
-const RESET_ITEMS_MUTATION = `mutation ResetItems($ids: [Int!]!) { resetItems(ids: $ids) }`;
-const RETRY_ITEMS_MUTATION = `mutation RetryItems($ids: [Int!]!) { retryItems(ids: $ids) }`;
-const REMOVE_ITEMS_MUTATION = `mutation RemoveItems($ids: [Int!]!) { removeItems(ids: $ids) }`;
-const PAUSE_ITEMS_MUTATION = `mutation PauseItems($ids: [Int!]!) { pauseItems(ids: $ids) }`;
-const UNPAUSE_ITEMS_MUTATION = `mutation UnpauseItems($ids: [Int!]!) { unpauseItems(ids: $ids) }`;
+type ItemsMutation =
+	| "resetItems"
+	| "retryItems"
+	| "removeItems"
+	| "pauseItems"
+	| "unpauseItems";
+
+/** `mutation X($ids) { name(ids: $ids) }` returning the affected count. */
+function mutate(name: ItemsMutation) {
+	const op = name[0].toUpperCase() + name.slice(1);
+	const query = `mutation ${op}($ids: [Int!]!) { ${name}(ids: $ids) }`;
+	return async (ids: number[]): Promise<number> =>
+		(await gqlClient<Record<ItemsMutation, number>>(query, { ids }))[name];
+}
 
 /** Coerce mixed/nullable id inputs into a clean numeric id array. */
 export function toNumericIds(
@@ -23,45 +32,11 @@ export function toNumericIds(
 		.filter((n) => !Number.isNaN(n));
 }
 
-/** Reset the given items on the backend. Returns the affected count. */
-export async function resetItems(ids: number[]): Promise<number> {
-	const result = await gqlClient<{ resetItems: number }>(RESET_ITEMS_MUTATION, {
-		ids,
-	});
-	return result.resetItems;
-}
-
-/** Retry the given items on the backend. Returns the affected count. */
-export async function retryItems(ids: number[]): Promise<number> {
-	const result = await gqlClient<{ retryItems: number }>(RETRY_ITEMS_MUTATION, {
-		ids,
-	});
-	return result.retryItems;
-}
-
-/** Remove the given items on the backend. Returns the affected count. */
-export async function removeItems(ids: number[]): Promise<number> {
-	const result = await gqlClient<{ removeItems: number }>(
-		REMOVE_ITEMS_MUTATION,
-		{ ids },
-	);
-	return result.removeItems;
-}
-
-async function pauseItems(ids: number[]): Promise<number> {
-	const result = await gqlClient<{ pauseItems: number }>(PAUSE_ITEMS_MUTATION, {
-		ids,
-	});
-	return result.pauseItems;
-}
-
-async function unpauseItems(ids: number[]): Promise<number> {
-	const result = await gqlClient<{ unpauseItems: number }>(
-		UNPAUSE_ITEMS_MUTATION,
-		{ ids },
-	);
-	return result.unpauseItems;
-}
+export const resetItems = mutate("resetItems");
+export const retryItems = mutate("retryItems");
+export const removeItems = mutate("removeItems");
+const pauseItems = mutate("pauseItems");
+const unpauseItems = mutate("unpauseItems");
 
 /** Pause or unpause the given items depending on `paused`. Returns the affected count. */
 export async function setItemsPaused(

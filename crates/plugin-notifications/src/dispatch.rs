@@ -202,8 +202,15 @@ fn build_detailed_embed(payload: &NotificationPayload) -> serde_json::Value {
     if let Some(ref imdb_id) = payload.imdb_id {
         links.push(format!("[IMDB](https://www.imdb.com/title/{imdb_id})"));
     }
-    if let Some(ref tvdb_slug) = payload.tvdb_slug {
-        links.push(format!("[TVDB](https://thetvdb.com/series/{tvdb_slug})"));
+    if let Some(ref tvdb_id) = payload.tvdb_id {
+        let path = if payload.item_type == MediaItemType::Movie {
+            "movie"
+        } else {
+            "series"
+        };
+        links.push(format!(
+            "[TVDB](https://thetvdb.com/dereferrer/{path}/{tvdb_id})"
+        ));
     }
     if !links.is_empty() {
         fields.push(serde_json::json!({

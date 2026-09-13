@@ -12,12 +12,13 @@
 
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::{Mutex, OnceLock};
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use hickory_resolver::config::{LookupIpStrategy, ResolverConfig};
 use hickory_resolver::net::runtime::TokioRuntimeProvider;
 use hickory_resolver::{ResolverBuilder, TokioResolver};
+use parking_lot::Mutex;
 use reqwest::dns::{Addrs, Name, Resolve, Resolving};
 
 /// How long a resolved address is reused before re-resolving.
@@ -71,43 +72,45 @@ fn dns_cache() -> &'static Mutex<HashMap<String, CachedAddrs>> {
 /// address on failure) removes that failure mode while still picking up real
 /// address changes.
 pub async fn resolve_cached(host: &str) -> std::io::Result<Vec<IpAddr>> {
-    if let Some(entry) = dns_cache().lock().expect("dns cache poisoned").get(host)
+    if let Some(entry) = dns_cache().lock().get(host)
         && entry.resolved_at.elapsed() < DNS_CACHE_TTL
     {
         return Ok(entry.addrs.clone());
     }
 
-    match resolver().lookup_ip(host).await {
+    let resolved = match resolver().lookup_ip(host).await {
         Ok(lookup) => {
             let addrs: Vec<IpAddr> = lookup.iter().collect();
-            if !addrs.is_empty() {
-                dns_cache().lock().expect("dns cache poisoned").insert(
-                    host.to_string(),
-                    CachedAddrs {
-                        addrs: addrs.clone(),
-                        resolved_at: Instant::now(),
-                    },
-                );
-                return Ok(addrs);
+            if addrs.is_empty() {
+                Err(format!("no addresses resolved for {host}"))
+            } else {
+                Ok(addrs)
             }
+        }
+        Err(error) => Err(error.to_string()),
+    };
+
+    match resolved {
+        Ok(addrs) => {
+            dns_cache().lock().insert(
+                host.to_string(),
+                CachedAddrs {
+                    addrs: addrs.clone(),
+                    resolved_at: Instant::now(),
+                },
+            );
+            Ok(addrs)
         }
         Err(error) => {
             // Resolver failed — reuse the last good address rather than failing.
             // This is what keeps a flaky resolver from wedging us (EAI_AGAIN storm).
-            if let Some(entry) = dns_cache().lock().expect("dns cache poisoned").get(host) {
+            if let Some(entry) = dns_cache().lock().get(host) {
                 tracing::debug!(host, %error, "DNS resolve failed; using cached address");
                 return Ok(entry.addrs.clone());
             }
-            return Err(std::io::Error::other(error.to_string()));
+            Err(std::io::Error::other(error))
         }
     }
-
-    if let Some(entry) = dns_cache().lock().expect("dns cache poisoned").get(host) {
-        return Ok(entry.addrs.clone());
-    }
-    Err(std::io::Error::other(format!(
-        "no addresses resolved for {host}"
-    )))
 }
 
 /// Warm the cache for a host with a single low-concurrency resolve, before a
@@ -121,7 +124,7 @@ pub async fn warm(host: &str) {
 /// Drop a host's cached address so the next lookup re-resolves — used when a
 /// cached address fails to connect (e.g. the host rotated IPs).
 pub fn invalidate(host: &str) {
-    dns_cache().lock().expect("dns cache poisoned").remove(host);
+    dns_cache().lock().remove(host);
 }
 
 /// A [`reqwest::dns::Resolve`] backed by the shared serve-stale cache, so the

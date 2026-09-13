@@ -8,30 +8,21 @@
 //! their own automation.
 //!
 //! Delivery is at-least-once: the shared HTTP client retries transient
-//! failures per its profile, and a delivery that still fails is recorded in a
-//! capped Redis dead-letter list rather than silently dropped. Consumers
-//! should dedupe on the envelope `id`; there is no ordering guarantee across
-//! events (broadcast hook jobs run concurrently).
+//! failures per its profile, and a delivery that still fails is logged.
+//! Consumers should dedupe on the envelope `id`; there is no ordering
+//! guarantee across events (broadcast hook jobs run concurrently).
 
 use async_trait::async_trait;
 use chrono::Utc;
-use hmac::{Hmac, KeyInit, Mac};
 use serde_json::json;
-use sha2::Sha256;
 use ulid::Ulid;
 
 use riven_core::events::{EventType, HookResponse, RivenEvent};
 use riven_core::http::profiles;
 use riven_core::plugin::{FieldType, Plugin, PluginContext, SettingField};
 use riven_core::settings::PluginSettings;
+use riven_core::stremio::hmac_sha256_hex;
 use riven_db::repo;
-
-type HmacSha256 = Hmac<Sha256>;
-
-/// Redis list holding the most recent failed deliveries (newest first).
-const DEAD_LETTER_KEY: &str = "riven:webhooks:dead";
-/// Cap on retained dead-letter entries — a diagnostic tail, not a queue.
-const DEAD_LETTER_MAX: isize = 100;
 
 #[derive(Default)]
 pub struct WebhooksPlugin;
@@ -124,7 +115,10 @@ impl Plugin for WebhooksPlugin {
             }
         };
 
-        let signature = ctx.settings.get("secret").map(|secret| sign(secret, &body));
+        let signature = ctx
+            .settings
+            .get("secret")
+            .map(|secret| hmac_sha256_hex(secret.as_bytes(), &body));
 
         for url in &urls {
             deliver(ctx, url, &body, slug, &delivery_id, signature.as_deref()).await;
@@ -165,37 +159,10 @@ async fn deliver(
         Ok(resp) => {
             let status = resp.status();
             tracing::warn!(target_url = %url, event = slug, delivery_id, %status, "webhook rejected");
-            dead_letter(ctx, url, slug, delivery_id, &format!("http {status}")).await;
         }
         Err(error) => {
             tracing::error!(target_url = %url, event = slug, delivery_id, error = %error, "webhook delivery failed");
-            dead_letter(ctx, url, slug, delivery_id, &error.to_string()).await;
         }
-    }
-}
-
-/// Record a failed delivery in a capped Redis list so failures stay visible
-/// (for a future "webhook deliveries" view) without unbounded growth.
-async fn dead_letter(ctx: &PluginContext, url: &str, slug: &str, delivery_id: &str, reason: &str) {
-    let record = json!({
-        "url": url,
-        "event": slug,
-        "id": delivery_id,
-        "reason": reason,
-        "at": Utc::now().to_rfc3339(),
-    })
-    .to_string();
-
-    let mut conn = ctx.redis.clone();
-    let result: redis::RedisResult<()> = redis::pipe()
-        .lpush(DEAD_LETTER_KEY, record)
-        .ignore()
-        .ltrim(DEAD_LETTER_KEY, 0, DEAD_LETTER_MAX - 1)
-        .ignore()
-        .query_async(&mut conn)
-        .await;
-    if let Err(error) = result {
-        tracing::warn!(error = %error, delivery_id, "failed to record webhook dead-letter");
     }
 }
 
@@ -203,13 +170,6 @@ async fn dead_letter(ctx: &PluginContext, url: &str, slug: &str, delivery_id: &s
 /// must be listed explicitly.
 fn should_deliver(filter: &[String], slug: &str) -> bool {
     filter.is_empty() || filter.iter().any(|f| f == slug)
-}
-
-fn sign(secret: &str, body: &[u8]) -> String {
-    let mut mac =
-        HmacSha256::new_from_slice(secret.as_bytes()).expect("HMAC accepts keys of any length");
-    mac.update(body);
-    hex::encode(mac.finalize().into_bytes())
 }
 
 /// Compact media-item snapshot attached when `enrich` is on. Hand-built rather

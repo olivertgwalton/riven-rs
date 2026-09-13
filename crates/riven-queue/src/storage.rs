@@ -5,7 +5,7 @@ impl JobQueue {
         redis_url: &str,
         registry: Arc<PluginRegistry>,
         notification_tx: broadcast::Sender<String>,
-        downloader_config: DownloaderConfig,
+        attempt_unknown_downloads: bool,
         reindex_config: ReindexConfig,
         filesystem_settings: FilesystemSettings,
         retry_interval_secs: u64,
@@ -14,18 +14,20 @@ impl JobQueue {
         let apalis_conn = connect_managed(redis_url).await?;
 
         let index_storage =
-            RedisStorage::new_with_config(apalis_conn.clone(), queue_config("riven:index"));
+            RedisStorage::new_with_config(apalis_conn.clone(), RedisConfig::new("riven:index"));
         let scrape_storage =
-            RedisStorage::new_with_config(apalis_conn.clone(), queue_config("riven:scrape"));
+            RedisStorage::new_with_config(apalis_conn.clone(), RedisConfig::new("riven:scrape"));
         let parse_storage =
-            RedisStorage::new_with_config(apalis_conn.clone(), queue_config("riven:parse"));
+            RedisStorage::new_with_config(apalis_conn.clone(), RedisConfig::new("riven:parse"));
         let download_storage =
-            RedisStorage::new_with_config(apalis_conn.clone(), queue_config("riven:download"));
-        let rank_streams_storage =
-            RedisStorage::new_with_config(apalis_conn.clone(), queue_config("riven:rank-streams"));
+            RedisStorage::new_with_config(apalis_conn.clone(), RedisConfig::new("riven:download"));
+        let rank_streams_storage = RedisStorage::new_with_config(
+            apalis_conn.clone(),
+            RedisConfig::new("riven:rank-streams"),
+        );
         let process_media_item_storage = RedisStorage::new_with_config(
             apalis_conn.clone(),
-            queue_config("riven:process-media-item"),
+            RedisConfig::new("riven:process-media-item"),
         );
 
         let mut plugin_hook_storages: HashMap<(String, EventType), RedisStorage<PluginHookJob>> =
@@ -36,7 +38,7 @@ impl JobQueue {
             }
             let namespace = format!("riven:plugin-hook:{}:{plugin_name}", event_type.slug());
             let storage =
-                RedisStorage::new_with_config(apalis_conn.clone(), queue_config(&namespace));
+                RedisStorage::new_with_config(apalis_conn.clone(), RedisConfig::new(&namespace));
             plugin_hook_storages.insert((plugin_name, event_type), storage);
         }
 
@@ -57,7 +59,7 @@ impl JobQueue {
             registry,
             event_tx,
             notification_tx,
-            downloader_config: Arc::new(RwLock::new(downloader_config)),
+            attempt_unknown_downloads: Arc::new(AtomicBool::new(attempt_unknown_downloads)),
             reindex_config: Arc::new(RwLock::new(reindex_config)),
             vfs_layout: Arc::new(RwLock::new(VfsLibraryLayout::new(
                 filesystem_settings.clone(),

@@ -10,8 +10,8 @@
 
 use async_trait::async_trait;
 use redis::AsyncCommands;
-use riven_core::cache::{ByteLru, NZB_BODY};
 use reqwest::StatusCode;
+use riven_core::cache::{ByteLru, NZB_BODY};
 use riven_core::events::{EventType, HookResponse};
 use riven_core::http::{HttpServiceProfile, RateLimitedError};
 use riven_core::plugin::{FieldType, Plugin, PluginContext, SettingField};
@@ -155,11 +155,9 @@ pub fn nntp_config_from_settings(settings: &PluginSettings) -> Option<NntpConfig
 }
 
 pub fn nntp_config_from_json_value(value: &serde_json::Value) -> Option<NntpConfig> {
-    let raw_field = value.as_object()?.get("nntpproviders")?;
-    match raw_field {
-        serde_json::Value::Object(_) => parse_providers_value(raw_field),
+    match value.as_object()?.get("nntpproviders")? {
         serde_json::Value::String(s) => parse_providers_str(s),
-        _ => None,
+        other => parse_providers_value(other),
     }
 }
 

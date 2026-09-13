@@ -8,11 +8,8 @@ rust-version.workspace = true
 riven-core = { path = "../riven-core" }
 tokio = { workspace = true, features = ["io-util", "net", "sync", "time", "rt", "macros"] }
 tokio-rustls = "0.26"
-rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std"] }
 webpki-roots = "1"
 quick-xml = "0.41"
-async-trait = { workspace = true }
-anyhow = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 serde = { workspace = true }

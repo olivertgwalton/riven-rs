@@ -7,7 +7,6 @@ use riven_db::repo;
 use std::sync::Arc;
 
 use super::super::queries::MediaQuery;
-use super::super::typed_items::Show;
 use super::super::types::MediaItemStateTree;
 use super::broadcast_stream;
 
@@ -33,20 +32,15 @@ fn event_item_id(event: &RivenEvent) -> Option<i64> {
     }
 }
 
-async fn item_relates_to_target(item_id: i64, target_id: i64) -> bool {
-    repo::is_item_descendant_of(item_id, target_id)
-        .await
-        .unwrap_or(false)
-}
-
+/// Events carrying an item id wake the subscriber only when that item is the
+/// target or one of its descendants; id-less events always wake it.
 async fn should_emit_for_external_target(event: &RivenEvent, target: &MediaItem) -> bool {
-    if let Some(event_id) = event_item_id(event) {
-        return item_relates_to_target(event_id, target.id).await;
+    match event_item_id(event) {
+        Some(event_id) => repo::is_item_descendant_of(event_id, target.id)
+            .await
+            .unwrap_or(false),
+        None => true,
     }
-    matches!(
-        target.item_type,
-        MediaItemType::Movie | MediaItemType::Show | MediaItemType::Season | MediaItemType::Episode
-    )
 }
 
 async fn wait_for_relevant_event(
@@ -131,7 +125,7 @@ impl MediaItemsSubscription {
     async fn show_indexed(
         &self,
         ctx: &Context<'_>,
-    ) -> async_graphql::Result<impl Stream<Item = async_graphql::Result<Show>>> {
+    ) -> async_graphql::Result<impl Stream<Item = async_graphql::Result<MediaItem>>> {
         let queue = ctx.data::<Arc<riven_queue::JobQueue>>()?;
         Ok(
             broadcast_stream(queue.event_tx.subscribe()).filter_map(|event| async move {
@@ -142,7 +136,7 @@ impl MediaItemsSubscription {
                     return None;
                 }
                 match repo::get_media_item(id).await {
-                    Ok(Some(item)) => Some(Ok(Show { item })),
+                    Ok(Some(item)) => Some(Ok(item)),
                     Ok(None) => None,
                     Err(error) => Some(Err(error.into())),
                 }

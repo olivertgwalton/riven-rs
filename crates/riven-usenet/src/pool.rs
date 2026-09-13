@@ -48,7 +48,9 @@ pub struct SegmentPool {
     cache: SegmentCache,
     missing: MissingCache,
     inflight: InFlight,
-    decoded_sizes: DecodedSizes,
+    /// Memoized decoded sizes keyed by message-id. An evicted entry only costs
+    /// a fallback to walking segments, never correctness.
+    decoded_sizes: ByteLru<Arc<str>, u64>,
     metrics: FetchMetrics,
 }
 
@@ -64,7 +66,7 @@ impl SegmentPool {
             cache: SegmentCache::with_budget(SEGMENT),
             missing: MissingCache::default(),
             inflight: InFlight::default(),
-            decoded_sizes: DecodedSizes::new(),
+            decoded_sizes: ByteLru::with_budget(SEGMENT_SIZES),
             metrics: FetchMetrics::default(),
         })
     }
@@ -88,7 +90,9 @@ impl SegmentPool {
     /// Decoded length of a segment we have fetched before, without refetching
     /// it. Needed to seek into the middle of a RAR volume.
     pub fn decoded_size(&self, message_id: &str) -> Option<u64> {
-        self.decoded_sizes.get(message_id)
+        // `touch`, not `get`: this memo is consulted opportunistically while
+        // walking a RAR volume, and its hit rate is not the segment cache's.
+        self.decoded_sizes.touch(message_id)
     }
 
     /// Live figures for the decoded-size memo, for the health query.
@@ -244,7 +248,7 @@ impl SegmentPool {
         body: Vec<u8>,
     ) -> Result<Bytes, NntpError> {
         let decoded = match tokio::task::spawn_blocking(move || yenc::decode(&body)).await {
-            Ok(Ok((decoded, _info))) => decoded,
+            Ok(Ok(decoded)) => decoded,
             Ok(Err(error)) => {
                 tracing::warn!(message_id = %message_id, %error, "yenc decode failed");
                 return Err(NntpError::Protocol("yenc decode failed"));
@@ -256,8 +260,11 @@ impl SegmentPool {
         };
 
         self.metrics.record_ok(decoded.len() as u64);
-        self.decoded_sizes
-            .put(message_id.clone(), decoded.len() as u64);
+        self.decoded_sizes.put(
+            message_id.clone(),
+            decoded.len() as u64,
+            decoded_size_weight(message_id),
+        );
         self.cache
             .put(message_id.clone(), decoded.clone(), decoded.len() as u64);
         Ok(decoded)
@@ -287,7 +294,7 @@ impl SegmentPool {
         // Each future owns its id and its own handle on the pool. Borrowing
         // them across `buffer_unordered` instead leaves the returned futures
         // with anonymous lifetimes that defeat `Send` inference at the
-        // `LocalByteSource` impls above this.
+        // VFS `ByteSource` impl above this.
         let owned: Vec<(usize, String)> = message_ids.iter().cloned().enumerate().collect();
         let mut results: Vec<(usize, Result<Bytes, NntpError>)> = futures::stream::iter(owned)
             .map(|(index, id)| {
@@ -445,47 +452,18 @@ impl SegmentPool {
     }
 }
 
-/// Memoized decoded sizes keyed by message-id. An evicted entry only costs a
-/// fallback to walking segments, never correctness.
-struct DecodedSizes {
-    inner: ByteLru<Arc<str>, u64>,
-}
-
-impl DecodedSizes {
-    fn new() -> Self {
-        Self {
-            inner: ByteLru::with_budget(SEGMENT_SIZES),
-        }
-    }
-
-    /// What one entry costs, so the byte budget means something.
-    ///
-    /// The `lru` crate boxes a node holding key, value and two links, the table
-    /// keeps a slot, and the message-id's own bytes sit behind the `Arc`. None
-    /// of that is measurable at runtime without walking the allocator, so it is
-    /// counted rather than measured — the point is that the budget tracks the
-    /// real cost within a small factor, not that it is exact.
-    fn weight(message_id: &str) -> u64 {
-        /// `Arc` header + `Arc<str>` fat pointer + `u64` + two LRU links +
-        /// the hashmap slot, rounded up for allocator overhead.
-        const PER_ENTRY_OVERHEAD: u64 = 96;
-        PER_ENTRY_OVERHEAD + message_id.len() as u64
-    }
-
-    fn get(&self, message_id: &str) -> Option<u64> {
-        // `touch`, not `get`: this memo is consulted opportunistically while
-        // walking a RAR volume, and its hit rate is not the segment cache's.
-        self.inner.touch(message_id)
-    }
-
-    fn put(&self, message_id: Arc<str>, size: u64) {
-        let weight = Self::weight(&message_id);
-        self.inner.put(message_id, size, weight);
-    }
-
-    fn stats(&self) -> riven_core::cache::CacheStats {
-        self.inner.stats()
-    }
+/// What one decoded-size memo entry costs, so the byte budget means something.
+///
+/// The `lru` crate boxes a node holding key, value and two links, the table
+/// keeps a slot, and the message-id's own bytes sit behind the `Arc`. None
+/// of that is measurable at runtime without walking the allocator, so it is
+/// counted rather than measured — the point is that the budget tracks the
+/// real cost within a small factor, not that it is exact.
+fn decoded_size_weight(message_id: &str) -> u64 {
+    /// `Arc` header + `Arc<str>` fat pointer + `u64` + two LRU links +
+    /// the hashmap slot, rounded up for allocator overhead.
+    const PER_ENTRY_OVERHEAD: u64 = 96;
+    PER_ENTRY_OVERHEAD + message_id.len() as u64
 }
 
 /// Cumulative counters for fetches that actually hit the wire.

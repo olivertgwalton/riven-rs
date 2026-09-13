@@ -11,8 +11,8 @@ import { resolveExternalId } from "$lib/services/backend-metadata";
 import {
 	MEDIA_ITEM_STATE_BY_TMDB_QUERY,
 	MEDIA_ITEM_STATE_BY_TVDB_QUERY,
-	mapMediaItemStateTree,
 	type GqlMediaItemStateTree,
+	type RivenMediaItem,
 } from "$lib/services/riven-media";
 
 const logger = createScopedLogger("media-details");
@@ -20,16 +20,17 @@ const logger = createScopedLogger("media-details");
 export type { MediaDetails };
 
 /** Riven's own view of the title, which the page renders alongside the metadata. */
-async function rivenState(query: string, variables: Record<string, string>) {
+async function rivenState(
+	query: string,
+	variables: Record<string, string>,
+): Promise<RivenMediaItem | undefined> {
 	return gqlClient<{
 		mediaItemStateByTmdb?: GqlMediaItemStateTree | null;
 		mediaItemStateByTvdb?: GqlMediaItemStateTree | null;
 	}>(query, variables)
 		.then(
 			(data) =>
-				mapMediaItemStateTree(
-					data.mediaItemStateByTmdb ?? data.mediaItemStateByTvdb ?? null,
-				) ?? undefined,
+				data.mediaItemStateByTmdb ?? data.mediaItemStateByTvdb ?? undefined,
 		)
 		.catch(() => undefined);
 }

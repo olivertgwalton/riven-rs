@@ -27,20 +27,9 @@ type AnilistListItem {
 	year: String!
 }
 
-type AnilistMappings {
-	anilistId: Int!
-	tmdbId: Int
-	tvdbId: Int
-}
-
 type AnilistPage {
 	results: [AnilistListItem!]!
 	page: Int!
-}
-
-type AnilistRating {
-	id: Int!
-	score: Float
 }
 
 type AudioTrack {
@@ -101,11 +90,6 @@ enum Capability {
 	Ask for something to be added. The only action an ordinary user has.
 	"""
 	REQUEST_ITEMS
-	"""
-	Put an item straight into the library, bypassing the request queue.
-	No riven-ts counterpart — `addItem`/`discoverItem` are riven-rs's.
-	"""
-	ADD_ITEMS
 	PAUSE_ITEMS
 	RETRY_ITEMS
 	RESET_ITEMS
@@ -176,78 +160,6 @@ type DiscoveredStream {
 	itemType: MediaItemType!
 	seasonNumber: Int
 	episodeNumber: Int
-}
-
-input DownloadMediaItemMutationInput {
-	id: Int!
-	torrent: JSON!
-	processedBy: String!
-}
-
-type DownloadMediaItemMutationResponse {
-	success: Boolean!
-	message: String!
-	statusText: MutationStatusText!
-	item: MediaItemUnion
-}
-
-type Episode {
-	id: Int!
-	title: String!
-	fullTitle: String
-	imdbId: String
-	tvdbId: String
-	tmdbId: String
-	createdAt: DateTime!
-	updatedAt: DateTime
-	indexedAt: DateTime
-	scrapedAt: DateTime
-	scrapedTimes: Int!
-	aliases: JSON
-	network: String
-	country: String
-	language: String
-	airedAt: NaiveDate
-	year: Int
-	genres: JSON
-	rating: Float
-	contentRating: ContentRating
-	state: MediaItemState!
-	failedAttempts: Int!
-	itemType: MediaItemType!
-	isRequested: Boolean!
-	showStatus: ShowStatus
-	seasonNumber: Int
-	isSpecial: Boolean
-	parentId: Int
-	episodeNumber: Int
-	absoluteNumber: Int
-	runtime: Int
-	itemRequestId: Int
-	activeStreamId: Int
-	isAnime: Boolean!
-	networkTimezone: String
-	airedAtUtc: DateTime
-	lastScrapeAttemptAt: DateTime
-	"""
-	Absolute artwork URL. The column holds a bare path for anything indexed
-	before the plugins normalised what they wrote, so it is resolved here
-	rather than in each client.
-	"""
-	posterPath: String
-	streams(infoHashes: [String!]): [Stream!]!
-	"""
-	The parent season for this episode.
-	"""
-	season: Season!
-	"""
-	Lookup keys: `["abs:{absoluteNumber}", "{seasonNumber}:{episodeNumber}"]`.
-	"""
-	lookupKeys: [String!]!
-	"""
-	Always 1 — an episode has exactly one expected media file.
-	"""
-	expectedFileCount: Int!
 }
 
 """
@@ -384,97 +296,6 @@ type Genre {
 type IdResolution {
 	id: String!
 	resolved: Boolean!
-}
-
-input IndexEpisodeInput {
-	title: String!
-	number: Int!
-	absoluteNumber: Int
-	contentRating: ContentRating
-	runtime: Int
-	"""
-	ISO date string (YYYY-MM-DD).
-	"""
-	airedAt: String
-	posterPath: String
-}
-
-"""
-Input for the `indexMovie` mutation.
-"""
-input IndexMovieInput {
-	"""
-	ID of the `ItemRequest` being indexed.
-	"""
-	id: Int!
-	title: String!
-	imdbId: String
-	contentRating: ContentRating
-	rating: Float
-	posterUrl: String
-	"""
-	ISO date string (YYYY-MM-DD) for the theatrical release.
-	"""
-	releaseDate: String
-	country: String
-	language: String
-	"""
-	Locale → title aliases, e.g. `{"de": ["Titel"]}`.
-	"""
-	aliases: JSON
-	genres: [String!]!
-	runtime: Int
-}
-
-"""
-Structured response returned by `indexMovie`.
-"""
-type IndexMovieMutationResponse {
-	success: Boolean!
-	message: String!
-	statusText: MutationStatusText!
-	movie: Movie
-}
-
-input IndexSeasonInput {
-	number: Int!
-	title: String
-	episodes: [IndexEpisodeInput!]!
-}
-
-"""
-Input for the `indexShow` mutation.
-"""
-input IndexShowInput {
-	"""
-	ID of the `ItemRequest` being indexed.
-	"""
-	id: Int!
-	title: String!
-	imdbId: String
-	contentRating: ContentRating
-	rating: Float
-	posterUrl: String
-	country: String
-	language: String
-	"""
-	Locale → title aliases, e.g. `{"de": ["Titel"]}`.
-	"""
-	aliases: JSON
-	status: ShowStatus!
-	network: String
-	seasons: [IndexSeasonInput!]!
-	genres: [String!]!
-}
-
-"""
-Structured response returned by `indexShow`.
-"""
-type IndexShowMutationResponse {
-	success: Boolean!
-	message: String!
-	statusText: MutationStatusText!
-	show: Show
 }
 
 """
@@ -853,11 +674,6 @@ enum MediaItemType {
 }
 
 """
-Discriminated union of all concrete media item types.
-"""
-union MediaItemUnion = Movie | Show | Season | Episode
-
-"""
 The `media_metadata` document, derived from a release filename by
 `riven_rank::derive_media_metadata` and stored as JSON on the entry.
 
@@ -885,57 +701,6 @@ type MediaMetadata {
 	`parsed` when derived from the filename; set by whoever wrote the row.
 	"""
 	dataSource: String
-}
-
-type Movie {
-	id: Int!
-	title: String!
-	fullTitle: String
-	imdbId: String
-	tvdbId: String
-	tmdbId: String
-	createdAt: DateTime!
-	updatedAt: DateTime
-	indexedAt: DateTime
-	scrapedAt: DateTime
-	scrapedTimes: Int!
-	aliases: JSON
-	network: String
-	country: String
-	language: String
-	airedAt: NaiveDate
-	year: Int
-	genres: JSON
-	rating: Float
-	contentRating: ContentRating
-	state: MediaItemState!
-	failedAttempts: Int!
-	itemType: MediaItemType!
-	isRequested: Boolean!
-	showStatus: ShowStatus
-	seasonNumber: Int
-	isSpecial: Boolean
-	parentId: Int
-	episodeNumber: Int
-	absoluteNumber: Int
-	runtime: Int
-	itemRequestId: Int
-	activeStreamId: Int
-	isAnime: Boolean!
-	networkTimezone: String
-	airedAtUtc: DateTime
-	lastScrapeAttemptAt: DateTime
-	"""
-	Absolute artwork URL. The column holds a bare path for anything indexed
-	before the plugins normalised what they wrote, so it is resolved here
-	rather than in each client.
-	"""
-	posterPath: String
-	streams(infoHashes: [String!]): [Stream!]!
-	"""
-	Always 1 — a movie has exactly one expected media file.
-	"""
-	expectedFileCount: Int!
 }
 
 """
@@ -998,30 +763,6 @@ type MutationRoot {
 	"""
 	requestItems(movies: [MovieRequestInput!]!, shows: [ShowRequestInput!]!): RequestItemsResult!
 	"""
-	Persist indexer data for a movie and advance it to the scraping stage.
-	
-	Called by the indexer plugin after it has resolved metadata (title,
-	content rating, release date, etc.) for a movie item request.
-	"""
-	indexMovie(input: IndexMovieInput!): IndexMovieMutationResponse!
-	"""
-	Persist indexer data for a show (including seasons and episodes) and
-	advance it to the scraping stage.
-	
-	Called by the indexer plugin after it has resolved metadata for a show
-	item request.
-	"""
-	indexShow(input: IndexShowInput!): IndexShowMutationResponse!
-	scrapeMediaItem(input: ScrapeMediaItemMutationInput!): ScrapeMediaItemMutationResponse!
-	downloadMediaItem(input: DownloadMediaItemMutationInput!): DownloadMediaItemMutationResponse!
-	"""
-	Save a stream URL on a filesystem entry (media entry).
-	
-	Used by players and integrations to store the resolved playback URL
-	alongside the downloaded file record.
-	"""
-	saveStreamUrl(id: Int!, url: String!): SaveStreamUrlMutationResponse!
-	"""
 	Save a custom profile. If `id` is provided the existing profile is
 	updated; otherwise a new one is created. Built-in profiles cannot be
 	modified through this mutation — use `setProfileEnabled` instead.
@@ -1043,16 +784,6 @@ type MutationRoot {
 	"""
 	updateProfileSettings(name: String!, settings: JSON!): Boolean!
 	"""
-	Update rank settings. Deserialises into [`RankSettings`] (applying
-	serde defaults for any missing fields), then re-serialises the
-	canonical form — ensuring the Rust schema is the source of truth.
-	"""
-	updateRankSettings(settings: JSON!): JSON!
-	"""
-	Update all settings. Accepts a JSON object of key/value pairs.
-	"""
-	updateAllSettings(settings: JSON!): JSON!
-	"""
 	Mark the instance-wide first-run setup flow as completed.
 	"""
 	completeInitialSetup: Boolean!
@@ -1063,10 +794,6 @@ type MutationRoot {
 	returns the updated section so the UI gets fresh enabled/valid state.
 	"""
 	updateSettings(section: String!, values: JSON!): SettingsSection!
-	"""
-	Recompute stored library-profile matches for every existing media entry.
-	"""
-	rematchFilesystemLibraryProfiles: Int!
 	"""
 	Delete a specific filesystem entry (a single downloaded version) by its ID.
 	Returns true if the entry was found and deleted. The DB trigger on
@@ -1102,22 +829,6 @@ type MutationRoot {
 	Unpause items (derives next state from current facts).
 	"""
 	unpauseItems(ids: [Int!]!): Int!
-	"""
-	Trigger a scrape for an existing item by entering its
-	per-item state machine. For shows, optionally provide season_numbers
-	to mark additional seasons requested before processing.
-	"""
-	scrapeItem(id: Int!, seasonNumbers: [Int!]): String!
-	"""
-	Add a new media item to track and immediately queue it for indexing.
-	For shows, `seasons` is an optional list of season numbers to request.
-	If omitted, all non-special seasons are requested.
-	"""
-	addItem(itemType: MediaItemType!, title: String!, imdbId: String, tmdbId: String, tvdbId: String, seasons: [Int!]): MediaItem!
-	"""
-	Create or reuse a non-requested media item, then index/scrape it so streams can be inspected.
-	"""
-	discoverItem(itemType: MediaItemType!, title: String!, imdbId: String, tmdbId: String, tvdbId: String, seasons: [Int!]): MediaItem!
 	"""
 	Discover stream candidates without creating or mutating media items.
 	"""
@@ -1289,14 +1000,8 @@ type ProductionCompany {
 
 type QueryRoot {
 	viewer: Viewer!
-	mediaItemById(id: Int!): MediaItemUnion
-	mediaItems: [MediaItemUnion!]!
-	mediaItemByImdb(imdbId: String!): MediaItem
-	mediaItemByTmdb(tmdbId: String!): MediaItem
-	mediaItemByTvdb(tvdbId: String!): MediaItem
 	mediaItemFullByTmdb(tmdbId: String!): MediaItemFull
 	mediaItemFullByTvdb(tvdbId: String!): MediaItemFull
-	mediaItemFull(id: Int!): MediaItemFull
 	mediaItemStateByTmdb(tmdbId: String!): MediaItemStateTree
 	mediaItemStateByTvdb(tvdbId: String!): MediaItemStateTree
 	"""
@@ -1311,26 +1016,7 @@ type QueryRoot {
 	counterpart to `mediaItemStatusesByTmdbIds`, same batching rationale.
 	"""
 	mediaItemStatusesByTvdbIds(tvdbIds: [String!]!): [MediaItemStatus!]!
-	movies: [MediaItem!]!
-	shows: [MediaItem!]!
-	seasons(showId: Int!, includeSpecials: Boolean): [MediaItem!]!
-	episodes(seasonId: Int!): [MediaItem!]!
-	filesystemEntries(mediaItemId: Int!): [FileSystemEntry!]!
-	itemsByState(state: MediaItemState!, itemType: MediaItemType!): [MediaItem!]!
 	items(page: Int, limit: Int, sort: String, types: [MediaItemType!], search: String, states: [MediaItemState!]): ItemsPage!
-	episodeByTvdb(tvdbId: String!, episodeNumber: Int!, seasonNumber: Int): MediaItem
-	"""
-	Return the number of media files expected for a media item:
-	- Movie / Episode → 1
-	- Season → total episode count
-	- Show → total processable episode count (continuing shows exclude the last season)
-	"""
-	expectedFileCount(id: Int!): Int!
-	"""
-	Return lookup key strings for an episode:
-	`["abs:{absolute_number}", "{season_number}:{episode_number}"]`.
-	"""
-	lookupKeys(id: Int!): [String!]!
 	"""
 	Return all quality profiles as an ordered array of
 	`{ id, label, description, settings }` objects.
@@ -1345,10 +1031,6 @@ type QueryRoot {
 	Return all ranking profiles (built-in + custom) with their enabled status.
 	"""
 	customProfiles: JSON!
-	"""
-	Get all stored settings as a JSON object.
-	"""
-	allSettings: JSON!
 	"""
 	Return instance-level status flags used by frontend bootstrap flows.
 	Owns the setup-readiness rule so the UI never has to recompute it.
@@ -1381,8 +1063,6 @@ type QueryRoot {
 	tmdbLogoAndCert(type: String!, id: Int!): TmdbLogoAndCert!
 	trendingTmdb(type: String!, timeWindow: String!, page: Int): TmdbPage!
 	trendingAnilist(page: Int, perPage: Int): AnilistPage!
-	anilistRating(id: Int!): AnilistRating!
-	anilistMappings(id: Int!): AnilistMappings!
 	resolveExternalId(from: String!, to: String!, id: String!, mediaType: String): IdResolution!
 	ratings(indexer: String!, id: String!, mediaType: String): RatingsResponse!
 	traktRecommendations(id: String!, idType: String!, mediaType: String!): [TmdbListItem!]!
@@ -1392,7 +1072,6 @@ type QueryRoot {
 	Trakt for related titles when the page was reached from a TMDB id.
 	"""
 	showDetails(id: Int!, tmdbId: String): MediaDetails!
-	resolveTmdbToTvdb(tmdbId: String!): Int
 	logs(limit: Int, level: String): [LogEntry!]!
 	"""
 	Per-provider NNTP health (connections + demotion state). Empty when
@@ -1445,18 +1124,6 @@ type QueryRoot {
 	Get upcoming unreleased items (calendar feed), with show title resolved in a single query.
 	"""
 	calendar(limit: Int): [CalendarEntry!]!
-	"""
-	Get filesystem stat info for a VFS path (file or directory).
-	"""
-	vfsEntryStat(path: String!): VfsEntryStat!
-	"""
-	Get the filesystem entry (media file record) for a VFS file path.
-	"""
-	vfsEntry(path: String!): FileSystemEntry
-	"""
-	List child entry names (file or directory names) directly under a VFS path.
-	"""
-	vfsDirectoryEntryPaths(path: String!): [String!]!
 }
 
 type RatingScore {
@@ -1526,99 +1193,6 @@ type RivenNotification {
 	count: Int
 	newItems: Int
 	error: String
-}
-
-"""
-Structured response returned by `saveStreamUrl`.
-"""
-type SaveStreamUrlMutationResponse {
-	success: Boolean!
-	message: String!
-	statusText: MutationStatusText!
-	item: FileSystemEntry
-}
-
-enum ScrapeMediaItemMutationErrorCode {
-	NO_NEW_STREAMS
-	INCORRECT_STATE
-	SCRAPE_ERROR
-}
-
-input ScrapeMediaItemMutationInput {
-	id: Int!
-	results: JSON!
-}
-
-type ScrapeMediaItemMutationResponse {
-	success: Boolean!
-	message: String!
-	statusText: MutationStatusText!
-	errorCode: ScrapeMediaItemMutationErrorCode
-	item: MediaItemUnion
-	newStreamsCount: Int
-}
-
-type Season {
-	id: Int!
-	title: String!
-	fullTitle: String
-	imdbId: String
-	tvdbId: String
-	tmdbId: String
-	createdAt: DateTime!
-	updatedAt: DateTime
-	indexedAt: DateTime
-	scrapedAt: DateTime
-	scrapedTimes: Int!
-	aliases: JSON
-	network: String
-	country: String
-	language: String
-	airedAt: NaiveDate
-	year: Int
-	genres: JSON
-	rating: Float
-	contentRating: ContentRating
-	state: MediaItemState!
-	failedAttempts: Int!
-	itemType: MediaItemType!
-	isRequested: Boolean!
-	showStatus: ShowStatus
-	seasonNumber: Int
-	isSpecial: Boolean
-	parentId: Int
-	episodeNumber: Int
-	absoluteNumber: Int
-	runtime: Int
-	itemRequestId: Int
-	activeStreamId: Int
-	isAnime: Boolean!
-	networkTimezone: String
-	airedAtUtc: DateTime
-	lastScrapeAttemptAt: DateTime
-	"""
-	Absolute artwork URL. The column holds a bare path for anything indexed
-	before the plugins normalised what they wrote, so it is resolved here
-	rather than in each client.
-	"""
-	posterPath: String
-	streams(infoHashes: [String!]): [Stream!]!
-	"""
-	The parent show for this season.
-	"""
-	show: Show!
-	"""
-	All episodes in this season.
-	"""
-	episodes: [Episode!]!
-	"""
-	Total number of episodes in this season.
-	"""
-	totalEpisodes: Int!
-	"""
-	Expected number of episode files to download (equals total episodes).
-	"""
-	expectedFileCount: Int!
 }
 
 """
@@ -1736,62 +1310,6 @@ type SetupGroup {
 	description: String!
 }
 
-type Show {
-	id: Int!
-	title: String!
-	fullTitle: String
-	imdbId: String
-	tvdbId: String
-	tmdbId: String
-	createdAt: DateTime!
-	updatedAt: DateTime
-	indexedAt: DateTime
-	scrapedAt: DateTime
-	scrapedTimes: Int!
-	aliases: JSON
-	network: String
-	country: String
-	language: String
-	airedAt: NaiveDate
-	year: Int
-	genres: JSON
-	rating: Float
-	contentRating: ContentRating
-	state: MediaItemState!
-	failedAttempts: Int!
-	itemType: MediaItemType!
-	isRequested: Boolean!
-	showStatus: ShowStatus
-	seasonNumber: Int
-	isSpecial: Boolean
-	parentId: Int
-	episodeNumber: Int
-	absoluteNumber: Int
-	runtime: Int
-	itemRequestId: Int
-	activeStreamId: Int
-	isAnime: Boolean!
-	networkTimezone: String
-	airedAtUtc: DateTime
-	lastScrapeAttemptAt: DateTime
-	"""
-	Absolute artwork URL. The column holds a bare path for anything indexed
-	before the plugins normalised what they wrote, so it is resolved here
-	rather than in each client.
-	"""
-	posterPath: String
-	streams(infoHashes: [String!]): [Stream!]!
-	"""
-	Seasons for this show. Excludes season 0 (specials) by default.
-	"""
-	seasons(includeSpecials: Boolean! = false): [Season!]!
-	"""
-	Total expected downloadable episode files.
-	For continuing shows the currently-airing season is excluded.
-	"""
-	expectedFileCount: Int!
-}
-
 """
 Input for requesting a show (and optionally specific seasons) to be tracked.
 """
@@ -1827,17 +1345,6 @@ type SpokenLanguage {
 	name: String
 }
 
-type Stream {
-	id: Int!
-	infoHash: String!
-	parsedData: JSON
-	rank: Int
-	fileSizeBytes: Int
-	magnet: String!
-	createdAt: DateTime!
-	updatedAt: DateTime
-}
-
 type SubscriptionRoot {
 	"""
 	Stream of all UI-notable Riven events. Replaces the `/notifications/stream` SSE endpoint.
@@ -1863,7 +1370,7 @@ type SubscriptionRoot {
 	"""
 	Fires when a show has been indexed (metadata and episode structure persisted).
 	"""
-	showIndexed: Show!
+	showIndexed: MediaItem!
 	"""
 	Fires when a media item transitions to the scraped state.
 	"""
@@ -2102,29 +1609,6 @@ enum UserRole {
 	USER
 	MANAGER
 	ADMIN
-}
-
-"""
-Filesystem stat metadata for a VFS path.
-"""
-type VfsEntryStat {
-	mtime: DateTime!
-	ctime: DateTime!
-	atime: DateTime!
-	"""
-	Unix file mode (e.g. 0o040755 for directory, 0o100644 for regular file).
-	"""
-	mode: Int!
-	"""
-	Number of hard links.
-	"""
-	nlink: Int!
-	"""
-	File size in bytes (0 for directories).
-	"""
-	size: Int!
-	uid: Int!
-	gid: Int!
 }
 
 type VideoMetadata {

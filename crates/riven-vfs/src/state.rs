@@ -3,13 +3,15 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use dashmap::DashMap;
-use parking_lot::Mutex;
+use fuser::FileType;
 use riven_core::settings::LibraryProfileMembership;
 use riven_core::types::FileSystemEntryType;
 use riven_db::entities::FileSystemEntry;
 
 use crate::prefetch::{FileKey, Prefetcher};
-use crate::readdir::DirEntry;
+
+/// A directory entry ready to hand back to FUSE.
+pub(crate) type DirEntry = (u64, FileType, String);
 
 pub(crate) const ROOT_INO: u64 = 1;
 pub(crate) const MOVIES_INO: u64 = 2;
@@ -81,7 +83,7 @@ impl CachedEntry {
 
 pub(crate) struct VfsState {
     revision: AtomicU64,
-    pub file_handles: DashMap<u64, Mutex<OpenedFile>>,
+    pub file_handles: DashMap<u64, OpenedFile>,
     path_to_ino: DashMap<Arc<str>, u64>,
     ino_to_path: DashMap<u64, Arc<str>>,
     next_ino: AtomicU64,
@@ -100,6 +102,7 @@ impl VfsState {
             next_fd: AtomicU64::new(1),
             readdir_cache: DashMap::new(),
         };
+        state.register_static_path("/", ROOT_INO);
         state.register_static_path("/movies", MOVIES_INO);
         state.register_static_path("/shows", SHOWS_INO);
         state
@@ -153,19 +156,9 @@ impl VfsState {
     }
 
     pub(crate) fn resolve_path(&self, parent_ino: u64, name: &str) -> Arc<str> {
-        let parent = match parent_ino {
-            ROOT_INO => Arc::<str>::from("/"),
-            MOVIES_INO => Arc::<str>::from("/movies"),
-            SHOWS_INO => Arc::<str>::from("/shows"),
-            _ => self
-                .path(parent_ino)
-                .unwrap_or_else(|| Arc::<str>::from("/")),
-        };
-        Arc::from(if parent.as_ref() == "/" {
-            format!("/{name}")
-        } else {
-            format!("{parent}/{name}")
-        })
+        let parent = self.path(parent_ino);
+        let parent = parent.as_deref().unwrap_or("/");
+        Arc::from(format!("{}/{name}", parent.trim_end_matches('/')))
     }
 
     pub(crate) fn directory_entries(&self, ino: u64) -> Option<Vec<DirEntry>> {
@@ -180,7 +173,7 @@ impl VfsState {
 
     pub(crate) fn open(&self, file: OpenedFile) -> u64 {
         let fd = self.next_fd.fetch_add(1, Ordering::SeqCst);
-        self.file_handles.insert(fd, Mutex::new(file));
+        self.file_handles.insert(fd, file);
         fd
     }
 
@@ -191,8 +184,6 @@ impl VfsState {
 
 #[cfg(test)]
 mod tests {
-    use fuser::FileType;
-
     use super::*;
 
     struct EmptySource;
@@ -290,5 +281,6 @@ mod tests {
             state.resolve_path(parent, "Film.mkv").as_ref(),
             "/movies/Film/Film.mkv"
         );
+        assert_eq!(state.resolve_path(ROOT_INO, "movies").as_ref(), "/movies");
     }
 }

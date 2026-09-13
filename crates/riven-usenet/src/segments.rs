@@ -119,11 +119,6 @@ impl SegmentList {
     pub fn heap_bytes(&self) -> usize {
         self.ids.len() + self.ends.len() * 4 + self.sizes.len() * 4
     }
-
-    /// Total encoded bytes across every segment.
-    pub fn total_bytes(&self) -> u64 {
-        self.sizes.iter().copied().map(u64::from).sum()
-    }
 }
 
 /// Accumulates segments into the packed layout without an intermediate `Vec`
@@ -349,7 +344,10 @@ mod tests {
 
         let collected: Vec<&str> = list.iter().map(|s| s.message_id).collect();
         assert_eq!(collected, ["a@host", "bb@host", "ccc@host"]);
-        assert_eq!(list.total_bytes(), 700_000 + 700_001 + 12);
+        assert_eq!(
+            list.iter().map(|s| s.bytes).sum::<u64>(),
+            700_000 + 700_001 + 12
+        );
     }
 
     #[test]
@@ -402,7 +400,7 @@ mod tests {
         assert_eq!(list.id(0), Some("MAOJbi-N3fMQcKs7ETvFp@Kg64ar.4Uw"));
         assert_eq!(list.id(2), Some("v-P7ZIUwPnpD7JMwtGAYxE0c@_fsK8axi.fIE"));
         assert!(list.iter().all(|s| s.bytes == 768_000));
-        assert_eq!(list.total_bytes(), 3 * 768_000);
+        assert_eq!(list.iter().map(|s| s.bytes).sum::<u64>(), 3 * 768_000);
 
         // Ids are packed end to end; each must still come back with its own
         // boundaries, which is the failure mode a packed layout invites.

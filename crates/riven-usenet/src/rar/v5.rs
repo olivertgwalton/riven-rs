@@ -27,9 +27,8 @@ pub(super) fn parse_volume_header_v5(bytes: &[u8]) -> Result<RarVolumeHeader, Ra
         }
         pos += 4;
 
-        let header_size = match read_vint(bytes, &mut pos) {
-            Some(v) => v as usize,
-            None => break,
+        let Some(header_size) = read_vint(bytes, &mut pos).map(|v| v as usize) else {
+            break;
         };
         let Some(header_end) = pos.checked_add(header_size) else {
             break;
@@ -38,23 +37,21 @@ pub(super) fn parse_volume_header_v5(bytes: &[u8]) -> Result<RarVolumeHeader, Ra
             break;
         }
 
-        let header_type = match read_vint(bytes, &mut pos) {
-            Some(v) => v,
-            None => break,
+        let Some(header_type) = read_vint(bytes, &mut pos) else {
+            break;
         };
-        let head_flags = match read_vint(bytes, &mut pos) {
-            Some(v) => v,
-            None => break,
+        let Some(head_flags) = read_vint(bytes, &mut pos) else {
+            break;
         };
 
         if head_flags & RAR5_HEAD_FLAG_EXTRA != 0 && read_vint(bytes, &mut pos).is_none() {
             break;
         }
         let data_size = if head_flags & RAR5_HEAD_FLAG_DATA != 0 {
-            match read_vint(bytes, &mut pos) {
-                Some(v) => v,
-                None => break,
-            }
+            let Some(v) = read_vint(bytes, &mut pos) else {
+                break;
+            };
+            v
         } else {
             0
         };
@@ -62,17 +59,14 @@ pub(super) fn parse_volume_header_v5(bytes: &[u8]) -> Result<RarVolumeHeader, Ra
         match header_type {
             RAR5_BLOCK_TYPE_END => break,
             RAR5_BLOCK_TYPE_FILE => {
-                let file_flags = match read_vint(bytes, &mut pos) {
-                    Some(v) => v,
-                    None => break,
+                let Some(file_flags) = read_vint(bytes, &mut pos) else {
+                    break;
                 };
-                let unpacked_size = match read_vint(bytes, &mut pos) {
-                    Some(v) => v,
-                    None => break,
+                let Some(unpacked_size) = read_vint(bytes, &mut pos) else {
+                    break;
                 };
-                let _attributes = match read_vint(bytes, &mut pos) {
-                    Some(v) => v,
-                    None => break,
+                let Some(_attributes) = read_vint(bytes, &mut pos) else {
+                    break;
                 };
                 if file_flags & RAR5_FILE_FLAG_HAS_MTIME != 0 {
                     pos += 4;
@@ -80,17 +74,14 @@ pub(super) fn parse_volume_header_v5(bytes: &[u8]) -> Result<RarVolumeHeader, Ra
                 if file_flags & RAR5_FILE_FLAG_HAS_CRC != 0 {
                     pos += 4;
                 }
-                let compression_info = match read_vint(bytes, &mut pos) {
-                    Some(v) => v,
-                    None => break,
+                let Some(compression_info) = read_vint(bytes, &mut pos) else {
+                    break;
                 };
-                let _host_os = match read_vint(bytes, &mut pos) {
-                    Some(v) => v,
-                    None => break,
+                let Some(_host_os) = read_vint(bytes, &mut pos) else {
+                    break;
                 };
-                let name_len = match read_vint(bytes, &mut pos) {
-                    Some(v) => v as usize,
-                    None => break,
+                let Some(name_len) = read_vint(bytes, &mut pos).map(|v| v as usize) else {
+                    break;
                 };
                 let Some(name_end) = pos.checked_add(name_len) else {
                     break;

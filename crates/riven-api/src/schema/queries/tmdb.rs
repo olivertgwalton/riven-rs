@@ -4,7 +4,7 @@ use riven_core::plugin::PluginRegistry;
 
 use crate::profiles::TMDB;
 use std::collections::HashMap;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 use riven_core::entities::helpers::{Artwork, artwork_url};
 
@@ -336,11 +336,10 @@ where
 ///
 /// The frontend used to carry a hardcoded copy of this; it is upstream data, so
 /// it is read from upstream. A failed fetch costs the names, not the page.
-static GENRES: OnceLock<tokio::sync::OnceCell<HashMap<i64, String>>> = OnceLock::new();
+static GENRES: tokio::sync::OnceCell<HashMap<i64, String>> = tokio::sync::OnceCell::const_new();
 
 async fn genre_names(ctx: &Context<'_>) -> &'static HashMap<i64, String> {
     GENRES
-        .get_or_init(tokio::sync::OnceCell::new)
         .get_or_init(|| async {
             let mut names = HashMap::new();
             for kind in ["movie", "tv"] {

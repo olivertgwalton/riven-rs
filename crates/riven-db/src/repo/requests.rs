@@ -46,34 +46,19 @@ pub async fn get_external_request_ids_for_items(media_item_ids: &[i64]) -> Resul
     if media_item_ids.is_empty() {
         return Ok(Vec::new());
     }
-    // The original JOIN-ed media_items → item_requests; SeaORM can't bind a PG
-    // array here (no `postgres-array` feature), so do it in two builder steps:
-    // collect the linked request ids, then their non-null external ids.
-    let request_ids: Vec<i64> = media_items::Entity::find()
-        .filter(media_items::Column::Id.is_in(media_item_ids.iter().copied()))
-        .filter(media_items::Column::ItemRequestId.is_not_null())
-        .select_only()
-        .column(media_items::Column::ItemRequestId)
-        .into_tuple::<Option<i64>>()
-        .all(orm())
+    Ok(orm()
+        .query_all_raw(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT DISTINCT ir.external_request_id \
+             FROM item_requests ir \
+             JOIN media_items mi ON mi.item_request_id = ir.id \
+             WHERE mi.id = ANY($1) AND ir.external_request_id IS NOT NULL",
+            [media_item_ids.to_vec().into()],
+        ))
         .await?
         .into_iter()
-        .flatten()
-        .collect();
-    if request_ids.is_empty() {
-        return Ok(Vec::new());
-    }
-    Ok(item_requests::Entity::find()
-        .filter(item_requests::Column::Id.is_in(request_ids))
-        .filter(item_requests::Column::ExternalRequestId.is_not_null())
-        .select_only()
-        .column(item_requests::Column::ExternalRequestId)
-        .into_tuple::<Option<String>>()
-        .all(orm())
-        .await?
-        .into_iter()
-        .flatten()
-        .collect())
+        .map(|row| row.try_get::<String>("", "external_request_id"))
+        .collect::<Result<Vec<String>, _>>()?)
 }
 
 pub async fn get_item_request_by_id(id: i64) -> Result<Option<ItemRequest>> {
@@ -340,30 +325,32 @@ pub async fn get_retryable_item_requests() -> Result<Vec<ItemRequest>> {
         .await?)
 }
 
-/// Run one of the COUNT(*) episode rollup queries. `season_numbers`, when set,
-/// is inlined into the SQL (plain integers, no injection risk) because SeaORM
-/// can't bind a PG array without the `postgres-array` feature.
-async fn count_episodes_raw(
-    sql: &str,
+/// Count a show's requested non-special episodes, optionally limited to
+/// `season_numbers`. With `include_finished` false, completed and unreleased
+/// episodes are excluded.
+async fn count_requested_episodes(
     show_id: i64,
     season_numbers: Option<&[i32]>,
+    include_finished: bool,
 ) -> Result<i64> {
-    let sql = match season_numbers {
-        Some(nums) => {
-            let list = nums
-                .iter()
-                .map(i32::to_string)
-                .collect::<Vec<_>>()
-                .join(", ");
-            sql.replace("ANY($2)", &format!("ANY(ARRAY[{list}]::int[])"))
-        }
-        None => sql.to_owned(),
-    };
     let row = orm()
         .query_one_raw(Statement::from_sql_and_values(
             DbBackend::Postgres,
-            &sql,
-            [show_id.into()],
+            "SELECT COUNT(*) AS count
+             FROM media_items episode
+             JOIN media_items season ON episode.parent_id = season.id
+             WHERE season.parent_id = $1
+               AND season.item_type = 'season'
+               AND season.is_special = false
+               AND ($2::int[] IS NULL OR season.season_number = ANY($2::int[]))
+               AND episode.item_type = 'episode'
+               AND episode.is_requested = true
+               AND ($3 OR (episode.state <> 'completed' AND episode.state <> 'unreleased'))",
+            [
+                show_id.into(),
+                season_numbers.map(<[i32]>::to_vec).into(),
+                include_finished.into(),
+            ],
         ))
         .await?;
     match row {
@@ -416,38 +403,12 @@ pub async fn derive_item_request_state_for_request(
                     return Ok(ItemRequestState::Completed);
                 }
 
-                let remaining_requested_episodes = count_episodes_raw(
-                    "SELECT COUNT(*) AS count
-                     FROM media_items episode
-                     JOIN media_items season ON episode.parent_id = season.id
-                     WHERE season.parent_id = $1
-                       AND season.item_type = 'season'
-                       AND season.is_special = false
-                       AND season.season_number = ANY($2)
-                       AND episode.item_type = 'episode'
-                       AND episode.is_requested = true
-                       AND episode.state <> 'completed'
-                       AND episode.state <> 'unreleased'",
-                    show.id,
-                    Some(&season_numbers),
-                )
-                .await?;
+                let remaining_requested_episodes =
+                    count_requested_episodes(show.id, Some(&season_numbers), false).await?;
 
                 if remaining_requested_episodes == 0 {
-                    let requested_episode_count = count_episodes_raw(
-                        "SELECT COUNT(*) AS count
-                         FROM media_items episode
-                         JOIN media_items season ON episode.parent_id = season.id
-                         WHERE season.parent_id = $1
-                           AND season.item_type = 'season'
-                           AND season.is_special = false
-                           AND season.season_number = ANY($2)
-                           AND episode.item_type = 'episode'
-                           AND episode.is_requested = true",
-                        show.id,
-                        Some(&season_numbers),
-                    )
-                    .await?;
+                    let requested_episode_count =
+                        count_requested_episodes(show.id, Some(&season_numbers), true).await?;
 
                     if requested_episode_count > 0 {
                         return Ok(ItemRequestState::Completed);
@@ -468,36 +429,10 @@ pub async fn derive_item_request_state_for_request(
                 return Ok(ItemRequestState::Ongoing);
             }
 
-            let remaining_aired_episodes = count_episodes_raw(
-                "SELECT COUNT(*) AS count
-                 FROM media_items episode
-                 JOIN media_items season ON episode.parent_id = season.id
-                 WHERE season.parent_id = $1
-                   AND season.item_type = 'season'
-                   AND season.is_special = false
-                   AND episode.item_type = 'episode'
-                   AND episode.is_requested = true
-                   AND episode.state <> 'completed'
-                   AND episode.state <> 'unreleased'",
-                show.id,
-                None,
-            )
-            .await?;
+            let remaining_aired_episodes = count_requested_episodes(show.id, None, false).await?;
 
             if remaining_aired_episodes == 0 {
-                let requested_episode_count = count_episodes_raw(
-                    "SELECT COUNT(*) AS count
-                     FROM media_items episode
-                     JOIN media_items season ON episode.parent_id = season.id
-                     WHERE season.parent_id = $1
-                       AND season.item_type = 'season'
-                       AND season.is_special = false
-                       AND episode.item_type = 'episode'
-                       AND episode.is_requested = true",
-                    show.id,
-                    None,
-                )
-                .await?;
+                let requested_episode_count = count_requested_episodes(show.id, None, true).await?;
 
                 if requested_episode_count > 0 {
                     return Ok(ItemRequestState::Completed);

@@ -100,7 +100,9 @@ impl Plugin for SeerrPlugin {
         let api_key = ctx.require_setting("apikey")?;
         let url = ctx.settings.get_or("url", DEFAULT_URL);
         let base_url = url.trim_end_matches('/');
-        fetch_content(ctx, api_key, base_url).await
+        let filter = ctx.settings.get_or("filter", DEFAULT_FILTER);
+        let content = fetch_seerr_content(&ctx.http, api_key, base_url, &filter).await?;
+        Ok(content.into_hook_response())
     }
 }
 
@@ -267,7 +269,7 @@ async fn fetch_seerr_content(
     api_key: &str,
     base_url: &str,
     filter: &str,
-) -> anyhow::Result<riven_core::types::ContentServiceResponse> {
+) -> anyhow::Result<ContentCollection> {
     let mut content = ContentCollection::default();
     let mut skip = 0u32;
     loop {
@@ -337,17 +339,7 @@ async fn fetch_seerr_content(
         }
         skip += PAGE_SIZE;
     }
-    Ok(content.into_response())
-}
-
-async fn fetch_content(
-    ctx: &PluginContext,
-    api_key: &str,
-    base_url: &str,
-) -> anyhow::Result<HookResponse> {
-    let filter = ctx.settings.get_or("filter", DEFAULT_FILTER);
-    let content = fetch_seerr_content(&ctx.http, api_key, base_url, &filter).await?;
-    Ok(HookResponse::ContentService(Box::new(content)))
+    Ok(content)
 }
 
 #[derive(Deserialize)]

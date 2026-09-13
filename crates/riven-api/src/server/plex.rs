@@ -18,11 +18,8 @@
 //! Ported from the SvelteKit `plex-oauth.ts` this replaces, which ran the same
 //! four steps in Node.
 
-use std::collections::HashMap;
-use std::sync::{Arc, LazyLock, Mutex};
-use std::time::{Duration, Instant};
-
-use argon2::password_hash::rand_core::{OsRng, RngCore};
+use std::sync::{Arc, LazyLock};
+use std::time::Duration;
 
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode, header::USER_AGENT};
@@ -34,8 +31,8 @@ use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use super::ApiState;
-use super::authn::{AuthService, cookie, cookie_name, cookie_value};
+use super::authn::{ApiError, ApiResult, AuthService, TtlMap, cookie, cookie_name, cookie_value};
+use super::{ApiState, urlencoding_encode};
 
 const PLEX_PINS_URL: &str = "https://plex.tv/api/v2/pins";
 const PLEX_USER_URL: &str = "https://plex.tv/api/v2/user";
@@ -170,59 +167,14 @@ const HANDLE_COOKIE: &str = "riven.plex_handle";
 ///
 /// In-memory on purpose: a restart mid-sign-in just means the user starts over,
 /// which is a better failure than persisting a bearer credential.
-static PENDING_PINS: LazyLock<Mutex<HashMap<String, PendingPin>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
-
-struct PendingPin {
-    pin_id: i64,
-    created_at: Instant,
-}
-
-/// Mint a handle for `pin_id`, sweeping anything that has aged out.
-fn remember_pin(pin_id: i64) -> String {
-    let mut bytes = [0_u8; 32];
-    OsRng.fill_bytes(&mut bytes);
-    let handle = hex::encode(bytes);
-
-    let mut pending = PENDING_PINS.lock().unwrap_or_else(|e| e.into_inner());
-    pending.retain(|_, entry| entry.created_at.elapsed() < HANDLE_TTL);
-    pending.insert(
-        handle.clone(),
-        PendingPin {
-            pin_id,
-            created_at: Instant::now(),
-        },
-    );
-    handle
-}
-
-/// Resolve a handle back to its PIN id, or `None` if it is unknown or expired.
 ///
-/// The entry is left in place: polling is expected to be repeated until the user
-/// approves, so consuming it on first use would break the flow.
-fn resolve_pin(handle: &str) -> Option<i64> {
-    let pending = PENDING_PINS.lock().unwrap_or_else(|e| e.into_inner());
-    pending
-        .get(handle)
-        .filter(|entry| entry.created_at.elapsed() < HANDLE_TTL)
-        .map(|entry| entry.pin_id)
-}
-
-/// Drop a handle once its sign-in has concluded, so a completed PIN cannot be
-/// replayed for a second session.
-fn forget_pin(handle: &str) {
-    PENDING_PINS
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .remove(handle);
-}
-
-fn error(status: StatusCode, message: &str) -> Response {
-    (status, Json(json!({ "message": message }))).into_response()
-}
+/// Polling is expected to repeat until the user approves, so `poll` peeks; the
+/// handle is taken only once its sign-in has concluded, so a completed PIN
+/// cannot be replayed for a second session.
+static PENDING_PINS: LazyLock<TtlMap<i64>> = LazyLock::new(|| TtlMap::new(HANDLE_TTL));
 
 /// Step 1: mint a PIN and hand back the URL to send the user to.
-pub(super) async fn start(State(state): State<ApiState>) -> Response {
+pub(super) async fn start(State(state): State<ApiState>) -> ApiResult<Response> {
     let response = state
         .stream_client
         .post(PLEX_PINS_URL)
@@ -237,16 +189,25 @@ pub(super) async fn start(State(state): State<ApiState>) -> Response {
             Ok(pin) => pin,
             Err(error_) => {
                 tracing::warn!(error = %error_, "plex pin response was not parseable");
-                return error(StatusCode::BAD_GATEWAY, "Unexpected response from Plex");
+                return Err(ApiError(
+                    StatusCode::BAD_GATEWAY,
+                    "Unexpected response from Plex".into(),
+                ));
             }
         },
         Ok(response) => {
             tracing::warn!(status = %response.status(), "plex refused to mint a pin");
-            return error(StatusCode::BAD_GATEWAY, "Plex refused to start sign-in");
+            return Err(ApiError(
+                StatusCode::BAD_GATEWAY,
+                "Plex refused to start sign-in".into(),
+            ));
         }
         Err(error_) => {
             tracing::warn!(error = %error_, "could not reach plex.tv");
-            return error(StatusCode::BAD_GATEWAY, "Could not reach Plex");
+            return Err(ApiError(
+                StatusCode::BAD_GATEWAY,
+                "Could not reach Plex".into(),
+            ));
         }
     };
 
@@ -257,8 +218,8 @@ pub(super) async fn start(State(state): State<ApiState>) -> Response {
     );
 
     let secure = state.auth.cookie_secure;
-    let handle = remember_pin(pin.id);
-    (
+    let handle = PENDING_PINS.insert(pin.id);
+    Ok((
         [(
             SET_COOKIE,
             cookie(
@@ -270,7 +231,7 @@ pub(super) async fn start(State(state): State<ApiState>) -> Response {
         )],
         Json(PinResponse { handle, auth_url }),
     )
-        .into_response()
+        .into_response())
 }
 
 /// Step 3+4: poll the PIN; when Plex has a token, resolve the profile, link it
@@ -282,18 +243,24 @@ pub(super) async fn poll(
     State(state): State<ApiState>,
     headers: HeaderMap,
     Path(handle): Path<String>,
-) -> Response {
+) -> ApiResult<Response> {
     // Checked before anything else, so a caller that did not start this sign-in
     // cannot even learn whether the handle exists.
     let secure = state.auth.cookie_secure;
     if cookie_value(&headers, &cookie_name(HANDLE_COOKIE, secure)).as_deref() != Some(&*handle) {
-        return error(StatusCode::NOT_FOUND, "Unknown or expired sign-in");
+        return Err(ApiError(
+            StatusCode::NOT_FOUND,
+            "Unknown or expired sign-in".into(),
+        ));
     }
 
     // An unknown handle is indistinguishable from an expired one, and neither
     // reveals whether a PIN with some id exists.
-    let Some(pin_id) = resolve_pin(&handle) else {
-        return error(StatusCode::NOT_FOUND, "Unknown or expired sign-in");
+    let Some(pin_id) = PENDING_PINS.peek(&handle) else {
+        return Err(ApiError(
+            StatusCode::NOT_FOUND,
+            "Unknown or expired sign-in".into(),
+        ));
     };
 
     let pin: PlexPin = match state
@@ -306,14 +273,29 @@ pub(super) async fn poll(
     {
         Ok(response) if response.status().is_success() => match response.json().await {
             Ok(pin) => pin,
-            Err(_) => return error(StatusCode::BAD_GATEWAY, "Unexpected response from Plex"),
+            Err(_) => {
+                return Err(ApiError(
+                    StatusCode::BAD_GATEWAY,
+                    "Unexpected response from Plex".into(),
+                ));
+            }
         },
-        Ok(_) => return error(StatusCode::BAD_GATEWAY, "Plex rejected the sign-in code"),
-        Err(_) => return error(StatusCode::BAD_GATEWAY, "Could not reach Plex"),
+        Ok(_) => {
+            return Err(ApiError(
+                StatusCode::BAD_GATEWAY,
+                "Plex rejected the sign-in code".into(),
+            ));
+        }
+        Err(_) => {
+            return Err(ApiError(
+                StatusCode::BAD_GATEWAY,
+                "Could not reach Plex".into(),
+            ));
+        }
     };
 
     let Some(token) = pin.auth_token.filter(|token| !token.is_empty()) else {
-        return (StatusCode::ACCEPTED, Json(json!({ "pending": true }))).into_response();
+        return Ok((StatusCode::ACCEPTED, Json(json!({ "pending": true }))).into_response());
     };
 
     let profile: PlexProfile = match state
@@ -326,38 +308,45 @@ pub(super) async fn poll(
     {
         Ok(response) if response.status().is_success() => match response.json().await {
             Ok(profile) => profile,
-            Err(_) => return error(StatusCode::BAD_GATEWAY, "Unexpected profile from Plex"),
+            Err(_) => {
+                return Err(ApiError(
+                    StatusCode::BAD_GATEWAY,
+                    "Unexpected profile from Plex".into(),
+                ));
+            }
         },
-        Ok(_) => return error(StatusCode::UNAUTHORIZED, "Plex rejected the token"),
-        Err(_) => return error(StatusCode::BAD_GATEWAY, "Could not reach Plex"),
+        Ok(_) => {
+            return Err(ApiError(
+                StatusCode::UNAUTHORIZED,
+                "Plex rejected the token".into(),
+            ));
+        }
+        Err(_) => {
+            return Err(ApiError(
+                StatusCode::BAD_GATEWAY,
+                "Could not reach Plex".into(),
+            ));
+        }
     };
 
-    match link_and_start_session(&state.auth, &profile, &token, &headers).await {
-        Ok(session_cookie) => {
-            // The sign-in is done; the handle must not mint a second session.
-            forget_pin(&handle);
-            let body = Json(json!({ "pending": false }));
-            match Response::builder()
-                .status(StatusCode::OK)
-                .header(SET_COOKIE, session_cookie)
-                // Spent along with the handle — `header` appends, so this rides
-                // alongside the session cookie rather than replacing it.
-                .header(
-                    SET_COOKIE,
-                    cookie(&cookie_name(HANDLE_COOKIE, secure), "", 0, secure),
-                )
-                .header("content-type", "application/json")
-                .body(body.into_response().into_body())
-            {
-                Ok(response) => response,
-                Err(_) => error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "Could not build response",
-                ),
-            }
-        }
-        Err(message) => error(StatusCode::FORBIDDEN, &message),
-    }
+    let session_cookie = link_and_start_session(&state.auth, &profile, &token, &headers)
+        .await
+        .map_err(ApiError::forbidden)?;
+    // The sign-in is done; the handle must not mint a second session.
+    PENDING_PINS.take(&handle);
+    let body = Json(json!({ "pending": false }));
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(SET_COOKIE, session_cookie)
+        // Spent along with the handle — `header` appends, so this rides
+        // alongside the session cookie rather than replacing it.
+        .header(
+            SET_COOKIE,
+            cookie(&cookie_name(HANDLE_COOKIE, secure), "", 0, secure),
+        )
+        .header("content-type", "application/json")
+        .body(body.into_response().into_body())
+        .map_err(|error| ApiError::internal("Could not build response", error))
 }
 
 /// Link the Plex identity to a local user, then mint a session cookie.
@@ -477,10 +466,6 @@ async fn link_and_start_session(
     // `Secure` and the `__Host-` prefix included — as every other sign-in
     // path on the instance.
     Ok(super::authn::session_cookie(auth.cookie_secure, &token))
-}
-
-fn urlencoding_encode(value: &str) -> String {
-    url::form_urlencoded::byte_serialize(value.as_bytes()).collect()
 }
 
 #[cfg(test)]

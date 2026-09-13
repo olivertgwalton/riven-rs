@@ -22,24 +22,6 @@ pub mod vfs {
     /// Kernel block size — the byte length the OS reads/writes at a time.
     pub const BLOCK_SIZE: u64 = 131_072;
 
-    /// Default header size for scanning purposes.
-    pub const HEADER_SIZE: u64 = 262_144;
-
-    /// Minimum footer size for scanning purposes.
-    pub const MIN_FOOTER_SIZE: u64 = 16_384;
-
-    /// Maximum footer size for scanning purposes.
-    pub const MAX_FOOTER_SIZE: u64 = 10_485_760;
-
-    /// Target footer size as 1/N of file size (50 = 2%).
-    pub const TARGET_FOOTER_DIVISOR: u64 = 50;
-
-    /// Chunk size (in bytes) used for streaming calculations.
-    pub const CHUNK_SIZE: u64 = 1_048_576;
-
-    /// Per-handle RAM budget for sequential playback buffering.
-    pub const STREAM_BUFFER_SIZE: u64 = 32 * 1_048_576;
-
     /// Timeout for detecting stalled streams. Wired to reqwest's
     /// `read_timeout`, which resets on every successful read, so this bounds
     /// *inactivity* rather than total transfer time. It must not be applied as
@@ -49,36 +31,4 @@ pub mod vfs {
 
     /// Timeout for establishing a connection to the streaming service.
     pub const CONNECT_TIMEOUT_SECS: u64 = 10;
-
-    /// Timeout for waiting for a chunk to become available.
-    pub const CHUNK_TIMEOUT_SECS: u64 = 10;
-
-    /// Number of times a stream request is retried in-place against the same
-    /// URL before the caller escalates to refreshing the stream URL. Transient
-    /// CDN failures (502/503/504/429, connection resets) usually clear within a
-    /// retry or two, so this absorbs them without a link-resolver round-trip.
-    pub const STREAM_RETRY_MAX_ATTEMPTS: u32 = 3;
-
-    /// Base delay for exponential backoff between stream request retries. Delay
-    /// for attempt `n` (0-indexed) is `STREAM_RETRY_BASE_DELAY_MS << n`.
-    pub const STREAM_RETRY_BASE_DELAY_MS: u64 = 200;
-
-    /// Tolerance for detecting scan reads (in blocks).
-    pub const SCAN_TOLERANCE_BLOCKS: u64 = 25;
-
-    /// Tolerance for interleaved sequential reads (in blocks).
-    pub const SEQUENTIAL_READ_TOLERANCE_BLOCKS: u64 = 10;
-
-    /// Scan tolerance in bytes.
-    pub const SCAN_TOLERANCE_BYTES: u64 = SCAN_TOLERANCE_BLOCKS * BLOCK_SIZE;
-
-    /// Sequential read tolerance in bytes.
-    pub const SEQUENTIAL_READ_TOLERANCE_BYTES: u64 = SEQUENTIAL_READ_TOLERANCE_BLOCKS * BLOCK_SIZE;
-
-    /// Calculate footer size for a given file size.
-    pub fn footer_size(file_size: u64) -> u64 {
-        let target = file_size / TARGET_FOOTER_DIVISOR;
-        let clamped = target.clamp(MIN_FOOTER_SIZE, MAX_FOOTER_SIZE);
-        (clamped / BLOCK_SIZE) * BLOCK_SIZE
-    }
 }

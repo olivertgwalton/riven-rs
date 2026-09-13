@@ -83,10 +83,19 @@
         resolved = getResolvedLibraryId(requestSource, requestExternalId, requestMediaType);
     });
 
-    let mediaURL = $derived.by(() => {
+    const mediaPath = (id: string | number, mediaType: string, query = "") =>
+        resolve("/(protected)/details/media/[id]/[mediaType]", {
+            id: String(id),
+            mediaType
+        }) + (query ? `?${query}` : "");
+
+    let mediaHref = $derived.by(() => {
         if (!data.id) return null;
         if (normalizedType === "person" || normalizedType === "company") {
-            return `/details/entity/${data.id}/${normalizedType}`;
+            return resolve("/(protected)/details/entity/[id]/[type]", {
+                id: String(data.id),
+                type: normalizedType
+            });
         }
 
         if (
@@ -99,9 +108,8 @@
             // by the producer that knows which extra params the details page
             // needs for this item.
             if (data.detailsQuery) params.push(String(data.detailsQuery));
-            const queryParam = params.length > 0 ? `?${params.join("&")}` : "";
             // If indexer is undefined, assume tmdb behavior for now as default
-            return `/details/media/${data.id}/${normalizedType}${queryParam}`;
+            return mediaPath(data.id, normalizedType, params.join("&"));
         }
 
         if (indexer === "anilist" && (normalizedType === "movie" || normalizedType === "tv")) {
@@ -111,8 +119,11 @@
             // below uses) rather than link to a guaranteed 404; while
             // that's in flight, no link is better than a broken one.
             if (!resolved || resolved === "pending") return null;
-            const queryParam = resolved.indexer === "tvdb" ? "?indexer=tvdb" : "";
-            return `/details/media/${resolved.id}/${normalizedType}${queryParam}`;
+            return mediaPath(
+                resolved.id,
+                normalizedType,
+                resolved.indexer === "tvdb" ? "indexer=tvdb" : ""
+            );
         }
 
         return `/details/${indexer}${normalizedType ? `/${normalizedType}` : ""}/${data.id}`;
@@ -176,25 +187,6 @@
         )
     );
 
-    function getMediaHref(mediaURL: string) {
-        const [pathname, search = ""] = mediaURL.split("?");
-
-        if (pathname.startsWith("/details/media/")) {
-            const [, , , id, mediaType] = pathname.split("/");
-            const basePath = resolve("/(protected)/details/media/[id]/[mediaType]", {
-                id,
-                mediaType
-            });
-            return search ? `${basePath}?${search}` : basePath;
-        }
-
-        if (pathname.startsWith("/details/entity/")) {
-            const [, , , id, type] = pathname.split("/");
-            return resolve("/(protected)/details/entity/[id]/[type]", { id, type });
-        }
-
-        return mediaURL;
-    }
 </script>
 
 {#snippet cardContent()}
@@ -256,8 +248,8 @@
     </PortraitCard>
 {/snippet}
 
-{#if mediaURL}
-    <a href={getMediaHref(mediaURL)} class={containerClasses} onclick={handleCardClick}>
+{#if mediaHref}
+    <a href={mediaHref} class={containerClasses} onclick={handleCardClick}>
         {@render cardContent()}
     </a>
 {:else}

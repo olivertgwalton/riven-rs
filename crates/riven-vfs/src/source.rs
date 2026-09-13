@@ -10,7 +10,20 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use bytes::Bytes;
-use riven_core::local_source::{LocalByteSource, LocalOpenFile, SourceLayout};
+use riven_usenet::UsenetStreamer;
+use riven_usenet::streamer::UsenetOpenFile;
+
+/// How an origin is physically chunked, so read-ahead fetches whole units of
+/// the origin's own instead of straddling them.
+///
+/// Presence is the signal: a layout means the origin fetches articles, and
+/// read-ahead sizes its cushion in bytes and divides by `chunk_size`. Absence
+/// means a plain ranged HTTP origin, chunked into 8 MiB by the reader.
+#[derive(Debug, Clone)]
+pub struct SourceLayout {
+    /// Natural fetch unit — one usenet article's decoded size.
+    pub chunk_size: u64,
+}
 
 /// Fetches byte ranges of one open file.
 ///
@@ -38,11 +51,11 @@ pub trait ByteSource: Send + Sync {
 
 /// Usenet-backed range source.
 pub struct UsenetSource {
-    inner: Arc<dyn LocalByteSource>,
+    inner: UsenetStreamer,
     /// The origin's handle on this file, held for the life of the FUSE handle.
-    /// Resolving the segment map is per-open now rather than per-read; see
-    /// [`LocalByteSource`] for why that replaced a cache.
-    file: Arc<dyn LocalOpenFile>,
+    /// Resolving the segment map is per-open rather than per-read; see
+    /// [`UsenetStreamer::open_file`] for why that replaced a cache.
+    file: UsenetOpenFile,
     size: u64,
     /// Active-streams registry key, powering the dashboard's "now playing".
     /// Registered for the life of the handle and released on drop, so the
@@ -52,7 +65,7 @@ pub struct UsenetSource {
 
 impl UsenetSource {
     pub fn new(
-        inner: Arc<dyn LocalByteSource>,
+        inner: UsenetStreamer,
         info_hash: Arc<str>,
         file_index: usize,
         size: u64,
@@ -88,7 +101,10 @@ impl ByteSource for UsenetSource {
     }
 
     async fn layout(&self) -> Option<SourceLayout> {
-        self.file.layout().await
+        self.file
+            .chunk_size()
+            .await
+            .map(|chunk_size| SourceLayout { chunk_size })
     }
 
     fn size(&self) -> u64 {

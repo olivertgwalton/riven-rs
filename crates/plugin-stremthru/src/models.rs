@@ -2,20 +2,6 @@ use serde::Deserialize;
 
 use riven_core::types::TorrentStatus;
 
-pub fn parse_torrent_status(status: &str) -> TorrentStatus {
-    match status {
-        "cached" => TorrentStatus::Cached,
-        "queued" => TorrentStatus::Queued,
-        "downloading" => TorrentStatus::Downloading,
-        "processing" => TorrentStatus::Processing,
-        "downloaded" => TorrentStatus::Downloaded,
-        "uploading" => TorrentStatus::Uploading,
-        "failed" => TorrentStatus::Failed,
-        "invalid" => TorrentStatus::Invalid,
-        _ => TorrentStatus::Unknown,
-    }
-}
-
 #[derive(Deserialize)]
 pub struct StremthruResponse<T> {
     pub data: Option<T>,
@@ -55,7 +41,7 @@ pub struct StremthruCacheCheck {
 #[derive(Deserialize)]
 pub struct StremthruCacheItem {
     pub hash: String,
-    pub status: String,
+    pub status: TorrentStatus,
     #[serde(default)]
     pub files: Vec<StremthruCacheFile>,
 }

@@ -1,11 +1,9 @@
 use std::collections::HashMap;
 
-use riven_core::events::RivenEvent;
 use riven_core::types::{MediaItemType, ShowStatus};
 use riven_db::entities::{MediaItem, MediaItemHierarchy};
 use riven_db::repo;
 
-use crate::JobQueue;
 use crate::discovery::{ParseContext, load_active_profiles, load_dubbed_anime_only};
 
 pub struct ShowContext {
@@ -107,32 +105,6 @@ pub fn is_scrapeable(state: riven_core::types::MediaItemState) -> bool {
             | MediaItemState::Scraped
             | MediaItemState::PartiallyCompleted
     )
-}
-
-pub async fn load_media_item_or_download_error(
-    queue: &JobQueue,
-    id: i64,
-    error_msg: &str,
-) -> Option<MediaItem> {
-    match load_media_item_or_log(id, error_msg).await {
-        Some(item) => Some(item),
-        None => {
-            queue
-                .notify(RivenEvent::MediaItemDownloadError {
-                    id,
-                    title: String::new(),
-                    // The item couldn't even be loaded, so there's nothing to
-                    // read a real type/tmdb_id/tvdb_id from — `Movie` matches
-                    // the frontend's own fallback for an unmapped item type.
-                    item_type: MediaItemType::Movie,
-                    error: error_msg.into(),
-                    tmdb_id: None,
-                    tvdb_id: None,
-                })
-                .await;
-            None
-        }
-    }
 }
 
 pub async fn load_requested_seasons(item: &MediaItem) -> Option<Vec<i32>> {
@@ -256,67 +228,31 @@ pub async fn load_download_hierarchy_context(item: &MediaItem) -> DownloadHierar
         _ => None,
     };
 
+    let h = hierarchy.as_ref();
+    macro_rules! pick {
+        ($field:ident, $fallback:expr) => {
+            h.and_then(|h| h.$field.as_ref()).cloned().or($fallback)
+        };
+    }
+
     DownloadHierarchyContext {
         item: item.clone(),
-        season_id: hierarchy
-            .as_ref()
-            .and_then(|h| h.resolved_season_id)
-            .or(default_season_id),
-        season_number: hierarchy
-            .as_ref()
-            .and_then(|h| h.resolved_season_number)
-            .or(default_season_number),
+        season_id: pick!(resolved_season_id, default_season_id),
+        season_number: pick!(resolved_season_number, default_season_number),
         season_episodes,
-        show_id: hierarchy
-            .as_ref()
-            .and_then(|h| h.resolved_show_id)
-            .or(default_show_id),
-        show_title: hierarchy
-            .as_ref()
-            .and_then(|h| h.resolved_show_title.clone())
-            .or(default_show_title),
-        show_imdb_id: hierarchy
-            .as_ref()
-            .and_then(|h| h.resolved_show_imdb_id.clone())
-            .or(default_show_imdb_id),
-        show_tvdb_id: hierarchy
-            .as_ref()
-            .and_then(|h| h.resolved_show_tvdb_id.clone())
-            .or_else(|| item.tvdb_id.clone()),
-        show_year: hierarchy
-            .as_ref()
-            .and_then(|h| h.resolved_show_year)
-            .or(item.year),
-        show_genres: hierarchy
-            .as_ref()
-            .and_then(|h| h.resolved_show_genres.clone())
-            .or_else(|| item.genres.clone()),
-        show_network: hierarchy
-            .as_ref()
-            .and_then(|h| h.resolved_show_network.clone())
-            .or_else(|| item.network.clone()),
-        show_rating: hierarchy
-            .as_ref()
-            .and_then(|h| h.resolved_show_rating)
-            .or(item.rating),
-        show_content_rating: hierarchy
-            .as_ref()
-            .and_then(|h| h.resolved_show_content_rating)
-            .or(item.content_rating),
-        show_language: hierarchy
-            .as_ref()
-            .and_then(|h| h.resolved_show_language.clone())
-            .or_else(|| item.language.clone()),
-        show_country: hierarchy
-            .as_ref()
-            .and_then(|h| h.resolved_show_country.clone())
-            .or_else(|| item.country.clone()),
-        show_aliases: hierarchy
-            .as_ref()
-            .and_then(|h| h.resolved_show_aliases.clone())
-            .or_else(|| item.aliases.clone()),
-        show_is_anime: hierarchy
-            .as_ref()
+        show_id: pick!(resolved_show_id, default_show_id),
+        show_title: pick!(resolved_show_title, default_show_title),
+        show_imdb_id: pick!(resolved_show_imdb_id, default_show_imdb_id),
+        show_tvdb_id: pick!(resolved_show_tvdb_id, item.tvdb_id.clone()),
+        show_year: pick!(resolved_show_year, item.year),
+        show_genres: pick!(resolved_show_genres, item.genres.clone()),
+        show_network: pick!(resolved_show_network, item.network.clone()),
+        show_rating: pick!(resolved_show_rating, item.rating),
+        show_content_rating: pick!(resolved_show_content_rating, item.content_rating),
+        show_language: pick!(resolved_show_language, item.language.clone()),
+        show_country: pick!(resolved_show_country, item.country.clone()),
+        show_aliases: pick!(resolved_show_aliases, item.aliases.clone()),
+        show_is_anime: h
             .and_then(|h| h.resolved_show_is_anime)
             .unwrap_or(item.is_anime),
     }

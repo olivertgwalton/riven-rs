@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use futures::StreamExt;
@@ -1043,15 +1044,11 @@ impl UsenetStreamer {
         files: &[NzbFile],
         prefetched_blob: Option<&[u8]>,
     ) -> Option<Vec<String>> {
-        let owned_buf;
-        let buf = match prefetched_blob {
-            Some(b) => b,
-            None => {
-                owned_buf = self.fetch_par2_blob(files).await?;
-                &owned_buf
-            }
+        let buf: Cow<'_, [u8]> = match prefetched_blob {
+            Some(b) => Cow::Borrowed(b),
+            None => Cow::Owned(self.fetch_par2_blob(files).await?),
         };
-        let descs: Vec<Par2FileDesc> = match parse_file_descriptors(buf) {
+        let descs: Vec<Par2FileDesc> = match parse_file_descriptors(&buf) {
             Ok(d) => d,
             Err(error) => {
                 tracing::debug!(error = %error, "par2 FileDesc parse failed");
@@ -1093,18 +1090,14 @@ impl UsenetStreamer {
         files: &[NzbFile],
         prefetched_blob: Option<&[u8]>,
     ) -> (Vec<Vec<usize>>, Vec<String>) {
-        let owned_buf;
-        let buf = match prefetched_blob {
-            Some(b) => b,
+        let buf: Cow<'_, [u8]> = match prefetched_blob {
+            Some(b) => Cow::Borrowed(b),
             None => match self.fetch_par2_blob(files).await {
-                Some(b) => {
-                    owned_buf = b;
-                    &owned_buf
-                }
+                Some(b) => Cow::Owned(b),
                 None => return (Vec::new(), Vec::new()),
             },
         };
-        let descs: Vec<Par2FileDesc> = match parse_file_descriptors(buf) {
+        let descs: Vec<Par2FileDesc> = match parse_file_descriptors(&buf) {
             Ok(d) => d,
             Err(error) => {
                 tracing::debug!(error = %error, "par2 FileDesc parse failed");

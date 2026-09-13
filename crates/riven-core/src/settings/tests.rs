@@ -4,7 +4,7 @@ use super::*;
 use crate::types::ContentRating;
 
 fn plugin_settings(values: &[(&str, &str)]) -> PluginSettings {
-    PluginSettings::from_pairs("TEST", values)
+    PluginSettings::from_pairs(values)
 }
 
 fn filter_selection(include: &[&str], exclude: &[&str]) -> FilesystemFilterSelection {
@@ -256,10 +256,9 @@ fn plugin_settings_getters_normalize_keys_and_trim_values() {
     assert_eq!(settings.get("API_KEY"), Some("secret-token"));
     assert_eq!(settings.get("empty_value"), None);
     assert!(settings.get_bool("feature_enabled"));
-    assert_eq!(settings.get_parsed::<u32>("timeout_secs"), Some(45));
+    assert_eq!(settings.get_parsed_or("timeout_secs", 0_u32), 45);
     assert_eq!(settings.get_or("missing", "fallback"), "fallback");
     assert_eq!(settings.get_parsed_or("missing", 12_u32), 12);
-    assert_eq!(settings.prefix(), "TEST");
     assert!(settings.has("api_key"));
 }
 
@@ -295,7 +294,7 @@ fn plugin_settings_merge_db_override_overrides_and_serializes_supported_values()
 
     assert_eq!(settings.get("api_key"), Some("db-value"));
     assert!(settings.get_bool("enabled"));
-    assert_eq!(settings.get_parsed::<u32>("retries"), Some(3));
+    assert_eq!(settings.get_parsed_or("retries", 0_u32), 3);
     assert_eq!(
         settings.get_list("providers"),
         vec!["a".to_string(), "b".to_string()]

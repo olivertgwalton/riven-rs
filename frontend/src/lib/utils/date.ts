@@ -5,6 +5,7 @@ import {
 	CalendarDate,
 	parseDate,
 	getLocalTimeZone,
+	startOfWeek,
 	today,
 	type DateValue,
 } from "@internationalized/date";
@@ -149,44 +150,11 @@ export function isDayAndMonthToday(
 }
 
 /**
- * Get the last Monday before or on a given date
- */
-function getLastMonday(date: CalendarDate): CalendarDate {
-	// Convert to native Date for day-of-week calculation
-	const nativeDate = new Date(date.year, date.month - 1, date.day);
-	const dayOfWeek = nativeDate.getDay();
-	const diff = (dayOfWeek + 6) % 7; // Days since Monday
-
-	// Subtract days to get to Monday
-	const mondayNative = new Date(nativeDate);
-	mondayNative.setDate(mondayNative.getDate() - diff);
-
-	return new CalendarDate(
-		mondayNative.getFullYear(),
-		mondayNative.getMonth() + 1,
-		mondayNative.getDate(),
-	);
-}
-
-/**
- * Add days to a date
- */
-export function addDays(date: CalendarDate, days: number): CalendarDate {
-	const nativeDate = new Date(date.year, date.month - 1, date.day);
-	nativeDate.setDate(nativeDate.getDate() + days);
-
-	return new CalendarDate(
-		nativeDate.getFullYear(),
-		nativeDate.getMonth() + 1,
-		nativeDate.getDate(),
-	);
-}
-
-/**
  * Generate calendar data for a year (for heatmap visualization)
  */
 export function getCalendar(data: { [key: string]: number }, year: number) {
-	const base = getLastMonday(new CalendarDate(year, 1, 1));
+	// Weeks start on Monday (en-GB) — each row of the heatmap is a weekday.
+	const base = startOfWeek(new CalendarDate(year, 1, 1), "en-GB");
 
 	const out: {
 		max: number;
@@ -194,9 +162,9 @@ export function getCalendar(data: { [key: string]: number }, year: number) {
 	} = { max: 0, calendar: [] };
 
 	out.calendar = Array.from({ length: 7 }, (_, i) => {
-		const start = addDays(base, i);
+		const start = base.add({ days: i });
 		return Array.from({ length: 53 }, (_, j) => {
-			const day = addDays(start, j * 7);
+			const day = start.add({ weeks: j });
 			if (day.year === year) {
 				const date = toISODate(day);
 				const value = data[date] ?? 0;
@@ -210,42 +178,4 @@ export function getCalendar(data: { [key: string]: number }, year: number) {
 	});
 
 	return out;
-}
-
-/**
- * Get the first day of a month
- */
-export function getFirstDayOfMonth(year: number, month: number): CalendarDate {
-	return new CalendarDate(year, month, 1);
-}
-
-/**
- * Get the last day of a month
- */
-export function getLastDayOfMonth(year: number, month: number): CalendarDate {
-	// Get the first day of next month, then go back one day
-	const nextMonth = month === 12 ? 1 : month + 1;
-	const nextYear = month === 12 ? year + 1 : year;
-	const firstOfNext = new CalendarDate(nextYear, nextMonth, 1);
-
-	const nativeDate = new Date(
-		firstOfNext.year,
-		firstOfNext.month - 1,
-		firstOfNext.day,
-	);
-	nativeDate.setDate(nativeDate.getDate() - 1);
-
-	return new CalendarDate(
-		nativeDate.getFullYear(),
-		nativeDate.getMonth() + 1,
-		nativeDate.getDate(),
-	);
-}
-
-/**
- * Get the day of week (0 = Sunday, 6 = Saturday)
- */
-export function getDayOfWeek(date: CalendarDate): number {
-	const nativeDate = new Date(date.year, date.month - 1, date.day);
-	return nativeDate.getDay();
 }

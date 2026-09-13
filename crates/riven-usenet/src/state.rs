@@ -278,10 +278,6 @@ impl ActiveStreams {
         self.inner.lock().remove(key);
     }
 
-    pub fn has_any(&self) -> bool {
-        !self.inner.lock().is_empty()
-    }
-
     pub fn count(&self) -> usize {
         self.inner.lock().len()
     }

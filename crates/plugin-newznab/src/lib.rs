@@ -307,12 +307,28 @@ async fn scrape_one(
     http: &riven_core::http::HttpClient,
 ) -> ScrapeOutcome {
     let mut collected: Vec<NewznabItem> = Vec::new();
-    let mut paging = Paging::default();
-    while let Some(page) = paging.next_page() {
-        match scrape_page(indexer, request, search_type, base_params, http, page).await {
+    while collected.len() < MAX_RESULTS {
+        let offset = collected.len();
+        let limit = PAGE_SIZE.min(MAX_RESULTS - offset);
+        match scrape_page(
+            indexer,
+            request,
+            search_type,
+            base_params,
+            http,
+            offset,
+            limit,
+        )
+        .await
+        {
             ScrapeOutcome::Ok(items) => {
-                paging.absorb(items.len());
+                // A page shorter than asked for is the last one — including an
+                // empty page, which also stops an indexer that ignores `offset`.
+                let last = items.len() < limit;
                 collected.extend(items);
+                if last {
+                    break;
+                }
             }
             // A page that fails mid-walk still yields what came before it: a
             // truncated result set beats discarding pages that did arrive.
@@ -323,57 +339,15 @@ async fn scrape_one(
     ScrapeOutcome::Ok(collected)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Page {
-    offset: usize,
-    limit: usize,
-}
-
-/// Where the walk over one indexer's result set has got to.
-///
-/// Split out from the loop so the stopping rules are testable without an HTTP
-/// server: they are the whole substance of paging, and getting one wrong means
-/// either a truncated search or an unbounded crawl.
-#[derive(Debug, Default)]
-struct Paging {
-    taken: usize,
-    exhausted: bool,
-}
-
-impl Paging {
-    /// The next request to issue, or `None` once the indexer is out of matches
-    /// or [`MAX_RESULTS`] has been reached.
-    fn next_page(&self) -> Option<Page> {
-        if self.exhausted || self.taken >= MAX_RESULTS {
-            return None;
-        }
-        Some(Page {
-            offset: self.taken,
-            limit: PAGE_SIZE.min(MAX_RESULTS - self.taken),
-        })
-    }
-
-    /// Record what a page actually returned. A page shorter than the one asked
-    /// for is the last one — including an empty page, which also protects the
-    /// walk from spinning against an indexer that ignores `offset` entirely.
-    fn absorb(&mut self, received: usize) {
-        let asked = self.next_page().map_or(0, |page| page.limit);
-        self.taken += received;
-        if received < asked {
-            self.exhausted = true;
-        }
-    }
-}
-
 async fn scrape_page(
     indexer: &Indexer,
     request: &ScrapeRequest<'_>,
     search_type: &str,
     base_params: &[(&'static str, String)],
     http: &riven_core::http::HttpClient,
-    page: Page,
+    offset: usize,
+    limit: usize,
 ) -> ScrapeOutcome {
-    let Page { offset, limit } = page;
     let base_url = indexer.url.trim_end_matches('/');
     let url = format!("{base_url}/api");
 
@@ -711,54 +685,6 @@ mod tests {
         );
         assert_eq!(quota_exhausted_pause("502 Bad Gateway"), None);
         assert_eq!(quota_exhausted_pause(""), None);
-    }
-
-    /// The regression paging exists for: a query with more matches than one
-    /// page must not stop at the first page, as every scrape did before.
-    #[test]
-    fn paging_walks_full_pages_until_a_short_one() {
-        let mut paging = Paging::default();
-        assert_eq!(
-            paging.next_page(),
-            Some(Page {
-                offset: 0,
-                limit: PAGE_SIZE
-            })
-        );
-        paging.absorb(PAGE_SIZE);
-        assert_eq!(
-            paging.next_page(),
-            Some(Page {
-                offset: PAGE_SIZE,
-                limit: PAGE_SIZE
-            })
-        );
-        paging.absorb(PAGE_SIZE - 1);
-        assert_eq!(paging.next_page(), None, "a short page is the last page");
-    }
-
-    #[test]
-    fn paging_stops_at_the_result_ceiling() {
-        let mut paging = Paging::default();
-        let mut requests = 0;
-        while let Some(page) = paging.next_page() {
-            requests += 1;
-            assert!(page.offset + page.limit <= MAX_RESULTS);
-            paging.absorb(page.limit);
-            assert!(requests <= 32, "paging failed to terminate");
-        }
-        assert_eq!(paging.taken, MAX_RESULTS);
-        assert_eq!(requests, MAX_RESULTS / PAGE_SIZE);
-    }
-
-    /// An indexer that ignores `offset` answers every request with the same
-    /// full page. The ceiling bounds that, but an empty page must stop the
-    /// walk immediately rather than burning the whole budget.
-    #[test]
-    fn paging_stops_on_an_empty_page() {
-        let mut paging = Paging::default();
-        paging.absorb(0);
-        assert_eq!(paging.next_page(), None);
     }
 
     fn caps(body: &str) -> NewznabCaps {

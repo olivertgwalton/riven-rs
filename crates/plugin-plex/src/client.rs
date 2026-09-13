@@ -238,17 +238,13 @@ struct PlexSessionsContainer {
 struct PlexSessionMetadata {
     #[serde(rename = "type")]
     item_type: Option<String>,
-    #[serde(rename = "title")]
     title: Option<String>,
     #[serde(rename = "grandparentTitle")]
     grandparent_title: Option<String>,
-    #[serde(rename = "duration")]
     duration: Option<i64>,
     #[serde(rename = "parentIndex")]
     parent_index: Option<i32>,
-    #[serde(rename = "index")]
     index: Option<i32>,
-    #[serde(rename = "thumb")]
     thumb: Option<String>,
     #[serde(rename = "ViewOffset")]
     view_offset: Option<i64>,
@@ -262,17 +258,13 @@ struct PlexSessionMetadata {
 
 #[derive(Deserialize)]
 struct PlexPlayer {
-    #[serde(rename = "title")]
     title: Option<String>,
-    #[serde(rename = "product")]
     product: Option<String>,
-    #[serde(rename = "state")]
     state: Option<String>,
 }
 
 #[derive(Deserialize)]
 struct PlexUser {
-    #[serde(rename = "title")]
     title: Option<String>,
 }
 

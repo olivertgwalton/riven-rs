@@ -14,18 +14,18 @@ use crate::entities::*;
 use crate::orm;
 
 /// Shared INSERT … ON CONFLICT … RETURNING * implementation for top-level items
-/// (movies and shows). `item_type` is either `"movie"` or `"show"`.
+/// (movies and shows). `second_id_val` is the tmdb id for a movie, else the tvdb id.
 async fn upsert_top_level_item(
     title: &str,
     imdb_id: Option<&str>,
     second_id_val: Option<&str>,
-    item_type: &'static str,
+    type_val: MediaItemType,
     item_request_id: Option<i64>,
     is_requested: bool,
 ) -> Result<(MediaItem, bool)> {
-    let (type_val, tmdb_id, tvdb_id) = match item_type {
-        "movie" => (MediaItemType::Movie, second_id_val, None),
-        _ => (MediaItemType::Show, None, second_id_val),
+    let (tmdb_id, tvdb_id) = match type_val {
+        MediaItemType::Movie => (second_id_val, None),
+        _ => (None, second_id_val),
     };
     if let Some(existing) = find_existing_media_item(type_val, imdb_id, tmdb_id, tvdb_id).await? {
         let needs_update = is_requested
@@ -296,7 +296,15 @@ pub async fn create_movie(
     tmdb_id: Option<&str>,
     item_request_id: Option<i64>,
 ) -> Result<(MediaItem, bool)> {
-    upsert_top_level_item(title, imdb_id, tmdb_id, "movie", item_request_id, true).await
+    upsert_top_level_item(
+        title,
+        imdb_id,
+        tmdb_id,
+        MediaItemType::Movie,
+        item_request_id,
+        true,
+    )
+    .await
 }
 
 /// Returns `(item, was_created)`. `was_created` is false when an existing item was found.
@@ -306,23 +314,15 @@ pub async fn create_show(
     tvdb_id: Option<&str>,
     item_request_id: Option<i64>,
 ) -> Result<(MediaItem, bool)> {
-    upsert_top_level_item(title, imdb_id, tvdb_id, "show", item_request_id, true).await
-}
-
-pub async fn create_movie_unrequested(
-    title: &str,
-    imdb_id: Option<&str>,
-    tmdb_id: Option<&str>,
-) -> Result<(MediaItem, bool)> {
-    upsert_top_level_item(title, imdb_id, tmdb_id, "movie", None, false).await
-}
-
-pub async fn create_show_unrequested(
-    title: &str,
-    imdb_id: Option<&str>,
-    tvdb_id: Option<&str>,
-) -> Result<(MediaItem, bool)> {
-    upsert_top_level_item(title, imdb_id, tvdb_id, "show", None, false).await
+    upsert_top_level_item(
+        title,
+        imdb_id,
+        tvdb_id,
+        MediaItemType::Show,
+        item_request_id,
+        true,
+    )
+    .await
 }
 
 pub(crate) fn to_json<T: serde::Serialize>(v: &T) -> serde_json::Value {
@@ -558,28 +558,4 @@ pub async fn delete_items_removed_from_content_services(
         .exec(db)
         .await?;
     Ok(deleted.rows_affected)
-}
-
-pub async fn add_media_item_unrequested(
-    item_type: MediaItemType,
-    title: String,
-    imdb_id: Option<String>,
-    tmdb_id: Option<String>,
-    tvdb_id: Option<String>,
-) -> Result<MediaItem> {
-    match item_type {
-        MediaItemType::Movie => {
-            create_movie_unrequested(&title, imdb_id.as_deref(), tmdb_id.as_deref())
-                .await
-                .map(|(item, _)| item)
-        }
-        MediaItemType::Show => {
-            create_show_unrequested(&title, imdb_id.as_deref(), tvdb_id.as_deref())
-                .await
-                .map(|(item, _)| item)
-        }
-        _ => Err(anyhow::anyhow!(
-            "Only Movie and Show types can be added directly"
-        )),
-    }
 }

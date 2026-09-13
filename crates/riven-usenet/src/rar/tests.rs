@@ -55,7 +55,6 @@ fn parses_single_volume_stored() {
     let payload = b"hello-world-stored-payload";
     let bytes = make_single_volume("contained.mkv", payload);
     let header = parse_volume_header(&bytes).unwrap();
-    assert!(!header.is_volume);
     assert_eq!(header.files.len(), 1);
     let f = &header.files[0];
     assert_eq!(f.name, "contained.mkv");

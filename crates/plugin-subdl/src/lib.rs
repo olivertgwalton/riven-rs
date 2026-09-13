@@ -171,26 +171,12 @@ fn parse_languages(raw: &str) -> Vec<String> {
 }
 
 struct ItemMetadata {
-    media_type: SubMediaType,
+    /// SubDL `type`: `"movie"` or `"tv"`.
+    media_type: &'static str,
     tmdb_id: Option<String>,
     imdb_id: Option<String>,
     season_number: Option<i32>,
     episode_number: Option<i32>,
-}
-
-#[derive(Clone, Copy)]
-enum SubMediaType {
-    Movie,
-    Tv,
-}
-
-impl SubMediaType {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Movie => "movie",
-            Self::Tv => "tv",
-        }
-    }
 }
 
 async fn resolve_item_metadata(
@@ -202,7 +188,7 @@ async fn resolve_item_metadata(
     };
     match item.item_type {
         MediaItemType::Movie => Ok(Some(ItemMetadata {
-            media_type: SubMediaType::Movie,
+            media_type: "movie",
             tmdb_id: item.tmdb_id,
             imdb_id: item.imdb_id,
             season_number: None,
@@ -214,7 +200,7 @@ async fn resolve_item_metadata(
                 return Ok(None);
             };
             Ok(Some(ItemMetadata {
-                media_type: SubMediaType::Tv,
+                media_type: "tv",
                 tmdb_id: hierarchy
                     .item
                     .tmdb_id
@@ -247,7 +233,7 @@ async fn search_subtitles(
 ) -> anyhow::Result<Vec<SubtitleEntry>> {
     let mut params = vec![
         ("api_key".to_string(), api_key.to_string()),
-        ("type".to_string(), meta.media_type.as_str().to_string()),
+        ("type".to_string(), meta.media_type.to_string()),
         ("subs_per_page".to_string(), "30".to_string()),
         ("languages".to_string(), languages.join(",")),
     ];
@@ -263,11 +249,12 @@ async fn search_subtitles(
         params.push(("episode_number".to_string(), e.to_string()));
     }
 
-    let qs = serde_urlencoded::to_string(&params)?;
-    let url = format!("{DEFAULT_BASE_URL}subtitles?{qs}");
+    let url = format!("{DEFAULT_BASE_URL}subtitles");
 
     let resp: SearchResponse = http
-        .get_json(PROFILE, url.clone(), |client| client.get(&url))
+        .get_json(PROFILE, format!("{url}{params:?}"), |client| {
+            client.get(&url).query(&params)
+        })
         .await?;
 
     if !resp.status {

@@ -80,8 +80,20 @@ fn log_rank_rejection(info_hash: &str, title: &str, profile_name: Option<&str>, 
     }
 }
 
-fn year_candidates(year: i32) -> [i32; 3] {
-    [year - 1, year, year + 1]
+/// True when a release year `parsed_year` is more than one year away from
+/// every known year (the item's own and its parent show's). With neither year
+/// known, nothing mismatches.
+pub(crate) fn year_mismatch(
+    parsed_year: i32,
+    item_year: Option<i32>,
+    parent_year: Option<i32>,
+) -> bool {
+    let years = [item_year, parent_year];
+    years.iter().any(Option::is_some)
+        && !years
+            .iter()
+            .flatten()
+            .any(|y| (y - 1..=y + 1).contains(&parsed_year))
 }
 
 fn validate(ctx: &ParseContext, parsed: &riven_rank::ParsedData) -> Option<String> {
@@ -104,17 +116,10 @@ fn validate(ctx: &ParseContext, parsed: &riven_rank::ParsedData) -> Option<Strin
         return Some(format!("incorrect country: {pc} vs {ic}"));
     }
 
-    if let Some(py) = parsed.year {
-        let mut candidates: HashSet<i32> = HashSet::new();
-        if let Some(y) = ctx.item_year {
-            candidates.extend(year_candidates(y));
-        }
-        if let Some(y) = ctx.parent_year {
-            candidates.extend(year_candidates(y));
-        }
-        if !candidates.is_empty() && !candidates.contains(&py) {
-            return Some(format!("incorrect year: {py}"));
-        }
+    if let Some(py) = parsed.year
+        && year_mismatch(py, ctx.item_year, ctx.parent_year)
+    {
+        return Some(format!("incorrect year: {py}"));
     }
 
     match ctx.item_type {
@@ -247,7 +252,7 @@ pub fn rank_streams(
                 .profiles
                 .iter()
                 .filter_map(|(profile_name, settings)| {
-                    match riven_rank::rank_torrent_fast(
+                    match riven_rank::rank_torrent(
                         title,
                         info_hash,
                         &ctx.correct_title,
@@ -315,14 +320,11 @@ pub async fn load_active_profiles() -> Vec<(String, RankSettings)> {
         Ok(p) => p,
         Err(e) => {
             tracing::warn!(error = %e, "parse: could not load the configured quality profiles; falling back to the built-in defaults");
-            return vec![(
-                "ultra_hd".to_string(),
-                QualityProfile::UltraHd.base_settings().prepare(),
-            )];
+            return default_profiles();
         }
     };
 
-    let mut result: Vec<(String, RankSettings)> = profiles
+    let result: Vec<(String, RankSettings)> = profiles
         .into_iter()
         .filter_map(|p| {
             let settings = if p.is_builtin {
@@ -353,12 +355,16 @@ pub async fn load_active_profiles() -> Vec<(String, RankSettings)> {
         .collect();
 
     if result.is_empty() {
-        result.push((
-            "ultra_hd".to_string(),
-            QualityProfile::UltraHd.base_settings().prepare(),
-        ));
+        return default_profiles();
     }
     result
+}
+
+fn default_profiles() -> Vec<(String, RankSettings)> {
+    vec![(
+        "ultra_hd".to_string(),
+        QualityProfile::UltraHd.base_settings().prepare(),
+    )]
 }
 
 pub async fn load_dubbed_anime_only() -> bool {

@@ -1,14 +1,12 @@
 use async_graphql::*;
-use riven_core::downloader::DownloaderConfig;
-use riven_core::logging::{LogControl, LogSettings};
+use riven_core::logging::LogControl;
 use riven_core::plugin::PluginRegistry;
-use riven_core::settings::FilesystemSettings;
+use riven_core::settings::{FilesystemSettings, RivenSettings};
 use riven_core::vfs_layout::VfsLibraryLayout;
 use riven_db::repo;
 use riven_queue::JobQueue;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use tokio::sync::RwLock;
 
 use crate::schema::auth::require_settings_access;
 use crate::schema::queries::settings::{build_general_section, build_plugin_section};
@@ -27,34 +25,14 @@ fn coerce_json_bool(value: &serde_json::Value) -> Option<bool> {
     }
 }
 
-/// Build a [`LogSettings`] from a settings JSON object. The `enabled` flag is
-/// supplied by the caller because different mutations source it differently
-/// (an explicit toggle vs. the `logging_enabled` field); the remaining fields
-/// are read uniformly from `settings`.
-fn log_settings_from_json(settings: &serde_json::Value, enabled: bool) -> LogSettings {
-    LogSettings {
-        enabled,
-        level: settings
-            .get("log_level")
-            .and_then(|value| value.as_str())
-            .unwrap_or("info")
-            .to_string(),
-        rotation: settings
-            .get("log_rotation")
-            .and_then(|value| value.as_str())
-            .unwrap_or("hourly")
-            .to_string(),
-        max_files: settings
-            .get("log_max_files")
-            .and_then(serde_json::Value::as_u64)
-            .map(|value| value as usize)
-            .filter(|value| *value > 0)
-            .unwrap_or(5),
-        vfs_debug_logging: settings
-            .get("vfs_debug_logging")
-            .and_then(coerce_json_bool)
-            .unwrap_or(false),
-    }
+/// Build the logging-relevant settings from a settings JSON object. The
+/// `enabled` flag is supplied by the caller because different mutations source
+/// it differently (an explicit toggle vs. the `logging_enabled` field).
+fn log_settings_from_json(settings: &serde_json::Value, enabled: bool) -> RivenSettings {
+    let mut log_settings = RivenSettings::default();
+    log_settings.apply_general_db_override(settings);
+    log_settings.logging_enabled = enabled;
+    log_settings
 }
 
 pub(super) async fn rematch_filesystem_library_profiles_inner(
@@ -124,34 +102,6 @@ impl SettingsMutations {
         Ok(repo::update_profile_settings(&name, settings).await?)
     }
 
-    /// Update rank settings. Deserialises into [`RankSettings`] (applying
-    /// serde defaults for any missing fields), then re-serialises the
-    /// canonical form — ensuring the Rust schema is the source of truth.
-    async fn update_rank_settings(
-        &self,
-        ctx: &Context<'_>,
-        settings: serde_json::Value,
-    ) -> Result<serde_json::Value> {
-        require_settings_access(ctx)?;
-        let validated: riven_rank::RankSettings = serde_json::from_value(settings)
-            .map_err(|e| Error::new(format!("invalid rank settings: {e}")))?;
-        let canonical = serde_json::to_value(&validated)
-            .map_err(|e| Error::new(format!("failed to serialise rank settings: {e}")))?;
-
-        repo::set_setting("rank_settings", canonical.clone()).await?;
-        Ok(canonical)
-    }
-
-    /// Update all settings. Accepts a JSON object of key/value pairs.
-    async fn update_all_settings(
-        &self,
-        ctx: &Context<'_>,
-        settings: serde_json::Value,
-    ) -> Result<serde_json::Value> {
-        require_settings_access(ctx)?;
-        Ok(repo::set_all_settings(settings).await?)
-    }
-
     /// Mark the instance-wide first-run setup flow as completed.
     async fn complete_initial_setup(&self, ctx: &Context<'_>) -> Result<bool> {
         require_settings_access(ctx)?;
@@ -179,20 +129,6 @@ impl SettingsMutations {
             let registry = ctx.data::<Arc<PluginRegistry>>()?;
             build_plugin_section(registry, &section).await
         }
-    }
-
-    /// Recompute stored library-profile matches for every existing media entry.
-    async fn rematch_filesystem_library_profiles(&self, ctx: &Context<'_>) -> Result<i64> {
-        require_settings_access(ctx)?;
-        let queue = ctx.data::<Arc<JobQueue>>()?;
-        let filesystem_settings = queue.filesystem_settings.read().await.clone();
-        let updated = rematch_filesystem_library_profiles_inner(&filesystem_settings).await?;
-
-        queue
-            .filesystem_settings_revision
-            .fetch_add(1, Ordering::SeqCst);
-
-        Ok(updated)
     }
 }
 
@@ -225,17 +161,14 @@ async fn apply_general_settings(ctx: &Context<'_>, mut settings: serde_json::Val
         .apply(&log_settings)
         .map_err(|error| Error::new(error.to_string()))?;
 
-    let cfg = ctx.data::<Arc<RwLock<DownloaderConfig>>>()?;
-    let mut cfg = cfg.write().await;
+    let queue = ctx.data::<Arc<JobQueue>>()?;
     if let Some(v) = settings
         .get("attempt_unknown_downloads")
         .and_then(serde_json::Value::as_bool)
     {
-        cfg.attempt_unknown_downloads = v;
+        queue.attempt_unknown_downloads.store(v, Ordering::SeqCst);
     }
-    drop(cfg);
 
-    let queue = ctx.data::<Arc<JobQueue>>()?;
     let mut reindex_cfg = queue.reindex_config.write().await;
     reindex_cfg.schedule_offset_minutes = settings
         .get("schedule_offset_minutes")

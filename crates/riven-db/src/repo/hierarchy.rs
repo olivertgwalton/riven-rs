@@ -513,43 +513,41 @@ pub async fn mark_seasons_requested_and_get_episodes(
     .await?)
 }
 
-/// Render a Postgres enum array literal, e.g. `ARRAY['movie','show']::media_item_type[]`.
-/// The labels come from the enum's own `Value` (never user input), so inlining
-/// them is injection-safe and avoids needing sea-orm's `postgres-array` bind.
-fn enum_array_literal<E: Into<sea_orm::Value> + Copy>(items: &[E], pg_type: &str) -> String {
-    let labels: Vec<String> = items
+/// The database labels of `items`, for binding as a text array.
+fn enum_labels<E: Into<sea_orm::Value> + Copy>(items: &[E]) -> Vec<String> {
+    items
         .iter()
-        .map(|e| match (*e).into() {
-            sea_orm::Value::String(Some(s)) => format!("'{s}'"),
-            _ => "NULL".to_owned(),
+        .filter_map(|e| match (*e).into() {
+            sea_orm::Value::String(s) => s,
+            _ => None,
         })
-        .collect();
-    format!("ARRAY[{}]::{pg_type}[]", labels.join(", "))
+        .collect()
 }
 
-/// Build the dynamic WHERE fragment shared by the list/count queries. Enum
-/// arrays are inlined; the only bound parameter is the search term, returned
-/// separately so the caller can append it as `$1`.
+/// Build the dynamic WHERE fragment shared by the list/count queries, with
+/// its bound values in placeholder order.
 fn item_filters(
     types: Option<&[MediaItemType]>,
     search: Option<&str>,
     states: Option<&[MediaItemState]>,
-) -> (String, Option<String>) {
+) -> (String, Vec<sea_orm::Value>) {
     let mut sql = String::new();
-    let mut search_param = None;
+    let mut values: Vec<sea_orm::Value> = Vec::new();
 
     if let Some(t) = types
         && !t.is_empty()
     {
+        values.push(enum_labels(t).into());
         sql.push_str(&format!(
-            " AND media_items.item_type = ANY({})",
-            enum_array_literal(t, "media_item_type")
+            " AND media_items.item_type = ANY(${}::media_item_type[])",
+            values.len()
         ));
     }
     if let Some(s) = states
         && !s.is_empty()
     {
-        let arr = enum_array_literal(s, "media_item_state");
+        values.push(enum_labels(s).into());
+        let arr = format!("${}::media_item_state[]", values.len());
         sql.push_str(&format!(
             " AND (media_items.state = ANY({arr}) \
                OR (media_items.item_type = 'show' AND (EXISTS (\
@@ -571,10 +569,13 @@ fn item_filters(
     if let Some(q) = search
         && !q.is_empty()
     {
-        sql.push_str(" AND LOWER(media_items.title) LIKE $1");
-        search_param = Some(format!("%{}%", q.to_lowercase()));
+        values.push(format!("%{}%", q.to_lowercase()).into());
+        sql.push_str(&format!(
+            " AND LOWER(media_items.title) LIKE ${}",
+            values.len()
+        ));
     }
-    (sql, search_param)
+    (sql, values)
 }
 
 pub async fn list_items_paginated(
@@ -591,8 +592,7 @@ pub async fn list_items_paginated(
     let page = Ord::max(page, 1);
     let limit = limit.clamp(1, 200);
     let offset = (page - 1) * limit;
-    let (filters, search_param) =
-        item_filters(types.as_deref(), search.as_deref(), states.as_deref());
+    let (filters, values) = item_filters(types.as_deref(), search.as_deref(), states.as_deref());
 
     let order = match sort.as_deref() {
         Some("date_asc") => "ORDER BY media_items.created_at ASC NULLS LAST",
@@ -625,7 +625,6 @@ pub async fn list_items_paginated(
            OR (media_items.item_type = 'episode' AND resolved_show.id = parent_season.parent_id) \
          WHERE 1=1{filters} {order} LIMIT {limit} OFFSET {offset}"
     );
-    let values: Vec<sea_orm::Value> = search_param.into_iter().map(Into::into).collect();
     Ok(
         MediaItemListRow::find_by_statement(Statement::from_sql_and_values(
             DbBackend::Postgres,
@@ -642,10 +641,8 @@ pub async fn count_items_filtered(
     search: Option<String>,
     states: Option<Vec<MediaItemState>>,
 ) -> Result<i64> {
-    let (filters, search_param) =
-        item_filters(types.as_deref(), search.as_deref(), states.as_deref());
+    let (filters, values) = item_filters(types.as_deref(), search.as_deref(), states.as_deref());
     let sql = format!("SELECT COUNT(*) AS count FROM media_items WHERE 1=1{filters}");
-    let values: Vec<sea_orm::Value> = search_param.into_iter().map(Into::into).collect();
     let row = orm()
         .query_one_raw(Statement::from_sql_and_values(
             DbBackend::Postgres,

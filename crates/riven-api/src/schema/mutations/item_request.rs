@@ -66,6 +66,20 @@ pub(super) struct RequestItemsResult {
     updated_items: Vec<ItemRequest>,
 }
 
+fn failed(
+    message: String,
+    status_text: MutationStatusText,
+    error_code: RequestItemMutationResponseErrorCode,
+) -> RequestItemMutationResponse {
+    RequestItemMutationResponse {
+        success: false,
+        message,
+        status_text,
+        error_code: Some(error_code),
+        item: None,
+    }
+}
+
 #[derive(Default)]
 pub struct ItemRequestMutations;
 
@@ -94,24 +108,20 @@ impl ItemRequestMutations {
         {
             Ok(outcome) => outcome,
             Err(error) => {
-                return Ok(RequestItemMutationResponse {
-                    success: false,
-                    message: error.to_string(),
-                    status_text: MutationStatusText::BadRequest,
-                    error_code: Some(RequestItemMutationResponseErrorCode::UnexpectedError),
-                    item: None,
-                });
+                return Ok(failed(
+                    error.to_string(),
+                    MutationStatusText::BadRequest,
+                    RequestItemMutationResponseErrorCode::UnexpectedError,
+                ));
             }
         };
 
         if outcome.action == ItemRequestUpsertAction::Unchanged {
-            return Ok(RequestItemMutationResponse {
-                success: false,
-                message: "A request for this movie already exists.".to_string(),
-                status_text: MutationStatusText::Conflict,
-                error_code: Some(RequestItemMutationResponseErrorCode::Conflict),
-                item: None,
-            });
+            return Ok(failed(
+                "A request for this movie already exists.".to_string(),
+                MutationStatusText::Conflict,
+                RequestItemMutationResponseErrorCode::Conflict,
+            ));
         }
 
         if let Some(event) = outcome.lifecycle_event(None) {
@@ -151,13 +161,11 @@ impl ItemRequestMutations {
         {
             Ok(outcome) => outcome,
             Err(error) => {
-                return Ok(RequestItemMutationResponse {
-                    success: false,
-                    message: error.to_string(),
-                    status_text: MutationStatusText::BadRequest,
-                    error_code: Some(RequestItemMutationResponseErrorCode::UnexpectedError),
-                    item: None,
-                });
+                return Ok(failed(
+                    error.to_string(),
+                    MutationStatusText::BadRequest,
+                    RequestItemMutationResponseErrorCode::UnexpectedError,
+                ));
             }
         };
 
@@ -173,13 +181,11 @@ impl ItemRequestMutations {
                 MutationStatusText::Ok,
             ),
             ItemRequestUpsertAction::Unchanged => {
-                return Ok(RequestItemMutationResponse {
-                    success: false,
-                    message: "A request for this show already exists.".to_string(),
-                    status_text: MutationStatusText::Conflict,
-                    error_code: Some(RequestItemMutationResponseErrorCode::Conflict),
-                    item: None,
-                });
+                return Ok(failed(
+                    "A request for this show already exists.".to_string(),
+                    MutationStatusText::Conflict,
+                    RequestItemMutationResponseErrorCode::Conflict,
+                ));
             }
         };
 
@@ -214,20 +220,14 @@ impl ItemRequestMutations {
         require(ctx, Capability::RequestItems)?;
         let job_queue = ctx.data::<Arc<JobQueue>>()?;
         let mut seen: HashSet<String> = HashSet::new();
+        // Keyless items are never deduplicated.
+        let mut first_sighting = |key: Option<&str>| key.is_none_or(|k| seen.insert(k.to_owned()));
         let mut new_items: Vec<ItemRequest> = Vec::new();
         let mut updated_items: Vec<ItemRequest> = Vec::new();
         let mut count: i32 = 0;
 
         for movie in movies {
-            let key = movie
-                .tmdb_id
-                .as_deref()
-                .or(movie.imdb_id.as_deref())
-                .map(str::to_owned);
-
-            if let Some(ref k) = key
-                && !seen.insert(k.clone())
-            {
+            if !first_sighting(movie.tmdb_id.as_deref().or(movie.imdb_id.as_deref())) {
                 continue;
             }
 
@@ -243,40 +243,25 @@ impl ItemRequestMutations {
             .await
             .map_err(Error::from)?;
 
-            match outcome.action {
-                ItemRequestUpsertAction::Created => {
-                    if let Some(event) = outcome.lifecycle_event(None) {
-                        job_queue.notify(event).await;
-                    }
-                    new_items.push(outcome.request);
-                }
-                ItemRequestUpsertAction::Updated => {
-                    if let Some(event) = outcome.lifecycle_event(None) {
-                        job_queue.notify(event).await;
-                    }
-                    updated_items.push(outcome.request);
-                }
-                ItemRequestUpsertAction::Unchanged => {}
+            let bucket = match outcome.action {
+                ItemRequestUpsertAction::Created => &mut new_items,
+                ItemRequestUpsertAction::Updated => &mut updated_items,
+                ItemRequestUpsertAction::Unchanged => continue,
+            };
+            if let Some(event) = outcome.lifecycle_event(None) {
+                job_queue.notify(event).await;
             }
+            bucket.push(outcome.request);
         }
 
         for show in shows {
-            let key = show
-                .tvdb_id
-                .as_deref()
-                .or(show.imdb_id.as_deref())
-                .map(str::to_owned);
-
-            if let Some(ref k) = key
-                && !seen.insert(k.clone())
-            {
+            if !first_sighting(show.tvdb_id.as_deref().or(show.imdb_id.as_deref())) {
                 continue;
             }
 
             count += 1;
 
             let seasons = show.seasons.as_deref();
-
             let outcome = upsert_requested_show(
                 &show.title,
                 show.imdb_id.as_deref(),
@@ -288,21 +273,15 @@ impl ItemRequestMutations {
             .await
             .map_err(Error::from)?;
 
-            match outcome.action {
-                ItemRequestUpsertAction::Created => {
-                    if let Some(event) = outcome.lifecycle_event(show.seasons.as_deref()) {
-                        job_queue.notify(event).await;
-                    }
-                    new_items.push(outcome.request);
-                }
-                ItemRequestUpsertAction::Updated => {
-                    if let Some(event) = outcome.lifecycle_event(show.seasons.as_deref()) {
-                        job_queue.notify(event).await;
-                    }
-                    updated_items.push(outcome.request);
-                }
-                ItemRequestUpsertAction::Unchanged => {}
+            let bucket = match outcome.action {
+                ItemRequestUpsertAction::Created => &mut new_items,
+                ItemRequestUpsertAction::Updated => &mut updated_items,
+                ItemRequestUpsertAction::Unchanged => continue,
+            };
+            if let Some(event) = outcome.lifecycle_event(seasons) {
+                job_queue.notify(event).await;
             }
+            bucket.push(outcome.request);
         }
 
         Ok(RequestItemsResult {

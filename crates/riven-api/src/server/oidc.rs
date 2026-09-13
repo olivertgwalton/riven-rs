@@ -70,6 +70,7 @@ async fn discover(issuer: &str) -> anyhow::Result<DiscoveryDocument> {
     let url = format!("{issuer}/.well-known/openid-configuration");
 
     let client = reqwest::Client::builder()
+        .dns_resolver(riven_core::dns::CachedDnsResolver)
         .timeout(std::time::Duration::from_secs(10))
         .redirect(reqwest::redirect::Policy::none())
         .build()?;

@@ -87,20 +87,14 @@ export type Step = {
 	description: string;
 };
 
-export type PluginGroup = {
-	id: string;
-	title: string;
-	description: string;
-	emptyMessage?: string;
-};
-
 export type SetupPluginCardView = {
 	section: SettingsSection;
 	badge: { label: string; variant: "default" | "secondary" };
 	saving: boolean;
 };
 
-export type SetupPluginSection = PluginGroup & {
+export type SetupPluginSection = SetupGroup & {
+	emptyMessage?: string;
 	plugins: SetupPluginCardView[];
 };
 

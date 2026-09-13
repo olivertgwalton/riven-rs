@@ -18,10 +18,7 @@ impl JobQueue {
     /// scheduling. Bypasses `push_deduped` since the dedup key only covers the
     /// in-flight orchestrator phase.
     pub async fn push_scrape_after(&self, job: ScrapeJob, delay: std::time::Duration) {
-        let task = TaskBuilder::new(job).run_after(delay).build();
-        if let Err(e) = self.scrape_storage.clone().push_task(task).await {
-            tracing::error!(error = %e, "failed to push delayed ScrapeJob");
-        }
+        push_after(self.scrape_storage.clone(), job, delay, "ScrapeJob").await;
     }
     /// Bypasses `push_deduped`: this job carries the only copy of a scrape
     /// run's collected responses, so a dedup miss (a second scrape finishing
@@ -45,10 +42,7 @@ impl JobQueue {
     /// `push_scrape_after` does: the dedup key only covers the in-flight
     /// phase, and this job is the continuation of one that just released it.
     pub async fn push_download_after(&self, job: DownloadJob, delay: std::time::Duration) {
-        let task = TaskBuilder::new(job).run_after(delay).build();
-        if let Err(e) = self.download_storage.clone().push_task(task).await {
-            tracing::error!(error = %e, "failed to push delayed DownloadJob");
-        }
+        push_after(self.download_storage.clone(), job, delay, "DownloadJob").await;
     }
 
     /// Entry point for the download flow. Pushes a `RankStreamsJob` which loads
@@ -199,28 +193,20 @@ impl JobQueue {
         Ok(())
     }
 
-    /// Re-push a `ProcessMediaItemJob` with a future `run_at`. Used by the
-    /// `Scrape` step when `next_scrape_attempt_at` is in the future.
-    pub async fn push_process_media_item_at(
+    /// Push a `ProcessMediaItemJob` to run after `delay`. Used by `Validate`
+    /// to schedule the next scrape once the failure cooldown expires.
+    pub async fn push_process_media_item_after(
         &self,
         job: ProcessMediaItemJob,
-        run_at: DateTime<Utc>,
+        delay: std::time::Duration,
     ) {
-        let now = Utc::now();
-        if run_at <= now {
-            self.push_process_media_item(job).await;
-            return;
-        }
-        let delay = (run_at - now).to_std().unwrap_or_default();
-        let task = TaskBuilder::new(job).run_after(delay).build();
-        if let Err(e) = self
-            .process_media_item_storage
-            .clone()
-            .push_task(task)
-            .await
-        {
-            tracing::error!(error = %e, "failed to push delayed ProcessMediaItemJob");
-        }
+        push_after(
+            self.process_media_item_storage.clone(),
+            job,
+            delay,
+            "ProcessMediaItemJob",
+        )
+        .await;
     }
 
     /// Enqueue the download flow starting at rank-streams, if at least one
@@ -304,6 +290,19 @@ impl JobQueue {
                 .map(|plugin| self.push_plugin_hook(plugin, event.clone())),
         )
         .await;
+    }
+}
+
+/// Push `job` onto `storage` to run after `delay` via apalis's native `run_at`
+/// scheduling, logging (not propagating) a failed push.
+async fn push_after<T, S>(mut storage: S, job: T, delay: std::time::Duration, label: &'static str)
+where
+    S: TaskSink<T>,
+    S::Error: std::fmt::Display,
+{
+    let task = TaskBuilder::new(job).run_after(delay).build();
+    if let Err(e) = storage.push_task(task).await {
+        tracing::error!(error = %e, label, "failed to push delayed job");
     }
 }
 

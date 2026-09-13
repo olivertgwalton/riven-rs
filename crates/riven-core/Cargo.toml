@@ -14,24 +14,17 @@ reqwest = { workspace = true }
 hyper = { workspace = true }
 # Async DNS resolver shared by the HTTP client and the NNTP dialer — replaces
 # musl's fragile getaddrinfo (EAI_AGAIN under concurrency in Docker/OrbStack).
-# Pinned to 0.25 to share the single version reqwest's `hickory-dns` feature
-# already pulls (reqwest requires ^0.25).
 hickory-resolver = "0.26"
 async-trait = { workspace = true }
 async-graphql = { workspace = true }
 chrono = { workspace = true }
 anyhow = { workspace = true }
+thiserror = { workspace = true }
 url = "2"
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 tracing-appender = { workspace = true }
 tracing-log = { workspace = true }
-tracing-opentelemetry = { workspace = true }
-opentelemetry = { workspace = true }
-opentelemetry_sdk = { workspace = true }
-opentelemetry-otlp = { workspace = true }
-sentry = { workspace = true }
-log = "0.4"
 figment = { workspace = true }
 parking_lot = { workspace = true }
 lru = { workspace = true }
@@ -40,7 +33,6 @@ hmac = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
 quick-xml = "0.41"
-dashmap = { workspace = true }
 bytes = { workspace = true }
 redis = { workspace = true }
 sea-orm = { workspace = true }

@@ -1,26 +1,36 @@
 <script lang="ts">
     import * as Chart from "$lib/components/ui/chart/index.js";
-    import ResponsiveChartContainer from "$lib/components/media/riven/responsive-chart-container.svelte";
     import { PieChart } from "layerchart";
-    import type { DashboardStatistics } from "./types";
+    import type { LibraryStats } from "$lib/gql/schema";
 
-    let { statistics }: { statistics: DashboardStatistics | undefined } = $props();
+    let { stats }: { stats: LibraryStats | undefined } = $props();
 
     const stateRows = $derived.by(() =>
-        Object.entries(statistics?.states ?? {})
-            .filter(([, value]) => value > 0)
-            .map(([label, value]) => ({ label, value }))
+        !stats
+            ? []
+            : Object.entries({
+                  Completed: stats.completed,
+                  Scraped: stats.scraped,
+                  Indexed: stats.indexed,
+                  Failed: stats.failed,
+                  Paused: stats.paused,
+                  Ongoing: stats.ongoing,
+                  PartiallyCompleted: stats.partiallyCompleted,
+                  Unreleased: stats.unreleased
+              })
+                  .filter(([, value]) => value > 0)
+                  .map(([label, value]) => ({ label, value }))
     );
     const maxStateValue = $derived.by(() => Math.max(...stateRows.map((item) => item.value), 1));
 
     const contentRows = $derived.by(() =>
-        !statistics
+        !stats
             ? []
             : [
-                  ["Movies", statistics.total_movies, "#ef4444"],
-                  ["Shows", statistics.total_shows, "#14b8a6"],
-                  ["Seasons", statistics.total_seasons, "#60a5fa"],
-                  ["Episodes", statistics.total_episodes, "#f59e0b"]
+                  ["Movies", stats.totalMovies, "#ef4444"],
+                  ["Shows", stats.totalShows, "#14b8a6"],
+                  ["Seasons", stats.totalSeasons, "#60a5fa"],
+                  ["Episodes", stats.totalEpisodes, "#f59e0b"]
               ].map(([label, value, color]) => ({
                   label: String(label),
                   value: Number(value),
@@ -73,7 +83,7 @@
         <h2 class="text-base font-semibold">Content Breakdown</h2>
 
         <div class="mt-6 grid items-center gap-6 sm:grid-cols-[14rem_minmax(0,1fr)]">
-            <ResponsiveChartContainer config={{}} class="mx-auto h-56 w-56">
+            <Chart.Container config={{}} class="mx-auto h-56 w-56">
                 <PieChart
                     data={contentRows}
                     key="label"
@@ -87,7 +97,7 @@
                         <Chart.Tooltip />
                     {/snippet}
                 </PieChart>
-            </ResponsiveChartContainer>
+            </Chart.Container>
             {@render LegendRows({ items: contentRows })}
         </div>
     </div>

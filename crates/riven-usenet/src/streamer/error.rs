@@ -22,8 +22,6 @@ pub enum StreamerError {
     IncompleteRelease { missing: usize, checked: usize },
     #[error("archive is encrypted but no password was provided")]
     MissingPassword,
-    #[error("crypto error: {0}")]
-    Crypto(#[from] crate::crypto::CryptoError),
     #[error("ingest queue full")]
     IngestQueueFull,
     #[error("blocking task failed: {0}")]
