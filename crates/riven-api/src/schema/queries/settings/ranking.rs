@@ -138,6 +138,16 @@ pub(super) fn build_rank_settings_schema() -> Vec<SettingField> {
                     FieldType::Boolean,
                 ),
                 SettingField::new(
+                    "remove_unknown_quality",
+                    "Remove unknown quality",
+                    FieldType::Boolean,
+                )
+                .with_description(
+                    "Reject releases whose quality/source tag (WEB-DL, BluRay, etc.) \
+                     couldn't be identified from the title — often decoys or camrips \
+                     with unconventional filenames.",
+                ),
+                SettingField::new(
                     "allow_english_in_languages",
                     "Always allow English",
                     FieldType::Boolean,
