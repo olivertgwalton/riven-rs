@@ -133,6 +133,20 @@ const FAILED_JOB_MAX_COUNT: isize = 5_000;
 /// old incarnation managed to ack can never be double-queued. (apalis ships
 /// `reenqueue_orphaned_jobs.lua` for this and nothing in apalis-redis
 /// 1.0.0-rc.8 invokes it.)
+///
+/// Before the `RPUSH`, each id is checked against the job-data hash with
+/// `HEXISTS` and dropped instead of requeued if it's missing — the same
+/// guard [`purge_orphaned_active_jobs`] and `rescue_queue`'s startup rescue
+/// already apply. Without it, an id whose data hash entry was reaped (e.g. by
+/// [`prune_queue_history`]) while still marked inflight comes back here on
+/// the crashed worker's very next restart, goes straight onto the active
+/// list, gets dequeued, fails to deserialize with no data behind it, crashes
+/// the worker, and lands right back in this function — a self-sustaining
+/// crash loop with no backoff ceiling below `BACKOFF_CAP`, observed in
+/// production taking down an entire queue's indexing for hours because
+/// `purge_orphaned_active_jobs` only runs from the coarse-grained
+/// `run_worker_monitor` maintenance pass (whole-`Monitor`-exit territory),
+/// never from this per-worker restart path.
 pub async fn clear_dead_incarnation(
     redis: &mut redis::aio::ConnectionManager,
     queue_name: &str,
@@ -140,10 +154,15 @@ pub async fn clear_dead_incarnation(
 ) -> redis::RedisResult<u64> {
     const CLEAR_DEAD_INCARNATION: &str = r#"
         local moved = 0
+        local dropped = 0
         for _, id in ipairs(redis.call("SMEMBERS", KEYS[1])) do
             if redis.call("SREM", KEYS[1], id) == 1 then
-                redis.call("RPUSH", KEYS[2], id)
-                moved = moved + 1
+                if redis.call("HEXISTS", KEYS[6], id) == 1 then
+                    redis.call("RPUSH", KEYS[2], id)
+                    moved = moved + 1
+                else
+                    dropped = dropped + 1
+                end
             end
         end
         redis.call("ZREM", KEYS[4], KEYS[1])
@@ -152,7 +171,7 @@ pub async fn clear_dead_incarnation(
             redis.call("DEL", KEYS[3])
             redis.call("LPUSH", KEYS[3], 1)
         end
-        return moved
+        return {moved, dropped}
     "#;
 
     let config = RedisConfig::new(queue_name);
@@ -161,12 +180,13 @@ pub async fn clear_dead_incarnation(
     // apalis-redis's own registration (lib.rs heartbeat + register_worker.lua).
     let inflight_set = format!("{}:{}", config.inflight_jobs_set(), worker_name);
     let metadata_key = format!("{queue_name}:workers:metadata{inflight_set}");
-    let moved: u64 = redis::Script::new(CLEAR_DEAD_INCARNATION)
+    let (moved, dropped): (u64, u64) = redis::Script::new(CLEAR_DEAD_INCARNATION)
         .key(&inflight_set)
         .key(config.active_jobs_list())
         .key(config.signal_list())
         .key(config.workers_set())
         .key(&metadata_key)
+        .key(config.job_data_hash())
         .invoke_async(redis)
         .await?;
     if moved > 0 {
@@ -175,6 +195,14 @@ pub async fn clear_dead_incarnation(
             worker = worker_name,
             requeued = moved,
             "requeued tasks stranded by the previous worker incarnation"
+        );
+    }
+    if dropped > 0 {
+        tracing::warn!(
+            queue = queue_name,
+            worker = worker_name,
+            dropped,
+            "dropped orphaned inflight job IDs with no backing job-data entry instead of requeueing them"
         );
     }
     Ok(moved)
