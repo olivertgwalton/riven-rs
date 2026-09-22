@@ -5,7 +5,7 @@ mod newznab;
 use async_trait::async_trait;
 use redis::AsyncCommands;
 use riven_core::events::{EventType, HookResponse, ScrapeRequest};
-use riven_core::http::HttpServiceProfile;
+use riven_core::http::{HttpServiceProfile, RateLimitedError};
 use riven_core::plugin::{Plugin, PluginContext};
 use riven_core::settings::PluginSettings;
 use riven_core::types::*;
@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use crate::client::{
     AddTorrentOutcome, GeneratedLink, StoreRateLimited, add_newz, add_torrent, check_cache,
-    download_result_from_files, fetch_user_info, generate_link, scrape_torznab,
+    download_result_from_files, fetch_user_info, forget_cache_check, generate_link, scrape_torznab,
     store_cooldown_remaining,
 };
 use crate::newznab::{is_nzb_info_hash, nzb_url_redis_key, scrape_newznab};
@@ -260,6 +260,7 @@ impl Plugin for StremthruPlugin {
         let stores = get_configured_stores(&ctx.settings);
         let score_map = get_store_scores(&ctx.redis, &stores).await;
         let mut any_network_error = false;
+        let mut any_rate_limited = false;
 
         if is_nzb_info_hash(info_hash) {
             let newz_stores = get_newz_stores(&ctx.settings);
@@ -326,6 +327,7 @@ impl Plugin for StremthruPlugin {
                     }
                     Err(error) => {
                         if handled_rate_limit(store, &error) {
+                            any_rate_limited = true;
                             continue;
                         }
                         any_network_error |= is_network_error(&error);
@@ -402,6 +404,7 @@ impl Plugin for StremthruPlugin {
                 }
                 Err(error) => {
                     if handled_rate_limit(attempt.store, &error) {
+                        any_rate_limited = true;
                         continue;
                     }
                     adjust_store_score(&ctx.redis, attempt.store, -1).await;
@@ -411,9 +414,18 @@ impl Plugin for StremthruPlugin {
             }
         }
 
+        // A store that was rate-limited never judged the release; answering
+        // "unavailable" would get it blacklisted, so defer the job instead.
+        if any_rate_limited {
+            return Err(RateLimitedError.into());
+        }
         if any_network_error {
             anyhow::bail!("network error contacting store");
         }
+        // Every store that answered said no: drop their cached "available"
+        // entries so the retry and later walks re-check instead of trusting them.
+        let store_names: Vec<&str> = stores.iter().map(|(s, _)| *s).collect();
+        forget_cache_check(&ctx.redis, &store_names, info_hash).await;
         Ok(HookResponse::DownloadStreamUnavailable)
     }
 
@@ -459,16 +471,23 @@ impl Plugin for StremthruPlugin {
 
         let results = futures::future::join_all(futures).await;
         let mut all_results = Vec::new();
+        let mut any_rate_limited = false;
         for ((store, _), result) in stores.iter().zip(results) {
             match result {
                 Ok(items) => all_results.extend(items),
                 Err(error) => {
                     if handled_rate_limit(store, &error) {
+                        any_rate_limited = true;
                         continue;
                     }
                     tracing::warn!(store, error = %error, "cache check failed for a store")
                 }
             }
+        }
+        // Omitting a throttled store's answer would read as "not cached" and
+        // get its releases blacklisted; defer the whole check instead.
+        if any_rate_limited {
+            return Err(RateLimitedError.into());
         }
         Ok(HookResponse::CacheCheck(all_results))
     }
@@ -625,6 +644,7 @@ async fn handle_newz_download(
 
     let poll_timeout = Duration::from_secs(NEWZ_POLL_TIMEOUT_SECS);
     let mut any_network_error = false;
+    let mut any_rate_limited = false;
     for (store, api_key) in ordered {
         match add_newz(
             &ctx.http,
@@ -649,6 +669,7 @@ async fn handle_newz_download(
             }
             Err(error) => {
                 if handled_rate_limit(store, &error) {
+                    any_rate_limited = true;
                     continue;
                 }
                 adjust_store_score(&ctx.redis, store, -1).await;
@@ -658,6 +679,9 @@ async fn handle_newz_download(
         }
     }
 
+    if any_rate_limited {
+        return Err(RateLimitedError.into());
+    }
     if any_network_error {
         anyhow::bail!("network error contacting newz store");
     }
