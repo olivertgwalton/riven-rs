@@ -467,3 +467,28 @@ async fn delete_torrent(
 pub(super) fn cache_check_key(store: &str, hash: &str) -> String {
     format!("plugin:stremthru:cache-check:{store}:{hash}")
 }
+
+/// Drop the cached availability of `hash` at each of `stores`, so the next
+/// cache check asks the stores again.
+pub async fn forget_cache_check(
+    redis: &redis::aio::ConnectionManager,
+    stores: &[&str],
+    hash: &str,
+) {
+    if stores.is_empty() {
+        return;
+    }
+    let hash = hash.to_lowercase();
+    let keys: Vec<String> = stores
+        .iter()
+        .map(|store| cache_check_key(store, &hash))
+        .collect();
+    let mut conn = redis.clone();
+    if let Err(error) = AsyncCommands::del::<_, ()>(&mut conn, &keys).await {
+        tracing::warn!(
+            hash,
+            %error,
+            "could not drop cached availability; the next check may repeat a stale answer"
+        );
+    }
+}

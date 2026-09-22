@@ -1,6 +1,5 @@
 use std::time::Instant;
 
-use anyhow::Result;
 use riven_core::events::{HookResponse, RivenEvent};
 use riven_core::types::{CachedStoreEntry, DownloadResult, MediaItemType};
 use riven_db::entities::Stream;
@@ -134,30 +133,22 @@ pub async fn attempt_download(
 
     let mut verdict = dispatch_once(queue, &event, info_hash, raw_title).await;
 
+    // The plugin dropped its stale availability entries when it answered
+    // "unavailable", so a second offer re-checks the stores from scratch.
     if verdict.result.is_none() && verdict.saw_unavailable && !verdict.saw_rate_limited {
-        if let Err(error) = clear_stremthru_cache_check_keys(queue, info_hash, raw_title).await {
-            tracing::error!(
-                id,
-                info_hash,
-                raw_title,
-                error = %error,
-                "download: could not clear the stale cached-availability entry, so the retry would hit the same wrong answer; skipping the retry"
-            );
-        } else {
-            tracing::debug!(
-                id,
-                info_hash,
-                raw_title,
-                "download: cleared the stale availability entry, offering the release again"
-            );
-            let retry_event = RivenEvent::MediaItemDownloadRequested {
-                id,
-                info_hash: info_hash.clone(),
-                magnet: stream.magnet.clone(),
-                cached_stores: Vec::new(),
-            };
-            verdict = dispatch_once(queue, &retry_event, info_hash, raw_title).await;
-        }
+        tracing::debug!(
+            id,
+            info_hash,
+            raw_title,
+            "download: availability entry was stale, offering the release again"
+        );
+        let retry_event = RivenEvent::MediaItemDownloadRequested {
+            id,
+            info_hash: info_hash.clone(),
+            magnet: stream.magnet.clone(),
+            cached_stores: Vec::new(),
+        };
+        verdict = dispatch_once(queue, &retry_event, info_hash, raw_title).await;
     }
 
     // Deferral outranks every no-result verdict: with a rate-limited plugin
@@ -169,17 +160,6 @@ pub async fn attempt_download(
     }
 
     let Some(download) = verdict.result else {
-        if verdict.saw_unavailable
-            && let Err(error) = clear_stremthru_cache_check_keys(queue, info_hash, raw_title).await
-        {
-            tracing::error!(
-                id,
-                info_hash,
-                raw_title,
-                error = %error,
-                "download: could not clear the stale cached-availability entry; the next attempt may repeat this failure"
-            );
-        }
         tracing::debug!(
             id,
             info_hash,
@@ -363,46 +343,4 @@ pub async fn attempt_download(
             }
         }
     }
-}
-
-async fn clear_stremthru_cache_check_keys(
-    queue: &JobQueue,
-    info_hash: &str,
-    raw_title: &str,
-) -> Result<()> {
-    let mut conn = queue.redis.clone();
-    let pattern = format!(
-        "plugin:stremthru:cache-check:*:{}",
-        info_hash.to_lowercase()
-    );
-    let mut cursor = 0u64;
-    let mut keys = Vec::new();
-
-    loop {
-        let (next, batch): (u64, Vec<String>) = redis::cmd("SCAN")
-            .arg(cursor)
-            .arg("MATCH")
-            .arg(&pattern)
-            .arg("COUNT")
-            .arg(100u32)
-            .query_async(&mut conn)
-            .await?;
-        keys.extend(batch);
-        cursor = next;
-        if cursor == 0 {
-            break;
-        }
-    }
-
-    if !keys.is_empty() {
-        let _: () = redis::cmd("DEL").arg(&keys).query_async(&mut conn).await?;
-        tracing::debug!(
-            info_hash,
-            raw_title,
-            cleared = keys.len(),
-            "download: dropped cached-availability entries for this release so it gets re-checked"
-        );
-    }
-
-    Ok(())
 }

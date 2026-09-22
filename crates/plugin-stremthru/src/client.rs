@@ -25,6 +25,7 @@ pub use account::fetch_user_info;
 use downloads::parse_quota_interval;
 pub use downloads::{
     AddTorrentOutcome, add_newz, add_torrent, check_cache, download_result_from_files,
+    forget_cache_check,
 };
 #[cfg(test)]
 use downloads::{cache_check_key, classify_add_torrent_rejection};
