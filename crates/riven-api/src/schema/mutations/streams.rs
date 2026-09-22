@@ -52,6 +52,10 @@ impl StreamsMutations {
     /// caller-supplied `seasons` / `season_number`). A single-season pack links
     /// to that season; a multi-season pack links to the **show** so the download
     /// flow can fill every season it contains.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each argument is a GraphQL field argument; grouping them would change the schema"
+    )]
     async fn download_discovered_stream(
         &self,
         ctx: &Context<'_>,
