@@ -130,7 +130,10 @@ const FAILED_JOB_MAX_COUNT: isize = 5_000;
 ///
 /// The task requeue rides in the same atomic script: per id, `SREM` from the
 /// inflight set and only on success `RPUSH` to the active list, so an id the
-/// old incarnation managed to ack can never be double-queued. (apalis ships
+/// old incarnation managed to ack can never be double-queued. An id with no
+/// data is dropped rather than requeued: `get_jobs.lua` HMGETs it as nil,
+/// which fails the whole stream ("Invalid job data format") and brings us
+/// straight back here — a restart loop every ~5s. (apalis ships
 /// `reenqueue_orphaned_jobs.lua` for this and nothing in apalis-redis
 /// 1.0.0-rc.8 invokes it.)
 pub async fn clear_dead_incarnation(
@@ -141,7 +144,7 @@ pub async fn clear_dead_incarnation(
     const CLEAR_DEAD_INCARNATION: &str = r#"
         local moved = 0
         for _, id in ipairs(redis.call("SMEMBERS", KEYS[1])) do
-            if redis.call("SREM", KEYS[1], id) == 1 then
+            if redis.call("SREM", KEYS[1], id) == 1 and redis.call("HEXISTS", KEYS[6], id) == 1 then
                 redis.call("RPUSH", KEYS[2], id)
                 moved = moved + 1
             end
@@ -167,6 +170,7 @@ pub async fn clear_dead_incarnation(
         .key(config.signal_list())
         .key(config.workers_set())
         .key(&metadata_key)
+        .key(config.job_data_hash())
         .invoke_async(redis)
         .await?;
     if moved > 0 {
