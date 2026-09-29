@@ -317,9 +317,10 @@ impl UsenetStreamer {
     ///
     /// `load_meta` owns two side effects this must not lose — the `Direct`
     /// offset auto-heal that keeps `filesystem_entries.file_size` honest, and
-    /// the `decoded_seg_size` backfill. Both need the whole release, so neither
-    /// belongs on a read. Instead a file that looks like it needs either kicks
-    /// one background `load_meta`, claimed once per release.
+    /// the `decoded_seg_size` backfill. Both need the whole release. The backfill
+    /// is kicked as one background `load_meta`, claimed once per release; a
+    /// `Direct` layout that looks wrong is healed here, before the handle's
+    /// first read, because serving it even once poisons the caches above.
     async fn fetch_file_meta(
         &self,
         info_hash: &str,
@@ -339,6 +340,36 @@ impl UsenetStreamer {
         }
         let loaded = store::load_file(&self.db, info_hash, file_index).await?;
         let file = loaded.ok_or(StreamerError::BadFileIndex(file_index))?;
+
+        // A layout known to be wrong is healed before this handle reads with
+        // it, not behind it. Served first, it puts wrong bytes in the kernel's
+        // page cache and read-ahead units the healed layout can never use:
+        // Drive to Survive S08E04 hung on the first read past the old slot.
+        // Costs the first open two article fetches.
+        if let NzbMetaSource::Direct { offsets, segments } = &file.source
+            && direct_offsets_look_approximate(offsets, segments)
+        {
+            match self.load_meta(info_hash).await {
+                Ok(meta) => {
+                    // ponytail: load_meta heals at most four files per load, so
+                    // a season pack's later episode may still serve the stored
+                    // layout; prioritise the opened file if that ever bites.
+                    if let Some(healed) = meta.files.get(file_index) {
+                        return Ok(Arc::new(FileMeta {
+                            file: healed.clone(),
+                            password: meta.password.clone(),
+                        }));
+                    }
+                }
+                Err(error) => tracing::warn!(
+                    info_hash,
+                    file_index,
+                    %error,
+                    "could not heal the layout before opening; serving the stored one"
+                ),
+            }
+        }
+
         let arc = Arc::new(file);
         self.maybe_kick_maintenance(info_hash, &arc);
         Ok(arc)

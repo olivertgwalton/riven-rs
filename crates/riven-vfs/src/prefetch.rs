@@ -107,10 +107,17 @@ pub fn read_ahead_stats() -> CacheStats {
 /// Bumping `revision` makes every unit cached under the old one unreachable.
 /// That is the whole of read-ahead invalidation: no sweep, and the stale units
 /// age out of the LRU as the cold entries they are.
+///
+/// `size` is there because a path can change what it holds without a settings
+/// change: a heal re-lays a file out, a re-scrape points it at another release.
+/// Units cut for one layout are not units of the other, and a stale one the
+/// new window cannot use was never refetched — the read waited forever. Every
+/// such change so far has changed the size.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct FileKey {
     pub revision: u64,
     pub ino: u64,
+    pub size: u64,
 }
 
 impl FileKey {
@@ -122,10 +129,11 @@ impl FileKey {
     /// and is bumped a handful of times per process, so it can never reach this
     /// value — and it must not, because an entry id colliding with an unrelated
     /// inode would serve one file's cached bytes as another's.
-    pub fn bridge(entry_id: i64) -> Self {
+    pub fn bridge(entry_id: i64, size: u64) -> Self {
         Self {
             revision: u64::MAX,
             ino: entry_id.cast_unsigned(),
+            size,
         }
     }
 }
@@ -895,6 +903,7 @@ mod tests {
         FileKey {
             revision: 0,
             ino: NEXT_INO.fetch_add(1, Ordering::SeqCst),
+            size: 0,
         }
     }
 

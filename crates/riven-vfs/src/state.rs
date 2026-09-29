@@ -133,10 +133,11 @@ impl VfsState {
     /// it finds the units around the play position already decoded instead of
     /// starting cold — and a file nothing is reading any more simply goes cold
     /// in the shared LRU, which is what reclaims it.
-    pub(crate) fn file_key(&self, ino: u64) -> FileKey {
+    pub(crate) fn file_key(&self, ino: u64, size: u64) -> FileKey {
         FileKey {
             revision: self.revision.load(Ordering::SeqCst),
             ino,
+            size,
         }
     }
 
@@ -186,6 +187,8 @@ impl VfsState {
 mod tests {
     use super::*;
 
+    const SIZE: u64 = 1 << 20;
+
     struct EmptySource;
 
     #[async_trait::async_trait]
@@ -194,14 +197,14 @@ mod tests {
             Ok(bytes::Bytes::new())
         }
         fn size(&self) -> u64 {
-            1 << 20
+            SIZE
         }
     }
 
     fn handle(state: &VfsState, ino: u64) -> u64 {
         let prefetcher = Arc::new(Prefetcher::new(
             Arc::new(EmptySource),
-            state.file_key(ino),
+            state.file_key(ino, SIZE),
             &tokio::runtime::Handle::current(),
         ));
         state.open(OpenedFile::Streamed {
@@ -215,14 +218,14 @@ mod tests {
         let state = VfsState::new();
         let ino = state.get_or_create_ino("/movies/Film/film.mkv");
 
-        let first = state.file_key(ino);
+        let first = state.file_key(ino, SIZE);
         let fd = handle(&state, ino);
         // The player closes every handle it has before opening the next one.
         state.close(fd);
 
         // Same key, so the re-open reads the units the last handle fetched
         // rather than starting cold.
-        assert_eq!(first, state.file_key(ino));
+        assert_eq!(first, state.file_key(ino, SIZE));
     }
 
     #[tokio::test]
@@ -235,8 +238,8 @@ mod tests {
         let two = handle(&state, ino);
         assert_ne!(one, two);
         assert_eq!(
-            state.file_key(ino),
-            state.file_key(ino),
+            state.file_key(ino, SIZE),
+            state.file_key(ino, SIZE),
             "both handles address one set of shared bytes"
         );
         assert_eq!(state.file_handles.len(), 2, "two independent windows");
@@ -246,10 +249,23 @@ mod tests {
     async fn a_settings_change_drops_warm_read_ahead() {
         let state = VfsState::new();
         let ino = state.get_or_create_ino("/movies/Film/film.mkv");
-        let before = state.file_key(ino);
+        let before = state.file_key(ino, SIZE);
         state.refresh(1);
         // A new key, so every unit cached under the old one is unreachable.
-        assert_ne!(before, state.file_key(ino));
+        assert_ne!(before, state.file_key(ino, SIZE));
+    }
+
+    /// Drive to Survive S08E04: healed from 4,967,033,930 bytes to
+    /// 8,937,961,546 mid-process, and units cut for the old layout hung every
+    /// read of the new one.
+    #[tokio::test]
+    async fn a_file_that_changes_size_drops_warm_read_ahead() {
+        let state = VfsState::new();
+        let ino = state.get_or_create_ino("/shows/Show/Season 01/episode.mkv");
+        assert_ne!(
+            state.file_key(ino, 4_967_033_930),
+            state.file_key(ino, 8_937_961_546)
+        );
     }
 
     #[test]

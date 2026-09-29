@@ -467,7 +467,7 @@ async fn serve_usenet_media(
     // has in flight — so a cancelled download stops costing connections.
     let reader = Arc::new(Prefetcher::new(
         source,
-        FileKey::bridge(entry.id),
+        FileKey::bridge(entry.id, file_size),
         &tokio::runtime::Handle::current(),
     ));
 
