@@ -160,20 +160,15 @@ impl UsenetStreamer {
         // whole season) would otherwise download hundreds of megabytes inline
         // on a single cache miss — with every other opener of that release
         // blocked behind it on the single-flight promise. Heal a few files per
-        // load instead: the result is persisted, so successive loads converge,
-        // and an unhealed file still serves correctly from its stored offsets
-        // (`read_direct` anchors on the offset table but sizes every slice
-        // from the actual decoded length).
+        // load instead: the result is persisted, so successive loads converge.
+        // A file left unhealed is not safe to serve — `read_direct` picks its
+        // anchor article from the offset table — so an opener heals its own
+        // file before reading it (`heal_opened_file`).
         const MAX_AUTOHEAL_FILES_PER_LOAD: usize = 4;
         let mut healed_indices: Vec<usize> = Vec::new();
-        let mut healed_names: Vec<String> = Vec::new();
         let mut pending_names: Vec<String> = Vec::new();
         for (file_index, file) in meta.files.iter_mut().enumerate() {
-            let approximate = matches!(
-                &file.source,
-                NzbMetaSource::Direct { offsets, segments } if direct_offsets_look_approximate(offsets, segments)
-            );
-            if !approximate {
+            if !layout_needs_heal(file) {
                 continue;
             }
             let filename = file.filename.clone();
@@ -182,10 +177,7 @@ impl UsenetStreamer {
                 continue;
             }
             match self.rescale_direct_to_decoded(file).await {
-                Ok(()) => {
-                    healed_indices.push(file_index);
-                    healed_names.push(filename);
-                }
+                Ok(()) => healed_indices.push(file_index),
                 Err(error) => tracing::warn!(
                     info_hash,
                     file = %filename,
@@ -203,54 +195,63 @@ impl UsenetStreamer {
             );
         }
         if !healed_indices.is_empty() {
-            match store::store(&self.db, info_hash, &meta).await {
-                Ok(()) => tracing::info!(
-                    info_hash,
-                    healed = healed_indices.len(),
-                    files = %summarize_filenames(&healed_names),
-                    "usenet meta auto-heal: rescaled Direct offsets to exact decoded space"
-                ),
-                Err(error) => tracing::warn!(
-                    info_hash,
-                    files = %summarize_filenames(&healed_names),
-                    %error,
-                    "usenet meta auto-heal: persist failed; healed in memory only"
-                ),
-            }
-            // The heal above can shrink `total_size` (an encoded-byte estimate
-            // corrected to the exact decoded length). `filesystem_entries.file_size`
-            // was set once at grab time from the old estimate and won't pick up
-            // this correction on its own, so every library entry serving this
-            // file would keep advertising a size the source can't actually back —
-            // any tail read past the real end then fails with EIO. Sync it now.
-            for file_index in &healed_indices {
-                let file_size = meta.files[*file_index].total_size;
-                let filename = meta.files[*file_index].filename.as_str();
-                match store::sync_file_size(&self.db, info_hash, *file_index, file_size).await {
-                    Ok(rows) if rows > 0 => tracing::info!(
-                        info_hash,
-                        file_index,
-                        file = %filename,
-                        file_size,
-                        rows,
-                        "usenet meta auto-heal: synced filesystem_entries.file_size"
-                    ),
-                    Ok(_) => {}
-                    Err(error) => tracing::warn!(
-                        info_hash,
-                        file_index,
-                        file = %filename,
-                        %error,
-                        "usenet meta auto-heal: failed to sync filesystem_entries.file_size"
-                    ),
-                }
-            }
+            self.persist_heal(info_hash, &meta, &healed_indices).await;
         }
 
         let arc = Arc::new(meta);
         crate::state::cache_meta(&self.state.meta_cache, info_hash.to_string(), arc.clone());
         self.maybe_kick_backfill(&arc);
         Ok(arc)
+    }
+
+    /// Persist healed files and bring `filesystem_entries.file_size` with them.
+    async fn persist_heal(&self, info_hash: &str, meta: &NzbMeta, healed_indices: &[usize]) {
+        let healed_names: Vec<String> = healed_indices
+            .iter()
+            .map(|index| meta.files[*index].filename.clone())
+            .collect();
+        match store::store(&self.db, info_hash, meta).await {
+            Ok(()) => tracing::info!(
+                info_hash,
+                healed = healed_indices.len(),
+                files = %summarize_filenames(&healed_names),
+                "usenet meta auto-heal: rescaled Direct offsets to exact decoded space"
+            ),
+            Err(error) => tracing::warn!(
+                info_hash,
+                files = %summarize_filenames(&healed_names),
+                %error,
+                "usenet meta auto-heal: persist failed; healed in memory only"
+            ),
+        }
+        // The heal above can shrink `total_size` (an encoded-byte estimate
+        // corrected to the exact decoded length). `filesystem_entries.file_size`
+        // was set once at grab time from the old estimate and won't pick up
+        // this correction on its own, so every library entry serving this
+        // file would keep advertising a size the source can't actually back —
+        // any tail read past the real end then fails with EIO. Sync it now.
+        for file_index in healed_indices {
+            let file_size = meta.files[*file_index].total_size;
+            let filename = meta.files[*file_index].filename.as_str();
+            match store::sync_file_size(&self.db, info_hash, *file_index, file_size).await {
+                Ok(rows) if rows > 0 => tracing::info!(
+                    info_hash,
+                    file_index,
+                    file = %filename,
+                    file_size,
+                    rows,
+                    "usenet meta auto-heal: synced filesystem_entries.file_size"
+                ),
+                Ok(_) => {}
+                Err(error) => tracing::warn!(
+                    info_hash,
+                    file_index,
+                    file = %filename,
+                    %error,
+                    "usenet meta auto-heal: failed to sync filesystem_entries.file_size"
+                ),
+            }
+        }
     }
 
     /// Rewrite one stored release in the deduplicated form.
@@ -346,17 +347,15 @@ impl UsenetStreamer {
         // page cache and read-ahead units the healed layout can never use:
         // Drive to Survive S08E04 hung on the first read past the old slot.
         // Costs the first open two article fetches.
-        if let NzbMetaSource::Direct { offsets, segments } = &file.source
-            && direct_offsets_look_approximate(offsets, segments)
-        {
+        if layout_needs_heal(&file) {
             match self.load_meta(info_hash).await {
                 Ok(meta) => {
-                    // ponytail: load_meta heals at most four files per load, so
-                    // a season pack's later episode may still serve the stored
-                    // layout; prioritise the opened file if that ever bites.
-                    if let Some(healed) = meta.files.get(file_index) {
+                    if let Some(stored) = meta.files.get(file_index) {
+                        let file = self
+                            .heal_opened_file(info_hash, &meta, file_index, stored)
+                            .await;
                         return Ok(Arc::new(FileMeta {
-                            file: healed.clone(),
+                            file,
                             password: meta.password.clone(),
                         }));
                     }
@@ -375,14 +374,46 @@ impl UsenetStreamer {
         Ok(arc)
     }
 
+    /// The opened file as `load_meta` left it, healed here if it still needs
+    /// it. A load heals only a few files, and a load already cached heals none,
+    /// so a season pack's later episode can come back unhealed.
+    async fn heal_opened_file(
+        &self,
+        info_hash: &str,
+        meta: &NzbMeta,
+        file_index: usize,
+        stored: &NzbMetaFile,
+    ) -> NzbMetaFile {
+        let mut file = stored.clone();
+        if !layout_needs_heal(&file) {
+            return file;
+        }
+        if let Err(error) = self.rescale_direct_to_decoded(&mut file).await {
+            tracing::warn!(
+                info_hash,
+                file = %file.filename,
+                %error,
+                "usenet meta auto-heal: rescale failed; serving stored offsets"
+            );
+            return stored.clone();
+        }
+        let mut healed = meta.clone();
+        healed.files[file_index] = file.clone();
+        self.persist_heal(info_hash, &healed, &[file_index]).await;
+        crate::state::cache_meta(
+            &self.state.meta_cache,
+            info_hash.to_string(),
+            Arc::new(healed),
+        );
+        file
+    }
+
     /// Kick the release-wide heal/backfill walk if this file shows either of
     /// the two symptoms `load_meta` looks for. Claimed once per release, so a
     /// season pack pays it once however many episodes are opened.
     fn maybe_kick_maintenance(&self, info_hash: &str, file: &FileMeta) {
         let needs = match &file.source {
-            NzbMetaSource::Direct { offsets, segments } => {
-                direct_offsets_look_approximate(offsets, segments)
-            }
+            NzbMetaSource::Direct { .. } => layout_needs_heal(file),
             NzbMetaSource::Rar { parts, .. } => parts.iter().any(|p| p.decoded_seg_size.is_none()),
         };
         if !needs || !self.state.maintained.claim(info_hash) {
@@ -628,6 +659,13 @@ fn summarize_filenames(names: &[String]) -> String {
         "{}, +{} more",
         names[..MAX_NAMED].join(", "),
         names.len() - MAX_NAMED
+    )
+}
+
+fn layout_needs_heal(file: &NzbMetaFile) -> bool {
+    matches!(
+        &file.source,
+        NzbMetaSource::Direct { offsets, segments } if direct_offsets_look_approximate(offsets, segments)
     )
 }
 
