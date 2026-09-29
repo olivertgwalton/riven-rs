@@ -35,11 +35,19 @@ pub enum YencError {
     MissingBegin,
     #[error("article body ended before =yend marker")]
     Truncated,
+    #[error("article decoded to {decoded} bytes but =yend declares {declared}")]
+    SizeMismatch { declared: u64, decoded: u64 },
 }
 
 /// Decode a yEnc-encoded NNTP article body. Input is the raw body bytes
 /// (CRLF-separated lines). Returns the decoded payload; the `=ybegin` and
 /// `=ypart` header lines are skipped, and `=yend`'s `pcrc32` is checked.
+///
+/// A body that decodes to a different length than its `=yend size=` is an
+/// error, not a short article. The size probe at ingest multiplies one
+/// article's length across the whole file, so a body missing lines between
+/// intact markers once laid a 716,800-byte post out at 398,336 per slot, and
+/// every read after the first slot served the wrong bytes.
 pub fn decode(body: &[u8]) -> Result<Bytes, YencError> {
     let begin_idx = find_line_starting_with(body, b"=ybegin").ok_or(YencError::MissingBegin)?;
     let mut payload_start = line_end(body, begin_idx);
@@ -55,13 +63,23 @@ pub fn decode(body: &[u8]) -> Result<Bytes, YencError> {
             .map(|n| payload_start + n + 1)
             .ok_or(YencError::Truncated)?
     };
-    let declared_pcrc32 = declared_pcrc32(&body[yend_idx..line_end(body, yend_idx)]);
+    let yend_line = &body[yend_idx..line_end(body, yend_idx)];
+    let declared_pcrc32 = declared_pcrc32(yend_line);
 
     let payload = &body[payload_start..yend_idx];
     // Decoding only ever shrinks, so the encoded length is an upper bound the
     // decode loop can never outgrow — one allocation, no realloc mid-decode.
     let mut out = Vec::with_capacity(payload.len());
     decode_payload(payload, &mut out);
+
+    if let Some(declared) = declared_size(yend_line)
+        && declared != out.len() as u64
+    {
+        return Err(YencError::SizeMismatch {
+            declared,
+            decoded: out.len() as u64,
+        });
+    }
 
     // CRC32 in a single pass over the decoded output rather than via
     // `Hasher::update` per memchr3-found chunk during the loop — profiling
@@ -138,11 +156,20 @@ fn line_end(body: &[u8], start: usize) -> usize {
 
 /// The `pcrc32=` value of a `=yend` line, if it declares one.
 fn declared_pcrc32(line: &[u8]) -> Option<u32> {
-    let line = std::str::from_utf8(line).ok()?;
-    line.split_ascii_whitespace()
+    yend_field(line, "pcrc32=").and_then(|v| u32::from_str_radix(v, 16).ok())
+}
+
+/// The `size=` value of a `=yend` line: the part's decoded length.
+fn declared_size(line: &[u8]) -> Option<u64> {
+    yend_field(line, "size=").and_then(|v| v.parse().ok())
+}
+
+fn yend_field<'a>(line: &'a [u8], key: &str) -> Option<&'a str> {
+    std::str::from_utf8(line)
+        .ok()?
+        .split_ascii_whitespace()
         .skip(1)
-        .find_map(|tok| tok.strip_prefix("pcrc32="))
-        .and_then(|v| u32::from_str_radix(v, 16).ok())
+        .find_map(|tok| tok.strip_prefix(key))
 }
 
 #[cfg(test)]
@@ -226,6 +253,33 @@ pub(crate) mod tests {
         with_preamble.extend_from_slice(&body);
         let decoded = decode(&with_preamble).unwrap();
         assert_eq!(decoded.as_ref(), payload.as_slice());
+    }
+
+    #[test]
+    fn a_body_missing_lines_between_intact_markers_is_rejected() {
+        let payload = vec![7u8; 1024];
+        let encoded = encode_single(&payload, "x");
+        // Drop the middle of the payload line, keeping =ybegin and =yend.
+        let header_end = line_end(&encoded, 0);
+        let mut short = encoded[..header_end + 100].to_vec();
+        short.extend_from_slice(&encoded[header_end + 600..]);
+
+        match decode(&short) {
+            Err(YencError::SizeMismatch { declared, decoded }) => {
+                assert_eq!(declared, 1024);
+                assert_eq!(decoded, 524);
+            }
+            other => panic!("expected SizeMismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reads_declared_size() {
+        assert_eq!(
+            declared_size(b"=yend size=716800 part=1 pcrc32=c7795cd5\r\n"),
+            Some(716800)
+        );
+        assert_eq!(declared_size(b"=yend pcrc32=c7795cd5\r\n"), None);
     }
 
     #[test]

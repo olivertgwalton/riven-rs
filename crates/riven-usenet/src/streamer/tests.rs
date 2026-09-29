@@ -33,15 +33,39 @@ fn primary_media_index_picks_largest_media() {
     assert_eq!(files[idx].subject, r#""main.mkv" yEnc"#);
 }
 
+/// Segments as the NZB lists them: encoded sizes, a few percent over decoded.
+fn encoded_segments(count: usize) -> crate::segments::SegmentList {
+    (0..count)
+        .map(|i| NzbSegment {
+            bytes: 739_879,
+            message_id: format!("{i}@test"),
+        })
+        .collect()
+}
+
 #[test]
 fn offset_table_heuristic_flags_estimates_only() {
     use super::direct_offsets_look_approximate;
+    let segments = encoded_segments(5);
     let exact = [0u64, 716800, 1433600, 2150400, 2867200, 3000000];
-    assert!(!direct_offsets_look_approximate(&exact));
+    assert!(!direct_offsets_look_approximate(&exact, &segments));
     let estimate = [0u64, 716800, 1433457, 2150130, 2866758, 3000000];
-    assert!(direct_offsets_look_approximate(&estimate));
-    assert!(!direct_offsets_look_approximate(&[0, 716800, 900000]));
-    assert!(!direct_offsets_look_approximate(&[0, 500000]));
+    assert!(direct_offsets_look_approximate(&estimate, &segments));
+    assert!(!direct_offsets_look_approximate(
+        &[0, 716800, 900000],
+        &segments
+    ));
+    assert!(!direct_offsets_look_approximate(&[0, 500000], &segments));
+}
+
+/// Formula 1: Drive to Survive S08E04: 716,800-byte parts measured once at
+/// 398,336, so every slot was even and every slot was wrong.
+#[test]
+fn offset_table_heuristic_flags_an_even_table_built_from_a_short_measurement() {
+    use super::direct_offsets_look_approximate;
+    let segments = encoded_segments(5);
+    let short = [0u64, 398336, 796672, 1195008, 1593344, 1775690];
+    assert!(direct_offsets_look_approximate(&short, &segments));
 }
 
 #[test]

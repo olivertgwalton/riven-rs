@@ -20,6 +20,7 @@ use riven_core::cache::CacheStats;
 
 use crate::nntp::NntpConfig;
 use crate::pool::SegmentPool;
+use crate::segments::SegmentList;
 use crate::state::StreamerState;
 
 mod backfill;
@@ -170,7 +171,7 @@ impl UsenetStreamer {
         for (file_index, file) in meta.files.iter_mut().enumerate() {
             let approximate = matches!(
                 &file.source,
-                NzbMetaSource::Direct { offsets, .. } if direct_offsets_look_approximate(offsets)
+                NzbMetaSource::Direct { offsets, segments } if direct_offsets_look_approximate(offsets, segments)
             );
             if !approximate {
                 continue;
@@ -348,7 +349,9 @@ impl UsenetStreamer {
     /// season pack pays it once however many episodes are opened.
     fn maybe_kick_maintenance(&self, info_hash: &str, file: &FileMeta) {
         let needs = match &file.source {
-            NzbMetaSource::Direct { offsets, .. } => direct_offsets_look_approximate(offsets),
+            NzbMetaSource::Direct { offsets, segments } => {
+                direct_offsets_look_approximate(offsets, segments)
+            }
             NzbMetaSource::Rar { parts, .. } => parts.iter().any(|p| p.decoded_seg_size.is_none()),
         };
         if !needs || !self.state.maintained.claim(info_hash) {
@@ -607,12 +610,25 @@ fn summarize_filenames(names: &[String]) -> String {
 /// Comparing the first few full-part steps catches the estimate immediately
 /// (S5E3, for instance, drifts at the very second segment) while leaving a
 /// genuinely uniform table untouched.
-fn direct_offsets_look_approximate(offsets: &[u64]) -> bool {
+///
+/// A uniform table can still be wrong: one short measurement at ingest makes
+/// every slot the same wrong size. yEnc only adds a few percent, so a full
+/// part's decoded slot sits just under its article's encoded size in the NZB;
+/// a slot outside 90–100 % of it was not measured from a whole article.
+/// Measured on 8,708 stored files: every exact table sits in that band, and
+/// the 19 bad ones at 35 % or 54 %.
+fn direct_offsets_look_approximate(offsets: &[u64], segments: &SegmentList) -> bool {
     let full_steps = offsets.len().saturating_sub(2);
     if full_steps < 2 {
         return false;
     }
     let step0 = offsets[1] - offsets[0];
+    if let Some(first) = segments.first()
+        && first.bytes > 0
+        && (step0 > first.bytes || step0 < first.bytes / 10 * 9)
+    {
+        return true;
+    }
     for i in 1..full_steps.min(4) {
         if offsets[i + 1] - offsets[i] != step0 {
             return true;
