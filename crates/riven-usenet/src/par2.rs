@@ -50,6 +50,9 @@ pub struct Par2FileDesc {
     /// 16-byte File ID (the MD5 hash the rest of the par2 set uses to refer
     /// to this file). Useful as a stable key.
     pub file_id: [u8; 16],
+    /// MD5 of the file's first 16 KiB (or the whole file if shorter) — what
+    /// ties a hash-named NZB entry back to its real name.
+    pub hash_16k: [u8; 16],
     /// File length in bytes.
     pub length: u64,
     /// UTF-8 filename. Length-prefix is implicit (`packet_length` minus the
@@ -102,10 +105,10 @@ where
 }
 
 fn decode_file_desc(body: &[u8], at: usize) -> Result<Par2FileDesc, Par2Error> {
-    // File ID, full MD5, 16K MD5, then the length; only the ID, length and
-    // name are used.
-    let (Some(file_id), Some(length)) = (
+    // File ID, full MD5, 16K MD5, then the length; the full MD5 is unused.
+    let (Some(file_id), Some(hash_16k), Some(length)) = (
         body.first_chunk::<16>(),
+        body.get(32..).and_then(|rest| rest.first_chunk::<16>()),
         body.get(48..).and_then(|rest| rest.first_chunk::<8>()),
     ) else {
         return Err(Par2Error::Truncated(at));
@@ -117,6 +120,7 @@ fn decode_file_desc(body: &[u8], at: usize) -> Result<Par2FileDesc, Par2Error> {
     };
     Ok(Par2FileDesc {
         file_id: *file_id,
+        hash_16k: *hash_16k,
         length: u64::from_le_bytes(*length),
         filename: String::from_utf8_lossy(trimmed).into_owned(),
     })
@@ -271,6 +275,7 @@ mod tests {
         assert_eq!(descs.len(), 1);
         assert_eq!(descs[0].filename, "Movie.2024.1080p.WEB.x264.mkv");
         assert_eq!(descs[0].length, 12345678);
+        assert_eq!(descs[0].hash_16k, [2u8; 16]);
     }
 
     #[test]

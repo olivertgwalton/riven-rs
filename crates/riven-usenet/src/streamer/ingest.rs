@@ -119,6 +119,10 @@ const RAR_HEADER_PROBE_BYTES: u64 = 32 * 1024;
 /// does not turn ingest into a connection storm.
 const PAR2_BLOB_CONCURRENCY: usize = 4;
 
+/// First articles fetched per batch when matching hash-named files to PAR2
+/// FileDesc names; bounds the decoded bytes held at once (~0.75 MB each).
+const PAR2_HASH_16K_CHUNK: usize = 32;
+
 impl UsenetStreamer {
     /// Probe a sample of `segments` for article availability on the
     /// configured NNTP provider. Returns `Err(IncompleteRelease)` if more
@@ -1075,14 +1079,15 @@ impl UsenetStreamer {
     /// an obfuscated *name* — no dot survives at all, so the name-based
     /// heuristic has nothing to key off). PAR2 protects the RAR volumes
     /// themselves and lists their real names in cleartext regardless of how
-    /// obfuscated the posting is, so this recovers those names, lines them
-    /// up positionally against the NZB's non-PAR2 files (same
-    /// posting-order assumption [`Self::recover_filenames_from_par2`]
-    /// already relies on), and retries grouping keyed by the recovered
-    /// names instead of the subjects. Returns an empty `Vec` — same as "no
-    /// groups found" — on any mismatch, so the caller's existing
+    /// obfuscated the posting is, so this recovers those names and ties each
+    /// one to its NZB file by the MD5 of the file's first 16 KiB (the
+    /// FileDesc `hash_16k`, as SABnzbd does). Posting order can't be used:
+    /// hash-named parts are posted in no particular order, so a positional
+    /// pairing scrambles the volume order. Retries grouping keyed by the
+    /// recovered names instead of the subjects. Returns an empty `Vec` — same
+    /// as "no groups found" — unless every volume matches, so the caller's existing
     /// direct-file fallback is unaffected. The second element is the same
-    /// positional name mapping used for grouping, handed back so the caller
+    /// name mapping used for grouping, handed back so the caller
     /// can key later PAR2 content verification off the recovered real names
     /// rather than the still-obfuscated subjects.
     async fn recover_rar_groups_from_par2(
@@ -1104,36 +1109,60 @@ impl UsenetStreamer {
                 return (Vec::new(), Vec::new());
             }
         };
-        let archive_names: Vec<String> = descs
+        let by_hash: std::collections::HashMap<[u8; 16], String> = descs
             .into_iter()
-            .map(|d| d.filename)
-            .filter(|n| rar_volume_info(n).is_some())
+            .filter(|d| rar_volume_info(&d.filename).is_some())
+            .map(|d| (d.hash_16k, d.filename))
             .collect();
-        if archive_names.is_empty() {
+        if by_hash.is_empty() {
             return (Vec::new(), Vec::new());
         }
 
-        let non_par2_indices: Vec<usize> = files
+        let candidates: Vec<usize> = files
             .iter()
             .enumerate()
-            .filter(|(_, f)| !looks_like_par2(&filename_from_subject(&f.subject)))
+            .filter(|(_, f)| {
+                !f.segments.is_empty() && !looks_like_par2(&filename_from_subject(&f.subject))
+            })
             .map(|(idx, _)| idx)
             .collect();
-        if non_par2_indices.len() != archive_names.len() {
-            tracing::debug!(
-                non_par2 = non_par2_indices.len(),
-                recovered = archive_names.len(),
-                "par2 FileDesc count differs from non-par2 file count; skipping rar rescue"
-            );
-            return (Vec::new(), Vec::new());
-        }
-
         let mut names: Vec<String> = files
             .iter()
             .map(|f| filename_from_subject(&f.subject))
             .collect();
-        for (idx, recovered) in non_par2_indices.into_iter().zip(archive_names) {
-            names[idx] = recovered;
+        let mut matched = 0usize;
+        // Only the first article of each file is needed (yEnc articles are
+        // far larger than 16 KiB). Chunked so a season pack's hundreds of
+        // volumes never hold more than one chunk of decoded articles at once.
+        for chunk in candidates.chunks(PAR2_HASH_16K_CHUNK) {
+            let ids: Vec<String> = chunk
+                .iter()
+                .filter_map(|&idx| files[idx].segments.id(0).map(str::to_string))
+                .collect();
+            if ids.len() != chunk.len() {
+                return (Vec::new(), Vec::new());
+            }
+            let fetched = self
+                .pool
+                .fetch_batch(&ids, super::DISCOVERY_FANOUT.min(ids.len()))
+                .await;
+            for (&idx, result) in chunk.iter().zip(fetched) {
+                let Ok(article) = result else { continue };
+                if let Some(real) = by_hash.get(&hash_16k(&article)) {
+                    names[idx] = real.clone();
+                    matched += 1;
+                }
+            }
+        }
+        // A volume left unnamed would shift every later one's position in
+        // its set, so a partial match is no match.
+        if matched != by_hash.len() {
+            tracing::debug!(
+                matched,
+                volumes = by_hash.len(),
+                "par2 hash16k did not match every rar volume; skipping rar rescue"
+            );
+            return (Vec::new(), Vec::new());
         }
         let groups = detect_rar_volume_groups_by_name(&names);
         if !groups.is_empty() {
@@ -1145,6 +1174,13 @@ impl UsenetStreamer {
         }
         (groups, names)
     }
+}
+
+/// MD5 of a file's first 16 KiB — PAR2's FileDesc `hash_16k`. `head` is the
+/// file's first article, or the whole file when it's shorter than that.
+fn hash_16k(head: &[u8]) -> [u8; 16] {
+    use md5::Digest;
+    md5::Md5::digest(&head[..head.len().min(16 * 1024)]).into()
 }
 
 /// Cumulative byte offsets of a file's segments: `offsets[i]` is where
@@ -1190,4 +1226,25 @@ pub(crate) fn pick_primary_media_index(files: &[NzbFile]) -> Option<usize> {
         .filter(|(_, f)| looks_like_media(f))
         .max_by_key(|(_, f)| f.segments.iter().map(|s| s.bytes).sum::<u64>())
         .map(|(i, _)| i)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::hash_16k;
+
+    #[test]
+    fn hash_16k_covers_only_the_first_16_kib() {
+        let mut long = vec![7u8; 16 * 1024];
+        let head = hash_16k(&long);
+        long.extend_from_slice(&[9u8; 4096]);
+        assert_eq!(hash_16k(&long), head);
+        // MD5("") — a file shorter than 16 KiB hashes whole.
+        assert_eq!(
+            hash_16k(&[]),
+            [
+                0xd4, 0x1d, 0x8c, 0xd9, 0x8f, 0x00, 0xb2, 0x04, 0xe9, 0x80, 0x09, 0x98, 0xec, 0xf8,
+                0x42, 0x7e
+            ]
+        );
+    }
 }

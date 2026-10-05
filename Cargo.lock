@@ -4135,6 +4135,7 @@ dependencies = [
  "futures",
  "hmac",
  "lru",
+ "md-5",
  "memchr",
  "parking_lot",
  "pbkdf2",
