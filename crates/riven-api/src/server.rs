@@ -9,6 +9,7 @@ mod oidc;
 mod plex;
 mod stremio;
 
+use std::future::IntoFuture;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -37,6 +38,9 @@ use authn::AuthService;
 pub struct StartServerConfig {
     pub host: String,
     pub port: u16,
+    /// The local media listener's port; `0` leaves it off. See
+    /// `RivenSettings::media_port`.
+    pub media_port: u16,
     pub registry: Arc<PluginRegistry>,
     pub job_queue: Arc<JobQueue>,
     pub http_client: HttpClient,
@@ -84,6 +88,7 @@ pub async fn start_server(config: StartServerConfig) -> Result<()> {
     let StartServerConfig {
         host,
         port,
+        media_port,
         registry,
         job_queue,
         http_client,
@@ -221,6 +226,7 @@ pub async fn start_server(config: StartServerConfig) -> Result<()> {
         app = app.layer(security_header_layer(header));
     }
 
+    let local_media = (media_port != 0).then(|| local_media_router(state.clone()));
     let app = app.with_state(state);
 
     let listener = tokio::net::TcpListener::bind(format!("{host}:{port}")).await?;
@@ -229,14 +235,39 @@ pub async fn start_server(config: StartServerConfig) -> Result<()> {
     // `with_connect_info` rather than the plain service so the auth rate
     // limiter can key on the peer address — the only client identity that
     // cannot be forged by a header.
-    axum::serve(
+    let api = axum::serve(
         listener,
         app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
-    .with_graceful_shutdown(async move { cancel.cancelled().await })
-    .await?;
+    .with_graceful_shutdown({
+        let cancel = cancel.clone();
+        async move { cancel.cancelled().await }
+    });
 
+    let Some(local_media) = local_media else {
+        api.await?;
+        return Ok(());
+    };
+    let listener = tokio::net::TcpListener::bind(format!("{host}:{media_port}")).await?;
+    tracing::info!(host = %host, port = media_port, "local media server listening");
+    let media = axum::serve(listener, local_media)
+        .with_graceful_shutdown(async move { cancel.cancelled().await });
+
+    tokio::try_join!(api.into_future(), media.into_future())?;
     Ok(())
+}
+
+/// `/media/{id}` alone, with no credential asked for. It answers whoever can
+/// reach its port, so that port is published on loopback only.
+fn local_media_router(state: ApiState) -> Router {
+    let mut router = Router::new().route(
+        "/media/{entry_id}",
+        get(media::local_media_handler).head(media::local_media_handler),
+    );
+    for header in SECURITY_HEADERS {
+        router = router.layer(security_header_layer(header));
+    }
+    router.with_state(state)
 }
 
 /// Response headers applied to everything riven serves.

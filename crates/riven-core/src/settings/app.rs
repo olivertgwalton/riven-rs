@@ -34,6 +34,11 @@ pub struct RivenSettings {
     /// loopback-only.
     pub gql_host: String,
     pub gql_port: u16,
+    /// Port of a second listener, on `gql_host`, that serves `/media/{id}` and
+    /// nothing else, with no credential asked for: whoever reaches it is
+    /// trusted by where it is, so publish it on loopback only. `0`, the
+    /// default, leaves it off. A `.strm` library names its addresses here.
+    pub media_port: u16,
     pub dubbed_anime_only: bool,
     /// When true, torrents with unknown cache status are included as download candidates.
     /// Defaults to false because attempting unknown torrents degrades performance.
@@ -105,6 +110,7 @@ impl Default for RivenSettings {
             log_directory: "./logs".into(),
             gql_host: "0.0.0.0".into(),
             gql_port: 8080,
+            media_port: 0,
             dubbed_anime_only: false,
             attempt_unknown_downloads: false,
             retry_interval_secs: 60 * 10, // 10 minutes

@@ -22,14 +22,14 @@ anything outside the markers survives regeneration. -->
 | Variable | Kind | Read at |
 | --- | --- | --- |
 | `RIVEN_SETTING__SETUP_COMPLETED` | variable | `crates/riven-api/src/schema/queries/settings.rs:111` |
-| `RIVEN_STATIC_DIR` | variable | `crates/riven-api/src/server.rs:135` |
+| `RIVEN_STATIC_DIR` | variable | `crates/riven-api/src/server.rs:140` |
 
 ### `riven-app`
 
 | Variable | Kind | Read at |
 | --- | --- | --- |
-| `ORIGIN` | variable | `crates/riven-app/src/main.rs:357`<br>`crates/riven-app/src/main.rs:375` |
-| `RIVEN_SETTING__API_KEY` | variable | `crates/riven-app/src/main.rs:541` |
+| `ORIGIN` | variable | `crates/riven-app/src/main.rs:358`<br>`crates/riven-app/src/main.rs:376` |
+| `RIVEN_SETTING__API_KEY` | variable | `crates/riven-app/src/main.rs:543` |
 | `RIVEN_SETTING__PUBLIC_URL` | variable | `crates/riven-app/src/main.rs:156` |
 | `RIVEN_USENET_AUTO_REPAIR` | variable | `crates/riven-app/src/usenet.rs:151` |
 | `RIVEN_USENET_DISABLE_META_COMPACTION` | variable | `crates/riven-app/src/usenet.rs:84` |
@@ -44,7 +44,7 @@ anything outside the markers survives regeneration. -->
 | --- | --- | --- |
 | `RIVEN_MEMORY_LIMIT_MB` | variable | `crates/riven-core/src/cache.rs:148` |
 | `RIVEN_READ_AHEAD_CACHE_BYTES` | variable | `crates/riven-core/src/cache.rs:58` |
-| `RIVEN_SETTING__` | prefix | `crates/riven-core/src/settings/app.rs:144` |
+| `RIVEN_SETTING__` | prefix | `crates/riven-core/src/settings/app.rs:150` |
 | `RIVEN_USENET_CACHE_BYTES` | variable | `crates/riven-core/src/cache.rs:95` |
 | `RIVEN_USENET_META_CACHE_BYTES` | variable | `crates/riven-core/src/cache.rs:81` |
 | `RIVEN_USENET_NZB_CACHE_BYTES` | variable | `crates/riven-core/src/cache.rs:83` |

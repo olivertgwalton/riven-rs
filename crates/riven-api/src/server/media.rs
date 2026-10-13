@@ -576,11 +576,32 @@ pub(super) async fn media_bridge_handler(
     method: Method,
     headers: HeaderMap,
 ) -> Response {
-    let request_started = Instant::now();
-
     if !media_credential_ok(&state, &headers, &query).await {
         return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
     }
+    serve_media(&state, entry_id, query.download.is_some(), method, &headers).await
+}
+
+/// The same media with no credential asked for, on the local media listener
+/// only: whoever can reach that port is trusted by where it is.
+pub(super) async fn local_media_handler(
+    State(state): State<ApiState>,
+    Path(entry_id): Path<i64>,
+    Query(query): Query<MediaQuery>,
+    method: Method,
+    headers: HeaderMap,
+) -> Response {
+    serve_media(&state, entry_id, query.download.is_some(), method, &headers).await
+}
+
+async fn serve_media(
+    state: &ApiState,
+    entry_id: i64,
+    want_download: bool,
+    method: Method,
+    headers: &HeaderMap,
+) -> Response {
+    let request_started = Instant::now();
 
     let entry = match riven_db::repo::get_media_entry_by_id(entry_id).await {
         Ok(Some(entry)) => entry,
@@ -591,15 +612,13 @@ pub(super) async fn media_bridge_handler(
         }
     };
 
-    let want_download = query.download.is_some();
-
     if let Some((info_hash, file_index)) = usenet_target(&entry) {
         return serve_usenet_media(
             &entry,
             info_hash,
             file_index,
             method,
-            &headers,
+            headers,
             want_download,
         )
         .await;
@@ -623,7 +642,7 @@ pub(super) async fn media_bridge_handler(
     let mut stream_url = entry.stream_url.clone();
     if stream_url.is_none() {
         refreshed_stream_url = true;
-        stream_url = resolve_media_stream_url(&state, &entry).await;
+        stream_url = resolve_media_stream_url(state, &entry).await;
     }
 
     let Some(initial_stream_url) = stream_url.take() else {
@@ -634,7 +653,7 @@ pub(super) async fn media_bridge_handler(
         &state.stream_client,
         method.clone(),
         &initial_stream_url,
-        &headers,
+        headers,
     )
     .send()
     .await
@@ -642,12 +661,12 @@ pub(super) async fn media_bridge_handler(
         Ok(response) => response,
         Err(error) => {
             tracing::warn!(entry_id, error = %error, "initial media request failed");
-            let Some(refreshed) = resolve_media_stream_url(&state, &entry).await else {
+            let Some(refreshed) = resolve_media_stream_url(state, &entry).await else {
                 return StatusCode::BAD_GATEWAY.into_response();
             };
             refreshed_stream_url = true;
 
-            match build_media_request(&state.stream_client, method.clone(), &refreshed, &headers)
+            match build_media_request(&state.stream_client, method.clone(), &refreshed, headers)
                 .send()
                 .await
             {
@@ -663,12 +682,12 @@ pub(super) async fn media_bridge_handler(
     let mut range_ignored = upstream_ignored_range(requested_range, upstream.status());
 
     if is_expired_stream_status(upstream.status()) || range_ignored {
-        let Some(refreshed) = resolve_media_stream_url(&state, &entry).await else {
+        let Some(refreshed) = resolve_media_stream_url(state, &entry).await else {
             return StatusCode::BAD_GATEWAY.into_response();
         };
         refreshed_stream_url = true;
 
-        match build_media_request(&state.stream_client, method.clone(), &refreshed, &headers)
+        match build_media_request(&state.stream_client, method.clone(), &refreshed, headers)
             .send()
             .await
         {
@@ -723,7 +742,7 @@ pub(super) async fn media_bridge_handler(
         "media bridge served"
     );
 
-    maybe_spawn_next_prewarm(&state, entry_id, &method, requested_range);
+    maybe_spawn_next_prewarm(state, entry_id, &method, requested_range);
 
     if method == Method::HEAD {
         return response

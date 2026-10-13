@@ -350,6 +350,7 @@ async fn main() -> Result<()> {
 
     let gql_host = settings.gql_host.clone();
     let gql_port = settings.gql_port;
+    let media_port = settings.media_port;
     // Auth configuration was validated before the database was opened; see
     // `validate_auth_settings`.
     let public_url = resolve_public_url(
@@ -392,6 +393,7 @@ async fn main() -> Result<()> {
             if let Err(e) = riven_api::start_server(riven_api::StartServerConfig {
                 host: gql_host,
                 port: gql_port,
+                media_port,
                 registry: reg,
                 job_queue: jq.clone(),
                 http_client: http_client.clone(),
