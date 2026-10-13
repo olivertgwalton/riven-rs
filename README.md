@@ -81,12 +81,15 @@ Common settings:
 | `RIVEN_SETTING__DATABASE_URL` | `postgresql://localhost/riven` | PostgreSQL connection string. |
 | `RIVEN_SETTING__REDIS_URL` | `redis://localhost:6379` | Redis connection string. |
 | `RIVEN_SETTING__GQL_PORT` | `8080` | API server port. |
+| `RIVEN_SETTING__MEDIA_PORT` | `0` | Port of a listener serving `/media/{id}` with no credential asked for, for a [`.strm` library](#strm-library). Publish it on loopback only. `0` leaves it off. |
 | `RIVEN_SETTING__API_KEY` | — | **Required.** Bearer/API key for machine callers; also seeds the Stremio addon token. Riven will not start without it. |
 | `RIVEN_SETTING__PUBLIC_URL` | bind address | Public origin browsers reach riven at. Sets cookie scope and the passkey relying-party ID. |
 | `RIVEN_SETTING__LOG_DIRECTORY` | `./logs` | Directory for log output. |
 | `RIVEN_SETTING__VFS_MOUNT_PATH` | empty | VFS mount path. |
 | `RIVEN_SETTING__FILESYSTEM__MOUNT_PATH` | empty | Preferred VFS mount path. |
 | `RIVEN_SETTING__FILESYSTEM__SYMLINK_PATH` | empty | Where to materialise the library as real directories holding symlinks into the VFS. Empty disables it. See [Symlink library](#symlink-library). |
+| `RIVEN_SETTING__FILESYSTEM__LIBRARY_ENTRIES` | `symlink` | What each media file in that tree is: `symlink`, or `strm`. See [`.strm` library](#strm-library). |
+| `RIVEN_SETTING__FILESYSTEM__STRM_BASE_URL` | empty | The origin a media server reaches riven at, written into every `.strm`. |
 | `RIVEN_SETTING__VFS_CACHE_MAX_SIZE_MB` | `0` | VFS chunk cache size. `0` uses the default. |
 | `RIVEN_SETTING__CORS_ALLOWED_ORIGINS` | empty | Comma-separated list of CORS origins. If empty, falls back to `ORIGIN`; if both are unset, CORS is permissive (warns on startup). |
 | `RIVEN_SETTING__OIDC_PROVIDERS` | `[]` | Sign in via PocketID, Authelia, Keycloak, or any other OIDC-compliant identity provider. See [OIDC sign-in](#oidc-sign-in) below. |
@@ -142,6 +145,31 @@ and on a slow sweep underneath both. Reconciling never removes a regular file
 -- only symlinks it would have created itself. A directory left holding nothing
 but sidecars is kept rather than tidied away, so a title downloaded again finds
 its theme song already there.
+
+### `.strm` library
+
+A media server that cannot see the mount -- a native server on a Mac whose
+FUSE mount lives inside the Docker VM -- can read the same tree with
+`filesystem.library_entries` set to `strm`. Each media file is then a `.strm`
+beside where the symlink would be, holding riven's address for it on the local
+media listener:
+
+```
+http://127.0.0.1:8081/media/18857
+```
+
+The address carries no credential. `RIVEN_SETTING__MEDIA_PORT` starts a second
+listener that serves `/media/{id}` and nothing else, to whoever can reach it,
+so it must be published on loopback only -- in Compose,
+`"127.0.0.1:8081:8081"`. The API port is untouched and still asks for the API
+key, a session or the Stremio token. `filesystem.strm_base_url` is the
+listener's origin as the media server reaches it.
+
+Switching an existing tree in place swaps every symlink for its `.strm` and
+keeps every sidecar where it is. A stale `.strm` is pruned like a stale symlink:
+every `.strm` in the tree is taken to be riven's. Subtitle entries are left out,
+since a `.strm` names a video and a server reads a subtitle as a file. The tree
+no longer needs the mount, so the mount checks do not apply.
 
 ### OIDC sign-in
 

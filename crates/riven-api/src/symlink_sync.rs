@@ -43,21 +43,15 @@ pub async fn reconcile_once(
     filesystem_settings: &RwLock<FilesystemSettings>,
     vfs_layout: &RwLock<VfsLibraryLayout>,
 ) -> anyhow::Result<Option<symlink::SymlinkStats>> {
-    let (symlink_path, mount_path) = {
-        let settings = filesystem_settings.read().await;
-        (
-            settings.symlink_path.trim().to_owned(),
-            settings.mount_path.trim().to_owned(),
-        )
-    };
-    if symlink_path.is_empty() {
-        return Ok(None);
-    }
     // Cloned rather than held: the reconcile awaits a query and a blocking
     // walk, and holding a read guard across those would block every settings
     // write for the length of a tree walk.
+    let settings = filesystem_settings.read().await.clone();
+    if settings.symlink_path.trim().is_empty() {
+        return Ok(None);
+    }
     let layout = vfs_layout.read().await.clone();
-    let stats = symlink::reconcile(&layout, &symlink_path, &mount_path).await?;
+    let stats = symlink::reconcile(&layout, &settings).await?;
     Ok(Some(stats))
 }
 

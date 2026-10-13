@@ -11,10 +11,17 @@
 //! sits at the same path in both and a profile's prefix means the same thing in
 //! both.
 //!
-//! One rule governs deletion: a regular file is never removed. Only symlinks
-//! this reconciler would itself have created are pruned, and a directory left
-//! holding nothing but sidecars is kept rather than tidied away -- if the title
-//! is downloaded again the theme song is already there.
+//! A media file can instead be a `.strm` naming riven's own `/media/{id}`
+//! address on its local media listener, for a server that cannot see the
+//! mount -- one outside the VM the mount lives in. The address carries no
+//! credential: the listener trusts whoever can reach it. The tree is otherwise the same, so
+//! switching between the two in place keeps every sidecar where it was.
+//!
+//! One rule governs deletion: a regular file is never removed. Only the
+//! symlinks and `.strm` files this reconciler would itself have created are
+//! pruned -- every `.strm` in the tree is taken to be its own -- and a
+//! directory left holding nothing but sidecars is kept rather than tidied away:
+//! if the title is downloaded again the theme song is already there.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
@@ -24,10 +31,62 @@ use std::os::unix::fs as unix_fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail};
-use riven_core::settings::LibraryProfileMembership;
+use riven_core::settings::{FilesystemSettings, LibraryEntries, LibraryProfileMembership};
 use riven_core::vfs_layout::VfsLibraryLayout;
 
-/// What one reconcile pass changed.
+/// What a path in the tree holds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Entry {
+    /// A symlink to this absolute path in the mount.
+    Link(String),
+    /// A `.strm` naming this address.
+    Strm(String),
+}
+
+/// How a library entry becomes an [`Entry`].
+#[derive(Debug, Clone, Copy)]
+pub enum EntryKind<'a> {
+    Symlink { mount_path: &'a str },
+    Strm { base_url: &'a str },
+}
+
+impl EntryKind<'_> {
+    /// The path relative to the tree root and what it holds, or `None` for an
+    /// entry this kind cannot stand in for.
+    fn entry(self, entry: &LibraryEntry, relative: &str) -> Option<(String, Entry)> {
+        match self {
+            Self::Symlink { mount_path } => {
+                let mount = mount_path.trim().trim_end_matches('/');
+                Some((
+                    relative.to_owned(),
+                    Entry::Link(format!("{mount}/{relative}")),
+                ))
+            }
+            // A `.strm` names a video. A server reads a subtitle as a file
+            // beside it, which riven's media address does not serve.
+            Self::Strm { .. } if entry.is_subtitle => None,
+            Self::Strm { base_url } => {
+                let base = base_url.trim().trim_end_matches('/');
+                let name = Path::new(relative).with_extension("strm");
+                Some((
+                    name.to_string_lossy().into_owned(),
+                    Entry::Strm(format!("{base}/media/{}", entry.id)),
+                ))
+            }
+        }
+    }
+}
+
+/// One library entry the tree holds a path for.
+#[derive(Debug, Clone)]
+pub struct LibraryEntry {
+    pub id: i64,
+    pub is_subtitle: bool,
+    pub path: String,
+    pub membership: LibraryProfileMembership,
+}
+
+/// What one reconcile pass changed. A link is a symlink or a `.strm`.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct SymlinkStats {
     pub links_created: usize,
@@ -57,17 +116,11 @@ impl SymlinkStats {
 
 /// Reject a configuration that cannot work before any of it is acted on.
 pub fn validate_paths(symlink_path: &str, mount_path: &str) -> Result<()> {
-    let root = symlink_path.trim();
+    let root = validate_root(symlink_path)?;
     let mount = mount_path.trim();
 
-    if root.is_empty() {
-        bail!("symlink path is empty");
-    }
     if mount.is_empty() {
         bail!("VFS mount path is empty, so the symlink tree would point nowhere");
-    }
-    if !Path::new(root).is_absolute() {
-        bail!("symlink path {root} must be absolute");
     }
     if !Path::new(mount).is_absolute() {
         bail!("VFS mount path {mount} must be absolute");
@@ -86,8 +139,32 @@ pub fn validate_paths(symlink_path: &str, mount_path: &str) -> Result<()> {
     Ok(())
 }
 
-/// The links the tree should hold: path relative to the tree root, against the
-/// absolute path it points at.
+/// Reject a `.strm` tree that cannot work before any of it is acted on. It
+/// does not read the mount, so the mount's path is no concern of it.
+pub fn validate_strm(symlink_path: &str, base_url: &str) -> Result<()> {
+    validate_root(symlink_path)?;
+    let base = base_url.trim();
+    if !(base.starts_with("http://") || base.starts_with("https://")) {
+        bail!(
+            "strm base URL {base:?} is not an http or https address, so no server could read the .strm files"
+        );
+    }
+    Ok(())
+}
+
+fn validate_root(symlink_path: &str) -> Result<&str> {
+    let root = symlink_path.trim();
+    if root.is_empty() {
+        bail!("symlink path is empty");
+    }
+    if !Path::new(root).is_absolute() {
+        bail!("symlink path {root} must be absolute");
+    }
+    Ok(root)
+}
+
+/// The links the tree should hold: path relative to the tree root, against
+/// what it holds.
 ///
 /// Pure, and the whole of the layout decision. An entry appears in the default
 /// `/movies` and `/shows` tree unless an exclusive profile has claimed it, and
@@ -95,27 +172,28 @@ pub fn validate_paths(symlink_path: &str, mount_path: &str) -> Result<()> {
 /// [`crate::query`] does for `readdir`, stated over the whole library at once.
 pub fn build_plan(
     layout: &VfsLibraryLayout,
-    entries: impl IntoIterator<Item = (String, LibraryProfileMembership)>,
-    mount_path: &str,
-) -> BTreeMap<String, String> {
-    let mount = mount_path.trim().trim_end_matches('/');
+    entries: impl IntoIterator<Item = LibraryEntry>,
+    kind: EntryKind<'_>,
+) -> BTreeMap<String, Entry> {
     let exclusive = layout.exclusive_profile_keys();
     let mut plan = BTreeMap::new();
 
-    for (path, membership) in entries {
-        let relative = path.trim_start_matches('/');
+    for entry in entries {
+        let relative = entry.path.trim_start_matches('/');
         if relative.is_empty() {
             continue;
         }
-        let target = format!("{mount}/{relative}");
+        let Some((relative, held)) = kind.entry(&entry, relative) else {
+            continue;
+        };
 
-        if !exclusive.iter().any(|key| membership.contains(key)) {
-            drop(plan.insert(relative.to_owned(), target.clone()));
+        if !exclusive.iter().any(|key| entry.membership.contains(key)) {
+            drop(plan.insert(relative.clone(), held.clone()));
         }
         for profile in layout.profiles() {
-            if membership.contains(&profile.key) {
+            if entry.membership.contains(&profile.key) {
                 let prefix = profile.library_path.trim_matches('/');
-                drop(plan.insert(format!("{prefix}/{relative}"), target.clone()));
+                drop(plan.insert(format!("{prefix}/{relative}"), held.clone()));
             }
         }
     }
@@ -124,12 +202,12 @@ pub fn build_plan(
 
 /// Bring the tree under `root` into line with `plan`. Blocking; call it off the
 /// runtime.
-pub fn apply(root: &Path, plan: &BTreeMap<String, String>) -> Result<SymlinkStats> {
+pub fn apply(root: &Path, plan: &BTreeMap<String, Entry>) -> Result<SymlinkStats> {
     let mut stats = SymlinkStats::default();
     fs::create_dir_all(root)?;
 
     let mut desired: BTreeSet<PathBuf> = BTreeSet::new();
-    for (relative, target) in plan {
+    for (relative, entry) in plan {
         let link = root.join(relative);
         desired.insert(link.clone());
 
@@ -140,26 +218,9 @@ pub fn apply(root: &Path, plan: &BTreeMap<String, String>) -> Result<SymlinkStat
             stats.dirs_created += 1;
         }
 
-        match fs::symlink_metadata(&link) {
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                unix_fs::symlink(target, &link)?;
-                stats.links_created += 1;
-            }
-            Err(error) => return Err(error.into()),
-            Ok(metadata) if metadata.file_type().is_symlink() => {
-                if fs::read_link(&link)?.as_os_str() != OsStr::new(target.as_str()) {
-                    fs::remove_file(&link)?;
-                    unix_fs::symlink(target, &link)?;
-                    stats.links_repointed += 1;
-                }
-            }
-            Ok(_) => {
-                stats.conflicts += 1;
-                tracing::warn!(
-                    link = %link.display(),
-                    "a real file occupies a link path; left as it is"
-                );
-            }
+        match entry {
+            Entry::Link(target) => place_link(&link, target, &mut stats)?,
+            Entry::Strm(address) => place_strm(&link, address, &mut stats)?,
         }
     }
 
@@ -169,8 +230,60 @@ pub fn apply(root: &Path, plan: &BTreeMap<String, String>) -> Result<SymlinkStat
     Ok(stats)
 }
 
+fn place_link(link: &Path, target: &str, stats: &mut SymlinkStats) -> Result<()> {
+    match fs::symlink_metadata(link) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            unix_fs::symlink(target, link)?;
+            stats.links_created += 1;
+        }
+        Err(error) => return Err(error.into()),
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            if fs::read_link(link)?.as_os_str() != OsStr::new(target) {
+                fs::remove_file(link)?;
+                unix_fs::symlink(target, link)?;
+                stats.links_repointed += 1;
+            }
+        }
+        Ok(_) => occupied(link, stats),
+    }
+    Ok(())
+}
+
+fn place_strm(path: &Path, address: &str, stats: &mut SymlinkStats) -> Result<()> {
+    let content = format!("{address}\n");
+    match fs::symlink_metadata(path) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            fs::write(path, content)?;
+            stats.links_created += 1;
+        }
+        Err(error) => return Err(error.into()),
+        Ok(metadata) if metadata.is_file() => {
+            if fs::read_to_string(path)? != content {
+                fs::write(path, content)?;
+                stats.links_repointed += 1;
+            }
+        }
+        Ok(_) => occupied(path, stats),
+    }
+    Ok(())
+}
+
+fn occupied(path: &Path, stats: &mut SymlinkStats) {
+    stats.conflicts += 1;
+    tracing::warn!(
+        link = %path.display(),
+        "something the reconciler did not make occupies a link path; left as it is"
+    );
+}
+
+fn is_strm(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("strm"))
+}
+
 /// Remove stale links under `dir`, then report whether it is now empty so the
-/// caller can remove it. Regular files are counted and never touched.
+/// caller can remove it. Regular files other than `.strm` are counted and never
+/// touched.
 fn prune_dir(dir: &Path, desired: &BTreeSet<PathBuf>, stats: &mut SymlinkStats) -> Result<bool> {
     let mut kept_links = 0usize;
     let mut kept_files = 0usize;
@@ -180,7 +293,7 @@ fn prune_dir(dir: &Path, desired: &BTreeSet<PathBuf>, stats: &mut SymlinkStats) 
         let path = entry?.path();
         let metadata = fs::symlink_metadata(&path)?;
 
-        if metadata.file_type().is_symlink() {
+        if metadata.file_type().is_symlink() || (metadata.is_file() && is_strm(&path)) {
             if desired.contains(&path) {
                 kept_links += 1;
             } else {
@@ -208,36 +321,49 @@ fn prune_dir(dir: &Path, desired: &BTreeSet<PathBuf>, stats: &mut SymlinkStats) 
 /// Read the library, plan the tree, and write it.
 pub async fn reconcile(
     layout: &VfsLibraryLayout,
-    symlink_path: &str,
-    mount_path: &str,
+    settings: &FilesystemSettings,
 ) -> Result<SymlinkStats> {
-    validate_paths(symlink_path, mount_path)?;
-
-    let mount = Path::new(mount_path.trim());
-    if !mount.exists() {
-        bail!(
-            "VFS mount {} does not exist; refusing to build a tree of links into nothing",
-            mount.display()
-        );
-    }
+    let mount = Path::new(settings.mount_path.trim());
+    let kind = match settings.library_entries {
+        LibraryEntries::Symlink => {
+            validate_paths(&settings.symlink_path, &settings.mount_path)?;
+            if !mount.exists() {
+                bail!(
+                    "VFS mount {} does not exist; refusing to build a tree of links into nothing",
+                    mount.display()
+                );
+            }
+            EntryKind::Symlink {
+                mount_path: &settings.mount_path,
+            }
+        }
+        LibraryEntries::Strm => {
+            validate_strm(&settings.symlink_path, &settings.strm_base_url)?;
+            EntryKind::Strm {
+                base_url: &settings.strm_base_url,
+            }
+        }
+    };
 
     let entries = riven_db::repo::list_vfs_entry_paths().await?;
-    let entries: Vec<(String, LibraryProfileMembership)> = entries
-        .into_iter()
-        .map(|entry| {
-            let membership = LibraryProfileMembership::from_json(entry.library_profiles.as_ref());
-            (entry.path, membership)
-        })
-        .collect();
+    let entries = entries.into_iter().map(|entry| LibraryEntry {
+        id: entry.id,
+        is_subtitle: entry.is_subtitle,
+        membership: LibraryProfileMembership::from_json(entry.library_profiles.as_ref()),
+        path: entry.path,
+    });
 
-    let plan = build_plan(layout, entries, mount_path);
+    let plan = build_plan(layout, entries, kind);
 
     // A tree of links into a mount that is not serving is a library of broken
     // paths, and a media server asked to scan one drops the items it can no
     // longer see. The database holding entries while the mount reads as empty
     // is what an unmounted VFS looks like from here -- the mount path is a
     // bind mount in its own right, so its device number says nothing.
-    if !plan.is_empty() && fs::read_dir(mount)?.next().is_none() {
+    if matches!(kind, EntryKind::Symlink { .. })
+        && !plan.is_empty()
+        && fs::read_dir(mount)?.next().is_none()
+    {
         bail!(
             "VFS mount {} is empty while the library holds {} entries; refusing to build a tree of broken links",
             mount.display(),
@@ -245,7 +371,7 @@ pub async fn reconcile(
         );
     }
 
-    let root = PathBuf::from(symlink_path.trim());
+    let root = PathBuf::from(settings.symlink_path.trim());
 
     tokio::task::spawn_blocking(move || apply(&root, &plan)).await?
 }
@@ -291,11 +417,21 @@ mod tests {
         })
     }
 
-    fn entry(path: &str, profiles: &[&str]) -> (String, LibraryProfileMembership) {
-        (
-            path.to_owned(),
-            LibraryProfileMembership::new(profiles.iter().map(|s| (*s).to_owned())),
-        )
+    fn entry(path: &str, profiles: &[&str]) -> LibraryEntry {
+        LibraryEntry {
+            id: 7,
+            is_subtitle: false,
+            path: path.to_owned(),
+            membership: LibraryProfileMembership::new(profiles.iter().map(|s| (*s).to_owned())),
+        }
+    }
+
+    const SYMLINKS: EntryKind<'static> = EntryKind::Symlink {
+        mount_path: "/mnt/riven-vfs",
+    };
+
+    fn link(target: &str) -> Entry {
+        Entry::Link(target.to_owned())
     }
 
     #[test]
@@ -304,12 +440,11 @@ mod tests {
         let plan = build_plan(
             &layout,
             vec![entry("/movies/Film (2019) {tmdb-1}/Film.mkv", &[])],
-            "/mnt/riven-vfs",
+            SYMLINKS,
         );
         assert_eq!(
-            plan.get("movies/Film (2019) {tmdb-1}/Film.mkv")
-                .map(String::as_str),
-            Some("/mnt/riven-vfs/movies/Film (2019) {tmdb-1}/Film.mkv")
+            plan.get("movies/Film (2019) {tmdb-1}/Film.mkv").cloned(),
+            Some(link("/mnt/riven-vfs/movies/Film (2019) {tmdb-1}/Film.mkv"))
         );
         assert_eq!(plan.len(), 1);
     }
@@ -320,7 +455,7 @@ mod tests {
         let plan = build_plan(
             &layout,
             vec![entry("/movies/Up (2009)/Up.mkv", &["kids"])],
-            "/mnt/riven-vfs",
+            SYMLINKS,
         );
         assert_eq!(plan.len(), 2);
         assert_eq!(
@@ -338,7 +473,7 @@ mod tests {
                 entry("/movies/Up (2009)/Up.mkv", &["kids"]),
                 entry("/movies/Heat (1995)/Heat.mkv", &[]),
             ],
-            "/mnt/riven-vfs",
+            SYMLINKS,
         );
         assert!(plan.contains_key("kids/movies/Up (2009)/Up.mkv"));
         assert!(!plan.contains_key("movies/Up (2009)/Up.mkv"));
@@ -351,7 +486,7 @@ mod tests {
         let mut plan = BTreeMap::new();
         drop(plan.insert(
             "movies/Film/Film.mkv".to_owned(),
-            "/mnt/riven-vfs/movies/Film/Film.mkv".to_owned(),
+            link("/mnt/riven-vfs/movies/Film/Film.mkv"),
         ));
 
         let first = apply(&root, &plan).expect("first pass");
@@ -369,7 +504,7 @@ mod tests {
         let mut plan = BTreeMap::new();
         drop(plan.insert(
             "movies/Film/Film.mkv".to_owned(),
-            "/mnt/riven-vfs/movies/Film/Film.mkv".to_owned(),
+            link("/mnt/riven-vfs/movies/Film/Film.mkv"),
         ));
         apply(&root, &plan).expect("first pass");
 
@@ -395,7 +530,7 @@ mod tests {
         let mut plan = BTreeMap::new();
         drop(plan.insert(
             "movies/Film/Film.mkv".to_owned(),
-            "/mnt/riven-vfs/movies/Film/Film.mkv".to_owned(),
+            link("/mnt/riven-vfs/movies/Film/Film.mkv"),
         ));
         apply(&root, &plan).expect("first pass");
 
@@ -414,14 +549,14 @@ mod tests {
         let mut before = BTreeMap::new();
         drop(before.insert(
             "movies/Film/Film.mkv".to_owned(),
-            "/mnt/riven-vfs/movies/Film/Film.mkv".to_owned(),
+            link("/mnt/riven-vfs/movies/Film/Film.mkv"),
         ));
         apply(&root, &before).expect("first pass");
 
         let mut after = BTreeMap::new();
         drop(after.insert(
             "movies/Film/Film.mkv".to_owned(),
-            "/mnt/elsewhere/movies/Film/Film.mkv".to_owned(),
+            link("/mnt/elsewhere/movies/Film/Film.mkv"),
         ));
         let stats = apply(&root, &after).expect("second pass");
 
@@ -445,7 +580,7 @@ mod tests {
         let mut plan = BTreeMap::new();
         drop(plan.insert(
             "movies/Film/Film.mkv".to_owned(),
-            "/mnt/riven-vfs/movies/Film/Film.mkv".to_owned(),
+            link("/mnt/riven-vfs/movies/Film/Film.mkv"),
         ));
         let stats = apply(&root, &plan).expect("pass");
 
@@ -465,5 +600,93 @@ mod tests {
         assert!(validate_paths("relative", "/mnt/riven").is_err());
         // A shared prefix that is not a shared path is fine.
         assert!(validate_paths("/mnt/riven", "/mnt/riven-vfs").is_ok());
+    }
+
+    const STRMS: EntryKind<'static> = EntryKind::Strm {
+        base_url: "http://127.0.0.1:8081/",
+    };
+
+    #[test]
+    fn a_strm_tree_names_the_media_address_beside_the_files_name() {
+        let layout = layout_with(vec![]);
+        let plan = build_plan(
+            &layout,
+            vec![entry("/movies/Film (2019)/Film (2019) [ultra_hd].mkv", &[])],
+            STRMS,
+        );
+        assert_eq!(
+            plan.get("movies/Film (2019)/Film (2019) [ultra_hd].strm"),
+            Some(&Entry::Strm("http://127.0.0.1:8081/media/7".to_owned()))
+        );
+        assert_eq!(plan.len(), 1);
+    }
+
+    #[test]
+    fn a_strm_tree_leaves_subtitles_out() {
+        let layout = layout_with(vec![]);
+        let subtitle = LibraryEntry {
+            is_subtitle: true,
+            ..entry("/movies/Film/Film.en.srt", &[])
+        };
+        assert!(build_plan(&layout, vec![subtitle.clone()], STRMS).is_empty());
+        assert_eq!(build_plan(&layout, vec![subtitle], SYMLINKS).len(), 1);
+    }
+
+    #[test]
+    fn switching_to_strm_in_place_replaces_the_links_and_keeps_the_sidecars() {
+        let root = scratch();
+        let layout = layout_with(vec![]);
+        let films = || vec![entry("/movies/Film/Film.mkv", &[])];
+        apply(&root, &build_plan(&layout, films(), SYMLINKS)).expect("symlink pass");
+        let theme = root.join("movies/Film/theme.mp3");
+        fs::write(&theme, b"id3").expect("write theme");
+
+        let stats = apply(&root, &build_plan(&layout, films(), STRMS)).expect("strm pass");
+
+        assert_eq!((stats.links_created, stats.links_removed), (1, 1));
+        assert!(fs::symlink_metadata(root.join("movies/Film/Film.mkv")).is_err());
+        assert_eq!(
+            fs::read_to_string(root.join("movies/Film/Film.strm")).expect("read strm"),
+            "http://127.0.0.1:8081/media/7\n"
+        );
+        assert!(theme.exists());
+
+        // The title leaves the library: its .strm goes, its theme song stays.
+        let stats = apply(&root, &BTreeMap::new()).expect("empty pass");
+        assert_eq!(stats.links_removed, 1);
+        assert!(!root.join("movies/Film/Film.strm").exists());
+        assert!(theme.exists(), "a regular file must never be removed");
+
+        drop(fs::remove_dir_all(&root));
+    }
+
+    #[test]
+    fn a_strm_naming_an_old_address_is_rewritten() {
+        let root = scratch();
+        let layout = layout_with(vec![]);
+        let films = || vec![entry("/movies/Film/Film.mkv", &[])];
+        apply(&root, &build_plan(&layout, films(), STRMS)).expect("first pass");
+
+        let moved = EntryKind::Strm {
+            base_url: "http://riven:8081",
+        };
+        let stats = apply(&root, &build_plan(&layout, films(), moved)).expect("second pass");
+
+        assert_eq!(stats.links_repointed, 1);
+        assert_eq!(
+            fs::read_to_string(root.join("movies/Film/Film.strm")).expect("read strm"),
+            "http://riven:8081/media/7\n"
+        );
+
+        drop(fs::remove_dir_all(&root));
+    }
+
+    #[test]
+    fn a_strm_tree_needs_an_absolute_root_and_an_http_address() {
+        assert!(validate_strm("/mnt/riven", "http://127.0.0.1:8080").is_ok());
+        assert!(validate_strm("/mnt/riven", "https://riven.example.com").is_ok());
+        assert!(validate_strm("/mnt/riven", "").is_err());
+        assert!(validate_strm("/mnt/riven", "riven:8080").is_err());
+        assert!(validate_strm("relative", "http://127.0.0.1:8080").is_err());
     }
 }
