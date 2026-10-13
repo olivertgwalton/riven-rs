@@ -923,7 +923,7 @@ pub async fn list_vfs_entry_paths() -> Result<Vec<VfsEntryPath>> {
     Ok(
         VfsEntryPath::find_by_statement(Statement::from_sql_and_values(
             DbBackend::Postgres,
-            "SELECT path, library_profiles \
+            "SELECT id, entry_type = 'subtitle' AS is_subtitle, path, library_profiles \
              FROM filesystem_entries \
              WHERE entry_type IN ('media', 'subtitle') \
              ORDER BY path",

@@ -104,6 +104,8 @@ pub struct VfsName {
 /// per-directory listings the FUSE layer answers `readdir` from.
 #[derive(Debug, Clone, sea_orm::FromQueryResult)]
 pub struct VfsEntryPath {
+    pub id: i64,
+    pub is_subtitle: bool,
     pub path: String,
     pub library_profiles: Option<serde_json::Value>,
 }
