@@ -6,7 +6,8 @@ mod plugin;
 pub use app::RivenSettings;
 pub use filesystem::{
     FilesystemContentType, FilesystemFilterRules, FilesystemFilterSelection,
-    FilesystemItemMetadata, FilesystemLibraryProfile, FilesystemSettings, LibraryProfileMembership,
+    FilesystemItemMetadata, FilesystemLibraryProfile, FilesystemSettings, LibraryEntries,
+    LibraryProfileMembership,
 };
 pub use oidc::OidcProviderSettings;
 pub use plugin::PluginSettings;

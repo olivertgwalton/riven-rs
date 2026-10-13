@@ -73,7 +73,25 @@ pub struct FilesystemSettings {
     /// Pointing the server at this tree instead gives it real directories to
     /// write into while the media itself is still streamed through the VFS.
     pub symlink_path: String,
+    /// What each media file in the tree at `symlink_path` is.
+    pub library_entries: LibraryEntries,
+    /// The origin a media server reaches riven at, written into every `.strm`
+    /// when `library_entries` is `strm`.
+    pub strm_base_url: String,
     pub library_profiles: HashMap<String, FilesystemLibraryProfile>,
+}
+
+/// How the tree at `symlink_path` holds a media file.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LibraryEntries {
+    /// A symlink into the VFS mount: the server reads the bytes through FUSE.
+    #[default]
+    Symlink,
+    /// A `.strm` naming riven's own `/media/{id}` address: the server reads the
+    /// bytes over HTTP, so it need not see the mount at all -- a server on
+    /// another host, or outside the VM the mount lives in.
+    Strm,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]

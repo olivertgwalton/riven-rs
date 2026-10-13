@@ -40,9 +40,9 @@ fn matching_profiles_allow_any_positive_token_and_respect_exclusions() {
         },
     );
     let settings = FilesystemSettings {
-        symlink_path: String::new(),
         mount_path: "/mount".to_string(),
         library_profiles,
+        ..FilesystemSettings::default()
     };
     let metadata = FilesystemItemMetadata {
         genres: vec!["animation".to_string(), "family".to_string()],
@@ -64,7 +64,6 @@ fn matching_profiles_allow_any_positive_token_and_respect_exclusions() {
 #[test]
 fn matching_profiles_reject_when_no_positive_token_matches() {
     let settings = FilesystemSettings {
-        symlink_path: String::new(),
         mount_path: "/mount".to_string(),
         library_profiles: HashMap::from([(
             "nonkids".to_string(),
@@ -88,6 +87,7 @@ fn matching_profiles_reject_when_no_positive_token_matches() {
                 },
             },
         )]),
+        ..FilesystemSettings::default()
     };
 
     let metadata = FilesystemItemMetadata {
@@ -110,7 +110,6 @@ fn matching_profiles_reject_when_no_positive_token_matches() {
 #[test]
 fn matching_profiles_support_language_country_year_and_rating_filters() {
     let settings = FilesystemSettings {
-        symlink_path: String::new(),
         mount_path: "/mount".to_string(),
         library_profiles: HashMap::from([(
             "curated".to_string(),
@@ -134,6 +133,7 @@ fn matching_profiles_support_language_country_year_and_rating_filters() {
                 },
             },
         )]),
+        ..FilesystemSettings::default()
     };
 
     let metadata = FilesystemItemMetadata {
@@ -328,4 +328,28 @@ fn plugin_settings_reports_effective_values_when_any_value_is_usable() {
     let settings = plugin_settings(&[("blank", "   "), ("api_key", " secret ")]);
 
     assert!(settings.has_effective_values());
+}
+
+#[test]
+fn a_saved_filesystem_block_without_library_entries_keeps_symlinks() {
+    let settings: FilesystemSettings = serde_json::from_value(serde_json::json!({
+        "mount_path": "/mnt/riven-vfs",
+        "symlink_path": "/mnt/riven",
+    }))
+    .expect("filesystem settings");
+
+    assert_eq!(settings.library_entries, LibraryEntries::Symlink);
+}
+
+#[test]
+fn library_entries_read_strm_with_its_base_url() {
+    let settings: FilesystemSettings = serde_json::from_value(serde_json::json!({
+        "symlink_path": "/mnt/riven",
+        "library_entries": "strm",
+        "strm_base_url": "http://127.0.0.1:8080",
+    }))
+    .expect("filesystem settings");
+
+    assert_eq!(settings.library_entries, LibraryEntries::Strm);
+    assert_eq!(settings.strm_base_url, "http://127.0.0.1:8080");
 }
