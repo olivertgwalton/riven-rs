@@ -88,7 +88,7 @@ impl Plugin for WebhooksPlugin {
             return Ok(HookResponse::Empty);
         }
 
-        let delivery_id = Ulid::new().to_string();
+        let delivery_id = Ulid::generate().to_string();
         let media_item_id = event.media_item_id();
         let item = if ctx.settings.get_bool("enrich") {
             enrich(ctx, media_item_id).await

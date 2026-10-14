@@ -70,11 +70,10 @@ tower-http = { version = "0.7", features = ["cors"] }
 # Redis
 redis = { version = "1", features = ["tokio-comp", "connection-manager"] }
 
-# Job queue. Pinned exactly: apalis 1.0 reworked the redis backend riven-queue
-# reaches into, and cargo would otherwise take it as an rc upgrade.
-apalis = { version = "=1.0.0-rc.9", features = ["limit"] }
-apalis-redis = { version = "=1.0.0-rc.8" }
-apalis-board-api = { version = "=1.0.0-rc.8", features = ["axum", "ui"] }
+# Job queue
+apalis = { version = "1", features = ["limit"] }
+apalis-redis = "1"
+apalis-board-api = { version = "1", features = ["axum", "ui"] }
 
 # FUSE
 fuser = "0.18"
@@ -104,9 +103,8 @@ parking_lot = "0.12"
 dashmap = "6"
 bytes = "1"
 tokio-util = { version = "0.7", features = ["io"] }
-# Pinned to apalis-redis's ulid: riven-queue passes `Ulid` into apalis `Task`,
-# so the two must be the same type. Cannot advance until apalis does.
-ulid = "1"
+# Must match apalis-redis's ulid: riven-queue passes `Ulid` into apalis `Task`.
+ulid = "3"
 hmac = "0.13"
 sha2 = "0.11"
 md-5 = "0.11"

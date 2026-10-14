@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use apalis_redis::RedisConfig;
+use apalis_redis::Config;
 use chrono::Utc;
 use riven_core::settings::{FilesystemSettings, LibraryProfileMembership};
 use riven_db::repo;
@@ -31,29 +31,19 @@ pub async fn reconcile_library_profiles(settings: &FilesystemSettings) -> anyhow
     repo::update_library_profiles_batch(&updates).await
 }
 
-/// `register_worker.lua` writes the metadata hash for each worker at
-/// `{workers_set}:metadata{worker_name}` (no separator before the worker name,
-/// since the Lua does `KEYS[2] .. worker`). Mirror that format so cleanup wipes
-/// the actual key apalis-redis wrote.
-fn worker_metadata_key(workers_set: &str, worker_name: &str) -> String {
-    format!("{workers_set}:metadata{worker_name}")
-}
+const QUEUE_REGISTRY_KEY: &str = "core:apalis:queues:list";
 
-const QUEUE_REGISTRY_KEY: &str = "core::apalis::queues::list";
-
-/// Walk the apalis queue registry, find workers_sets whose queue is not in
-/// `live_queues`, and drop them along with their metadata hashes. Cleans up
-/// zombie worker registrations left by queues that have since been removed
-/// (e.g. `riven:scrape-plugin` after the per-(plugin) hook-queue refactor).
-/// `rescue_workers` only walks the live queue list, so without
-/// this pass the dashboard would keep showing pre-deploy workers indefinitely.
+/// Drop the worker registrations of queues this process no longer runs (a
+/// plugin disabled, a queue renamed). apalis only ever reaps a dead worker from
+/// a live worker on the same queue, so a queue with no live workers left would
+/// keep its stale workers on the dashboard forever.
 pub async fn purge_orphaned_worker_sets(
     redis: &mut redis::aio::ConnectionManager,
     live_queues: &[String],
 ) {
     let live: HashSet<String> = live_queues
         .iter()
-        .map(|q| RedisConfig::new(q).workers_set())
+        .map(|q| Config::default().queue(q).workers_set())
         .collect();
 
     let registered: Vec<String> = match redis::cmd("ZRANGE")
@@ -75,6 +65,10 @@ pub async fn purge_orphaned_worker_sets(
         if live.contains(&workers_set) {
             continue;
         }
+        let Some(queue) = workers_set.strip_suffix(":workers") else {
+            continue;
+        };
+        let config = Config::default().queue(queue);
         let workers: Vec<String> = redis::cmd("ZRANGE")
             .arg(&workers_set)
             .arg(0i64)
@@ -84,8 +78,8 @@ pub async fn purge_orphaned_worker_sets(
             .unwrap_or_default();
         let mut pipe = redis::pipe();
         for worker in &workers {
-            pipe.del(worker_metadata_key(&workers_set, worker));
-            pipe.del(worker);
+            pipe.del(format!("{queue}:workers:metadata:{worker}"));
+            pipe.del(format!("{}:{worker}", config.inflight_jobs_set()));
         }
         pipe.del(&workers_set);
         pipe.zrem(QUEUE_REGISTRY_KEY, &workers_set);
@@ -102,256 +96,17 @@ pub async fn purge_orphaned_worker_sets(
     }
 }
 
-const COMPLETED_JOB_MAX_AGE_SECS: i64 = 60 * 60 * 6;
-const FAILED_JOB_MAX_AGE_SECS: i64 = 60 * 60 * 24;
-const COMPLETED_JOB_MAX_COUNT: isize = 500;
-const FAILED_JOB_MAX_COUNT: isize = 5_000;
-
-/// Clear a dead worker incarnation out of the way of its replacement:
-/// requeue everything it was holding and remove its registration.
-///
-/// Called from the worker factory when apalis restarts a worker
-/// (`Monitor::should_restart` → factory closure with `runs > 0`), and it must
-/// complete *before* the replacement is built, because both halves are
-/// ordering-sensitive in opposite directions:
-///
-/// - The registration must go. `register_worker.lua` refuses to register a
-///   name whose existing entry has heartbeated within the last keep-alive
-///   ("worker is still active within threshold") — and the dead incarnation
-///   heartbeated seconds ago. Left in place, the replacement's first register
-///   errors, which is itself a stream error, which triggers another restart:
-///   a hot loop measured at ~200k attempts while the stale entry aged out.
-/// - The removal must not run *after* the replacement registers, or it would
-///   delete the replacement's own registration and fail its next
-///   `get_jobs.lua` zscore check — the same loop from the other side.
-///
-/// Synchronous-before-build is the only ordering that satisfies both, which
-/// is why the caller blocks on this rather than spawning it.
-///
-/// The task requeue rides in the same atomic script: per id, `SREM` from the
-/// inflight set and only on success `RPUSH` to the active list, so an id the
-/// old incarnation managed to ack can never be double-queued. An id with no
-/// data is dropped rather than requeued: `get_jobs.lua` HMGETs it as nil,
-/// which fails the whole stream ("Invalid job data format") and brings us
-/// straight back here — a restart loop every ~5s. (apalis ships
-/// `reenqueue_orphaned_jobs.lua` for this and nothing in apalis-redis
-/// 1.0.0-rc.8 invokes it.)
-pub async fn clear_dead_incarnation(
-    redis: &mut redis::aio::ConnectionManager,
-    queue_name: &str,
-    worker_name: &str,
-) -> redis::RedisResult<u64> {
-    const CLEAR_DEAD_INCARNATION: &str = r#"
-        local moved = 0
-        for _, id in ipairs(redis.call("SMEMBERS", KEYS[1])) do
-            if redis.call("SREM", KEYS[1], id) == 1 and redis.call("HEXISTS", KEYS[6], id) == 1 then
-                redis.call("RPUSH", KEYS[2], id)
-                moved = moved + 1
-            end
-        end
-        redis.call("ZREM", KEYS[4], KEYS[1])
-        redis.call("DEL", KEYS[5])
-        if moved > 0 then
-            redis.call("DEL", KEYS[3])
-            redis.call("LPUSH", KEYS[3], 1)
-        end
-        return moved
-    "#;
-
-    let config = RedisConfig::new(queue_name);
-    // The workers-zset member IS the inflight-set name, and the metadata key
-    // is that member appended to `{ns}:workers:metadata` — both per
-    // apalis-redis's own registration (lib.rs heartbeat + register_worker.lua).
-    let inflight_set = format!("{}:{}", config.inflight_jobs_set(), worker_name);
-    let metadata_key = format!("{queue_name}:workers:metadata{inflight_set}");
-    let moved: u64 = redis::Script::new(CLEAR_DEAD_INCARNATION)
-        .key(&inflight_set)
-        .key(config.active_jobs_list())
-        .key(config.signal_list())
-        .key(config.workers_set())
-        .key(&metadata_key)
-        .key(config.job_data_hash())
-        .invoke_async(redis)
-        .await?;
-    if moved > 0 {
-        tracing::warn!(
-            queue = queue_name,
-            worker = worker_name,
-            requeued = moved,
-            "requeued tasks stranded by the previous worker incarnation"
-        );
-    }
-    Ok(moved)
-}
-
-/// Re-enqueue every inflight job and clear every worker registration.
-///
-/// Startup only: nothing this process owns is running yet, so every
-/// registration and claim in Redis belongs to a previous incarnation of the
-/// process (a hard kill, an OOM, a `docker restart`) and is safe to sweep
-/// wholesale. While the process is alive, per-worker recovery happens at
-/// worker-restart time instead — see [`clear_dead_incarnation`].
-pub async fn rescue_workers(redis: &mut redis::aio::ConnectionManager, queues: &[String]) {
-    // Per-queue isolation: one queue failing must not abandon the sweep for
-    // the rest. An abandoned sweep leaves stale registrations behind, and
-    // every worker whose registration survives fails its first register
-    // ("worker is still active within threshold") — one error here used to
-    // cascade into a restart wave across every queue.
-    for queue_name in queues {
-        if let Err(error) = rescue_queue(redis, queue_name).await {
-            tracing::error!(
-                queue = queue_name,
-                %error,
-                "could not sweep the previous incarnation's workers; replacements on this queue will each recover individually"
-            );
-        }
-    }
-}
-
-async fn rescue_queue(
-    redis: &mut redis::aio::ConnectionManager,
-    queue_name: &str,
-) -> redis::RedisResult<()> {
-    let config = RedisConfig::new(queue_name);
-    let workers: Vec<String> = redis::cmd("ZRANGE")
-        .arg(config.workers_set())
-        .arg(0i64)
-        .arg(-1i64)
-        .query_async(redis)
-        .await?;
-    if workers.is_empty() {
-        return Ok(());
-    }
-
-    let worker_jobs: Vec<Vec<String>> = {
-        let mut pipe = redis::pipe();
-        for worker in &workers {
-            pipe.cmd("SMEMBERS").arg(worker);
-        }
-        pipe.query_async(redis).await?
-    };
-    let candidates: HashSet<String> = worker_jobs.into_iter().flatten().collect();
-    let candidate_ids: Vec<String> = candidates.into_iter().collect();
-    // Guarded because an empty pipeline is a client error ("empty command"),
-    // not a no-op — and idle workers with empty inflight sets are the NORMAL
-    // restart case. This exact unguarded pipe aborted the whole startup sweep
-    // on every healthy reboot.
-    let exists: Vec<bool> = if candidate_ids.is_empty() {
-        Vec::new()
-    } else {
-        let mut pipe = redis::pipe();
-        for id in &candidate_ids {
-            pipe.cmd("HEXISTS").arg(config.job_data_hash()).arg(id);
-        }
-        pipe.query_async(redis).await?
-    };
-    let rescued: Vec<String> = candidate_ids
-        .into_iter()
-        .zip(exists)
-        .filter_map(|(id, exists)| exists.then_some(id))
-        .collect();
-
-    // Redis executes an atomic pipeline as MULTI/EXEC. Requeueing and
-    // registration cleanup therefore commit together, so a connection
-    // failure cannot leave jobs detached from both locations.
-    let workers_set = config.workers_set();
-    let mut transaction = redis::pipe();
-    transaction.atomic();
-    if !rescued.is_empty() {
-        transaction
-            .rpush(config.active_jobs_list(), &rescued)
-            .ignore()
-            .del(config.signal_list())
-            .ignore()
-            .lpush(config.signal_list(), 1u8)
-            .ignore();
-    }
-    for worker in &workers {
-        transaction
-            .del(worker_metadata_key(&workers_set, worker))
-            .ignore()
-            .del(worker)
-            .ignore()
-            .zrem(&workers_set, worker)
-            .ignore();
-    }
-    transaction.query_async::<()>(redis).await?;
-
-    tracing::info!(
-        queue = queue_name,
-        workers = workers.len(),
-        jobs = rescued.len(),
-        "recovered previous incarnation's workers"
-    );
-    Ok(())
-}
-
-/// Remove job IDs from each queue's active list that have no corresponding
-/// entry in the job-data hash. These orphans (no data + no meta) are harmless
-/// when idle but cause the worker's poll stream to emit a StreamError the
-/// first time it dequeues them, which kills the worker immediately.
-pub async fn purge_orphaned_active_jobs(
-    redis: &mut redis::aio::ConnectionManager,
-    queues: &[String],
-) {
-    for queue_name in queues {
-        let config = RedisConfig::new(queue_name);
-        let active_key = config.active_jobs_list();
-        let data_key = config.job_data_hash();
-
-        let ids: Vec<String> = redis::cmd("LRANGE")
-            .arg(&active_key)
-            .arg(0i64)
-            .arg(-1i64)
-            .query_async(redis)
-            .await
-            .unwrap_or_default();
-
-        if ids.is_empty() {
-            continue;
-        }
-
-        let exists: Vec<bool> = {
-            let mut pipe = redis::pipe();
-            for id in &ids {
-                pipe.cmd("HEXISTS").arg(&data_key).arg(id);
-            }
-            pipe.query_async(redis)
-                .await
-                .unwrap_or_else(|_| vec![true; ids.len()])
-        };
-
-        let orphans: Vec<&str> = ids
-            .iter()
-            .zip(exists.iter())
-            .filter_map(|(id, &ok)| if !ok { Some(id.as_str()) } else { None })
-            .collect();
-
-        if orphans.is_empty() {
-            continue;
-        }
-
-        let mut pipe = redis::pipe();
-        for id in &orphans {
-            pipe.cmd("LREM").arg(&active_key).arg(0i64).arg(id);
-        }
-        let _result: Result<(), _> = pipe.query_async(redis).await;
-
-        tracing::info!(
-            queue = queue_name,
-            count = orphans.len(),
-            "purged orphaned job IDs from active list (no data)"
-        );
-    }
-}
+const COMPLETED_JOB_MAX_AGE_SECS: u64 = 60 * 60 * 6;
+const DEAD_JOB_MAX_AGE_SECS: u64 = 60 * 60 * 24;
+const COMPLETED_JOB_MAX_COUNT: usize = 500;
+const DEAD_JOB_MAX_COUNT: usize = 5_000;
 
 const DEDUP_KEY_PATTERN: &str = "riven:dedup:*";
 
 /// Delete all `riven:dedup:*` keys left over by `DedupGuard::drop`, which only
 /// *attempts* an async cleanup and can lose the race against process exit on
-/// a hard restart. Safe to run unconditionally here for the same reason
-/// `rescue_workers` unconditionally rescues jobs at this point:
-/// anything holding a dedup key before this pass is presumed dead.
+/// a hard restart. Runs before any worker starts, so anything holding a dedup
+/// key at this point belongs to a dead process.
 pub async fn purge_stale_dedup_keys(redis: &mut redis::aio::ConnectionManager) {
     let mut cursor: u64 = 0;
     let mut purged = 0usize;
@@ -388,128 +143,114 @@ pub async fn purge_stale_dedup_keys(redis: &mut redis::aio::ConnectionManager) {
     }
 }
 
-/// Hand-rolled history retention, kept deliberately: apalis-redis rc.8 ships
-/// `vacuum.lua`, but it deletes *every* terminal task with no age or count
-/// cutoff, does it via `HGETALL` of the entire data hash (which blocks Redis
-/// for the duration on a large one), and exposes no public way to call it
-/// anyway.
+/// Hand-rolled history retention, kept deliberately: apalis-redis's
+/// `vacuum_before` has no count cap, walks the entire data hash with
+/// `HGETALL` (blocking Redis for the duration on a large one), and leaves every
+/// id it deletes in the done and dead sets, so those grow forever.
 pub async fn prune_queue_history(redis: &mut redis::aio::ConnectionManager, queues: &[String]) {
     for queue in queues {
-        let config = RedisConfig::new(queue);
-        let data = config.job_data_hash();
-        let meta = config.job_meta_hash();
+        let config = Config::default().queue(queue);
         let done = prune_set(
             redis,
+            &config,
             &config.done_jobs_set(),
-            &data,
-            &meta,
             COMPLETED_JOB_MAX_AGE_SECS,
             COMPLETED_JOB_MAX_COUNT,
         )
         .await;
-        let failed = prune_set(
-            redis,
-            &config.failed_jobs_set(),
-            &data,
-            &meta,
-            FAILED_JOB_MAX_AGE_SECS,
-            FAILED_JOB_MAX_COUNT,
-        )
-        .await;
         let dead = prune_set(
             redis,
+            &config,
             &config.dead_jobs_set(),
-            &data,
-            &meta,
-            FAILED_JOB_MAX_AGE_SECS,
-            FAILED_JOB_MAX_COUNT,
+            DEAD_JOB_MAX_AGE_SECS,
+            DEAD_JOB_MAX_COUNT,
         )
         .await;
-        if done + failed + dead > 0 {
-            tracing::info!(queue, done, failed, dead, "pruned redis job history");
+        if done + dead > 0 {
+            tracing::info!(queue, done, dead, "pruned redis job history");
         }
     }
 }
 
+/// Remove the tasks in `set_key` older than `max_age_secs`, then the oldest of
+/// what is left beyond `max_count`. A task's age is the `done_at` apalis
+/// stamps on its metadata when it finishes.
 async fn prune_set(
     redis: &mut redis::aio::ConnectionManager,
+    config: &Config,
     set_key: &str,
-    job_data_hash: &str,
-    job_meta_hash: &str,
-    max_age_secs: i64,
-    max_count: isize,
+    max_age_secs: u64,
+    max_count: usize,
 ) -> usize {
-    let cutoff = Utc::now().timestamp() - max_age_secs;
-    let mut ids: HashSet<String> = redis::cmd("ZRANGEBYSCORE")
-        .arg(set_key)
-        .arg("-inf")
-        .arg(cutoff)
-        .query_async::<Vec<String>>(redis)
-        .await
-        .unwrap_or_default()
-        .into_iter()
-        .collect();
-
-    let total: isize = redis::cmd("ZCARD")
+    let ids: Vec<String> = redis::cmd("SMEMBERS")
         .arg(set_key)
         .query_async(redis)
         .await
-        .unwrap_or(0);
-    let overflow = total.saturating_sub(max_count);
-    if overflow > 0 {
-        let extra: Vec<String> = redis::cmd("ZRANGE")
-            .arg(set_key)
-            .arg(0)
-            .arg(overflow - 1)
-            .query_async(redis)
-            .await
-            .unwrap_or_default();
-        ids.extend(extra);
-    }
-
+        .unwrap_or_default();
     if ids.is_empty() {
         return 0;
     }
+    let meta_key = |id: &str| format!("{}:{id}", config.job_meta_hash());
+    let mut pipe = redis::pipe();
+    for id in &ids {
+        pipe.hget(meta_key(id), "done_at");
+    }
+    let done_at: Vec<Option<u64>> = match pipe.query_async(redis).await {
+        Ok(done_at) => done_at,
+        Err(_) => return 0,
+    };
 
-    let ids: Vec<String> = ids.into_iter().collect();
-    let meta_keys: Vec<String> = ids
-        .iter()
-        .map(|id| format!("{job_meta_hash}:{id}"))
+    let mut finished: Vec<(u64, String)> = done_at
+        .into_iter()
+        .zip(ids)
+        .map(|(done_at, id)| (done_at.unwrap_or(0), id))
         .collect();
-    // `{meta}:result` holds each task's stored result (every plugin-hook
-    // outcome lands there); without this HDEL the hash grows forever.
+    finished.sort_unstable();
+    let cutoff = Utc::now()
+        .timestamp()
+        .cast_unsigned()
+        .saturating_sub(max_age_secs);
+    let done_at: Vec<u64> = finished.iter().map(|(done_at, _)| *done_at).collect();
+    let prune = prune_count(&done_at, cutoff, max_count);
+    if prune == 0 {
+        return 0;
+    }
+
+    let ids: Vec<&str> = finished[..prune]
+        .iter()
+        .map(|(_, id)| id.as_str())
+        .collect();
+    let meta_keys: Vec<String> = ids.iter().map(|id| meta_key(id)).collect();
     let _result: Result<(), _> = redis::pipe()
         .atomic()
-        .zrem(set_key, &ids)
-        .hdel(job_data_hash, &ids)
-        .hdel(format!("{job_meta_hash}:result"), &ids)
+        .srem(set_key, &ids)
+        .hdel(config.job_data_hash(), &ids)
         .del(meta_keys)
         .query_async(redis)
         .await;
+    prune
+}
 
-    ids.len()
+/// How many of `done_at` (oldest first) to prune: everything finished at or
+/// before `cutoff`, and then the oldest of the rest beyond `max_count`.
+fn prune_count(done_at: &[u64], cutoff: u64, max_count: usize) -> usize {
+    let expired = done_at.partition_point(|done_at| *done_at <= cutoff);
+    expired.max(done_at.len().saturating_sub(max_count))
 }
 
 #[cfg(test)]
 mod tests {
-    use apalis_redis::RedisConfig;
+    use super::prune_count;
 
-    /// The restart cleanup and apalis's registration must address the same
-    /// keys, or restarts would silently clear nothing — or worse, leave the
-    /// stale registration that hot-loops the replacement. apalis derives the
-    /// inflight set as `{queue}:inflight:{worker}` (fetcher.rs), registers it
-    /// as the workers-zset *member*, and keys metadata as
-    /// `{ns}:workers:metadata{member}` (lib.rs heartbeat); this pins riven's
-    /// reconstruction of all three.
     #[test]
-    fn dead_incarnation_keys_match_apalis_layout() {
-        let config = RedisConfig::new("riven:download");
-        let inflight = format!("{}:{}", config.inflight_jobs_set(), "riven-download");
-        assert_eq!(inflight, "riven:download:inflight:riven-download");
-        let metadata = format!("{}:workers:metadata{inflight}", "riven:download");
-        assert_eq!(
-            metadata,
-            "riven:download:workers:metadatariven:download:inflight:riven-download"
-        );
+    fn history_past_its_age_is_pruned() {
+        assert_eq!(prune_count(&[10, 20, 30, 40], 25, 100), 2);
+        assert_eq!(prune_count(&[10, 20], 5, 100), 0);
+    }
+
+    #[test]
+    fn a_burst_beyond_the_cap_loses_its_oldest() {
+        assert_eq!(prune_count(&[10, 20, 30, 40, 50], 0, 3), 2);
+        assert_eq!(prune_count(&[10, 20, 30, 40, 50], 35, 3), 3);
     }
 }

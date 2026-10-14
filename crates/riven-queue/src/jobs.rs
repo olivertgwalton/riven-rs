@@ -33,12 +33,6 @@ pub enum HookOutcome {
     Skipped,
 }
 
-/// Handler return type for plugin-hook workers. The outer `Result` layer is
-/// required by apalis-redis's wire format: `RedisAck` stores the handler's
-/// Ok-value JSON verbatim while `check_status` decodes it as
-/// `Result<Res, String>` — so the Ok value must itself be that `Result`.
-pub type HookAck = Result<HookOutcome, String>;
-
 /// Per-item state-machine job.
 ///
 /// Each step is a separate job execution; after enqueueing children (scrape /

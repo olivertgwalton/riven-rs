@@ -123,15 +123,20 @@ pub async fn start_server(config: StartServerConfig) -> Result<()> {
 
     start_event_controller(job_queue.clone());
 
-    let mut board_builder = ApiBuilder::new(Router::new())
-        .register(job_queue.index_storage.clone())
-        .register(job_queue.scrape_storage.clone())
-        .register(job_queue.parse_storage.clone())
-        .register(job_queue.download_storage.clone())
-        .register(job_queue.rank_streams_storage.clone())
-        .register(job_queue.process_media_item_storage.clone());
+    macro_rules! on_board {
+        ($builder:expr, $storage:expr) => {
+            $builder.register($storage.get_config().queue.as_ref(), $storage.clone())
+        };
+    }
+    let mut board_builder = ApiBuilder::new(Router::new());
+    board_builder = on_board!(board_builder, job_queue.index_storage);
+    board_builder = on_board!(board_builder, job_queue.scrape_storage);
+    board_builder = on_board!(board_builder, job_queue.parse_storage);
+    board_builder = on_board!(board_builder, job_queue.download_storage);
+    board_builder = on_board!(board_builder, job_queue.rank_streams_storage);
+    board_builder = on_board!(board_builder, job_queue.process_media_item_storage);
     for storage in job_queue.plugin_hook_storages.values() {
-        board_builder = board_builder.register(storage.clone());
+        board_builder = on_board!(board_builder, storage);
     }
     let board_api = board_builder.build();
     let board_ui = Router::new().fallback_service(ServeUI::new());

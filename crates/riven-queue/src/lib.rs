@@ -22,7 +22,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64};
 
 use anyhow::Result;
 use apalis::prelude::{TaskBuilder, TaskId, TaskSink, WaitForCompletion};
-use apalis_redis::{RedisConfig, RedisStorage};
+use apalis_redis::{Config, RedisStorage};
 use chrono::{DateTime, Utc};
 use futures::future;
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QuerySelect};
@@ -41,12 +41,12 @@ use riven_rank::ResolutionRanks;
 
 pub use dedup::DedupGuard;
 pub use jobs::{
-    DownloadJob, HookAck, HookOutcome, IndexJob, ParseScrapeResultsJob, PluginHookJob,
-    ProcessMediaItemJob, ProcessStep, RankStreamsJob, ScrapeJob,
+    DownloadJob, HookOutcome, IndexJob, ParseScrapeResultsJob, PluginHookJob, ProcessMediaItemJob,
+    ProcessStep, RankStreamsJob, ScrapeJob,
 };
 pub use maintenance::{
-    clear_dead_incarnation, prune_queue_history, purge_orphaned_active_jobs,
-    purge_orphaned_worker_sets, purge_stale_dedup_keys, reconcile_library_profiles, rescue_workers,
+    prune_queue_history, purge_orphaned_worker_sets, purge_stale_dedup_keys,
+    reconcile_library_profiles,
 };
 pub use workers::start_workers;
 

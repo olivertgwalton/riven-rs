@@ -82,10 +82,8 @@ impl JobQueue {
             Some(async move {
                 // Explicit task id: apalis's sink invents one otherwise and
                 // never reports it back, and the id is the wait handle.
-                let task_id = Ulid::new();
-                let task = TaskBuilder::new(job)
-                    .with_task_id(TaskId::new(task_id))
-                    .build();
+                let task_id = TaskId::from_ulid(Ulid::generate());
+                let task = TaskBuilder::new(job).task_id(task_id.clone()).build();
                 if let Err(e) = storage.clone().push_task(task).await {
                     tracing::error!(plugin = %plugin, ?event_type, error = %e, "failed to push plugin-hook job");
                     return (plugin, HookOutcome::Failed);
@@ -295,10 +293,13 @@ impl JobQueue {
 
 /// Push `job` onto `storage` to run after `delay` via apalis's native `run_at`
 /// scheduling, logging (not propagating) a failed push.
-async fn push_after<T, S>(mut storage: S, job: T, delay: std::time::Duration, label: &'static str)
-where
-    S: TaskSink<T>,
-    S::Error: std::fmt::Display,
+async fn push_after<T>(
+    mut storage: RedisStorage<T>,
+    job: T,
+    delay: std::time::Duration,
+    label: &'static str,
+) where
+    T: Serialize + DeserializeOwned + Unpin + Send + Sync + 'static,
 {
     let task = TaskBuilder::new(job).run_after(delay).build();
     if let Err(e) = storage.push_task(task).await {
@@ -312,17 +313,17 @@ where
 /// orchestrator; apalis's `wait_for` itself polls forever.
 async fn wait_for_hook_outcome(
     storage: &RedisStorage<PluginHookJob>,
-    task_id: Ulid,
+    task_id: TaskId,
     plugin: &str,
 ) -> HookOutcome {
     use futures::StreamExt;
     let mut results =
-        WaitForCompletion::<HookOutcome>::wait_for_single(storage, TaskId::new(task_id));
+        WaitForCompletion::<HookOutcome>::wait_for_single(&mut storage.clone(), task_id);
     let timeout = std::time::Duration::from_secs(HOOK_COLLECT_TIMEOUT_SECS);
     match tokio::time::timeout(timeout, results.next()).await {
         Ok(Some(Ok(result))) => match result.take() {
             Ok(outcome) => outcome,
-            // The task itself errored (panic, worker timeout): RedisAck stores
+            // The task itself errored (panic, worker timeout): apalis stores
             // the raw error string, surfaced here as the Err arm.
             Err(error) => {
                 tracing::warn!(plugin, %error, "plugin-hook task failed");

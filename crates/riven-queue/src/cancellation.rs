@@ -1,9 +1,10 @@
-//! Hand-rolled cancellation, kept deliberately: apalis-redis rc.8 has
-//! `kill_job.lua`/`retry_job.lua`, but both operate on *a worker's own
-//! inflight set* — they exist for a worker disposing of a task it currently
-//! holds, not for an external caller cancelling pending work by content.
-//! Cancelling every task belonging to a deleted media item requires scanning
-//! payloads, which no native API offers.
+//! Hand-rolled cancellation, kept deliberately: apalis-redis can only release
+//! tasks a worker itself holds. Cancelling every task belonging to a deleted
+//! media item requires scanning payloads, which no native API offers.
+//!
+//! Only pending tasks are purged. A running one is left to finish (download
+//! handlers poll `is_cancelled`): deleting a claimed task's data would strand
+//! an id that apalis's fetch cannot decode once the claim is requeued.
 use super::*;
 
 impl JobQueue {
@@ -88,11 +89,11 @@ impl JobQueue {
         }
     }
 
-    /// Purge every task in `config`'s queue whose payload id (read by
+    /// Purge every pending task in `config`'s queue whose payload id (read by
     /// `extract_id`) is in `ids`.
     async fn purge_queue_with_id_extractor<F>(
         &self,
-        config: &apalis_redis::RedisConfig,
+        config: &Config,
         ids: &std::collections::HashSet<i64>,
         extract_id: F,
     ) -> redis::RedisResult<()>
@@ -101,13 +102,6 @@ impl JobQueue {
     {
         let mut conn = self.redis.clone();
         let data_hash = config.job_data_hash();
-        let active_list = config.active_jobs_list();
-        let scheduled_set = config.scheduled_jobs_set();
-        let inflight_set = config.inflight_jobs_set();
-        let done_set = config.done_jobs_set();
-        let dead_set = config.dead_jobs_set();
-        let failed_set = config.failed_jobs_set();
-        let meta_hash_prefix = config.job_meta_hash();
 
         let mut cursor: u64 = 0;
         let mut matching_task_ids: Vec<String> = Vec::new();
@@ -150,29 +144,24 @@ impl JobQueue {
             "purging queued jobs for cancelled items"
         );
 
-        let mut pipe = redis::pipe();
-        pipe.atomic();
-        for task_id in &matching_task_ids {
-            pipe.cmd("HDEL").arg(&data_hash).arg(task_id).ignore();
-            pipe.cmd("LREM")
-                .arg(&active_list)
-                .arg(0)
-                .arg(task_id)
-                .ignore();
-            pipe.cmd("ZREM").arg(&scheduled_set).arg(task_id).ignore();
-            pipe.cmd("SREM").arg(&inflight_set).arg(task_id).ignore();
-            pipe.cmd("ZREM").arg(&done_set).arg(task_id).ignore();
-            pipe.cmd("ZREM").arg(&dead_set).arg(task_id).ignore();
-            pipe.cmd("ZREM").arg(&failed_set).arg(task_id).ignore();
-            pipe.cmd("DEL")
-                .arg(format!("{meta_hash_prefix}:{task_id}"))
-                .ignore();
-            pipe.cmd("HDEL")
-                .arg(format!("{meta_hash_prefix}:result"))
-                .arg(task_id)
-                .ignore();
-        }
-        let _: () = pipe.query_async(&mut conn).await?;
+        // Atomic, so a task a worker claims mid-purge is either purged first
+        // or left whole.
+        const PURGE_PENDING: &str = r#"
+            for _, id in ipairs(ARGV) do
+                if redis.call("LREM", KEYS[1], 0, id) + redis.call("ZREM", KEYS[2], id) > 0 then
+                    redis.call("HDEL", KEYS[3], id)
+                    redis.call("DEL", KEYS[4] .. ":" .. id)
+                end
+            end
+        "#;
+        let () = redis::Script::new(PURGE_PENDING)
+            .key(config.active_jobs_list())
+            .key(config.scheduled_jobs_set())
+            .key(&data_hash)
+            .key(config.job_meta_hash())
+            .arg(&matching_task_ids)
+            .invoke_async(&mut conn)
+            .await?;
         Ok(())
     }
 }

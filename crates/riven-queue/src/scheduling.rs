@@ -20,7 +20,7 @@ impl JobQueue {
     }
 
     /// Force-overwrite a scheduled task: clear any prior entry for this
-    /// deterministic `task_id` (data/meta/scheduled/done/dead/failed/active),
+    /// deterministic `task_id` (data/meta/scheduled/done/dead/active),
     /// then push the fresh payload through apalis's own `push_task` so the
     /// wire format (metadata hash, scheduled-set entry) is always whatever the
     /// installed apalis-redis version actually expects — no hand-rolled copy
@@ -69,9 +69,8 @@ impl JobQueue {
             .hdel(config.job_data_hash(), &task_id_str)
             .del(&meta_key)
             .zrem(config.scheduled_jobs_set(), &task_id_str)
-            .zrem(config.done_jobs_set(), &task_id_str)
-            .zrem(config.dead_jobs_set(), &task_id_str)
-            .zrem(config.failed_jobs_set(), &task_id_str)
+            .srem(config.done_jobs_set(), &task_id_str)
+            .srem(config.dead_jobs_set(), &task_id_str)
             .lrem(config.active_jobs_list(), 0, &task_id_str)
             .query_async(&mut conn)
             .await;
@@ -81,7 +80,7 @@ impl JobQueue {
         }
 
         let task = TaskBuilder::new(job)
-            .with_task_id(TaskId::new(task_id))
+            .task_id(TaskId::from_ulid(task_id))
             .run_at_timestamp(run_at.timestamp().max(0).cast_unsigned())
             .build();
         match storage.clone().push_task(task).await {
@@ -94,7 +93,7 @@ impl JobQueue {
         &self,
         kind: &'static str,
         id: i64,
-        config: &apalis_redis::RedisConfig,
+        config: &Config,
         task_id: &str,
     ) {
         let meta_key = format!("{}:{}", config.job_meta_hash(), task_id);

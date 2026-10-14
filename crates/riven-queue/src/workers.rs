@@ -9,7 +9,7 @@ use riven_core::http::RateLimitedError;
 
 use crate::context::{is_scrapeable, load_media_item_or_log};
 use crate::dedup::DedupGuard;
-use crate::jobs::{HookAck, HookOutcome};
+use crate::jobs::HookOutcome;
 use crate::{
     DownloadJob, HOOK_COLLECT_TIMEOUT_SECS, IndexJob, JobQueue, ParseScrapeResultsJob,
     PluginHookJob, ProcessMediaItemJob, RankStreamsJob, ScrapeJob,
@@ -75,15 +75,17 @@ async fn handle_process_media_item_job(
 ///
 /// Fan-in outcomes are always `Ok` at the apalis layer — a failed plugin is
 /// reported as `HookOutcome::Failed`, not a task error — so children are
-/// never retried and the orchestrator's wait resolves on first completion.
+/// never retried and the orchestrator's wait resolves on first completion. A
+/// broadcast failure is an [`AbortError`], which apalis files as dead rather
+/// than retrying.
 async fn handle_plugin_hook_job(
     job: PluginHookJob,
     q: Data<Arc<JobQueue>>,
-) -> Result<HookAck, BoxDynError> {
+) -> Result<HookOutcome, BoxDynError> {
     let event_type = job.event.event_type();
     match event_type.dispatch_strategy() {
         DispatchStrategy::Broadcast => handle_broadcast(&job, &q).await,
-        DispatchStrategy::FanIn => Ok(Ok(handle_fan_in(&job, &q).await)),
+        DispatchStrategy::FanIn => Ok(handle_fan_in(&job, &q).await),
         DispatchStrategy::Inline => {
             tracing::error!(?event_type, "Inline event reached plugin-hook worker");
             handle_broadcast(&job, &q).await
@@ -91,14 +93,14 @@ async fn handle_plugin_hook_job(
     }
 }
 
-async fn handle_broadcast(job: &PluginHookJob, q: &JobQueue) -> Result<HookAck, BoxDynError> {
+async fn handle_broadcast(job: &PluginHookJob, q: &JobQueue) -> Result<HookOutcome, BoxDynError> {
     match q
         .registry
         .dispatch_to_plugin(&job.plugin_name, &job.event)
         .await
     {
-        Some(Err(error)) => Err(error.into()),
-        Some(Ok(_)) | None => Ok(Ok(HookOutcome::Skipped)),
+        Some(Err(error)) => Err(AbortError::new(error).into()),
+        Some(Ok(_)) | None => Ok(HookOutcome::Skipped),
     }
 }
 
@@ -176,58 +178,34 @@ fn extract_fan_in_response(
     }
 }
 
-/// Clear the previous incarnation of `worker_name` out of the replacement's
-/// way, blocking until it is done.
+/// Pause before rebuilding a failed worker.
 ///
-/// Runs inside the synchronous worker factory, which is the only point that
-/// is guaranteed to sit between the old worker dying and the new one
-/// registering — the ordering [`crate::maintenance::clear_dead_incarnation`]
-/// requires from both directions. `block_in_place` is sound here because the
-/// monitor always runs on the multi-thread runtime (`tokio::spawn` in
-/// riven-app), and this is the failure path, not the hot path.
-///
-/// The short pause before the cleanup is a circuit-breaker: if restarts are
-/// failing for a reason cleanup cannot fix (Redis hard down), the factory loop
-/// must not spin — the original incident retried ~200k times in under a
-/// minute. Capped low because the common case is a single transient error
-/// where a long wait would just prolong the outage.
-fn clear_previous_incarnation(q: &Arc<JobQueue>, queue_name: &str, worker_name: &str, runs: usize) {
+/// A replacement cannot register until its predecessor has missed a heartbeat
+/// (apalis then requeues the predecessor's claims itself), so an immediate
+/// rebuild only fails again. Without the pause the factory loop spins: an
+/// earlier incident retried ~200k times in under a minute. The factory is
+/// synchronous, hence `block_in_place`; the monitor runs on the multi-thread
+/// runtime (`tokio::spawn` in riven-app).
+fn restart_backoff(runs: usize) {
     const BACKOFF_STEP: Duration = Duration::from_millis(250);
     const BACKOFF_CAP: Duration = Duration::from_secs(5);
-
-    let mut redis = q.redis.clone();
-    tokio::task::block_in_place(|| {
-        tokio::runtime::Handle::current().block_on(async {
-            tokio::time::sleep(BACKOFF_STEP.saturating_mul(runs as u32).min(BACKOFF_CAP)).await;
-            if let Err(error) =
-                crate::maintenance::clear_dead_incarnation(&mut redis, queue_name, worker_name)
-                    .await
-            {
-                tracing::error!(
-                    worker = worker_name,
-                    queue = queue_name,
-                    %error,
-                    "could not clear the dead incarnation; its registration may block the replacement until it ages out"
-                );
-            }
-        });
-    });
+    let pause = BACKOFF_STEP.saturating_mul(runs as u32).min(BACKOFF_CAP);
+    tokio::task::block_in_place(|| std::thread::sleep(pause));
 }
 
 macro_rules! register_worker {
     ($monitor:expr, $queue:expr, $name:literal, $storage:ident, $n:expr, $handler:ident, $timeout_secs:expr) => {{
         let q = Arc::clone(&$queue);
-        let queue_name = q.$storage.get_config().get_namespace().as_ref().to_owned();
         $monitor.register(move |runs| {
             if runs > 0 {
-                clear_previous_incarnation(&q, &queue_name, $name, runs);
+                restart_backoff(runs);
             }
             WorkerBuilder::new($name)
                 .backend(q.$storage.clone())
+                .concurrency($n)
+                .timeout(Duration::from_secs($timeout_secs))
                 .enable_tracing()
                 .catch_panic()
-                .timeout(Duration::from_secs($timeout_secs))
-                .concurrency($n)
                 .data(q.clone())
                 .build($handler)
         })
@@ -237,16 +215,15 @@ macro_rules! register_worker {
     // reintroduce the thing the inner code was written to avoid.
     ($monitor:expr, $queue:expr, $name:literal, $storage:ident, $n:expr, $handler:ident) => {{
         let q = Arc::clone(&$queue);
-        let queue_name = q.$storage.get_config().get_namespace().as_ref().to_owned();
         $monitor.register(move |runs| {
             if runs > 0 {
-                clear_previous_incarnation(&q, &queue_name, $name, runs);
+                restart_backoff(runs);
             }
             WorkerBuilder::new($name)
                 .backend(q.$storage.clone())
+                .concurrency($n)
                 .enable_tracing()
                 .catch_panic()
-                .concurrency($n)
                 .data(q.clone())
                 .build($handler)
         })
@@ -340,47 +317,39 @@ pub fn start_workers(queue: Arc<JobQueue>, usenet_download_workers: Option<usize
     for ((plugin_name, event_type), storage) in &queue.plugin_hook_storages {
         let q = Arc::clone(&queue);
         let storage = storage.clone();
-        let queue_name = storage.get_config().get_namespace().as_ref().to_owned();
         let worker_name = format!("hook-{plugin_name}-{}", event_type.slug());
         m = m.register(move |runs| {
             if runs > 0 {
-                clear_previous_incarnation(&q, &queue_name, &worker_name, runs);
+                restart_backoff(runs);
             }
             WorkerBuilder::new(worker_name.clone())
                 .backend(storage.clone())
+                .concurrency(plugin_n)
+                .timeout(Duration::from_secs(180))
                 .enable_tracing()
                 .catch_panic()
-                .timeout(Duration::from_secs(180))
-                .concurrency(plugin_n)
                 .data(q.clone())
                 .build(handle_plugin_hook_job)
         });
     }
 
     // The load-bearing line of this whole module. A worker's task stream and
-    // its heartbeat are one merged stream (`stream_select!` in apalis-core),
-    // and `Worker::run` returns on the first `Err` — so a single transient
-    // failure (a Redis response timeout, a reconnect blip, one failed
-    // `get_jobs.lua`) resolves the worker future with `StreamError`. Without a
-    // restart policy, `MonitoredWorker` treats that as final: the worker is
-    // gone until the process restarts, its queue goes silent while every other
-    // queue keeps running, and everything it had claimed stays claimed. With
-    // it, the factory above rebuilds the worker (and rescues its stranded
-    // claims) and the failure costs milliseconds.
+    // its heartbeat are one merged stream, and `Worker::run` returns on the
+    // first `Err` — so a single transient failure (a Redis response timeout, a
+    // reconnect blip) ends the worker. Without a restart policy, the monitor
+    // treats that as final: the worker is gone until the process restarts, its
+    // queue goes silent while every other queue keeps running, and everything
+    // it had claimed stays claimed. With it, the factory above rebuilds the
+    // worker and the failure costs seconds.
     //
-    // `GracefulExit` is the one non-restart: that is shutdown working as
-    // intended. Panics don't reach here — `.catch_panic()` converts them to
-    // task errors first.
-    m.should_restart(|ctx, error, attempt| match error {
-        WorkerError::GracefulExit => false,
-        error => {
-            tracing::error!(
-                worker = %ctx.name(),
-                %error,
-                attempt,
-                "worker failed; restarting it"
-            );
-            true
-        }
+    // A graceful shutdown ends the worker with `Ok` and never reaches this, and
+    // panics don't either — `.catch_panic()` converts them to task errors.
+    m.should_restart(|ctx, error| {
+        tracing::error!(
+            worker = %ctx.name(),
+            %error,
+            "worker failed; restarting it"
+        );
+        true
     })
 }

@@ -99,9 +99,7 @@ async fn run_worker_monitor(
 
     while !cancel.is_cancelled() {
         let maintenance = async {
-            riven_queue::rescue_workers(&mut redis, &queues).await;
             riven_queue::purge_orphaned_worker_sets(&mut redis, &queues).await;
-            riven_queue::purge_orphaned_active_jobs(&mut redis, &queues).await;
             riven_queue::purge_stale_dedup_keys(&mut redis).await;
         };
         if tokio::time::timeout(MAINTENANCE_TIMEOUT, maintenance)
@@ -122,7 +120,7 @@ async fn run_worker_monitor(
         tokio::pin!(handle);
         // Individual worker failures never reach this select: the monitor's
         // `should_restart` policy (see `start_workers`) rebuilds a failed
-        // worker in place and rescues its stranded claims. The monitor future
+        // worker in place, and apalis requeues its stranded claims. The monitor future
         // resolving here means something categorically worse — every restart
         // was declined or the monitor itself failed — so the whole thing is
         // rebuilt from a clean maintenance pass.

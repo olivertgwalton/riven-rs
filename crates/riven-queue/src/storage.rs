@@ -13,22 +13,12 @@ impl JobQueue {
     ) -> Result<Self> {
         let apalis_conn = connect_managed(redis_url).await?;
 
-        let index_storage =
-            RedisStorage::new_with_config(apalis_conn.clone(), RedisConfig::new("riven:index"));
-        let scrape_storage =
-            RedisStorage::new_with_config(apalis_conn.clone(), RedisConfig::new("riven:scrape"));
-        let parse_storage =
-            RedisStorage::new_with_config(apalis_conn.clone(), RedisConfig::new("riven:parse"));
-        let download_storage =
-            RedisStorage::new_with_config(apalis_conn.clone(), RedisConfig::new("riven:download"));
-        let rank_streams_storage = RedisStorage::new_with_config(
-            apalis_conn.clone(),
-            RedisConfig::new("riven:rank-streams"),
-        );
-        let process_media_item_storage = RedisStorage::new_with_config(
-            apalis_conn.clone(),
-            RedisConfig::new("riven:process-media-item"),
-        );
+        let index_storage = queue_storage(&apalis_conn, "riven:index");
+        let scrape_storage = queue_storage(&apalis_conn, "riven:scrape");
+        let parse_storage = queue_storage(&apalis_conn, "riven:parse");
+        let download_storage = queue_storage(&apalis_conn, "riven:download");
+        let rank_streams_storage = queue_storage(&apalis_conn, "riven:rank-streams");
+        let process_media_item_storage = queue_storage(&apalis_conn, "riven:process-media-item");
 
         let mut plugin_hook_storages: HashMap<(String, EventType), RedisStorage<PluginHookJob>> =
             HashMap::new();
@@ -37,8 +27,7 @@ impl JobQueue {
                 continue;
             }
             let namespace = format!("riven:plugin-hook:{}:{plugin_name}", event_type.slug());
-            let storage =
-                RedisStorage::new_with_config(apalis_conn.clone(), RedisConfig::new(&namespace));
+            let storage = queue_storage(&apalis_conn, &namespace);
             plugin_hook_storages.insert((plugin_name, event_type), storage);
         }
 
@@ -72,7 +61,7 @@ impl JobQueue {
         })
     }
 
-    pub(crate) fn orchestrator_queue_configs(&self) -> [&RedisConfig; 6] {
+    pub(crate) fn orchestrator_queue_configs(&self) -> [&Config; 6] {
         [
             self.index_storage.get_config(),
             self.scrape_storage.get_config(),
@@ -91,13 +80,30 @@ impl JobQueue {
     pub fn queue_names(&self) -> Vec<String> {
         let mut names: Vec<String> = self
             .orchestrator_queue_configs()
-            .map(|config| config.get_namespace().as_ref().to_owned())
+            .map(|config| config.queue.as_ref().to_owned())
             .into();
         names.extend(
             self.plugin_hook_storages
                 .values()
-                .map(|storage| storage.get_config().get_namespace().as_ref().to_owned()),
+                .map(|storage| storage.get_config().queue.as_ref().to_owned()),
         );
         names
     }
+}
+
+/// A worker that stops heartbeating is presumed dead after
+/// `HEARTBEAT_INTERVAL × MISSED_HEARTBEATS`, and its claims go back on the
+/// queue. A replacement under the same name can only register once one
+/// interval has passed since its predecessor's last heartbeat, so the interval
+/// is kept short: it bounds how long a restarted worker waits to come back.
+const HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+const MISSED_HEARTBEATS: usize = 6;
+
+fn queue_storage<Args>(conn: &redis::aio::ConnectionManager, queue: &str) -> RedisStorage<Args> {
+    RedisStorage::new(conn.clone()).with_config(
+        Config::default()
+            .queue(queue)
+            .heartbeat_interval(HEARTBEAT_INTERVAL)
+            .missed_heartbeats(MISSED_HEARTBEATS),
+    )
 }
