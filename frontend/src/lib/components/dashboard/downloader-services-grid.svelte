@@ -1,9 +1,9 @@
 <script lang="ts">
-    import { cn } from "$lib/utils";
-    import { Badge } from "$lib/components/ui/badge/index.js";
-    import { formatBytes, getServiceDisplayName } from "$lib/helpers";
-    import { formatDate } from "$lib/utils/date";
-    import type { DebridUserInfo } from "$lib/gql/schema";
+    import { cn } from "#lib/utils.js";
+    import { Badge } from "#lib/components/ui/badge/index.js";
+    import { formatBytes, getServiceDisplayName } from "#lib/helpers.js";
+    import { formatDate } from "#lib/utils/date.js";
+    import type { DebridUserInfo } from "#lib/gql/schema.js";
 
     let { services }: { services: DebridUserInfo[] } = $props();
 
@@ -52,14 +52,13 @@
 
     <div class="grid gap-x-8 gap-y-6 md:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-4">
         {#each services as downloader (downloader.store)}
-            {@const premiumDaysLeft = daysLeft(downloader.premiumUntil)}
-            {@const premium =
-                premiumMeta[
+            {const premiumDaysLeft = $derived(daysLeft(downloader.premiumUntil))}
+            {const premium = $derived(premiumMeta[
                     downloader.subscriptionStatus === "premium" ||
                     downloader.subscriptionStatus === "trial"
                         ? downloader.subscriptionStatus
                         : "expired"
-                ]}
+                ])}
 
             <div class="border-border/60 border-b pb-5">
                 <div class="flex items-center justify-between gap-3">

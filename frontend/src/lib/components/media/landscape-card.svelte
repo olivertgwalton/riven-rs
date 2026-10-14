@@ -1,11 +1,10 @@
 <script lang="ts">
     import Mountain from "@lucide/svelte/icons/mountain";
     import Star from "@lucide/svelte/icons/star";
-    import { browser } from "$app/environment";
-    import { cn } from "$lib/utils";
-    import type { Snippet } from "svelte";
+    import { cn } from "#lib/utils.js";
+    import { getAbortSignal, type Snippet } from "svelte";
 
-    import { getRatings, type RatingsData } from "$lib/stores/ratings";
+    import { getRatings, type RatingsData } from "#lib/stores/ratings.js";
 
     interface Props {
         title?: string | null;
@@ -33,21 +32,10 @@
         episodeNumber
     }: Props = $props();
 
-    let ratingsPromise = $state<Promise<RatingsData> | null>(null);
-
-    $effect(() => {
-        if (!browser || !tmdbId) {
-            ratingsPromise = null;
-            return;
-        }
-
-        const controller = new AbortController();
-        ratingsPromise = getRatings(tmdbId, mediaType, controller.signal);
-
-        return () => {
-            controller.abort();
-        };
-    });
+    // The signal aborts when tmdbId/mediaType change or the card is destroyed.
+    const ratingsPromise: Promise<RatingsData> | null = $derived(
+        tmdbId ? getRatings(tmdbId, mediaType, getAbortSignal()) : null
+    );
 </script>
 
 {#snippet ratingBadge(rating: number)}

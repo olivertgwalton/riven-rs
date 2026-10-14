@@ -1,12 +1,12 @@
 <script lang="ts">
     import Eye from "@lucide/svelte/icons/eye";
     import EyeOff from "@lucide/svelte/icons/eye-off";
-    import * as ButtonGroup from "$lib/components/ui/button-group/index.js";
-    import { Button } from "$lib/components/ui/button/index.js";
-    import { Input } from "$lib/components/ui/input/index.js";
-    import { Label } from "$lib/components/ui/label/index.js";
-    import * as Select from "$lib/components/ui/select/index.js";
-    import { Switch } from "$lib/components/ui/switch/index.js";
+    import * as ButtonGroup from "#lib/components/ui/button-group/index.js";
+    import { Button } from "#lib/components/ui/button/index.js";
+    import { Input } from "#lib/components/ui/input/index.js";
+    import { Label } from "#lib/components/ui/label/index.js";
+    import * as Select from "#lib/components/ui/select/index.js";
+    import { Switch } from "#lib/components/ui/switch/index.js";
     import { settingsSwitchClass } from "./helpers";
     import SettingFieldEditor from "./setting-field-editor.svelte";
     import type { SettingFieldDef } from "./types";
@@ -259,11 +259,11 @@
     }
 </script>
 
-<div class:rounded-lg={!nested} class:border={!nested} class:p-4={!nested} class="space-y-3">
+<div class={["space-y-3", !nested && "rounded-lg border p-4"]}>
     {#if field.type === "object" && field.display === "tabs"}
-        {@const objectValue = ensureObject(field.fields ?? [])}
-        {@const tabs = field.fields ?? []}
-        {@const current = tabs.find((t) => t.key === activeTab)?.key ?? tabs[0]?.key ?? ""}
+        {const objectValue = $derived(ensureObject(field.fields ?? []))}
+        {const tabs = $derived(field.fields ?? [])}
+        {const current = $derived(tabs.find((t) => t.key === activeTab)?.key ?? tabs[0]?.key ?? "")}
         <div class="space-y-1">
             <Label class="text-base">{field.label}</Label>
             {#if field.description}
@@ -274,7 +274,7 @@
         <div class="rounded-lg border">
             <div class="flex gap-1 overflow-x-auto border-b p-1">
                 {#each tabs as tab (tab.key)}
-                    {@const summary = fetchSummary(objectValue[tab.key], tab)}
+                    {const summary = $derived(fetchSummary(objectValue[tab.key], tab))}
                     <button
                         type="button"
                         class="shrink-0 rounded-md px-3 py-2 text-left text-xs transition-colors {current ===
@@ -292,7 +292,7 @@
 
             {#each tabs as tab (tab.key)}
                 {#if tab.key === current}
-                    {@const tabValue = ensurePlainObject(objectValue[tab.key], tab.fields ?? [])}
+                    {const tabValue = $derived(ensurePlainObject(objectValue[tab.key], tab.fields ?? []))}
                     <div class="grid gap-3 p-3 sm:grid-cols-2">
                         {#each tab.fields ?? [] as subfield (subfield.key)}
                             <SettingFieldEditor
@@ -313,8 +313,8 @@
             {/each}
         </div>
     {:else if field.type === "object"}
-        {@const objectValue = ensureObject(field.fields ?? [])}
-        {@const grid = field.display === "grid"}
+        {const objectValue = $derived(ensureObject(field.fields ?? []))}
+        {const grid = $derived(field.display === "grid")}
         <div class="space-y-1">
             <Label class="text-base">{field.label}</Label>
             {#if field.description}
@@ -339,7 +339,7 @@
             {/each}
         </div>
     {:else if field.type === "dictionary"}
-        {@const dictionaryValue = ensureDictionary()}
+        {const dictionaryValue = $derived(ensureDictionary())}
         <div class="space-y-1">
             <Label class="text-base">{field.label}</Label>
             {#if field.description}
@@ -349,11 +349,11 @@
 
         <div class="space-y-3">
             {#each Object.entries(dictionaryValue) as [entryKey] (entryKey)}
-                {@const entryValue = ensureDictionaryEntry(
+                {const entryValue = $derived(ensureDictionaryEntry(
                     dictionaryValue,
                     entryKey,
                     field.item_fields ?? []
-                )}
+                ))}
                 <div class="space-y-3 rounded-lg border p-3">
                     <div class="flex items-end gap-3">
                         <div class="min-w-0 flex-1 space-y-2">
@@ -400,9 +400,9 @@
             </button>
         </div>
     {:else if field.type === "string_array" || field.type === "filter_array"}
-        {@const items = ensureStringArray()}
-        {@const filterItems = selectedFilterItems()}
-        {@const filteredOptions = filteredArrayOptions()}
+        {const items = $derived(ensureStringArray())}
+        {const filterItems = $derived(selectedFilterItems())}
+        {const filteredOptions = $derived(filteredArrayOptions())}
         <div class="space-y-2">
             <Label for={idFor(path)}>{field.label}</Label>
             {#if field.description}
@@ -539,7 +539,7 @@
             </Select.Root>
         </div>
     {:else if field.type === "custom_rank"}
-        {@const cr = isRecord(value) ? value : {}}
+        {const cr = $derived(isRecord(value) ? value : {})}
         <div class="bg-muted/30 flex items-center justify-between gap-3 rounded-lg px-3 py-2">
             <Label class="min-w-0 truncate">{field.label}</Label>
             <div class="flex items-center gap-3">

@@ -3,7 +3,7 @@
     import { resolve } from "$app/paths";
     import { untrack } from "svelte";
     import { toast } from "svelte-sonner";
-    import { gqlClient } from "$lib/graphql-client";
+    import { gqlClient } from "#lib/graphql-client.js";
     import {
         buildGeneralSections,
         buildPluginSections,
@@ -26,14 +26,14 @@
     let { data }: { data: SetupData } = $props();
     const initial = untrack(() => createSetupState(JSON.parse(JSON.stringify(data)) as SetupData));
 
-    let stepIndex = $state(0);
+    let selectedStep = $state(0);
     let generalSection = $state<SettingsSection | null>(initial.general);
     let plugins = $state<SettingsSection[]>(initial.plugins);
-    let customProfiles = $state<CustomProfile[]>(initial.customProfiles);
+    let customProfiles = $state.raw<CustomProfile[]>(initial.customProfiles);
     let savingMap = $state<Record<string, boolean>>({});
 
     // Setup readiness is owned by the backend (`instanceStatus`); refreshed after edits.
-    let status = $state<InstanceStatus>(
+    let status = $state.raw<InstanceStatus>(
         untrack(() => ({ ...(data.instanceStatus as InstanceStatus) }))
     );
 
@@ -42,6 +42,7 @@
     );
     const generalSections = $derived(buildGeneralSections(generalSection?.schema ?? []));
     const steps = $derived(buildSetupSteps(pluginSections));
+    const stepIndex = $derived(Math.max(0, Math.min(selectedStep, steps.length - 1)));
     const currentStep = $derived(steps[stepIndex] ?? steps[0]);
     const currentPluginSection = $derived(
         pluginSections.find((section) => section.id === currentStep?.id) ?? null
@@ -52,15 +53,6 @@
             enabled: customProfiles.some((entry) => entry.name === profile.id && entry.enabled)
         }))
     );
-
-    $effect(() => {
-        if (steps.length === 0) return;
-        if (stepIndex >= steps.length) stepIndex = steps.length - 1;
-    });
-
-    $effect(() => {
-        if (currentStep?.id === "finish") void refreshStatus();
-    });
 
     async function refreshStatus() {
         try {
@@ -116,19 +108,20 @@
     }
 
     function nextStep() {
-        if (stepIndex < steps.length - 1) stepIndex += 1;
+        if (stepIndex < steps.length - 1) goToStep(stepIndex + 1);
     }
     function previousStep() {
-        if (stepIndex > 0) stepIndex -= 1;
+        if (stepIndex > 0) goToStep(stepIndex - 1);
     }
     function goToStep(index: number) {
-        stepIndex = index;
+        selectedStep = index;
+        if (steps[index]?.id === "finish") void refreshStatus();
     }
 
     async function finishSetup() {
         try {
             await gqlClient(COMPLETE_INITIAL_SETUP);
-            await goto(resolve("/"));
+            await goto(resolve(""));
         } catch {
             toast.error("Failed to complete setup");
         }

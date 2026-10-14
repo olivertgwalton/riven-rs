@@ -1,5 +1,5 @@
 <script lang="ts">
-    import * as Card from "$lib/components/ui/card/index.js";
+    import * as Card from "#lib/components/ui/card/index.js";
 </script>
 
 <div class="mx-auto grid w-full max-w-4xl gap-8">

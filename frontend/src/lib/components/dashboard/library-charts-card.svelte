@@ -1,7 +1,7 @@
 <script lang="ts">
-    import * as Chart from "$lib/components/ui/chart/index.js";
+    import * as Chart from "#lib/components/ui/chart/index.js";
     import { PieChart } from "layerchart";
-    import type { LibraryStats } from "$lib/gql/schema";
+    import type { LibraryStats } from "#lib/gql/schema.js";
 
     let { stats }: { stats: LibraryStats | undefined } = $props();
 

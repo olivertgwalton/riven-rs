@@ -1,21 +1,20 @@
 <script lang="ts">
-    import { Badge } from "$lib/components/ui/badge/index.js";
-    import * as Drawer from "$lib/components/ui/drawer/index.js";
-    import * as Sheet from "$lib/components/ui/sheet/index.js";
-    import LandscapeCard from "$lib/components/media/landscape-card.svelte";
-    import StatusBadge from "$lib/components/media/status-badge.svelte";
-    import ItemAction from "$lib/components/media/riven/item-action.svelte";
-    import ItemManualScrape from "$lib/components/media/riven/item-manual-scrape.svelte";
-    import { isMobile } from "$lib/stores/global.svelte";
-    import type { EpisodeSummary } from "$lib/gql/schema";
-    import type { MediaMetadata, Maybe } from "$lib/gql/schema";
-    import { formatBytes } from "$lib/helpers";
+    import { Badge } from "#lib/components/ui/badge/index.js";
+    import * as Drawer from "#lib/components/ui/drawer/index.js";
+    import * as Sheet from "#lib/components/ui/sheet/index.js";
+    import LandscapeCard from "#lib/components/media/landscape-card.svelte";
+    import StatusBadge from "#lib/components/media/status-badge.svelte";
+    import ItemAction from "#lib/components/media/riven/item-action.svelte";
+    import ItemManualScrape from "#lib/components/media/riven/item-manual-scrape.svelte";
+    import { isMobile } from "#lib/stores/global.svelte.js";
+    import type { EpisodeSummary } from "#lib/gql/schema.js";
+    import type { MediaMetadata, Maybe } from "#lib/gql/schema.js";
+    import { formatBytes } from "#lib/helpers.js";
     import {
         getFilesystemEntryLabel,
         type GqlEpisodeFull,
         type GqlFilesystemEntry
-    } from "$lib/services/riven-media";
-    import { untrack } from "svelte";
+    } from "#lib/services/riven-media.js";
     import RotateCcw from "@lucide/svelte/icons/rotate-ccw";
     import RefreshCw from "@lucide/svelte/icons/refresh-cw";
     import Search from "@lucide/svelte/icons/search";
@@ -51,11 +50,9 @@
         showExternalId = ""
     }: Props = $props();
 
-    let openEpisodeOverride = $state<number | null | "unset">(untrack(() => "unset"));
-    const openEpisodeNumber = $derived.by<number | null>(() => {
-        if (openEpisodeOverride !== "unset") return openEpisodeOverride;
-        return selectedEpisode ? Number(selectedEpisode) : null;
-    });
+    let openEpisodeNumber = $derived<number | null>(
+        selectedEpisode ? Number(selectedEpisode) : null
+    );
 
     const selectedEpisodes = $derived.by(() =>
         episodes.filter((episode) => episode.seasonNumber?.toString() === selectedSeason)
@@ -73,7 +70,7 @@
 
     function setEpisodeOpen(episodeNumber: number | null | undefined, open: boolean) {
         if (episodeNumber == null) return;
-        openEpisodeOverride = open ? episodeNumber : null;
+        openEpisodeNumber = open ? episodeNumber : null;
     }
 
     function getFsLabel(
@@ -174,8 +171,8 @@
     episodeNumber: number | null | undefined,
     onSelectIdx: (idx: number) => void
 )}
-    {@const fs = allEntries[selectedIdx] ?? allEntries[0]}
-    {@const meta = fs?.mediaMetadata ?? fallbackMeta}
+    {const fs = $derived(allEntries[selectedIdx] ?? allEntries[0])}
+    {const meta = $derived(fs?.mediaMetadata ?? fallbackMeta)}
     <div class="flex flex-col gap-6">
         <div class="mb-4 flex items-center justify-between gap-3">
             <div class="flex items-center gap-3">
@@ -191,7 +188,7 @@
                     value={selectedIdx}
                     onchange={(e) => onSelectIdx(Number(e.currentTarget.value))}
                     class="bg-background border-border text-foreground rounded-md border px-2 py-1 font-mono text-xs">
-                    {#each allEntries as entry, i (i)}
+                    {#each allEntries as entry, i (entry.id)}
                         <option value={i}>{getFsLabel(entry, episodeNumber)}</option>
                     {/each}
                 </select>
@@ -441,11 +438,11 @@
         {/if}
 
         {#if getEpisodeEntries(rivenEpisode).length > 0 || rivenEpisode?.filesystemEntry?.mediaMetadata}
-            {@const allEntries = getEpisodeEntries(rivenEpisode)}
-            {@const selectedIdx = Math.min(
+            {const allEntries = $derived(getEpisodeEntries(rivenEpisode))}
+            {const selectedIdx = $derived(Math.min(
                 selectedVersionIdxByEpisode[episode.number ?? -1] ?? 0,
                 Math.max(allEntries.length - 1, 0)
-            )}
+            ))}
             {@render fileDetails(
                 allEntries,
                 selectedIdx,
@@ -460,9 +457,9 @@
 {/snippet}
 
 <div class="grid grid-cols-1 gap-4 md:grid-cols-2 md:gap-6 xl:grid-cols-3 2xl:grid-cols-4">
-    {#each selectedEpisodes as episode, i (i)}
-        {@const rivenEpisode = stateByEpisodeNumber.get(episode.number ?? 0)}
-        {@const detailedEpisode = detailsByEpisodeNumber.get(episode.number ?? 0)}
+    {#each selectedEpisodes as episode (episode.id)}
+        {const rivenEpisode = $derived(stateByEpisodeNumber.get(episode.number ?? 0))}
+        {const detailedEpisode = $derived(detailsByEpisodeNumber.get(episode.number ?? 0))}
 
         {#if isMobile.current}
             <Drawer.Root

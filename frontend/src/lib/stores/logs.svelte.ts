@@ -1,6 +1,6 @@
-import { gqlSubscribeClient } from "$lib/graphql-client";
-import { gqlClient } from "$lib/graphql-client";
-import { createScopedLogger } from "$lib/logger";
+import { gqlSubscribeClient } from "#lib/graphql-client.js";
+import { gqlClient } from "#lib/graphql-client.js";
+import { createScopedLogger } from "#lib/logger.js";
 
 const logger = createScopedLogger("logs");
 
@@ -30,7 +30,7 @@ const LOG_LINES_SUBSCRIPTION = `subscription {
 
 class LogStore {
 	logs = $state<LiveLogLine[]>([]);
-	historicalLogs = $state<LogEntry[]>([]);
+	historicalLogs = $state.raw<LogEntry[]>([]);
 	isLoadingHistorical = $state(false);
 	error = $state<string | null>(null);
 	historicalError = $state<string | null>(null);

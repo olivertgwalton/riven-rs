@@ -1,5 +1,5 @@
 import type { PageLoad } from "./$types";
-import { gqlClient } from "$lib/graphql-client";
+import { gqlClient } from "#lib/graphql-client.js";
 import { error } from "@sveltejs/kit";
 
 const CALENDAR_QUERY = `

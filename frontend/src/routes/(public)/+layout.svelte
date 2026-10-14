@@ -3,7 +3,7 @@
     import oxanium400Woff2 from "@fontsource/oxanium/files/oxanium-latin-400-normal.woff2?url";
 
     import { onNavigate } from "$app/navigation";
-    import { Toaster } from "$lib/components/ui/sonner/index.js";
+    import { Toaster } from "#lib/components/ui/sonner/index.js";
     import type { LayoutProps } from "./$types";
 
     let { children }: LayoutProps = $props();

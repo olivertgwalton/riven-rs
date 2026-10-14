@@ -1,9 +1,8 @@
 <script lang="ts">
-    import { browser } from "$app/environment";
     import { resolve } from "$app/paths";
     import { page } from "$app/state";
-    import { Button } from "$lib/components/ui/button/index.js";
-    import { Badge } from "$lib/components/ui/badge/index.js";
+    import { Button } from "#lib/components/ui/button/index.js";
+    import { Badge } from "#lib/components/ui/badge/index.js";
     import ArrowLeft from "@lucide/svelte/icons/arrow-left";
     import Home from "@lucide/svelte/icons/home";
     import RotateCcw from "@lucide/svelte/icons/rotate-ccw";
@@ -39,15 +38,13 @@
     });
 
     function goBack() {
-        if (browser && history.length > 1) {
+        if (history.length > 1) {
             history.back();
         }
     }
 
     function reload() {
-        if (browser) {
-            location.reload();
-        }
+        location.reload();
     }
 </script>
 
@@ -107,15 +104,15 @@
         </div>
 
         <div class="flex flex-wrap gap-2">
-            <Button variant="outline" onclick={goBack} disabled={!browser}>
+            <Button variant="outline" onclick={goBack}>
                 <ArrowLeft />
                 Back
             </Button>
-            <Button variant="outline" href={resolve("/")}>
+            <Button variant="outline" href={resolve("")}>
                 <Home />
                 Home
             </Button>
-            <Button variant="ghost" onclick={reload} disabled={!browser}>
+            <Button variant="ghost" onclick={reload}>
                 <RotateCcw />
                 Retry
             </Button>

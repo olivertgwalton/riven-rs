@@ -1,10 +1,10 @@
 <script lang="ts">
-    import * as Carousel from "$lib/components/ui/carousel/index.js";
-    import PortraitCard from "$lib/components/media/portrait-card.svelte";
-    import StatusBadge from "$lib/components/media/status-badge.svelte";
-    import { cn } from "$lib/utils";
-    import type { SeasonSummary } from "$lib/gql/schema";
-    import type { GqlSeasonFull } from "$lib/services/riven-media";
+    import * as Carousel from "#lib/components/ui/carousel/index.js";
+    import PortraitCard from "#lib/components/media/portrait-card.svelte";
+    import StatusBadge from "#lib/components/media/status-badge.svelte";
+    import { cn } from "#lib/utils.js";
+    import type { SeasonSummary } from "#lib/gql/schema.js";
+    import type { GqlSeasonFull } from "#lib/services/riven-media.js";
 
     interface Props {
         seasons: SeasonSummary[];
@@ -25,11 +25,10 @@
 
 <Carousel.Root opts={{ dragFree: true, slidesToScroll: "auto" }}>
     <Carousel.Content>
-        {#each seasons as season, i (i)}
-            {@const rivenSeason = stateBySeasonNumber.get(season.number ?? 0)}
-            {@const episodeCount = episodeCountBySeasonNumber?.get(season.number ?? 0)}
-            {@const completedCount =
-                rivenSeason?.episodes?.filter((e) => e.state === "Completed").length ?? 0}
+        {#each seasons as season (season.id)}
+            {const rivenSeason = $derived(stateBySeasonNumber.get(season.number ?? 0))}
+            {const episodeCount = $derived(episodeCountBySeasonNumber?.get(season.number ?? 0))}
+            {const completedCount = $derived(rivenSeason?.episodes?.filter((e) => e.state === "Completed").length ?? 0)}
             <Carousel.Item class="basis-auto">
                 <button type="button"
                     onclick={() => onSelectSeason(season.number?.toString())}

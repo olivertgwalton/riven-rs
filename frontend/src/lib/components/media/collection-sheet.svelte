@@ -1,13 +1,13 @@
 <script lang="ts">
-    import { can } from "$lib/permissions";
-    import * as Sheet from "$lib/components/ui/sheet/index.js";
-    import { Button } from "$lib/components/ui/button/index.js";
-    import LandscapeCard from "$lib/components/media/landscape-card.svelte";
+    import { can } from "#lib/permissions.js";
+    import * as Sheet from "#lib/components/ui/sheet/index.js";
+    import { Button } from "#lib/components/ui/button/index.js";
+    import LandscapeCard from "#lib/components/media/landscape-card.svelte";
     import Loader2 from "@lucide/svelte/icons/loader-2";
     import { toast } from "svelte-sonner";
-    import { gqlClient } from "$lib/graphql-client";
-    import { createScopedLogger } from "$lib/logger";
-    import { isMobile } from "$lib/stores/global.svelte";
+    import { gqlClient } from "#lib/graphql-client.js";
+    import { createScopedLogger } from "#lib/logger.js";
+    import { isMobile } from "#lib/stores/global.svelte.js";
     import type { Snippet } from "svelte";
     import { resolve } from "$app/paths";
     import { page } from "$app/state";
@@ -44,7 +44,7 @@
     let open = $state(false);
     let loading = $state(false);
     let requestLoading = $state(false);
-    let collectionData = $state<CollectionDetails | null>(null);
+    let collectionData = $state.raw<CollectionDetails | null>(null);
     let error = $state<string | null>(null);
 
     function closeOnMobile() {
@@ -135,15 +135,16 @@
             requestLoading = false;
         }
     }
-
-    $effect(() => {
-        if (open) {
-            fetchCollection();
-        }
-    });
 </script>
 
-<Sheet.Root bind:open>
+<Sheet.Root
+    bind:open={
+        () => open,
+        (next) => {
+            open = next;
+            if (next) void fetchCollection();
+        }
+    }>
     <Sheet.Trigger>
         {#snippet child({ props })}
             {#if trigger}
@@ -210,7 +211,7 @@
                 <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
                     {#each collectionData.parts ?? [] as part (part.id)}
                         <a
-                            href={resolve(`/details/media/${part.id}/movie`)}
+                            href={resolve(`details/media/${part.id}/movie`)}
                             class="group block transition-all duration-300 hover:scale-[1.02]"
 							onclick={closeOnMobile}>
                             <LandscapeCard

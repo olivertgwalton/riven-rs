@@ -30,7 +30,7 @@ for component in "${components[@]}"; do
     echo ""
     echo "[$current/$total] Installing component: $component..."
 
-    if pnpm dlx shadcn-svelte@latest add "$component" --yes --overwrite; then
+    if pnpm exec shadcn-svelte add "$component" --yes --overwrite; then
         echo "✓ Successfully installed $component"
         successful=$((successful + 1))
     else

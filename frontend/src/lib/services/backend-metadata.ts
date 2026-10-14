@@ -1,5 +1,5 @@
-import { gqlClient } from "$lib/graphql-client";
-import type { TmdbListItem } from "$lib/gql/schema";
+import { gqlClient } from "#lib/graphql-client.js";
+import type { TmdbListItem } from "#lib/gql/schema.js";
 
 export type { TmdbListItem };
 

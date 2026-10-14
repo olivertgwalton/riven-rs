@@ -1,3 +1,4 @@
+import { createContext } from "svelte";
 import type { FilterParams } from "./search-store.svelte";
 
 /**
@@ -289,3 +290,5 @@ export class FilterStore {
 		this.isOpen = false;
 	}
 }
+
+export const [getFilterStore, setFilterStore] = createContext<FilterStore>();

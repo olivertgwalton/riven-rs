@@ -1,6 +1,6 @@
 <script lang="ts">
-    import { Button } from "$lib/components/ui/button/index.js";
-    import { cn } from "$lib/utils";
+    import { Button } from "#lib/components/ui/button/index.js";
+    import { cn } from "#lib/utils.js";
 
     type Option = {
         label: string;
@@ -21,7 +21,7 @@
 <div
     class="relative flex w-fit items-center gap-1 rounded-xl border border-white/10 bg-black/20 p-1 shadow-inner backdrop-blur-md">
     {#each options as option (option.value)}
-        {@const active = option.value === value}
+        {const active = $derived(option.value === value)}
         <Button
             variant="ghost"
             size="sm"

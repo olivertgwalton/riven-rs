@@ -1,10 +1,11 @@
 @import "tailwindcss";
 @import "tw-animate-css";
+/* Variants (data-open, data-horizontal, ...) and keyframes the shadcn-svelte
+   components are written against; bits-ui sets data-state/data-orientation. */
+@import "shadcn-svelte/tailwind.css";
 @import "./themes/all.css";
 
 @custom-variant dark (&:is(.dark *));
-@custom-variant data-checked (&[data-state="checked"]);
-@custom-variant data-unchecked (&[data-state="unchecked"]);
 
 @theme {
 	--font-sans: "Oxanium", sans-serif;

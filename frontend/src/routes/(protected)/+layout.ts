@@ -1,10 +1,11 @@
 import type { LayoutLoad } from "./$types";
 import { redirect } from "@sveltejs/kit";
-import { browser } from "$app/environment";
-import { gqlClient } from "$lib/graphql-client";
-import { NO_PERMISSIONS, type Permissions } from "$lib/permissions";
-import type { InstanceStatus } from "$lib/gql/schema";
-import { authClient } from "$lib/auth-client";
+import { resolve } from "$app/paths";
+import { browser } from "$app/env";
+import { gqlClient } from "#lib/graphql-client.js";
+import { NO_PERMISSIONS, type Permissions } from "#lib/permissions.js";
+import type { InstanceStatus } from "#lib/gql/schema.js";
+import { authClient } from "#lib/auth-client.js";
 
 // One round trip for both: the setup gate and the caller's capabilities, which
 // the backend derives from the same role it authorises mutations with.
@@ -38,7 +39,7 @@ export const load = (async ({ route }) => {
 
 	const { data: session } = await authClient.getSession();
 	if (!session?.user) {
-		redirect(302, "/auth/login");
+		redirect(302, resolve("auth/login"));
 	}
 
 	const result = await gqlClient<LayoutQueryResult>(LAYOUT_QUERY).catch(
@@ -52,10 +53,10 @@ export const load = (async ({ route }) => {
 
 	const isSetupRoute = route.id === "/(protected)/setup";
 	if (!setupCompleted && !isSetupRoute) {
-		redirect(302, "/setup");
+		redirect(302, resolve("setup"));
 	}
 	if (setupCompleted && isSetupRoute) {
-		redirect(302, "/");
+		redirect(302, resolve(""));
 	}
 
 	return { user: session.user, permissions };

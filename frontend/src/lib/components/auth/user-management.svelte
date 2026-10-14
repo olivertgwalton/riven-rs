@@ -1,15 +1,15 @@
 <script lang="ts">
-    import { Input } from "$lib/components/ui/input/index.js";
-    import { Label } from "$lib/components/ui/label/index.js";
-    import { Button } from "$lib/components/ui/button/index.js";
-    import * as Table from "$lib/components/ui/table/index.js";
-    import { Badge } from "$lib/components/ui/badge/index.js";
+    import { Input } from "#lib/components/ui/input/index.js";
+    import { Label } from "#lib/components/ui/label/index.js";
+    import { Button } from "#lib/components/ui/button/index.js";
+    import * as Table from "#lib/components/ui/table/index.js";
+    import { Badge } from "#lib/components/ui/badge/index.js";
     import { toast } from "svelte-sonner";
     import LoaderCircle from "@lucide/svelte/icons/loader-circle";
-    import { invalidateAll } from "$app/navigation";
-    import { authClient } from "$lib/auth-client";
-    import { createUserSchema } from "$lib/schemas/auth";
-    import * as dateUtils from "$lib/utils/date";
+    import { refreshAll } from "$app/navigation";
+    import { authClient } from "#lib/auth-client.js";
+    import { createUserSchema } from "#lib/schemas/auth.js";
+    import * as dateUtils from "#lib/utils/date.js";
     import FormBase from "./form-base.svelte";
     import { validateForm } from "./validate";
 
@@ -55,7 +55,7 @@
         }
 
         form.reset();
-        await invalidateAll();
+        await refreshAll();
         toast.success("User created successfully.");
     }
 
@@ -76,11 +76,11 @@
 
         if (error) {
             toast.error(error.message);
-            await invalidateAll();
+            await refreshAll();
             return;
         }
 
-        await invalidateAll();
+        await refreshAll();
         toast.success("User role updated.");
     }
 
@@ -97,7 +97,7 @@
             return;
         }
 
-        await invalidateAll();
+        await refreshAll();
         toast.success("User deleted successfully.");
     }
 </script>

@@ -1,7 +1,7 @@
 <script lang="ts">
-    import { Badge } from "$lib/components/ui/badge/index.js";
-    import { Button } from "$lib/components/ui/button/index.js";
-    import { Separator } from "$lib/components/ui/separator/index.js";
+    import { Badge } from "#lib/components/ui/badge/index.js";
+    import { Button } from "#lib/components/ui/button/index.js";
+    import { Separator } from "#lib/components/ui/separator/index.js";
     import SettingFieldEditor from "./setting-field-editor.svelte";
     import { groupPluginsByCategory, pluginStatus } from "./helpers";
     import type { SettingsSection, SetupGroup } from "./types";

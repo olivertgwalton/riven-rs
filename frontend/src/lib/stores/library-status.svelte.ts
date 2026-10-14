@@ -20,9 +20,9 @@
  * here instead of per card.
  */
 
-import { gqlClient } from "$lib/graphql-client";
-import { resolveExternalId } from "$lib/services/backend-metadata";
-import { subscribeToRivenMediaEvents } from "$lib/services/riven-live-updates";
+import { gqlClient } from "#lib/graphql-client.js";
+import { resolveExternalId } from "#lib/services/backend-metadata.js";
+import { subscribeToRivenMediaEvents } from "#lib/services/riven-live-updates.js";
 
 export type LibraryStatusEntry =
 	| { status: "loading" }

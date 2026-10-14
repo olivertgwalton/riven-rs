@@ -1,13 +1,13 @@
 <script lang="ts">
-    import { can } from "$lib/permissions";
+    import { can } from "#lib/permissions.js";
     import { goto } from "$app/navigation";
     import { resolve } from "$app/paths";
     import { page } from "$app/state";
-    import { authClient } from "$lib/auth-client";
-    import NotificationCenter from "$lib/components/notification-center.svelte";
-    import * as Avatar from "$lib/components/ui/avatar/index.js";
-    import { Button } from "$lib/components/ui/button/index.js";
-    import { getInitials } from "$lib/utils";
+    import { authClient } from "#lib/auth-client.js";
+    import NotificationCenter from "#lib/components/notification-center.svelte";
+    import * as Avatar from "#lib/components/ui/avatar/index.js";
+    import { Button } from "#lib/components/ui/button/index.js";
+    import { getInitials } from "#lib/utils.js";
     import CalendarDays from "@lucide/svelte/icons/calendar-days";
     import FileClock from "@lucide/svelte/icons/file-clock";
     import Home from "@lucide/svelte/icons/home";
@@ -22,30 +22,23 @@
     import ThemeSwitcher from "./theme-switcher.svelte";
     import { fly } from "svelte/transition";
     import { cubicOut } from "svelte/easing";
-    import { sidebar } from "$lib/stores/global.svelte";
+    import { sidebar } from "#lib/stores/global.svelte.js";
+    import type { Path } from "$app/types";
 
     const navItems: Array<{
-        href:
-            | "/"
-            | "/dashboard"
-            | "/library"
-            | "/explore"
-            | "/calendar"
-            | "/auth"
-            | "/settings"
-            | "/logs";
+        href: Path;
         icon: typeof Home;
         label: string;
         adminOnly?: boolean;
     }> = [
-        { href: "/", icon: Home, label: "Home" },
-        { href: "/dashboard", icon: LayoutDashboard, label: "Dashboard" },
-        { href: "/library", icon: Library, label: "Library" },
-        { href: "/explore", icon: Search, label: "Explore" },
-        { href: "/calendar", icon: CalendarDays, label: "Calendar" },
-        { href: "/auth", icon: User, label: "Profile" },
-        { href: "/settings", icon: Settings, label: "Settings", adminOnly: true },
-        { href: "/logs", icon: FileClock, label: "Logs", adminOnly: true }
+        { href: "", icon: Home, label: "Home" },
+        { href: "dashboard", icon: LayoutDashboard, label: "Dashboard" },
+        { href: "library", icon: Library, label: "Library" },
+        { href: "explore", icon: Search, label: "Explore" },
+        { href: "calendar", icon: CalendarDays, label: "Calendar" },
+        { href: "auth", icon: User, label: "Profile" },
+        { href: "settings", icon: Settings, label: "Settings", adminOnly: true },
+        { href: "logs", icon: FileClock, label: "Logs", adminOnly: true }
     ];
 
     let { user } = $props();
@@ -72,13 +65,15 @@
             <Tooltip>
                 {#snippet trigger()}
                     <a
-                        data-sveltekit-preload-data={item.label === "Settings" ? "off" : "hover"}
+                        data-sveltekit-preload-data={item.label === "Settings" ? false : "hover"}
                         href={resolve(item.href)}
-                        class="hover:bg-accent/80 group relative flex h-10 w-10 items-center justify-center rounded-md transition-colors"
-                        class:bg-accent={page.url.pathname === item.href}
-                        aria-label={item.label}
-                        aria-current={page.url.pathname === item.href ? "page" : undefined}>
+                        class={[
+                            "hover:bg-accent/80 group relative flex h-10 w-10 items-center justify-center rounded-md transition-colors",
+                            page.url.pathname === resolve(item.href) && "bg-accent"
+                        ]}
+                        aria-current={page.url.pathname === resolve(item.href) ? "page" : undefined}>
                         <item.icon class="size-5" />
+                        <span class="sr-only">{item.label}</span>
                     </a>
                 {/snippet}
                 {#snippet content()}
@@ -100,7 +95,7 @@
         {#if user}
             <Tooltip>
                 {#snippet trigger()}
-                    <a href={resolve("/auth")} class="cursor-pointer" aria-label="Profile">
+                    <a href={resolve("auth")} class="cursor-pointer" aria-label="Profile">
                         <Avatar.Root>
                             {#if user.image}
                                 <Avatar.Image src={user.image} alt={handle} />
@@ -121,7 +116,7 @@
             <Button
                 onclick={async () => {
                     await authClient.signOut();
-                    await goto(resolve("/auth/login"));
+                    await goto(resolve("auth/login"));
                 }}
                 variant="ghost"
                 size="icon"
@@ -130,7 +125,7 @@
                 <LogOut class="size-5" />
             </Button>
         {:else}
-            <a href={resolve("/auth/login")} class="cursor-pointer" aria-label="Login">
+            <a href={resolve("auth/login")} class="cursor-pointer" aria-label="Login">
                 <Avatar.Root>
                     <Avatar.Fallback class="bg-primary text-primary-foreground">
                         {getInitials("Guest")}
@@ -163,7 +158,7 @@
             {#if user}
                 <div class="mb-4 flex items-center justify-between px-2">
                     <a
-                        href={resolve("/auth")}
+                        href={resolve("auth")}
                         class="flex items-center gap-3"
                         onclick={() => (sidebar.open = false)}>
                         <Avatar.Root class="size-8">
@@ -184,7 +179,7 @@
                         <Button
                             onclick={async () => {
                                 await authClient.signOut();
-                                await goto(resolve("/auth/login"));
+                                await goto(resolve("auth/login"));
                             }}
                             variant="ghost"
                             size="icon"
@@ -211,8 +206,8 @@
                         href={resolve(item.href)}
                         onclick={() => (sidebar.open = false)}
                         class="hover:text-foreground flex w-full items-center gap-3 rounded-xl px-4 py-2.5 text-sm font-medium transition-colors hover:bg-white/10
-						{page.url.pathname === item.href ? 'text-primary bg-white/10' : 'text-muted-foreground'}"
-                        aria-current={page.url.pathname === item.href ? "page" : undefined}>
+						{page.url.pathname === resolve(item.href) ? 'text-primary bg-white/10' : 'text-muted-foreground'}"
+                        aria-current={page.url.pathname === resolve(item.href) ? "page" : undefined}>
                         <item.icon class="size-4" />
                         <span>{item.label}</span>
                     </a>

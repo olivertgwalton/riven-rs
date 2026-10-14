@@ -1,5 +1,5 @@
 import { error } from "@sveltejs/kit";
-import type { Capability } from "$lib/gql/schema";
+import type { Capability } from "#lib/gql/schema.js";
 
 export type { Capability };
 

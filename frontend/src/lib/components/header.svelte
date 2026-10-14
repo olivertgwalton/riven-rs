@@ -1,30 +1,31 @@
 <script lang="ts">
     import Menu from "@lucide/svelte/icons/menu";
-    import { Button } from "$lib/components/ui/button/index.js";
-    import NotificationCenter from "$lib/components/notification-center.svelte";
-    import { getContext, onMount } from "svelte";
+    import { Button } from "#lib/components/ui/button/index.js";
+    import NotificationCenter from "#lib/components/notification-center.svelte";
+    import { onMount } from "svelte";
     import Search from "@lucide/svelte/icons/search";
-    import * as Kbd from "$lib/components/ui/kbd/index.js";
-    import * as InputGroup from "$lib/components/ui/input-group/index.js";
+    import * as Kbd from "#lib/components/ui/kbd/index.js";
+    import * as InputGroup from "#lib/components/ui/input-group/index.js";
     import { goto, afterNavigate } from "$app/navigation";
     import { resolve } from "$app/paths";
     import { page } from "$app/state";
-    import { sidebar } from "$lib/stores/global.svelte";
-    import type { SearchStore } from "$lib/services/search-store.svelte";
-    import { parseSearchQuery } from "$lib/search-parser";
+    import { sidebar } from "#lib/stores/global.svelte.js";
+    import { getSearchStore } from "#lib/services/search-store.svelte.js";
+    import { parseSearchQuery } from "#lib/search-parser.js";
 
-    const searchStore = getContext<SearchStore>("searchStore");
+    const searchStore = getSearchStore();
 
-    // Detect modifier key client-side only to avoid hydration mismatch
-    let modifierKey = $state<string | null>(null);
+    // Client-only app (ssr = false), so navigator is always available here.
+    const modifierKey = (
+        (navigator.userAgentData?.platform ?? navigator.platform) ||
+        ""
+    )
+        .toUpperCase()
+        .includes("MAC")
+        ? "⌘"
+        : "^";
 
     onMount(() => {
-        const platform = (
-            (navigator.userAgentData?.platform ?? navigator.platform) ||
-            ""
-        ).toUpperCase();
-        modifierKey = platform.includes("MAC") ? "⌘" : "^";
-
         const handleSearch = (e: Event) => {
             const evt = e as CustomEvent<{ query: string }>;
             if (evt.detail.query) {
@@ -34,8 +35,12 @@
             }
         };
 
+        // `riven:search` contains a colon, so it can't be a <svelte:window> attribute.
         window.addEventListener("riven:search", handleSearch);
-        return () => window.removeEventListener("riven:search", handleSearch);
+        return () => {
+            window.removeEventListener("riven:search", handleSearch);
+            clearTimeout(debounceTimer);
+        };
     });
 
     // Local input value state to decouple from URL updates while typing
@@ -68,14 +73,13 @@
             searchStore.syncQuery(parsed);
         }
 
-        const explorePath = resolve("/explore");
+        const explorePath = resolve("explore");
         const searchPath = query
             ? `${explorePath}?query=${encodeURIComponent(query)}`
             : explorePath;
         await goto(searchPath, {
-            keepFocus: true,
-            noScroll: true,
-            replaceState: currentlyExplore
+            reset: false,
+            replace: currentlyExplore
         });
     }
 
@@ -83,10 +87,6 @@
         clearTimeout(debounceTimer);
         debounceTimer = setTimeout(navigateToSearch, 300);
     }
-
-    $effect(() => {
-        return () => clearTimeout(debounceTimer);
-    });
 
     function onKeydown(e: KeyboardEvent) {
         if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
@@ -120,13 +120,11 @@
                         }
                     }}
                     autocomplete="off" />
-                {#if modifierKey}
-                    <InputGroup.Addon align="inline-end" class="pr-4">
-                        <Kbd.Root
-                            class="h-5 min-h-0 border-white/10 bg-white/5 px-1.5 text-[10px] text-white/50"
-                            >{modifierKey}K</Kbd.Root>
-                    </InputGroup.Addon>
-                {/if}
+                <InputGroup.Addon align="inline-end" class="pr-4">
+                    <Kbd.Root
+                        class="h-5 min-h-0 border-white/10 bg-white/5 px-1.5 text-[10px] text-white/50"
+                        >{modifierKey}K</Kbd.Root>
+                </InputGroup.Addon>
             </InputGroup.Root>
         </div>
 

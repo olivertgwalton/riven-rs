@@ -1,4 +1,4 @@
-import { createPasskey, getPasskeyAssertion } from "$lib/passkeys";
+import { createPasskey, getPasskeyAssertion } from "#lib/passkeys.js";
 
 /**
  * Thin client for the backend's authentication endpoints (`riven-api`'s

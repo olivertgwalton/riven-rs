@@ -7,10 +7,10 @@
  * read itself.
  *
  * Usage (components and universal `load` functions alike):
- *   import { gqlClient } from '$lib/graphql-client';
+ *   import { gqlClient } from '#lib/graphql-client.js';
  *   const data = await gqlClient<{ removeItems: number }>(MUTATION, vars);
  *
- *   import { gqlSubscribeClient } from '$lib/graphql-client';
+ *   import { gqlSubscribeClient } from '#lib/graphql-client.js';
  *   const unsubscribe = gqlSubscribeClient<...>(SUBSCRIPTION, vars, { onData, onError });
  *
  * Subscriptions go over a single shared WebSocket via the `graphql-ws`

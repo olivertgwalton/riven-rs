@@ -1,12 +1,12 @@
 <script lang="ts">
-    import { changeUserDataSchema } from "$lib/schemas/auth";
-    import { Button } from "$lib/components/ui/button/index.js";
-    import { Input } from "$lib/components/ui/input/index.js";
-    import { Label } from "$lib/components/ui/label/index.js";
+    import { changeUserDataSchema } from "#lib/schemas/auth.js";
+    import { Button } from "#lib/components/ui/button/index.js";
+    import { Input } from "#lib/components/ui/input/index.js";
+    import { Label } from "#lib/components/ui/label/index.js";
     import { toast } from "svelte-sonner";
     import LoaderCircle from "@lucide/svelte/icons/loader-circle";
-    import { invalidateAll } from "$app/navigation";
-    import { authClient } from "$lib/auth-client";
+    import { refreshAll } from "$app/navigation";
+    import { authClient } from "#lib/auth-client.js";
     import FormBase from "./form-base.svelte";
     import { validateForm } from "./validate";
 
@@ -39,7 +39,7 @@
             return;
         }
 
-        await invalidateAll();
+        await refreshAll();
         toast.success("User data updated successfully.");
     }
 </script>

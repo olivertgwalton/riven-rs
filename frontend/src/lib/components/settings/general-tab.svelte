@@ -1,5 +1,5 @@
 <script lang="ts">
-    import { Button } from "$lib/components/ui/button/index.js";
+    import { Button } from "#lib/components/ui/button/index.js";
     import SettingFieldEditor from "./setting-field-editor.svelte";
     import { buildGeneralSections } from "./helpers";
     import type { SettingsSection } from "./types";

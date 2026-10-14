@@ -2,14 +2,14 @@
     import Menu from "@lucide/svelte/icons/menu";
     import X from "@lucide/svelte/icons/x";
     import ChevronLeft from "@lucide/svelte/icons/chevron-left";
-    import { Button } from "$lib/components/ui/button/index.js";
-    import NotificationCenter from "$lib/components/notification-center.svelte";
-    import SearchModal from "$lib/components/search-modal.svelte";
+    import { Button } from "#lib/components/ui/button/index.js";
+    import NotificationCenter from "#lib/components/notification-center.svelte";
+    import SearchModal from "#lib/components/search-modal.svelte";
     import { goto } from "$app/navigation";
     import { resolve } from "$app/paths";
     import Search from "@lucide/svelte/icons/search";
     import { page } from "$app/state";
-    import { sidebar } from "$lib/stores/global.svelte";
+    import { sidebar } from "#lib/stores/global.svelte.js";
     import { fly } from "svelte/transition";
     import { cubicOut } from "svelte/easing";
 
@@ -37,7 +37,7 @@
             if (history.length > 1) {
                 history.back();
             } else {
-                goto(resolve("/"));
+                goto(resolve(""));
             }
         }}
         aria-label="Go back"
@@ -82,17 +82,17 @@
                 onclick={() => (sidebar.open = !sidebar.open)}>
                 <div class="relative flex size-5 items-center justify-center">
                     <div
-                        class="absolute inset-0 flex items-center justify-center transition-all duration-300 ease-in-out"
-                        class:opacity-0={sidebar.open}
-                        class:rotate-90={sidebar.open}
-                        class:scale-0={sidebar.open}>
+                        class={[
+                            "absolute inset-0 flex items-center justify-center transition-all duration-300 ease-in-out",
+                            sidebar.open && "rotate-90 scale-0 opacity-0"
+                        ]}>
                         <Menu class="size-5" />
                     </div>
                     <div
-                        class="absolute inset-0 flex items-center justify-center transition-all duration-300 ease-in-out"
-                        class:opacity-0={!sidebar.open}
-                        class:-rotate-90={!sidebar.open}
-                        class:scale-0={!sidebar.open}>
+                        class={[
+                            "absolute inset-0 flex items-center justify-center transition-all duration-300 ease-in-out",
+                            !sidebar.open && "-rotate-90 scale-0 opacity-0"
+                        ]}>
                         <X class="size-5" />
                     </div>
                 </div>

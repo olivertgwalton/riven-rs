@@ -1,6 +1,13 @@
 import { redirect } from "@sveltejs/kit";
+import { resolve } from "$app/paths";
 import type { PageLoad } from "./$types";
 
 export const load: PageLoad = async ({ params }) => {
-	throw redirect(301, `/details/entity/${params.id}/person`);
+	redirect(
+		301,
+		resolve("/(protected)/details/entity/[id]/[type]", {
+			id: params.id,
+			type: "person",
+		}),
+	);
 };

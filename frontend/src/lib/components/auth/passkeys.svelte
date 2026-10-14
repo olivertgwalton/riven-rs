@@ -6,16 +6,16 @@
     import { onMount } from "svelte";
     import { toast } from "svelte-sonner";
 
-    import { authClient, type Passkey } from "$lib/auth-client";
-    import { createScopedLogger } from "$lib/logger";
-    import { browserSupportsPasskeys, PasskeyCancelledError } from "$lib/passkeys";
-    import { Button } from "$lib/components/ui/button";
-    import { Input } from "$lib/components/ui/input";
-    import * as Card from "$lib/components/ui/card";
+    import { authClient, type Passkey } from "#lib/auth-client.js";
+    import { createScopedLogger } from "#lib/logger.js";
+    import { browserSupportsPasskeys, PasskeyCancelledError } from "#lib/passkeys.js";
+    import { Button } from "#lib/components/ui/button/index.js";
+    import { Input } from "#lib/components/ui/input/index.js";
+    import * as Card from "#lib/components/ui/card/index.js";
 
     const logger = createScopedLogger("passkeys");
 
-    let passkeys = $state<Passkey[]>([]);
+    let passkeys = $state.raw<Passkey[]>([]);
     let loading = $state(true);
     let registering = $state(false);
     let editingId = $state<string | null>(null);

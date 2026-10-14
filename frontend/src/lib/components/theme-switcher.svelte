@@ -2,8 +2,8 @@
     import { setTheme, theme } from "mode-watcher";
     import Pallete from "@lucide/svelte/icons/palette";
     import Check from "@lucide/svelte/icons/check";
-    import { Button } from "$lib/components/ui/button/index.js";
-    import * as DropdownMenu from "$lib/components/ui/dropdown-menu/index.js";
+    import { Button } from "#lib/components/ui/button/index.js";
+    import * as DropdownMenu from "#lib/components/ui/dropdown-menu/index.js";
 
     const themes = {
         amberminimal: "Amber Minimal",

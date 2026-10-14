@@ -7,18 +7,18 @@
     import Mountain from "@lucide/svelte/icons/mountain";
     import { toast } from "svelte-sonner";
 
-    import { authClient, type OidcProviderSummary } from "$lib/auth-client";
-    import { createScopedLogger } from "$lib/logger";
+    import { authClient, type OidcProviderSummary } from "#lib/auth-client.js";
+    import { createScopedLogger } from "#lib/logger.js";
     import {
         browserSupportsPasskeys,
         supportsConditionalMediation,
         PasskeyCancelledError
-    } from "$lib/passkeys";
-    import { Button } from "$lib/components/ui/button";
-    import { Input } from "$lib/components/ui/input";
-    import { Label } from "$lib/components/ui/label";
-    import * as Card from "$lib/components/ui/card";
-    import * as Tabs from "$lib/components/ui/tabs";
+    } from "#lib/passkeys.js";
+    import { Button } from "#lib/components/ui/button/index.js";
+    import { Input } from "#lib/components/ui/input/index.js";
+    import { Label } from "#lib/components/ui/label/index.js";
+    import * as Card from "#lib/components/ui/card/index.js";
+    import * as Tabs from "#lib/components/ui/tabs/index.js";
 
     const logger = createScopedLogger("login");
 
@@ -48,7 +48,7 @@
     let autofillAbort: AbortController | null = null;
 
     function finishSignIn() {
-        return goto(resolve("/"), { invalidateAll: true });
+        return goto(resolve(""), { refreshAll: true });
     }
 
     async function signIn(event: SubmitEvent) {
@@ -211,7 +211,7 @@
 
         const { data, error } = await authClient.signIn.social({
             provider: id,
-            callback_url: window.location.origin + resolve("/")
+            callback_url: window.location.origin + resolve("")
         });
         if (error || !data?.url) {
             oidcBusyId = null;
@@ -410,7 +410,7 @@
     </div>
 
     <div
-        class="from-primary/25 via-background to-background relative hidden overflow-hidden bg-gradient-to-br lg:block"
+        class="from-primary/25 via-background to-background relative hidden overflow-hidden bg-linear-to-br lg:block"
         aria-hidden="true">
         <div class="bg-primary/20 absolute -top-24 -right-24 size-[28rem] rounded-full blur-3xl">
         </div>
@@ -421,9 +421,9 @@
             alt=""
             fetchpriority="high"
             class="absolute inset-0 size-full object-cover" />
-        <div class="from-background absolute inset-0 bg-gradient-to-r to-transparent"></div>
+        <div class="from-background absolute inset-0 bg-linear-to-r to-transparent"></div>
         <div
-            class="from-primary/25 absolute inset-0 bg-gradient-to-br to-transparent mix-blend-overlay">
+            class="from-primary/25 absolute inset-0 bg-linear-to-br to-transparent mix-blend-overlay">
         </div>
     </div>
 </div>

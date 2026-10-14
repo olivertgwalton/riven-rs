@@ -1,19 +1,19 @@
 import type { PageLoad } from "./$types";
-import type { MediaDetails } from "$lib/gql/schema";
+import type { MediaDetails } from "#lib/gql/schema.js";
 import { error } from "@sveltejs/kit";
-import { createScopedLogger } from "$lib/logger";
-import { gqlClient } from "$lib/graphql-client";
+import { createScopedLogger } from "#lib/logger.js";
+import { gqlClient } from "#lib/graphql-client.js";
 import {
 	fetchMovieDetails,
 	fetchShowDetails,
-} from "$lib/services/media-details";
-import { resolveExternalId } from "$lib/services/backend-metadata";
+} from "#lib/services/media-details.js";
+import { resolveExternalId } from "#lib/services/backend-metadata.js";
 import {
 	MEDIA_ITEM_STATE_BY_TMDB_QUERY,
 	MEDIA_ITEM_STATE_BY_TVDB_QUERY,
 	type GqlMediaItemStateTree,
 	type RivenMediaItem,
-} from "$lib/services/riven-media";
+} from "#lib/services/riven-media.js";
 
 const logger = createScopedLogger("media-details");
 
@@ -115,6 +115,6 @@ export const load = (async ({ params, url }) => {
 			throw err;
 		}
 		logger.error("Unexpected error loading media details:", err);
-		throw error(500, "Internal Server Error loading media details");
+		error(500, "Internal Server Error loading media details");
 	}
 }) satisfies PageLoad;

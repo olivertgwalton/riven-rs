@@ -2,14 +2,14 @@
     import type { PageProps } from "./$types";
     import { fade, fly } from "svelte/transition";
     import { cubicOut } from "svelte/easing";
-    import { Badge } from "$lib/components/ui/badge/index.js";
-    import PortraitCard from "$lib/components/media/portrait-card.svelte";
-    import { calculateAge, formatDate, isDayAndMonthToday } from "$lib/utils/date";
+    import { Badge } from "#lib/components/ui/badge/index.js";
+    import PortraitCard from "#lib/components/media/portrait-card.svelte";
+    import { calculateAge, formatDate, isDayAndMonthToday } from "#lib/utils/date.js";
     import ArrowRight from "@lucide/svelte/icons/arrow-right";
-    import { cn, deduplicateById } from "$lib/utils";
+    import { cn, deduplicateById } from "#lib/utils.js";
     import { resolve } from "$app/paths";
-    import TmdbNowPlaying from "$lib/components/tmdb-now-playing.svelte";
-    import type { TmdbListItem } from "$lib/gql/schema";
+    import TmdbNowPlaying from "#lib/components/tmdb-now-playing.svelte";
+    import type { TmdbListItem } from "#lib/gql/schema.js";
 
     let { data }: PageProps = $props();
 
@@ -209,7 +209,7 @@
         <!-- Birthday Confetti -->
         {#if birthdayToday && !data.entity.deathday}
             <div class="pointer-events-none fixed inset-0 z-50 overflow-hidden">
-                {#each Array(20) as i (i)}
+                {#each { length: 20 }, i}
                     <div
                         class="confetti {CONFETTI_CONFIG.shapes[i % CONFETTI_CONFIG.shapes.length]}"
                         style="
@@ -465,7 +465,7 @@
     {#each credits as credit, index (`${credit.id}-${index}`)}
         <a
             href={resolve(
-                `/details/media/${credit.id}/${credit.mediaType}${credit.indexer === "tvdb" ? "?indexer=tvdb" : ""}`
+                `details/media/${credit.id}/${credit.mediaType}${credit.indexer === "tvdb" ? "?indexer=tvdb" : ""}`
             )}
             class="group relative block opacity-80 transition-all duration-300 hover:scale-105 hover:opacity-100">
             <PortraitCard

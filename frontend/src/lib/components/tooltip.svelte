@@ -1,5 +1,5 @@
 <script lang="ts">
-    import * as Tooltip from "$lib/components/ui/tooltip/index.js";
+    import * as Tooltip from "#lib/components/ui/tooltip/index.js";
     import type { Snippet } from "svelte";
 
     let {

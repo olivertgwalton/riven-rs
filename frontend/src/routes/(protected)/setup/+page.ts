@@ -1,6 +1,6 @@
 import type { PageLoad } from "./$types";
 import { load as settingsLoad } from "../settings/+page";
-import { requireCapability } from "$lib/permissions";
+import { requireCapability } from "#lib/permissions.js";
 
 // Whether the wizard should show at all is decided once, in the auth hook
 // (`instanceNeedsSetup`): it redirects away from /setup when setup is done and

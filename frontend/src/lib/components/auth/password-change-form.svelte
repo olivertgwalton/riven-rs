@@ -1,15 +1,15 @@
 <script lang="ts">
-    import * as ButtonGroup from "$lib/components/ui/button-group/index.js";
-    import { Button } from "$lib/components/ui/button/index.js";
-    import { passwordChangeSchema } from "$lib/schemas/auth";
-    import { Input } from "$lib/components/ui/input/index.js";
-    import { Label } from "$lib/components/ui/label/index.js";
+    import * as ButtonGroup from "#lib/components/ui/button-group/index.js";
+    import { Button } from "#lib/components/ui/button/index.js";
+    import { passwordChangeSchema } from "#lib/schemas/auth.js";
+    import { Input } from "#lib/components/ui/input/index.js";
+    import { Label } from "#lib/components/ui/label/index.js";
     import Eye from "@lucide/svelte/icons/eye";
     import EyeOff from "@lucide/svelte/icons/eye-off";
-    import { Switch } from "$lib/components/ui/switch/index.js";
+    import { Switch } from "#lib/components/ui/switch/index.js";
     import { toast } from "svelte-sonner";
     import LoaderCircle from "@lucide/svelte/icons/loader-circle";
-    import { authClient } from "$lib/auth-client";
+    import { authClient } from "#lib/auth-client.js";
     import FormBase from "./form-base.svelte";
     import { validateForm } from "./validate";
 

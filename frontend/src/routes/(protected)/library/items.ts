@@ -1,5 +1,5 @@
-import { createScopedLogger } from "$lib/logger";
-import { getYearFromISO } from "$lib/utils/date";
+import { createScopedLogger } from "#lib/logger.js";
+import { getYearFromISO } from "#lib/utils/date.js";
 
 // Shared by the load (initial fetch) and the page (live refresh).
 

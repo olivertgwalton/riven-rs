@@ -1,11 +1,11 @@
 import type { PageLoad } from "./$types";
-import { parseSearchQuery } from "$lib/search-parser";
-import type { TmdbListItem } from "$lib/gql/schema";
-import { logger } from "$lib/logger";
+import { parseSearchQuery } from "#lib/search-parser.js";
+import type { TmdbListItem } from "#lib/gql/schema.js";
+import { logger } from "#lib/logger.js";
 import {
 	fetchTmdbCategory,
 	fetchTmdbTrending,
-} from "$lib/services/backend-metadata";
+} from "#lib/services/backend-metadata.js";
 
 export const load: PageLoad = async ({ url }) => {
 	const parsed = parseSearchQuery(url.searchParams.get("query") ?? "");

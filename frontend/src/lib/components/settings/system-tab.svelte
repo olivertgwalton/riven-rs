@@ -1,9 +1,9 @@
 <script lang="ts">
     import { toast } from "svelte-sonner";
-    import { invalidateAll } from "$app/navigation";
-    import { gqlClient } from "$lib/graphql-client";
-    import { Button } from "$lib/components/ui/button/index.js";
-    import * as AlertDialog from "$lib/components/ui/alert-dialog/index.js";
+    import { refreshAll } from "$app/navigation";
+    import { gqlClient } from "#lib/graphql-client.js";
+    import { Button } from "#lib/components/ui/button/index.js";
+    import * as AlertDialog from "#lib/components/ui/alert-dialog/index.js";
     import Loader2 from "@lucide/svelte/icons/loader-2";
 
     const RESET_LIBRARY = `mutation { resetLibrary }`;
@@ -14,7 +14,7 @@
     async function resetLibrary() {
         try {
             const result = await gqlClient<{ resetLibrary: number }>(RESET_LIBRARY);
-            await invalidateAll();
+            await refreshAll();
             toast.success(`Library reset — ${result.resetLibrary} items removed.`);
         } catch {
             toast.error("Failed to reset library");

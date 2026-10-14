@@ -1,12 +1,12 @@
 <script lang="ts">
-    import { notificationStore, type Notification } from "$lib/stores/notifications.svelte";
+    import { notificationStore, type Notification } from "#lib/stores/notifications.svelte.js";
     import { onMount, onDestroy } from "svelte";
     import { goto } from "$app/navigation";
     import { resolve } from "$app/paths";
-    import * as Popover from "$lib/components/ui/popover/index.js";
-    import { Button } from "$lib/components/ui/button/index.js";
-    import { Badge } from "$lib/components/ui/badge/index.js";
-    import { Separator } from "$lib/components/ui/separator/index.js";
+    import * as Popover from "#lib/components/ui/popover/index.js";
+    import { Button } from "#lib/components/ui/button/index.js";
+    import { Badge } from "#lib/components/ui/badge/index.js";
+    import { Separator } from "#lib/components/ui/separator/index.js";
     import Bell from "@lucide/svelte/icons/bell";
     import BellRing from "@lucide/svelte/icons/bell-ring";
     import Check from "@lucide/svelte/icons/check";
@@ -15,8 +15,8 @@
     import X from "@lucide/svelte/icons/x";
     import Tooltip from "./tooltip.svelte";
     import { toast } from "svelte-sonner";
-    import { cn } from "$lib/utils";
-    import { relativeTime } from "$lib/helpers";
+    import { cn } from "#lib/utils.js";
+    import { relativeTime } from "#lib/helpers.js";
 
     let open = $state(false);
 
@@ -69,7 +69,7 @@
     function detailsHref(notification: Notification): string | null {
         const mediaType = notification.type === "movie" ? "movie" : "tv";
         if (notification.tmdbId) {
-            return resolve(`/details/media/${notification.tmdbId}/${mediaType}`);
+            return resolve(`details/media/${notification.tmdbId}/${mediaType}`);
         }
         // Shows/seasons/episodes are frequently TVDB-only — no TMDB match at
         // all — so tmdbId alone would leave most TV notifications
@@ -77,7 +77,7 @@
         // the id as a TVDB id instead, same as the rest of the app does for
         // TVDB-sourced content (see list-item.svelte).
         if (notification.tvdbId) {
-            return resolve(`/details/media/${notification.tvdbId}/${mediaType}?indexer=tvdb`);
+            return resolve(`details/media/${notification.tvdbId}/${mediaType}?indexer=tvdb`);
         }
         return null;
     }
@@ -288,7 +288,7 @@
                     {/snippet}
 
                     {#each notificationStore.notifications as notification (notification.id)}
-                        {@const href = detailsHref(notification)}
+                        {const href = $derived(detailsHref(notification))}
                         {#if href}
                             <!-- biome-ignore lint/a11y/useSemanticElements: notificationBody renders its own <button>s (mark-as-read, remove) for the row's per-item actions — nesting a <button> inside a <button> is invalid HTML, so this can't be a real button and still contain those. -->
                             <div

@@ -5,26 +5,26 @@
     import { fly } from "svelte/transition";
     import { cubicOut } from "svelte/easing";
     import type { Component } from "svelte";
-    import { Input } from "$lib/components/ui/input/index.js";
+    import { Input } from "#lib/components/ui/input/index.js";
 
-    import ListItem from "$lib/components/list-item.svelte";
+    import ListItem from "#lib/components/list-item.svelte";
     import Trash from "@lucide/svelte/icons/trash";
     import Search from "@lucide/svelte/icons/search";
     import X from "@lucide/svelte/icons/x";
-    import { Button } from "$lib/components/ui/button/index.js";
+    import { Button } from "#lib/components/ui/button/index.js";
     import ListChecks from "@lucide/svelte/icons/list-checks";
-    import * as Select from "$lib/components/ui/select/index.js";
-    import { ItemStore } from "$lib/stores/library-items.svelte";
-    import { resetItems, retryItems, removeItems } from "$lib/services/library-mutations";
-    import * as Pagination from "$lib/components/ui/pagination/index.js";
+    import * as Select from "#lib/components/ui/select/index.js";
+    import { ItemStore } from "#lib/stores/library-items.svelte.js";
+    import { resetItems, retryItems, removeItems } from "#lib/services/library-mutations.js";
+    import * as Pagination from "#lib/components/ui/pagination/index.js";
     import Loading2Circle from "@lucide/svelte/icons/loader-2";
     import { toast } from "svelte-sonner";
     import { goto } from "$app/navigation";
     import { resolve } from "$app/paths";
-    import PageShell from "$lib/components/page-shell.svelte";
-    import { cn } from "$lib/utils";
-    import { subscribeToRivenMediaEvents } from "$lib/services/riven-live-updates";
-    import { gqlClient } from "$lib/graphql-client";
+    import PageShell from "#lib/components/page-shell.svelte";
+    import { cn } from "#lib/utils.js";
+    import { subscribeToRivenMediaEvents } from "#lib/services/riven-live-updates.js";
+    import { gqlClient } from "#lib/graphql-client.js";
     import {
         ITEMS_QUERY,
         itemsQueryVariables,
@@ -34,11 +34,11 @@
     } from "./items";
 
     let { data }: PageProps = $props();
-    let liveItems = $state<LibraryItem[]>([]);
+    let liveItems = $state.raw<LibraryItem[]>([]);
     let liveLimit = $state(20);
     let liveTotalItems = $state(0);
-    let typeOptions = $state<{ value: string; label: string }[]>([]);
-    let stateOptions = $state<{ value: string; label: string }[]>([]);
+    let typeOptions = $state.raw<{ value: string; label: string }[]>([]);
+    let stateOptions = $state.raw<{ value: string; label: string }[]>([]);
 
     let debounceTimer: ReturnType<typeof setTimeout> | undefined;
 
@@ -56,7 +56,7 @@
     let formElement: HTMLFormElement;
 
     function search() {
-        const url = new URL(page.url);
+        const url = new URL(page.url.href);
 
         if (formData.search) {
             url.searchParams.set("search", formData.search);
@@ -82,10 +82,9 @@
         url.searchParams.set("page", "1");
         formData.page = 1;
 
-        const libraryPath = resolve("/library");
+        const libraryPath = resolve("library");
         goto(url.search ? `${libraryPath}${url.search}` : libraryPath, {
-            keepFocus: true,
-            noScroll: true
+            reset: false
         });
     }
 
@@ -332,7 +331,7 @@
                 </div>
                 <Button
                     variant="outline"
-                    onclick={() => goto(resolve("/library"))}
+                    onclick={() => goto(resolve("library"))}
                     class="border-white/10 hover:bg-white/5">
                     Clear all filters
                 </Button>

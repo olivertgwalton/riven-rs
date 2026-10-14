@@ -1,13 +1,13 @@
 <script lang="ts">
-    import { can } from "$lib/permissions";
-    import { gqlClient } from "$lib/graphql-client";
-    import { retryItems, toNumericIds } from "$lib/services/library-mutations";
+    import { can } from "#lib/permissions.js";
+    import { gqlClient } from "#lib/graphql-client.js";
+    import { retryItems, toNumericIds } from "#lib/services/library-mutations.js";
     import { toast } from "svelte-sonner";
-    import * as AlertDialog from "$lib/components/ui/alert-dialog/index.js";
-    import { Button } from "$lib/components/ui/button/index.js";
+    import * as AlertDialog from "#lib/components/ui/alert-dialog/index.js";
+    import { Button } from "#lib/components/ui/button/index.js";
     import Loader2 from "@lucide/svelte/icons/loader-2";
     import SeasonSelector, { type SeasonInfo } from "./season-selector.svelte";
-    import { createScopedLogger } from "$lib/logger";
+    import { createScopedLogger } from "#lib/logger.js";
     import type { Snippet } from "svelte";
     import { page } from "$app/state";
 
@@ -47,15 +47,16 @@
     let selectedSeasonNums = $state<number[]>([]);
 
     // Re-initialize selection each time the dialog opens.
-    $effect(() => {
-        if (open) {
+    function setOpen(next: boolean) {
+        open = next;
+        if (next) {
             selectedSeasonNums = seasons
                 .filter((s) => s.status !== "Available")
                 .map((s) => s.season_number)
                 .filter(Number.isInteger)
                 .sort((a, b) => a - b);
         }
-    });
+    }
 
     function toggleSeason(n: number) {
         selectedSeasonNums = selectedSeasonNums.includes(n)
@@ -138,7 +139,7 @@
 </script>
 
 {#if can(page.data.permissions, "REQUEST_ITEMS")}
-    <AlertDialog.Root bind:open>
+    <AlertDialog.Root bind:open={() => open, setOpen}>
         <AlertDialog.Trigger>
             {#snippet child({ props })}
                 <Button {variant} {size} class={className} {...restProps} {...props}>

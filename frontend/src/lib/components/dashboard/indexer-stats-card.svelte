@@ -1,7 +1,7 @@
 <script lang="ts">
-    import * as Chart from "$lib/components/ui/chart/index.js";
+    import * as Chart from "#lib/components/ui/chart/index.js";
     import { BarChart } from "layerchart";
-    import type { IndexerStats } from "$lib/gql/schema";
+    import type { IndexerStats } from "#lib/gql/schema.js";
 
     let { stats }: { stats: IndexerStats[] } = $props();
 

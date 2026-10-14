@@ -1,23 +1,23 @@
 <script lang="ts">
-    import PageShell from "$lib/components/page-shell.svelte";
-    import { gqlClient } from "$lib/graphql-client";
-    import { cn } from "$lib/utils";
+    import PageShell from "#lib/components/page-shell.svelte";
+    import { gqlClient } from "#lib/graphql-client.js";
+    import { cn } from "#lib/utils.js";
     import type { PageData } from "./$types";
-    import ActivityCard from "$lib/components/dashboard/activity-card.svelte";
-    import LibraryChartsCard from "$lib/components/dashboard/library-charts-card.svelte";
-    import ReleaseYearCard from "$lib/components/dashboard/release-year-card.svelte";
-    import ServiceStatusCard from "$lib/components/dashboard/service-status-card.svelte";
-    import DownloaderServicesGrid from "$lib/components/dashboard/downloader-services-grid.svelte";
-    import WatchingNowCard from "$lib/components/dashboard/watching-now-card.svelte";
-    import UsenetProvidersCard from "$lib/components/dashboard/usenet-providers-card.svelte";
-    import UsenetActivityCard from "$lib/components/dashboard/usenet-activity-card.svelte";
-    import UsenetHealthCard from "$lib/components/dashboard/usenet-health-card.svelte";
-    import IndexerStatsCard from "$lib/components/dashboard/indexer-stats-card.svelte";
+    import ActivityCard from "#lib/components/dashboard/activity-card.svelte";
+    import LibraryChartsCard from "#lib/components/dashboard/library-charts-card.svelte";
+    import ReleaseYearCard from "#lib/components/dashboard/release-year-card.svelte";
+    import ServiceStatusCard from "#lib/components/dashboard/service-status-card.svelte";
+    import DownloaderServicesGrid from "#lib/components/dashboard/downloader-services-grid.svelte";
+    import WatchingNowCard from "#lib/components/dashboard/watching-now-card.svelte";
+    import UsenetProvidersCard from "#lib/components/dashboard/usenet-providers-card.svelte";
+    import UsenetActivityCard from "#lib/components/dashboard/usenet-activity-card.svelte";
+    import UsenetHealthCard from "#lib/components/dashboard/usenet-health-card.svelte";
+    import IndexerStatsCard from "#lib/components/dashboard/indexer-stats-card.svelte";
     import type {
         ActivePlaybackSession,
         DebridUserInfo,
         IndexerStats
-    } from "$lib/gql/schema";
+    } from "#lib/gql/schema.js";
     import {
         ACTIVE_PLAYBACK_QUERY,
         EMPTY_TITLE_SUMMARY,
@@ -27,28 +27,27 @@
         type ActivePlaybackResult,
         type DashboardStats,
         type IndexerStatsResult,
+        type ServiceStatuses,
         type UsenetHealthResult
     } from "./queries";
     import { onMount } from "svelte";
-    import { subscribeToRivenMediaEvents } from "$lib/services/riven-live-updates";
+    import { subscribeToRivenMediaEvents } from "#lib/services/riven-live-updates.js";
 
     let { data }: { data: PageData } = $props();
 
-    let activePlaybackSessions = $state<ActivePlaybackSession[]>([]);
-    let downloaderServices = $state<DebridUserInfo[]>([]);
-    let statistics = $state<DashboardStats | undefined>(undefined);
-    let usenet = $state<UsenetHealthResult>({
+    let activePlaybackSessions = $state.raw<ActivePlaybackSession[]>([]);
+    let downloaderServices = $state.raw<DebridUserInfo[]>([]);
+    let statistics = $state.raw<DashboardStats | undefined>(undefined);
+    let usenet = $state.raw<UsenetHealthResult>({
         nntpProviders: [],
         usenetStreamingHealth: null,
         usenetTitleHealth: [],
         usenetTitleHealthSummary: EMPTY_TITLE_SUMMARY,
         usenetTraffic: null
     });
-    let indexerStats = $state<IndexerStats[]>([]);
+    let indexerStats = $state.raw<IndexerStats[]>([]);
 
-    const serviceStatuses = $derived(
-        (data as PageData & { services?: Record<string, boolean | null> }).services ?? null
-    );
+    let serviceStatuses = $state.raw<ServiceStatuses | null>(null);
     const kpiCards = $derived.by(() => [
         {
             title: "Total Items",
@@ -94,6 +93,9 @@
         });
         Promise.resolve(data.usenetHealth).then((health) => {
             if (!cancelled && health) usenet = health;
+        });
+        Promise.resolve(data.services).then((services) => {
+            if (!cancelled) serviceStatuses = services;
         });
 
         return () => {

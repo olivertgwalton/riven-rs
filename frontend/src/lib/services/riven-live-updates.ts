@@ -1,10 +1,10 @@
-import { gqlSubscribeClient } from "$lib/graphql-client";
+import { gqlSubscribeClient } from "#lib/graphql-client.js";
 import {
 	MOVIE_REQUESTED_SUBSCRIPTION,
 	SHOW_INDEXED_SUBSCRIPTION,
 	SHOW_REQUESTED_SUBSCRIPTION,
 	SHOW_REQUEST_UPDATED_SUBSCRIPTION,
-} from "$lib/services/riven-media";
+} from "#lib/services/riven-media.js";
 
 const MEDIA_EVENT_SUBSCRIPTIONS = [
 	MOVIE_REQUESTED_SUBSCRIPTION,

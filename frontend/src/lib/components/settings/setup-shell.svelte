@@ -1,8 +1,8 @@
 <script lang="ts">
     import Mountain from "@lucide/svelte/icons/mountain";
-    import { Button } from "$lib/components/ui/button/index.js";
-    import * as Card from "$lib/components/ui/card/index.js";
-    import { Separator } from "$lib/components/ui/separator/index.js";
+    import { Button } from "#lib/components/ui/button/index.js";
+    import * as Card from "#lib/components/ui/card/index.js";
+    import { Separator } from "#lib/components/ui/separator/index.js";
     import type { Step } from "./types";
     import type { Snippet } from "svelte";
 

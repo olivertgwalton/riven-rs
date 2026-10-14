@@ -1,20 +1,14 @@
-// Disables access to DOM typings like `HTMLElement` which are not available
-// inside a service worker and instantiates the correct globals
-/// <reference no-default-lib="true"/>
-/// <reference lib="esnext" />
-/// <reference lib="webworker" />
-// Ensures that the `$service-worker` import has proper type definitions
-/// <reference types="@sveltejs/kit" />
-// Only necessary if you have an import from `$env/static/public`
-/// <reference types="../.svelte-kit/ambient.d.ts" />
-
-import { build, files, version } from "$service-worker";
-
-const self = globalThis.self as unknown as ServiceWorkerGlobalScope;
+import { version } from "$app/env";
+import { assets, immutable } from "$app/manifest";
+import { self } from "$app/service-worker";
 
 const CACHE = `cache-${version}`;
 const EXTERNAL_IMAGES_CACHE = `external-images-${version}`;
-const ASSETS = [...build, ...files];
+// Manifest paths are relative to the base path; the fetch handler matches on
+// `url.pathname`, so resolve them against the worker's scope.
+const ASSETS = [...immutable, ...assets].map(
+	({ path }) => new URL(path, self.registration.scope).pathname,
+);
 
 const IMAGE_DOMAINS = [
 	"tmdb.org",

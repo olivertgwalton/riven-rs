@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { Pagination as PaginationPrimitive } from "bits-ui";
-	import { buttonVariants, type ButtonSize } from "$lib/components/ui/button/index.js";
-	import { cn } from "$lib/utils.js";
+	import { buttonVariants, type ButtonSize } from "#lib/components/ui/button/index.js";
+	import { cn } from "#lib/utils.js";
 	let {
 		ref = $bindable(null),
 		class: className,
@@ -29,7 +29,7 @@
 	data-size={size}
 	class={cn(
 		buttonVariants({ size, variant: isActive ? "outline" : "ghost" }),
-		"cn-pagination-link",
+		"",
 		className
 	)}
 	{...restProps}
