@@ -33,7 +33,7 @@ members = [
 
 [workspace.package]
 edition = "2024"
-rust-version = "1.96"
+rust-version = "1.99"
 
 [workspace.dependencies]
 # Async runtime

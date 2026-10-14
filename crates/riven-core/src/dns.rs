@@ -42,7 +42,7 @@ fn resolver() -> &'static TokioResolver {
         builder.build()
     };
 
-    RESOLVER.get_or_init(|| match TokioResolver::builder_tokio().and_then(&with_ipv4_first) {
+    RESOLVER.get_or_init(|| match TokioResolver::builder_tokio().and_then(with_ipv4_first) {
         Ok(resolver) => resolver,
         Err(error) => {
             tracing::warn!(%error, "hickory: system resolver config unavailable; using defaults");
