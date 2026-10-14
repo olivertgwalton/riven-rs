@@ -28,7 +28,8 @@
     const rowKey = (t: UsenetTitleHealth) => `${t.infoHash}:${t.fileIndex}`;
 
     // Items needing a re-grab (re-scrape): confirmed-broken or never-ingested.
-    const needsRegrab = (status: string) => status === "unhealthy" || status === "not_ingested";
+    const needsRegrab = (status: string) =>
+        status === "unhealthy" || status === "not_media" || status === "not_ingested";
 
     // Surface the actionable rows (anything not confirmed healthy), worst-first
     // (the backend already orders them).
@@ -38,6 +39,7 @@
     function statusBadge(status: string) {
         if (status === "unhealthy")
             return { label: "Missing data", variant: "destructive" as const };
+        if (status === "not_media") return { label: "Not media", variant: "destructive" as const };
         if (status === "not_ingested")
             return { label: "Not ingested", variant: "destructive" as const };
         if (status === "unknown") return { label: "Unverified", variant: "secondary" as const };
@@ -84,6 +86,9 @@
                 {#if summary.unhealthy > 0}
                     · <span class="text-red-400">{summary.unhealthy} missing data</span>
                 {/if}
+                {#if summary.notMedia > 0}
+                    · <span class="text-red-400">{summary.notMedia} not media</span>
+                {/if}
                 {#if summary.notIngested > 0}
                     · <span class="text-red-400">{summary.notIngested} not ingested</span>
                 {/if}
@@ -128,6 +133,8 @@
                             checked {t.checkedAt ? relativeTime(t.checkedAt * 1000) : "never"}
                             {#if t.status === "unhealthy" && t.sampledSegments > 0}
                                 · {t.missingPct.toFixed(1)}% of {t.sampledSegments} sampled missing
+                            {:else if t.status === "not_media"}
+                                · articles present, but not a video file
                             {:else if t.status === "not_ingested"}
                                 · no segment map — re-grab to re-ingest
                             {:else if t.status === "unknown"}

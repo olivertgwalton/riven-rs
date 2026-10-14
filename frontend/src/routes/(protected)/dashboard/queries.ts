@@ -127,6 +127,7 @@ export const USENET_HEALTH_QUERY = `
         usenetTitleHealthSummary {
             healthy
             unhealthy
+            notMedia
             notIngested
             unknown
             total
@@ -160,6 +161,7 @@ export type UsenetHealthResult = {
 export const EMPTY_TITLE_SUMMARY: UsenetTitleHealthSummary = {
 	healthy: 0,
 	unhealthy: 0,
+	notMedia: 0,
 	notIngested: 0,
 	unknown: 0,
 	total: 0,

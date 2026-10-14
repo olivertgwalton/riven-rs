@@ -35,7 +35,8 @@ impl UsenetHealthMutations {
     }
 
     /// Re-run the availability scan for one usenet file now and persist the
-    /// result. Returns the new status (`healthy` / `unhealthy` / `unknown`).
+    /// result. Returns the new status (`healthy` / `unhealthy` / `not_media` /
+    /// `not_ingested` / `unknown`).
     async fn rescan_usenet_health(
         &self,
         ctx: &Context<'_>,

@@ -4,7 +4,7 @@
 use riven_usenet::{StreamerError, UsenetStreamer};
 
 /// Scan one file and upsert its health row. Returns the status (`healthy` /
-/// `unhealthy` / `not_ingested` / `unknown`) alongside the upsert's outcome, so
+/// `unhealthy` / `not_media` / `not_ingested` / `unknown`) alongside the upsert's outcome, so
 /// a caller can act on the status even when persisting it failed.
 pub async fn rescan_file(
     streamer: &UsenetStreamer,
@@ -30,6 +30,20 @@ pub async fn rescan_file(
             tracing::debug!(info_hash, file_index, %error, "usenet health: scan failed");
             ("unknown", 0, 0, 0, 0)
         }
+    };
+    // Every article present says nothing about what they decode to. A probe
+    // that fails leaves the verdict alone: that is the provider, not the file.
+    let status = if status == "healthy" {
+        match streamer.head_is_media(info_hash, idx).await {
+            Ok(true) => status,
+            Ok(false) => "not_media",
+            Err(error) => {
+                tracing::debug!(info_hash, file_index, %error, "usenet health: head probe failed");
+                status
+            }
+        }
+    } else {
+        status
     };
 
     let saved = riven_db::repo::upsert_usenet_file_health(riven_db::repo::UsenetHealthUpdate {

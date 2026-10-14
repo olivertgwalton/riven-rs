@@ -227,7 +227,7 @@ pub(crate) fn spawn_background_tasks(
                                 );
                             }
                         }
-                        "unhealthy" | "not_ingested" => {
+                        "unhealthy" | "not_media" | "not_ingested" => {
                             let Some(media_item_id) = file.media_item_id else {
                                 continue;
                             };

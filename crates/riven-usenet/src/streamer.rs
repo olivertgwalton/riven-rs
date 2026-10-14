@@ -30,6 +30,7 @@ mod meta;
 mod read_direct;
 mod read_rar;
 mod salvage;
+mod signature;
 mod store;
 #[cfg(test)]
 mod tests;
@@ -426,6 +427,20 @@ impl UsenetStreamer {
                 tracing::debug!(info_hash, error = %e, "background meta maintenance failed");
             }
         });
+    }
+
+    /// Whether the file's first bytes open a video container. An empty read
+    /// counts as not media: the archive or layout behind it yields nothing.
+    pub async fn head_is_media(
+        &self,
+        info_hash: &str,
+        file_index: usize,
+    ) -> Result<bool, StreamerError> {
+        let head = self
+            .open_file(info_hash, file_index)
+            .read_range(0, signature::HEAD_PROBE_BYTES - 1)
+            .await?;
+        Ok(signature::is_media_container(&head))
     }
 
     /// STAT-sample a file's segments across providers to gauge availability,

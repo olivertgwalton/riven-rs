@@ -768,7 +768,8 @@ export type MutationRoot = {
   requestShow: RequestItemMutationResponse;
   /**
    * Re-run the availability scan for one usenet file now and persist the
-   * result. Returns the new status (`healthy` / `unhealthy` / `unknown`).
+   * result. Returns the new status (`healthy` / `unhealthy` / `not_media` /
+   * `not_ingested` / `unknown`).
    */
   rescanUsenetHealth: Scalars['String']['output'];
   /** Reset items to Indexed state and clear failed_attempts. */
@@ -1132,7 +1133,7 @@ export type QueryRoot = {
   usenetStreamingHealth: UsenetStreamingHealth;
   /**
    * Per-title usenet health from the background availability scanner.
-   * Ordered worst-first (unhealthy, then most missing segments).
+   * Ordered worst-first (unhealthy or not media, then most missing segments).
    */
   usenetTitleHealth: Array<UsenetTitleHealth>;
   /**
@@ -1628,7 +1629,7 @@ export type UsenetTitleHealth = {
   /** Auto-repair attempts made so far (0 if none / not applicable). */
   repairAttempts: Scalars['Int']['output'];
   sampledSegments: Scalars['Int']['output'];
-  /** `healthy` | `unhealthy` | `unknown` | `checking`. */
+  /** `healthy` | `unhealthy` | `not_media` | `not_ingested` | `unknown` | `checking`. */
   status: Scalars['String']['output'];
   /** `S05E03 · Sand Job` for episodes, year for movies. */
   subtitle?: Maybe<Scalars['String']['output']>;
@@ -1641,6 +1642,8 @@ export type UsenetTitleHealth = {
 export type UsenetTitleHealthSummary = {
   healthy: Scalars['Int']['output'];
   notIngested: Scalars['Int']['output'];
+  /** Every article present, but the bytes are not a video container. */
+  notMedia: Scalars['Int']['output'];
   total: Scalars['Int']['output'];
   unhealthy: Scalars['Int']['output'];
   /** Catch-all for any other status (e.g. `checking`/`unknown`). */

@@ -106,7 +106,7 @@ pub struct UsenetTitleHealth {
     pub info_hash: String,
     pub file_index: i32,
     pub media_item_id: Option<i64>,
-    /// `healthy` | `unhealthy` | `unknown` | `checking`.
+    /// `healthy` | `unhealthy` | `not_media` | `not_ingested` | `unknown` | `checking`.
     pub status: String,
     pub total_segments: i32,
     pub sampled_segments: i32,
@@ -133,6 +133,8 @@ pub struct UsenetTitleHealth {
 pub struct UsenetTitleHealthSummary {
     pub healthy: i64,
     pub unhealthy: i64,
+    /// Every article present, but the bytes are not a video container.
+    pub not_media: i64,
     pub not_ingested: i64,
     /// Catch-all for any other status (e.g. `checking`/`unknown`).
     pub unknown: i64,
@@ -143,6 +145,7 @@ pub struct UsenetTitleHealthSummary {
 struct HealthSummaryRow {
     healthy: i64,
     unhealthy: i64,
+    not_media: i64,
     not_ingested: i64,
     total: i64,
 }
@@ -246,7 +249,7 @@ impl UsenetHealthQuery {
     }
 
     /// Per-title usenet health from the background availability scanner.
-    /// Ordered worst-first (unhealthy, then most missing segments).
+    /// Ordered worst-first (unhealthy or not media, then most missing segments).
     async fn usenet_title_health(&self, _ctx: &Context<'_>) -> Result<Vec<UsenetTitleHealth>> {
         let rows = HealthRow::find_by_statement(Statement::from_sql_and_values(
             DbBackend::Postgres,
@@ -282,7 +285,7 @@ impl UsenetHealthQuery {
                 WHERE fe.usenet_info_hash = h.info_hash
                   AND fe.usenet_file_index = h.file_index
             )
-            ORDER BY (h.status = 'unhealthy') DESC, h.missing_segments DESC,
+            ORDER BY (h.status IN ('unhealthy', 'not_media')) DESC, h.missing_segments DESC,
                      h.checked_at DESC NULLS LAST
             "#,
             [],
@@ -337,6 +340,7 @@ impl UsenetHealthQuery {
             SELECT
                 COUNT(*) FILTER (WHERE h.status = 'healthy')::bigint      AS healthy,
                 COUNT(*) FILTER (WHERE h.status = 'unhealthy')::bigint    AS unhealthy,
+                COUNT(*) FILTER (WHERE h.status = 'not_media')::bigint    AS not_media,
                 COUNT(*) FILTER (WHERE h.status = 'not_ingested')::bigint AS not_ingested,
                 COUNT(*)::bigint                                          AS total
             FROM usenet_file_health h
@@ -355,8 +359,9 @@ impl UsenetHealthQuery {
         Ok(UsenetTitleHealthSummary {
             healthy: row.healthy,
             unhealthy: row.unhealthy,
+            not_media: row.not_media,
             not_ingested: row.not_ingested,
-            unknown: row.total - row.healthy - row.unhealthy - row.not_ingested,
+            unknown: row.total - row.healthy - row.unhealthy - row.not_media - row.not_ingested,
             total: row.total,
         })
     }

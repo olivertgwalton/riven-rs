@@ -858,7 +858,8 @@ type MutationRoot {
 	regrabUsenetTitle(mediaItemId: Int!): String!
 	"""
 	Re-run the availability scan for one usenet file now and persist the
-	result. Returns the new status (`healthy` / `unhealthy` / `unknown`).
+	result. Returns the new status (`healthy` / `unhealthy` / `not_media` /
+	`not_ingested` / `unknown`).
 	"""
 	rescanUsenetHealth(infoHash: String!, fileIndex: Int!): String!
 	"""
@@ -1080,7 +1081,7 @@ type QueryRoot {
 	nntpProviders: [NntpProviderHealth!]!
 	"""
 	Per-title usenet health from the background availability scanner.
-	Ordered worst-first (unhealthy, then most missing segments).
+	Ordered worst-first (unhealthy or not media, then most missing segments).
 	"""
 	usenetTitleHealth: [UsenetTitleHealth!]!
 	"""
@@ -1533,7 +1534,7 @@ type UsenetTitleHealth {
 	fileIndex: Int!
 	mediaItemId: Int
 	"""
-	`healthy` | `unhealthy` | `unknown` | `checking`.
+	`healthy` | `unhealthy` | `not_media` | `not_ingested` | `unknown` | `checking`.
 	"""
 	status: String!
 	totalSegments: Int!
@@ -1574,6 +1575,10 @@ Title-health counts grouped by status, for the dashboard summary line.
 type UsenetTitleHealthSummary {
 	healthy: Int!
 	unhealthy: Int!
+	"""
+	Every article present, but the bytes are not a video container.
+	"""
+	notMedia: Int!
 	notIngested: Int!
 	"""
 	Catch-all for any other status (e.g. `checking`/`unknown`).
