@@ -52,14 +52,13 @@
 
     <div class="grid gap-x-8 gap-y-6 md:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-4">
         {#each services as downloader (downloader.store)}
-            {@const premiumDaysLeft = daysLeft(downloader.premiumUntil)}
-            {@const premium =
-                premiumMeta[
+            {const premiumDaysLeft = $derived(daysLeft(downloader.premiumUntil))}
+            {const premium = $derived(premiumMeta[
                     downloader.subscriptionStatus === "premium" ||
                     downloader.subscriptionStatus === "trial"
                         ? downloader.subscriptionStatus
                         : "expired"
-                ]}
+                ])}
 
             <div class="border-border/60 border-b pb-5">
                 <div class="flex items-center justify-between gap-3">

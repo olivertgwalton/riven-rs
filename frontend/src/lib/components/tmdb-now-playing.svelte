@@ -23,7 +23,7 @@
         heightClass = "h-[350px] md:h-[420px]"
     }: Props = $props();
 
-    let api = $state<CarouselAPI>();
+    let api = $state.raw<CarouselAPI>();
     let currentIndex = $state(0);
     let logos = $state<Record<number, string | null>>({});
     let ratings = $state<
@@ -34,25 +34,15 @@
     >({});
     let certifications = $state<Record<number, string | null>>({});
 
-    // Handle carousel API events with proper cleanup using $effect.pre
-    // This is the appropriate Svelte 5 pattern for subscribing to external events
-    // when reacting to state changes (api becoming available)
-    $effect.pre(() => {
-        if (!api) return;
-
-        const onSelect = () => {
-			currentIndex = api?.selectedScrollSnap() ?? 0;
-        };
-
-        // Initialize current index and register event handler
-        currentIndex = api.selectedScrollSnap();
-        api.on("select", onSelect);
-
-        // Cleanup: remove event handler when api changes or component unmounts
-        return () => {
-            api?.off("select", onSelect);
-        };
-    });
+    // Embla calls this once on init; its listeners are torn down with the carousel.
+    function setApi(emblaApi: CarouselAPI | undefined) {
+        api = emblaApi;
+        if (!emblaApi) return;
+        currentIndex = emblaApi.selectedScrollSnap();
+        emblaApi.on("select", () => {
+            currentIndex = emblaApi.selectedScrollSnap();
+        });
+    }
 
     // Autoplay: advance 5s after every slide change (restarts on manual navigation,
     // in step with the 5s progress animation).
@@ -156,15 +146,15 @@
 {#if Array.isArray(data) && data.length > 0}
     <section class="border-border/50 relative overflow-hidden rounded-2xl border shadow-2xl">
         <Carousel.Root
-            setApi={(emblaApi) => (api = emblaApi)}
+            {setApi}
             opts={{ loop: true }}
             class="relative"
             aria-label="Now playing movies carousel">
             <Carousel.Content>
                 {#each data as item, index (item.id)}
-                    {@const isTV = item.mediaType === "tv"}
-                    {@const mediaType = isTV ? "tv" : "movie"}
-                    {@const displayTitle = item.title || "Untitled"}
+                    {const isTV = $derived(item.mediaType === "tv")}
+                    {const mediaType = $derived(isTV ? "tv" : "movie")}
+                    {const displayTitle = $derived(item.title || "Untitled")}
                     <Carousel.Item class="relative w-full {heightClass}">
                         <!-- Backdrop Image -->
                         <img
@@ -367,7 +357,7 @@
 
             <!-- Desktop Segmented Progress (Hidden until Large screens) -->
             <div class="hidden gap-1.5 lg:flex">
-                {#each data.map((__, idx) => idx) as i (i)}
+                {#each data as item, i (item.id)}
                     <button type="button"
                         class="relative h-1 w-6 cursor-pointer overflow-hidden rounded-full transition-all duration-300 {i ===
                         currentIndex

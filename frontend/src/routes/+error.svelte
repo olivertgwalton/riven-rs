@@ -1,5 +1,4 @@
 <script lang="ts">
-    import { browser } from "$app/env";
     import { resolve } from "$app/paths";
     import { page } from "$app/state";
     import { Button } from "#lib/components/ui/button/index.js";
@@ -39,15 +38,13 @@
     });
 
     function goBack() {
-        if (browser && history.length > 1) {
+        if (history.length > 1) {
             history.back();
         }
     }
 
     function reload() {
-        if (browser) {
-            location.reload();
-        }
+        location.reload();
     }
 </script>
 
@@ -107,7 +104,7 @@
         </div>
 
         <div class="flex flex-wrap gap-2">
-            <Button variant="outline" onclick={goBack} disabled={!browser}>
+            <Button variant="outline" onclick={goBack}>
                 <ArrowLeft />
                 Back
             </Button>
@@ -115,7 +112,7 @@
                 <Home />
                 Home
             </Button>
-            <Button variant="ghost" onclick={reload} disabled={!browser}>
+            <Button variant="ghost" onclick={reload}>
                 <RotateCcw />
                 Retry
             </Button>

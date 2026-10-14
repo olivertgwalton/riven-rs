@@ -34,17 +34,17 @@
 
     let { data }: { data: PageData } = $props();
 
-    let activePlaybackSessions = $state<ActivePlaybackSession[]>([]);
-    let downloaderServices = $state<DebridUserInfo[]>([]);
-    let statistics = $state<DashboardStats | undefined>(undefined);
-    let usenet = $state<UsenetHealthResult>({
+    let activePlaybackSessions = $state.raw<ActivePlaybackSession[]>([]);
+    let downloaderServices = $state.raw<DebridUserInfo[]>([]);
+    let statistics = $state.raw<DashboardStats | undefined>(undefined);
+    let usenet = $state.raw<UsenetHealthResult>({
         nntpProviders: [],
         usenetStreamingHealth: null,
         usenetTitleHealth: [],
         usenetTitleHealthSummary: EMPTY_TITLE_SUMMARY,
         usenetTraffic: null
     });
-    let indexerStats = $state<IndexerStats[]>([]);
+    let indexerStats = $state.raw<IndexerStats[]>([]);
 
     const serviceStatuses = $derived(
         (data as PageData & { services?: Record<string, boolean | null> }).services ?? null

@@ -1,5 +1,4 @@
 <script lang="ts">
-    import { untrack } from "svelte";
     import { formatBytes } from "#lib/helpers.js";
     import * as Chart from "#lib/components/ui/chart/index.js";
     import { LineChart } from "layerchart";
@@ -18,20 +17,17 @@
     let width = $state(0);
 
     // Live decode throughput, derived from the cumulative byte counter across
-    // polls (tracked dep is `health`; sample bookkeeping is untracked).
-    let prev = $state<{ bytes: number; t: number } | null>(null);
-    let throughputBytesPerSec = $state(0);
-    $effect(() => {
-        const current = health;
-        untrack(() => {
-            if (!current) return;
-            const now = Date.now();
-            if (prev && now > prev.t && current.bytesDecoded >= prev.bytes) {
-                throughputBytesPerSec =
-                    (current.bytesDecoded - prev.bytes) / ((now - prev.t) / 1000);
-            }
-            prev = { bytes: current.bytesDecoded, t: now };
-        });
+    // polls. The previous sample is plain bookkeeping, not reactive state.
+    let prev: { bytes: number; t: number } | null = null;
+    let lastThroughput = 0;
+    const throughputBytesPerSec = $derived.by(() => {
+        if (!health) return lastThroughput;
+        const now = Date.now();
+        if (prev && now > prev.t && health.bytesDecoded >= prev.bytes) {
+            lastThroughput = (health.bytesDecoded - prev.bytes) / ((now - prev.t) / 1000);
+        }
+        prev = { bytes: health.bytesDecoded, t: now };
+        return lastThroughput;
     });
 
     const hasActivity = $derived(

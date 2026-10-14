@@ -15,16 +15,17 @@
 
     const searchStore = getSearchStore();
 
-    // Detect modifier key client-side only to avoid hydration mismatch
-    let modifierKey = $state<string | null>(null);
+    // Client-only app (ssr = false), so navigator is always available here.
+    const modifierKey = (
+        (navigator.userAgentData?.platform ?? navigator.platform) ||
+        ""
+    )
+        .toUpperCase()
+        .includes("MAC")
+        ? "⌘"
+        : "^";
 
     onMount(() => {
-        const platform = (
-            (navigator.userAgentData?.platform ?? navigator.platform) ||
-            ""
-        ).toUpperCase();
-        modifierKey = platform.includes("MAC") ? "⌘" : "^";
-
         const handleSearch = (e: Event) => {
             const evt = e as CustomEvent<{ query: string }>;
             if (evt.detail.query) {
@@ -34,8 +35,12 @@
             }
         };
 
+        // `riven:search` contains a colon, so it can't be a <svelte:window> attribute.
         window.addEventListener("riven:search", handleSearch);
-        return () => window.removeEventListener("riven:search", handleSearch);
+        return () => {
+            window.removeEventListener("riven:search", handleSearch);
+            clearTimeout(debounceTimer);
+        };
     });
 
     // Local input value state to decouple from URL updates while typing
@@ -83,10 +88,6 @@
         debounceTimer = setTimeout(navigateToSearch, 300);
     }
 
-    $effect(() => {
-        return () => clearTimeout(debounceTimer);
-    });
-
     function onKeydown(e: KeyboardEvent) {
         if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
             e.preventDefault();
@@ -119,13 +120,11 @@
                         }
                     }}
                     autocomplete="off" />
-                {#if modifierKey}
-                    <InputGroup.Addon align="inline-end" class="pr-4">
-                        <Kbd.Root
-                            class="h-5 min-h-0 border-white/10 bg-white/5 px-1.5 text-[10px] text-white/50"
-                            >{modifierKey}K</Kbd.Root>
-                    </InputGroup.Addon>
-                {/if}
+                <InputGroup.Addon align="inline-end" class="pr-4">
+                    <Kbd.Root
+                        class="h-5 min-h-0 border-white/10 bg-white/5 px-1.5 text-[10px] text-white/50"
+                        >{modifierKey}K</Kbd.Root>
+                </InputGroup.Addon>
             </InputGroup.Root>
         </div>
 

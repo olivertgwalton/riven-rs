@@ -111,7 +111,7 @@
     let customTvdbId = $state("");
     let explicitHash = $state("");
     let profileName = $state("");
-    let streams = $state<StreamCandidate[]>([]);
+    let streams = $state.raw<StreamCandidate[]>([]);
     let downloadingKey = $state<string | null>(null);
 
     const isEpisodeMode = $derived(mediaType === "tv" && episodeNumber != null);
@@ -315,16 +315,18 @@
             parsedData: null
         });
     }
-
-    $effect(() => {
-        if (!open) {
-            reset();
-        }
-    });
 </script>
 
 {#if can(page.data.permissions, "SCRAPE_ITEMS")}
-    <Dialog.Root bind:open>
+    <Dialog.Root
+        bind:open={
+            () => open,
+            (next) => {
+                // Start every session from a clean slate.
+                if (next) reset();
+                open = next;
+            }
+        }>
         <Dialog.Trigger>
             {#snippet child({ props })}
                 <Button {variant} {size} {...restProps} {...props}>{@render children?.()}</Button>

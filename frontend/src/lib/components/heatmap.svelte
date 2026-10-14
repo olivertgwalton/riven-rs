@@ -63,7 +63,8 @@
         </thead>
     {/if}
     <tbody>
-        {#each calendar as w, i (i)}
+        <!-- Each row is one weekday; its first in-year date identifies it. -->
+        {#each calendar as w, i (w.find(Boolean)?.date)}
             <tr>
                 {#if lday}
                     <td class="pr-[0.5em] text-[0.75em]">

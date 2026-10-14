@@ -288,7 +288,7 @@
                     {/snippet}
 
                     {#each notificationStore.notifications as notification (notification.id)}
-                        {@const href = detailsHref(notification)}
+                        {const href = $derived(detailsHref(notification))}
                         {#if href}
                             <!-- biome-ignore lint/a11y/useSemanticElements: notificationBody renders its own <button>s (mark-as-read, remove) for the row's per-item actions — nesting a <button> inside a <button> is invalid HTML, so this can't be a real button and still contain those. -->
                             <div

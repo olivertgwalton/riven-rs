@@ -1,7 +1,7 @@
 <script lang="ts">
     import { goto, afterNavigate } from "$app/navigation";
     import { resolve } from "$app/paths";
-    import { onDestroy } from "svelte";
+    import { onDestroy, untrack } from "svelte";
     import X from "@lucide/svelte/icons/x";
     import Search from "@lucide/svelte/icons/search";
     import PortraitCard from "#lib/components/media/portrait-card.svelte";
@@ -26,10 +26,8 @@
         onopen();
     }
 
-    let inputRef = $state<HTMLInputElement | null>(null);
-    let scrollContainer = $state<HTMLElement | null>(null);
     let query = $state("");
-    let results = $state<TmdbListItem[]>([]);
+    let results = $state.raw<TmdbListItem[]>([]);
     let loading = $state(false);
     let loadingMore = $state(false);
     let debounceTimer: ReturnType<typeof setTimeout> | null = null;
@@ -59,16 +57,17 @@
     // When true, skip transitions (instant hide/show for navigation)
     let skipTransition = $state(false);
 
-    $effect(() => {
-        if (open && inputRef) {
+    // Runs once each time the input mounts (i.e. the modal opens).
+    function focusInput(input: HTMLInputElement) {
+        untrack(() => {
             // Restore previous search if available
             if (savedQuery && !query) {
                 query = savedQuery;
                 results = savedResults;
             }
-            inputRef.focus();
-        }
-    });
+        });
+        input.focus();
+    }
 
     function handleInput() {
         if (debounceTimer) clearTimeout(debounceTimer);
@@ -261,7 +260,7 @@
             <Search class="size-4 shrink-0 text-white/50" />
             <!-- svelte-ignore a11y_autofocus -->
             <input
-                bind:this={inputRef}
+                {@attach focusInput}
                 bind:value={query}
                 oninput={handleInput}
                 onkeydown={handleKeydown}
@@ -280,10 +279,10 @@
         </div>
 
         <!-- Results -->
-        <div bind:this={scrollContainer} onscroll={handleScroll} class="flex-1 overflow-y-auto">
+        <div onscroll={handleScroll} class="flex-1 overflow-y-auto">
             {#if loading}
                 <div class="grid grid-cols-2 gap-3 px-4 pt-4 pb-24">
-                    {#each Array.from({ length: 8 }, (_, i) => i) as i (i)}
+                    {#each { length: 8 }, i}
                         <PortraitCardSkeleton />
                     {/each}
                 </div>
@@ -301,7 +300,7 @@
                         </button>
                     {/each}
                     {#if loadingMore}
-                        {#each Array.from({ length: 4 }, (_, i) => i) as i (i)}
+                        {#each { length: 4 }, i}
                             <PortraitCardSkeleton />
                         {/each}
                     {/if}

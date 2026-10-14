@@ -108,8 +108,8 @@
     {:else}
         <div class="flex flex-col">
             {#each problems as t (`${t.infoHash}:${t.fileIndex}`)}
-                {@const badge = statusBadge(t.status)}
-                {@const state = action[`${t.infoHash}:${t.fileIndex}`]}
+                {const badge = $derived(statusBadge(t.status))}
+                {const state = $derived(action[`${t.infoHash}:${t.fileIndex}`])}
                 <div class="border-border/60 flex items-center gap-3 border-b py-2.5">
                     <div
                         class="h-14 w-10 shrink-0 overflow-hidden rounded border border-white/8 bg-white/[0.04]">

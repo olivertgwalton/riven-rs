@@ -15,7 +15,7 @@
 
     const logger = createScopedLogger("passkeys");
 
-    let passkeys = $state<Passkey[]>([]);
+    let passkeys = $state.raw<Passkey[]>([]);
     let loading = $state(true);
     let registering = $state(false);
     let editingId = $state<string | null>(null);

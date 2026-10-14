@@ -44,7 +44,7 @@
     let open = $state(false);
     let loading = $state(false);
     let requestLoading = $state(false);
-    let collectionData = $state<CollectionDetails | null>(null);
+    let collectionData = $state.raw<CollectionDetails | null>(null);
     let error = $state<string | null>(null);
 
     function closeOnMobile() {
@@ -135,15 +135,16 @@
             requestLoading = false;
         }
     }
-
-    $effect(() => {
-        if (open) {
-            fetchCollection();
-        }
-    });
 </script>
 
-<Sheet.Root bind:open>
+<Sheet.Root
+    bind:open={
+        () => open,
+        (next) => {
+            open = next;
+            if (next) void fetchCollection();
+        }
+    }>
     <Sheet.Trigger>
         {#snippet child({ props })}
             {#if trigger}

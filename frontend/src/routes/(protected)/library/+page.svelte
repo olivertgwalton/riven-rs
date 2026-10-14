@@ -34,11 +34,11 @@
     } from "./items";
 
     let { data }: PageProps = $props();
-    let liveItems = $state<LibraryItem[]>([]);
+    let liveItems = $state.raw<LibraryItem[]>([]);
     let liveLimit = $state(20);
     let liveTotalItems = $state(0);
-    let typeOptions = $state<{ value: string; label: string }[]>([]);
-    let stateOptions = $state<{ value: string; label: string }[]>([]);
+    let typeOptions = $state.raw<{ value: string; label: string }[]>([]);
+    let stateOptions = $state.raw<{ value: string; label: string }[]>([]);
 
     let debounceTimer: ReturnType<typeof setTimeout> | undefined;
 

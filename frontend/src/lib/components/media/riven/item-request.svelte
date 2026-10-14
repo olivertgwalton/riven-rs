@@ -47,15 +47,16 @@
     let selectedSeasonNums = $state<number[]>([]);
 
     // Re-initialize selection each time the dialog opens.
-    $effect(() => {
-        if (open) {
+    function setOpen(next: boolean) {
+        open = next;
+        if (next) {
             selectedSeasonNums = seasons
                 .filter((s) => s.status !== "Available")
                 .map((s) => s.season_number)
                 .filter(Number.isInteger)
                 .sort((a, b) => a - b);
         }
-    });
+    }
 
     function toggleSeason(n: number) {
         selectedSeasonNums = selectedSeasonNums.includes(n)
@@ -138,7 +139,7 @@
 </script>
 
 {#if can(page.data.permissions, "REQUEST_ITEMS")}
-    <AlertDialog.Root bind:open>
+    <AlertDialog.Root bind:open={() => open, setOpen}>
         <AlertDialog.Trigger>
             {#snippet child({ props })}
                 <Button {variant} {size} class={className} {...restProps} {...props}>

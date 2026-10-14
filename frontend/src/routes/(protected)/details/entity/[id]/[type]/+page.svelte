@@ -209,7 +209,7 @@
         <!-- Birthday Confetti -->
         {#if birthdayToday && !data.entity.deathday}
             <div class="pointer-events-none fixed inset-0 z-50 overflow-hidden">
-                {#each Array(20) as i (i)}
+                {#each { length: 20 }, i}
                     <div
                         class="confetti {CONFETTI_CONFIG.shapes[i % CONFETTI_CONFIG.shapes.length]}"
                         style="

@@ -25,11 +25,10 @@
 
 <Carousel.Root opts={{ dragFree: true, slidesToScroll: "auto" }}>
     <Carousel.Content>
-        {#each seasons as season, i (i)}
-            {@const rivenSeason = stateBySeasonNumber.get(season.number ?? 0)}
-            {@const episodeCount = episodeCountBySeasonNumber?.get(season.number ?? 0)}
-            {@const completedCount =
-                rivenSeason?.episodes?.filter((e) => e.state === "Completed").length ?? 0}
+        {#each seasons as season (season.id)}
+            {const rivenSeason = $derived(stateBySeasonNumber.get(season.number ?? 0))}
+            {const episodeCount = $derived(episodeCountBySeasonNumber?.get(season.number ?? 0))}
+            {const completedCount = $derived(rivenSeason?.episodes?.filter((e) => e.state === "Completed").length ?? 0)}
             <Carousel.Item class="basis-auto">
                 <button type="button"
                     onclick={() => onSelectSeason(season.number?.toString())}

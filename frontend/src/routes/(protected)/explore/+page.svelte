@@ -374,7 +374,7 @@
                         <ListItem data={item} indexer={item.indexer} type={item.mediaType} />
                     {/each}
                     {#if searchStore.loading}
-                        {#each Array.from({ length: 6 }, (_, i) => i) as i (i)}
+                        {#each { length: 6 }, i}
                             <div class="aspect-2/3 w-full">
                                 <PortraitCardSkeleton />
                             </div>
@@ -384,7 +384,7 @@
             {:else if searchStore.loading}
                 <div
                     class="grid grid-cols-2 gap-6 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-7 2xl:grid-cols-9">
-                    {#each Array.from({ length: 12 }, (_, i) => i) as i (i)}
+                    {#each { length: 12 }, i}
                         <div class="aspect-2/3 w-full">
                             <PortraitCardSkeleton />
                         </div>

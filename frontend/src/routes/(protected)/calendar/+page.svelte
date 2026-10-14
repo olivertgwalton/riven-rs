@@ -172,8 +172,8 @@
 </svelte:head>
 
 {#snippet itemIcon(item: EntertainmentItem, size = 4)}
-    {@const s = typeStyles[item.item_type] ?? typeStyles.movie}
-    {@const cls = `h-${size} w-${size} shrink-0 ${s.icon}`}
+    {const s = $derived(typeStyles[item.item_type] ?? typeStyles.movie)}
+    {const cls = $derived(`h-${size} w-${size} shrink-0 ${s.icon}`)}
     {#if item.item_type === "movie"}
         <Film class={cls} />
     {:else}
@@ -201,18 +201,18 @@
 {/snippet}
 
 {#snippet entertainmentItem(item: EntertainmentItem, compact = false)}
-    {@const href = itemUrl(item)}
-    {@const s = typeStyles[item.item_type] ?? typeStyles.movie}
-    {@const classes = cn(
+    {const href = $derived(itemUrl(item))}
+    {const s = $derived(typeStyles[item.item_type] ?? typeStyles.movie)}
+    {const classes = $derived(cn(
         "group/item flex items-center rounded-md border transition-colors",
         compact ? "gap-1.5 truncate px-2 py-1" : "gap-3 p-2.5",
         s.item,
         item.last_state === "Completed" && "line-through opacity-60",
         href && "no-underline"
-    )}
-    {@const title = compact
+    ))}
+    {const title = $derived(compact
         ? `${item.show_title}${item.season ? ` S${item.season}E${item.episode}` : ""}`
-        : undefined}
+        : undefined)}
     {#if href}
         <a {href} class={classes} {title}>
             {#if compact}
@@ -268,7 +268,7 @@
 {/snippet}
 
 {#snippet calendarDayCard(day: CalendarDay)}
-    {@const isToday = day.dateKey === todayKey}
+    {const isToday = $derived(day.dateKey === todayKey)}
     <div
         class={cn(
             "group/day min-h-32 rounded-md border p-2 transition-colors",
@@ -302,7 +302,7 @@
 {/snippet}
 
 {#snippet mobileDayCard(day: CalendarDay)}
-    {@const isToday = day.dateKey === todayKey}
+    {const isToday = $derived(day.dateKey === todayKey)}
     <div
         class={cn(
             "bg-card/80 border-border rounded-md border p-3",
@@ -348,9 +348,9 @@
 
     <section class="flex flex-wrap items-center gap-2">
         {#each filterOptions as opt (opt.id)}
-            {@const Icon = opt.icon}
-            {@const selected = filters[opt.type] !== false}
-            {@const s = typeStyles[opt.type] ?? typeStyles.movie}
+            {const Icon = $derived(opt.icon)}
+            {const selected = $derived(filters[opt.type] !== false)}
+            {const s = $derived(typeStyles[opt.type] ?? typeStyles.movie)}
             <label
                 for={opt.id}
                 class={cn(

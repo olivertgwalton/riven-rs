@@ -3,6 +3,7 @@
     import { Button } from "#lib/components/ui/button/index.js";
     import PortraitCardSkeleton from "#lib/components/media/portrait-card-skeleton.svelte";
     import { onMount } from "svelte";
+    import type { Attachment } from "svelte/attachments";
     import { SearchStore, setSearchStore } from "#lib/services/search-store.svelte.js";
     import { FilterStore, setFilterStore, SORT_OPTIONS } from "#lib/services/filter-store.svelte.js";
     import FilterPopover from "#lib/components/filter-popover.svelte";
@@ -13,7 +14,6 @@
 
     let searchStore = new SearchStore();
     let filterStore = new FilterStore();
-    let loadMoreTrigger = $state<HTMLDivElement | null>(null);
 
     // Provide stores to children (like FilterPopover)
     setSearchStore(searchStore);
@@ -27,22 +27,19 @@
         searchStore.allowEmptySearch = true; // Enable discovery mode
         searchStore.search(); // Initial fetch
 
+        return () => searchStore.cancelPendingRequests();
+    });
+
+    const observeTrigger: Attachment<HTMLDivElement> = (node) => {
         const observer = new IntersectionObserver(
             (entries) => {
                 isTriggerVisible = entries[0].isIntersecting;
             },
             { threshold: 0.1 }
         );
-
-        if (loadMoreTrigger) {
-            observer.observe(loadMoreTrigger);
-        }
-
-        return () => {
-            observer.disconnect();
-            searchStore.cancelPendingRequests();
-        };
-    });
+        observer.observe(node);
+        return () => observer.disconnect();
+    };
 
     $effect(() => {
         if (isTriggerVisible && !searchStore.loading && searchStore.hasMore) {
@@ -141,7 +138,7 @@
                     </div>
                 {/each}
                 {#if searchStore.loading}
-                    {#each [...Array(6).keys()] as i (i)}
+                    {#each { length: 6 }, i}
                         <div class="aspect-[2/3] w-full">
                             <PortraitCardSkeleton />
                         </div>
@@ -151,7 +148,7 @@
         {:else if searchStore.loading}
             <div
                 class="grid grid-cols-2 gap-6 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-7 2xl:grid-cols-9">
-                {#each [...Array(12).keys()] as i (i)}
+                {#each { length: 12 }, i}
                     <div class="aspect-[2/3] w-full">
                         <PortraitCardSkeleton />
                     </div>
@@ -166,6 +163,6 @@
                 {/if}
             </div>
         {/if}
-        <div bind:this={loadMoreTrigger}></div>
+        <div {@attach observeTrigger}></div>
     </div>
 </PageShell>

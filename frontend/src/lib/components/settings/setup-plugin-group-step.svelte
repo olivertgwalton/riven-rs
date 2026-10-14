@@ -1,4 +1,5 @@
 <script lang="ts">
+    import { untrack } from "svelte";
     import { Button } from "#lib/components/ui/button/index.js";
     import * as Card from "#lib/components/ui/card/index.js";
     import SetupPluginCard from "./setup-plugin-card.svelte";
@@ -12,20 +13,20 @@
         savePlugin: (section: SettingsSection) => void;
     } = $props();
 
-    let activePluginName = $state<string | null>(null);
+    // Primitive, so it only notifies when the step's group actually changes —
+    // not every time `section` is rebuilt after a save.
+    const groupId = $derived(section.id);
 
-    $effect(() => {
-        const preferred =
-            section.plugins.find((view) => view.section.enabled)?.section.id ??
-            section.plugins[0]?.section.id ??
-            null;
-
-        if (
-            !activePluginName ||
-            !section.plugins.some((view) => view.section.id === activePluginName)
-        ) {
-            activePluginName = preferred;
-        }
+    // Defaults to the group's preferred plugin whenever the group changes;
+    // overwritten by the user's pick below.
+    let activePluginName = $derived.by(() => {
+        void groupId;
+        return untrack(
+            () =>
+                section.plugins.find((view) => view.section.enabled)?.section.id ??
+                section.plugins[0]?.section.id ??
+                null
+        );
     });
 
     const activeCard = $derived(

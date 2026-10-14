@@ -38,7 +38,12 @@
         saveActiveProfileSettings: () => Promise<void>;
     } = $props();
 
-    let savedRankJson = $state("");
+    // Snapshot of `rank` taken whenever the active profile changes; reassigned
+    // after a successful save.
+    let savedRankJson = $derived.by(() => {
+        void activeProfileName;
+        return untrack(() => JSON.stringify(rank));
+    });
     let savingRanking = $state(false);
 
     const customProfileCount = $derived(
@@ -58,11 +63,6 @@
     const rankJson = $derived(JSON.stringify(rank));
     const hasUnsavedChanges = $derived(savedRankJson !== "" && rankJson !== savedRankJson);
     const saveLabel = $derived(activeProfileName ? "Save profile" : "Save");
-
-    $effect(() => {
-        void activeProfileName;
-        savedRankJson = untrack(() => JSON.stringify(rank));
-    });
 
     function profileEnabled(name: string) {
         return customProfiles.find((profile) => profile.name === name)?.enabled ?? false;
@@ -108,8 +108,8 @@
                 {#if qualityProfiles.length > 0}
                     <div class="grid grid-cols-1 gap-3 sm:grid-cols-3">
                         {#each qualityProfiles as profile (profile.id)}
-                            {@const enabled = profileEnabled(profile.id)}
-                            {@const selected = activeProfileName === profile.id}
+                            {const enabled = $derived(profileEnabled(profile.id))}
+                            {const selected = $derived(activeProfileName === profile.id)}
                             <div
                                 class="group rounded-lg border p-3 transition-colors {selected
                                     ? 'border-primary bg-primary/10 shadow-sm'
@@ -152,7 +152,7 @@
                     <h3 class="pt-1 text-sm font-medium">Custom Profiles</h3>
                     <div class="grid grid-cols-1 gap-3 sm:grid-cols-3">
                         {#each customProfiles.filter((p) => !p.is_builtin) as profile (profile.name)}
-                            {@const selected = activeProfileName === profile.name}
+                            {const selected = $derived(activeProfileName === profile.name)}
                             <div
                                 class="group relative rounded-lg border transition-colors {selected
                                     ? 'border-primary bg-primary/10 shadow-sm'

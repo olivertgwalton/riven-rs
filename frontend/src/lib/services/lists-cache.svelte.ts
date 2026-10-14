@@ -49,7 +49,7 @@ export class MediaListStore<T = unknown> {
 	#timeWindow = $state<TimeWindow>("day");
 
 	// Runtime state (non-persisted)
-	#items = $state<T[]>([]);
+	#items = $state.raw<T[]>([]);
 	#loading = $state(false);
 	#error = $state<string | null>(null);
 	#page = $state(1);

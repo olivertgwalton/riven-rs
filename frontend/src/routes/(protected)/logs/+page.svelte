@@ -70,14 +70,14 @@
 {/snippet}
 
 {#snippet logEntry(log: LogEntry)}
-    {@const levelColors = {
+    {const levelColors = {
         error: "text-red-400",
         warn: "text-yellow-400",
         info: "text-green-400",
         debug: "text-blue-400",
         trace: "text-muted-foreground"
     }}
-    {@const level = (log.level ?? "info").toLowerCase()}
+    {const level = $derived((log.level ?? "info").toLowerCase())}
     <div class="border-border/50 hover:bg-muted/20 border-b transition-colors last:border-b-0">
         <div
             class="text-foreground/90 grid grid-cols-[auto_auto_auto_1fr] gap-x-3 p-2 font-mono text-xs">
@@ -213,7 +213,8 @@
                 <div class="min-h-0 flex-1 overflow-y-auto">
                     {#if logStore.activeTab === "live"}
                         {#if logStore.logs.length > 0}
-                            {#each logStore.logs.slice().reverse() as line, i (i)}
+                            <!-- Append-only, so a line's position in `logs` is a stable key. -->
+                            {#each logStore.logs.slice().reverse() as line, i (logStore.logs.length - 1 - i)}
                                 {@render liveLine(line)}
                             {/each}
                         {:else if logStore.connectionStatus === "connecting"}

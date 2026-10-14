@@ -30,7 +30,7 @@ const LOG_LINES_SUBSCRIPTION = `subscription {
 
 class LogStore {
 	logs = $state<LiveLogLine[]>([]);
-	historicalLogs = $state<LogEntry[]>([]);
+	historicalLogs = $state.raw<LogEntry[]>([]);
 	isLoadingHistorical = $state(false);
 	error = $state<string | null>(null);
 	historicalError = $state<string | null>(null);
