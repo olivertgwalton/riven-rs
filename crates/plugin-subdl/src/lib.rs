@@ -346,7 +346,8 @@ fn extract_srt_from_zip(buf: &[u8]) -> anyhow::Result<Option<String>> {
     let mut archive = zip::ZipArchive::new(Cursor::new(buf))?;
     for i in 0..archive.len() {
         let mut file = archive.by_index(i)?;
-        if !file.name().to_ascii_lowercase().ends_with(".srt") {
+        let Ok(name) = file.name() else { continue };
+        if !name.to_ascii_lowercase().ends_with(".srt") {
             continue;
         }
         let mut bytes = Vec::with_capacity(file.size() as usize);

@@ -21,8 +21,7 @@
 //! itself, so a wrong assumption here fails the test rather than the login.
 
 use anyhow::anyhow;
-use argon2::password_hash::{PasswordHash, SaltString, rand_core::OsRng};
-use argon2::{Argon2, PasswordHasher as _, PasswordVerifier};
+use argon2::{Argon2, PasswordHash, PasswordHasher as _, PasswordVerifier};
 use chrono::Utc;
 use riven_core::entities::auth::account;
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, Set};
@@ -149,9 +148,8 @@ impl DualFormatHasher {
     }
 
     fn hash_argon2(password: &str) -> anyhow::Result<String> {
-        let salt = SaltString::generate(&mut OsRng);
         Argon2::default()
-            .hash_password(password.as_bytes(), &salt)
+            .hash_password(password.as_bytes())
             .map(|hash| hash.to_string())
             .map_err(|error| anyhow!("failed to hash password: {error}"))
     }

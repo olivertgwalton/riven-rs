@@ -9,7 +9,7 @@ riven-core = { path = "../riven-core" }
 tokio = { workspace = true, features = ["io-util", "net", "sync", "time", "rt", "macros"] }
 tokio-rustls = "0.26"
 webpki-roots = "1"
-quick-xml = "0.41"
+quick-xml = "0.42"
 thiserror = { workspace = true }
 tracing = { workspace = true }
 serde = { workspace = true }

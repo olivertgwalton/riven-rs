@@ -22,7 +22,6 @@ use axum::extract::State;
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use rand_core::{OsRng, RngCore};
 use riven_core::entities::auth::user;
 use riven_core::settings::OidcProviderSettings;
 use sea_orm::DatabaseConnection;
@@ -228,7 +227,7 @@ impl IntoResponse for ApiError {
 /// state, reset tokens.
 pub(super) fn random_token() -> String {
     let mut bytes = [0_u8; 32];
-    OsRng.fill_bytes(&mut bytes);
+    getrandom::fill(&mut bytes).expect("the OS random source is unavailable");
     hex::encode(bytes)
 }
 

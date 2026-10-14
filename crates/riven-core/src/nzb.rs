@@ -164,12 +164,12 @@ pub fn parse_newznab_caps(body: &str) -> NewznabCaps {
     while let Ok(event) = reader.read_event() {
         match event {
             Event::Eof => break,
-            Event::Start(e) if e.name().as_ref() == b"searching" => in_searching = true,
-            Event::End(e) if e.name().as_ref() == b"searching" => in_searching = false,
+            Event::Start(e) if e.name().as_ref() == "searching" => in_searching = true,
+            Event::End(e) if e.name().as_ref() == "searching" => in_searching = false,
             // Modes are usually empty elements, but a self-closing tag written
             // as a start/end pair parses as `Start` — accept both.
             Event::Empty(e) | Event::Start(e) if in_searching => {
-                let name = String::from_utf8_lossy(e.name().as_ref()).into_owned();
+                let name = e.name().as_ref().to_owned();
                 let mut available = true;
                 let mut params = std::collections::HashSet::new();
                 for attr in e.attributes().flatten() {
@@ -178,8 +178,8 @@ pub fn parse_newznab_caps(body: &str) -> NewznabCaps {
                         continue;
                     };
                     match attr.key.as_ref() {
-                        b"available" => available = !value.eq_ignore_ascii_case("no"),
-                        b"supportedParams" => {
+                        "available" => available = !value.eq_ignore_ascii_case("no"),
+                        "supportedParams" => {
                             params.extend(
                                 value
                                     .split(',')
@@ -227,8 +227,8 @@ pub fn parse_newznab_xml(body: &str) -> Vec<NewznabItem> {
                 let name = e.name();
                 let local = name.as_ref();
                 match local {
-                    b"item" => current = Some(NewznabItem::default()),
-                    b"title" if current.is_some() => text_target = Some("title"),
+                    "item" => current = Some(NewznabItem::default()),
+                    "title" if current.is_some() => text_target = Some("title"),
                     _ => {}
                 }
             }
@@ -239,9 +239,9 @@ pub fn parse_newznab_xml(body: &str) -> Vec<NewznabItem> {
                     continue;
                 };
                 match local {
-                    b"enclosure" => {
+                    "enclosure" => {
                         for attr in e.attributes().flatten() {
-                            if attr.key.as_ref() == b"url"
+                            if attr.key.as_ref() == "url"
                                 && let Ok(v) =
                                     attr.normalized_value(quick_xml::XmlVersion::Implicit1_0)
                             {
@@ -249,9 +249,9 @@ pub fn parse_newznab_xml(body: &str) -> Vec<NewznabItem> {
                             }
                         }
                     }
-                    b"link" if item.nzb_url.is_empty() => {
+                    "link" if item.nzb_url.is_empty() => {
                         for attr in e.attributes().flatten() {
-                            if attr.key.as_ref() == b"href"
+                            if attr.key.as_ref() == "href"
                                 && let Ok(v) =
                                     attr.normalized_value(quick_xml::XmlVersion::Implicit1_0)
                             {
@@ -259,18 +259,18 @@ pub fn parse_newznab_xml(body: &str) -> Vec<NewznabItem> {
                             }
                         }
                     }
-                    b"newznab:attr" | b"torznab:attr" => {
+                    "newznab:attr" | "torznab:attr" => {
                         let mut name_val: Option<String> = None;
                         let mut value_val: Option<String> = None;
                         for attr in e.attributes().flatten() {
                             match attr.key.as_ref() {
-                                b"name" => {
+                                "name" => {
                                     name_val = attr
                                         .normalized_value(quick_xml::XmlVersion::Implicit1_0)
                                         .ok()
                                         .map(std::borrow::Cow::into_owned);
                                 }
-                                b"value" => {
+                                "value" => {
                                     value_val = attr
                                         .normalized_value(quick_xml::XmlVersion::Implicit1_0)
                                         .ok()
@@ -290,7 +290,7 @@ pub fn parse_newznab_xml(body: &str) -> Vec<NewznabItem> {
             }
             Ok(Event::Text(t)) => {
                 if let (Some(target), Some(item)) = (text_target.take(), current.as_mut()) {
-                    let text = String::from_utf8_lossy(t.as_ref()).into_owned();
+                    let text = t.as_ref().to_owned();
                     if target == "title" && item.title.is_empty() {
                         item.title = text;
                     }
@@ -298,7 +298,7 @@ pub fn parse_newznab_xml(body: &str) -> Vec<NewznabItem> {
             }
             Ok(Event::CData(t)) => {
                 if let (Some(target), Some(item)) = (text_target.take(), current.as_mut()) {
-                    let text = String::from_utf8_lossy(t.as_ref()).into_owned();
+                    let text = t.as_ref().to_owned();
                     if target == "title" && item.title.is_empty() {
                         item.title = text;
                     }
@@ -306,7 +306,7 @@ pub fn parse_newznab_xml(body: &str) -> Vec<NewznabItem> {
             }
             Ok(Event::End(e)) => {
                 let name = e.name();
-                if name.as_ref() == b"item"
+                if name.as_ref() == "item"
                     && let Some(item) = current.take()
                 {
                     items.push(item);

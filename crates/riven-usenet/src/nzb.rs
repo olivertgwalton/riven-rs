@@ -103,23 +103,23 @@ pub fn peek_release_title(xml: &str) -> Option<String> {
         match reader.read_event() {
             Err(_) | Ok(Event::Eof) => break,
             Ok(Event::Start(e)) => match e.name().as_ref() {
-                b"meta" => {
+                "meta" => {
                     cur_meta_type = e
                         .attributes()
                         .flatten()
-                        .find(|attr| attr.key.as_ref() == b"type")
+                        .find(|attr| attr.key.as_ref() == "type")
                         .and_then(|attr| {
                             attr.normalized_value(quick_xml::XmlVersion::Implicit1_0)
                                 .ok()
                         })
                         .map(|v| v.to_ascii_lowercase());
                 }
-                b"file" => {
+                "file" => {
                     // Head metadata is complete by the first file element.
                     let subject = e
                         .attributes()
                         .flatten()
-                        .find(|attr| attr.key.as_ref() == b"subject")
+                        .find(|attr| attr.key.as_ref() == "subject")
                         .and_then(|attr| {
                             attr.normalized_value(quick_xml::XmlVersion::Implicit1_0)
                                 .ok()
@@ -138,10 +138,8 @@ pub fn peek_release_title(xml: &str) -> Option<String> {
                 _ => {}
             },
             Ok(Event::Text(t)) => {
-                if let Some(key) = cur_meta_type.take()
-                    && let Ok(v) = t.decode()
-                {
-                    meta.insert(key, v.into_owned());
+                if let Some(key) = cur_meta_type.take() {
+                    meta.insert(key, t.into_inner().into_owned());
                 }
             }
             Ok(_) => {}
@@ -178,13 +176,13 @@ pub fn parse_nzb_document(xml: &str) -> Result<NzbDocument, NzbError> {
         match reader.read_event()? {
             Event::Eof => break,
             Event::Start(e) => match e.name().as_ref() {
-                b"file" => {
+                "file" => {
                     let mut f = NzbFile {
                         subject: String::new(),
                         segments: crate::segments::SegmentList::default(),
                     };
                     for attr in e.attributes().flatten() {
-                        if attr.key.as_ref() == b"subject"
+                        if attr.key.as_ref() == "subject"
                             && let Ok(v) = attr.normalized_value(quick_xml::XmlVersion::Implicit1_0)
                         {
                             f.subject = v.into_owned();
@@ -192,7 +190,7 @@ pub fn parse_nzb_document(xml: &str) -> Result<NzbDocument, NzbError> {
                     }
                     cur_file = Some(f);
                 }
-                b"segment" => {
+                "segment" => {
                     let mut s = ParsedSegment {
                         number: 0,
                         bytes: 0,
@@ -204,17 +202,17 @@ pub fn parse_nzb_document(xml: &str) -> Result<NzbDocument, NzbError> {
                             .ok()
                             .map(std::borrow::Cow::into_owned);
                         match (attr.key.as_ref(), val) {
-                            (b"bytes", Some(v)) => s.bytes = v.parse().unwrap_or(0),
-                            (b"number", Some(v)) => s.number = v.parse().unwrap_or(0),
+                            ("bytes", Some(v)) => s.bytes = v.parse().unwrap_or(0),
+                            ("number", Some(v)) => s.number = v.parse().unwrap_or(0),
                             _ => {}
                         }
                     }
                     cur_segment = Some(s);
                     text_target = Some("segment");
                 }
-                b"meta" => {
+                "meta" => {
                     for attr in e.attributes().flatten() {
-                        if attr.key.as_ref() == b"type"
+                        if attr.key.as_ref() == "type"
                             && let Ok(v) = attr.normalized_value(quick_xml::XmlVersion::Implicit1_0)
                         {
                             let key = v.trim().to_ascii_lowercase();
@@ -227,31 +225,22 @@ pub fn parse_nzb_document(xml: &str) -> Result<NzbDocument, NzbError> {
                 }
                 _ => {}
             },
-            event @ (Event::Text(_) | Event::CData(_)) => {
-                // Both dereference to their raw content bytes.
-                let text = String::from_utf8_lossy(&event);
-                match text_target.take() {
-                    Some("segment") => {
-                        if let Some(seg) = cur_segment.as_mut() {
-                            seg.message_id = text
-                                .trim()
-                                .trim_matches(|c| c == '<' || c == '>')
-                                .to_string();
-                        }
-                    }
-                    Some("meta") => {
-                        if let Some(key) = cur_meta_type.take() {
-                            let val = text.trim().to_string();
-                            if !val.is_empty() {
-                                meta.insert(key, val);
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            }
+            Event::Text(t) => take_text(
+                &t,
+                text_target.take(),
+                &mut cur_segment,
+                &mut cur_meta_type,
+                &mut meta,
+            ),
+            Event::CData(t) => take_text(
+                &t,
+                text_target.take(),
+                &mut cur_segment,
+                &mut cur_meta_type,
+                &mut meta,
+            ),
             Event::End(e) => match e.name().as_ref() {
-                b"segment" => {
+                "segment" => {
                     if let (Some(_), Some(seg)) = (cur_file.as_ref(), cur_segment.take())
                         && !seg.message_id.is_empty()
                     {
@@ -259,11 +248,11 @@ pub fn parse_nzb_document(xml: &str) -> Result<NzbDocument, NzbError> {
                     }
                     text_target = None;
                 }
-                b"meta" => {
+                "meta" => {
                     cur_meta_type = None;
                     text_target = None;
                 }
-                b"file" => {
+                "file" => {
                     if let Some(mut file) = cur_file.take() {
                         // Sort while `number` still exists, then drop it.
                         cur_segments.sort_by_key(|s| s.number);
@@ -292,6 +281,34 @@ pub fn parse_nzb_document(xml: &str) -> Result<NzbDocument, NzbError> {
         return Err(NzbError::Malformed("no files with segments found"));
     }
     Ok(NzbDocument { meta, files })
+}
+
+fn take_text(
+    text: &str,
+    target: Option<&str>,
+    cur_segment: &mut Option<ParsedSegment>,
+    cur_meta_type: &mut Option<String>,
+    meta: &mut HashMap<String, String>,
+) {
+    match target {
+        Some("segment") => {
+            if let Some(seg) = cur_segment.as_mut() {
+                seg.message_id = text
+                    .trim()
+                    .trim_matches(|c| c == '<' || c == '>')
+                    .to_string();
+            }
+        }
+        Some("meta") => {
+            if let Some(key) = cur_meta_type.take() {
+                let val = text.trim().to_string();
+                if !val.is_empty() {
+                    meta.insert(key, val);
+                }
+            }
+        }
+        _ => {}
+    }
 }
 
 pub use riven_core::filename::looks_obfuscated;
