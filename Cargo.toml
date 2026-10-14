@@ -70,10 +70,11 @@ tower-http = { version = "0.7", features = ["cors"] }
 # Redis
 redis = { version = "1", features = ["tokio-comp", "connection-manager"] }
 
-# Job queue
-apalis = { version = "1.0.0-rc.9", features = ["limit"] }
-apalis-redis = { version = "1.0.0-rc.8" }
-apalis-board-api = { version = "1.0.0-rc.8", features = ["axum", "ui"] }
+# Job queue. Pinned exactly: apalis 1.0 reworked the redis backend riven-queue
+# reaches into, and cargo would otherwise take it as an rc upgrade.
+apalis = { version = "=1.0.0-rc.9", features = ["limit"] }
+apalis-redis = { version = "=1.0.0-rc.8" }
+apalis-board-api = { version = "=1.0.0-rc.8", features = ["axum", "ui"] }
 
 # FUSE
 fuser = "0.18"
