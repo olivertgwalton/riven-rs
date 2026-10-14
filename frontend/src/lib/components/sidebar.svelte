@@ -71,9 +71,9 @@
                             "hover:bg-accent/80 group relative flex h-10 w-10 items-center justify-center rounded-md transition-colors",
                             page.url.pathname === resolve(item.href) && "bg-accent"
                         ]}
-                        aria-label={item.label}
                         aria-current={page.url.pathname === resolve(item.href) ? "page" : undefined}>
                         <item.icon class="size-5" />
+                        <span class="sr-only">{item.label}</span>
                     </a>
                 {/snippet}
                 {#snippet content()}
