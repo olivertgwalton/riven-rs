@@ -4,6 +4,7 @@ import type {
 	IndexerStats,
 	LibraryStats,
 	NntpProviderHealth,
+	SettingsSection,
 	UsenetStreamingHealth,
 	UsenetTitleHealth,
 	UsenetTitleHealthSummary,
@@ -196,3 +197,25 @@ export const DEBRID_ACCOUNT_INFO_QUERY = `
 `;
 
 export type DebridAccountInfoResult = { debridAccountInfo: DebridUserInfo[] };
+
+// Each enabled plugin and whether it passed validation (`valid` is the
+// registry's "active" flag); feeds the Service Status card.
+export const SERVICE_STATUS_QUERY = `
+    query {
+        settingsSections {
+            title
+            kind
+            enabled
+            valid
+        }
+    }
+`;
+
+export type ServiceStatusResult = {
+	settingsSections: Pick<
+		SettingsSection,
+		"title" | "kind" | "enabled" | "valid"
+	>[];
+};
+
+export type ServiceStatuses = Record<string, boolean | null>;

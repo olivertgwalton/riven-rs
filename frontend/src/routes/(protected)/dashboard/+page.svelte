@@ -27,6 +27,7 @@
         type ActivePlaybackResult,
         type DashboardStats,
         type IndexerStatsResult,
+        type ServiceStatuses,
         type UsenetHealthResult
     } from "./queries";
     import { onMount } from "svelte";
@@ -46,9 +47,7 @@
     });
     let indexerStats = $state.raw<IndexerStats[]>([]);
 
-    const serviceStatuses = $derived(
-        (data as PageData & { services?: Record<string, boolean | null> }).services ?? null
-    );
+    let serviceStatuses = $state.raw<ServiceStatuses | null>(null);
     const kpiCards = $derived.by(() => [
         {
             title: "Total Items",
@@ -94,6 +93,9 @@
         });
         Promise.resolve(data.usenetHealth).then((health) => {
             if (!cancelled && health) usenet = health;
+        });
+        Promise.resolve(data.services).then((services) => {
+            if (!cancelled) serviceStatuses = services;
         });
 
         return () => {

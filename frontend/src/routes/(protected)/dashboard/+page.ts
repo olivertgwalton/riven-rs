@@ -6,12 +6,15 @@ import {
 	DEBRID_ACCOUNT_INFO_QUERY,
 	EMPTY_TITLE_SUMMARY,
 	INDEXER_STATS_QUERY,
+	SERVICE_STATUS_QUERY,
 	STATS_QUERY,
 	USENET_HEALTH_QUERY,
 	type ActivePlaybackResult,
 	type DashboardStats,
 	type DebridAccountInfoResult,
 	type IndexerStatsResult,
+	type ServiceStatusResult,
+	type ServiceStatuses,
 	type UsenetHealthResult,
 } from "./queries";
 
@@ -69,11 +72,23 @@ export const load = (async ({ depends }) => {
 			}),
 		);
 
+	const services = gqlClient<ServiceStatusResult>(SERVICE_STATUS_QUERY, {})
+		.then(
+			(data): ServiceStatuses =>
+				Object.fromEntries(
+					data.settingsSections
+						.filter((s) => s.kind === "plugin" && s.enabled)
+						.map((s) => [s.title, s.valid ?? null]),
+				),
+		)
+		.catch((): ServiceStatuses | null => null);
+
 	return {
 		statistics,
 		activePlaybackSessions,
 		downloaderServices,
 		indexerStats,
 		usenetHealth,
+		services,
 	};
 }) satisfies PageLoad;
