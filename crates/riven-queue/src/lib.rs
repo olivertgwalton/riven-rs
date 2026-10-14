@@ -45,8 +45,8 @@ pub use jobs::{
     ProcessStep, RankStreamsJob, ScrapeJob,
 };
 pub use maintenance::{
-    prune_queue_history, purge_orphaned_worker_sets, purge_stale_dedup_keys,
-    reconcile_library_profiles,
+    migrate_from_apalis_rc, prune_queue_history, purge_orphaned_worker_sets,
+    purge_stale_dedup_keys, reconcile_library_profiles,
 };
 pub use workers::start_workers;
 

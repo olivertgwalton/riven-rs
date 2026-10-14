@@ -271,6 +271,7 @@ async fn main() -> Result<()> {
     );
     {
         let mut redis = job_queue.redis.clone();
+        riven_queue::migrate_from_apalis_rc(&mut redis).await?;
         let queues = job_queue.queue_names();
         riven_queue::prune_queue_history(&mut redis, &queues).await;
     }

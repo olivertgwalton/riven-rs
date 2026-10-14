@@ -31,6 +31,30 @@ pub async fn reconcile_library_profiles(settings: &FilesystemSettings) -> anyhow
     repo::update_library_profiles_batch(&updates).await
 }
 
+/// Move a Redis that apalis-redis 1.0.0-rc.8 wrote to 1.0's layout, once.
+/// rc.8 registered workers under their inflight set's name and kept history in
+/// sorted sets under the keys 1.0 writes plain sets to: left as they are, the
+/// claims are never reaped and every acknowledgement fails with `WRONGTYPE`.
+/// Must run before any worker starts.
+pub async fn migrate_from_apalis_rc(
+    redis: &mut redis::aio::ConnectionManager,
+) -> redis::RedisResult<()> {
+    let (queues, kept, requeued, dropped): (u64, u64, u64, u64) =
+        redis::Script::new(include_str!("apalis_rc_migration.lua"))
+            .invoke_async(redis)
+            .await?;
+    if queues > 0 {
+        tracing::info!(
+            queues,
+            kept,
+            requeued,
+            dropped,
+            "migrated job queues to apalis 1.0"
+        );
+    }
+    Ok(())
+}
+
 const QUEUE_REGISTRY_KEY: &str = "core:apalis:queues:list";
 
 /// Drop the worker registrations of queues this process no longer runs (a
