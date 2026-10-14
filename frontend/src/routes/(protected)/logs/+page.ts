@@ -1,5 +1,5 @@
 import type { PageLoad } from "./$types";
-import { requireCapability } from "$lib/permissions";
+import { requireCapability } from "#lib/permissions.js";
 
 export const load = (async ({ parent }) => {
 	const { permissions } = await parent();

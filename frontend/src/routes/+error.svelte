@@ -1,9 +1,9 @@
 <script lang="ts">
-    import { browser } from "$app/environment";
+    import { browser } from "$app/env";
     import { resolve } from "$app/paths";
     import { page } from "$app/state";
-    import { Button } from "$lib/components/ui/button/index.js";
-    import { Badge } from "$lib/components/ui/badge/index.js";
+    import { Button } from "#lib/components/ui/button/index.js";
+    import { Badge } from "#lib/components/ui/badge/index.js";
     import ArrowLeft from "@lucide/svelte/icons/arrow-left";
     import Home from "@lucide/svelte/icons/home";
     import RotateCcw from "@lucide/svelte/icons/rotate-ccw";
@@ -111,7 +111,7 @@
                 <ArrowLeft />
                 Back
             </Button>
-            <Button variant="outline" href={resolve("/")}>
+            <Button variant="outline" href={resolve("")}>
                 <Home />
                 Home
             </Button>

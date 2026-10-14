@@ -1,5 +1,5 @@
-import { gqlClient } from "$lib/graphql-client";
-import type { MediaDetails, PersonDetails } from "$lib/gql/schema";
+import { gqlClient } from "#lib/graphql-client.js";
+import type { MediaDetails, PersonDetails } from "#lib/gql/schema.js";
 
 /**
  * Everything the detail pages render. Movies and shows come back through one

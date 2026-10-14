@@ -1,10 +1,10 @@
 <script lang="ts">
-    import { MediaListStore, type BaseListItem } from "$lib/services/lists-cache.svelte";
-    import ListItem from "$lib/components/list-item.svelte";
-    import PortraitCardSkeleton from "$lib/components/media/portrait-card-skeleton.svelte";
+    import { MediaListStore, type BaseListItem } from "#lib/services/lists-cache.svelte.js";
+    import ListItem from "#lib/components/list-item.svelte";
+    import PortraitCardSkeleton from "#lib/components/media/portrait-card-skeleton.svelte";
     import { onMount } from "svelte";
-    import PageShell from "$lib/components/page-shell.svelte";
-    import { gqlClient } from "$lib/graphql-client";
+    import PageShell from "#lib/components/page-shell.svelte";
+    import { gqlClient } from "#lib/graphql-client.js";
 
     const ANILIST_TRENDING_QUERY = `query TrendingAnilist($page: Int!, $perPage: Int) {
         trendingAnilist(page: $page, perPage: $perPage) {
@@ -60,7 +60,7 @@
 <PageShell class="bg-background relative flex min-h-screen flex-col overflow-x-hidden">
     <!-- Immersive Background -->
     <div class="pointer-events-none fixed inset-0 z-0">
-        <div class="absolute inset-0 bg-gradient-to-b from-zinc-900 via-zinc-950 to-black"></div>
+        <div class="absolute inset-0 bg-linear-to-b from-zinc-900 via-zinc-950 to-black"></div>
         <div
             class="bg-primary/5 absolute top-[-20%] left-[-10%] h-[600px] w-[600px] rounded-full blur-[120px]">
         </div>

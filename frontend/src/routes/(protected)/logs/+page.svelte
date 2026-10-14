@@ -1,10 +1,10 @@
 <script lang="ts">
     import { onMount, onDestroy } from "svelte";
-    import { Button } from "$lib/components/ui/button/index.js";
+    import { Button } from "#lib/components/ui/button/index.js";
     import { toast } from "svelte-sonner";
-    import { logStore, type LogEntry, type LiveLogLine } from "$lib/stores/logs.svelte";
-    import { createScopedLogger } from "$lib/logger";
-    import PageShell from "$lib/components/page-shell.svelte";
+    import { logStore, type LogEntry, type LiveLogLine } from "#lib/stores/logs.svelte.js";
+    import { createScopedLogger } from "#lib/logger.js";
+    import PageShell from "#lib/components/page-shell.svelte";
 
     const logger = createScopedLogger("logs-page");
 

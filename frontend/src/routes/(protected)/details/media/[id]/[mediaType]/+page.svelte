@@ -1,15 +1,14 @@
 <script lang="ts">
-    import { browser } from "$app/environment";
     import { page } from "$app/state";
     import type { PageProps } from "./$types";
-    import type { MediaDetails, TmdbListItem } from "$lib/gql/schema";
-    import { formatBytes } from "$lib/helpers";
+    import type { MediaDetails, TmdbListItem } from "#lib/gql/schema.js";
+    import { formatBytes } from "#lib/helpers.js";
     import { fade, fly } from "svelte/transition";
     import { cubicOut } from "svelte/easing";
-    import * as Carousel from "$lib/components/ui/carousel/index.js";
-    import { Badge } from "$lib/components/ui/badge/index.js";
-    import { Button } from "$lib/components/ui/button/index.js";
-    import * as Dialog from "$lib/components/ui/dialog/index.js";
+    import * as Carousel from "#lib/components/ui/carousel/index.js";
+    import { Badge } from "#lib/components/ui/badge/index.js";
+    import { Button } from "#lib/components/ui/button/index.js";
+    import * as Dialog from "#lib/components/ui/dialog/index.js";
     import Play from "@lucide/svelte/icons/play";
     import FileJson from "@lucide/svelte/icons/file-json";
     import RotateCcw from "@lucide/svelte/icons/rotate-ccw";
@@ -18,20 +17,20 @@
     import Search from "@lucide/svelte/icons/search";
     import Pause from "@lucide/svelte/icons/pause";
     import Download from "@lucide/svelte/icons/download";
-    import { cn } from "$lib/utils";
-    import PortraitCard from "$lib/components/media/portrait-card.svelte";
-    import ListItem from "$lib/components/list-item.svelte";
-    import ItemRequest from "$lib/components/media/riven/item-request.svelte";
-    import ItemAction from "$lib/components/media/riven/item-action.svelte";
-    import ItemManualScrape from "$lib/components/media/riven/item-manual-scrape.svelte";
-    import CollectionSheet from "$lib/components/media/collection-sheet.svelte";
-    import StatusBadge from "$lib/components/media/status-badge.svelte";
+    import { cn } from "#lib/utils.js";
+    import PortraitCard from "#lib/components/media/portrait-card.svelte";
+    import ListItem from "#lib/components/list-item.svelte";
+    import ItemRequest from "#lib/components/media/riven/item-request.svelte";
+    import ItemAction from "#lib/components/media/riven/item-action.svelte";
+    import ItemManualScrape from "#lib/components/media/riven/item-manual-scrape.svelte";
+    import CollectionSheet from "#lib/components/media/collection-sheet.svelte";
+    import StatusBadge from "#lib/components/media/status-badge.svelte";
     import LiveSeasons from "./live-seasons.svelte";
     import LiveEpisodes from "./live-episodes.svelte";
     import { toast } from "svelte-sonner";
     import X from "@lucide/svelte/icons/x";
-    import { gqlClient, gqlSubscribeClient } from "$lib/graphql-client";
-    import type { RivenMediaItem } from "$lib/services/riven-media";
+    import { gqlClient, gqlSubscribeClient } from "#lib/graphql-client.js";
+    import type { RivenMediaItem } from "#lib/services/riven-media.js";
     import {
         MEDIA_ITEM_FULL_BY_TMDB_QUERY,
         MEDIA_ITEM_FULL_BY_TVDB_QUERY,
@@ -46,7 +45,7 @@
         type GqlMediaItemFull,
         type GqlMediaItemStateTree,
         type GqlIndexedShow
-    } from "$lib/services/riven-media";
+    } from "#lib/services/riven-media.js";
     import { untrack } from "svelte";
     import { SvelteMap } from "svelte/reactivity";
     import { resolve } from "$app/paths";
@@ -252,7 +251,7 @@
     let ratingsLoading = $state(false);
 
     $effect(() => {
-        if (!browser || !ratingsId || !mediaType) {
+        if (!ratingsId || !mediaType) {
             ratingsLoading = false;
             ratingsData = null;
             return;
@@ -593,10 +592,6 @@
     }
 
     $effect(() => {
-        if (!browser) {
-            return;
-        }
-
         const subscription = getLiveRivenSubscription();
 
         if (!subscription) {
@@ -621,7 +616,7 @@
     });
 
     $effect(() => {
-        if (!browser || !needsCompletedDetailsHydration(riven)) {
+        if (!needsCompletedDetailsHydration(riven)) {
             return;
         }
 
@@ -629,7 +624,7 @@
     });
 
     $effect(() => {
-        if (!browser || !rawDataOpen) {
+        if (!rawDataOpen) {
             return;
         }
 
@@ -639,7 +634,7 @@
     // When the current show gets indexed (via background queue or indexShow mutation),
     // hydrate the Riven state so the page reflects the transition without a manual refresh.
     $effect(() => {
-        if (!browser || data.mediaDetails?.type !== "tv" || !data.resolvedTvdbId) return;
+        if (data.mediaDetails?.type !== "tv" || !data.resolvedTvdbId) return;
 
         const targetTvdbId = data.resolvedTvdbId.toString();
 

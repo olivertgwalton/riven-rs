@@ -2,14 +2,13 @@
     // Fonts are imported once, in the root layout.
     import oxanium400Woff2 from "@fontsource/oxanium/files/oxanium-latin-400-normal.woff2?url";
     import { afterNavigate } from "$app/navigation";
-    import Sidebar from "$lib/components/sidebar.svelte";
-    import { Toaster } from "$lib/components/ui/sonner/index.js";
+    import Sidebar from "#lib/components/sidebar.svelte";
+    import { Toaster } from "#lib/components/ui/sonner/index.js";
     import type { LayoutProps } from "./$types";
-    import { setContext } from "svelte";
-    import Header from "$lib/components/header.svelte";
-    import MobileNav from "$lib/components/mobile-nav.svelte";
-    import { SearchStore } from "$lib/services/search-store.svelte";
-    import { FilterStore } from "$lib/services/filter-store.svelte";
+    import Header from "#lib/components/header.svelte";
+    import MobileNav from "#lib/components/mobile-nav.svelte";
+    import { SearchStore, setSearchStore } from "#lib/services/search-store.svelte.js";
+    import { FilterStore, setFilterStore } from "#lib/services/filter-store.svelte.js";
     import { page } from "$app/state";
 
     let { data, children }: LayoutProps = $props();
@@ -23,8 +22,8 @@
         if (mainContent) mainContent.scrollTop = 0;
     });
 
-    setContext("searchStore", searchStore);
-    setContext("filterStore", filterStore);
+    setSearchStore(searchStore);
+    setFilterStore(filterStore);
 
     const isSetupRoute = $derived(page.url.pathname === "/setup");
 </script>

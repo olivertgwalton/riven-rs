@@ -1,14 +1,13 @@
 <script lang="ts">
-    import { getContext } from "svelte";
-    import * as Popover from "$lib/components/ui/popover/index.js";
-    import * as Select from "$lib/components/ui/select/index.js";
-    import { Button } from "$lib/components/ui/button/index.js";
-    import { Slider } from "$lib/components/ui/slider/index.js";
-    import { Badge } from "$lib/components/ui/badge/index.js";
-    import { Toggle } from "$lib/components/ui/toggle/index.js";
-    import { Separator } from "$lib/components/ui/separator/index.js";
+    import * as Popover from "#lib/components/ui/popover/index.js";
+    import * as Select from "#lib/components/ui/select/index.js";
+    import { Button } from "#lib/components/ui/button/index.js";
+    import { Slider } from "#lib/components/ui/slider/index.js";
+    import { Badge } from "#lib/components/ui/badge/index.js";
+    import { Toggle } from "#lib/components/ui/toggle/index.js";
+    import { Separator } from "#lib/components/ui/separator/index.js";
     import {
-        type FilterStore,
+        getFilterStore,
         MOVIE_GENRES,
         TV_GENRES,
         CONTENT_RATINGS,
@@ -16,10 +15,10 @@
         RUNTIME_CONFIG,
         VOTE_AVERAGE_CONFIG,
         VOTE_COUNT_CONFIG
-    } from "$lib/services/filter-store.svelte";
-    import type { SearchStore } from "$lib/services/search-store.svelte";
+    } from "#lib/services/filter-store.svelte.js";
+    import { getSearchStore } from "#lib/services/search-store.svelte.js";
     import FilterIcon from "@lucide/svelte/icons/filter";
-    import DatePicker from "$lib/components/date-picker.svelte";
+    import DatePicker from "#lib/components/date-picker.svelte";
 
     interface Props {
         onApply: () => void;
@@ -27,8 +26,8 @@
 
     let { onApply }: Props = $props();
 
-    const filterStore = getContext<FilterStore>("filterStore");
-    const searchStore = getContext<SearchStore>("searchStore");
+    const filterStore = getFilterStore();
+    const searchStore = getSearchStore();
 
     if (!filterStore) {
         throw new Error("FilterPopover must be used within a context that provides 'filterStore'.");

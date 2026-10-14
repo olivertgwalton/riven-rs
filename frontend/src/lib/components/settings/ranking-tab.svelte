@@ -1,11 +1,11 @@
 <script lang="ts">
     import { untrack } from "svelte";
     import { toast } from "svelte-sonner";
-    import { Button } from "$lib/components/ui/button/index.js";
-    import { Input } from "$lib/components/ui/input/index.js";
-    import { Label } from "$lib/components/ui/label/index.js";
-    import { Separator } from "$lib/components/ui/separator/index.js";
-    import { Switch } from "$lib/components/ui/switch/index.js";
+    import { Button } from "#lib/components/ui/button/index.js";
+    import { Input } from "#lib/components/ui/input/index.js";
+    import { Label } from "#lib/components/ui/label/index.js";
+    import { Separator } from "#lib/components/ui/separator/index.js";
+    import { Switch } from "#lib/components/ui/switch/index.js";
     import { settingsSwitchClass } from "./helpers";
     import SettingFieldEditor from "./setting-field-editor.svelte";
     import type { CustomProfile, QualityProfile, SettingFieldDef } from "./types";

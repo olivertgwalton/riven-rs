@@ -1,16 +1,16 @@
 <script lang="ts">
-    import PortraitCard from "$lib/components/media/portrait-card.svelte";
-    import ItemRequest from "$lib/components/media/riven/item-request.svelte";
-    import StatusBadge from "$lib/components/media/status-badge.svelte";
-    import { Badge } from "$lib/components/ui/badge/index.js";
-    import { cn } from "$lib/utils";
+    import PortraitCard from "#lib/components/media/portrait-card.svelte";
+    import ItemRequest from "#lib/components/media/riven/item-request.svelte";
+    import StatusBadge from "#lib/components/media/status-badge.svelte";
+    import { Badge } from "#lib/components/ui/badge/index.js";
+    import { cn } from "#lib/utils.js";
     import { resolve } from "$app/paths";
     import {
         getLibraryStatus,
         markLibraryStatusRequested,
         getResolvedLibraryId,
         watchLibraryStatus
-    } from "$lib/stores/library-status.svelte";
+    } from "#lib/stores/library-status.svelte.js";
 
     const badgeVariantClasses: Record<string, string> = {
         success: "bg-green-600/90 text-white border-0",

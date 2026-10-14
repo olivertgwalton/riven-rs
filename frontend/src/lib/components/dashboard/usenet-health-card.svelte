@@ -1,8 +1,8 @@
 <script lang="ts">
-    import { Badge } from "$lib/components/ui/badge/index.js";
-    import { gqlClient } from "$lib/graphql-client";
-    import { relativeTime } from "$lib/helpers";
-    import type { UsenetTitleHealth, UsenetTitleHealthSummary } from "$lib/gql/schema";
+    import { Badge } from "#lib/components/ui/badge/index.js";
+    import { gqlClient } from "#lib/graphql-client.js";
+    import { relativeTime } from "#lib/helpers.js";
+    import type { UsenetTitleHealth, UsenetTitleHealthSummary } from "#lib/gql/schema.js";
 
     let { titles, summary }: { titles: UsenetTitleHealth[]; summary: UsenetTitleHealthSummary } =
         $props();

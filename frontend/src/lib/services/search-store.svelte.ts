@@ -1,10 +1,11 @@
-import { browser } from "$app/environment";
-import type { ParsedSearchQuery } from "$lib/search-parser";
+import { createContext } from "svelte";
+import { browser } from "$app/env";
+import type { ParsedSearchQuery } from "#lib/search-parser.js";
 
-import { createScopedLogger } from "$lib/logger";
-import { gqlClient } from "$lib/graphql-client";
-import type { TmdbListItem } from "$lib/gql/schema";
-import { SEARCH_TMDB_PAGE_QUERY } from "$lib/services/backend-metadata";
+import { createScopedLogger } from "#lib/logger.js";
+import { gqlClient } from "#lib/graphql-client.js";
+import type { TmdbListItem } from "#lib/gql/schema.js";
+import { SEARCH_TMDB_PAGE_QUERY } from "#lib/services/backend-metadata.js";
 
 const logger = createScopedLogger("search");
 
@@ -441,3 +442,5 @@ export class SearchStore {
 		return !!this.parsedSearch || Object.keys(this.filterParams).length > 0;
 	}
 }
+
+export const [getSearchStore, setSearchStore] = createContext<SearchStore>();

@@ -1,22 +1,22 @@
 <script lang="ts">
-    import { getContext, onDestroy, onMount } from "svelte";
-    import type { Action } from "svelte/action";
-    import ListItem from "$lib/components/list-item.svelte";
-    import { Button } from "$lib/components/ui/button/index.js";
-    import PortraitCardSkeleton from "$lib/components/media/portrait-card-skeleton.svelte";
-    import type { SearchStore } from "$lib/services/search-store.svelte";
-    import AnimatedToggle from "$lib/components/animated-toggle.svelte";
+    import { onDestroy, onMount } from "svelte";
+    import type { Attachment } from "svelte/attachments";
+    import ListItem from "#lib/components/list-item.svelte";
+    import { Button } from "#lib/components/ui/button/index.js";
+    import PortraitCardSkeleton from "#lib/components/media/portrait-card-skeleton.svelte";
+    import { getSearchStore } from "#lib/services/search-store.svelte.js";
+    import AnimatedToggle from "#lib/components/animated-toggle.svelte";
     import SearchIcon from "@lucide/svelte/icons/search";
     import Sparkles from "@lucide/svelte/icons/sparkles";
     import Info from "@lucide/svelte/icons/info";
     import { scale, fly } from "svelte/transition";
     import { goto } from "$app/navigation";
     import { resolve } from "$app/paths";
-    import { getRatings } from "$lib/stores/ratings";
+    import { getRatings } from "#lib/stores/ratings.js";
 
     let { data } = $props();
 
-    const searchStore = getContext<SearchStore>("searchStore");
+    const searchStore = getSearchStore();
 
     let currentExampleIndex = $state(0);
     let currentHeroIndex = $state(0);
@@ -56,7 +56,7 @@
         if (!data.feelingLuckyItems?.length) return;
         const randomItem =
             data.feelingLuckyItems[Math.floor(Math.random() * data.feelingLuckyItems.length)];
-        const route = resolve(`/details/media/${randomItem.id}/${randomItem.mediaType}`);
+        const route = resolve(`details/media/${randomItem.id}/${randomItem.mediaType}`);
         goto(route);
     }
 
@@ -91,7 +91,7 @@
         searchStore.clear();
     });
 
-    const infiniteScroll: Action<HTMLDivElement> = (node) => {
+    const infiniteScroll: Attachment<HTMLDivElement> = (node) => {
         const observer = new IntersectionObserver(
             (entries) => {
                 if (entries[0].isIntersecting && !searchStore.loading && searchStore.hasMore) {
@@ -103,11 +103,9 @@
 
         observer.observe(node);
 
-        return {
-            destroy() {
-                observer.disconnect();
-                searchStore.cancelPendingRequests();
-            }
+        return () => {
+            observer.disconnect();
+            searchStore.cancelPendingRequests();
         };
     };
 </script>
@@ -408,7 +406,7 @@
                 </div>
             {/if}
 
-            <div use:infiniteScroll></div>
+            <div {@attach infiniteScroll}></div>
         </div>
     </div>
 </div>

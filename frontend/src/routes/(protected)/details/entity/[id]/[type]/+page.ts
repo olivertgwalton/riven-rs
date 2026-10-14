@@ -3,7 +3,7 @@ import { error } from "@sveltejs/kit";
 import {
 	fetchCompanyDetails,
 	fetchPersonDetails,
-} from "$lib/services/media-details";
+} from "#lib/services/media-details.js";
 
 function isNotFound(err: unknown) {
 	return err instanceof Error && err.message.includes("status 404 Not Found");

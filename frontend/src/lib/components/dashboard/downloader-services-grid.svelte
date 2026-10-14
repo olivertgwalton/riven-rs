@@ -1,9 +1,9 @@
 <script lang="ts">
-    import { cn } from "$lib/utils";
-    import { Badge } from "$lib/components/ui/badge/index.js";
-    import { formatBytes, getServiceDisplayName } from "$lib/helpers";
-    import { formatDate } from "$lib/utils/date";
-    import type { DebridUserInfo } from "$lib/gql/schema";
+    import { cn } from "#lib/utils.js";
+    import { Badge } from "#lib/components/ui/badge/index.js";
+    import { formatBytes, getServiceDisplayName } from "#lib/helpers.js";
+    import { formatDate } from "#lib/utils/date.js";
+    import type { DebridUserInfo } from "#lib/gql/schema.js";
 
     let { services }: { services: DebridUserInfo[] } = $props();
 

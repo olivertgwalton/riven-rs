@@ -1,10 +1,10 @@
 <script lang="ts">
-    import { Button } from "$lib/components/ui/button/index.js";
+    import { Button } from "#lib/components/ui/button/index.js";
     import Link2 from "@lucide/svelte/icons/link-2";
     import Link2Off from "@lucide/svelte/icons/link-2-off";
-    import { authClient, type LinkedAccount } from "$lib/auth-client";
+    import { authClient, type LinkedAccount } from "#lib/auth-client.js";
     import { toast } from "svelte-sonner";
-    import { invalidateAll } from "$app/navigation";
+    import { refreshAll } from "$app/navigation";
 
     let { accounts }: { accounts: LinkedAccount[] } = $props();
 
@@ -35,7 +35,7 @@
             return;
         }
         toast.success(`${providerId} unlinked successfully.`);
-        await invalidateAll();
+        await refreshAll();
     }
 
     /**
@@ -76,7 +76,7 @@
                 plexTab.close();
                 busy = null;
                 toast.success("Plex linked successfully.");
-                await invalidateAll();
+                await refreshAll();
                 return;
             }
         }

@@ -1,11 +1,10 @@
 <script lang="ts">
     import Mountain from "@lucide/svelte/icons/mountain";
     import Star from "@lucide/svelte/icons/star";
-    import { browser } from "$app/environment";
-    import { cn } from "$lib/utils";
+    import { cn } from "#lib/utils.js";
     import type { Snippet } from "svelte";
 
-    import { getRatings, type RatingsData } from "$lib/stores/ratings";
+    import { getRatings, type RatingsData } from "#lib/stores/ratings.js";
 
     interface Props {
         title?: string | null;
@@ -36,7 +35,7 @@
     let ratingsPromise = $state<Promise<RatingsData> | null>(null);
 
     $effect(() => {
-        if (!browser || !tmdbId) {
+        if (!tmdbId) {
             ratingsPromise = null;
             return;
         }

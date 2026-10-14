@@ -1,10 +1,10 @@
 <script lang="ts">
     import { untrack } from "svelte";
-    import { formatBytes } from "$lib/helpers";
-    import * as Chart from "$lib/components/ui/chart/index.js";
+    import { formatBytes } from "#lib/helpers.js";
+    import * as Chart from "#lib/components/ui/chart/index.js";
     import { LineChart } from "layerchart";
     import { curveCatmullRom } from "d3-shape";
-    import type { UsenetStreamingHealth, UsenetTraffic } from "$lib/gql/schema";
+    import type { UsenetStreamingHealth, UsenetTraffic } from "#lib/gql/schema.js";
 
     let {
         health,
@@ -156,9 +156,10 @@
                 <div>
                     <p class="text-[11px] text-neutral-500">{tile.label}</p>
                     <p
-                        class="mt-1 text-lg font-semibold tabular-nums"
-                        class:text-amber-300={tile.warn}
-                        class:text-neutral-100={!tile.warn}>
+                        class={[
+                            "mt-1 text-lg font-semibold tabular-nums",
+                            tile.warn ? "text-amber-300" : "text-neutral-100"
+                        ]}>
                         {tile.value}
                     </p>
                 </div>

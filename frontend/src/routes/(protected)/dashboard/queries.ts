@@ -9,7 +9,7 @@ import type {
 	UsenetTitleHealthSummary,
 	UsenetTraffic,
 	YearRelease,
-} from "$lib/gql/schema";
+} from "#lib/gql/schema.js";
 
 // Shared by the load (initial fetch) and the page (live refresh / polling).
 // Every selection below is the full field set of its schema type, so the

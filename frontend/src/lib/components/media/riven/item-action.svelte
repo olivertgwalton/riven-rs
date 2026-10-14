@@ -1,21 +1,21 @@
 <script lang="ts">
-    import { can, type Capability } from "$lib/permissions";
+    import { can, type Capability } from "#lib/permissions.js";
     import {
         resetItems,
         retryItems,
         removeItems,
         setItemsPaused,
         toNumericIds
-    } from "$lib/services/library-mutations";
+    } from "#lib/services/library-mutations.js";
     import { toast } from "svelte-sonner";
-    import { invalidateAll } from "$app/navigation";
-    import { createScopedLogger } from "$lib/logger";
-    import * as AlertDialog from "$lib/components/ui/alert-dialog/index.js";
+    import { refreshAll } from "$app/navigation";
+    import { createScopedLogger } from "#lib/logger.js";
+    import * as AlertDialog from "#lib/components/ui/alert-dialog/index.js";
     import {
         Button,
         type ButtonSize,
         type ButtonVariant
-    } from "$lib/components/ui/button/index.js";
+    } from "#lib/components/ui/button/index.js";
     import Loader2 from "@lucide/svelte/icons/loader-2";
     import { page } from "$app/state";
     import type { Snippet } from "svelte";
@@ -114,7 +114,7 @@
                 }
                 case "delete": {
                     await removeItems(validIds);
-                    invalidateAll();
+                    refreshAll();
                     toast.success("Media item deleted successfully!");
                     return;
                 }

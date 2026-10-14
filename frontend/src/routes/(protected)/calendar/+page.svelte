@@ -1,15 +1,15 @@
 <script lang="ts">
-    import { Button } from "$lib/components/ui/button/index.js";
-    import { Checkbox } from "$lib/components/ui/checkbox/index.js";
-    import * as Dialog from "$lib/components/ui/dialog/index.js";
+    import { Button } from "#lib/components/ui/button/index.js";
+    import { Checkbox } from "#lib/components/ui/checkbox/index.js";
+    import * as Dialog from "#lib/components/ui/dialog/index.js";
     import ChevronLeft from "@lucide/svelte/icons/chevron-left";
     import ChevronRight from "@lucide/svelte/icons/chevron-right";
     import Film from "@lucide/svelte/icons/film";
     import Tv from "@lucide/svelte/icons/tv";
     import type { PageData } from "./$types";
-    import { cn } from "$lib/utils";
+    import { cn } from "#lib/utils.js";
     import { MediaQuery } from "svelte/reactivity";
-    import * as dateUtils from "$lib/utils/date";
+    import * as dateUtils from "#lib/utils/date.js";
     import {
         type CalendarDate,
         endOfMonth,
@@ -17,7 +17,7 @@
         getLocalTimeZone,
         startOfMonth
     } from "@internationalized/date";
-    import PageShell from "$lib/components/page-shell.svelte";
+    import PageShell from "#lib/components/page-shell.svelte";
     import { resolve } from "$app/paths";
 
     let { data }: { data: PageData } = $props();
@@ -70,13 +70,13 @@
         if (mediaType === "tv") {
             // For TV items, prefer TVDB ID to skip TMDB→TVDB resolution
             if (item.tvdb_id)
-                return resolve(`/details/media/${item.tvdb_id}/${mediaType}?indexer=tvdb`);
-            if (item.tmdb_id) return resolve(`/details/media/${item.tmdb_id}/${mediaType}`);
+                return resolve(`details/media/${item.tvdb_id}/${mediaType}?indexer=tvdb`);
+            if (item.tmdb_id) return resolve(`details/media/${item.tmdb_id}/${mediaType}`);
         } else {
             // For movies, prefer TMDB ID
-            if (item.tmdb_id) return resolve(`/details/media/${item.tmdb_id}/${mediaType}`);
+            if (item.tmdb_id) return resolve(`details/media/${item.tmdb_id}/${mediaType}`);
             if (item.tvdb_id)
-                return resolve(`/details/media/${item.tvdb_id}/${mediaType}?indexer=tvdb`);
+                return resolve(`details/media/${item.tvdb_id}/${mediaType}?indexer=tvdb`);
         }
         return undefined;
     }

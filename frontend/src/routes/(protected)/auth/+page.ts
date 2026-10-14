@@ -3,9 +3,9 @@ import {
 	authClient,
 	type AuthUser,
 	type LinkedAccount,
-} from "$lib/auth-client";
-import { can } from "$lib/permissions";
-import { createScopedLogger } from "$lib/logger";
+} from "#lib/auth-client.js";
+import { can } from "#lib/permissions.js";
+import { createScopedLogger } from "#lib/logger.js";
 
 const logger = createScopedLogger("profile-page");
 

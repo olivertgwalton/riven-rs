@@ -1,19 +1,19 @@
 <script lang="ts">
     import Menu from "@lucide/svelte/icons/menu";
-    import { Button } from "$lib/components/ui/button/index.js";
-    import NotificationCenter from "$lib/components/notification-center.svelte";
-    import { getContext, onMount } from "svelte";
+    import { Button } from "#lib/components/ui/button/index.js";
+    import NotificationCenter from "#lib/components/notification-center.svelte";
+    import { onMount } from "svelte";
     import Search from "@lucide/svelte/icons/search";
-    import * as Kbd from "$lib/components/ui/kbd/index.js";
-    import * as InputGroup from "$lib/components/ui/input-group/index.js";
+    import * as Kbd from "#lib/components/ui/kbd/index.js";
+    import * as InputGroup from "#lib/components/ui/input-group/index.js";
     import { goto, afterNavigate } from "$app/navigation";
     import { resolve } from "$app/paths";
     import { page } from "$app/state";
-    import { sidebar } from "$lib/stores/global.svelte";
-    import type { SearchStore } from "$lib/services/search-store.svelte";
-    import { parseSearchQuery } from "$lib/search-parser";
+    import { sidebar } from "#lib/stores/global.svelte.js";
+    import { getSearchStore } from "#lib/services/search-store.svelte.js";
+    import { parseSearchQuery } from "#lib/search-parser.js";
 
-    const searchStore = getContext<SearchStore>("searchStore");
+    const searchStore = getSearchStore();
 
     // Detect modifier key client-side only to avoid hydration mismatch
     let modifierKey = $state<string | null>(null);
@@ -68,14 +68,13 @@
             searchStore.syncQuery(parsed);
         }
 
-        const explorePath = resolve("/explore");
+        const explorePath = resolve("explore");
         const searchPath = query
             ? `${explorePath}?query=${encodeURIComponent(query)}`
             : explorePath;
         await goto(searchPath, {
-            keepFocus: true,
-            noScroll: true,
-            replaceState: currentlyExplore
+            reset: false,
+            replace: currentlyExplore
         });
     }
 

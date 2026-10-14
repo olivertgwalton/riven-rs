@@ -1,22 +1,22 @@
 <script lang="ts">
     import type { PageData } from "./$types";
-    import TmdbNowPlaying from "$lib/components/tmdb-now-playing.svelte";
-    import ListCarousel from "$lib/components/list-carousel.svelte";
-    import AnimatedToggle from "$lib/components/animated-toggle.svelte";
-    import { Button } from "$lib/components/ui/button/index.js";
-    import { MediaListStore, type BaseListItem } from "$lib/services/lists-cache.svelte";
-    import PageShell from "$lib/components/page-shell.svelte";
+    import TmdbNowPlaying from "#lib/components/tmdb-now-playing.svelte";
+    import ListCarousel from "#lib/components/list-carousel.svelte";
+    import AnimatedToggle from "#lib/components/animated-toggle.svelte";
+    import { Button } from "#lib/components/ui/button/index.js";
+    import { MediaListStore, type BaseListItem } from "#lib/services/lists-cache.svelte.js";
+    import PageShell from "#lib/components/page-shell.svelte";
     import { fly } from "svelte/transition";
     import { cubicOut } from "svelte/easing";
-    import { subscribeToRivenMediaEvents } from "$lib/services/riven-live-updates";
-    import { gqlClient } from "$lib/graphql-client";
+    import { subscribeToRivenMediaEvents } from "#lib/services/riven-live-updates.js";
+    import { gqlClient } from "#lib/graphql-client.js";
     import {
         getRecentItemsVariables,
         mapRecentItemsPage,
         RECENT_ITEMS_QUERY,
         type RecentListItem,
         type RecentItemsResponse
-    } from "$lib/services/recent-items";
+    } from "#lib/services/recent-items.js";
 
     let { data }: { data: PageData } = $props();
 

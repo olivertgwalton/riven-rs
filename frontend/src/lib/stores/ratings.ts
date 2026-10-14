@@ -1,4 +1,4 @@
-import { gqlClient } from "$lib/graphql-client";
+import { gqlClient } from "#lib/graphql-client.js";
 
 export interface RatingsData {
 	scores: Array<{

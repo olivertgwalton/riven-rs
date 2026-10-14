@@ -1,6 +1,6 @@
 import type { PageLoad } from "./$types";
-import { gqlClient } from "$lib/graphql-client";
-import { createScopedLogger } from "$lib/logger";
+import { gqlClient } from "#lib/graphql-client.js";
+import { createScopedLogger } from "#lib/logger.js";
 import {
 	ACTIVE_PLAYBACK_QUERY,
 	DEBRID_ACCOUNT_INFO_QUERY,

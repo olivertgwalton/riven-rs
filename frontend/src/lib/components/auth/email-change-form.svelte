@@ -1,12 +1,12 @@
 <script lang="ts">
-    import { emailChangeSchema } from "$lib/schemas/auth";
-    import { Button } from "$lib/components/ui/button/index.js";
-    import { Input } from "$lib/components/ui/input/index.js";
-    import { Label } from "$lib/components/ui/label/index.js";
+    import { emailChangeSchema } from "#lib/schemas/auth.js";
+    import { Button } from "#lib/components/ui/button/index.js";
+    import { Input } from "#lib/components/ui/input/index.js";
+    import { Label } from "#lib/components/ui/label/index.js";
     import { toast } from "svelte-sonner";
     import LoaderCircle from "@lucide/svelte/icons/loader-circle";
-    import { invalidateAll } from "$app/navigation";
-    import { authClient } from "$lib/auth-client";
+    import { refreshAll } from "$app/navigation";
+    import { authClient } from "#lib/auth-client.js";
     import FormBase from "./form-base.svelte";
     import { validateForm } from "./validate";
 
@@ -33,7 +33,7 @@
 
         // riven sends no confirmation mail, so the address is already live —
         // reload so the header stops showing the old one.
-        await invalidateAll();
+        await refreshAll();
         toast.success("Email changed successfully.");
     }
 </script>

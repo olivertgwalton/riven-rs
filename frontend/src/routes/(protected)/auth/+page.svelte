@@ -1,24 +1,24 @@
 <script lang="ts">
     import type { PageProps } from "./$types";
-    import { authClient } from "$lib/auth-client";
+    import { authClient } from "#lib/auth-client.js";
     import { goto } from "$app/navigation";
     import { resolve } from "$app/paths";
-    import { Button } from "$lib/components/ui/button/index.js";
-    import { Badge } from "$lib/components/ui/badge/index.js";
-    import { Input } from "$lib/components/ui/input/index.js";
-    import { Label } from "$lib/components/ui/label/index.js";
-    import * as AlertDialog from "$lib/components/ui/alert-dialog/index.js";
-    import * as Avatar from "$lib/components/ui/avatar/index.js";
-    import Passkeys from "$lib/components/auth/passkeys.svelte";
-    import PasswordChangeForm from "$lib/components/auth/password-change-form.svelte";
-    import EmailChangeForm from "$lib/components/auth/email-change-form.svelte";
-    import AccountLinks from "$lib/components/auth/account-links.svelte";
-    import UpdateUserForm from "$lib/components/auth/update-user-form.svelte";
-    import UserManagement from "$lib/components/auth/user-management.svelte";
-    import * as dateUtils from "$lib/utils/date";
-    import { getInitials } from "$lib/utils";
+    import { Button } from "#lib/components/ui/button/index.js";
+    import { Badge } from "#lib/components/ui/badge/index.js";
+    import { Input } from "#lib/components/ui/input/index.js";
+    import { Label } from "#lib/components/ui/label/index.js";
+    import * as AlertDialog from "#lib/components/ui/alert-dialog/index.js";
+    import * as Avatar from "#lib/components/ui/avatar/index.js";
+    import Passkeys from "#lib/components/auth/passkeys.svelte";
+    import PasswordChangeForm from "#lib/components/auth/password-change-form.svelte";
+    import EmailChangeForm from "#lib/components/auth/email-change-form.svelte";
+    import AccountLinks from "#lib/components/auth/account-links.svelte";
+    import UpdateUserForm from "#lib/components/auth/update-user-form.svelte";
+    import UserManagement from "#lib/components/auth/user-management.svelte";
+    import * as dateUtils from "#lib/utils/date.js";
+    import { getInitials } from "#lib/utils.js";
     import { toast } from "svelte-sonner";
-    import PageShell from "$lib/components/page-shell.svelte";
+    import PageShell from "#lib/components/page-shell.svelte";
 
     let { data }: PageProps = $props();
 
@@ -39,7 +39,7 @@
 
     async function signOut() {
         await authClient.signOut();
-        await goto(resolve("/auth/login"));
+        await goto(resolve("auth/login"));
     }
 
     async function deleteAccount() {
@@ -52,7 +52,7 @@
             return;
         }
         deleteOpen = false;
-        await goto(resolve("/auth/login"));
+        await goto(resolve("auth/login"));
     }
 </script>
 

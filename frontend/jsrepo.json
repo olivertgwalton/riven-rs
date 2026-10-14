@@ -7,10 +7,10 @@
 	"formatter": "biome",
 	"configFiles": {},
 	"paths": {
-		"*": "$lib/blocks",
-		"ui": "$lib/components/ui/extras",
-		"hooks": "$lib/hooks",
-		"actions": "$lib/actions",
-		"utils": "$lib"
+		"*": "#lib/blocks",
+		"ui": "#lib/components/ui/extras",
+		"hooks": "#lib/hooks",
+		"actions": "#lib/actions",
+		"utils": "#lib"
 	}
 }

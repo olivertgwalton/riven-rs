@@ -1,24 +1,23 @@
 <script lang="ts">
-    import { setContext } from "svelte";
-    import ListItem from "$lib/components/list-item.svelte";
-    import { Button } from "$lib/components/ui/button/index.js";
-    import PortraitCardSkeleton from "$lib/components/media/portrait-card-skeleton.svelte";
+    import ListItem from "#lib/components/list-item.svelte";
+    import { Button } from "#lib/components/ui/button/index.js";
+    import PortraitCardSkeleton from "#lib/components/media/portrait-card-skeleton.svelte";
     import { onMount } from "svelte";
-    import { SearchStore } from "$lib/services/search-store.svelte";
-    import { FilterStore, SORT_OPTIONS } from "$lib/services/filter-store.svelte";
-    import FilterPopover from "$lib/components/filter-popover.svelte";
-    import * as Select from "$lib/components/ui/select/index.js";
+    import { SearchStore, setSearchStore } from "#lib/services/search-store.svelte.js";
+    import { FilterStore, setFilterStore, SORT_OPTIONS } from "#lib/services/filter-store.svelte.js";
+    import FilterPopover from "#lib/components/filter-popover.svelte";
+    import * as Select from "#lib/components/ui/select/index.js";
     import XIcon from "@lucide/svelte/icons/x";
     import ArrowUpDownIcon from "@lucide/svelte/icons/arrow-up-down";
-    import PageShell from "$lib/components/page-shell.svelte";
+    import PageShell from "#lib/components/page-shell.svelte";
 
     let searchStore = new SearchStore();
     let filterStore = new FilterStore();
     let loadMoreTrigger = $state<HTMLDivElement | null>(null);
 
     // Provide stores to children (like FilterPopover)
-    setContext("searchStore", searchStore);
-    setContext("filterStore", filterStore);
+    setSearchStore(searchStore);
+    setFilterStore(filterStore);
 
     let isTriggerVisible = $state(false);
 
@@ -79,7 +78,7 @@
 <PageShell class="bg-background relative flex min-h-screen flex-col overflow-x-hidden">
     <!-- Immersive Background -->
     <div class="pointer-events-none fixed inset-0 z-0">
-        <div class="absolute inset-0 bg-gradient-to-b from-zinc-900 via-zinc-950 to-black"></div>
+        <div class="absolute inset-0 bg-linear-to-b from-zinc-900 via-zinc-950 to-black"></div>
         <div
             class="bg-primary/5 absolute top-[-20%] left-[-10%] h-[600px] w-[600px] rounded-full blur-[120px]">
         </div>

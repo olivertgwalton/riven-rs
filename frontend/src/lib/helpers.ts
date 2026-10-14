@@ -1,7 +1,7 @@
 /**
  * Small presentation helpers with no better home.
  *
- * Date handling lives in `$lib/utils/date` — import it directly rather than
+ * Date handling lives in `#lib/utils/date` — import it directly rather than
  * re-exporting through here.
  */
 

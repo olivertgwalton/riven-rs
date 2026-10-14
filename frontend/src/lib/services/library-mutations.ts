@@ -5,7 +5,7 @@
  * inline strings across the media item-action and item-request components.
  */
 
-import { gqlClient } from "$lib/graphql-client";
+import { gqlClient } from "#lib/graphql-client.js";
 
 type ItemsMutation =
 	| "resetItems"

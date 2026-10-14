@@ -1,7 +1,7 @@
 <script lang="ts">
-    import * as Carousel from "$lib/components/ui/carousel/index.js";
+    import * as Carousel from "#lib/components/ui/carousel/index.js";
     import ListItem from "./list-item.svelte";
-    import PortraitCardSkeleton from "$lib/components/media/portrait-card-skeleton.svelte";
+    import PortraitCardSkeleton from "#lib/components/media/portrait-card-skeleton.svelte";
 
     let { data = $bindable(), indexer = undefined, type = "" } = $props();
 </script>

@@ -1,5 +1,5 @@
-import { gqlSubscribeClient } from "$lib/graphql-client";
-import { createScopedLogger } from "$lib/logger";
+import { gqlSubscribeClient } from "#lib/graphql-client.js";
+import { createScopedLogger } from "#lib/logger.js";
 import { SvelteSet } from "svelte/reactivity";
 
 const logger = createScopedLogger("notifications");

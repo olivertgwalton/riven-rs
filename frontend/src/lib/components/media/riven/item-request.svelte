@@ -1,13 +1,13 @@
 <script lang="ts">
-    import { can } from "$lib/permissions";
-    import { gqlClient } from "$lib/graphql-client";
-    import { retryItems, toNumericIds } from "$lib/services/library-mutations";
+    import { can } from "#lib/permissions.js";
+    import { gqlClient } from "#lib/graphql-client.js";
+    import { retryItems, toNumericIds } from "#lib/services/library-mutations.js";
     import { toast } from "svelte-sonner";
-    import * as AlertDialog from "$lib/components/ui/alert-dialog/index.js";
-    import { Button } from "$lib/components/ui/button/index.js";
+    import * as AlertDialog from "#lib/components/ui/alert-dialog/index.js";
+    import { Button } from "#lib/components/ui/button/index.js";
     import Loader2 from "@lucide/svelte/icons/loader-2";
     import SeasonSelector, { type SeasonInfo } from "./season-selector.svelte";
-    import { createScopedLogger } from "$lib/logger";
+    import { createScopedLogger } from "#lib/logger.js";
     import type { Snippet } from "svelte";
     import { page } from "$app/state";
 

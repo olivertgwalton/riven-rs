@@ -1,12 +1,12 @@
 <script lang="ts">
     import Eye from "@lucide/svelte/icons/eye";
     import EyeOff from "@lucide/svelte/icons/eye-off";
-    import * as ButtonGroup from "$lib/components/ui/button-group/index.js";
-    import { Button } from "$lib/components/ui/button/index.js";
-    import { Input } from "$lib/components/ui/input/index.js";
-    import { Label } from "$lib/components/ui/label/index.js";
-    import * as Select from "$lib/components/ui/select/index.js";
-    import { Switch } from "$lib/components/ui/switch/index.js";
+    import * as ButtonGroup from "#lib/components/ui/button-group/index.js";
+    import { Button } from "#lib/components/ui/button/index.js";
+    import { Input } from "#lib/components/ui/input/index.js";
+    import { Label } from "#lib/components/ui/label/index.js";
+    import * as Select from "#lib/components/ui/select/index.js";
+    import { Switch } from "#lib/components/ui/switch/index.js";
     import { settingsSwitchClass } from "./helpers";
     import SettingFieldEditor from "./setting-field-editor.svelte";
     import type { SettingFieldDef } from "./types";
@@ -259,7 +259,7 @@
     }
 </script>
 
-<div class:rounded-lg={!nested} class:border={!nested} class:p-4={!nested} class="space-y-3">
+<div class={["space-y-3", !nested && "rounded-lg border p-4"]}>
     {#if field.type === "object" && field.display === "tabs"}
         {@const objectValue = ensureObject(field.fields ?? [])}
         {@const tabs = field.fields ?? []}

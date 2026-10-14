@@ -1,6 +1,6 @@
 <script lang="ts">
-    import { Button } from "$lib/components/ui/button/index.js";
-    import * as Card from "$lib/components/ui/card/index.js";
+    import { Button } from "#lib/components/ui/button/index.js";
+    import * as Card from "#lib/components/ui/card/index.js";
     import SetupPluginCard from "./setup-plugin-card.svelte";
     import type { SettingsSection, SetupPluginSection } from "./types";
 

@@ -1,7 +1,7 @@
 <script lang="ts">
-    import * as Accordion from "$lib/components/ui/accordion/index.js";
-    import { Button } from "$lib/components/ui/button/index.js";
-    import * as Card from "$lib/components/ui/card/index.js";
+    import * as Accordion from "#lib/components/ui/accordion/index.js";
+    import { Button } from "#lib/components/ui/button/index.js";
+    import * as Card from "#lib/components/ui/card/index.js";
     import SettingFieldEditor from "./setting-field-editor.svelte";
     import type { SetupGeneralSection, SetupProfileView } from "./types";
 

@@ -1,23 +1,23 @@
 <script lang="ts">
-    import PageShell from "$lib/components/page-shell.svelte";
-    import { gqlClient } from "$lib/graphql-client";
-    import { cn } from "$lib/utils";
+    import PageShell from "#lib/components/page-shell.svelte";
+    import { gqlClient } from "#lib/graphql-client.js";
+    import { cn } from "#lib/utils.js";
     import type { PageData } from "./$types";
-    import ActivityCard from "$lib/components/dashboard/activity-card.svelte";
-    import LibraryChartsCard from "$lib/components/dashboard/library-charts-card.svelte";
-    import ReleaseYearCard from "$lib/components/dashboard/release-year-card.svelte";
-    import ServiceStatusCard from "$lib/components/dashboard/service-status-card.svelte";
-    import DownloaderServicesGrid from "$lib/components/dashboard/downloader-services-grid.svelte";
-    import WatchingNowCard from "$lib/components/dashboard/watching-now-card.svelte";
-    import UsenetProvidersCard from "$lib/components/dashboard/usenet-providers-card.svelte";
-    import UsenetActivityCard from "$lib/components/dashboard/usenet-activity-card.svelte";
-    import UsenetHealthCard from "$lib/components/dashboard/usenet-health-card.svelte";
-    import IndexerStatsCard from "$lib/components/dashboard/indexer-stats-card.svelte";
+    import ActivityCard from "#lib/components/dashboard/activity-card.svelte";
+    import LibraryChartsCard from "#lib/components/dashboard/library-charts-card.svelte";
+    import ReleaseYearCard from "#lib/components/dashboard/release-year-card.svelte";
+    import ServiceStatusCard from "#lib/components/dashboard/service-status-card.svelte";
+    import DownloaderServicesGrid from "#lib/components/dashboard/downloader-services-grid.svelte";
+    import WatchingNowCard from "#lib/components/dashboard/watching-now-card.svelte";
+    import UsenetProvidersCard from "#lib/components/dashboard/usenet-providers-card.svelte";
+    import UsenetActivityCard from "#lib/components/dashboard/usenet-activity-card.svelte";
+    import UsenetHealthCard from "#lib/components/dashboard/usenet-health-card.svelte";
+    import IndexerStatsCard from "#lib/components/dashboard/indexer-stats-card.svelte";
     import type {
         ActivePlaybackSession,
         DebridUserInfo,
         IndexerStats
-    } from "$lib/gql/schema";
+    } from "#lib/gql/schema.js";
     import {
         ACTIVE_PLAYBACK_QUERY,
         EMPTY_TITLE_SUMMARY,
@@ -30,7 +30,7 @@
         type UsenetHealthResult
     } from "./queries";
     import { onMount } from "svelte";
-    import { subscribeToRivenMediaEvents } from "$lib/services/riven-live-updates";
+    import { subscribeToRivenMediaEvents } from "#lib/services/riven-live-updates.js";
 
     let { data }: { data: PageData } = $props();
 

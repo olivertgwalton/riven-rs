@@ -1,14 +1,14 @@
 import type { PageLoad } from "./$types";
-import { createScopedLogger } from "$lib/logger";
-import { gqlClient } from "$lib/graphql-client";
-import { fetchTmdbTrending } from "$lib/services/backend-metadata";
+import { createScopedLogger } from "#lib/logger.js";
+import { gqlClient } from "#lib/graphql-client.js";
+import { fetchTmdbTrending } from "#lib/services/backend-metadata.js";
 import {
 	getRecentItemsVariables,
 	mapRecentItemsPage,
 	RECENT_ITEMS_QUERY,
 	type RecentListItem,
 	type RecentItemsResponse,
-} from "$lib/services/recent-items";
+} from "#lib/services/recent-items.js";
 
 const logger = createScopedLogger("home");
 

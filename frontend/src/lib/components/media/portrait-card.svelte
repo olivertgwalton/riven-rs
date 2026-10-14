@@ -1,7 +1,7 @@
 <script lang="ts">
     import Mountain from "@lucide/svelte/icons/mountain";
     import Check from "@lucide/svelte/icons/check";
-    import { cn } from "$lib/utils";
+    import { cn } from "#lib/utils.js";
     import type { Snippet } from "svelte";
 
     interface Props {

@@ -3,7 +3,7 @@
     import { resolve } from "$app/paths";
     import { untrack } from "svelte";
     import { toast } from "svelte-sonner";
-    import { gqlClient } from "$lib/graphql-client";
+    import { gqlClient } from "#lib/graphql-client.js";
     import {
         buildGeneralSections,
         buildPluginSections,
@@ -128,7 +128,7 @@
     async function finishSetup() {
         try {
             await gqlClient(COMPLETE_INITIAL_SETUP);
-            await goto(resolve("/"));
+            await goto(resolve(""));
         } catch {
             toast.error("Failed to complete setup");
         }

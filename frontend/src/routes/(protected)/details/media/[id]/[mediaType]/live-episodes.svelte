@@ -1,20 +1,20 @@
 <script lang="ts">
-    import { Badge } from "$lib/components/ui/badge/index.js";
-    import * as Drawer from "$lib/components/ui/drawer/index.js";
-    import * as Sheet from "$lib/components/ui/sheet/index.js";
-    import LandscapeCard from "$lib/components/media/landscape-card.svelte";
-    import StatusBadge from "$lib/components/media/status-badge.svelte";
-    import ItemAction from "$lib/components/media/riven/item-action.svelte";
-    import ItemManualScrape from "$lib/components/media/riven/item-manual-scrape.svelte";
-    import { isMobile } from "$lib/stores/global.svelte";
-    import type { EpisodeSummary } from "$lib/gql/schema";
-    import type { MediaMetadata, Maybe } from "$lib/gql/schema";
-    import { formatBytes } from "$lib/helpers";
+    import { Badge } from "#lib/components/ui/badge/index.js";
+    import * as Drawer from "#lib/components/ui/drawer/index.js";
+    import * as Sheet from "#lib/components/ui/sheet/index.js";
+    import LandscapeCard from "#lib/components/media/landscape-card.svelte";
+    import StatusBadge from "#lib/components/media/status-badge.svelte";
+    import ItemAction from "#lib/components/media/riven/item-action.svelte";
+    import ItemManualScrape from "#lib/components/media/riven/item-manual-scrape.svelte";
+    import { isMobile } from "#lib/stores/global.svelte.js";
+    import type { EpisodeSummary } from "#lib/gql/schema.js";
+    import type { MediaMetadata, Maybe } from "#lib/gql/schema.js";
+    import { formatBytes } from "#lib/helpers.js";
     import {
         getFilesystemEntryLabel,
         type GqlEpisodeFull,
         type GqlFilesystemEntry
-    } from "$lib/services/riven-media";
+    } from "#lib/services/riven-media.js";
     import { untrack } from "svelte";
     import RotateCcw from "@lucide/svelte/icons/rotate-ccw";
     import RefreshCw from "@lucide/svelte/icons/refresh-cw";

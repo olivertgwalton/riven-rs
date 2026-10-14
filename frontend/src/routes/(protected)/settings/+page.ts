@@ -1,7 +1,7 @@
 import type { PageLoad } from "./$types";
 import { error } from "@sveltejs/kit";
-import { gqlClient } from "$lib/graphql-client";
-import { requireCapability } from "$lib/permissions";
+import { gqlClient } from "#lib/graphql-client.js";
+import { requireCapability } from "#lib/permissions.js";
 import type {
 	CustomProfile,
 	InstanceStatus,
@@ -9,7 +9,7 @@ import type {
 	SettingFieldDef,
 	SettingsSection,
 	SetupGroup,
-} from "$lib/components/settings/types";
+} from "#lib/components/settings/types.js";
 
 // Initial data is loaded server-side (SSR); every mutation runs client-side via
 // `gqlClient` (see operations.ts), matching the rest of the app.

@@ -1,6 +1,6 @@
-import { browser } from "$app/environment";
-import { createScopedLogger } from "$lib/logger";
-import { deduplicateById } from "$lib/utils";
+import { browser } from "$app/env";
+import { createScopedLogger } from "#lib/logger.js";
+import { deduplicateById } from "#lib/utils.js";
 
 const logger = createScopedLogger("lists-cache");
 

@@ -1,14 +1,14 @@
 <script lang="ts">
-    import * as Carousel from "$lib/components/ui/carousel/index.js";
+    import * as Carousel from "#lib/components/ui/carousel/index.js";
     import { fly } from "svelte/transition";
     import { cubicOut } from "svelte/easing";
-    import type { CarouselAPI } from "$lib/components/ui/carousel/context.js";
-    import type { TmdbListItem } from "$lib/gql/schema";
-    import { gqlClient } from "$lib/graphql-client";
-    import { getSeasonAndYear } from "$lib/utils/date";
-    import { Button } from "$lib/components/ui/button/index.js";
-    import { Skeleton } from "$lib/components/ui/skeleton/index.js";
-    import { getRatings } from "$lib/stores/ratings";
+    import type { CarouselAPI } from "#lib/components/ui/carousel/context.js";
+    import type { TmdbListItem } from "#lib/gql/schema.js";
+    import { gqlClient } from "#lib/graphql-client.js";
+    import { getSeasonAndYear } from "#lib/utils/date.js";
+    import { Button } from "#lib/components/ui/button/index.js";
+    import { Skeleton } from "#lib/components/ui/skeleton/index.js";
+    import { getRatings } from "#lib/stores/ratings.js";
     import { ChevronLeft, ChevronRight, Star } from "@lucide/svelte";
 
     interface Props {

@@ -1,5 +1,5 @@
 <script lang="ts">
-    import { Input } from "$lib/components/ui/input/index.js";
+    import { Input } from "#lib/components/ui/input/index.js";
 
     // `value` is a "YYYY-MM-DD" string ("" when empty) — the native date input's own format.
     let { value = $bindable(""), ...restProps }: { value?: string; "aria-label"?: string } =

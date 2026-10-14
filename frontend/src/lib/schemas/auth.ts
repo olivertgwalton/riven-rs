@@ -17,7 +17,7 @@ export const passwordChangeSchema = z
 		revokeSessions: z.coerce.boolean<boolean>(),
 	})
 	.refine((data) => data.newPassword === data.confirmNewPassword, {
-		message: "New password and confirmation do not match.",
+		error: "New password and confirmation do not match.",
 		path: ["confirmNewPassword"],
 	});
 
@@ -71,7 +71,7 @@ export const createUserSchema = z
 		role: userRoleSchema.default("user"),
 	})
 	.refine((data) => data.password === data.confirmPassword, {
-		message: "Password and confirmation do not match.",
+		error: "Password and confirmation do not match.",
 		path: ["confirmPassword"],
 	});
 

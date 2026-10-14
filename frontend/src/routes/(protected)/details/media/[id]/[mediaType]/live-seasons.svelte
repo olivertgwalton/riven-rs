@@ -1,10 +1,10 @@
 <script lang="ts">
-    import * as Carousel from "$lib/components/ui/carousel/index.js";
-    import PortraitCard from "$lib/components/media/portrait-card.svelte";
-    import StatusBadge from "$lib/components/media/status-badge.svelte";
-    import { cn } from "$lib/utils";
-    import type { SeasonSummary } from "$lib/gql/schema";
-    import type { GqlSeasonFull } from "$lib/services/riven-media";
+    import * as Carousel from "#lib/components/ui/carousel/index.js";
+    import PortraitCard from "#lib/components/media/portrait-card.svelte";
+    import StatusBadge from "#lib/components/media/status-badge.svelte";
+    import { cn } from "#lib/utils.js";
+    import type { SeasonSummary } from "#lib/gql/schema.js";
+    import type { GqlSeasonFull } from "#lib/services/riven-media.js";
 
     interface Props {
         seasons: SeasonSummary[];

@@ -1,15 +1,15 @@
 <script lang="ts">
-    import { can } from "$lib/permissions";
-    import { formatBytes } from "$lib/helpers";
-    import { invalidateAll } from "$app/navigation";
-    import { gqlClient } from "$lib/graphql-client";
+    import { can } from "#lib/permissions.js";
+    import { formatBytes } from "#lib/helpers.js";
+    import { refreshAll } from "$app/navigation";
+    import { gqlClient } from "#lib/graphql-client.js";
     import { toast } from "svelte-sonner";
     import type { Snippet } from "svelte";
-    import * as Dialog from "$lib/components/ui/dialog/index.js";
-    import { Button } from "$lib/components/ui/button/index.js";
-    import { Label } from "$lib/components/ui/label/index.js";
-    import { Badge } from "$lib/components/ui/badge/index.js";
-    import { Input } from "$lib/components/ui/input/index.js";
+    import * as Dialog from "#lib/components/ui/dialog/index.js";
+    import { Button } from "#lib/components/ui/button/index.js";
+    import { Label } from "#lib/components/ui/label/index.js";
+    import { Badge } from "#lib/components/ui/badge/index.js";
+    import { Input } from "#lib/components/ui/input/index.js";
     import LoaderCircle from "@lucide/svelte/icons/loader-circle";
     import WandSparkles from "@lucide/svelte/icons/wand-sparkles";
     import ChevronLeft from "@lucide/svelte/icons/chevron-left";
@@ -215,7 +215,7 @@
                     : "Item created and stream queued for download"
             );
             open = false;
-            await invalidateAll();
+            await refreshAll();
         } catch (e) {
             error = e instanceof Error ? e.message : "Failed to start download";
             toast.error(error);

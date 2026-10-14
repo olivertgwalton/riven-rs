@@ -6,8 +6,8 @@
     Author: Felipe Izolan 
     */
 
-    import { getColor } from "$lib/helpers";
-    import { getCalendar } from "$lib/utils/date";
+    import { getColor } from "#lib/helpers.js";
+    import { getCalendar } from "#lib/utils/date.js";
     import type { MouseEventHandler, FocusEventHandler } from "svelte/elements";
 
     type Props = {

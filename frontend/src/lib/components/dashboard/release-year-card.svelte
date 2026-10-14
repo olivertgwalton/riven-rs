@@ -1,5 +1,5 @@
 <script lang="ts">
-    import * as Chart from "$lib/components/ui/chart/index.js";
+    import * as Chart from "#lib/components/ui/chart/index.js";
     import { LineChart } from "layerchart";
     import { curveCatmullRom } from "d3-shape";
 

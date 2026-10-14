@@ -4,15 +4,15 @@
     import { onDestroy } from "svelte";
     import X from "@lucide/svelte/icons/x";
     import Search from "@lucide/svelte/icons/search";
-    import PortraitCard from "$lib/components/media/portrait-card.svelte";
-    import PortraitCardSkeleton from "$lib/components/media/portrait-card-skeleton.svelte";
+    import PortraitCard from "#lib/components/media/portrait-card.svelte";
+    import PortraitCardSkeleton from "#lib/components/media/portrait-card-skeleton.svelte";
     import { fly, fade } from "svelte/transition";
     import { cubicOut } from "svelte/easing";
-    import type { TmdbListItem } from "$lib/gql/schema";
-    import { gqlClient } from "$lib/graphql-client";
+    import type { TmdbListItem } from "#lib/gql/schema.js";
+    import { gqlClient } from "#lib/graphql-client.js";
     import {
         SEARCH_TMDB_PAGE_QUERY
-    } from "$lib/services/backend-metadata";
+    } from "#lib/services/backend-metadata.js";
 
     interface Props {
         open: boolean;
@@ -181,7 +181,7 @@
         navigatedFromModal = true;
         pendingNavigation = true;
         // Keep modal open — it will be hidden after the new page loads
-        goto(resolve(`/details/media/${item.id}/${item.mediaType}`));
+        goto(resolve(`details/media/${item.id}/${item.mediaType}`));
     }
 
     afterNavigate((navigation) => {

@@ -17,7 +17,7 @@ import type {
 	MediaItemStateTree,
 	SeasonFull,
 	SeasonState,
-} from "$lib/gql/schema";
+} from "#lib/gql/schema.js";
 
 /**
  * The slices of the schema these operations actually select.

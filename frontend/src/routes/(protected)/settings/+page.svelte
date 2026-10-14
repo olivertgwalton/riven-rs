@@ -1,20 +1,20 @@
 <script lang="ts">
-    import { can } from "$lib/permissions";
+    import { can } from "#lib/permissions.js";
     import { toast } from "svelte-sonner";
-    import { gqlClient } from "$lib/graphql-client";
-    import PageShell from "$lib/components/page-shell.svelte";
-    import * as Tabs from "$lib/components/ui/tabs/index.js";
-    import GeneralTab from "$lib/components/settings/general-tab.svelte";
-    import PluginsTab from "$lib/components/settings/plugins-tab.svelte";
-    import RankingTab from "$lib/components/settings/ranking-tab.svelte";
-    import SystemTab from "$lib/components/settings/system-tab.svelte";
+    import { gqlClient } from "#lib/graphql-client.js";
+    import PageShell from "#lib/components/page-shell.svelte";
+    import * as Tabs from "#lib/components/ui/tabs/index.js";
+    import GeneralTab from "#lib/components/settings/general-tab.svelte";
+    import PluginsTab from "#lib/components/settings/plugins-tab.svelte";
+    import RankingTab from "#lib/components/settings/ranking-tab.svelte";
+    import SystemTab from "#lib/components/settings/system-tab.svelte";
     import { page } from "$app/state";
     import type { PageData } from "./$types";
     import type {
         CustomProfile,
         QualityProfile,
         SettingsSection
-    } from "$lib/components/settings/types";
+    } from "#lib/components/settings/types.js";
     import {
         UPDATE_SETTINGS,
         SAVE_CUSTOM_PROFILE,
@@ -22,7 +22,7 @@
         SET_PROFILE_ENABLED,
         UPDATE_PROFILE_SETTINGS,
         CUSTOM_PROFILES
-    } from "$lib/components/settings/operations";
+    } from "#lib/components/settings/operations.js";
     import { untrack } from "svelte";
 
     let { data }: { data: PageData } = $props();

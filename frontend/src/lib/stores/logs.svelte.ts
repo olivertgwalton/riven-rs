@@ -1,6 +1,6 @@
-import { gqlSubscribeClient } from "$lib/graphql-client";
-import { gqlClient } from "$lib/graphql-client";
-import { createScopedLogger } from "$lib/logger";
+import { gqlSubscribeClient } from "#lib/graphql-client.js";
+import { gqlClient } from "#lib/graphql-client.js";
+import { createScopedLogger } from "#lib/logger.js";
 
 const logger = createScopedLogger("logs");
 

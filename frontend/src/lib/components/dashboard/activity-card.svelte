@@ -1,5 +1,5 @@
 <script lang="ts">
-    import Heatmap from "$lib/components/heatmap.svelte";
+    import Heatmap from "#lib/components/heatmap.svelte";
 
     let { activity }: { activity: Record<string, number> } = $props();
 
