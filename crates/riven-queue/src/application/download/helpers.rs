@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use riven_core::types::DownloadFile;
-use riven_db::entities::Stream;
+use riven_db::entities::{MediaItem, Stream};
 use riven_db::repo;
 
 /// The parsed resolution of a stream, falling back to `"unknown"` when the
@@ -84,18 +84,29 @@ pub fn is_persistable_video_file(filename: &str) -> bool {
 
 pub use riven_core::filename::looks_obfuscated;
 
-/// Whether a parsed file names this episode: by season+episode when the file
-/// carries seasons, otherwise by absolute number.
+/// The season/episode releases use for an episode: its scene numbering when
+/// TheXEM knows it, else TVDB's (`season`, `episode`).
+pub fn release_numbers(item: &MediaItem, season: i32, episode: i32) -> (i32, i32) {
+    match (item.scene_season_number, item.scene_episode_number) {
+        (Some(s), Some(e)) => (s, e),
+        _ => (season, episode),
+    }
+}
+
+/// Whether a parsed file names episode `ep` of TVDB season `season`: by
+/// season+episode (scene numbering when known) when the file carries
+/// seasons, otherwise by absolute number.
 pub fn matches_episode_lookup(
     parsed: &riven_rank::ParsedData,
+    ep: &MediaItem,
     season: i32,
-    ep: i32,
-    abs: Option<i32>,
 ) -> bool {
     if parsed.seasons.is_empty() {
-        abs.is_some_and(|abs| parsed.episodes.contains(&abs))
+        ep.absolute_number
+            .is_some_and(|abs| parsed.episodes.contains(&abs))
     } else {
-        parsed.seasons.contains(&season) && parsed.episodes.contains(&ep)
+        let (season, episode) = release_numbers(ep, season, ep.episode_number.unwrap_or(1));
+        parsed.seasons.contains(&season) && parsed.episodes.contains(&episode)
     }
 }
 
@@ -171,24 +182,48 @@ pub fn select_episode_files<'a>(
 
 #[cfg(test)]
 mod tests {
-    use super::{is_persistable_video_file, is_sample_file, matches_episode_lookup};
+    use super::{
+        is_persistable_video_file, is_sample_file, matches_episode_lookup, parse_file_path,
+    };
+    use crate::application::download::candidates::tests::media_item;
+    use riven_db::entities::MediaItem;
 
     #[test]
     fn episode_lookup_matches_season_episode_or_absolute() {
+        let ep = |episode, abs| MediaItem {
+            episode_number: Some(episode),
+            absolute_number: abs,
+            ..media_item()
+        };
         let mut parsed = riven_rank::ParsedData {
             seasons: vec![1, 2],
             episodes: vec![3],
             ..Default::default()
         };
-        assert!(matches_episode_lookup(&parsed, 2, 3, None));
-        assert!(!matches_episode_lookup(&parsed, 3, 3, Some(3)));
+        assert!(matches_episode_lookup(&parsed, &ep(3, None), 2));
+        assert!(!matches_episode_lookup(&parsed, &ep(3, Some(3)), 3));
 
         parsed.seasons.clear();
-        assert!(matches_episode_lookup(&parsed, 1, 1, Some(3)));
-        assert!(!matches_episode_lookup(&parsed, 1, 3, None));
+        assert!(matches_episode_lookup(&parsed, &ep(1, Some(3)), 1));
+        assert!(!matches_episode_lookup(&parsed, &ep(3, None), 1));
 
         parsed.episodes.clear();
-        assert!(!matches_episode_lookup(&parsed, 1, 3, Some(3)));
+        assert!(!matches_episode_lookup(&parsed, &ep(3, Some(3)), 1));
+    }
+
+    #[test]
+    fn episode_lookup_prefers_scene_numbering() {
+        // Kitchen Nightmares (US): TVDB S07E05 is scene S08E05, TVDB S08E05
+        // is scene S09E05.
+        let scene = |season, episode| MediaItem {
+            episode_number: Some(5),
+            scene_season_number: Some(season),
+            scene_episode_number: Some(episode),
+            ..media_item()
+        };
+        let parsed = parse_file_path("Kitchen.Nightmares.S08E05.1080p.HULU-ViETNAM.mkv");
+        assert!(matches_episode_lookup(&parsed, &scene(8, 5), 7));
+        assert!(!matches_episode_lookup(&parsed, &scene(9, 5), 8));
     }
 
     #[test]

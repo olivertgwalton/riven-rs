@@ -24,6 +24,9 @@ pub struct ParseContext {
     pub season_number: Option<i32>,
     pub episode_number: Option<i32>,
     pub absolute_number: Option<i32>,
+    /// The episode's scene (season, episode) from TheXEM. When set, releases
+    /// are numbered this way instead of by `season_number`/`episode_number`.
+    pub scene: Option<(i32, i32)>,
     pub item_year: Option<i32>,
     pub parent_year: Option<i32>,
     pub item_country: Option<String>,
@@ -157,8 +160,11 @@ fn validate(ctx: &ParseContext, parsed: &riven_rank::ParsedData) -> Option<Strin
                 }
                 return Some("no seasons or episodes for episode item".into());
             }
+            let (season_num, ep_num) = ctx.scene.unwrap_or((
+                ctx.season_number.unwrap_or(0),
+                ctx.episode_number.unwrap_or(0),
+            ));
             if has_episodes {
-                let ep_num = ctx.episode_number.unwrap_or(0);
                 let matches_relative = parsed.episodes.contains(&ep_num);
                 let matches_absolute = ctx
                     .absolute_number
@@ -170,14 +176,11 @@ fn validate(ctx: &ParseContext, parsed: &riven_rank::ParsedData) -> Option<Strin
                     ));
                 }
             }
-            if has_seasons {
-                let season_num = ctx.season_number.unwrap_or(0);
-                if !parsed.seasons.contains(&season_num) {
-                    return Some(format!(
-                        "incorrect season number for episode item: {:?} does not include season {}",
-                        parsed.seasons, season_num
-                    ));
-                }
+            if has_seasons && !parsed.seasons.contains(&season_num) {
+                return Some(format!(
+                    "incorrect season number for episode item: {:?} does not include season {}",
+                    parsed.seasons, season_num
+                ));
             }
         }
         MediaItemType::Season => {
@@ -467,6 +470,7 @@ mod tests {
             season_number: Some(9),
             episode_number: Some(1),
             absolute_number: None,
+            scene: None,
             item_year: None,
             parent_year: None,
             item_country: Some("gbr".to_string()),
@@ -570,6 +574,23 @@ mod tests {
         let ranked = rank_streams(ctx, streams);
         assert_eq!(ranked.len(), 1);
         assert_eq!(ranked[0].info_hash, "b");
+    }
+
+    #[test]
+    fn validate_uses_scene_numbering_when_known() {
+        // Kitchen Nightmares (US), tvdb 80552: TVDB S07E05 "Juicy Box" is
+        // scene S08E05, and TVDB S08E05 "3 Southern Girls" is scene S09E05.
+        let parsed = riven_rank::parse("Kitchen.Nightmares.S08E05.1080p.HULU-ViETNAM");
+        let ctx = |season, scene| ParseContext {
+            season_number: Some(season),
+            episode_number: Some(5),
+            scene: Some(scene),
+            item_country: None,
+            correct_title: "Kitchen Nightmares".to_string(),
+            ..episode_ctx()
+        };
+        assert_eq!(validate(&ctx(7, (8, 5)), &parsed), None);
+        assert!(validate(&ctx(8, (9, 5)), &parsed).is_some());
     }
 
     #[test]

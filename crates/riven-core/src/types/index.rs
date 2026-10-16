@@ -100,6 +100,9 @@ pub struct IndexedEpisode {
     pub runtime: Option<i32>,
     pub poster_path: Option<String>,
     pub content_rating: Option<ContentRating>,
+    /// Season/episode as release groups number it (TheXEM), when known.
+    #[serde(default)]
+    pub scene: Option<(i32, i32)>,
 }
 
 fn merge_anime_flag(current: Option<bool>, incoming: Option<bool>) -> Option<bool> {

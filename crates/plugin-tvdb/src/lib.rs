@@ -23,9 +23,12 @@ pub const PROFILE: HttpServiceProfile =
 /// TVmaze's own docs document 20 calls/10s and explicitly recommend sending
 /// without pacing and backing off on the 429 they return — reactive-only.
 pub(crate) const TVMAZE_PROFILE: HttpServiceProfile = HttpServiceProfile::new("tvmaze");
+/// TheXEM documents no rate limit; reactive-only like TVmaze.
+pub(crate) const XEM_PROFILE: HttpServiceProfile = HttpServiceProfile::new("thexem");
 
 const TVDB_BASE_URL: &str = "https://api4.thetvdb.com/v4/";
 const TVMAZE_BASE_URL: &str = "https://api.tvmaze.com/";
+const XEM_BASE_URL: &str = "https://thexem.info/";
 const TOKEN_EXPIRY: Duration = Duration::from_secs(25 * 24 * 3600);
 
 #[derive(Default)]
@@ -112,7 +115,14 @@ impl Plugin for TvdbPlugin {
             .await
             .ok()
             .flatten();
-        let indexed = fetch_series(&ctx.http, &token, tvdb_id, timezone).await?;
+        let mut indexed = fetch_series(&ctx.http, &token, tvdb_id, timezone).await?;
+        // Best-effort: without a scene map, episodes keep TVDB numbering only.
+        match fetch_scene_map(&ctx.http, tvdb_id).await {
+            Ok(map) => apply_scene_map(&mut indexed, &map),
+            Err(e) => {
+                tracing::warn!(tvdb_id, error = %e, "thexem: could not fetch scene numbering")
+            }
+        }
         Ok(HookResponse::Index(Box::new(indexed)))
     }
 }
@@ -129,6 +139,56 @@ async fn fetch_tvmaze_timezone(
         .network
         .and_then(|n| n.country)
         .and_then(|c| c.timezone))
+}
+
+/// TVDB (season, episode) → scene (season, episode). Empty when TheXEM has
+/// no map for the show (it answers `"result": "failure"` with no data).
+// ponytail: skips `/map/havemap`; one `/map/all` call costs the same and
+// answers "no map" by itself.
+async fn fetch_scene_map(
+    http: &riven_core::http::HttpClient,
+    tvdb_id: &str,
+) -> anyhow::Result<HashMap<(i32, i32), (i32, i32)>> {
+    let url = format!("{XEM_BASE_URL}map/all?id={tvdb_id}&origin=tvdb");
+    let resp: XemResponse = http
+        .get_json(XEM_PROFILE, url.clone(), |client| client.get(&url))
+        .await?;
+    Ok(resp
+        .data
+        .into_iter()
+        .map(|m| {
+            (
+                (m.tvdb.season, m.tvdb.episode),
+                (m.scene.season, m.scene.episode),
+            )
+        })
+        .collect())
+}
+
+fn apply_scene_map(indexed: &mut IndexedMediaItem, map: &HashMap<(i32, i32), (i32, i32)>) {
+    for season in indexed.seasons.iter_mut().flatten() {
+        for ep in &mut season.episodes {
+            ep.scene = map.get(&(season.number, ep.number)).copied();
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct XemResponse {
+    #[serde(default)]
+    data: Vec<XemMapping>,
+}
+
+#[derive(Deserialize)]
+struct XemMapping {
+    tvdb: XemNumber,
+    scene: XemNumber,
+}
+
+#[derive(Deserialize)]
+struct XemNumber {
+    season: i32,
+    episode: i32,
 }
 
 async fn fetch_series(
@@ -232,6 +292,7 @@ async fn fetch_series(
             runtime: ep.runtime,
             poster_path: artwork_url(ep.image.as_deref(), Artwork::Poster),
             content_rating: None,
+            scene: None,
         };
 
         season_map.entry(season_num).or_default().push(indexed_ep);

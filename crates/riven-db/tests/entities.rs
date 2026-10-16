@@ -32,6 +32,8 @@ fn sample_movie(title: &str, year: Option<i32>, tmdb_id: Option<&str>) -> MediaI
         state: MediaItemState::Indexed,
         failed_attempts: 0,
         last_scrape_attempt_at: None,
+        scene_season_number: None,
+        scene_episode_number: None,
         item_type: MediaItemType::Movie,
         is_requested: true,
         show_status: None,

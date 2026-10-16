@@ -71,6 +71,11 @@ pub struct Model {
     pub network_timezone: Option<String>,
     pub aired_at_utc: Option<DateTimeUtc>,
     pub last_scrape_attempt_at: Option<DateTimeUtc>,
+    /// Episode numbering release groups use (TheXEM), when it is known.
+    #[graphql(skip)]
+    pub scene_season_number: Option<i32>,
+    #[graphql(skip)]
+    pub scene_episode_number: Option<i32>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

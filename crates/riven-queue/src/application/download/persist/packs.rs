@@ -91,15 +91,12 @@ pub async fn persist_season(
     let mut episode_matches: Vec<(&MediaItem, Vec<(&DownloadFile, riven_rank::ParsedData)>)> =
         Vec::with_capacity(episodes.len());
     for ep in &episodes {
-        let episode_number = ep.episode_number.unwrap_or(1);
         let matched: Vec<(&DownloadFile, riven_rank::ParsedData)> = parsed_video_files
             .iter()
             .zip(&named_owner)
             .filter(|((_, p), owner)| match owner {
                 Some(owner) => *owner == ep.id,
-                None => {
-                    matches_episode_lookup(p, season_number, episode_number, ep.absolute_number)
-                }
+                None => matches_episode_lookup(p, ep, season_number),
             })
             .map(|(fp, _)| fp)
             .map(|(f, p)| (*f, p.clone()))
@@ -352,17 +349,9 @@ pub async fn persist_show(
             episodes
                 .iter()
                 .map(|ep| {
-                    let episode_number = ep.episode_number.unwrap_or(1);
                     let matched = parsed_video_files
                         .iter()
-                        .filter(|(_, p)| {
-                            matches_episode_lookup(
-                                p,
-                                season_number,
-                                episode_number,
-                                ep.absolute_number,
-                            )
-                        })
+                        .filter(|(_, p)| matches_episode_lookup(p, ep, season_number))
                         .map(|(f, p)| (*f, p.clone()))
                         .collect();
                     (ep, matched)

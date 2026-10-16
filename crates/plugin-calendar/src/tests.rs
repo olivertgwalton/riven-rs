@@ -31,6 +31,8 @@ fn media_item(item_type: MediaItemType, title: &str) -> MediaItem {
         state: MediaItemState::Unreleased,
         failed_attempts: 0,
         last_scrape_attempt_at: None,
+        scene_season_number: None,
+        scene_episode_number: None,
         item_type,
         is_requested: false,
         show_status: None::<ShowStatus>,

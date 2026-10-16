@@ -183,6 +183,7 @@ pub async fn build_parse_item_context_with_hierarchy(
         season_number: item.season_number,
         episode_number: item.episode_number,
         absolute_number: item.absolute_number,
+        scene: item.scene_season_number.zip(item.scene_episode_number),
         item_year: item.year,
         parent_year,
         item_country: item

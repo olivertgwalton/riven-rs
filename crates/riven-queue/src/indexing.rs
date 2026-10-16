@@ -68,6 +68,7 @@ pub async fn apply_indexed_media_item(
                     item.item_request_id,
                     season_requested,
                     Some(season_data.number),
+                    ep_data.scene,
                 )
                 .await?;
             }

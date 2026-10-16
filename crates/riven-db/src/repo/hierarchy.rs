@@ -342,6 +342,7 @@ pub async fn create_episode(
     item_request_id: Option<i64>,
     is_requested: bool,
     season_number: Option<i32>,
+    scene: Option<(i32, i32)>,
 ) -> Result<MediaItem> {
     let now = Utc::now();
     let default_title = format!("Episode {number:02}");
@@ -366,8 +367,8 @@ pub async fn create_episode(
     // 'episode' DO UPDATE … RETURNING *. Raw statement for the partial-index
     // conflict target and the enum-bearing RETURNING. The bound state is passed
     // as text and cast to media_item_state in the VALUES clause.
-    let sql = r#"INSERT INTO media_items (title, tvdb_id, item_type, state, episode_number, absolute_number, runtime, parent_id, aired_at, aired_at_utc, is_requested, season_number, created_at, item_request_id)
-           VALUES ($1, $2, 'episode', $3::media_item_state, $4, $5, $6, $7, $8, $13, $9, $10, $11, $12)
+    let sql = r#"INSERT INTO media_items (title, tvdb_id, item_type, state, episode_number, absolute_number, runtime, parent_id, aired_at, aired_at_utc, is_requested, season_number, created_at, item_request_id, scene_season_number, scene_episode_number)
+           VALUES ($1, $2, 'episode', $3::media_item_state, $4, $5, $6, $7, $8, $13, $9, $10, $11, $12, $14, $15)
            ON CONFLICT (parent_id, episode_number) WHERE item_type = 'episode'
            DO UPDATE SET
                title           = EXCLUDED.title,
@@ -377,6 +378,8 @@ pub async fn create_episode(
                runtime         = COALESCE(EXCLUDED.runtime, media_items.runtime),
                absolute_number = COALESCE(EXCLUDED.absolute_number, media_items.absolute_number),
                season_number   = COALESCE(EXCLUDED.season_number, media_items.season_number),
+               scene_season_number  = COALESCE(EXCLUDED.scene_season_number, media_items.scene_season_number),
+               scene_episode_number = COALESCE(EXCLUDED.scene_episode_number, media_items.scene_episode_number),
                is_requested    = EXCLUDED.is_requested OR media_items.is_requested,
                -- Transition unreleased episodes that have since aired, preferring precise UTC time
                state = CASE
@@ -409,6 +412,8 @@ pub async fn create_episode(
             now.into(),
             item_request_id.into(),
             aired_at_utc.into(),
+            scene.map(|(s, _)| s).into(),
+            scene.map(|(_, e)| e).into(),
         ],
     ))
     .one(orm())

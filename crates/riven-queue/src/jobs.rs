@@ -143,8 +143,9 @@ impl ScrapeJob {
             imdb_id: show_imdb_id,
             tvdb_id: show_tvdb_id,
             title: show_title,
-            season: item.season_number,
-            episode: item.episode_number,
+            // Scrapers search by the numbering releases use, when known.
+            season: item.scene_season_number.or(item.season_number),
+            episode: item.scene_episode_number.or(item.episode_number),
             rate_limit_retries: 0,
         }
     }

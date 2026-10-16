@@ -187,14 +187,14 @@ fn pack_preference(item: &MediaItem, parsed: &ParsedData) -> i64 {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::{TitleMatchContext, rank_streams_for_profile};
     use riven_core::types::MediaItemType;
     use riven_db::entities::{MediaItem, Stream};
     use riven_rank::RankSettings;
     use std::collections::HashMap;
 
-    fn media_item() -> MediaItem {
+    pub(crate) fn media_item() -> MediaItem {
         MediaItem {
             id: 1,
             title: "Shrek 2".to_string(),
@@ -223,6 +223,8 @@ mod tests {
             state: riven_core::types::MediaItemState::Scraped,
             failed_attempts: 0,
             last_scrape_attempt_at: None,
+            scene_season_number: None,
+            scene_episode_number: None,
             item_type: MediaItemType::Movie,
             is_requested: false,
             show_status: None,

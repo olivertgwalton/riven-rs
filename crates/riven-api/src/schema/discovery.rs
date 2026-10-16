@@ -124,6 +124,7 @@ pub fn build_discovery_targets(
                   season_number: Option<i32>,
                   episode_number: Option<i32>,
                   absolute_number: Option<i32>,
+                  scene: Option<(i32, i32)>,
                   season_episodes: Vec<(i32, Option<i32>)>| {
         // A movie's year is its own; an episode or season inherits the show's.
         let is_movie = item_type == MediaItemType::Movie;
@@ -137,6 +138,7 @@ pub fn build_discovery_targets(
                 season_number,
                 episode_number,
                 absolute_number,
+                scene,
                 item_year: if is_movie { indexed.year } else { None },
                 parent_year: if is_movie { None } else { indexed.year },
                 item_country: indexed.country.clone(),
@@ -162,7 +164,14 @@ pub fn build_discovery_targets(
     };
 
     match item_type {
-        MediaItemType::Movie => Ok(vec![target(MediaItemType::Movie, None, None, None, vec![])]),
+        MediaItemType::Movie => Ok(vec![target(
+            MediaItemType::Movie,
+            None,
+            None,
+            None,
+            None,
+            vec![],
+        )]),
         MediaItemType::Show => {
             let all_seasons = indexed.seasons.clone().unwrap_or_default();
             let selected: Vec<i32> = if let Some(numbers) = seasons {
@@ -218,6 +227,7 @@ pub fn build_discovery_targets(
                     Some(number),
                     Some(episode_number),
                     episode.absolute_number,
+                    episode.scene,
                     season_episodes(season),
                 )]);
             }
@@ -234,6 +244,7 @@ pub fn build_discovery_targets(
                 targets.push(target(
                     MediaItemType::Season,
                     Some(number),
+                    None,
                     None,
                     None,
                     season_episodes(season),
@@ -282,8 +293,15 @@ pub async fn discover_streams(
             imdb_id,
             tvdb_id,
             &target.scrape_title,
-            target.season_number,
-            target.episode_number,
+            // Scrapers search by the numbering releases use, when known.
+            target
+                .parse_ctx
+                .scene
+                .map_or(target.season_number, |(s, _)| Some(s)),
+            target
+                .parse_ctx
+                .scene
+                .map_or(target.episode_number, |(_, e)| Some(e)),
         )
         .await;
         let ranked = tokio::task::spawn_blocking({

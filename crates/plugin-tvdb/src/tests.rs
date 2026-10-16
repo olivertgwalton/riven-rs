@@ -57,3 +57,50 @@ fn runtime_deserializer_accepts_integer_float_and_missing_values() {
     assert_eq!(float.runtime, Some(22));
     assert_eq!(missing.runtime, None);
 }
+
+#[test]
+fn scene_map_applies_thexem_numbering() {
+    let resp: XemResponse = serde_json::from_str(
+        r#"{"result":"success","data":[
+            {"scene":{"season":8,"episode":5,"absolute":97},"tvdb":{"season":7,"episode":5,"absolute":97}}
+        ]}"#,
+    )
+    .unwrap();
+    let map = resp
+        .data
+        .into_iter()
+        .map(|m| {
+            (
+                (m.tvdb.season, m.tvdb.episode),
+                (m.scene.season, m.scene.episode),
+            )
+        })
+        .collect();
+    let mut indexed = IndexedMediaItem {
+        seasons: Some(vec![IndexedSeason {
+            number: 7,
+            episodes: vec![
+                IndexedEpisode {
+                    number: 5,
+                    ..Default::default()
+                },
+                IndexedEpisode {
+                    number: 6,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        }]),
+        ..Default::default()
+    };
+    apply_scene_map(&mut indexed, &map);
+    let eps = &indexed.seasons.unwrap()[0].episodes;
+    assert_eq!(eps[0].scene, Some((8, 5)));
+    assert_eq!(eps[1].scene, None);
+
+    let none: XemResponse = serde_json::from_str(
+        r#"{"result":"failure","data":[],"message":"no show with the tvdb_id 1 found"}"#,
+    )
+    .unwrap();
+    assert!(none.data.is_empty());
+}
