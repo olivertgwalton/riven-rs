@@ -164,7 +164,12 @@ pub async fn build_parse_item_context_with_hierarchy(
         load_dubbed_anime_only(),
         async {
             match hierarchy.and_then(|h| h.resolved_show_id) {
-                Some(show_id) if item.item_type == MediaItemType::Episode => {
+                Some(show_id)
+                    if matches!(
+                        item.item_type,
+                        MediaItemType::Episode | MediaItemType::Season
+                    ) =>
+                {
                     load_show_episodes(item.id, show_id).await
                 }
                 _ => vec![],

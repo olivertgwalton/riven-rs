@@ -36,6 +36,54 @@ pub(crate) fn release_numberings(
     scene.into_iter().chain((!taken).then_some(tvdb)).collect()
 }
 
+/// The scene season a whole TVDB season ships as: TheXEM maps every one of
+/// its episodes to one scene season that no other TVDB season uses (Kitchen
+/// Nightmares' TVDB S07 is scene S08). `None` when it maps to itself, is
+/// split (KN's TVDB S01 is scene S01 + S02) or shared (every Naruto Shippuden
+/// season is scene S01): no single pack number names it then.
+pub fn season_scene_number(season: i32, show_episodes: &[ShowEpisode]) -> Option<i32> {
+    let mut own = show_episodes
+        .iter()
+        .filter(|e| e.season == season)
+        .map(|e| e.scene.map(|(s, _)| s));
+    let first = own.next()??;
+    let shared = show_episodes
+        .iter()
+        .any(|e| e.season != season && e.scene.is_some_and(|(s, _)| s == first));
+    (first != season && own.all(|s| s == Some(first)) && !shared).then_some(first)
+}
+
+/// Season numbers a pack may use for TVDB `season`, each with the episode
+/// numbers a pack under it should hold: its scene season (above), and TVDB's
+/// own unless other seasons' episodes ship under that number while this
+/// season's don't (a KN "S07" pack is TVDB S06).
+fn season_pack_numberings(
+    season: i32,
+    tvdb_episodes: HashSet<i32>,
+    show_episodes: &[ShowEpisode],
+) -> Vec<(i32, HashSet<i32>)> {
+    let scene = season_scene_number(season, show_episodes).map(|scene_season| {
+        let eps = show_episodes
+            .iter()
+            .filter(|e| e.season == season)
+            .filter_map(|e| e.scene.map(|(_, ep)| ep))
+            .collect();
+        (scene_season, eps)
+    });
+    let used_by_others = show_episodes
+        .iter()
+        .any(|e| e.season != season && e.scene.is_some_and(|(s, _)| s == season));
+    let all_own = show_episodes
+        .iter()
+        .filter(|e| e.season == season)
+        .all(|e| e.scene.is_some_and(|(s, _)| s == season));
+    let taken = used_by_others && !all_own;
+    scene
+        .into_iter()
+        .chain((!taken).then_some((season, tvdb_episodes)))
+        .collect()
+}
+
 #[derive(Clone)]
 pub struct ParseContext {
     pub item_type: MediaItemType,
@@ -218,22 +266,24 @@ fn validate(ctx: &ParseContext, parsed: &riven_rank::ParsedData) -> Option<Strin
                 }
             } else {
                 let season_num = ctx.season_number.unwrap_or(1);
-                if !parsed.seasons.contains(&season_num) {
+                let numberings = season_pack_numberings(
+                    season_num,
+                    ctx.season_episodes.iter().map(|(ep, _)| *ep).collect(),
+                    &ctx.show_episodes,
+                );
+                let torrent_eps: HashSet<i32> = parsed.episodes.iter().copied().collect();
+                let Some((_, want_eps)) = numberings
+                    .iter()
+                    .find(|(season, _)| parsed.seasons.contains(season))
+                else {
                     return Some(format!(
-                        "incorrect season number for season item: {:?} does not include season {}",
-                        parsed.seasons, season_num
+                        "incorrect season number for season item: {:?} does not include season {:?}",
+                        parsed.seasons,
+                        numberings.iter().map(|(s, _)| s).collect::<Vec<_>>()
                     ));
-                }
-                if has_episodes {
-                    let rel_eps: HashSet<i32> =
-                        ctx.season_episodes.iter().map(|(ep, _)| *ep).collect();
-                    if !rel_eps.is_empty() {
-                        let torrent_eps: HashSet<i32> = parsed.episodes.iter().copied().collect();
-                        let intersection = rel_eps.intersection(&torrent_eps).count();
-                        if intersection != rel_eps.len() {
-                            return Some("incorrect episodes for season item".into());
-                        }
-                    }
+                };
+                if has_episodes && !want_eps.is_empty() && !want_eps.is_subset(&torrent_eps) {
+                    return Some("incorrect episodes for season item".into());
                 }
             }
         }
@@ -474,7 +524,8 @@ fn merge_json_value(base: &mut Value, override_value: &Value) {
 #[cfg(test)]
 mod tests {
     use super::{
-        ParseContext, ShowEpisode, merge_builtin_profile_settings, rank_streams, validate,
+        ParseContext, ShowEpisode, merge_builtin_profile_settings, rank_streams,
+        season_scene_number, validate,
     };
     use riven_core::types::MediaItemType;
     use riven_rank::QualityProfile;
@@ -652,6 +703,72 @@ mod tests {
         }
         let parsed = riven_rank::parse("Naruto.Shippuden.S01E01.1080p.WEB-GROUP");
         assert!(validate(&ctx, &parsed).is_some());
+    }
+
+    #[test]
+    fn season_packs_use_the_scene_season_when_unshared() {
+        // Kitchen Nightmares (US): TVDB S01 is scene S01+S02, then every
+        // TVDB season n is scene n+1.
+        let ep = |season, episode, scene| ShowEpisode {
+            id: None,
+            season,
+            episode,
+            title: String::new(),
+            scene: Some(scene),
+        };
+        let mut show_episodes = vec![ep(1, 1, (1, 1)), ep(1, 2, (2, 1))];
+        for season in 2..=8 {
+            show_episodes.extend((1..=3).map(|e| ep(season, e, (season + 1, e))));
+        }
+        assert_eq!(season_scene_number(7, &show_episodes), Some(8));
+        assert_eq!(season_scene_number(1, &show_episodes), None, "split");
+
+        let ctx = |season| ParseContext {
+            item_type: MediaItemType::Season,
+            season_number: Some(season),
+            episode_number: None,
+            season_episodes: (1..=3).map(|e| (e, None)).collect(),
+            item_country: None,
+            show_episodes: show_episodes.clone(),
+            correct_title: "Kitchen Nightmares".to_string(),
+            ..episode_ctx()
+        };
+        let pack = |title| riven_rank::parse(title);
+        assert_eq!(
+            validate(
+                &ctx(7),
+                &pack("Kitchen.Nightmares.US.S08.1080p.WEB.h264-BAE")
+            ),
+            None
+        );
+        assert!(
+            validate(
+                &ctx(7),
+                &pack("Kitchen.Nightmares.US.S07.1080p.WEB.h264-BAE")
+            )
+            .is_some(),
+            "scene S07 is TVDB S06"
+        );
+        assert!(
+            validate(&ctx(2), &pack("Kitchen.Nightmares.US.S02.720p.HDTV-GROUP")).is_some(),
+            "scene S02 is half of TVDB S01"
+        );
+
+        // Naruto Shippuden: every TVDB season is scene S01, so no season
+        // has a scene pack number and TVDB-numbered packs still count.
+        let shared: Vec<ShowEpisode> = (1..=3)
+            .flat_map(|season| (1..=3).map(move |e| ep(season, e, (1, season * 3 + e))))
+            .collect();
+        assert_eq!(season_scene_number(2, &shared), None);
+        let ctx = ParseContext {
+            show_episodes: shared,
+            correct_title: "Naruto Shippuden".to_string(),
+            ..ctx(2)
+        };
+        assert_eq!(
+            validate(&ctx, &pack("Naruto.Shippuden.S02.1080p.WEB-GROUP")),
+            None
+        );
     }
 
     #[test]

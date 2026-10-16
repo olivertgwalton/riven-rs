@@ -115,13 +115,25 @@ pub async fn start(id: i64, job: &ScrapeJob, queue: &JobQueue) {
     // Cinemeta's (usually TVDB's), indexers by the release's own. When
     // TheXEM's scene numbering differs, ask again with it; `validate` drops
     // whichever releases belong to another episode.
-    let scene = item.scene_season_number.zip(item.scene_episode_number);
-    if let Some((season, episode)) = scene.filter(|s| Some(*s) != job.season.zip(job.episode)) {
-        outcomes.extend(
-            queue
-                .fan_out_and_collect(&scrape_event(job, (Some(season), Some(episode))))
-                .await,
-        );
+    let scene = match item.item_type {
+        MediaItemType::Episode => item
+            .scene_season_number
+            .zip(item.scene_episode_number)
+            .filter(|s| Some(*s) != job.season.zip(job.episode))
+            .map(|(season, episode)| (Some(season), Some(episode))),
+        // Season packs: only when the whole season ships as one scene season.
+        MediaItemType::Season => match (item.parent_id, job.season) {
+            (Some(show_id), Some(season)) => crate::discovery::season_scene_number(
+                season,
+                &crate::context::load_show_episodes(id, show_id).await,
+            )
+            .map(|scene_season| (Some(scene_season), None)),
+            _ => None,
+        },
+        _ => None,
+    };
+    if let Some(numbers) = scene {
+        outcomes.extend(queue.fan_out_and_collect(&scrape_event(job, numbers)).await);
     }
     if outcomes.is_empty() {
         tracing::warn!(

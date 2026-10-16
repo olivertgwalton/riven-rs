@@ -8,6 +8,7 @@ use riven_db::entities::MediaItem;
 use riven_db::repo;
 use riven_queue::discovery::{
     ParseContext, ShowEpisode, load_active_profiles, load_dubbed_anime_only, rank_streams,
+    season_scene_number,
 };
 use riven_queue::indexing::apply_indexed_media_item;
 use riven_queue::lifecycle::{upsert_requested_movie, upsert_requested_show};
@@ -300,11 +301,19 @@ pub async fn discover_streams(
         .await;
         // Indexers number by the release, Stremio addons by Cinemeta: ask
         // with the scene numbering too when it differs (see `scrape::start`).
-        if let Some((season, episode)) = target
-            .parse_ctx
-            .scene
-            .filter(|s| Some(*s) != target.season_number.zip(target.episode_number))
-        {
+        let scene = match target.item_type {
+            MediaItemType::Episode => target
+                .parse_ctx
+                .scene
+                .filter(|s| Some(*s) != target.season_number.zip(target.episode_number))
+                .map(|(season, episode)| (Some(season), Some(episode))),
+            MediaItemType::Season => target
+                .season_number
+                .and_then(|season| season_scene_number(season, &target.parse_ctx.show_episodes))
+                .map(|scene_season| (Some(scene_season), None)),
+            _ => None,
+        };
+        if let Some((season, episode)) = scene {
             scraped.extend(
                 run_scrape_discovery(
                     registry,
@@ -312,8 +321,8 @@ pub async fn discover_streams(
                     imdb_id,
                     tvdb_id,
                     &target.scrape_title,
-                    Some(season),
-                    Some(episode),
+                    season,
+                    episode,
                 )
                 .await,
             );
