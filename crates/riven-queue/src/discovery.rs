@@ -241,7 +241,19 @@ fn validate(ctx: &ParseContext, parsed: &riven_rank::ParsedData) -> Option<Strin
                 (!has_episodes || matches_absolute || parsed.episodes.contains(&episode))
                     && (!has_seasons || parsed.seasons.contains(&season))
             };
-            if !numberings.iter().any(matches) && (has_seasons || !matches_absolute) {
+            // A title naming this very episode outranks any number: Amazon
+            // ships KN's TVDB S06E10 "Revisited #9" as "S06E10.Revisited.No.9",
+            // which is TVDB S05E10's scene number.
+            let names_this = crate::application::download::event_match::named_episode(
+                &parsed.raw_title,
+                &ctx.show_episodes,
+                |e| e.title.as_str(),
+            )
+            .is_some_and(|e| {
+                (Some(e.season), Some(e.episode)) == (ctx.season_number, ctx.episode_number)
+            });
+            if !names_this && !numberings.iter().any(matches) && (has_seasons || !matches_absolute)
+            {
                 return Some(format!(
                     "incorrect season/episode for episode item: seasons {:?} episodes {:?} match none of {numberings:?} (abs {:?})",
                     parsed.seasons, parsed.episodes, ctx.absolute_number
@@ -676,6 +688,36 @@ mod tests {
         // of it still count.
         let parsed = riven_rank::parse("Kitchen.Nightmares.S07E05.720p.WEB-GROUP");
         assert_eq!(validate(&ctx(7, (8, 5)), &parsed), None);
+    }
+
+    #[test]
+    fn validate_accepts_a_title_naming_this_episode_whatever_its_number() {
+        // Kitchen Nightmares: TVDB S06E10 "Revisited #9" is scene S07E10, and
+        // S06E10 is TVDB S05E10's scene number.
+        let ep = |season, episode, scene, title: &str| ShowEpisode {
+            id: None,
+            season,
+            episode,
+            title: title.to_string(),
+            scene: Some(scene),
+        };
+        let ctx = ParseContext {
+            season_number: Some(6),
+            episode_number: Some(10),
+            scene: Some((7, 10)),
+            item_country: None,
+            show_episodes: vec![
+                ep(5, 10, (6, 10), "Spanish Pavillion"),
+                ep(6, 10, (7, 10), "Revisited #9"),
+            ],
+            correct_title: "Kitchen Nightmares".to_string(),
+            ..episode_ctx()
+        };
+        let titled =
+            riven_rank::parse("Kitchen.Nightmares.S06E10.Revisited.No.9.480p.AMZN.WEB-DL-SiGMA");
+        assert_eq!(validate(&ctx, &titled), None);
+        let untitled = riven_rank::parse("Kitchen.Nightmares.S06E10.1080p.WEB-GROUP");
+        assert!(validate(&ctx, &untitled).is_some());
     }
 
     #[test]
