@@ -291,6 +291,30 @@ fn is_episode_code(tok: &str) -> bool {
     digits(season) && eps.split('e').all(digits)
 }
 
+/// Tokens for title comparison: release groups drop apostrophes ("Leos"),
+/// spell out "&", and write TVDB's "(1)" / "#8" as "Part One" / "No 8", so
+/// number words become digits and "part"/"pt"/"no" before a number go.
+fn title_tokens(text: &str) -> Vec<String> {
+    const NUMBERS: [&str; 10] = [
+        "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+    ];
+    let toks: Vec<String> = tokens(&text.replace(['\'', '\u{2019}'], "").replace('&', " and "))
+        .into_iter()
+        .map(|t| match NUMBERS.iter().position(|n| *n == t) {
+            Some(i) => (i + 1).to_string(),
+            None => t,
+        })
+        .collect();
+    let is_number = |t: Option<&String>| t.is_some_and(|t| t.bytes().all(|b| b.is_ascii_digit()));
+    toks.iter()
+        .enumerate()
+        .filter(|(i, t)| {
+            !(matches!(t.as_str(), "part" | "pt" | "no") && is_number(toks.get(i + 1)))
+        })
+        .map(|(_, t)| t.clone())
+        .collect()
+}
+
 /// The episode a release names by title right after its `SxxEyy` token
 /// ("Kitchen.Nightmares.S09E11.Simmer.Down.1080p" → "Simmer Down"). Release
 /// numbering doesn't always follow TVDB's (a run TVDB calls season 8 can ship
@@ -299,12 +323,6 @@ fn is_episode_code(tok: &str) -> bool {
 /// `None` when the release names none of `episodes`.
 // ponytail: a one-word title that is also a release tag ("Proper") can
 // false-match; add a tag stop-list if that ever bites.
-/// Tokens for title comparison: release groups drop apostrophes ("Leos")
-/// and spell out "&".
-fn title_tokens(text: &str) -> Vec<String> {
-    tokens(&text.replace(['\'', '\u{2019}'], "").replace('&', " and "))
-}
-
 pub fn named_episode<'a, T>(
     release: &str,
     episodes: &'a [T],
@@ -482,6 +500,20 @@ mod tests {
             None
         );
         assert_eq!(named("Simmer.Down.1080p"), None, "no episode code");
+        let parts = ["La Galleria 33 (1)", "La Galleria 33 (2)", "Revisited #8"];
+        let named = |r| named_episode(r, &parts, |t| t).copied();
+        assert_eq!(
+            named("Kitchen.Nightmares.S05E01.La.Galleria.33.Part.One.480p.AMZN"),
+            Some("La Galleria 33 (1)")
+        );
+        assert_eq!(
+            named("Kitchen.Nightmares.US.S06E02.La.Galleria.33.Part.2.576p"),
+            Some("La Galleria 33 (2)")
+        );
+        assert_eq!(
+            named("Kitchen.Nightmares.S05E06.Revisited.No.8.480p"),
+            Some("Revisited #8")
+        );
         let dupes = ["Pilot", "Pilot"];
         assert_eq!(named_episode("Show.S02E01.Pilot.720p", &dupes, |t| t), None);
     }
