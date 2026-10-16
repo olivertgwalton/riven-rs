@@ -6,6 +6,18 @@ use riven_rank::rank::RankError;
 use riven_rank::{QualityProfile, RankSettings};
 use serde_json::Value;
 
+/// One episode of the item's show, so a release that names a different
+/// episode than its `SxxEyy` claims can be routed to that episode.
+#[derive(Clone)]
+pub struct ShowEpisode {
+    /// `None` for index-only discovery: a contradicting release can only be
+    /// dropped there, not reassigned.
+    pub id: Option<i64>,
+    pub season: i32,
+    pub episode: i32,
+    pub title: String,
+}
+
 #[derive(Clone)]
 pub struct ParseContext {
     pub item_type: MediaItemType,
@@ -22,6 +34,9 @@ pub struct ParseContext {
     /// sports-style releases that carry no SxxExx numbering.
     pub item_title: String,
     pub item_aired_at: Option<chrono::NaiveDate>,
+    /// Every episode of the show, for episode items; empty disables the
+    /// episode-title check.
+    pub show_episodes: Vec<ShowEpisode>,
     pub correct_title: String,
     pub aliases: HashMap<String, Vec<String>>,
     pub profiles: Vec<(String, RankSettings)>,
@@ -35,6 +50,9 @@ pub struct RankedStreamCandidate {
     pub parsed_data: Option<serde_json::Value>,
     pub rank: Option<i64>,
     pub file_size_bytes: Option<u64>,
+    /// Set when the release names another episode of the show by title: the
+    /// stream belongs to that episode, not the one being scraped.
+    pub reassign_to: Option<i64>,
 }
 
 fn log_rank_rejection(info_hash: &str, title: &str, profile_name: Option<&str>, error: &RankError) {
@@ -238,15 +256,43 @@ pub fn rank_streams(
             let title = &entry.title;
             let parsed = riven_rank::parse(title);
 
-            if let Some(reason) = validate(&ctx, &parsed) {
-                tracing::debug!(
-                    info_hash,
-                    title,
-                    reason,
-                    "parse: release does not belong to this item"
-                );
-                return None;
-            }
+            let named = (ctx.item_type == MediaItemType::Episode)
+                .then(|| {
+                    crate::application::download::event_match::named_episode(
+                        &parsed.raw_title,
+                        &ctx.show_episodes,
+                        |e| e.title.as_str(),
+                    )
+                })
+                .flatten()
+                .filter(|e| {
+                    (Some(e.season), Some(e.episode)) != (ctx.season_number, ctx.episode_number)
+                });
+            let reassign_to = match named {
+                Some(other) => {
+                    tracing::debug!(
+                        info_hash,
+                        title,
+                        season = other.season,
+                        episode = other.episode,
+                        episode_title = %other.title,
+                        "parse: release names a different episode by title"
+                    );
+                    Some(other.id?)
+                }
+                None => {
+                    if let Some(reason) = validate(&ctx, &parsed) {
+                        tracing::debug!(
+                            info_hash,
+                            title,
+                            reason,
+                            "parse: release does not belong to this item"
+                        );
+                        return None;
+                    }
+                    None
+                }
+            };
 
             let best = ctx
                 .profiles
@@ -310,6 +356,7 @@ pub fn rank_streams(
                 parsed_data: parsed_value,
                 rank,
                 file_size_bytes: entry.file_size_bytes,
+                reassign_to,
             })
         })
         .collect()
@@ -406,7 +453,9 @@ fn merge_json_value(base: &mut Value, override_value: &Value) {
 
 #[cfg(test)]
 mod tests {
-    use super::{ParseContext, merge_builtin_profile_settings, validate};
+    use super::{
+        ParseContext, ShowEpisode, merge_builtin_profile_settings, rank_streams, validate,
+    };
     use riven_core::types::MediaItemType;
     use riven_rank::QualityProfile;
     use serde_json::json;
@@ -426,6 +475,7 @@ mod tests {
             show_status: None,
             item_title: "Episode 1".to_string(),
             item_aired_at: None,
+            show_episodes: vec![],
             correct_title: "Top Gear".to_string(),
             aliases: HashMap::new(),
             profiles: vec![],
@@ -464,6 +514,62 @@ mod tests {
         let ctx = episode_ctx();
         let parsed = riven_rank::parse("Top.Gear.UK.S09E01.1080p.WEB.x264-GROUP");
         assert_eq!(validate(&ctx, &parsed), None);
+    }
+
+    #[test]
+    fn release_naming_another_episode_is_reassigned_to_it() {
+        // TVDB has "Simmer Down" as S08E11; releases ship it as S09E11, which
+        // TVDB gives to a different episode.
+        let ep = |id, season, episode, title: &str| ShowEpisode {
+            id: Some(id),
+            season,
+            episode,
+            title: title.to_string(),
+        };
+        let ctx = ParseContext {
+            season_number: Some(9),
+            episode_number: Some(11),
+            item_country: None,
+            item_title: "Wick 'n Ore Kitchen & Tap".to_string(),
+            correct_title: "Kitchen Nightmares".to_string(),
+            show_episodes: vec![
+                ep(1, 8, 11, "Simmer Down"),
+                ep(2, 9, 11, "Wick 'n Ore Kitchen & Tap"),
+            ],
+            ..episode_ctx()
+        };
+        let streams = HashMap::from([
+            (
+                "a".to_string(),
+                riven_core::types::ScrapeEntry::new(
+                    "Kitchen.Nightmares.S09E11.Simmer.Down.1080p.AMZN.WEB-DL-FLUX",
+                ),
+            ),
+            (
+                "b".to_string(),
+                riven_core::types::ScrapeEntry::new("Kitchen.Nightmares.S09E11.1080p.WEB-EDITH"),
+            ),
+        ]);
+        let ranked = rank_streams(ctx.clone(), streams.clone());
+        let by_hash: HashMap<_, _> = ranked
+            .iter()
+            .map(|c| (c.info_hash.as_str(), c.reassign_to))
+            .collect();
+        assert_eq!(by_hash.get("a"), Some(&Some(1)));
+        assert_eq!(by_hash.get("b"), Some(&None));
+
+        // Without DB ids (index-only discovery) it is dropped instead.
+        let ctx = ParseContext {
+            show_episodes: ctx
+                .show_episodes
+                .into_iter()
+                .map(|e| ShowEpisode { id: None, ..e })
+                .collect(),
+            ..ctx
+        };
+        let ranked = rank_streams(ctx, streams);
+        assert_eq!(ranked.len(), 1);
+        assert_eq!(ranked[0].info_hash, "b");
     }
 
     #[test]

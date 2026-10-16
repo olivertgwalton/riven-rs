@@ -4,7 +4,7 @@ use riven_core::types::{MediaItemType, ShowStatus};
 use riven_db::entities::{MediaItem, MediaItemHierarchy};
 use riven_db::repo;
 
-use crate::discovery::{ParseContext, load_active_profiles, load_dubbed_anime_only};
+use crate::discovery::{ParseContext, ShowEpisode, load_active_profiles, load_dubbed_anime_only};
 
 pub struct ShowContext {
     pub title: String,
@@ -156,11 +156,20 @@ pub async fn build_parse_item_context_with_hierarchy(
         (season_episodes, show_season_numbers, show_status),
         profiles,
         dubbed_anime_only,
+        show_episodes,
     ) = tokio::join!(
         resolve_parent_info(&item, hierarchy),
         load_episode_or_season_data(&item),
         load_active_profiles(),
         load_dubbed_anime_only(),
+        async {
+            match hierarchy.and_then(|h| h.resolved_show_id) {
+                Some(show_id) if item.item_type == MediaItemType::Episode => {
+                    load_show_episodes(item.id, show_id).await
+                }
+                _ => vec![],
+            }
+        },
     );
 
     let item_title = match (item.item_type, show_title_for_format.as_deref()) {
@@ -185,6 +194,7 @@ pub async fn build_parse_item_context_with_hierarchy(
         show_status,
         item_title: item.title.clone(),
         item_aired_at: item.aired_at,
+        show_episodes,
         correct_title,
         aliases,
         profiles,
@@ -303,6 +313,37 @@ async fn resolve_parent_info(
 }
 
 /// Load season episodes (Season items) or show season numbers (Show items).
+/// Every episode of a show, for episode-title checks; empty on a DB error.
+pub(crate) async fn load_show_episodes(item_id: i64, show_id: i64) -> Vec<ShowEpisode> {
+    let seasons = match repo::list_seasons(show_id).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(id = item_id, error = %e, "failed to load show seasons for episode-title validation");
+            return vec![];
+        }
+    };
+    let season_ids: Vec<i64> = seasons.iter().map(|s| s.id).collect();
+    let episodes = match repo::list_episodes_for_seasons(&season_ids).await {
+        Ok(e) => e,
+        Err(e) => {
+            tracing::warn!(id = item_id, error = %e, "failed to load show episodes for episode-title validation");
+            return vec![];
+        }
+    };
+    episodes
+        .into_values()
+        .flatten()
+        .filter_map(|e| {
+            Some(ShowEpisode {
+                id: Some(e.id),
+                season: e.season_number?,
+                episode: e.episode_number?,
+                title: e.title,
+            })
+        })
+        .collect()
+}
+
 /// Returns (season_episodes, show_season_numbers, show_status).
 async fn load_episode_or_season_data(
     item: &MediaItem,

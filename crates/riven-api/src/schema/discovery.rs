@@ -7,7 +7,7 @@ use riven_core::types::*;
 use riven_db::entities::MediaItem;
 use riven_db::repo;
 use riven_queue::discovery::{
-    ParseContext, load_active_profiles, load_dubbed_anime_only, rank_streams,
+    ParseContext, ShowEpisode, load_active_profiles, load_dubbed_anime_only, rank_streams,
 };
 use riven_queue::indexing::apply_indexed_media_item;
 use riven_queue::lifecycle::{upsert_requested_movie, upsert_requested_show};
@@ -105,6 +105,21 @@ pub fn build_discovery_targets(
         .clone()
         .unwrap_or_else(|| requested_title.to_string());
     let aliases = indexed.aliases.clone().unwrap_or_default();
+    let show_episodes: Vec<ShowEpisode> = indexed
+        .seasons
+        .iter()
+        .flatten()
+        .flat_map(|season| {
+            season.episodes.iter().filter_map(|episode| {
+                Some(ShowEpisode {
+                    id: None,
+                    season: season.number,
+                    episode: episode.number,
+                    title: episode.title.clone()?,
+                })
+            })
+        })
+        .collect();
     let target = |item_type: MediaItemType,
                   season_number: Option<i32>,
                   episode_number: Option<i32>,
@@ -130,6 +145,7 @@ pub fn build_discovery_targets(
                 show_status: indexed.status,
                 item_title: correct_title.clone(),
                 item_aired_at: None,
+                show_episodes: show_episodes.clone(),
                 correct_title: correct_title.clone(),
                 aliases: aliases.clone(),
                 profiles: profiles.clone(),

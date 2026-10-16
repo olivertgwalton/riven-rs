@@ -282,6 +282,61 @@ pub fn release_matches_episode(
     event_hit(&toks, session, &dates, &venue_words, ep_session, aired)
 }
 
+/// `s09e11` / `s09e11e12`.
+fn is_episode_code(tok: &str) -> bool {
+    let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    let Some((season, eps)) = tok.strip_prefix('s').and_then(|t| t.split_once('e')) else {
+        return false;
+    };
+    digits(season) && eps.split('e').all(digits)
+}
+
+/// The episode a release names by title right after its `SxxEyy` token
+/// ("Kitchen.Nightmares.S09E11.Simmer.Down.1080p" → "Simmer Down"). Release
+/// numbering doesn't always follow TVDB's (a run TVDB calls season 8 can ship
+/// as S09), so a named title is stronger evidence than the number. The
+/// longest matching title wins, so "Lyla's Family Restaurant" beats "Lyla's".
+/// `None` when the release names none of `episodes`.
+// ponytail: a one-word title that is also a release tag ("Proper") can
+// false-match; add a tag stop-list if that ever bites.
+/// Tokens for title comparison: release groups drop apostrophes ("Leos")
+/// and spell out "&".
+fn title_tokens(text: &str) -> Vec<String> {
+    tokens(&text.replace(['\'', '\u{2019}'], "").replace('&', " and "))
+}
+
+pub fn named_episode<'a, T>(
+    release: &str,
+    episodes: &'a [T],
+    title: impl Fn(&T) -> &str,
+) -> Option<&'a T> {
+    let toks = title_tokens(release);
+    let start = toks.iter().position(|t| is_episode_code(t))? + 1;
+    // Skip the tail of a split multi-episode code ("S09E11-E12").
+    let after = &toks[start..];
+    let skip = after
+        .iter()
+        .take_while(|t| {
+            t.strip_prefix('e')
+                .is_some_and(|n| n.parse::<u32>().is_ok())
+        })
+        .count();
+    let after = &after[skip..];
+
+    let hits: Vec<(usize, &T)> = episodes
+        .iter()
+        .filter_map(|ep| {
+            let want = title_tokens(title(ep));
+            (!want.is_empty() && after.starts_with(&want)).then_some((want.len(), ep))
+        })
+        .collect();
+    let best = hits.iter().map(|(len, _)| *len).max()?;
+    // Two episodes with the same title ("Pilot" in two seasons) say nothing.
+    let mut longest = hits.into_iter().filter(|(len, _)| *len == best);
+    let (_, ep) = longest.next()?;
+    longest.next().is_none().then_some(ep)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -393,5 +448,41 @@ mod tests {
         assert!(parse_episode_event("Pilot").is_none());
         assert!(parse_episode_event("Test 1 - Day 1, Session 1").is_none());
         assert!(parse_episode_event("The One Where It Ends (Part 2)").is_none());
+    }
+
+    #[test]
+    fn named_episode_reads_the_title_after_the_episode_code() {
+        let eps = [
+            "Simmer Down",
+            "Wick 'n Ore Kitchen & Tap",
+            "Lyla's",
+            "Lyla's Family Restaurant (2)",
+        ];
+        let named = |r| named_episode(r, &eps, |t| t).copied();
+        assert_eq!(
+            named("Kitchen.Nightmares.S09E11.Simmer.Down.1080p.AMZN.WEB-DL-FLUX"),
+            Some("Simmer Down")
+        );
+        assert_eq!(
+            named("Show.S09E11.Wick.n.Ore.Kitchen.and.Tap.720p"),
+            Some("Wick 'n Ore Kitchen & Tap")
+        );
+        assert_eq!(
+            named("Show.S09E09-E10.Lylas.Family.Restaurant.2.1080p"),
+            Some("Lyla's Family Restaurant (2)")
+        );
+        assert_eq!(named("Show.S09E09.Lylas.1080p"), Some("Lyla's"));
+        assert_eq!(
+            named("Show.S09E09.Lylas.Diner.1080p"),
+            Some("Lyla's"),
+            "a longer release title still names the episode it starts with"
+        );
+        assert_eq!(
+            named("Kitchen.Nightmares.US.S09E11.1080p.WEB.h264-EDITH"),
+            None
+        );
+        assert_eq!(named("Simmer.Down.1080p"), None, "no episode code");
+        let dupes = ["Pilot", "Pilot"];
+        assert_eq!(named_episode("Show.S02E01.Pilot.720p", &dupes, |t| t), None);
     }
 }

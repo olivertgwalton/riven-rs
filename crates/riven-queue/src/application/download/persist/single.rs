@@ -196,10 +196,26 @@ pub async fn persist_episode(
         .map(|f| (f, parse_file_path(&f.filename)))
         .collect();
 
+    // A file that names an episode of the show by title belongs to that
+    // episode whatever its number says ("S09E11.Simmer.Down" is TVDB's
+    // S08E11); only untitled files are placed by number.
+    let show_episodes = match hierarchy.show_id {
+        Some(show_id) => crate::context::load_show_episodes(id, show_id).await,
+        None => vec![],
+    };
     let mut matched: Vec<(&DownloadFile, riven_rank::ParsedData)> = playable_videos
         .iter()
-        .filter(|(_, p)| {
-            matches_episode_lookup(p, season_number, episode_number, item.absolute_number)
+        .filter(|(f, p)| {
+            match super::super::event_match::named_episode(&f.filename, &show_episodes, |e| {
+                e.title.as_str()
+            })
+            .and_then(|e| e.id)
+            {
+                Some(owner) => owner == id,
+                None => {
+                    matches_episode_lookup(p, season_number, episode_number, item.absolute_number)
+                }
+            }
         })
         .map(|(f, p)| (*f, p.clone()))
         .collect();

@@ -276,9 +276,10 @@ pub async fn parse_results(id: i64, job: &ParseScrapeResultsJob, queue: &JobQueu
         "parse: filtered the scraped streams down to the ones matching this item and the active profiles"
     );
 
-    let new_stream_count = stream::iter(ranked)
+    let links: Vec<(i64, bool)> = stream::iter(ranked)
         .map(|candidate| {
             async move {
+                let target = candidate.reassign_to.unwrap_or(id);
                 let stream = match repo::upsert_stream(
                     &candidate.info_hash,
                     &build_magnet_uri(&candidate.info_hash),
@@ -297,11 +298,11 @@ pub async fn parse_results(id: i64, job: &ParseScrapeResultsJob, queue: &JobQueu
                             release = %candidate.title,
                             "parse: could not save this stream, dropping it from the candidates"
                         );
-                        return false;
+                        return (target, false);
                     }
                 };
-                match repo::link_stream_to_item(id, stream.id).await {
-                    Ok(inserted) => inserted,
+                match repo::link_stream_to_item(target, stream.id).await {
+                    Ok(inserted) => (target, inserted),
                     Err(e) => {
                         tracing::error!(
                             id,
@@ -310,15 +311,33 @@ pub async fn parse_results(id: i64, job: &ParseScrapeResultsJob, queue: &JobQueu
                             release = %candidate.title,
                             "parse: saved the stream but could not attach it to the item, so it will not be downloaded"
                         );
-                        false
+                        (target, false)
                     }
                 }
             }
         })
         .buffer_unordered(4)
-        .filter(|inserted| futures::future::ready(*inserted))
-        .count()
+        .filter(|(_, inserted)| futures::future::ready(*inserted))
+        .collect()
         .await;
+    let new_stream_count = links.iter().filter(|(target, _)| *target == id).count();
+
+    // Releases that named a different episode by title were linked to that
+    // episode instead; give it a chance to download them.
+    let reassigned: std::collections::HashSet<i64> = links
+        .iter()
+        .map(|(target, _)| *target)
+        .filter(|target| *target != id)
+        .collect();
+    for target in reassigned {
+        tracing::info!(
+            id,
+            title = %item_title,
+            other_episode_id = target,
+            "parse: some releases name a different episode by title; linked them to that episode instead"
+        );
+        queue.push_download_from_best_stream(target).await;
+    }
 
     if let Err(e) = repo::update_scraped(id).await {
         tracing::error!(
