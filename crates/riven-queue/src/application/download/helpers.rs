@@ -84,29 +84,27 @@ pub fn is_persistable_video_file(filename: &str) -> bool {
 
 pub use riven_core::filename::looks_obfuscated;
 
-/// The season/episode releases use for an episode: its scene numbering when
-/// TheXEM knows it, else TVDB's (`season`, `episode`).
-pub fn release_numbers(item: &MediaItem, season: i32, episode: i32) -> (i32, i32) {
-    match (item.scene_season_number, item.scene_episode_number) {
-        (Some(s), Some(e)) => (s, e),
-        _ => (season, episode),
-    }
-}
-
 /// Whether a parsed file names episode `ep` of TVDB season `season`: by
-/// season+episode (scene numbering when known) when the file carries
-/// seasons, otherwise by absolute number.
+/// season+episode when the file carries seasons (any of the numberings
+/// `release_numberings` allows, given the show's `show_episodes`), otherwise
+/// by absolute number.
 pub fn matches_episode_lookup(
     parsed: &riven_rank::ParsedData,
     ep: &MediaItem,
     season: i32,
+    show_episodes: &[crate::discovery::ShowEpisode],
 ) -> bool {
     if parsed.seasons.is_empty() {
         ep.absolute_number
             .is_some_and(|abs| parsed.episodes.contains(&abs))
     } else {
-        let (season, episode) = release_numbers(ep, season, ep.episode_number.unwrap_or(1));
-        parsed.seasons.contains(&season) && parsed.episodes.contains(&episode)
+        crate::discovery::release_numberings(
+            (season, ep.episode_number.unwrap_or(1)),
+            ep.scene_season_number.zip(ep.scene_episode_number),
+            show_episodes,
+        )
+        .iter()
+        .any(|(s, e)| parsed.seasons.contains(s) && parsed.episodes.contains(e))
     }
 }
 
@@ -186,6 +184,7 @@ mod tests {
         is_persistable_video_file, is_sample_file, matches_episode_lookup, parse_file_path,
     };
     use crate::application::download::candidates::tests::media_item;
+    use crate::discovery::ShowEpisode;
     use riven_db::entities::MediaItem;
 
     #[test]
@@ -200,30 +199,44 @@ mod tests {
             episodes: vec![3],
             ..Default::default()
         };
-        assert!(matches_episode_lookup(&parsed, &ep(3, None), 2));
-        assert!(!matches_episode_lookup(&parsed, &ep(3, Some(3)), 3));
+        assert!(matches_episode_lookup(&parsed, &ep(3, None), 2, &[]));
+        assert!(!matches_episode_lookup(&parsed, &ep(3, Some(3)), 3, &[]));
 
         parsed.seasons.clear();
-        assert!(matches_episode_lookup(&parsed, &ep(1, Some(3)), 1));
-        assert!(!matches_episode_lookup(&parsed, &ep(3, None), 1));
+        assert!(matches_episode_lookup(&parsed, &ep(1, Some(3)), 1, &[]));
+        assert!(!matches_episode_lookup(&parsed, &ep(3, None), 1, &[]));
 
         parsed.episodes.clear();
-        assert!(!matches_episode_lookup(&parsed, &ep(3, Some(3)), 1));
+        assert!(!matches_episode_lookup(&parsed, &ep(3, Some(3)), 1, &[]));
     }
 
     #[test]
-    fn episode_lookup_prefers_scene_numbering() {
+    fn episode_lookup_uses_scene_numbering() {
         // Kitchen Nightmares (US): TVDB S07E05 is scene S08E05, TVDB S08E05
         // is scene S09E05.
-        let scene = |season, episode| MediaItem {
-            episode_number: Some(5),
-            scene_season_number: Some(season),
-            scene_episode_number: Some(episode),
-            ..media_item()
+        let ep = |season, scene: (i32, i32)| {
+            (
+                MediaItem {
+                    episode_number: Some(5),
+                    scene_season_number: Some(scene.0),
+                    scene_episode_number: Some(scene.1),
+                    ..media_item()
+                },
+                ShowEpisode {
+                    id: None,
+                    season,
+                    episode: 5,
+                    title: String::new(),
+                    scene: Some(scene),
+                },
+            )
         };
+        let (s7, s7_show) = ep(7, (8, 5));
+        let (s8, s8_show) = ep(8, (9, 5));
+        let show = [s7_show, s8_show];
         let parsed = parse_file_path("Kitchen.Nightmares.S08E05.1080p.HULU-ViETNAM.mkv");
-        assert!(matches_episode_lookup(&parsed, &scene(8, 5), 7));
-        assert!(!matches_episode_lookup(&parsed, &scene(9, 5), 8));
+        assert!(matches_episode_lookup(&parsed, &s7, 7, &show));
+        assert!(!matches_episode_lookup(&parsed, &s8, 8, &show));
     }
 
     #[test]

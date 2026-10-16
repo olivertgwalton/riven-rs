@@ -340,6 +340,7 @@ pub(crate) async fn load_show_episodes(item_id: i64, show_id: i64) -> Vec<ShowEp
                 season: e.season_number?,
                 episode: e.episode_number?,
                 title: e.title,
+                scene: e.scene_season_number.zip(e.scene_episode_number),
             })
         })
         .collect()

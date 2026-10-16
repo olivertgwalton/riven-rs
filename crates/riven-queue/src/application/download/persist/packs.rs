@@ -96,7 +96,7 @@ pub async fn persist_season(
             .zip(&named_owner)
             .filter(|((_, p), owner)| match owner {
                 Some(owner) => *owner == ep.id,
-                None => matches_episode_lookup(p, ep, season_number),
+                None => matches_episode_lookup(p, ep, season_number, &show_episodes),
             })
             .map(|(fp, _)| fp)
             .map(|(f, p)| (*f, p.clone()))
@@ -324,6 +324,7 @@ pub async fn persist_show(
     };
 
     let mut completed_episode_ids: Vec<i64> = Vec::new();
+    let show_episodes = crate::context::load_show_episodes(id, id).await;
 
     // One query for every season's episodes rather than one per season.
     let season_ids: Vec<i64> = seasons.iter().map(|season| season.id).collect();
@@ -351,7 +352,9 @@ pub async fn persist_show(
                 .map(|ep| {
                     let matched = parsed_video_files
                         .iter()
-                        .filter(|(_, p)| matches_episode_lookup(p, ep, season_number))
+                        .filter(|(_, p)| {
+                            matches_episode_lookup(p, ep, season_number, &show_episodes)
+                        })
                         .map(|(f, p)| (*f, p.clone()))
                         .collect();
                     (ep, matched)

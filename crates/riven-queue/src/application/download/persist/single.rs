@@ -212,7 +212,7 @@ pub async fn persist_episode(
             .and_then(|e| e.id)
             {
                 Some(owner) => owner == id,
-                None => matches_episode_lookup(p, item, season_number),
+                None => matches_episode_lookup(p, item, season_number, &show_episodes),
             }
         })
         .map(|(f, p)| (*f, p.clone()))

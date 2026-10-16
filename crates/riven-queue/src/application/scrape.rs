@@ -52,15 +52,15 @@ async fn record_scrape_failure(item: &riven_db::entities::MediaItem) {
     }
 }
 
-fn scrape_event(job: &ScrapeJob) -> RivenEvent {
+fn scrape_event(job: &ScrapeJob, (season, episode): (Option<i32>, Option<i32>)) -> RivenEvent {
     RivenEvent::MediaItemScrapeRequested {
         id: job.id,
         item_type: job.item_type,
         imdb_id: job.imdb_id.clone(),
         tvdb_id: job.tvdb_id.clone(),
         title: job.title.clone(),
-        season: job.season,
-        episode: job.episode,
+        season,
+        episode,
     }
 }
 
@@ -108,7 +108,21 @@ pub async fn start(id: i64, job: &ScrapeJob, queue: &JobQueue) {
         );
     }
 
-    let outcomes = queue.fan_out_and_collect(&scrape_event(job)).await;
+    let mut outcomes = queue
+        .fan_out_and_collect(&scrape_event(job, (job.season, job.episode)))
+        .await;
+    // Scrapers disagree on numbering: Stremio addons key episodes by
+    // Cinemeta's (usually TVDB's), indexers by the release's own. When
+    // TheXEM's scene numbering differs, ask again with it; `validate` drops
+    // whichever releases belong to another episode.
+    let scene = item.scene_season_number.zip(item.scene_episode_number);
+    if let Some((season, episode)) = scene.filter(|s| Some(*s) != job.season.zip(job.episode)) {
+        outcomes.extend(
+            queue
+                .fan_out_and_collect(&scrape_event(job, (Some(season), Some(episode))))
+                .await,
+        );
+    }
     if outcomes.is_empty() {
         tracing::warn!(
             id,

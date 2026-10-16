@@ -16,6 +16,24 @@ pub struct ShowEpisode {
     pub season: i32,
     pub episode: i32,
     pub title: String,
+    /// Scene (season, episode) from TheXEM, when known.
+    pub scene: Option<(i32, i32)>,
+}
+
+/// The (season, episode) numberings a release may use for an episode: its
+/// scene numbering (TheXEM) when known, and TVDB's unless another episode of
+/// the show has that as its scene numbering. Kitchen Nightmares' TVDB S08E05
+/// is scene S09E05, and a release numbered S08E05 is TVDB's S07E05; Naruto
+/// Shippuden's TVDB S02E01 ships as both S02E01 and scene S01E33.
+pub(crate) fn release_numberings(
+    tvdb: (i32, i32),
+    scene: Option<(i32, i32)>,
+    show_episodes: &[ShowEpisode],
+) -> Vec<(i32, i32)> {
+    let taken = show_episodes
+        .iter()
+        .any(|e| e.scene == Some(tvdb) && (e.season, e.episode) != tvdb);
+    scene.into_iter().chain((!taken).then_some(tvdb)).collect()
 }
 
 #[derive(Clone)]
@@ -160,26 +178,25 @@ fn validate(ctx: &ParseContext, parsed: &riven_rank::ParsedData) -> Option<Strin
                 }
                 return Some("no seasons or episodes for episode item".into());
             }
-            let (season_num, ep_num) = ctx.scene.unwrap_or((
-                ctx.season_number.unwrap_or(0),
-                ctx.episode_number.unwrap_or(0),
-            ));
-            if has_episodes {
-                let matches_relative = parsed.episodes.contains(&ep_num);
-                let matches_absolute = ctx
-                    .absolute_number
-                    .is_some_and(|a| parsed.episodes.contains(&a));
-                if !matches_relative && !matches_absolute {
-                    return Some(format!(
-                        "incorrect episode number for episode item: {:?} does not include ep {} (abs {:?})",
-                        parsed.episodes, ep_num, ctx.absolute_number
-                    ));
-                }
-            }
-            if has_seasons && !parsed.seasons.contains(&season_num) {
+            let numberings = release_numberings(
+                (
+                    ctx.season_number.unwrap_or(0),
+                    ctx.episode_number.unwrap_or(0),
+                ),
+                ctx.scene,
+                &ctx.show_episodes,
+            );
+            let matches_absolute = ctx
+                .absolute_number
+                .is_some_and(|a| parsed.episodes.contains(&a));
+            let matches = |&(season, episode): &(i32, i32)| {
+                (!has_episodes || matches_absolute || parsed.episodes.contains(&episode))
+                    && (!has_seasons || parsed.seasons.contains(&season))
+            };
+            if !numberings.iter().any(matches) && (has_seasons || !matches_absolute) {
                 return Some(format!(
-                    "incorrect season number for episode item: {:?} does not include season {}",
-                    parsed.seasons, season_num
+                    "incorrect season/episode for episode item: seasons {:?} episodes {:?} match none of {numberings:?} (abs {:?})",
+                    parsed.seasons, parsed.episodes, ctx.absolute_number
                 ));
             }
         }
@@ -529,6 +546,7 @@ mod tests {
             season,
             episode,
             title: title.to_string(),
+            scene: None,
         };
         let ctx = ParseContext {
             season_number: Some(9),
@@ -580,17 +598,60 @@ mod tests {
     fn validate_uses_scene_numbering_when_known() {
         // Kitchen Nightmares (US), tvdb 80552: TVDB S07E05 "Juicy Box" is
         // scene S08E05, and TVDB S08E05 "3 Southern Girls" is scene S09E05.
-        let parsed = riven_rank::parse("Kitchen.Nightmares.S08E05.1080p.HULU-ViETNAM");
+        let ep = |season, scene, title: &str| ShowEpisode {
+            id: None,
+            season,
+            episode: 5,
+            title: title.to_string(),
+            scene: Some(scene),
+        };
+        let show_episodes = vec![
+            ep(7, (8, 5), "Juicy Box"),
+            ep(8, (9, 5), "3 Southern Girls"),
+        ];
         let ctx = |season, scene| ParseContext {
             season_number: Some(season),
             episode_number: Some(5),
             scene: Some(scene),
             item_country: None,
+            show_episodes: show_episodes.clone(),
             correct_title: "Kitchen Nightmares".to_string(),
             ..episode_ctx()
         };
+        let parsed = riven_rank::parse("Kitchen.Nightmares.S08E05.1080p.HULU-ViETNAM");
         assert_eq!(validate(&ctx(7, (8, 5)), &parsed), None);
         assert!(validate(&ctx(8, (9, 5)), &parsed).is_some());
+        // TVDB S07E05 is nobody's scene number, so TVDB-numbered releases
+        // of it still count.
+        let parsed = riven_rank::parse("Kitchen.Nightmares.S07E05.720p.WEB-GROUP");
+        assert_eq!(validate(&ctx(7, (8, 5)), &parsed), None);
+    }
+
+    #[test]
+    fn validate_accepts_tvdb_and_scene_numbering_when_unambiguous() {
+        // Naruto Shippuden: TVDB S02E01 (abs 33) is scene S01E33.
+        let ctx = ParseContext {
+            season_number: Some(2),
+            episode_number: Some(1),
+            absolute_number: Some(33),
+            scene: Some((1, 33)),
+            item_country: None,
+            correct_title: "Naruto Shippuden".to_string(),
+            ..episode_ctx()
+        };
+        for release in [
+            "Naruto.Shippuden.S02E01.1080p.WEB-GROUP",
+            "Naruto.Shippuden.S01E33.1080p.WEB-GROUP",
+            "[AnimeRG] Naruto Shippuden - 033 [1080p]",
+        ] {
+            assert_eq!(
+                validate(&ctx, &riven_rank::parse(release)),
+                None,
+                "{release}"
+            );
+        }
+        let parsed = riven_rank::parse("Naruto.Shippuden.S01E01.1080p.WEB-GROUP");
+        assert!(validate(&ctx, &parsed).is_some());
     }
 
     #[test]

@@ -116,6 +116,7 @@ pub fn build_discovery_targets(
                     season: season.number,
                     episode: episode.number,
                     title: episode.title.clone()?,
+                    scene: episode.scene,
                 })
             })
         })
@@ -287,23 +288,36 @@ pub async fn discover_streams(
 
     let mut discovered = Vec::new();
     for target in targets {
-        let scraped = run_scrape_discovery(
+        let mut scraped = run_scrape_discovery(
             registry,
             target.item_type,
             imdb_id,
             tvdb_id,
             &target.scrape_title,
-            // Scrapers search by the numbering releases use, when known.
-            target
-                .parse_ctx
-                .scene
-                .map_or(target.season_number, |(s, _)| Some(s)),
-            target
-                .parse_ctx
-                .scene
-                .map_or(target.episode_number, |(_, e)| Some(e)),
+            target.season_number,
+            target.episode_number,
         )
         .await;
+        // Indexers number by the release, Stremio addons by Cinemeta: ask
+        // with the scene numbering too when it differs (see `scrape::start`).
+        if let Some((season, episode)) = target
+            .parse_ctx
+            .scene
+            .filter(|s| Some(*s) != target.season_number.zip(target.episode_number))
+        {
+            scraped.extend(
+                run_scrape_discovery(
+                    registry,
+                    target.item_type,
+                    imdb_id,
+                    tvdb_id,
+                    &target.scrape_title,
+                    Some(season),
+                    Some(episode),
+                )
+                .await,
+            );
+        }
         let ranked = tokio::task::spawn_blocking({
             let parse_ctx = target.parse_ctx.clone();
             move || rank_streams(parse_ctx, scraped)
