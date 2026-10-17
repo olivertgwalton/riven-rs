@@ -52,7 +52,10 @@ fn nzb_fetch_profile(indexer: Option<&str>) -> HttpServiceProfile {
     }
 }
 
-pub(crate) use riven_core::nzb::{is_nzb_info_hash, nzb_indexer_redis_key, nzb_url_redis_key};
+pub(crate) use riven_core::nzb::{
+    LostNzbUrlError, is_nzb_info_hash, nzb_indexer_redis_key, nzb_url_from_handle,
+    nzb_url_redis_key,
+};
 
 /// A candidate that fails ingest/verification at download time is permanently
 /// blacklisted immediately — it's a dead release, and retrying it every
@@ -72,29 +75,6 @@ async fn blacklist_failed_download_candidate(media_item_id: i64, info_hash: &str
             release,
             %error,
             "failed to blacklist failed release"
-        );
-    }
-}
-
-/// A candidate that fails only because the provider(s) reported their own
-/// connection limit ("502 too many connections") after the pool's bounded
-/// retry gave up is *not* known to be dead — that's the account being at
-/// capacity, not a bad release. Skip it for the rest of this download
-/// attempt via the non-permanent blacklist (cleared on the next scrape by
-/// `clear_blacklisted_streams`) instead of ruling it out for good.
-async fn defer_transient_download_candidate(media_item_id: i64, info_hash: &str, release: &str) {
-    tracing::warn!(
-        info_hash,
-        release,
-        media_item_id,
-        "usenet ingest/verification hit a transient provider-capacity error; deferring candidate this cycle"
-    );
-    if let Err(error) = riven_db::repo::blacklist_stream_by_hash(media_item_id, info_hash).await {
-        tracing::warn!(
-            info_hash,
-            release,
-            %error,
-            "failed to defer transient-failure release"
         );
     }
 }
@@ -369,7 +349,7 @@ impl Plugin for UsenetPlugin {
         &self,
         id: i64,
         info_hash: &str,
-        _magnet: &str,
+        magnet: &str,
         _cached_stores: &[CachedStoreEntry],
         ctx: &PluginContext,
     ) -> anyhow::Result<HookResponse> {
@@ -380,7 +360,7 @@ impl Plugin for UsenetPlugin {
             return Ok(HookResponse::Empty);
         };
 
-        let xml_arc = match fetch_nzb_xml(info_hash, ctx).await {
+        let xml_arc = match fetch_nzb_xml(info_hash, magnet, ctx).await {
             Ok(Some(xml)) => xml,
             Ok(None) => {
                 // No NZB body means no release name exists anywhere yet — the
@@ -391,6 +371,19 @@ impl Plugin for UsenetPlugin {
                     "no NZB body available; cannot ingest"
                 );
                 return Ok(HookResponse::DownloadStreamUnavailable);
+            }
+            // Nothing was ever asked of the indexer: this release's URL is
+            // not on the stream row (scraped before the row carried it) and
+            // the cache entry has expired. Undecidable, not dead — saying
+            // "unavailable" here is what blacklisted every good release for
+            // an item whose streams simply outlived the cache.
+            Err(error) if error.is::<LostNzbUrlError>() => {
+                tracing::warn!(
+                    info_hash,
+                    media_item_id = id,
+                    "no NZB URL left for this release; deferring instead of judging it"
+                );
+                return Ok(HookResponse::DownloadCandidateUndecidable);
             }
             // The fetch was rate-limited, which says nothing about the
             // release. Propagate so the download job requeues; answering
@@ -461,8 +454,7 @@ impl Plugin for UsenetPlugin {
                     "usenet ingest/verification failed because provider(s) are at their own \
                      connection limit"
                 );
-                defer_transient_download_candidate(id, info_hash, &release).await;
-                return Ok(HookResponse::DownloadStreamUnavailable);
+                return Ok(HookResponse::DownloadCandidateUndecidable);
             }
             Err(e) => {
                 tracing::warn!(info_hash, release, error = %e, "usenet ingest/verification failed");
@@ -559,21 +551,30 @@ async fn nzb_indexer_for_hash(info_hash: &str, ctx: &PluginContext) -> Option<St
         .flatten()
 }
 
-/// `Ok(None)` means the NZB genuinely cannot be had (no URL mapping left in
-/// Redis, or the indexer answered without a body) — a verdict about the
-/// release. `Err` is [`RateLimitedError`] only: a verdict about *this moment*,
-/// which the caller must surface as a deferral, never as unavailability.
-/// Other transport errors stay `Ok(None)`, matching the behaviour this
-/// function has always had for them.
+/// `Ok(None)` means the indexer was asked and the NZB genuinely cannot be had
+/// — a verdict about the release. `Err` is a verdict about *this moment*,
+/// which the caller must surface as a deferral and never as unavailability:
+/// [`RateLimitedError`] (the indexer refused to answer) or
+/// [`LostNzbUrlError`] (there is no URL left to ask with, so the indexer was
+/// never asked at all). Other transport errors stay `Ok(None)`, matching the
+/// behaviour this function has always had for them.
 async fn fetch_nzb_xml(
     info_hash: &str,
+    handle: &str,
     ctx: &PluginContext,
 ) -> anyhow::Result<Option<Arc<String>>> {
     if let Some(hit) = nzb_body_cache().get(info_hash) {
         return Ok(Some(hit));
     }
-    let Some(nzb_url) = nzb_url_for_hash(info_hash, ctx).await else {
-        return Ok(None);
+    // The stream row's handle is authoritative and lives as long as the
+    // candidate; Redis is only the fast path and a fallback for rows scraped
+    // before the handle was stored there.
+    let nzb_url = match nzb_url_from_handle(handle).map(str::to_string) {
+        Some(url) => url,
+        None => match nzb_url_for_hash(info_hash, ctx).await {
+            Some(url) => url,
+            None => return Err(LostNzbUrlError.into()),
+        },
     };
     let indexer = nzb_indexer_for_hash(info_hash, ctx).await;
     let profile = nzb_fetch_profile(indexer.as_deref());

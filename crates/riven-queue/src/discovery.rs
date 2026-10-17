@@ -119,6 +119,10 @@ pub struct RankedStreamCandidate {
     pub parsed_data: Option<serde_json::Value>,
     pub rank: Option<i64>,
     pub file_size_bytes: Option<u64>,
+    /// See [`riven_core::types::ScrapeEntry::source_url`]: the fetchable
+    /// handle for sources whose info_hash is synthetic, carried through to
+    /// the stream row.
+    pub source_url: Option<String>,
     /// Set when the release names another episode of the show by title: the
     /// stream belongs to that episode, not the one being scraped.
     pub reassign_to: Option<i64>,
@@ -438,6 +442,7 @@ pub fn rank_streams(
                 parsed_data: parsed_value,
                 rank,
                 file_size_bytes: entry.file_size_bytes,
+                source_url: entry.source_url.clone(),
                 reassign_to,
             })
         })

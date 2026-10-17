@@ -8,6 +8,15 @@ pub struct ScrapeEntry {
     pub title: String,
     /// Total torrent size in bytes, if known at scrape time.
     pub file_size_bytes: Option<u64>,
+    /// The URL the release is actually fetched from, for sources whose
+    /// `info_hash` is synthetic and therefore carries no handle back to the
+    /// release (NZBs: the hash is a SHA-1 *of* this URL, so it cannot be
+    /// reversed). Stored on the stream row so the handle lives exactly as
+    /// long as the candidate does; a cache that outlives it is not enough,
+    /// since a stream nobody can fetch is indistinguishable from a dead
+    /// release and gets blacklisted for good. `None` for torrents, whose
+    /// info_hash is the handle.
+    pub source_url: Option<String>,
 }
 
 impl ScrapeEntry {
@@ -15,6 +24,7 @@ impl ScrapeEntry {
         Self {
             title: title.into(),
             file_size_bytes: None,
+            source_url: None,
         }
     }
 
@@ -22,6 +32,7 @@ impl ScrapeEntry {
         Self {
             title: title.into(),
             file_size_bytes: Some(size),
+            source_url: None,
         }
     }
 }

@@ -17,7 +17,7 @@ use crate::client::{
     download_result_from_files, fetch_user_info, forget_cache_check, generate_link, scrape_torznab,
     store_cooldown_remaining,
 };
-use crate::newznab::{is_nzb_info_hash, nzb_url_redis_key, scrape_newznab};
+use crate::newznab::{is_nzb_info_hash, nzb_url_from_handle, nzb_url_redis_key, scrape_newznab};
 
 const DEFAULT_URL: &str = "https://stremthru.13377001.xyz/";
 const STORE_SCORE_TTL_SECS: u64 = 60 * 60 * 24 * 7;
@@ -265,8 +265,15 @@ impl Plugin for StremthruPlugin {
         if is_nzb_info_hash(info_hash) {
             let newz_stores = get_newz_stores(&ctx.settings);
             let newz_scores = get_store_scores(&ctx.redis, &newz_stores).await;
-            return handle_newz_download(info_hash, &base_url, &newz_stores, &newz_scores, ctx)
-                .await;
+            return handle_newz_download(
+                info_hash,
+                magnet,
+                &base_url,
+                &newz_stores,
+                &newz_scores,
+                ctx,
+            )
+            .await;
         }
 
         #[derive(Clone)]
@@ -617,24 +624,35 @@ fn is_network_error(error: &anyhow::Error) -> bool {
 
 async fn handle_newz_download(
     info_hash: &str,
+    handle: &str,
     base_url: &str,
     stores: &[(&str, String)],
     score_map: &HashMap<String, i64>,
     ctx: &PluginContext,
 ) -> anyhow::Result<HookResponse> {
-    let mut redis = ctx.redis.clone();
-    let nzb_url: Option<String> =
-        AsyncCommands::get::<_, Option<String>>(&mut redis, nzb_url_redis_key(info_hash))
-            .await
-            .ok()
-            .flatten();
-    let Some(nzb_url) = nzb_url else {
+    // The stream row's handle is the NZB URL itself and outlives any cache;
+    // Redis only covers rows scraped before it was stored there.
+    let nzb_url = match nzb_url_from_handle(handle).map(str::to_string) {
+        Some(url) => url,
+        None => {
+            let mut redis = ctx.redis.clone();
+            AsyncCommands::get::<_, Option<String>>(&mut redis, nzb_url_redis_key(info_hash))
+                .await
+                .ok()
+                .flatten()
+                .unwrap_or_default()
+        }
+    };
+    if nzb_url.is_empty() {
+        // No URL means no store was ever asked about this release, so there
+        // is no verdict to report — answering "unavailable" here would get a
+        // perfectly good release permanently blacklisted.
         tracing::warn!(
             info_hash,
-            "no NZB URL in Redis; cannot dispatch to stremthru newz"
+            "no NZB URL left for this release; deferring instead of judging it"
         );
-        return Ok(HookResponse::DownloadStreamUnavailable);
-    };
+        return Ok(HookResponse::DownloadCandidateUndecidable);
+    }
 
     let mut ordered: Vec<(&str, &str)> = stores
         .iter()

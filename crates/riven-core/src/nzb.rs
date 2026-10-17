@@ -23,6 +23,22 @@ pub fn is_nzb_info_hash(info_hash: &str) -> bool {
     info_hash.starts_with(NZB_INFO_HASH_PREFIX)
 }
 
+/// No NZB URL could be recovered for a release, so no indexer or provider was
+/// ever asked about it. Distinct from "the indexer has no body for this
+/// release": that is a verdict on the release, this is the absence of one, and
+/// conflating them permanently blacklists good releases whose stream rows
+/// simply outlived the URL cache.
+#[derive(Debug, thiserror::Error)]
+#[error("no NZB URL left for this release")]
+pub struct LostNzbUrlError;
+
+/// The NZB URL a stream row carries as its handle, when it has one. Torrent
+/// rows (and NZB rows written before the URL was stored on them) hold a
+/// synthetic `magnet:?xt=urn:btih:…` instead, which is not fetchable.
+pub fn nzb_url_from_handle(handle: &str) -> Option<&str> {
+    (handle.starts_with("http://") || handle.starts_with("https://")).then_some(handle)
+}
+
 pub fn nzb_url_redis_key(info_hash: &str) -> String {
     format!("riven:nzb:url:{info_hash}")
 }
@@ -460,5 +476,27 @@ mod tests {
         let b = nzb_info_hash("https://example/x.nzb");
         assert_eq!(a, b);
         assert!(is_nzb_info_hash(&a));
+    }
+
+    /// A stream row holds either a fetchable NZB URL or the synthetic magnet
+    /// built from its info_hash. Mistaking the latter for a URL would send a
+    /// `magnet:` string to an HTTP client; mistaking a real URL for a magnet
+    /// would send the download back to the expiring cache it is meant to
+    /// outlive, and a miss there blacklists the release for good.
+    #[test]
+    fn only_a_real_url_counts_as_a_fetch_handle() {
+        let url = "https://indexer.example/getnzb/abc.nzb?apikey=k";
+        assert_eq!(nzb_url_from_handle(url), Some(url));
+        assert_eq!(
+            nzb_url_from_handle("http://indexer/x.nzb"),
+            Some("http://indexer/x.nzb")
+        );
+
+        let hash = nzb_info_hash(url);
+        assert_eq!(
+            nzb_url_from_handle(&format!("magnet:?xt=urn:btih:{hash}")),
+            None
+        );
+        assert_eq!(nzb_url_from_handle(""), None);
     }
 }

@@ -9,7 +9,7 @@ use riven_core::http::HttpClient;
 use riven_core::nzb::{
     NZB_URL_TTL_SECS, NewznabItem, newznab_text_query, nzb_info_hash, parse_newznab_xml,
 };
-pub use riven_core::nzb::{is_nzb_info_hash, nzb_url_redis_key};
+pub use riven_core::nzb::{is_nzb_info_hash, nzb_url_from_handle, nzb_url_redis_key};
 use riven_core::types::{MediaItemType, ScrapeEntry, ScrapeResponse};
 
 use crate::PROFILE;
@@ -120,6 +120,7 @@ pub async fn scrape_newznab(
         if let Some(size) = item.size {
             entry.file_size_bytes = Some(size);
         }
+        entry.source_url = Some(item.nzb_url);
         results.insert(info_hash, entry);
     }
 

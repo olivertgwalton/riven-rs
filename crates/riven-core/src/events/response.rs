@@ -16,6 +16,14 @@ pub enum HookResponse {
     /// (not cached, rejected, etc.). The download flow should blacklist this
     /// stream and try the next best candidate rather than scheduling a retry.
     DownloadStreamUnavailable,
+    /// The plugin could not form a verdict on this release at all — it never
+    /// got as far as asking a provider (the handle needed to fetch it is
+    /// missing, the provider is at its own connection limit, …). Unlike
+    /// [`HookResponse::DownloadStreamUnavailable`] this says nothing about
+    /// the release, so the download flow must defer the candidate and leave
+    /// it un-blacklisted: the two were conflated once, and a week-old URL
+    /// cache expiring permanently blacklisted every good release for an item.
+    DownloadCandidateUndecidable,
     CacheCheck(Vec<CacheCheckResult>),
     ProviderList(Vec<ProviderInfo>),
     StreamLink(StreamLinkResponse),

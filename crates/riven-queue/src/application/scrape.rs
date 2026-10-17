@@ -306,9 +306,17 @@ pub async fn parse_results(id: i64, job: &ParseScrapeResultsJob, queue: &JobQueu
         .map(|candidate| {
             async move {
                 let target = candidate.reassign_to.unwrap_or(id);
+                // NZB candidates carry their own fetch URL: an NZB info_hash
+                // is a SHA-1 of that URL, so the row is the only place the
+                // handle survives. A torrent's info_hash *is* its handle, so
+                // it keeps the synthetic magnet.
+                let handle = candidate
+                    .source_url
+                    .clone()
+                    .unwrap_or_else(|| build_magnet_uri(&candidate.info_hash));
                 let stream = match repo::upsert_stream(
                     &candidate.info_hash,
-                    &build_magnet_uri(&candidate.info_hash),
+                    &handle,
                     candidate.parsed_data,
                     candidate.rank,
                     candidate.file_size_bytes,

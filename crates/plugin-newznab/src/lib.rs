@@ -588,6 +588,7 @@ impl Plugin for NewznabPlugin {
                         if let Some(size) = item.size {
                             entry.file_size_bytes = Some(size);
                         }
+                        entry.source_url = Some(item.nzb_url);
                         if was_new {
                             added += 1;
                         }

@@ -24,14 +24,39 @@ pub enum DownloadAttemptOutcome {
     /// count, can be a day apart under the escalating backoff).
     Progressed,
     TerminalHandled,
-    /// A plugin was rate-limited before it could say anything about the
-    /// release. This is a fact about *now*, not about the stream, and the
-    /// two must never be conflated: recording it as `Failed` counts toward
-    /// `failed_attempts` and — once every provider "fails" — permanently
-    /// blacklists a release nobody actually looked at. The caller must stop
-    /// the walk and requeue the whole job, because the limiter that deferred
-    /// this candidate would defer every later candidate the same way.
+    /// No plugin could say anything about the release: one was rate-limited,
+    /// or could not judge it at all (no fetch handle left for it, a provider
+    /// at its own connection limit). This is a fact about *now*, not about
+    /// the stream, and the two must never be conflated: recording it as
+    /// `Failed` counts toward `failed_attempts` and — once every provider
+    /// "fails" — permanently blacklists a release nobody actually looked at.
+    /// The caller leaves this candidate un-blacklisted and, if nothing else
+    /// in the walk works out, requeues the whole job.
     Deferred,
+}
+
+/// What a dispatch that produced no download says about the *stream*.
+#[derive(Debug, PartialEq, Eq)]
+enum Judgement {
+    /// Nobody looked: a plugin was rate-limited, or could not judge the
+    /// release at all. The caller must not record this against the stream —
+    /// the walk permanently blacklists anything it considers judged and
+    /// failed, so judging here is how a release nobody asked about gets
+    /// ruled out for good.
+    Deferred,
+    /// Every plugin that looked said it cannot provide the release.
+    Failed,
+}
+
+/// Deferral outranks every no-result verdict: with a rate-limited or undecided
+/// plugin in the mix, "unavailable" from the others is at best a partial
+/// answer. Only an actual accepted download supersedes it.
+fn judges_the_release(saw_rate_limited: bool, saw_undecidable: bool) -> Judgement {
+    if saw_rate_limited || saw_undecidable {
+        Judgement::Deferred
+    } else {
+        Judgement::Failed
+    }
 }
 
 pub async fn attempt_download(
@@ -71,6 +96,10 @@ pub async fn attempt_download(
         result: Option<Box<DownloadResult>>,
         saw_unavailable: bool,
         saw_rate_limited: bool,
+        /// A plugin could not judge the release at all (no fetch handle left,
+        /// provider at its own connection limit). Grouped with
+        /// `saw_rate_limited` by the caller: both mean "nobody looked".
+        saw_undecidable: bool,
     }
 
     async fn dispatch_once(
@@ -101,6 +130,15 @@ pub async fn attempt_download(
                         info_hash,
                         raw_title,
                         "download: plugin reported this release as available earlier but can no longer provide it"
+                    );
+                }
+                Ok(HookResponse::DownloadCandidateUndecidable) => {
+                    verdict.saw_undecidable = true;
+                    tracing::debug!(
+                        plugin = plugin_name,
+                        info_hash,
+                        raw_title,
+                        "download: plugin could not judge this release; the candidate will be deferred rather than blacklisted"
                     );
                 }
                 Ok(_) => {}
@@ -135,7 +173,11 @@ pub async fn attempt_download(
 
     // The plugin dropped its stale availability entries when it answered
     // "unavailable", so a second offer re-checks the stores from scratch.
-    if verdict.result.is_none() && verdict.saw_unavailable && !verdict.saw_rate_limited {
+    if verdict.result.is_none()
+        && verdict.saw_unavailable
+        && !verdict.saw_rate_limited
+        && !verdict.saw_undecidable
+    {
         tracing::debug!(
             id,
             info_hash,
@@ -151,11 +193,10 @@ pub async fn attempt_download(
         verdict = dispatch_once(queue, &retry_event, info_hash, raw_title).await;
     }
 
-    // Deferral outranks every no-result verdict: with a rate-limited plugin
-    // in the mix, "unavailable" from the others is at best a partial answer,
-    // and "no provider could provide it" would be recorded against the
-    // stream. Only an actual accepted download supersedes it.
-    if verdict.result.is_none() && verdict.saw_rate_limited {
+    if verdict.result.is_none()
+        && judges_the_release(verdict.saw_rate_limited, verdict.saw_undecidable)
+            == Judgement::Deferred
+    {
         return DownloadAttemptOutcome::Deferred;
     }
 
@@ -342,5 +383,25 @@ pub async fn attempt_download(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Judgement, judges_the_release};
+
+    /// The walk blacklists a stream permanently once an attempt comes back
+    /// `Failed`, so "no plugin could judge this release" must never land
+    /// there. It did once: NZB fetch URLs live in a cache that expires a week
+    /// after the scrape, and a cache miss was reported as unavailability —
+    /// which burned every good release for an item whose streams had simply
+    /// been sitting around longer than that.
+    #[test]
+    fn a_release_nobody_judged_is_deferred_not_failed() {
+        assert_eq!(judges_the_release(false, true), Judgement::Deferred);
+        assert_eq!(judges_the_release(true, false), Judgement::Deferred);
+        assert_eq!(judges_the_release(true, true), Judgement::Deferred);
+        // Every plugin looked and none could provide it: a real verdict.
+        assert_eq!(judges_the_release(false, false), Judgement::Failed);
     }
 }
