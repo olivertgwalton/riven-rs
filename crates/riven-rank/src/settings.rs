@@ -802,6 +802,8 @@ pub struct RankOptions {
     #[serde(flatten)]
     pub language: LanguageRankOptions,
     #[serde(flatten)]
+    pub quality: QualityRankOptions,
+    #[serde(flatten)]
     pub content: ContentRankOptions,
     /// When `true` (default), fetch checks fail as soon as one check fails.
     /// When `false`, all checks run and every failure is collected — useful for
@@ -817,6 +819,7 @@ impl Default for RankOptions {
             remove_ranks_under: -10000,
             trash: TrashOptions::default(),
             language: LanguageRankOptions::default(),
+            quality: QualityRankOptions::default(),
             content: ContentRankOptions::default(),
             fetch: FetchRankOptions::default(),
         }
@@ -854,6 +857,19 @@ impl Default for LanguageRankOptions {
             allow_english_in_languages: true,
         }
     }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct QualityRankOptions {
+    /// When `true`, reject any release whose quality/source tag (WEB-DL,
+    /// BluRay, etc.) could not be identified from its title, instead of
+    /// treating an unparseable tag as automatically acceptable. Off by
+    /// default to match prior behavior. Decoy uploads and camrips often use
+    /// filenames that don't fit recognized quality conventions, so this is
+    /// a useful extra guard for profiles that would rather miss a release
+    /// than risk one of those.
+    pub remove_unknown_quality: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
