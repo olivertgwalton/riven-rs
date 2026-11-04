@@ -44,6 +44,7 @@ macro_rules! sql_migrations {
                 migrations.push(Box::new(M041SceneNumbering));
                 migrations.push(Box::new(M042MusicTypes));
                 migrations.push(Box::new(M043MusicColumns));
+                migrations.push(Box::new(M044RankingProfileKind));
                 migrations
             }
         }
@@ -86,6 +87,12 @@ sql_migration!(
     M043MusicColumns,
     "m043_music_columns",
     "043_music_columns.sql"
+);
+
+sql_migration!(
+    M044RankingProfileKind,
+    "m044_ranking_profile_kind",
+    "044_ranking_profile_kind.sql"
 );
 
 /// Authentication tables, generated from riven's own entities.

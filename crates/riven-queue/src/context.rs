@@ -4,7 +4,9 @@ use riven_core::types::{MediaItemType, ShowStatus};
 use riven_db::entities::{MediaItem, MediaItemHierarchy};
 use riven_db::repo;
 
-use crate::discovery::{ParseContext, ShowEpisode, load_active_profiles, load_dubbed_anime_only};
+use crate::discovery::{
+    ParseContext, ShowEpisode, load_active_profiles, load_dubbed_anime_only, load_music_profiles,
+};
 
 pub struct ShowContext {
     pub title: String,
@@ -164,12 +166,20 @@ pub async fn build_parse_item_context_with_hierarchy(
         (correct_title, parent_year, aliases, show_title_for_format),
         (season_episodes, show_season_numbers, show_status),
         profiles,
+        music_profiles,
         dubbed_anime_only,
         show_episodes,
     ) = tokio::join!(
         resolve_parent_info(&item, hierarchy),
         load_episode_or_season_data(&item),
         load_active_profiles(),
+        async {
+            if item.item_type.is_music() {
+                load_music_profiles().await
+            } else {
+                Vec::new()
+            }
+        },
         load_dubbed_anime_only(),
         async {
             match hierarchy.and_then(|h| h.resolved_show_id) {
@@ -215,6 +225,7 @@ pub async fn build_parse_item_context_with_hierarchy(
         correct_title,
         aliases,
         profiles,
+        music_profiles,
         dubbed_anime_only,
     };
 

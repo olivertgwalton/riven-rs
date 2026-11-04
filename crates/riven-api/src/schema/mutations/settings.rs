@@ -2,6 +2,7 @@ use async_graphql::*;
 use riven_core::logging::LogControl;
 use riven_core::plugin::PluginRegistry;
 use riven_core::settings::{FilesystemSettings, RivenSettings};
+use riven_core::types::RankingProfileKind;
 use riven_core::vfs_layout::VfsLibraryLayout;
 use riven_db::repo;
 use riven_queue::JobQueue;
@@ -56,15 +57,13 @@ impl SettingsMutations {
         name: String,
         settings: serde_json::Value,
         enabled: Option<bool>,
+        kind: RankingProfileKind,
     ) -> Result<serde_json::Value> {
         require_settings_access(ctx)?;
-        let validated: riven_rank::RankSettings = serde_json::from_value(settings)
-            .map_err(|e| Error::new(format!("invalid rank settings: {e}")))?;
-        let canonical = serde_json::to_value(&validated)
-            .map_err(|e| Error::new(format!("failed to serialise rank settings: {e}")))?;
-
+        let canonical = canonical_profile_settings(kind, settings)?;
         let profile =
-            repo::upsert_ranking_profile(id, &name, canonical, enabled.unwrap_or(false)).await?;
+            repo::upsert_ranking_profile(id, &name, canonical, enabled.unwrap_or(false), kind)
+                .await?;
         Ok(serde_json::to_value(profile)?)
     }
 
@@ -96,9 +95,13 @@ impl SettingsMutations {
         settings: serde_json::Value,
     ) -> Result<bool> {
         require_settings_access(ctx)?;
-        let _validated: riven_rank::RankSettings = serde_json::from_value(settings.clone())
-            .map_err(|e| Error::new(format!("invalid rank settings: {e}")))?;
-
+        let kind = repo::list_ranking_profiles()
+            .await?
+            .into_iter()
+            .find(|profile| profile.name == name)
+            .map(|profile| profile.kind)
+            .ok_or_else(|| Error::new(format!("no ranking profile named {name}")))?;
+        canonical_profile_settings(kind, settings.clone())?;
         Ok(repo::update_profile_settings(&name, settings).await?)
     }
 
@@ -130,6 +133,25 @@ impl SettingsMutations {
             build_plugin_section(registry, &section).await
         }
     }
+}
+
+/// Settings checked against the model of the profile's kind, as that model
+/// writes them.
+fn canonical_profile_settings(
+    kind: RankingProfileKind,
+    settings: serde_json::Value,
+) -> Result<serde_json::Value> {
+    let invalid = |e: serde_json::Error| Error::new(format!("invalid rank settings: {e}"));
+    let canonical = match kind {
+        RankingProfileKind::Video => serde_json::to_value(
+            serde_json::from_value::<riven_rank::RankSettings>(settings).map_err(invalid)?,
+        ),
+        RankingProfileKind::Music => serde_json::to_value(
+            serde_json::from_value::<riven_rank::music::MusicRankSettings>(settings)
+                .map_err(invalid)?,
+        ),
+    };
+    canonical.map_err(|e| Error::new(format!("failed to serialise rank settings: {e}")))
 }
 
 /// Persist and reconcile the general (non-plugin) settings: store them, then

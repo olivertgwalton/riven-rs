@@ -944,6 +944,7 @@ export type MutationRootRetryItemsArgs = {
 export type MutationRootSaveCustomProfileArgs = {
   enabled?: InputMaybe<Scalars['Boolean']['input']>;
   id?: InputMaybe<Scalars['Int']['input']>;
+  kind: RankingProfileKind;
   name: Scalars['String']['input'];
   settings: Scalars['JSON']['input'];
 };
@@ -1121,6 +1122,9 @@ export type QueryRoot = {
    * `showDetails`.
    */
   movieDetails: MediaDetails;
+  /** The built-in music profiles, as `qualityProfiles` gives the video ones. */
+  musicQualityProfiles: Scalars['JSON']['output'];
+  musicRankSettingsSchema: Scalars['JSON']['output'];
   /**
    * Per-provider NNTP health (connections + demotion state). Empty when
    * usenet isn't configured.
@@ -1318,6 +1322,10 @@ export type QueryRootTrendingTmdbArgs = {
   timeWindow: Scalars['String']['input'];
   type: Scalars['String']['input'];
 };
+
+export type RankingProfileKind =
+  | 'MUSIC'
+  | 'VIDEO';
 
 export type RatingScore = {
   image?: Maybe<Scalars['String']['output']>;

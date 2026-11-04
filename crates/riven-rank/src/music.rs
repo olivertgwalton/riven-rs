@@ -5,16 +5,16 @@
 //! `Radiohead - OK Computer (1997) [FLAC 24bit-96kHz]`, or in scene style
 //! `Radiohead-OK_Computer-(CDNODATA22)-WEB-FLAC-2016-GROUP`. None of the
 //! film and television vocabulary (resolution, HDR, episodes) applies, so
-//! these have a parser and a ranking of their own.
+//! these have a parser of their own, and profiles of their own in
+//! [`MusicRankSettings`].
 
 use serde::{Deserialize, Serialize};
 
 use crate::parse::title::remove_accents;
 
-/// The one version a music item is downloaded in. Film quality profiles
-/// (resolution, HDR, codecs) say nothing about audio, so music has none of
-/// them, and its files carry this name where a film's carry a profile's.
-pub const PROFILE_NAME: &str = "music";
+mod profile;
+
+pub use profile::{BitDepthPreference, MusicProfile, MusicRankSettings, PerFormat, PerSource};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -134,38 +134,6 @@ pub fn judge_album(
         source: source_of(&rest),
         names_album_exactly: tokens.get(after_album).is_none_or(|next| is_tag(next)),
     })
-}
-
-/// Higher is better. Lossless at CD quality comes first: it is what a
-/// library plays everywhere, where hi-res is two to three times the size for
-/// a difference few systems reproduce and DSD is played by few servers.
-pub fn rank(release: &MusicRelease) -> i64 {
-    let format = match (release.format, release.bit_depth) {
-        (Some(AudioFormat::Flac | AudioFormat::Alac), Some(24)) => 90,
-        (Some(AudioFormat::Flac | AudioFormat::Alac), _) => 100,
-        (Some(AudioFormat::Wav), _) => 80,
-        (Some(AudioFormat::Dsd), _) => 70,
-        (Some(AudioFormat::Mp3), _) => match release.lossy_quality {
-            Some(LossyQuality::Cbr(kbps)) if kbps >= 320 => 50,
-            Some(LossyQuality::V0) => 48,
-            Some(LossyQuality::Cbr(kbps)) if kbps >= 256 => 32,
-            Some(LossyQuality::V2) => 30,
-            Some(LossyQuality::Cbr(_)) => 10,
-            None => 35,
-        },
-        (Some(AudioFormat::Aac), _) => 45,
-        (Some(AudioFormat::Opus | AudioFormat::Vorbis), _) => 40,
-        // An untagged release could be anything; it is better than nothing.
-        (None, _) => 20,
-    };
-    let source = match release.source {
-        Some(AudioSource::Cd | AudioSource::Web) => 5,
-        None | Some(AudioSource::Sacd) => 0,
-        Some(AudioSource::Vinyl) => -10,
-        Some(AudioSource::Cassette) => -20,
-    };
-    let exact = if release.names_album_exactly { 3 } else { 0 };
-    format + source + exact
 }
 
 /// Lower case, without accents or punctuation, `&` read as `and`. Numbers

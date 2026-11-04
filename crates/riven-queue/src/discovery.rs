@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use riven_core::types::*;
 use riven_db::repo;
+use riven_rank::music::{MusicProfile, MusicRankSettings};
 use riven_rank::rank::RankError;
 use riven_rank::{QualityProfile, RankSettings};
 use serde_json::Value;
@@ -109,6 +110,8 @@ pub struct ParseContext {
     pub correct_title: String,
     pub aliases: HashMap<String, Vec<String>>,
     pub profiles: Vec<(String, RankSettings)>,
+    /// The enabled music profiles, for music items; empty for anything else.
+    pub music_profiles: Vec<(String, MusicRankSettings)>,
     pub dubbed_anime_only: bool,
 }
 
@@ -453,8 +456,8 @@ pub fn rank_streams(
         .collect()
 }
 
-/// A music release either names the album asked for or does not; there are
-/// no quality profiles to pass, only a ranking of the copy it is.
+/// A music release either names the album asked for or does not, and is then
+/// ranked by the best of the enabled music profiles that take it.
 fn rank_music_stream(
     ctx: &ParseContext,
     info_hash: &str,
@@ -478,18 +481,29 @@ fn rank_music_stream(
             return None;
         }
     };
-    let rank = riven_rank::music::rank(&release);
-    tracing::debug!(
-        info_hash,
-        rank,
-        title = %entry.title,
-        "parse: release accepted as a download candidate"
-    );
+    let rank = ctx
+        .music_profiles
+        .iter()
+        .filter_map(|(_, settings)| settings.rank(&release))
+        .max();
+    match rank {
+        Some(rank) => tracing::debug!(
+            info_hash,
+            rank,
+            title = %entry.title,
+            "parse: release accepted as a download candidate"
+        ),
+        None => tracing::debug!(
+            info_hash,
+            title = %entry.title,
+            "parse: release rejected by every enabled music profile"
+        ),
+    }
     Some(RankedStreamCandidate {
         info_hash: info_hash.to_owned(),
         title: entry.title.clone(),
         parsed_data: serde_json::to_value(&release).ok(),
-        rank: Some(rank),
+        rank,
         file_size_bytes: entry.file_size_bytes,
         source_url: entry.source_url.clone(),
         reassign_to: None,
@@ -497,7 +511,7 @@ fn rank_music_stream(
 }
 
 pub async fn load_active_profiles() -> Vec<(String, RankSettings)> {
-    let profiles = match repo::get_enabled_profiles().await {
+    let profiles = match repo::get_enabled_profiles(RankingProfileKind::Video).await {
         Ok(p) => p,
         Err(e) => {
             tracing::warn!(error = %e, "parse: could not load the configured quality profiles; falling back to the built-in defaults");
@@ -539,6 +553,46 @@ pub async fn load_active_profiles() -> Vec<(String, RankSettings)> {
         return default_profiles();
     }
     result
+}
+
+/// Enabled music profiles, built-in ones with their saved changes laid over
+/// their Rust settings. With none enabled, the best-available profile stands
+/// in, as the 4K profile does for video.
+pub async fn load_music_profiles() -> Vec<(String, MusicRankSettings)> {
+    let fallback = || {
+        vec![(
+            MusicProfile::Best.id().to_owned(),
+            MusicProfile::Best.base_settings(),
+        )]
+    };
+    let profiles = match repo::get_enabled_profiles(RankingProfileKind::Music).await {
+        Ok(profiles) => profiles,
+        Err(e) => {
+            tracing::warn!(error = %e, "parse: could not load the music profiles; falling back to the built-in best-available profile");
+            return fallback();
+        }
+    };
+    let loaded: Vec<(String, MusicRankSettings)> = profiles
+        .into_iter()
+        .filter_map(|p| {
+            let base = MusicProfile::ALL
+                .into_iter()
+                .find(|profile| p.is_builtin && profile.id() == p.name)
+                .unwrap_or(MusicProfile::Best)
+                .base_settings();
+            match MusicRankSettings::from_overrides(base, &p.settings) {
+                Ok(settings) => Some((p.name, settings)),
+                Err(e) => {
+                    tracing::warn!(profile = p.name, error = %e, "parse: this music profile's saved settings could not be read; leaving it out");
+                    None
+                }
+            }
+        })
+        .collect();
+    if loaded.is_empty() {
+        return fallback();
+    }
+    loaded
 }
 
 fn default_profiles() -> Vec<(String, RankSettings)> {
@@ -615,6 +669,7 @@ mod tests {
             correct_title: "Top Gear".to_string(),
             aliases: HashMap::new(),
             profiles: vec![],
+            music_profiles: vec![],
             dubbed_anime_only: false,
         }
     }

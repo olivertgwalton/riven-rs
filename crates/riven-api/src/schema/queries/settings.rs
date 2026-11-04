@@ -1,6 +1,7 @@
 use async_graphql::*;
 use riven_core::plugin::{Display, FieldType, PluginRegistry, SettingField};
 use riven_core::settings::RivenSettings;
+use riven_core::types::RankingProfileKind;
 use riven_db::repo;
 use std::sync::Arc;
 
@@ -15,7 +16,8 @@ pub(crate) use general::{STREMIO_MANIFEST_URL_KEY, build_general_section};
 pub(crate) use plugins::build_plugin_section;
 use plugins::plugin_section_from;
 use ranking::{
-    build_rank_settings_schema, effective_profile_settings, inject_rank_defaults, strip_zero_ranks,
+    build_music_rank_settings_schema, build_rank_settings_schema, effective_music_profile_settings,
+    effective_profile_settings, inject_rank_defaults, strip_zero_ranks,
 };
 
 #[derive(Default)]
@@ -49,6 +51,30 @@ impl CoreSettingsQuery {
             })
             .collect();
         Ok(profiles)
+    }
+
+    /// The built-in music profiles, as `qualityProfiles` gives the video ones.
+    async fn music_quality_profiles(&self, ctx: &Context<'_>) -> Result<serde_json::Value> {
+        require_settings_access(ctx)?;
+        let db_profiles = repo::list_ranking_profiles().await.unwrap_or_default();
+        Ok(riven_rank::music::MusicProfile::ALL
+            .iter()
+            .map(|&p| {
+                let stored = db_profiles.iter().find(|r| r.name == p.id());
+                serde_json::json!({
+                    "id":          p.id(),
+                    "label":       p.label(),
+                    "description": p.description(),
+                    "settings":    effective_music_profile_settings(p, stored.map(|row| &row.settings)),
+                })
+            })
+            .collect())
+    }
+
+    async fn music_rank_settings_schema(&self, ctx: &Context<'_>) -> Result<serde_json::Value> {
+        require_settings_access(ctx)?;
+        Ok(serde_json::to_value(build_music_rank_settings_schema())
+            .unwrap_or(serde_json::Value::Array(vec![])))
     }
 
     async fn rank_settings_schema(&self, ctx: &Context<'_>) -> Result<serde_json::Value> {
@@ -110,7 +136,9 @@ impl CoreSettingsQuery {
         let setup_completed =
             env_bool("RIVEN_SETTING__SETUP_COMPLETED").unwrap_or(db_setup_completed);
 
-        let enabled_profile_count = repo::get_enabled_profiles().await?.len() as i32;
+        let enabled_profile_count = repo::get_enabled_profiles(RankingProfileKind::Video)
+            .await?
+            .len() as i32;
         let enabled_valid_plugin_count = registry
             .all_plugins_info()
             .await

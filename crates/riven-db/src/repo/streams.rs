@@ -718,6 +718,32 @@ pub async fn get_downloaded_profile_names_for_season(season_id: i64) -> Result<V
     Ok(rows.into_iter().flatten().collect())
 }
 
+/// The ranking profiles every track of an album has an entry for.
+pub async fn get_profiles_complete_for_album(album_id: i64) -> Result<Vec<String>> {
+    let rows = orm()
+        .query_all_raw(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT fe.ranking_profile_name AS profile
+             FROM filesystem_entries fe
+             JOIN media_items track ON track.id = fe.media_item_id
+             WHERE track.parent_id = $1
+               AND track.item_type = 'track'
+               AND fe.entry_type = 'media'
+               AND fe.ranking_profile_name IS NOT NULL
+             GROUP BY fe.ranking_profile_name
+             HAVING COUNT(DISTINCT track.id) = (
+                 SELECT COUNT(*) FROM media_items
+                 WHERE parent_id = $1 AND item_type = 'track'
+             )",
+            [album_id.into()],
+        ))
+        .await?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|row| row.try_get::<String>("", "profile").ok())
+        .collect())
+}
+
 /// Episode ids under a season that already have an entry for the given
 /// ranking profile.
 ///
