@@ -4,6 +4,9 @@ Media server integration for [Jellyfin](https://jellyfin.org). Refreshes the lib
 a download succeeds, removes items from the library when they are deleted in Riven, and
 reports active playback sessions so the core knows which files are in use.
 
+Music is mounted under `music/` beside `movies/` and `shows/`, as
+`Artist/Album (Year)/01 - Title.flac`; add a Music library pointed at it.
+
 Shares an implementation with [Emby](emby.md) — the two are configured separately and can
 run at the same time. The API key comes from Jellyfin's dashboard under
 *Administration → API Keys*.

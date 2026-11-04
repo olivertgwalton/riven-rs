@@ -54,6 +54,7 @@ impl VfsLibraryLayout {
             .collect();
         entries.insert("movies");
         entries.insert("shows");
+        entries.insert("music");
         entries.into_iter().map(String::from).collect()
     }
 
@@ -71,6 +72,7 @@ impl VfsLibraryLayout {
                 None => {
                     entries.insert("movies");
                     entries.insert("shows");
+                    entries.insert("music");
                 }
             }
         }

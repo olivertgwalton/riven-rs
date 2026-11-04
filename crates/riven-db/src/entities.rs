@@ -81,7 +81,7 @@ pub struct CalendarRow {
 pub struct FilesystemProfileEntryCandidate {
     pub id: i64,
     pub library_profiles: Option<serde_json::Value>,
-    pub is_movie: bool,
+    pub item_type: MediaItemType,
     pub genres: Option<serde_json::Value>,
     pub network: Option<String>,
     pub content_rating: Option<ContentRating>,
@@ -112,10 +112,14 @@ pub struct VfsEntryPath {
 
 impl FilesystemProfileEntryCandidate {
     pub fn filesystem_content_type(&self) -> FilesystemContentType {
-        if self.is_movie {
-            FilesystemContentType::Movie
-        } else {
-            FilesystemContentType::Show
+        match self.item_type {
+            MediaItemType::Movie => FilesystemContentType::Movie,
+            MediaItemType::Show | MediaItemType::Season | MediaItemType::Episode => {
+                FilesystemContentType::Show
+            }
+            MediaItemType::Artist | MediaItemType::Album | MediaItemType::Track => {
+                FilesystemContentType::Music
+            }
         }
     }
 

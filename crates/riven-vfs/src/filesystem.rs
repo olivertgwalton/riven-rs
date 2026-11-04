@@ -24,7 +24,9 @@ use crate::path_info::{CanonicalPath, PathTarget, parse_path};
 use crate::prefetch::Prefetcher;
 use crate::query::directory_entry_paths;
 use crate::source::{ByteSource, HttpSource, LinkRefresher, UsenetSource};
-use crate::state::{CachedEntry, DirEntry, MOVIES_INO, OpenedFile, ROOT_INO, SHOWS_INO, VfsState};
+use crate::state::{
+    CachedEntry, DirEntry, MOVIES_INO, MUSIC_INO, OpenedFile, ROOT_INO, SHOWS_INO, VfsState,
+};
 
 const TTL: Duration = Duration::from_secs(300);
 
@@ -103,7 +105,9 @@ fn populate_entries(
     let file_type = if matches!(
         target,
         PathTarget::Canonical {
-            path: CanonicalPath::MovieDir { .. } | CanonicalPath::SeasonDir { .. },
+            path: CanonicalPath::MovieDir { .. }
+                | CanonicalPath::SeasonDir { .. }
+                | CanonicalPath::AlbumDir { .. },
             ..
         }
     ) {
@@ -313,7 +317,8 @@ impl RivenFsInner {
             } => {
                 let actual_path = match canonical {
                     CanonicalPath::MovieFile { actual_path }
-                    | CanonicalPath::EpisodeFile { actual_path } => actual_path,
+                    | CanonicalPath::EpisodeFile { actual_path }
+                    | CanonicalPath::TrackFile { actual_path } => actual_path,
                     _ => return None,
                 };
                 if actual_path.is_empty() {
@@ -455,28 +460,38 @@ impl Filesystem for RivenFs {
                     };
                     reply.entry(&TTL, &dir_attr(ino), Generation(0));
                 }
+                CanonicalPath::AllArtists => {
+                    let ino = if profile_key.is_some() {
+                        s.state.get_or_create_ino(&path)
+                    } else {
+                        MUSIC_INO
+                    };
+                    reply.entry(&TTL, &dir_attr(ino), Generation(0));
+                }
                 CanonicalPath::MovieDir { .. }
                 | CanonicalPath::ShowDir { .. }
-                | CanonicalPath::SeasonDir { .. } => {
+                | CanonicalPath::SeasonDir { .. }
+                | CanonicalPath::ArtistDir { .. }
+                | CanonicalPath::AlbumDir { .. } => {
                     reply.entry(
                         &TTL,
                         &dir_attr(s.state.get_or_create_ino(&path)),
                         Generation(0),
                     );
                 }
-                CanonicalPath::MovieFile { .. } | CanonicalPath::EpisodeFile { .. } => {
-                    match s.get_entry(&path) {
-                        Some(entry) => {
-                            let ino = s.state.get_or_create_ino(&path);
-                            reply.entry(
-                                &TTL,
-                                &file_attr(ino, entry.file_size, entry.mtime),
-                                Generation(0),
-                            );
-                        }
-                        None => reply.error(Errno::ENOENT),
+                CanonicalPath::MovieFile { .. }
+                | CanonicalPath::EpisodeFile { .. }
+                | CanonicalPath::TrackFile { .. } => match s.get_entry(&path) {
+                    Some(entry) => {
+                        let ino = s.state.get_or_create_ino(&path);
+                        reply.entry(
+                            &TTL,
+                            &file_attr(ino, entry.file_size, entry.mtime),
+                            Generation(0),
+                        );
                     }
-                }
+                    None => reply.error(Errno::ENOENT),
+                },
             },
             PathTarget::Invalid => reply.error(Errno::ENOENT),
         }
@@ -489,6 +504,7 @@ impl Filesystem for RivenFs {
             ROOT_INO => reply.attr(&TTL, &dir_attr(ROOT_INO)),
             MOVIES_INO => reply.attr(&TTL, &dir_attr(MOVIES_INO)),
             SHOWS_INO => reply.attr(&TTL, &dir_attr(SHOWS_INO)),
+            MUSIC_INO => reply.attr(&TTL, &dir_attr(MUSIC_INO)),
             _ => {
                 let Some(path) = s.state.path(ino) else {
                     reply.error(Errno::ENOENT);
@@ -498,7 +514,10 @@ impl Filesystem for RivenFs {
                 let layout = s.current_layout();
                 match parse_path(&layout, &path) {
                     PathTarget::Canonical {
-                        path: CanonicalPath::MovieFile { .. } | CanonicalPath::EpisodeFile { .. },
+                        path:
+                            CanonicalPath::MovieFile { .. }
+                            | CanonicalPath::EpisodeFile { .. }
+                            | CanonicalPath::TrackFile { .. },
                         ..
                     } => match s.get_entry(&path) {
                         Some(entry) => {
