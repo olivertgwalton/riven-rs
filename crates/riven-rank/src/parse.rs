@@ -1,7 +1,7 @@
 mod detect;
 mod languages;
 pub(crate) mod patterns;
-mod title;
+pub(crate) mod title;
 
 use regex::Regex;
 use serde::{Deserialize, Serialize};

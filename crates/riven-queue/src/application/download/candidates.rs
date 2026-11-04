@@ -55,10 +55,67 @@ impl TitleMatchContext {
     }
 }
 
+/// How one version of an item is ranked: a film or episode by a quality
+/// profile, music by what kind of copy a release is.
+pub enum Ranking {
+    Video(Box<RankSettings>),
+    Music,
+}
+
 /// Returns the streams that pass the title re-check and the profile's fetch
 /// checks, sorted best-first. Cache state is no longer consulted here — the
 /// download loop asks each `(plugin, provider)` for cache hits per-stream.
 pub fn rank_streams_for_profile<'a>(
+    streams: &'a [Stream],
+    item: &MediaItem,
+    ranking: &Ranking,
+    title_ctx: &TitleMatchContext,
+) -> Vec<&'a Stream> {
+    match ranking {
+        Ranking::Video(profile) => rank_video_streams(streams, item, profile, title_ctx),
+        Ranking::Music => rank_music_streams(streams, item, title_ctx),
+    }
+}
+
+fn rank_music_streams<'a>(
+    streams: &'a [Stream],
+    item: &MediaItem,
+    title_ctx: &TitleMatchContext,
+) -> Vec<&'a Stream> {
+    let aliases: Vec<String> = title_ctx.aliases.values().flatten().cloned().collect();
+    let mut scored: Vec<(&'a Stream, i64)> = streams
+        .iter()
+        .filter_map(|stream| {
+            let raw_title = stream
+                .parsed_data
+                .as_ref()
+                .and_then(|data| data.get("raw_title"))
+                .and_then(serde_json::Value::as_str)?;
+            match riven_rank::music::judge_album(
+                raw_title,
+                &title_ctx.correct_title,
+                &aliases,
+                &item.title,
+            ) {
+                Ok(release) => Some((stream, riven_rank::music::rank(&release))),
+                Err(reason) => {
+                    tracing::debug!(
+                        item_id = item.id,
+                        info_hash = %stream.info_hash,
+                        raw_title,
+                        %reason,
+                        "download: stream rejected, the release is not this album"
+                    );
+                    None
+                }
+            }
+        })
+        .collect();
+    scored.sort_by_key(|(_, score)| std::cmp::Reverse(*score));
+    scored.into_iter().map(|(stream, _)| stream).collect()
+}
+
+fn rank_video_streams<'a>(
     streams: &'a [Stream],
     item: &MediaItem,
     profile: &RankSettings,
@@ -188,7 +245,7 @@ fn pack_preference(item: &MediaItem, parsed: &ParsedData) -> i64 {
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use super::{TitleMatchContext, rank_streams_for_profile};
+    use super::{Ranking, TitleMatchContext, rank_streams_for_profile};
     use riven_core::types::MediaItemType;
     use riven_db::entities::{MediaItem, Stream};
     use riven_rank::RankSettings;
@@ -281,7 +338,7 @@ pub(crate) mod tests {
         let best = rank_streams_for_profile(
             &streams,
             &media_item(),
-            &profile,
+            &Ranking::Video(Box::new(profile)),
             &title_ctx("Shrek 2", None),
         )
         .into_iter()
@@ -308,7 +365,12 @@ pub(crate) mod tests {
         correct_show.rank = None;
         let streams = [wrong_show, correct_show];
 
-        let candidates = rank_streams_for_profile(&streams, &media_item(), &profile, &ctx);
+        let candidates = rank_streams_for_profile(
+            &streams,
+            &media_item(),
+            &Ranking::Video(Box::new(profile)),
+            &ctx,
+        );
 
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].info_hash, "hashcorrect");
@@ -327,7 +389,12 @@ pub(crate) mod tests {
         let original = stream(2, "hashoriginal", "iCarly.S03E18.1080p.WEB.h264-DiRT");
         let streams = [reboot, original];
 
-        let candidates = rank_streams_for_profile(&streams, &media_item(), &profile, &ctx);
+        let candidates = rank_streams_for_profile(
+            &streams,
+            &media_item(),
+            &Ranking::Video(Box::new(profile)),
+            &ctx,
+        );
 
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].info_hash, "hashoriginal");
@@ -343,7 +410,12 @@ pub(crate) mod tests {
         let h264 = stream(2, "hashh264", "You.S04E01.1080p.NF.WEB-DL.H264-GROUP");
         let streams = [av1, h264];
 
-        let candidates = rank_streams_for_profile(&streams, &media_item(), &profile, &ctx);
+        let candidates = rank_streams_for_profile(
+            &streams,
+            &media_item(),
+            &Ranking::Video(Box::new(profile)),
+            &ctx,
+        );
 
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].info_hash, "hashh264");
@@ -392,7 +464,12 @@ pub(crate) mod tests {
             disable(&mut profile);
             let streams = [stream(1, "hashexcluded", raw_title)];
 
-            let candidates = rank_streams_for_profile(&streams, &media_item(), &profile, &ctx);
+            let candidates = rank_streams_for_profile(
+                &streams,
+                &media_item(),
+                &Ranking::Video(Box::new(profile)),
+                &ctx,
+            );
 
             assert!(
                 candidates.is_empty(),
@@ -410,9 +487,38 @@ pub(crate) mod tests {
         let season_pack = stream(2, "hashseason", "Top.Gear.S17.1080p.BluRay.x264-aAF");
         let streams = [extras_disc, season_pack];
 
-        let candidates = rank_streams_for_profile(&streams, &media_item(), &profile, &ctx);
+        let candidates = rank_streams_for_profile(
+            &streams,
+            &media_item(),
+            &Ranking::Video(Box::new(profile)),
+            &ctx,
+        );
 
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].info_hash, "hashseason");
+    }
+
+    /// An album's streams rank by the copy each is, best first, and a release
+    /// of another album is no candidate whatever its quality.
+    #[test]
+    fn album_streams_rank_by_copy_and_drop_other_albums() {
+        let mut album = media_item();
+        album.item_type = MediaItemType::Album;
+        album.title = "OK Computer".to_string();
+        let streams = [
+            stream(1, "mp3", "Radiohead - OK Computer (1997) [MP3 320]"),
+            stream(2, "flac", "Radiohead - OK Computer (1997) [FLAC]"),
+            stream(3, "bends", "Radiohead - The Bends (1995) [FLAC]"),
+        ];
+
+        let ranked = rank_streams_for_profile(
+            &streams,
+            &album,
+            &Ranking::Music,
+            &title_ctx("Radiohead", None),
+        );
+
+        let hashes: Vec<&str> = ranked.iter().map(|s| s.info_hash.as_str()).collect();
+        assert_eq!(hashes, ["flac", "mp3"]);
     }
 }

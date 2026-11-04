@@ -36,6 +36,12 @@ pub enum MediaItemType {
     Track,
 }
 
+impl MediaItemType {
+    pub const fn is_music(self) -> bool {
+        matches!(self, Self::Artist | Self::Album | Self::Track)
+    }
+}
+
 #[derive(
     Debug,
     Clone,

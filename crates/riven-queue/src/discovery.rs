@@ -340,6 +340,9 @@ pub fn rank_streams(
     ordered_streams
         .into_iter()
         .filter_map(|(info_hash, entry)| {
+            if ctx.item_type.is_music() {
+                return rank_music_stream(&ctx, info_hash, entry);
+            }
             let title = &entry.title;
             let parsed = riven_rank::parse(title);
 
@@ -448,6 +451,49 @@ pub fn rank_streams(
             })
         })
         .collect()
+}
+
+/// A music release either names the album asked for or does not; there are
+/// no quality profiles to pass, only a ranking of the copy it is.
+fn rank_music_stream(
+    ctx: &ParseContext,
+    info_hash: &str,
+    entry: &riven_core::types::ScrapeEntry,
+) -> Option<RankedStreamCandidate> {
+    let aliases: Vec<String> = ctx.aliases.values().flatten().cloned().collect();
+    let release = match riven_rank::music::judge_album(
+        &entry.title,
+        &ctx.correct_title,
+        &aliases,
+        &ctx.item_title,
+    ) {
+        Ok(release) => release,
+        Err(reason) => {
+            tracing::debug!(
+                info_hash,
+                title = %entry.title,
+                %reason,
+                "parse: release does not belong to this item"
+            );
+            return None;
+        }
+    };
+    let rank = riven_rank::music::rank(&release);
+    tracing::debug!(
+        info_hash,
+        rank,
+        title = %entry.title,
+        "parse: release accepted as a download candidate"
+    );
+    Some(RankedStreamCandidate {
+        info_hash: info_hash.to_owned(),
+        title: entry.title.clone(),
+        parsed_data: serde_json::to_value(&release).ok(),
+        rank: Some(rank),
+        file_size_bytes: entry.file_size_bytes,
+        source_url: entry.source_url.clone(),
+        reassign_to: None,
+    })
 }
 
 pub async fn load_active_profiles() -> Vec<(String, RankSettings)> {
