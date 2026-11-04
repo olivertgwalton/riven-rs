@@ -75,24 +75,33 @@ pub fn is_persistable_audio_file(filename: &str) -> bool {
 /// from it, where a video player probes the container. The disc goes in the
 /// name rather than a folder of its own, so every track is the same depth
 /// below its album.
-pub fn track_vfs_path(
-    artist: &str,
-    album: &str,
-    year: Option<i32>,
-    disc: Option<i32>,
-    number: i32,
-    title: &str,
-    original_filename: &str,
-) -> String {
-    let year = year.map(|y| format!(" ({y})")).unwrap_or_default();
-    let disc = disc.map(|d| format!("{d}-")).unwrap_or_default();
-    format!(
-        "/music/{}/{}{year}/{disc}{number:02} - {}.{}",
-        path_component(artist),
-        path_component(album),
-        path_component(title),
-        extension(original_filename),
-    )
+/// Each version of an album is a folder of its own, named for its profile as a
+/// film's version file is.
+pub struct TrackPath<'a> {
+    pub artist: &'a str,
+    pub album: &'a str,
+    pub year: Option<i32>,
+    pub version: Option<&'a str>,
+    pub disc: Option<i32>,
+    pub number: i32,
+    pub title: &'a str,
+    pub original_filename: &'a str,
+}
+
+impl TrackPath<'_> {
+    pub fn vfs_path(&self) -> String {
+        let year = self.year.map(|y| format!(" ({y})")).unwrap_or_default();
+        let version = self.version.map(|v| format!(" [{v}]")).unwrap_or_default();
+        let disc = self.disc.map(|d| format!("{d}-")).unwrap_or_default();
+        format!(
+            "/music/{}/{}{year}{version}/{disc}{:02} - {}.{}",
+            path_component(self.artist),
+            path_component(self.album),
+            self.number,
+            path_component(self.title),
+            extension(self.original_filename),
+        )
+    }
 }
 
 /// Returns true if the filename has a recognised video extension.
@@ -302,30 +311,31 @@ mod tests {
     }
 
     #[test]
-    fn a_track_sits_in_its_album_with_its_own_extension() {
+    fn a_track_sits_in_its_albums_version_with_its_own_extension() {
+        let track = super::TrackPath {
+            artist: "AC/DC",
+            album: "Back in Black",
+            year: Some(1980),
+            version: Some("music_best"),
+            disc: None,
+            number: 6,
+            title: "Back in Black",
+            original_filename: "06.flac",
+        };
         assert_eq!(
-            super::track_vfs_path(
-                "AC/DC",
-                "Back in Black",
-                Some(1980),
-                None,
-                6,
-                "Back in Black",
-                "06.flac"
-            ),
-            "/music/AC_DC/Back in Black (1980)/06 - Back in Black.flac"
+            track.vfs_path(),
+            "/music/AC_DC/Back in Black (1980) [music_best]/06 - Back in Black.flac"
         );
+        let track = super::TrackPath {
+            disc: Some(3),
+            number: 2,
+            title: "Fog",
+            original_filename: "x.MP3",
+            ..track
+        };
         assert_eq!(
-            super::track_vfs_path(
-                "Radiohead",
-                "Kid A Mnesia",
-                None,
-                Some(3),
-                2,
-                "Fog",
-                "x.MP3"
-            ),
-            "/music/Radiohead/Kid A Mnesia/3-02 - Fog.mp3"
+            track.vfs_path(),
+            "/music/AC_DC/Back in Black (1980) [music_best]/3-02 - Fog.mp3"
         );
     }
 }

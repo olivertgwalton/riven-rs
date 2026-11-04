@@ -157,6 +157,7 @@ pub fn build_discovery_targets(
                 correct_title: correct_title.clone(),
                 aliases: aliases.clone(),
                 profiles: profiles.clone(),
+                music_profiles: Vec::new(),
                 dubbed_anime_only,
             },
         }

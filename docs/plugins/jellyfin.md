@@ -5,7 +5,8 @@ a download succeeds, removes items from the library when they are deleted in Riv
 reports active playback sessions so the core knows which files are in use.
 
 Music is mounted under `music/` beside `movies/` and `shows/`, as
-`Artist/Album (Year)/01 - Title.flac`; add a Music library pointed at it.
+`Artist/Album (Year) [profile]/01 - Title.flac`, one album folder per enabled music
+profile; add a Music library pointed at it.
 
 Shares an implementation with [Emby](emby.md) — the two are configured separately and can
 run at the same time. The API key comes from Jellyfin's dashboard under

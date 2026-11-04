@@ -818,7 +818,7 @@ type MutationRoot {
 	updated; otherwise a new one is created. Built-in profiles cannot be
 	modified through this mutation — use `setProfileEnabled` instead.
 	"""
-	saveCustomProfile(id: Int, name: String!, settings: JSON!, enabled: Boolean): JSON!
+	saveCustomProfile(id: Int, name: String!, settings: JSON!, enabled: Boolean, kind: RankingProfileKind!): JSON!
 	"""
 	Delete a custom ranking profile by ID. Built-in profiles cannot be deleted.
 	"""
@@ -1077,6 +1077,11 @@ type QueryRoot {
 	the values that will actually be used at runtime.
 	"""
 	qualityProfiles: JSON!
+	"""
+	The built-in music profiles, as `qualityProfiles` gives the video ones.
+	"""
+	musicQualityProfiles: JSON!
+	musicRankSettingsSchema: JSON!
 	rankSettingsSchema: JSON!
 	defaultRankProfile: JSON!
 	"""
@@ -1176,6 +1181,11 @@ type QueryRoot {
 	Get upcoming unreleased items (calendar feed), with show title resolved in a single query.
 	"""
 	calendar(limit: Int): [CalendarEntry!]!
+}
+
+enum RankingProfileKind {
+	VIDEO
+	MUSIC
 }
 
 type RatingScore {

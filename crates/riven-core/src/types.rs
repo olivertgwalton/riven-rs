@@ -12,7 +12,7 @@ pub use content::{ContentServiceResponse, ExternalIds};
 pub use download::{DownloadFile, DownloadResult, ScrapeEntry, ScrapeResponse, build_magnet_uri};
 pub use enums::{
     ContentRating, FileSystemEntryType, ItemRequestState, ItemRequestType, MediaItemState,
-    MediaItemType, ShowStatus,
+    MediaItemType, RankingProfileKind, ShowStatus,
 };
 pub use index::{IndexedAlbum, IndexedEpisode, IndexedMediaItem, IndexedSeason, IndexedTrack};
 pub use playback::{ActivePlaybackSession, PlaybackMethod, PlaybackState, artwork_path};

@@ -1,7 +1,7 @@
 use anyhow::Result;
 use chrono::{DateTime, NaiveDate, Utc};
 use riven_core::entities::{media_items, ranking_profiles, settings};
-use riven_core::types::MediaItemState;
+use riven_core::types::{MediaItemState, RankingProfileKind};
 use sea_orm::ActiveValue::Set;
 use sea_orm::sea_query::{Expr, OnConflict};
 use sea_orm::{
@@ -19,6 +19,7 @@ pub struct RankingProfile {
     pub settings: serde_json::Value,
     pub is_builtin: bool,
     pub enabled: bool,
+    pub kind: RankingProfileKind,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -284,9 +285,10 @@ pub async fn list_ranking_profiles() -> Result<Vec<RankingProfile>> {
 /// profile ranks and attempts a download independently, so this order no
 /// longer affects which profile "wins" — it only fixes the order in which
 /// their attempts are logged/dispatched.
-pub async fn get_enabled_profiles() -> Result<Vec<RankingProfile>> {
+pub async fn get_enabled_profiles(kind: RankingProfileKind) -> Result<Vec<RankingProfile>> {
     Ok(ranking_profiles::Entity::find()
         .filter(ranking_profiles::Column::Enabled.eq(true))
+        .filter(ranking_profiles::Column::Kind.eq(kind))
         .order_by_asc(ranking_profiles::Column::Id)
         .into_model::<RankingProfile>()
         .all(orm())
@@ -304,11 +306,13 @@ pub async fn set_profile_enabled(name: &str, enabled: bool) -> Result<bool> {
     Ok(result.rows_affected > 0)
 }
 
+/// `kind` is fixed when a profile is created; an update keeps the profile's own.
 pub async fn upsert_ranking_profile(
     id: Option<i32>,
     name: &str,
     settings: serde_json::Value,
     enabled: bool,
+    kind: RankingProfileKind,
 ) -> Result<RankingProfile> {
     if let Some(existing_id) = id {
         // UPDATE ... WHERE id = $1 AND is_builtin = false RETURNING *. SeaORM's
@@ -337,6 +341,7 @@ pub async fn upsert_ranking_profile(
             name: Set(name.to_owned()),
             settings: Set(settings),
             enabled: Set(enabled),
+            kind: Set(kind),
             ..Default::default()
         }
         .insert(orm())
@@ -355,6 +360,7 @@ fn profile_from_model(m: ranking_profiles::Model) -> RankingProfile {
         settings: m.settings,
         is_builtin: m.is_builtin,
         enabled: m.enabled,
+        kind: m.kind,
         created_at: m.created_at.into(),
         updated_at: m.updated_at.into(),
     }

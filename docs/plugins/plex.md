@@ -10,7 +10,8 @@ one. `plexserverurl` must be reachable from the Riven container, which usually m
 container name or LAN address rather than `localhost`.
 
 Music is mounted under `music/` beside `movies/` and `shows/`, as
-`Artist/Album (Year)/01 - Title.flac`; add a Music library in Plex pointed at it.
+`Artist/Album (Year) [profile]/01 - Title.flac`, one album folder per enabled music
+profile; add a Music library in Plex pointed at it.
 
 Library sections are cached for five minutes, so a section added in Plex can take that
 long to become visible to Riven.

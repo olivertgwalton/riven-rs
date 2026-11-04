@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use super::tracklist::{TrackRef, match_files_to_tracks};
 use super::*;
-use crate::application::download::helpers::{is_persistable_audio_file, track_vfs_path};
+use crate::application::download::helpers::{TrackPath, is_persistable_audio_file};
 
 /// Persist an album download: each audio file the release holds is matched
 /// to a track of the album and saved under it. On success this sends the
@@ -72,15 +72,17 @@ pub async fn persist_album(
         if already_saved.contains(&track.id) {
             continue;
         }
-        let path = track_vfs_path(
+        let path = TrackPath {
             artist,
-            &item.title,
-            item.year,
-            multi_disc.then(|| track.disc_number.unwrap_or(1)),
-            track.track_number.unwrap_or(0),
-            &track.title,
-            &file.filename,
-        );
+            album: &item.title,
+            year: item.year,
+            version: profile,
+            disc: multi_disc.then(|| track.disc_number.unwrap_or(1)),
+            number: track.track_number.unwrap_or(0),
+            title: &track.title,
+            original_filename: &file.filename,
+        }
+        .vfs_path();
         match repo::create_media_entry(repo::MediaEntryInput {
             media_item_id: track.id,
             path: &path,

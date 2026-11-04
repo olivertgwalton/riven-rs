@@ -21,7 +21,7 @@ anything outside the markers survives regeneration. -->
 
 | Variable | Kind | Read at |
 | --- | --- | --- |
-| `RIVEN_SETTING__SETUP_COMPLETED` | variable | `crates/riven-api/src/schema/queries/settings.rs:111` |
+| `RIVEN_SETTING__SETUP_COMPLETED` | variable | `crates/riven-api/src/schema/queries/settings.rs:137` |
 | `RIVEN_STATIC_DIR` | variable | `crates/riven-api/src/server.rs:145` |
 
 ### `riven-app`

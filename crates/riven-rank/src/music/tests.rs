@@ -125,22 +125,82 @@ fn a_format_word_in_the_title_is_not_the_format() {
     assert_eq!(release.lossy_quality, Some(LossyQuality::Cbr(320)));
 }
 
+fn rank_under(profile: MusicProfile, raw: &str) -> Option<i64> {
+    profile
+        .base_settings()
+        .rank(&judge(raw, "Radiohead", "OK Computer").unwrap())
+}
+
 #[test]
-fn cd_quality_lossless_ranks_above_hi_res_and_lossy() {
-    let rank_of = |raw: &str| rank(&judge(raw, "Radiohead", "OK Computer").unwrap());
-    let cd = rank_of("Radiohead - OK Computer (1997) [FLAC]");
-    let hi_res = rank_of("Radiohead - OK Computer (1997) [FLAC 24-96]");
-    let mp3 = rank_of("Radiohead - OK Computer (1997) [MP3 320]");
-    let v0 = rank_of("Radiohead - OK Computer (1997) [MP3 V0]");
-    let low = rank_of("Radiohead - OK Computer (1997) [MP3 128kbps]");
+fn the_best_profile_puts_cd_quality_lossless_first_and_takes_lossy() {
+    let rank = |raw| rank_under(MusicProfile::Best, raw).unwrap();
+    let cd = rank("Radiohead - OK Computer (1997) [FLAC]");
+    let hi_res = rank("Radiohead - OK Computer (1997) [FLAC 24-96]");
+    let mp3 = rank("Radiohead - OK Computer (1997) [MP3 320]");
+    let v0 = rank("Radiohead - OK Computer (1997) [MP3 V0]");
+    let low = rank("Radiohead - OK Computer (1997) [MP3 128kbps]");
     assert!(cd > hi_res && hi_res > mp3 && mp3 > v0 && v0 > low);
 }
 
 #[test]
-fn a_vinyl_rip_ranks_below_the_same_format_from_cd() {
-    let rank_of = |raw: &str| rank(&judge(raw, "Radiohead", "OK Computer").unwrap());
+fn the_hi_res_profile_puts_24_bit_first_and_refuses_lossy() {
+    let rank = |raw| rank_under(MusicProfile::HiRes, raw);
     assert!(
-        rank_of("Radiohead - OK Computer (1997) CD FLAC")
-            > rank_of("Radiohead - OK Computer (1997) Vinyl FLAC")
+        rank("Radiohead - OK Computer (1997) [FLAC 24-96]")
+            > rank("Radiohead - OK Computer (1997) [FLAC]")
     );
+    assert_eq!(rank("Radiohead - OK Computer (1997) [MP3 320]"), None);
+}
+
+#[test]
+fn the_portable_profile_refuses_lossless() {
+    assert_eq!(
+        rank_under(
+            MusicProfile::Portable,
+            "Radiohead - OK Computer (1997) [FLAC]"
+        ),
+        None
+    );
+    assert!(
+        rank_under(
+            MusicProfile::Portable,
+            "Radiohead - OK Computer (1997) [MP3 V0]"
+        )
+        .is_some()
+    );
+}
+
+#[test]
+fn a_vinyl_rip_ranks_below_the_same_format_from_cd() {
+    assert!(
+        rank_under(MusicProfile::Best, "Radiohead - OK Computer (1997) CD FLAC")
+            > rank_under(
+                MusicProfile::Best,
+                "Radiohead - OK Computer (1997) Vinyl FLAC"
+            )
+    );
+}
+
+/// Saved settings name only what was changed; the rest is the profile's.
+#[test]
+fn a_refused_source_refuses_the_release_and_leaves_the_rest() {
+    let settings = MusicRankSettings::from_overrides(
+        MusicProfile::Best.base_settings(),
+        &serde_json::json!({ "sources": { "vinyl": false } }),
+    )
+    .unwrap();
+    let vinyl = judge(
+        "Radiohead - OK Computer (1997) Vinyl FLAC",
+        "Radiohead",
+        "OK Computer",
+    )
+    .unwrap();
+    let cd = judge(
+        "Radiohead - OK Computer (1997) CD FLAC",
+        "Radiohead",
+        "OK Computer",
+    )
+    .unwrap();
+    assert_eq!(settings.rank(&vinyl), None);
+    assert!(settings.rank(&cd).is_some());
 }

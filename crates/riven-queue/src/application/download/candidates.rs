@@ -55,11 +55,11 @@ impl TitleMatchContext {
     }
 }
 
-/// How one version of an item is ranked: a film or episode by a quality
-/// profile, music by what kind of copy a release is.
+/// How one version of an item is ranked: by a film quality profile or a music
+/// one.
 pub enum Ranking {
     Video(Box<RankSettings>),
-    Music,
+    Music(Box<riven_rank::music::MusicRankSettings>),
 }
 
 /// Returns the streams that pass the title re-check and the profile's fetch
@@ -73,13 +73,14 @@ pub fn rank_streams_for_profile<'a>(
 ) -> Vec<&'a Stream> {
     match ranking {
         Ranking::Video(profile) => rank_video_streams(streams, item, profile, title_ctx),
-        Ranking::Music => rank_music_streams(streams, item, title_ctx),
+        Ranking::Music(settings) => rank_music_streams(streams, item, settings, title_ctx),
     }
 }
 
 fn rank_music_streams<'a>(
     streams: &'a [Stream],
     item: &MediaItem,
+    settings: &riven_rank::music::MusicRankSettings,
     title_ctx: &TitleMatchContext,
 ) -> Vec<&'a Stream> {
     let aliases: Vec<String> = title_ctx.aliases.values().flatten().cloned().collect();
@@ -97,7 +98,7 @@ fn rank_music_streams<'a>(
                 &aliases,
                 &item.title,
             ) {
-                Ok(release) => Some((stream, riven_rank::music::rank(&release))),
+                Ok(release) => settings.rank(&release).map(|rank| (stream, rank)),
                 Err(reason) => {
                     tracing::debug!(
                         item_id = item.id,
@@ -514,7 +515,9 @@ pub(crate) mod tests {
         let ranked = rank_streams_for_profile(
             &streams,
             &album,
-            &Ranking::Music,
+            &Ranking::Music(Box::new(
+                riven_rank::music::MusicProfile::Best.base_settings(),
+            )),
             &title_ctx("Radiohead", None),
         );
 

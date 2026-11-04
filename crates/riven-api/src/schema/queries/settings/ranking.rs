@@ -17,6 +17,94 @@ pub(super) fn effective_profile_settings(
         })
 }
 
+pub(super) fn effective_music_profile_settings(
+    profile: riven_rank::music::MusicProfile,
+    stored: Option<&serde_json::Value>,
+) -> serde_json::Value {
+    let base = profile.base_settings();
+    let settings = match stored {
+        Some(stored) => riven_rank::music::MusicRankSettings::from_overrides(base.clone(), stored)
+            .unwrap_or(base),
+        None => base,
+    };
+    serde_json::to_value(settings).unwrap_or(serde_json::Value::Null)
+}
+
+/// Label for a music format or source key, where humanizing reads wrong.
+fn music_label(key: &str) -> String {
+    match key {
+        "flac" | "alac" | "wav" | "dsd" | "aac" | "cd" | "sacd" => key.to_uppercase(),
+        "mp3_320" => "MP3 320".to_owned(),
+        "mp3_v0" => "MP3 V0".to_owned(),
+        "mp3_lower" => "MP3 below 320".to_owned(),
+        "mp3" => "MP3, bitrate unstated".to_owned(),
+        _ => humanize(key),
+    }
+}
+
+/// Build the SettingField schema for `MusicRankSettings`, laid out as the
+/// video one is: which values are accepted, then a score for each.
+pub(super) fn build_music_rank_settings_schema() -> Vec<SettingField> {
+    use riven_rank::music::{BitDepthPreference, PerFormat, PerSource};
+    let group = |key: &'static str,
+                 label: &'static str,
+                 section: &'static str,
+                 description: &'static str,
+                 keys: &[&'static str],
+                 field_type: FieldType| {
+        SettingField::new(key, label, FieldType::Object)
+            .with_section(section)
+            .with_display(Display::Grid)
+            .with_description(description)
+            .with_fields(
+                keys.iter()
+                    .map(|k| SettingField::new(*k, music_label(k), field_type))
+                    .collect(),
+            )
+    };
+    let depths: Vec<&'static str> = BitDepthPreference::ALL.iter().map(|d| d.as_str()).collect();
+    vec![
+        group(
+            "formats",
+            "Formats",
+            "Formats",
+            "Which formats Riven will accept.",
+            &PerFormat::<bool>::KEYS,
+            FieldType::Boolean,
+        ),
+        group(
+            "format_ranks",
+            "Format scores",
+            "Formats",
+            "Score per format; the accepted copy that scores highest is downloaded.",
+            &PerFormat::<i64>::KEYS,
+            FieldType::Number,
+        ),
+        SettingField::new("bit_depth", "Lossless bit depth", FieldType::Select)
+            .with_section("Formats")
+            .with_options(&depths)
+            .with_description(
+                "Which lossless copy is preferred: 16-bit CD quality or 24-bit hi-res.",
+            ),
+        group(
+            "sources",
+            "Sources",
+            "Sources",
+            "Which sources Riven will accept.",
+            &PerSource::<bool>::KEYS,
+            FieldType::Boolean,
+        ),
+        group(
+            "source_ranks",
+            "Source scores",
+            "Sources",
+            "Score added per source.",
+            &PerSource::<i64>::KEYS,
+            FieldType::Number,
+        ),
+    ]
+}
+
 /// Label for a resolution key: strip the leading `r` before the digits so
 /// `r2160p` → "2160p"; everything else (e.g. `unknown`) falls back to humanize.
 fn resolution_label(key: &str) -> String {

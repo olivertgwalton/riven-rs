@@ -17,7 +17,7 @@ use crate::context::{
     DownloadHierarchyContext, load_download_hierarchy_context, load_media_item_or_log,
     notification_tvdb_id,
 };
-use crate::discovery::load_active_profiles;
+use crate::discovery::{load_active_profiles, load_music_profiles};
 use crate::{DownloadJob, JobQueue, RankStreamsJob};
 
 use self::persist::finalize_download_success;
@@ -451,11 +451,15 @@ async fn build_plugin_provider_iterations(queue: &JobQueue) -> Vec<(String, Opti
 }
 
 /// Convert a ranking profile's bitrate settings into runtime [`BitrateLimits`].
-/// The versions an item is downloaded in: one per enabled quality profile
-/// for film and television, the one music version for music.
+/// The versions an item is downloaded in: one per enabled profile of its
+/// kind.
 async fn load_download_profiles(item_type: MediaItemType) -> Vec<(String, Ranking)> {
     if item_type.is_music() {
-        return vec![(riven_rank::music::PROFILE_NAME.to_owned(), Ranking::Music)];
+        return load_music_profiles()
+            .await
+            .into_iter()
+            .map(|(name, settings)| (name, Ranking::Music(Box::new(settings))))
+            .collect();
     }
     load_active_profiles()
         .await
@@ -943,19 +947,12 @@ async fn profile_satisfied_mid_walk(id: i64, item_type: MediaItemType, profile: 
 }
 
 async fn fetch_done_profiles(id: i64, item_type: MediaItemType) -> Vec<String> {
-    // An album is not fanned out to its tracks, so its one version is done
+    // An album is not fanned out to its tracks, so a version of it is done
     // only once every track holds it, not once any does as for a season.
     if item_type == MediaItemType::Album {
-        let complete = repo::get_media_item(id)
+        return repo::get_profiles_complete_for_album(id)
             .await
-            .ok()
-            .flatten()
-            .is_some_and(|album| album.state == MediaItemState::Completed);
-        return if complete {
-            vec![riven_rank::music::PROFILE_NAME.to_owned()]
-        } else {
-            Vec::new()
-        };
+            .unwrap_or_default();
     }
     let result = if item_type == MediaItemType::Season {
         repo::get_downloaded_profile_names_for_season(id).await

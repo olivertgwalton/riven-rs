@@ -5,9 +5,13 @@ export type QualityProfile = {
 	settings: Record<string, unknown>;
 };
 
+/** Film and television profiles rank video; music profiles rank albums. */
+export type ProfileKind = "video" | "music";
+
 export type CustomProfile = {
 	id: number;
 	name: string;
+	kind: ProfileKind;
 	settings: Record<string, unknown>;
 	is_builtin: boolean;
 	enabled: boolean;

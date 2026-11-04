@@ -241,3 +241,29 @@ pub enum ItemRequestState {
     #[sea_orm(string_value = "unreleased")]
     Unreleased,
 }
+
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    async_graphql::Enum,
+    sea_orm::EnumIter,
+    sea_orm::DeriveActiveEnum,
+)]
+#[sea_orm(
+    rs_type = "String",
+    db_type = "Enum",
+    enum_name = "ranking_profile_kind"
+)]
+#[serde(rename_all = "snake_case")]
+pub enum RankingProfileKind {
+    #[sea_orm(string_value = "video")]
+    Video,
+    #[sea_orm(string_value = "music")]
+    Music,
+}

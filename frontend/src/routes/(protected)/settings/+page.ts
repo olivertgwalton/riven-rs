@@ -13,8 +13,8 @@ import type {
 
 // Initial data is loaded server-side (SSR); every mutation runs client-side via
 // `gqlClient` (see operations.ts), matching the rest of the app.
-const RANK_PROFILES_QUERY = `query { qualityProfiles customProfiles }`;
-const RANK_SETTINGS_SCHEMA_QUERY = `query { rankSettingsSchema }`;
+const RANK_PROFILES_QUERY = `query { qualityProfiles musicQualityProfiles customProfiles }`;
+const RANK_SETTINGS_SCHEMA_QUERY = `query { rankSettingsSchema musicRankSettingsSchema }`;
 const DEFAULT_RANK_PROFILE_QUERY = `query { defaultRankProfile }`;
 const SETUP_GROUPS_QUERY = `query { setupGroups { id title description } }`;
 const INSTANCE_STATUS_QUERY = `
@@ -67,15 +67,20 @@ export const load: PageLoad = async ({ parent }) => {
 			).catch(() => ({ settingsSections: [] })),
 			gqlClient<{
 				qualityProfiles: QualityProfile[];
+				musicQualityProfiles: QualityProfile[];
 				customProfiles: CustomProfile[];
 			}>(RANK_PROFILES_QUERY, {}).catch(() => ({
 				qualityProfiles: [],
+				musicQualityProfiles: [],
 				customProfiles: [],
 			})),
-			gqlClient<{ rankSettingsSchema: SettingFieldDef[] }>(
-				RANK_SETTINGS_SCHEMA_QUERY,
-				{},
-			).catch(() => ({ rankSettingsSchema: [] })),
+			gqlClient<{
+				rankSettingsSchema: SettingFieldDef[];
+				musicRankSettingsSchema: SettingFieldDef[];
+			}>(RANK_SETTINGS_SCHEMA_QUERY, {}).catch(() => ({
+				rankSettingsSchema: [],
+				musicRankSettingsSchema: [],
+			})),
 			gqlClient<{ setupGroups: SetupGroup[] }>(SETUP_GROUPS_QUERY, {}).catch(
 				() => ({
 					setupGroups: [],
@@ -103,13 +108,25 @@ export const load: PageLoad = async ({ parent }) => {
 			})),
 		]);
 
+		const musicQualityProfiles = rankProfilesData.musicQualityProfiles ?? [];
+		const customProfiles = rankProfilesData.customProfiles ?? [];
+		// Open on the first enabled built-in music profile, as the video panel
+		// opens on its default.
+		const initialMusicProfile =
+			musicQualityProfiles.find((profile) =>
+				customProfiles.some((row) => row.enabled && row.name === profile.id),
+			) ?? musicQualityProfiles[0];
+
 		return {
 			sections: sectionsData.settingsSections,
 			rankSettings: defaultProfileData.defaultRankProfile.settings,
 			rankSettingsSchema: rankSchemaData.rankSettingsSchema,
 			initialProfileName: defaultProfileData.defaultRankProfile.name,
 			qualityProfiles: rankProfilesData.qualityProfiles ?? [],
-			customProfiles: rankProfilesData.customProfiles ?? [],
+			musicRankSettingsSchema: rankSchemaData.musicRankSettingsSchema,
+			musicQualityProfiles,
+			initialMusicProfile,
+			customProfiles,
 			setupGroups: setupGroupsData.setupGroups,
 			instanceStatus: instanceStatusData.instanceStatus,
 		};
