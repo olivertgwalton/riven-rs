@@ -11,6 +11,7 @@ members = [
     "crates/riven-plugins",
     "crates/plugin-tmdb",
     "crates/plugin-tvdb",
+    "crates/plugin-musicbrainz",
     "crates/plugin-comet",
     "crates/plugin-torrentio",
     "crates/plugin-aiostreams",

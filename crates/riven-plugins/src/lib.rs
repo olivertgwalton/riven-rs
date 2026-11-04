@@ -14,6 +14,7 @@ pub fn all_plugins() -> Vec<Box<dyn Plugin>> {
     vec![
         Box::new(plugin_tmdb::TmdbPlugin),
         Box::new(plugin_tvdb::TvdbPlugin::default()),
+        Box::new(plugin_musicbrainz::MusicbrainzPlugin),
         Box::new(plugin_comet::CometPlugin),
         Box::new(plugin_torrentio::TorrentioPlugin),
         Box::new(plugin_aiostreams::AioStreamsPlugin),

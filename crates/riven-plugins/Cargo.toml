@@ -12,6 +12,7 @@ path = "src/bin/gen-docs.rs"
 riven-core = { path = "../riven-core" }
 plugin-tmdb = { path = "../plugin-tmdb" }
 plugin-tvdb = { path = "../plugin-tvdb" }
+plugin-musicbrainz = { path = "../plugin-musicbrainz" }
 plugin-comet = { path = "../plugin-comet" }
 plugin-torrentio = { path = "../plugin-torrentio" }
 plugin-aiostreams = { path = "../plugin-aiostreams" }
