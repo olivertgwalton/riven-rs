@@ -104,10 +104,34 @@ pub fn newznab_text_query(req: &ScrapeRequest<'_>) -> (&'static str, Vec<(&'stat
                 ("tvsearch", params)
             }
         }
+        // A general search over the music categories: every indexer has one,
+        // where not all have an audio search.
         MediaItemType::Artist | MediaItemType::Album | MediaItemType::Track => {
-            ("music", vec![("q", q)])
+            let q = match req.artist {
+                Some(artist) => format!("{} {q}", sanitize_query_title(artist)),
+                None => q,
+            };
+            ("search", vec![("q", q)])
         }
     }
+}
+
+/// Newznab's audio search for an album, by artist and album name. `None` for
+/// anything else, and for an album whose artist is not known.
+pub fn newznab_music_query(
+    req: &ScrapeRequest<'_>,
+) -> Option<(&'static str, Vec<(&'static str, String)>)> {
+    if req.item_type != MediaItemType::Album {
+        return None;
+    }
+    let artist = req.artist?;
+    Some((
+        "music",
+        vec![
+            ("artist", sanitize_query_title(artist)),
+            ("album", sanitize_query_title(req.title)),
+        ],
+    ))
 }
 
 /// What one indexer says it can be asked, from its `t=caps` document.
@@ -431,6 +455,26 @@ mod tests {
             season,
             episode,
         }
+    }
+
+    #[test]
+    fn an_album_is_searched_by_artist_and_album() {
+        let mut req = request(MediaItemType::Album, "OK Computer", None, None);
+        req.artist = Some("Radiohead");
+        assert_eq!(
+            newznab_music_query(&req),
+            Some((
+                "music",
+                vec![
+                    ("artist", "Radiohead".to_string()),
+                    ("album", "OK Computer".to_string()),
+                ]
+            ))
+        );
+        assert_eq!(
+            newznab_text_query(&req),
+            ("search", vec![("q", "Radiohead OK Computer".to_string())])
+        );
     }
 
     #[test]

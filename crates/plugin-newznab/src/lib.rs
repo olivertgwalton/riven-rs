@@ -7,8 +7,8 @@ use riven_core::events::{EventType, HookResponse, ScrapeRequest};
 use riven_core::http::{HttpServiceProfile, RateLimitedError};
 use riven_core::indexer_stats::{QueryKind, record_query};
 use riven_core::nzb::{
-    NZB_URL_TTL_SECS, NewznabCaps, NewznabItem, newznab_text_query, nzb_indexer_redis_key,
-    nzb_info_hash, nzb_url_redis_key, parse_newznab_caps, parse_newznab_xml,
+    NZB_URL_TTL_SECS, NewznabCaps, NewznabItem, newznab_music_query, newznab_text_query,
+    nzb_indexer_redis_key, nzb_info_hash, nzb_url_redis_key, parse_newznab_caps, parse_newznab_xml,
 };
 use riven_core::plugin::{FieldType, Plugin, PluginContext, SettingField};
 use riven_core::settings::PluginSettings;
@@ -139,6 +139,9 @@ fn constrain_to_caps<'a>(
     Some((search_type, kept))
 }
 
+/// Newznab's whole audio category, which holds MP3, lossless and the rest.
+const DEFAULT_MUSIC_CATEGORIES: &str = "3000";
+
 #[derive(Default)]
 pub struct NewznabPlugin;
 
@@ -150,6 +153,7 @@ struct Indexer {
     url: String,
     apikey: String,
     categories: String,
+    music_categories: String,
 }
 
 /// Read the configured indexer list out of the `indexers` dictionary
@@ -174,6 +178,8 @@ struct IndexerJson {
     apikey: String,
     #[serde(default)]
     categories: Option<String>,
+    #[serde(default)]
+    music_categories: Option<String>,
 }
 
 fn parse_indexers_str(raw: &str) -> Option<Vec<Indexer>> {
@@ -192,11 +198,17 @@ fn parse_indexers_str(raw: &str) -> Option<Vec<Indexer>> {
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
                 .unwrap_or_else(|| "2000,5000".to_string());
+            let music_categories = entry
+                .music_categories
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| DEFAULT_MUSIC_CATEGORIES.to_string());
             Some(Indexer {
                 name,
                 url,
                 apikey,
                 categories,
+                music_categories,
             })
         })
         .collect();
@@ -242,7 +254,9 @@ fn build_query(request: &ScrapeRequest<'_>) -> Option<(&'static str, Vec<(&'stat
             ))
         }
         // Newznab has no MusicBrainz id parameter: music is found by name.
-        MediaItemType::Artist | MediaItemType::Album | MediaItemType::Track => None,
+        MediaItemType::Artist | MediaItemType::Album | MediaItemType::Track => {
+            newznab_music_query(request)
+        }
     }
 }
 
@@ -356,7 +370,12 @@ async fn scrape_page(
     let mut params: Vec<(&'static str, String)> = base_params.to_vec();
     params.push(("t", search_type.to_string()));
     params.push(("apikey", indexer.apikey.clone()));
-    params.push(("cat", indexer.categories.clone()));
+    let categories = if request.item_type.is_music() {
+        &indexer.music_categories
+    } else {
+        &indexer.categories
+    };
+    params.push(("cat", categories.clone()));
     params.push(("limit", limit.to_string()));
     if offset > 0 {
         params.push(("offset", offset.to_string()));
@@ -491,6 +510,11 @@ impl Plugin for NewznabPlugin {
                         .with_default("2000,5000")
                         .with_description(
                             "Comma-separated Newznab category IDs. 2000 = Movies, 5000 = TV.",
+                        ),
+                    SettingField::new("music_categories", "Music Categories", FieldType::Text)
+                        .with_default(DEFAULT_MUSIC_CATEGORIES)
+                        .with_description(
+                            "Comma-separated Newznab category IDs searched for albums. 3000 = Audio, 3010 = MP3, 3040 = Lossless.",
                         ),
                 ]),
         ]
@@ -759,6 +783,20 @@ mod tests {
         assert_eq!(parsed[0].categories, "5000");
         assert_eq!(parsed[1].name, "geek");
         assert_eq!(parsed[1].categories, "2000,5000");
+    }
+
+    /// An indexer configured before music existed searches its whole audio
+    /// category for albums, not the film and TV categories it was given.
+    #[test]
+    fn albums_search_the_audio_category_unless_told_otherwise() {
+        let raw = r#"{
+            "geek": {"url": "https://nzbgeek.info", "apikey": "abc", "categories": "5000"},
+            "finder": {"url": "https://nzbfinder.ws/", "apikey": "def", "music_categories": "3040"}
+        }"#;
+        let mut parsed = parse_indexers_str(raw).expect("non-empty");
+        parsed.sort_by(|a, b| a.name.cmp(&b.name));
+        assert_eq!(parsed[0].music_categories, "3040");
+        assert_eq!(parsed[1].music_categories, "3000");
     }
 
     #[test]
