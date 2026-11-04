@@ -170,7 +170,7 @@ pub fn rank(release: &MusicRelease) -> i64 {
 
 /// Lower case, without accents or punctuation, `&` read as `and`. Numbers
 /// are kept: `1989` and `2112` are album titles.
-fn tokenize(text: &str) -> Vec<String> {
+pub fn tokenize(text: &str) -> Vec<String> {
     let lower = remove_accents(&text.to_lowercase()).replace('&', " and ");
     lower
         .chars()

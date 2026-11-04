@@ -10,6 +10,7 @@ use crate::types::ContentRating;
 pub enum FilesystemContentType {
     Movie,
     Show,
+    Music,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
