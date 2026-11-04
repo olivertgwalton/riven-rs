@@ -112,6 +112,10 @@
             return mediaPath(data.id, normalizedType, params.join("&"));
         }
 
+        if (indexer === "musicbrainz" && normalizedType === "artist") {
+            return resolve("/(protected)/details/artist/[id]", { id: String(data.id) });
+        }
+
         if (indexer === "anilist" && (normalizedType === "movie" || normalizedType === "tv")) {
             // There is no /details/anilist/... route — Anilist ids aren't
             // ones the details page understands at all. Resolve to the
@@ -135,6 +139,7 @@
         else if (data.mediaType === "person" || normalizedType === "person") parts.push("Person");
         else if (data.mediaType === "company" || normalizedType === "company")
             parts.push("Studio");
+        else if (normalizedType === "artist") parts.push("Artist");
 
         if (data.year && data.year !== "N/A") parts.push(data.year);
         return parts.join(" • ") || null;

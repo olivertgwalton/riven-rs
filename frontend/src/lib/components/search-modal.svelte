@@ -13,6 +13,7 @@
     import {
         SEARCH_TMDB_PAGE_QUERY
     } from "#lib/services/backend-metadata.js";
+    import { SEARCH_MUSIC_ARTISTS_QUERY, type MusicArtist } from "#lib/services/music.js";
 
     interface Props {
         open: boolean;
@@ -26,8 +27,12 @@
         onopen();
     }
 
+    /** Films and series come from TMDB, artists from MusicBrainz. */
+    type SearchMode = "media" | "music";
+    let mode = $state<SearchMode>("media");
     let query = $state("");
     let results = $state.raw<TmdbListItem[]>([]);
+    let artistResults = $state.raw<MusicArtist[]>([]);
     let loading = $state(false);
     let loadingMore = $state(false);
     let debounceTimer: ReturnType<typeof setTimeout> | null = null;
@@ -84,6 +89,7 @@
             abortController?.abort();
             abortController = null;
             results = [];
+            artistResults = [];
             currentPage = 1;
             hasMorePages = true;
             currentQuery = "";
@@ -111,6 +117,17 @@
         }
 
         try {
+            if (mode === "music") {
+                const data = await gqlClient<{ searchMusicArtists: MusicArtist[] }>(
+                    SEARCH_MUSIC_ARTISTS_QUERY,
+                    { query: q },
+                    signal
+                );
+                if (signal.aborted) return;
+                artistResults = data.searchMusicArtists;
+                hasMorePages = false;
+                return;
+            }
             const searchParams = { query: q, page: String(currentPage) };
             const [movieData, tvData] = await Promise.all([
                 gqlClient<SearchTmdbResponse>(
@@ -154,7 +171,10 @@
             currentPage++;
         } catch (err) {
             if (err instanceof Error && err.name === "AbortError") return;
-            if (reset) results = [];
+            if (reset) {
+                results = [];
+                artistResults = [];
+            }
         } finally {
             if (!signal.aborted) {
                 loading = false;
@@ -173,6 +193,21 @@
     }
 
     let pendingNavigation = false;
+
+    function setMode(next: SearchMode) {
+        if (mode === next) return;
+        mode = next;
+        results = [];
+        artistResults = [];
+        void search(true);
+    }
+
+    function handleArtistClick(artist: MusicArtist) {
+        savedQuery = query;
+        navigatedFromModal = true;
+        pendingNavigation = true;
+        goto(resolve("/(protected)/details/artist/[id]", { id: artist.id }));
+    }
 
     function handleResultClick(item: TmdbListItem) {
         savedQuery = query;
@@ -219,6 +254,7 @@
         savedResults = [];
         query = "";
         results = [];
+        artistResults = [];
         loading = false;
         loadingMore = false;
         currentPage = 1;
@@ -264,7 +300,7 @@
                 bind:value={query}
                 oninput={handleInput}
                 onkeydown={handleKeydown}
-                placeholder="Search movies & shows..."
+                placeholder={mode === "music" ? "Search artists..." : "Search movies & shows..."}
                 aria-label="Search"
                 autocomplete="off"
                 enterkeyhint="search"
@@ -278,9 +314,43 @@
             </button>
         </div>
 
+        <div class="flex shrink-0 gap-2 border-b border-white/5 px-4 py-2" role="tablist">
+            {#each [{ value: "media", label: "Movies & Shows" }, { value: "music", label: "Music" }] as option (option.value)}
+                <button
+                    type="button"
+                    role="tab"
+                    aria-selected={mode === option.value}
+                    onclick={() => setMode(option.value as SearchMode)}
+                    class="rounded-full px-3 py-1 text-xs font-medium transition-colors {mode ===
+                    option.value
+                        ? 'bg-white text-zinc-950'
+                        : 'text-white/60 hover:bg-white/10 hover:text-white'}">
+                    {option.label}
+                </button>
+            {/each}
+        </div>
+
         <!-- Results -->
         <div onscroll={handleScroll} class="flex-1 overflow-y-auto">
-            {#if loading}
+            {#if mode === "music" && artistResults.length > 0}
+                <ul class="divide-y divide-white/5 px-4 pt-2 pb-24">
+                    {#each artistResults as artist (artist.id)}
+                        <li>
+                            <button
+                                type="button"
+                                onclick={() => handleArtistClick(artist)}
+                                class="w-full py-3 text-left outline-none focus-visible:ring-2 focus-visible:ring-white/50">
+                                <span class="block text-sm font-medium text-white">{artist.name}</span>
+                                <span class="block text-xs text-white/40">
+                                    {[artist.kind, artist.country, artist.disambiguation]
+                                        .filter(Boolean)
+                                        .join(" • ")}
+                                </span>
+                            </button>
+                        </li>
+                    {/each}
+                </ul>
+            {:else if loading}
                 <div class="grid grid-cols-2 gap-3 px-4 pt-4 pb-24">
                     {#each { length: 8 }, i}
                         <PortraitCardSkeleton />

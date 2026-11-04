@@ -61,6 +61,20 @@ export type AnilistPage = {
   results: Array<AnilistListItem>;
 };
 
+/** Input for requesting an artist: its whole discography, or chosen albums. */
+export type ArtistRequestInput = {
+  /**
+   * Release group ids of the albums to request. When omitted the whole
+   * discography is requested, and every album the artist releases later.
+   */
+  albums?: InputMaybe<Array<Scalars['String']['input']>>;
+  /** MusicBrainz artist id. */
+  musicbrainzId: Scalars['String']['input'];
+  /** Name used as a placeholder until indexing fills in the canonical one. */
+  name: Scalars['String']['input'];
+  requestedBy?: InputMaybe<Scalars['String']['input']>;
+};
+
 export type AudioTrack = {
   channels?: Maybe<Scalars['Int']['output']>;
   codec?: Maybe<Scalars['String']['output']>;
@@ -618,6 +632,8 @@ export type MediaItemListRow = {
   scrapedTimes: Scalars['Int']['output'];
   seasonNumber?: Maybe<Scalars['Int']['output']>;
   showId?: Maybe<Scalars['Int']['output']>;
+  /** For an artist, album or track: the artist's MusicBrainz id. */
+  showMusicbrainzId?: Maybe<Scalars['String']['output']>;
   /**
    * Absolute artwork URL for the parent show, resolved the same way as the
    * row's own poster.
@@ -730,6 +746,35 @@ export type MovieRequestInput = {
   tmdbId?: InputMaybe<Scalars['String']['input']>;
 };
 
+export type MusicAlbum = {
+  coverUrl: Scalars['String']['output'];
+  /** MusicBrainz release group id. */
+  id: Scalars['String']['output'];
+  primaryType?: Maybe<Scalars['String']['output']>;
+  releaseDate?: Maybe<Scalars['NaiveDate']['output']>;
+  /** The album's state in the library; `None` when it was never requested. */
+  state?: Maybe<MediaItemState>;
+  title: Scalars['String']['output'];
+};
+
+export type MusicArtist = {
+  country?: Maybe<Scalars['String']['output']>;
+  disambiguation?: Maybe<Scalars['String']['output']>;
+  /** MusicBrainz artist id. */
+  id: Scalars['String']['output'];
+  kind?: Maybe<Scalars['String']['output']>;
+  name: Scalars['String']['output'];
+};
+
+export type MusicArtistDetails = {
+  albums: Array<MusicAlbum>;
+  artist: MusicArtist;
+  /** Whether the request follows the whole discography, new albums included. */
+  followsDiscography: Scalars['Boolean']['output'];
+  /** The artist's id in the library, once requested. */
+  libraryId?: Maybe<Scalars['Int']['output']>;
+};
+
 export type MutationRoot = {
   /**
    * Reject a downloaded file: permanently blacklist the release behind it
@@ -773,6 +818,12 @@ export type MutationRoot = {
   regrabUsenetTitle: Scalars['String']['output'];
   /** Remove items by ID. */
   removeItems: Scalars['Int']['output'];
+  /**
+   * Request an artist's discography, or albums of it, to be tracked and
+   * indexed. Albums asked for later are added to the request; if nothing
+   * new is asked for `statusText` is `CONFLICT` and `item` is `null`.
+   */
+  requestArtist: RequestItemMutationResponse;
   /**
    * Bulk-request movies and shows in a single call.
    *
@@ -906,6 +957,11 @@ export type MutationRootRegrabUsenetTitleArgs = {
 
 export type MutationRootRemoveItemsArgs = {
   ids: Array<Scalars['Int']['input']>;
+};
+
+
+export type MutationRootRequestArtistArgs = {
+  input: ArtistRequestInput;
 };
 
 
@@ -1122,6 +1178,11 @@ export type QueryRoot = {
    * `showDetails`.
    */
   movieDetails: MediaDetails;
+  /**
+   * An artist's albums, EPs and singles, with what of them the library
+   * already holds.
+   */
+  musicArtist: MusicArtistDetails;
   /** The built-in music profiles, as `qualityProfiles` gives the video ones. */
   musicQualityProfiles: Scalars['JSON']['output'];
   musicRankSettingsSchema: Scalars['JSON']['output'];
@@ -1143,6 +1204,8 @@ export type QueryRoot = {
   rankSettingsSchema: Scalars['JSON']['output'];
   ratings: RatingsResponse;
   resolveExternalId: IdResolution;
+  /** Artists on MusicBrainz matching `query`, best match first. */
+  searchMusicArtists: Array<MusicArtist>;
   searchTmdb: TmdbPage;
   /**
    * Every configurable settings surface — the instance-wide "general"
@@ -1252,6 +1315,11 @@ export type QueryRootMovieDetailsArgs = {
 };
 
 
+export type QueryRootMusicArtistArgs = {
+  id: Scalars['String']['input'];
+};
+
+
 export type QueryRootPersonDetailsArgs = {
   id: Scalars['Int']['input'];
   indexer?: InputMaybe<Scalars['String']['input']>;
@@ -1270,6 +1338,11 @@ export type QueryRootResolveExternalIdArgs = {
   id: Scalars['String']['input'];
   mediaType?: InputMaybe<Scalars['String']['input']>;
   to: Scalars['String']['input'];
+};
+
+
+export type QueryRootSearchMusicArtistsArgs = {
+  query: Scalars['String']['input'];
 };
 
 
@@ -1342,7 +1415,10 @@ export type RatingsResponse = {
   tmdbId?: Maybe<Scalars['Int']['output']>;
 };
 
-/** Structured response returned by `requestMovie` and `requestShow`. */
+/**
+ * Structured response returned by `requestMovie`, `requestShow` and
+ * `requestArtist`.
+ */
 export type RequestItemMutationResponse = {
   errorCode?: Maybe<RequestItemMutationResponseErrorCode>;
   /** The item request that was created or updated; `null` on conflict. */

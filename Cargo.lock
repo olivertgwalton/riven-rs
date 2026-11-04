@@ -3917,6 +3917,7 @@ dependencies = [
  "hex",
  "plugin-calendar",
  "plugin-dashboard",
+ "plugin-musicbrainz",
  "plugin-seerr",
  "reqwest",
  "riven-core",

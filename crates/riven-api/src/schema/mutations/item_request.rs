@@ -2,7 +2,9 @@ use async_graphql::*;
 use riven_db::entities::ItemRequest;
 use riven_db::repo::ItemRequestUpsertAction;
 use riven_queue::JobQueue;
-use riven_queue::lifecycle::{upsert_requested_movie, upsert_requested_show};
+use riven_queue::lifecycle::{
+    upsert_requested_artist, upsert_requested_movie, upsert_requested_show,
+};
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -44,7 +46,21 @@ pub(super) struct ShowRequestInput {
     external_request_id: Option<String>,
 }
 
-/// Structured response returned by `requestMovie` and `requestShow`.
+/// Input for requesting an artist: its whole discography, or chosen albums.
+#[derive(InputObject)]
+pub(super) struct ArtistRequestInput {
+    /// Name used as a placeholder until indexing fills in the canonical one.
+    name: String,
+    /// MusicBrainz artist id.
+    musicbrainz_id: String,
+    /// Release group ids of the albums to request. When omitted the whole
+    /// discography is requested, and every album the artist releases later.
+    albums: Option<Vec<String>>,
+    requested_by: Option<String>,
+}
+
+/// Structured response returned by `requestMovie`, `requestShow` and
+/// `requestArtist`.
 #[derive(SimpleObject)]
 pub(super) struct RequestItemMutationResponse {
     success: bool,
@@ -196,6 +212,65 @@ impl ItemRequestMutations {
         Ok(RequestItemMutationResponse {
             success,
             message,
+            status_text,
+            error_code: None,
+            item: Some(outcome.request),
+        })
+    }
+
+    /// Request an artist's discography, or albums of it, to be tracked and
+    /// indexed. Albums asked for later are added to the request; if nothing
+    /// new is asked for `statusText` is `CONFLICT` and `item` is `null`.
+    async fn request_artist(
+        &self,
+        ctx: &Context<'_>,
+        input: ArtistRequestInput,
+    ) -> Result<RequestItemMutationResponse> {
+        require(ctx, Capability::RequestItems)?;
+        let job_queue = ctx.data::<Arc<JobQueue>>()?;
+        let outcome = match upsert_requested_artist(
+            &input.name,
+            &input.musicbrainz_id,
+            input.requested_by.as_deref(),
+            input.albums.as_deref(),
+        )
+        .await
+        {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                return Ok(failed(
+                    error.to_string(),
+                    MutationStatusText::BadRequest,
+                    RequestItemMutationResponseErrorCode::UnexpectedError,
+                ));
+            }
+        };
+
+        let (message, status_text) = match outcome.action {
+            ItemRequestUpsertAction::Created => (
+                "Artist request created successfully.",
+                MutationStatusText::Created,
+            ),
+            ItemRequestUpsertAction::Updated => (
+                "Artist request updated successfully.",
+                MutationStatusText::Ok,
+            ),
+            ItemRequestUpsertAction::Unchanged => {
+                return Ok(failed(
+                    "Everything asked for is already requested.".to_string(),
+                    MutationStatusText::Conflict,
+                    RequestItemMutationResponseErrorCode::Conflict,
+                ));
+            }
+        };
+
+        if let Some(event) = outcome.lifecycle_event(None) {
+            job_queue.notify(event).await;
+        }
+
+        Ok(RequestItemMutationResponse {
+            success: true,
+            message: message.to_string(),
             status_text,
             error_code: None,
             item: Some(outcome.request),

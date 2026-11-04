@@ -148,3 +148,8 @@ fn a_discography_can_take_eps_too() {
         vec![ReleaseType::Album, ReleaseType::Ep]
     );
 }
+
+#[test]
+fn a_search_term_is_percent_encoded() {
+    assert_eq!(url_encode("Sigur Rós & co"), "Sigur%20R%C3%B3s%20%26%20co");
+}

@@ -112,6 +112,7 @@ mod tests {
         // Requesting — the only action an ordinary user holds.
         ("requestMovie", "RequestItems"),
         ("requestShow", "RequestItems"),
+        ("requestArtist", "RequestItems"),
         ("requestItems", "RequestItems"),
         ("seerrHandleWebhook", "RequestItems"),
         // Item actions.

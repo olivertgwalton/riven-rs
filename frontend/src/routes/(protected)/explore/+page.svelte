@@ -13,10 +13,77 @@
     import { goto } from "$app/navigation";
     import { resolve } from "$app/paths";
     import { getRatings } from "#lib/stores/ratings.js";
+    import { gqlClient } from "#lib/graphql-client.js";
+    import { SEARCH_MUSIC_ARTISTS_QUERY, type MusicArtist } from "#lib/services/music.js";
 
     let { data } = $props();
 
     const searchStore = getSearchStore();
+
+    // Films, series, people and studios come from TMDB through the search
+    // store; artists come from MusicBrainz, searched beside it.
+    type Tab = "both" | "movie" | "tv" | "person" | "company" | "music";
+    const TABS: { label: string; value: Tab }[] = [
+        { label: "All", value: "both" },
+        { label: "Movies", value: "movie" },
+        { label: "TV Shows", value: "tv" },
+        { label: "Music", value: "music" },
+        { label: "People", value: "person" },
+        { label: "Studios", value: "company" }
+    ];
+    /** How many artists "All" shows above the TMDB results. */
+    const ARTISTS_ON_ALL = 6;
+
+    let musicTab = $state(false);
+    let artists = $state.raw<MusicArtist[]>([]);
+    let artistsLoading = $state(false);
+    const activeTab = $derived<Tab>(musicTab ? "music" : searchStore.mediaType);
+
+    function selectTab(value: string) {
+        if (value === "music") {
+            musicTab = true;
+            return;
+        }
+        musicTab = false;
+        searchStore.setMediaType(value as Exclude<Tab, "music">);
+    }
+
+    $effect(() => {
+        const query = searchStore.rawSearchString.trim();
+        if (!query) {
+            artists = [];
+            return;
+        }
+        let cancelled = false;
+        artistsLoading = true;
+        const timer = setTimeout(async () => {
+            try {
+                const data = await gqlClient<{ searchMusicArtists: MusicArtist[] }>(
+                    SEARCH_MUSIC_ARTISTS_QUERY,
+                    { query }
+                );
+                if (!cancelled) artists = data.searchMusicArtists;
+            } catch {
+                if (!cancelled) artists = [];
+            } finally {
+                if (!cancelled) artistsLoading = false;
+            }
+        }, 300);
+        return () => {
+            cancelled = true;
+            clearTimeout(timer);
+        };
+    });
+
+    // The card's second line reads "Artist • <country>".
+    function artistCard(artist: MusicArtist) {
+        return {
+            id: artist.id,
+            title: artist.name,
+            mediaType: "artist",
+            year: artist.country ?? undefined
+        };
+    }
 
     let currentExampleIndex = $state(0);
     let currentHeroIndex = $state(0);
@@ -182,37 +249,13 @@
 
                 <!-- Desktop filter tabs -->
                 <div class="hidden md:block">
-                    <AnimatedToggle
-                        options={[
-                            { label: "All", value: "both" },
-                            { label: "Movies", value: "movie" },
-                            { label: "TV Shows", value: "tv" },
-                            { label: "People", value: "person" },
-                            { label: "Studios", value: "company" }
-                        ]}
-                        value={searchStore.mediaType}
-                        onchange={(value) =>
-                            searchStore.setMediaType(
-                                value as "both" | "movie" | "tv" | "person" | "company"
-                            )} />
+                    <AnimatedToggle options={TABS} value={activeTab} onchange={selectTab} />
                 </div>
             </div>
 
             <!-- Mobile filter tabs - inline below header -->
             <div class="-mx-1 block overflow-x-auto md:hidden">
-                <AnimatedToggle
-                    options={[
-                        { label: "All", value: "both" },
-                        { label: "Movies", value: "movie" },
-                        { label: "TV Shows", value: "tv" },
-                        { label: "People", value: "person" },
-                        { label: "Studios", value: "company" }
-                    ]}
-                    value={searchStore.mediaType}
-                    onchange={(value) =>
-                        searchStore.setMediaType(
-                            value as "both" | "movie" | "tv" | "person" | "company"
-                        )} />
+                <AnimatedToggle options={TABS} value={activeTab} onchange={selectTab} />
             </div>
 
             <!-- Warnings -->
@@ -367,7 +410,49 @@
                         {/key}
                     </div>
                 </div>
+            {:else if musicTab}
+                {#if artists.length > 0}
+                    <div
+                        class="grid grid-cols-2 gap-6 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-7 2xl:grid-cols-9">
+                        {#each artists as artist (artist.id)}
+                            <ListItem data={artistCard(artist)} indexer="musicbrainz" type="artist" />
+                        {/each}
+                    </div>
+                {:else if artistsLoading}
+                    <div
+                        class="grid grid-cols-2 gap-6 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-7 2xl:grid-cols-9">
+                        {#each { length: 6 }, i}
+                            <div class="aspect-2/3 w-full">
+                                <PortraitCardSkeleton />
+                            </div>
+                        {/each}
+                    </div>
+                {:else}
+                    <p class="text-muted-foreground py-16 text-center text-lg">No artists found</p>
+                {/if}
             {:else if hasResults}
+                {#if searchStore.mediaType === "both" && artists.length > 0}
+                    <section class="flex flex-col gap-3">
+                        <div class="flex items-center justify-between">
+                            <h2 class="text-foreground text-lg font-semibold">Artists</h2>
+                            <button
+                                type="button"
+                                onclick={() => selectTab("music")}
+                                class="text-muted-foreground hover:text-foreground text-sm">
+                                See all
+                            </button>
+                        </div>
+                        <div
+                            class="grid grid-cols-2 gap-6 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-7 2xl:grid-cols-9">
+                            {#each artists.slice(0, ARTISTS_ON_ALL) as artist (artist.id)}
+                                <ListItem
+                                    data={artistCard(artist)}
+                                    indexer="musicbrainz"
+                                    type="artist" />
+                            {/each}
+                        </div>
+                    </section>
+                {/if}
                 <div
                     class="grid grid-cols-2 gap-6 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-7 2xl:grid-cols-9">
                     {#each searchStore.results as item (`${item.indexer}-${item.mediaType}-${item.id}`)}

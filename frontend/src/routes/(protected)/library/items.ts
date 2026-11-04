@@ -20,6 +20,8 @@ export interface GqlMediaItem {
 	showTitle?: string | null;
 	showTmdbId?: string | null;
 	showTvdbId?: string | null;
+	musicbrainzId?: string | null;
+	showMusicbrainzId?: string | null;
 	showPosterPath?: string | null;
 }
 
@@ -56,6 +58,8 @@ export const ITEMS_QUERY = `
                 showTitle
                 showTmdbId
                 showTvdbId
+                musicbrainzId
+                showMusicbrainzId
                 showPosterPath
             }
             page
@@ -114,7 +118,7 @@ export function transformItems(items: GqlMediaItem[]) {
 	return items.map((item) => {
 		const rawType = item.itemType.toLowerCase();
 		let id: string | number | null = null;
-		let indexer: "tmdb" | "tvdb" = "tmdb";
+		let indexer: "tmdb" | "tvdb" | "musicbrainz" = "tmdb";
 		let mediaPageType = rawType === "show" ? "tv" : rawType;
 		let posterPath = item.posterPath;
 		const detailParams = new URLSearchParams();
@@ -134,6 +138,18 @@ export function transformItems(items: GqlMediaItem[]) {
 			}
 			if (item.episodeNumber != null) {
 				detailParams.set("episode", item.episodeNumber.toString());
+			}
+		} else if (
+			rawType === "artist" ||
+			rawType === "album" ||
+			rawType === "track"
+		) {
+			// Music has one page, the artist's, listing its albums.
+			id = item.showMusicbrainzId ?? item.musicbrainzId ?? null;
+			indexer = "musicbrainz";
+			mediaPageType = "artist";
+			if (rawType === "track") {
+				posterPath = item.showPosterPath ?? item.posterPath;
 			}
 		}
 
@@ -157,7 +173,11 @@ export function transformItems(items: GqlMediaItem[]) {
 					? { text: "Season", variant: "default" }
 					: rawType === "episode"
 						? { text: "Episode", variant: "default" }
-						: undefined,
+						: rawType === "album"
+							? { text: "Album", variant: "default" }
+							: rawType === "track"
+								? { text: "Track", variant: "default" }
+								: undefined,
 			rivenId: item.id,
 		};
 	});
