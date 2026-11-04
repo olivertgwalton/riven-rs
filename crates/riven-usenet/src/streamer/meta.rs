@@ -193,14 +193,32 @@ impl<'de> Deserialize<'de> for NzbMeta {
 pub const UNKNOWN_FILE_LABEL: &str = "<unknown>";
 
 /// Match against the same extensions the downstream persist step accepts as
-/// playable video — see `crates/riven-queue/src/flows/download_item/helpers.rs`
-/// `is_video_file`. Kept in sync intentionally: returning a virtual file
-/// whose extension the queue ignores wastes an ingest cycle.
+/// playable video or audio — see `crates/riven-queue/src/application/download/helpers.rs`
+/// `is_video_file` and `is_persistable_audio_file`. Kept in sync intentionally:
+/// returning a virtual file whose extension the queue ignores wastes an ingest
+/// cycle.
 pub(crate) fn is_media_filename(name: &str) -> bool {
     let ext = name.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
     matches!(
         ext.as_str(),
-        "mp4" | "mkv" | "avi" | "mov" | "wmv" | "flv" | "webm"
+        "mp4"
+            | "mkv"
+            | "avi"
+            | "mov"
+            | "wmv"
+            | "flv"
+            | "webm"
+            | "flac"
+            | "mp3"
+            | "m4a"
+            | "aac"
+            | "ogg"
+            | "oga"
+            | "opus"
+            | "wav"
+            | "aif"
+            | "aiff"
+            | "dsf"
     )
 }
 
