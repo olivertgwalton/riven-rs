@@ -6,23 +6,12 @@
     import * as Tabs from "#lib/components/ui/tabs/index.js";
     import GeneralTab from "#lib/components/settings/general-tab.svelte";
     import PluginsTab from "#lib/components/settings/plugins-tab.svelte";
-    import RankingTab from "#lib/components/settings/ranking-tab.svelte";
+    import RankingPanel from "#lib/components/settings/ranking-panel.svelte";
     import SystemTab from "#lib/components/settings/system-tab.svelte";
     import { page } from "$app/state";
     import type { PageData } from "./$types";
-    import type {
-        CustomProfile,
-        QualityProfile,
-        SettingsSection
-    } from "#lib/components/settings/types.js";
-    import {
-        UPDATE_SETTINGS,
-        SAVE_CUSTOM_PROFILE,
-        DELETE_CUSTOM_PROFILE,
-        SET_PROFILE_ENABLED,
-        UPDATE_PROFILE_SETTINGS,
-        CUSTOM_PROFILES
-    } from "#lib/components/settings/operations.js";
+    import type { CustomProfile, SettingsSection } from "#lib/components/settings/types.js";
+    import { UPDATE_SETTINGS } from "#lib/components/settings/operations.js";
     import { untrack } from "svelte";
 
     let { data }: { data: PageData } = $props();
@@ -57,84 +46,8 @@
     }
 
     // Ranking is a distinct domain (presets + custom profiles), kept separate.
-    let rank = $state<Record<string, unknown>>(
-        untrack(() => JSON.parse(JSON.stringify(data.rankSettings ?? {})))
-    );
-    const qualityProfiles: QualityProfile[] = untrack(() => data.qualityProfiles ?? []);
+    // Both panels share the one list of saved profiles and show their own kind.
     let customProfiles = $state<CustomProfile[]>(untrack(() => data.customProfiles ?? []));
-    let activeProfileName = $state<string | null>(untrack(() => data.initialProfileName ?? null));
-    let newProfileName = $state("");
-    let savingProfile = $state(false);
-
-    function applyProfile(settings: Record<string, unknown>, profileName?: string) {
-        activeProfileName = profileName ?? null;
-        rank = JSON.parse(JSON.stringify(settings)) as Record<string, unknown>;
-    }
-
-    async function saveActiveProfileSettings() {
-        if (!activeProfileName) return;
-        try {
-            await gqlClient<{ updateProfileSettings: unknown }>(UPDATE_PROFILE_SETTINGS, {
-                name: activeProfileName,
-                settings: rank
-            });
-
-            const settings = JSON.parse(JSON.stringify(rank)) as Record<string, unknown>;
-            const customProfile = customProfiles.find(
-                (profile) => profile.name === activeProfileName
-            );
-            if (customProfile) customProfile.settings = settings;
-            const qualityProfile = qualityProfiles.find(
-                (profile) => profile.id === activeProfileName
-            );
-            if (qualityProfile) qualityProfile.settings = settings;
-        } catch {
-            throw new Error("Failed to update active ranking profile");
-        }
-    }
-
-    async function saveAsProfile() {
-        const name = newProfileName.trim();
-        if (!name) return;
-        savingProfile = true;
-        try {
-            const result = await gqlClient<{ saveCustomProfile: CustomProfile }>(
-                SAVE_CUSTOM_PROFILE,
-                { id: null, name, settings: rank }
-            );
-            const profile = result.saveCustomProfile;
-            const idx = customProfiles.findIndex((p) => p.id === profile.id);
-            if (idx >= 0) customProfiles[idx] = profile;
-            else customProfiles.push(profile);
-            newProfileName = "";
-            toast.success(`Profile "${profile.name}" saved`);
-        } catch {
-            toast.error("Failed to save profile");
-        } finally {
-            savingProfile = false;
-        }
-    }
-
-    async function toggleProfileEnabled(name: string, enabled: boolean) {
-        try {
-            await gqlClient<{ setProfileEnabled: unknown }>(SET_PROFILE_ENABLED, { name, enabled });
-            const data = await gqlClient<{ customProfiles: CustomProfile[] }>(CUSTOM_PROFILES);
-            customProfiles = data.customProfiles ?? customProfiles;
-            toast.success(`Profile "${name}" ${enabled ? "enabled" : "disabled"}`);
-        } catch {
-            toast.error("Failed to update profile");
-        }
-    }
-
-    async function deleteCustomProfile(id: number, name: string) {
-        try {
-            await gqlClient<{ deleteCustomProfile: unknown }>(DELETE_CUSTOM_PROFILE, { id });
-            customProfiles = customProfiles.filter((p) => p.id !== id);
-            toast.success(`Profile "${name}" deleted`);
-        } catch {
-            toast.error("Failed to delete profile");
-        }
-    }
 </script>
 
 <svelte:head>
@@ -155,6 +68,7 @@
                 <Tabs.Trigger value="general">General</Tabs.Trigger>
                 <Tabs.Trigger value="plugins">Plugins</Tabs.Trigger>
                 <Tabs.Trigger value="ranking">Ranking</Tabs.Trigger>
+                <Tabs.Trigger value="music-ranking">Music ranking</Tabs.Trigger>
             </Tabs.List>
 
             <Tabs.Content value="general">
@@ -176,19 +90,23 @@
             </Tabs.Content>
 
             <Tabs.Content value="ranking">
-                <RankingTab
-                    bind:rank
+                <RankingPanel
+                    kind="video"
                     rankSchema={data.rankSettingsSchema}
-                    {qualityProfiles}
+                    qualityProfiles={data.qualityProfiles}
                     bind:customProfiles
-                    bind:activeProfileName
-                    bind:newProfileName
-                    bind:savingProfile
-                    {saveAsProfile}
-                    {toggleProfileEnabled}
-                    {applyProfile}
-                    {deleteCustomProfile}
-                    {saveActiveProfileSettings} />
+                    initialSettings={data.rankSettings ?? {}}
+                    initialProfileName={data.initialProfileName ?? null} />
+            </Tabs.Content>
+
+            <Tabs.Content value="music-ranking">
+                <RankingPanel
+                    kind="music"
+                    rankSchema={data.musicRankSettingsSchema}
+                    qualityProfiles={data.musicQualityProfiles}
+                    bind:customProfiles
+                    initialSettings={data.initialMusicProfile?.settings ?? {}}
+                    initialProfileName={data.initialMusicProfile?.id ?? null} />
             </Tabs.Content>
         </Tabs.Root>
     </div>
