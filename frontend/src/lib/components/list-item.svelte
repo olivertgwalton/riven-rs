@@ -139,6 +139,7 @@
         else if (data.mediaType === "person" || normalizedType === "person") parts.push("Person");
         else if (data.mediaType === "company" || normalizedType === "company")
             parts.push("Studio");
+        else if (normalizedType === "artist") parts.push("Artist");
 
         if (data.year && data.year !== "N/A") parts.push(data.year);
         return parts.join(" • ") || null;
