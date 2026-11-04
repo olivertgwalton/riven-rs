@@ -9,6 +9,10 @@ pub enum CanonicalPath {
     ShowDir { actual_dir: String },
     SeasonDir { actual_dir: String },
     EpisodeFile { actual_path: String },
+    AllArtists,
+    ArtistDir { actual_dir: String },
+    AlbumDir { actual_dir: String },
+    TrackFile { actual_path: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -63,6 +67,16 @@ fn canonical(profile_key: Option<String>, segments: &[&str]) -> PathTarget {
         [first, dir, season, file] if *first == "shows" => CanonicalPath::EpisodeFile {
             actual_path: format!("/shows/{dir}/{season}/{file}"),
         },
+        [first] if *first == "music" => CanonicalPath::AllArtists,
+        [first, artist] if *first == "music" => CanonicalPath::ArtistDir {
+            actual_dir: format!("/music/{artist}"),
+        },
+        [first, artist, album] if *first == "music" => CanonicalPath::AlbumDir {
+            actual_dir: format!("/music/{artist}/{album}"),
+        },
+        [first, artist, album, file] if *first == "music" => CanonicalPath::TrackFile {
+            actual_path: format!("/music/{artist}/{album}/{file}"),
+        },
         _ => return PathTarget::Invalid,
     };
     PathTarget::Canonical { profile_key, path }
@@ -106,6 +120,32 @@ mod tests {
     }
 
     #[test]
+    fn music_is_artist_album_track() {
+        let layout = VfsLibraryLayout::new(FilesystemSettings::default());
+        assert_eq!(
+            parse_path(
+                &layout,
+                "/music/Radiohead/OK Computer (1997)/01 - Airbag.flac"
+            ),
+            PathTarget::Canonical {
+                profile_key: None,
+                path: CanonicalPath::TrackFile {
+                    actual_path: "/music/Radiohead/OK Computer (1997)/01 - Airbag.flac".to_string(),
+                },
+            }
+        );
+        assert_eq!(
+            parse_path(&layout, "/music/Radiohead"),
+            PathTarget::Canonical {
+                profile_key: None,
+                path: CanonicalPath::ArtistDir {
+                    actual_dir: "/music/Radiohead".to_string(),
+                },
+            }
+        );
+    }
+
+    #[test]
     fn root_entries_include_profile_prefixes_once() {
         let mut profiles = HashMap::new();
         profiles.insert(
@@ -140,6 +180,7 @@ mod tests {
             vec![
                 "library".to_string(),
                 "movies".to_string(),
+                "music".to_string(),
                 "shows".to_string()
             ]
         );
@@ -175,7 +216,11 @@ mod tests {
         );
         assert_eq!(
             layout.profile_prefix_children("/library/kids"),
-            vec!["movies".to_string(), "shows".to_string()]
+            vec![
+                "movies".to_string(),
+                "music".to_string(),
+                "shows".to_string()
+            ]
         );
     }
 }

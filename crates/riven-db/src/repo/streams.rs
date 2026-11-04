@@ -556,15 +556,14 @@ pub async fn get_next_playback_entry(entry_id: i64) -> Result<Option<FileSystemE
 
 pub async fn list_filesystem_profile_entry_candidates()
 -> Result<Vec<FilesystemProfileEntryCandidate>> {
-    // Raw Statement: large multi-CASE projection across self-joins. item_type
-    // is consumed only inside CASE expressions (not selected), so no enum cast
-    // is needed on the output.
+    // Raw Statement: large multi-CASE projection across self-joins. A track's
+    // metadata is its artist's, as an episode's is its show's.
     Ok(FilesystemProfileEntryCandidate::find_by_statement(Statement::from_string(
         DbBackend::Postgres,
         r#"SELECT
                fe.id,
                fe.library_profiles,
-               item.item_type = 'movie' AS is_movie,
+               item.item_type::text AS item_type,
                CASE
                    WHEN item.item_type = 'movie' THEN item.genres
                    ELSE show_item.genres
@@ -606,7 +605,7 @@ pub async fn list_filesystem_profile_entry_candidates()
            INNER JOIN media_items item ON item.id = fe.media_item_id
            LEFT JOIN media_items season_item
                ON item.parent_id = season_item.id
-              AND season_item.item_type = 'season'
+              AND season_item.item_type IN ('season', 'album')
            LEFT JOIN media_items show_item
                ON (
                    (item.item_type = 'show' AND item.id = show_item.id)
@@ -616,6 +615,9 @@ pub async fn list_filesystem_profile_entry_candidates()
                    OR (item.item_type = 'episode'
                        AND season_item.parent_id = show_item.id
                        AND show_item.item_type = 'show')
+                   OR (item.item_type = 'track'
+                       AND season_item.parent_id = show_item.id
+                       AND show_item.item_type = 'artist')
                )
            WHERE fe.entry_type = 'media'
            ORDER BY fe.id"#,

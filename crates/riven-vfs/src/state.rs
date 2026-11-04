@@ -16,6 +16,7 @@ pub(crate) type DirEntry = (u64, FileType, String);
 pub(crate) const ROOT_INO: u64 = 1;
 pub(crate) const MOVIES_INO: u64 = 2;
 pub(crate) const SHOWS_INO: u64 = 3;
+pub(crate) const MUSIC_INO: u64 = 4;
 const FIRST_DYNAMIC_INO: u64 = 100;
 const READDIR_CACHE_TTL: Duration = Duration::from_secs(30);
 pub(crate) enum OpenedFile {
@@ -105,6 +106,7 @@ impl VfsState {
         state.register_static_path("/", ROOT_INO);
         state.register_static_path("/movies", MOVIES_INO);
         state.register_static_path("/shows", SHOWS_INO);
+        state.register_static_path("/music", MUSIC_INO);
         state
     }
 

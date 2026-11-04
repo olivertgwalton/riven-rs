@@ -26,25 +26,30 @@ async fn canonical_directory_entries(
     match path {
         CanonicalPath::AllMovies => movie_directories(layout, profile_key).await,
         CanonicalPath::AllShows => show_directories(layout, profile_key).await,
-        CanonicalPath::MovieDir { actual_dir } | CanonicalPath::SeasonDir { actual_dir } => {
+        CanonicalPath::AllArtists => artist_directories(layout, profile_key).await,
+        CanonicalPath::MovieDir { actual_dir }
+        | CanonicalPath::SeasonDir { actual_dir }
+        | CanonicalPath::AlbumDir { actual_dir } => visible_names(
+            layout,
+            profile_key,
+            repo::list_vfs_file_names(&actual_dir)
+                .await?
+                .into_iter()
+                .map(|entry| (entry.name, entry.library_profiles)),
+        ),
+        CanonicalPath::ShowDir { actual_dir } | CanonicalPath::ArtistDir { actual_dir } => {
             visible_names(
                 layout,
                 profile_key,
-                repo::list_vfs_file_names(&actual_dir)
+                repo::list_vfs_dir_names(&format!("{actual_dir}/%/%"), 4)
                     .await?
                     .into_iter()
                     .map(|entry| (entry.name, entry.library_profiles)),
             )
         }
-        CanonicalPath::ShowDir { actual_dir } => visible_names(
-            layout,
-            profile_key,
-            repo::list_vfs_dir_names(&format!("{actual_dir}/%/%"), 4)
-                .await?
-                .into_iter()
-                .map(|entry| (entry.name, entry.library_profiles)),
-        ),
-        CanonicalPath::MovieFile { .. } | CanonicalPath::EpisodeFile { .. } => {
+        CanonicalPath::MovieFile { .. }
+        | CanonicalPath::EpisodeFile { .. }
+        | CanonicalPath::TrackFile { .. } => {
             bail!("Invalid path")
         }
     }
@@ -72,6 +77,20 @@ async fn show_directories(
         layout,
         profile_key,
         repo::list_vfs_dir_names("/shows/%/%/%", 3)
+            .await?
+            .into_iter()
+            .map(|entry| (entry.name, entry.library_profiles)),
+    )
+}
+
+async fn artist_directories(
+    layout: &VfsLibraryLayout,
+    profile_key: Option<&str>,
+) -> Result<Vec<String>> {
+    visible_names(
+        layout,
+        profile_key,
+        repo::list_vfs_dir_names("/music/%/%/%", 3)
             .await?
             .into_iter()
             .map(|entry| (entry.name, entry.library_profiles)),
