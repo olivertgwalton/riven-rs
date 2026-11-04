@@ -753,16 +753,17 @@ pub async fn list_items_paginated(
                 resolved_show.title AS show_title, \
                 resolved_show.tmdb_id AS show_tmdb_id, \
                 resolved_show.tvdb_id AS show_tvdb_id, \
+                resolved_show.musicbrainz_id AS show_musicbrainz_id, \
                 resolved_show.poster_path AS show_poster_path \
          FROM media_items \
          LEFT JOIN media_items parent_season \
-           ON media_items.item_type = 'episode' \
+           ON media_items.item_type IN ('episode', 'track') \
           AND parent_season.id = media_items.parent_id \
-          AND parent_season.item_type = 'season' \
+          AND parent_season.item_type IN ('season', 'album') \
          LEFT JOIN media_items resolved_show \
-           ON (media_items.item_type = 'show' AND resolved_show.id = media_items.id) \
-           OR (media_items.item_type = 'season' AND resolved_show.id = media_items.parent_id) \
-           OR (media_items.item_type = 'episode' AND resolved_show.id = parent_season.parent_id) \
+           ON (media_items.item_type IN ('show', 'artist') AND resolved_show.id = media_items.id) \
+           OR (media_items.item_type IN ('season', 'album') AND resolved_show.id = media_items.parent_id) \
+           OR (media_items.item_type IN ('episode', 'track') AND resolved_show.id = parent_season.parent_id) \
          WHERE 1=1{filters} {order} LIMIT {limit} OFFSET {offset}"
     );
     Ok(

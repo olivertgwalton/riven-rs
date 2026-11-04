@@ -42,6 +42,8 @@ pub struct MediaItemListRow {
     pub show_title: Option<String>,
     pub show_tmdb_id: Option<String>,
     pub show_tvdb_id: Option<String>,
+    /// For an artist, album or track: the artist's MusicBrainz id.
+    pub show_musicbrainz_id: Option<String>,
     /// As stored; read it through the `showPosterPath` GraphQL field.
     #[graphql(skip)]
     pub show_poster_path: Option<String>,

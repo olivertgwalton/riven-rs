@@ -139,6 +139,78 @@ async fn get<T: serde::de::DeserializeOwned>(http: &HttpClient, path: &str) -> a
     .await
 }
 
+/// An artist as a search or a lookup returns it.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ArtistSummary {
+    pub id: String,
+    pub name: String,
+    pub country: Option<String>,
+    /// Tells apart artists of one name: `UK rock band`.
+    pub disambiguation: Option<String>,
+    /// `Person`, `Group`, `Orchestra` and the like.
+    #[serde(rename = "type")]
+    pub kind: Option<String>,
+}
+
+/// One release group of an artist's own work.
+#[derive(Debug, Clone)]
+pub struct ReleaseGroupSummary {
+    pub id: String,
+    pub title: String,
+    pub first_release_date: Option<NaiveDate>,
+    /// `Album`, `EP` or `Single`.
+    pub primary_type: Option<String>,
+}
+
+/// The Cover Art Archive's front cover for a release group, which it serves
+/// from whichever of the group's releases has one.
+pub fn release_group_cover_url(release_group_id: &str) -> String {
+    format!("{COVER_ART_URL}release-group/{release_group_id}/front-250")
+}
+
+pub async fn search_artists(http: &HttpClient, query: &str) -> anyhow::Result<Vec<ArtistSummary>> {
+    #[derive(Deserialize)]
+    struct Page {
+        artists: Vec<ArtistSummary>,
+    }
+    let query: String = url_encode(query);
+    let page: Page = get(http, &format!("artist?query={query}&limit=25&fmt=json")).await?;
+    Ok(page.artists)
+}
+
+/// An artist and every album, EP and single of its own work, oldest first,
+/// for choosing what to request.
+pub async fn artist_discography(
+    http: &HttpClient,
+    artist_id: &str,
+) -> anyhow::Result<(ArtistSummary, Vec<ReleaseGroupSummary>)> {
+    let artist: ArtistSummary = get(http, &format!("artist/{artist_id}?fmt=json")).await?;
+    let mut groups: Vec<ReleaseGroupSummary> = discography(http, artist_id, &ReleaseType::ALL)
+        .await?
+        .into_iter()
+        .map(|group| ReleaseGroupSummary {
+            first_release_date: group.first_release_date.as_deref().and_then(parse_date),
+            id: group.id,
+            title: group.title,
+            primary_type: group.primary_type,
+        })
+        .collect();
+    groups.sort_by_key(|group| group.first_release_date);
+    Ok((artist, groups))
+}
+
+/// Percent-encodes a search term for a query string.
+fn url_encode(text: &str) -> String {
+    text.bytes()
+        .map(|byte| match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                (byte as char).to_string()
+            }
+            _ => format!("%{byte:02X}"),
+        })
+        .collect()
+}
+
 async fn index_artist(
     http: &HttpClient,
     artist_id: &str,
@@ -392,6 +464,7 @@ struct MbReleaseGroup {
     id: String,
     title: String,
     first_release_date: Option<String>,
+    primary_type: Option<String>,
     #[serde(default)]
     secondary_types: Vec<String>,
 }

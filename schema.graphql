@@ -32,6 +32,26 @@ type AnilistPage {
 	page: Int!
 }
 
+"""
+Input for requesting an artist: its whole discography, or chosen albums.
+"""
+input ArtistRequestInput {
+	"""
+	Name used as a placeholder until indexing fills in the canonical one.
+	"""
+	name: String!
+	"""
+	MusicBrainz artist id.
+	"""
+	musicbrainzId: String!
+	"""
+	Release group ids of the albums to request. When omitted the whole
+	discography is requested, and every album the artist releases later.
+	"""
+	albums: [String!]
+	requestedBy: String
+}
+
 type AudioTrack {
 	codec: String
 	channels: Int
@@ -668,6 +688,10 @@ type MediaItemListRow {
 	showTmdbId: String
 	showTvdbId: String
 	"""
+	For an artist, album or track: the artist's MusicBrainz id.
+	"""
+	showMusicbrainzId: String
+	"""
 	Absolute artwork URL for the parent show, resolved the same way as the
 	row's own poster.
 	"""
@@ -784,6 +808,45 @@ input MovieRequestInput {
 	externalRequestId: String
 }
 
+type MusicAlbum {
+	"""
+	MusicBrainz release group id.
+	"""
+	id: String!
+	title: String!
+	releaseDate: NaiveDate
+	primaryType: String
+	coverUrl: String!
+	"""
+	The album's state in the library; `None` when it was never requested.
+	"""
+	state: MediaItemState
+}
+
+type MusicArtist {
+	"""
+	MusicBrainz artist id.
+	"""
+	id: String!
+	name: String!
+	country: String
+	disambiguation: String
+	kind: String
+}
+
+type MusicArtistDetails {
+	artist: MusicArtist!
+	albums: [MusicAlbum!]!
+	"""
+	The artist's id in the library, once requested.
+	"""
+	libraryId: Int
+	"""
+	Whether the request follows the whole discography, new albums included.
+	"""
+	followsDiscography: Boolean!
+}
+
 type MutationRoot {
 	"""
 	Request a movie to be tracked and indexed.
@@ -801,6 +864,12 @@ type MutationRoot {
 	is `CONFLICT` and `item` is `null`.
 	"""
 	requestShow(input: ShowRequestInput!): RequestItemMutationResponse!
+	"""
+	Request an artist's discography, or albums of it, to be tracked and
+	indexed. Albums asked for later are added to the request; if nothing
+	new is asked for `statusText` is `CONFLICT` and `item` is `null`.
+	"""
+	requestArtist(input: ArtistRequestInput!): RequestItemMutationResponse!
 	"""
 	Bulk-request movies and shows in a single call.
 	
@@ -1070,6 +1139,15 @@ type QueryRoot {
 	mediaItemStatusesByTvdbIds(tvdbIds: [String!]!): [MediaItemStatus!]!
 	items(page: Int, limit: Int, sort: String, types: [MediaItemType!], search: String, states: [MediaItemState!]): ItemsPage!
 	"""
+	Artists on MusicBrainz matching `query`, best match first.
+	"""
+	searchMusicArtists(query: String!): [MusicArtist!]!
+	"""
+	An artist's albums, EPs and singles, with what of them the library
+	already holds.
+	"""
+	musicArtist(id: String!): MusicArtistDetails!
+	"""
 	Return all quality profiles as an ordered array of
 	`{ id, label, description, settings }` objects.
 	The `settings` field reflects the *effective* settings (base preset merged
@@ -1204,7 +1282,8 @@ type RatingsResponse {
 }
 
 """
-Structured response returned by `requestMovie` and `requestShow`.
+Structured response returned by `requestMovie`, `requestShow` and
+`requestArtist`.
 """
 type RequestItemMutationResponse {
 	success: Boolean!

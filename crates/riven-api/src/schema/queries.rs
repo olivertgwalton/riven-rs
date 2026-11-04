@@ -3,6 +3,7 @@ mod external_ids;
 mod indexer_stats;
 pub(crate) mod logs;
 mod media;
+mod music;
 mod ratings;
 pub(crate) mod settings;
 mod tmdb;
@@ -17,6 +18,7 @@ pub use external_ids::CoreExternalIdsQuery;
 pub use indexer_stats::IndexerStatsQuery;
 pub use logs::LogsQuery;
 pub use media::MediaQuery;
+pub use music::MusicQuery;
 pub use ratings::CoreRatingsQuery;
 pub use settings::CoreSettingsQuery;
 pub use tmdb::CoreTmdbQuery;
@@ -30,6 +32,7 @@ use crate::schema::auth::ViewerQuery;
 pub struct CoreQuery(
     ViewerQuery,
     MediaQuery,
+    MusicQuery,
     CoreSettingsQuery,
     CoreTmdbQuery,
     CoreAnilistQuery,

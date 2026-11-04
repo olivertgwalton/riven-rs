@@ -18,6 +18,7 @@ apalis-board-api = { workspace = true }
 plugin-dashboard = { path = "../plugin-dashboard" }
 plugin-calendar = { path = "../plugin-calendar" }
 plugin-seerr = { path = "../plugin-seerr" }
+plugin-musicbrainz = { path = "../plugin-musicbrainz" }
 async-graphql = { workspace = true }
 async-graphql-axum = { workspace = true }
 axum = { workspace = true }
