@@ -129,6 +129,9 @@ fn build_detailed_embed(payload: &NotificationPayload) -> serde_json::Value {
             MediaItemType::Show => "Show",
             MediaItemType::Season => "Season",
             MediaItemType::Episode => "Episode",
+            MediaItemType::Artist => "Artist",
+            MediaItemType::Album => "Album",
+            MediaItemType::Track => "Track",
         }
     };
 
@@ -138,6 +141,7 @@ fn build_detailed_embed(payload: &NotificationPayload) -> serde_json::Value {
         match payload.item_type {
             MediaItemType::Movie => 0xE67E22,
             MediaItemType::Show | MediaItemType::Season | MediaItemType::Episode => 0x3498DB,
+            MediaItemType::Artist | MediaItemType::Album | MediaItemType::Track => 0x1ABC9C,
         }
     };
 

@@ -109,9 +109,15 @@ async fn handle_scrape(item: &MediaItem, queue: &JobQueue) {
                 ))
                 .await;
         }
-        MediaItemType::Show => {
+        MediaItemType::Album => {
+            let artist = load_show_context(item).await.title;
+            queue.push_scrape(ScrapeJob::for_album(item, artist)).await;
+        }
+        MediaItemType::Show | MediaItemType::Artist => {
             fan_out_to_children(item, queue).await;
         }
+        // Releases are of whole albums, so a track is only ever found in one.
+        MediaItemType::Track => {}
     }
 }
 
@@ -144,11 +150,19 @@ async fn handle_validate(job: &ProcessMediaItemJob, item: &MediaItem, queue: &Jo
 
     match item.state {
         MediaItemState::Completed => log_completion(&item, job.started_at),
-        MediaItemState::PartiallyCompleted | MediaItemState::Ongoing => {
+        MediaItemState::PartiallyCompleted | MediaItemState::Ongoing
+            if item.item_type != MediaItemType::Album =>
+        {
             fan_out_to_children(&item, queue).await;
         }
         MediaItemState::Failed | MediaItemState::Paused => {}
-        MediaItemState::Scraped | MediaItemState::Indexed | MediaItemState::Unreleased => {
+        // An album still missing tracks is scraped again, for a release that
+        // has them.
+        MediaItemState::Scraped
+        | MediaItemState::Indexed
+        | MediaItemState::Unreleased
+        | MediaItemState::PartiallyCompleted
+        | MediaItemState::Ongoing => {
             // Mirrors `FAILED_ATTEMPTS_COOLDOWN_SQL`'s escalating tiers — this
             // job-level re-push doesn't go through `get_pending_items_for_retry`,
             // so without this it would keep retrying every 30 minutes forever
@@ -211,7 +225,26 @@ pub(crate) async fn fan_out_to_children(parent: &MediaItem, queue: &JobQueue) {
                     .await;
             }
         }
-        MediaItemType::Movie | MediaItemType::Episode => {}
+        MediaItemType::Artist => {
+            let albums = repo::get_requested_albums_for_artist(parent.id)
+                .await
+                .unwrap_or_default();
+            for album in albums {
+                if matches!(
+                    album.state,
+                    MediaItemState::Completed | MediaItemState::Failed | MediaItemState::Paused
+                ) {
+                    continue;
+                }
+                queue
+                    .push_process_media_item(ProcessMediaItemJob::new(album.id))
+                    .await;
+            }
+        }
+        MediaItemType::Movie
+        | MediaItemType::Episode
+        | MediaItemType::Album
+        | MediaItemType::Track => {}
     }
 }
 

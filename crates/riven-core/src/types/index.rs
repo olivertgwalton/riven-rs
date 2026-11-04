@@ -26,6 +26,8 @@ pub struct IndexedMediaItem {
     pub status: Option<ShowStatus>,
     pub seasons: Option<Vec<IndexedSeason>>,
     pub network_timezone: Option<String>,
+    pub musicbrainz_id: Option<String>,
+    pub albums: Option<Vec<IndexedAlbum>>,
 }
 
 impl IndexedMediaItem {
@@ -53,6 +55,8 @@ impl IndexedMediaItem {
             status: other.status.or(self.status),
             seasons: other.seasons.or(self.seasons),
             network_timezone: other.network_timezone.or(self.network_timezone),
+            musicbrainz_id: other.musicbrainz_id.or(self.musicbrainz_id),
+            albums: other.albums.or(self.albums),
         }
     }
 
@@ -103,6 +107,29 @@ pub struct IndexedEpisode {
     /// Season/episode as release groups number it (TheXEM), when known.
     #[serde(default)]
     pub scene: Option<(i32, i32)>,
+}
+
+/// One release group of an artist, with the tracklist of the release chosen
+/// to stand for it.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct IndexedAlbum {
+    /// Release group MBID.
+    pub musicbrainz_id: String,
+    pub release_id: Option<String>,
+    pub title: String,
+    pub aired_at: Option<chrono::NaiveDate>,
+    pub poster_path: Option<String>,
+    pub genres: Option<Vec<String>>,
+    pub tracks: Vec<IndexedTrack>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct IndexedTrack {
+    /// Recording MBID.
+    pub musicbrainz_id: Option<String>,
+    pub disc_number: i32,
+    pub number: i32,
+    pub title: String,
 }
 
 fn merge_anime_flag(current: Option<bool>, incoming: Option<bool>) -> Option<bool> {

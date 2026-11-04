@@ -82,6 +82,8 @@ pub struct IndexJob {
     pub imdb_id: Option<String>,
     pub tvdb_id: Option<String>,
     pub tmdb_id: Option<String>,
+    #[serde(default)]
+    pub musicbrainz_id: Option<String>,
 }
 
 impl IndexJob {
@@ -92,6 +94,7 @@ impl IndexJob {
             imdb_id: item.imdb_id.clone(),
             tvdb_id: item.tvdb_id.clone(),
             tmdb_id: item.tmdb_id.clone(),
+            musicbrainz_id: item.musicbrainz_id.clone(),
         }
     }
 }
@@ -106,6 +109,11 @@ pub struct ScrapeJob {
     pub title: String,
     pub season: Option<i32>,
     pub episode: Option<i32>,
+    /// The artist, when `title` is an album.
+    #[serde(default)]
+    pub artist: Option<String>,
+    #[serde(default)]
+    pub year: Option<i32>,
     /// Number of times this job has been re-pushed because every scraper
     /// plugin was temporarily deferred. Incremented before re-pushing;
     /// existing jobs in Redis deserialise to 0 via the `default`.
@@ -123,6 +131,23 @@ impl ScrapeJob {
             title: item.title.clone(),
             season: None,
             episode: None,
+            artist: None,
+            year: None,
+            rate_limit_retries: 0,
+        }
+    }
+
+    pub fn for_album(item: &MediaItem, artist: String) -> Self {
+        Self {
+            id: item.id,
+            item_type: item.item_type,
+            imdb_id: None,
+            tvdb_id: None,
+            title: item.title.clone(),
+            season: None,
+            episode: None,
+            artist: Some(artist),
+            year: item.year,
             rate_limit_retries: 0,
         }
     }
@@ -145,6 +170,8 @@ impl ScrapeJob {
             title: show_title,
             season: item.season_number,
             episode: item.episode_number,
+            artist: None,
+            year: None,
             rate_limit_retries: 0,
         }
     }

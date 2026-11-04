@@ -180,6 +180,7 @@ export type EpisodeFull = {
   contentRating?: Maybe<ContentRating>;
   country?: Maybe<Scalars['String']['output']>;
   createdAt: Scalars['DateTime']['output'];
+  discNumber?: Maybe<Scalars['Int']['output']>;
   episodeNumber?: Maybe<Scalars['Int']['output']>;
   failedAttempts: Scalars['Int']['output'];
   filesystemEntries: Array<FileSystemEntry>;
@@ -196,6 +197,10 @@ export type EpisodeFull = {
   itemType: MediaItemType;
   language?: Maybe<Scalars['String']['output']>;
   lastScrapeAttemptAt?: Maybe<Scalars['DateTime']['output']>;
+  /** Artist MBID, release group MBID or recording MBID, by item type. */
+  musicbrainzId?: Maybe<Scalars['String']['output']>;
+  /** The release of an album's release group that its tracks come from. */
+  musicbrainzReleaseId?: Maybe<Scalars['String']['output']>;
   network?: Maybe<Scalars['String']['output']>;
   networkTimezone?: Maybe<Scalars['String']['output']>;
   parentId?: Maybe<Scalars['Int']['output']>;
@@ -214,6 +219,7 @@ export type EpisodeFull = {
   state: MediaItemState;
   title: Scalars['String']['output'];
   tmdbId?: Maybe<Scalars['String']['output']>;
+  trackNumber?: Maybe<Scalars['Int']['output']>;
   tvdbId?: Maybe<Scalars['String']['output']>;
   updatedAt?: Maybe<Scalars['DateTime']['output']>;
   year?: Maybe<Scalars['Int']['output']>;
@@ -328,12 +334,18 @@ export type InstanceStatus = {
 };
 
 export type ItemRequest = {
+  /**
+   * Release group MBIDs of the albums an artist request asks for; `None`
+   * follows the whole discography.
+   */
+  albums?: Maybe<Scalars['JSON']['output']>;
   completedAt?: Maybe<Scalars['DateTime']['output']>;
   createdAt: Scalars['DateTime']['output'];
   externalRequestId?: Maybe<Scalars['String']['output']>;
   id: Scalars['Int']['output'];
   imdbId?: Maybe<Scalars['String']['output']>;
   isPartialRequest: Scalars['Boolean']['output'];
+  musicbrainzId?: Maybe<Scalars['String']['output']>;
   requestType: ItemRequestType;
   requestedBy?: Maybe<Scalars['String']['output']>;
   seasons?: Maybe<Scalars['JSON']['output']>;
@@ -348,15 +360,17 @@ export type ItemRequestState =
   | 'ONGOING'
   | 'REQUESTED'
   /**
-   * An existing request had additional seasons appended after it was
-   * already completed/ongoing. Signals to the indexer that it should
-   * re-process this show; the recompute pipeline will then transition it
-   * back to its derived state (completed/ongoing/unreleased).
+   * An existing request had additional seasons (or, for an artist,
+   * albums) appended after it was already completed/ongoing. Signals to the
+   * indexer that it should re-process the show or artist; the recompute
+   * pipeline will then transition it back to its derived state
+   * (completed/ongoing/unreleased).
    */
   | 'REQUESTED_ADDITIONAL_SEASONS'
   | 'UNRELEASED';
 
 export type ItemRequestType =
+  | 'ARTIST'
   | 'MOVIE'
   | 'SHOW';
 
@@ -462,6 +476,7 @@ export type MediaItem = {
   contentRating?: Maybe<ContentRating>;
   country?: Maybe<Scalars['String']['output']>;
   createdAt: Scalars['DateTime']['output'];
+  discNumber?: Maybe<Scalars['Int']['output']>;
   episodeNumber?: Maybe<Scalars['Int']['output']>;
   failedAttempts: Scalars['Int']['output'];
   fullTitle?: Maybe<Scalars['String']['output']>;
@@ -476,6 +491,10 @@ export type MediaItem = {
   itemType: MediaItemType;
   language?: Maybe<Scalars['String']['output']>;
   lastScrapeAttemptAt?: Maybe<Scalars['DateTime']['output']>;
+  /** Artist MBID, release group MBID or recording MBID, by item type. */
+  musicbrainzId?: Maybe<Scalars['String']['output']>;
+  /** The release of an album's release group that its tracks come from. */
+  musicbrainzReleaseId?: Maybe<Scalars['String']['output']>;
   network?: Maybe<Scalars['String']['output']>;
   networkTimezone?: Maybe<Scalars['String']['output']>;
   parentId?: Maybe<Scalars['Int']['output']>;
@@ -494,6 +513,7 @@ export type MediaItem = {
   state: MediaItemState;
   title: Scalars['String']['output'];
   tmdbId?: Maybe<Scalars['String']['output']>;
+  trackNumber?: Maybe<Scalars['Int']['output']>;
   tvdbId?: Maybe<Scalars['String']['output']>;
   updatedAt?: Maybe<Scalars['DateTime']['output']>;
   year?: Maybe<Scalars['Int']['output']>;
@@ -509,6 +529,7 @@ export type MediaItemFull = {
   contentRating?: Maybe<ContentRating>;
   country?: Maybe<Scalars['String']['output']>;
   createdAt: Scalars['DateTime']['output'];
+  discNumber?: Maybe<Scalars['Int']['output']>;
   episodeNumber?: Maybe<Scalars['Int']['output']>;
   failedAttempts: Scalars['Int']['output'];
   filesystemEntries: Array<FileSystemEntry>;
@@ -525,6 +546,10 @@ export type MediaItemFull = {
   itemType: MediaItemType;
   language?: Maybe<Scalars['String']['output']>;
   lastScrapeAttemptAt?: Maybe<Scalars['DateTime']['output']>;
+  /** Artist MBID, release group MBID or recording MBID, by item type. */
+  musicbrainzId?: Maybe<Scalars['String']['output']>;
+  /** The release of an album's release group that its tracks come from. */
+  musicbrainzReleaseId?: Maybe<Scalars['String']['output']>;
   network?: Maybe<Scalars['String']['output']>;
   networkTimezone?: Maybe<Scalars['String']['output']>;
   parentId?: Maybe<Scalars['Int']['output']>;
@@ -544,6 +569,7 @@ export type MediaItemFull = {
   state: MediaItemState;
   title: Scalars['String']['output'];
   tmdbId?: Maybe<Scalars['String']['output']>;
+  trackNumber?: Maybe<Scalars['Int']['output']>;
   tvdbId?: Maybe<Scalars['String']['output']>;
   updatedAt?: Maybe<Scalars['DateTime']['output']>;
   year?: Maybe<Scalars['Int']['output']>;
@@ -558,6 +584,7 @@ export type MediaItemListRow = {
   contentRating?: Maybe<ContentRating>;
   country?: Maybe<Scalars['String']['output']>;
   createdAt: Scalars['DateTime']['output'];
+  discNumber?: Maybe<Scalars['Int']['output']>;
   episodeNumber?: Maybe<Scalars['Int']['output']>;
   failedAttempts: Scalars['Int']['output'];
   fullTitle?: Maybe<Scalars['String']['output']>;
@@ -572,6 +599,10 @@ export type MediaItemListRow = {
   itemType: MediaItemType;
   language?: Maybe<Scalars['String']['output']>;
   lastScrapeAttemptAt?: Maybe<Scalars['DateTime']['output']>;
+  /** Artist MBID, release group MBID or recording MBID, by item type. */
+  musicbrainzId?: Maybe<Scalars['String']['output']>;
+  /** The release of an album's release group that its tracks come from. */
+  musicbrainzReleaseId?: Maybe<Scalars['String']['output']>;
   network?: Maybe<Scalars['String']['output']>;
   networkTimezone?: Maybe<Scalars['String']['output']>;
   parentId?: Maybe<Scalars['Int']['output']>;
@@ -599,6 +630,7 @@ export type MediaItemListRow = {
   state: MediaItemState;
   title: Scalars['String']['output'];
   tmdbId?: Maybe<Scalars['String']['output']>;
+  trackNumber?: Maybe<Scalars['Int']['output']>;
   tvdbId?: Maybe<Scalars['String']['output']>;
   updatedAt?: Maybe<Scalars['DateTime']['output']>;
   year?: Maybe<Scalars['Int']['output']>;
@@ -642,10 +674,13 @@ export type MediaItemStatus = {
 };
 
 export type MediaItemType =
+  | 'ALBUM'
+  | 'ARTIST'
   | 'EPISODE'
   | 'MOVIE'
   | 'SEASON'
-  | 'SHOW';
+  | 'SHOW'
+  | 'TRACK';
 
 /**
  * The `media_metadata` document, derived from a release filename by
@@ -1350,6 +1385,7 @@ export type SeasonFull = {
   contentRating?: Maybe<ContentRating>;
   country?: Maybe<Scalars['String']['output']>;
   createdAt: Scalars['DateTime']['output'];
+  discNumber?: Maybe<Scalars['Int']['output']>;
   episodeNumber?: Maybe<Scalars['Int']['output']>;
   episodes: Array<EpisodeFull>;
   failedAttempts: Scalars['Int']['output'];
@@ -1365,6 +1401,10 @@ export type SeasonFull = {
   itemType: MediaItemType;
   language?: Maybe<Scalars['String']['output']>;
   lastScrapeAttemptAt?: Maybe<Scalars['DateTime']['output']>;
+  /** Artist MBID, release group MBID or recording MBID, by item type. */
+  musicbrainzId?: Maybe<Scalars['String']['output']>;
+  /** The release of an album's release group that its tracks come from. */
+  musicbrainzReleaseId?: Maybe<Scalars['String']['output']>;
   network?: Maybe<Scalars['String']['output']>;
   networkTimezone?: Maybe<Scalars['String']['output']>;
   parentId?: Maybe<Scalars['Int']['output']>;
@@ -1383,6 +1423,7 @@ export type SeasonFull = {
   state: MediaItemState;
   title: Scalars['String']['output'];
   tmdbId?: Maybe<Scalars['String']['output']>;
+  trackNumber?: Maybe<Scalars['Int']['output']>;
   tvdbId?: Maybe<Scalars['String']['output']>;
   updatedAt?: Maybe<Scalars['DateTime']['output']>;
   year?: Maybe<Scalars['Int']['output']>;

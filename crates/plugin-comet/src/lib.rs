@@ -74,6 +74,10 @@ impl Plugin for CometPlugin {
                 let e = request.episode_or_1();
                 ("series", format!(":{s}:{e}"))
             }
+            // Comet is a Stremio addon, which serves only films and series.
+            MediaItemType::Artist | MediaItemType::Album | MediaItemType::Track => {
+                return Ok(HookResponse::Empty);
+            }
         };
 
         let url = format!("{base_url}/stream/{scrape_type}/{imdb_id}{identifier}.json");

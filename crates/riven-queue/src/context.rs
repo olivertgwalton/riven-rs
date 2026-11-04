@@ -117,6 +117,15 @@ pub async fn load_requested_seasons(item: &MediaItem) -> Option<Vec<i32>> {
         .and_then(|s| serde_json::from_value(s).ok())
 }
 
+pub async fn load_requested_albums(item: &MediaItem) -> Option<Vec<String>> {
+    let req_id = item.item_request_id?;
+    repo::get_item_request_by_id(req_id)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|req| repo::parse_request_albums(&req))
+}
+
 pub async fn load_show_context(item: &MediaItem) -> ShowContext {
     let Some(hierarchy) = load_media_item_hierarchy_or_log(item.id, "load show context").await
     else {

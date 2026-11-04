@@ -6,6 +6,9 @@ pub struct ScrapeRequest<'a> {
     pub imdb_id: Option<&'a str>,
     pub tvdb_id: Option<&'a str>,
     pub title: &'a str,
+    /// The artist, when `title` is an album.
+    pub artist: Option<&'a str>,
+    pub year: Option<i32>,
     pub season: Option<i32>,
     pub episode: Option<i32>,
 }
@@ -26,6 +29,10 @@ pub struct IndexRequest<'a> {
     pub imdb_id: Option<&'a str>,
     pub tvdb_id: Option<&'a str>,
     pub tmdb_id: Option<&'a str>,
+    pub musicbrainz_id: Option<&'a str>,
+    /// Release group MBIDs an artist's request names, which are wanted
+    /// whatever their type; `None` asks for the discography.
+    pub requested_albums: Option<&'a [String]>,
 }
 
 pub struct DownloadSuccessInfo<'a> {

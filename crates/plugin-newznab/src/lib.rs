@@ -241,6 +241,8 @@ fn build_query(request: &ScrapeRequest<'_>) -> Option<(&'static str, Vec<(&'stat
                 ],
             ))
         }
+        // Newznab has no MusicBrainz id parameter: music is found by name.
+        MediaItemType::Artist | MediaItemType::Album | MediaItemType::Track => None,
     }
 }
 

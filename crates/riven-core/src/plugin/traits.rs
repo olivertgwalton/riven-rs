@@ -205,6 +205,8 @@ pub trait Plugin: Send + Sync + 'static {
                 imdb_id,
                 tvdb_id,
                 tmdb_id,
+                musicbrainz_id,
+                requested_albums,
             } => {
                 let req = IndexRequest {
                     id: *id,
@@ -212,6 +214,8 @@ pub trait Plugin: Send + Sync + 'static {
                     imdb_id: imdb_id.as_deref(),
                     tvdb_id: tvdb_id.as_deref(),
                     tmdb_id: tmdb_id.as_deref(),
+                    musicbrainz_id: musicbrainz_id.as_deref(),
+                    requested_albums: requested_albums.as_deref(),
                 };
                 self.on_index_requested(&req, ctx).await
             }
@@ -228,6 +232,8 @@ pub trait Plugin: Send + Sync + 'static {
                 title,
                 season,
                 episode,
+                artist,
+                year,
             } => {
                 let req = ScrapeRequest {
                     id: *id,
@@ -235,6 +241,8 @@ pub trait Plugin: Send + Sync + 'static {
                     imdb_id: imdb_id.as_deref(),
                     tvdb_id: tvdb_id.as_deref(),
                     title,
+                    artist: artist.as_deref(),
+                    year: *year,
                     season: *season,
                     episode: *episode,
                 };

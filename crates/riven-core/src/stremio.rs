@@ -123,6 +123,8 @@ impl<'a> StremioScrapeConfig<'a> {
                 StremioKind::Series,
                 Some((req.season_or_1(), req.episode_or_1())),
             ),
+            // Stremio addons serve only films and series.
+            MediaItemType::Artist | MediaItemType::Album | MediaItemType::Track => return None,
         };
         Some(Self {
             imdb_id,
@@ -163,6 +165,8 @@ mod tests {
             imdb_id: Some("tt123"),
             tvdb_id: None,
             title: "",
+            artist: None,
+            year: None,
             season,
             episode,
         }

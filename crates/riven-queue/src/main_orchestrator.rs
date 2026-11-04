@@ -164,6 +164,11 @@ impl MainOrchestrator {
                         .flatten()
                         .is_some()
             }
+            // Indexing again is how an artist's new albums are found.
+            MediaItemType::Artist => {
+                crate::context::load_requested_albums(&item).await.is_none()
+                    || item.state != MediaItemState::Completed
+            }
             _ => item.state == MediaItemState::Unreleased,
         };
         if needs_reindex {
@@ -220,6 +225,11 @@ impl MainOrchestrator {
                         );
                     }
                 }
+            }
+            // An artist gets its albums only from its index, so one never
+            // indexed has lost its index job.
+            MediaItemType::Artist if item.indexed_at.is_none() => {
+                self.queue.push_index(IndexJob::from_item(item)).await;
             }
             _ => {
                 self.queue
@@ -312,6 +322,8 @@ impl MainOrchestrator {
             MediaItemType::Show,
             MediaItemType::Season,
             MediaItemType::Episode,
+            MediaItemType::Artist,
+            MediaItemType::Album,
         ] {
             let items = match repo::get_pending_items_for_retry(item_type).await {
                 Ok(items) => items,

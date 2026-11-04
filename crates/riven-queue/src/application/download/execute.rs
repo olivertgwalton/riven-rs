@@ -383,6 +383,15 @@ pub async fn attempt_download(
                 }
             }
         }
+        MediaItemType::Artist | MediaItemType::Album | MediaItemType::Track => {
+            tracing::debug!(
+                id,
+                info_hash,
+                raw_title,
+                "download: music releases cannot be saved yet; leaving the release untried"
+            );
+            DownloadAttemptOutcome::Deferred
+        }
     }
 }
 

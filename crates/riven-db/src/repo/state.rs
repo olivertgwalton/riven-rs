@@ -169,7 +169,13 @@ async fn load_child_states(
         MediaItemType::Season => {
             base.filter(media_items::Column::ItemType.eq(MediaItemType::Episode))
         }
-        _ => return Ok(Vec::new()),
+        MediaItemType::Artist => base
+            .filter(media_items::Column::ItemType.eq(MediaItemType::Album))
+            .filter(media_items::Column::IsRequested.eq(true)),
+        MediaItemType::Album => base.filter(media_items::Column::ItemType.eq(MediaItemType::Track)),
+        MediaItemType::Movie | MediaItemType::Episode | MediaItemType::Track => {
+            return Ok(Vec::new());
+        }
     };
     Ok(query
         .select_only()
@@ -235,7 +241,11 @@ pub fn leaf_state(
     if current_state == MediaItemState::Paused {
         return current_state;
     }
-    if matches!(item_type, MediaItemType::Movie | MediaItemType::Episode) && has_media_entry {
+    if matches!(
+        item_type,
+        MediaItemType::Movie | MediaItemType::Episode | MediaItemType::Track
+    ) && has_media_entry
+    {
         return MediaItemState::Completed;
     }
     let undated_means_unreleased = match item_type {
@@ -279,12 +289,15 @@ async fn recompute_one(item_id: i64, max_attempts: i32) -> Result<Option<i64>> {
         )
     };
     let new_state = match facts.item_type {
-        MediaItemType::Show | MediaItemType::Season => {
+        MediaItemType::Show
+        | MediaItemType::Season
+        | MediaItemType::Artist
+        | MediaItemType::Album => {
             let children = load_child_states(item_id, facts.item_type).await?;
             aggregate_states(facts.item_type, facts.state, facts.show_status, &children)
                 .unwrap_or_else(leaf)
         }
-        MediaItemType::Movie | MediaItemType::Episode => leaf(),
+        MediaItemType::Movie | MediaItemType::Episode | MediaItemType::Track => leaf(),
     };
 
     if new_state == facts.state {
