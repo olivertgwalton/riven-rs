@@ -187,7 +187,9 @@ pub async fn build_parse_item_context_with_hierarchy(
     );
 
     let item_title = match (item.item_type, show_title_for_format.as_deref()) {
-        (MediaItemType::Season, Some(show_t)) => format!("{show_t} - {}", item.title),
+        (MediaItemType::Season | MediaItemType::Album, Some(show_t)) => {
+            format!("{show_t} - {}", item.title)
+        }
         _ => item.title.clone(),
     };
     let item_type = item.item_type;
@@ -283,7 +285,8 @@ pub async fn load_download_hierarchy_context(item: &MediaItem) -> DownloadHierar
     }
 }
 
-/// Resolve the show title, year, and aliases for Season/Episode items by
+/// Resolve the show (or artist) title, year, and aliases for Season/Episode
+/// (or Album/Track) items by
 /// walking up the parent chain. Returns (correct_title, parent_year, aliases,
 /// show_title_for_format).
 async fn resolve_parent_info(
@@ -303,7 +306,10 @@ async fn resolve_parent_info(
 
     if !matches!(
         item.item_type,
-        MediaItemType::Season | MediaItemType::Episode
+        MediaItemType::Season
+            | MediaItemType::Episode
+            | MediaItemType::Album
+            | MediaItemType::Track
     ) {
         return (item.title.clone(), None, initial_aliases, None);
     }

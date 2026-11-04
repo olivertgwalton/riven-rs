@@ -12,7 +12,6 @@ use riven_core::events::{EventType, HookResponse, RivenEvent};
 use riven_core::types::*;
 use riven_db::entities::{MediaItem, Stream};
 use riven_db::repo;
-use riven_rank::RankSettings;
 
 use crate::context::{
     DownloadHierarchyContext, load_download_hierarchy_context, load_media_item_or_log,
@@ -23,7 +22,7 @@ use crate::{DownloadJob, JobQueue, RankStreamsJob};
 
 use self::persist::finalize_download_success;
 
-use self::candidates::{TitleMatchContext, rank_streams_for_profile};
+use self::candidates::{Ranking, TitleMatchContext, rank_streams_for_profile};
 use self::execute::{DownloadAttemptOutcome, attempt_download};
 
 /// Step 1 of the download flow: validate the item is in a processable state
@@ -146,13 +145,14 @@ pub async fn run(id: i64, job: &DownloadJob, queue: &JobQueue) {
     }
 
     let hierarchy = match item.item_type {
-        MediaItemType::Episode | MediaItemType::Season | MediaItemType::Show => {
-            Some(load_download_hierarchy_context(&item).await)
-        }
+        MediaItemType::Episode
+        | MediaItemType::Season
+        | MediaItemType::Show
+        | MediaItemType::Album => Some(load_download_hierarchy_context(&item).await),
         _ => None,
     };
 
-    let active_profiles: Vec<(String, RankSettings)> = load_active_profiles().await;
+    let active_profiles = load_download_profiles(item.item_type).await;
 
     let ranks = queue.resolution_ranks.read().await.clone();
     let all_streams = match repo::get_non_blacklisted_streams(id, &ranks).await {
@@ -271,9 +271,10 @@ pub async fn run(id: i64, job: &DownloadJob, queue: &JobQueue) {
 /// hierarchy/profile/stream assembly `run` uses for a real download attempt.
 pub async fn has_realistic_download_candidate(item: &MediaItem, queue: &JobQueue) -> bool {
     let hierarchy = match item.item_type {
-        MediaItemType::Episode | MediaItemType::Season | MediaItemType::Show => {
-            Some(load_download_hierarchy_context(item).await)
-        }
+        MediaItemType::Episode
+        | MediaItemType::Season
+        | MediaItemType::Show
+        | MediaItemType::Album => Some(load_download_hierarchy_context(item).await),
         _ => None,
     };
 
@@ -294,10 +295,10 @@ pub async fn has_realistic_download_candidate(item: &MediaItem, queue: &JobQueue
         return false;
     }
 
-    let active_profiles: Vec<(String, RankSettings)> = load_active_profiles().await;
+    let active_profiles = load_download_profiles(item.item_type).await;
     let title_ctx = TitleMatchContext::new(item, hierarchy.as_ref());
-    active_profiles.iter().any(|(_, settings)| {
-        !rank_streams_for_profile(&streams, item, settings, &title_ctx).is_empty()
+    active_profiles.iter().any(|(_, ranking)| {
+        !rank_streams_for_profile(&streams, item, ranking, &title_ctx).is_empty()
     })
 }
 
@@ -450,7 +451,23 @@ async fn build_plugin_provider_iterations(queue: &JobQueue) -> Vec<(String, Opti
 }
 
 /// Convert a ranking profile's bitrate settings into runtime [`BitrateLimits`].
-fn profile_bitrate_limits(settings: &RankSettings) -> BitrateLimits {
+/// The versions an item is downloaded in: one per enabled quality profile
+/// for film and television, the one music version for music.
+async fn load_download_profiles(item_type: MediaItemType) -> Vec<(String, Ranking)> {
+    if item_type.is_music() {
+        return vec![(riven_rank::music::PROFILE_NAME.to_owned(), Ranking::Music)];
+    }
+    load_active_profiles()
+        .await
+        .into_iter()
+        .map(|(name, settings)| (name, Ranking::Video(Box::new(settings))))
+        .collect()
+}
+
+fn profile_bitrate_limits(ranking: &Ranking) -> BitrateLimits {
+    let Ranking::Video(settings) = ranking else {
+        return BitrateLimits::default();
+    };
     BitrateLimits {
         minimum_average_bitrate_movies: settings.bitrate.minimum_average_bitrate_movies,
         minimum_average_bitrate_episodes: settings.bitrate.minimum_average_bitrate_episodes,
@@ -588,7 +605,7 @@ async fn run_downloads(
     item: &MediaItem,
     queue: &JobQueue,
     start_time: Instant,
-    profiles: &[(String, RankSettings)],
+    profiles: &[(String, Ranking)],
     streams: &[Stream],
     plugin_providers: &[(String, Option<String>)],
     cache: &mut CacheMemo,
