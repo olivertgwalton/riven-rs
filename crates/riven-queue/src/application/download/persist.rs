@@ -24,9 +24,12 @@ use super::helpers::{
 };
 use crate::JobQueue;
 
+mod album;
 mod packs;
 mod single;
+mod tracklist;
 
+pub use album::persist_album;
 pub use packs::{persist_season, persist_show};
 pub use single::{persist_episode, persist_movie};
 

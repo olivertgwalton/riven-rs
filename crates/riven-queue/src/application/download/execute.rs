@@ -7,7 +7,8 @@ use riven_db::repo;
 
 use super::helpers::{stream_raw_title, stream_resolution};
 use super::persist::{
-    SeasonPersistOutcome, persist_episode, persist_movie, persist_season, persist_show,
+    SeasonPersistOutcome, persist_album, persist_episode, persist_movie, persist_season,
+    persist_show,
 };
 use crate::JobQueue;
 use crate::context::DownloadHierarchyContext;
@@ -383,12 +384,56 @@ pub async fn attempt_download(
                 }
             }
         }
-        MediaItemType::Artist | MediaItemType::Album | MediaItemType::Track => {
+        MediaItemType::Album => {
+            match persist_album(
+                item,
+                download,
+                info_hash,
+                queue,
+                hierarchy.expect("album downloads require hierarchy context"),
+                start_time,
+                stream_id,
+                profile,
+            )
+            .await
+            {
+                SeasonPersistOutcome::Complete => {
+                    tracing::debug!(
+                        id,
+                        info_hash,
+                        raw_title,
+                        "download: album saved, every track is in"
+                    );
+                    DownloadAttemptOutcome::TerminalHandled
+                }
+                SeasonPersistOutcome::Partial => {
+                    tracing::debug!(
+                        id,
+                        info_hash,
+                        raw_title,
+                        "download: album release saved, some tracks are still missing"
+                    );
+                    DownloadAttemptOutcome::Progressed
+                }
+                SeasonPersistOutcome::Failed => {
+                    tracing::debug!(
+                        id,
+                        info_hash,
+                        raw_title,
+                        "download: album release rejected, none of its files is a missing track"
+                    );
+                    DownloadAttemptOutcome::Failed
+                }
+            }
+        }
+        // Only albums are scraped: an artist's albums are, and a track comes
+        // in its album's release.
+        MediaItemType::Artist | MediaItemType::Track => {
             tracing::debug!(
                 id,
                 info_hash,
                 raw_title,
-                "download: music releases cannot be saved yet; leaving the release untried"
+                "download: only albums are downloaded; leaving the release untried"
             );
             DownloadAttemptOutcome::Deferred
         }

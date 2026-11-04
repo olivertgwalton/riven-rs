@@ -415,13 +415,14 @@ pub fn detect_rar_volume_groups_by_name(names: &[String]) -> Vec<Vec<usize>> {
     out.into_iter().map(|(_, v)| v).collect()
 }
 
-/// True if the file's subject looks like a video/media payload rather than a
-/// PAR2 / NFO / SFV companion file. Used to pick the right file to stream
+/// True if the file's subject looks like a video or audio payload rather than
+/// a PAR2 / NFO / SFV companion file. Used to pick the right file to stream
 /// from a multi-file NZB.
 pub fn looks_like_media(file: &NzbFile) -> bool {
     let lower = file.subject.to_ascii_lowercase();
     const MEDIA_EXTS: &[&str] = &[
-        ".mkv", ".mp4", ".avi", ".mov", ".m4v", ".webm", ".ts", ".m2ts", ".wmv",
+        ".mkv", ".mp4", ".avi", ".mov", ".m4v", ".webm", ".ts", ".m2ts", ".wmv", ".flac", ".mp3",
+        ".m4a", ".aac", ".ogg", ".oga", ".opus", ".wav", ".aif", ".dsf",
     ];
     const SKIP_EXTS: &[&str] = &[".par2", ".nfo", ".sfv", ".srr", ".nzb", ".7z", ".zip"];
     if SKIP_EXTS.iter().any(|e| lower.contains(e)) {
@@ -474,6 +475,8 @@ mod tests {
             subject: "Some.Movie.2024.1080p.mkv".into(),
             segments: crate::segments::SegmentList::default(),
         };
+        assert!(looks_like_media(&f));
+        f.subject = "01 - Airbag.flac".into();
         assert!(looks_like_media(&f));
         f.subject = "movie.par2".into();
         assert!(!looks_like_media(&f));

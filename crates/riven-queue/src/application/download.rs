@@ -848,7 +848,10 @@ async fn run_downloads(
     // Season/Show persists already emit their own Success/PartialSuccess events
     // and library-state updates per profile (see persist_season/persist_show);
     // the notify+finalize below is the Movie/Episode-only completion path.
-    if matches!(item.item_type, MediaItemType::Season | MediaItemType::Show) {
+    if matches!(
+        item.item_type,
+        MediaItemType::Season | MediaItemType::Show | MediaItemType::Album
+    ) {
         return DownloadWalkOutcome::Finished;
     }
 
@@ -931,11 +934,29 @@ async fn profile_satisfied_mid_walk(id: i64, item_type: MediaItemType, profile: 
             let mut episodes = episodes.values().flatten().peekable();
             episodes.peek().is_some() && episodes.all(|ep| have.contains(&ep.id))
         }
+        MediaItemType::Album => fetch_done_profiles(id, item_type)
+            .await
+            .iter()
+            .any(|p| p == profile),
         _ => false,
     }
 }
 
 async fn fetch_done_profiles(id: i64, item_type: MediaItemType) -> Vec<String> {
+    // An album is not fanned out to its tracks, so its one version is done
+    // only once every track holds it, not once any does as for a season.
+    if item_type == MediaItemType::Album {
+        let complete = repo::get_media_item(id)
+            .await
+            .ok()
+            .flatten()
+            .is_some_and(|album| album.state == MediaItemState::Completed);
+        return if complete {
+            vec![riven_rank::music::PROFILE_NAME.to_owned()]
+        } else {
+            Vec::new()
+        };
+    }
     let result = if item_type == MediaItemType::Season {
         repo::get_downloaded_profile_names_for_season(id).await
     } else {

@@ -1,5 +1,5 @@
-//! Container signatures, for telling a video file from bytes that only carry
-//! its name.
+//! Container signatures, for telling a video or audio file from bytes that
+//! only carry its name.
 //!
 //! A release can have every article on the provider and still not be a video:
 //! a scrambled or obfuscated post riven cannot undo, a text listing posted
@@ -15,16 +15,44 @@ const TS_PACKET: usize = 188;
 /// Blu-ray BDAV (.m2ts): a 4-byte timestamp before each 188-byte packet.
 const BDAV_PACKET: usize = 192;
 
-/// Whether `head`, a file's first bytes, opens a video container riven serves.
+/// Whether `head`, a file's first bytes, opens a video or audio container
+/// riven serves.
 pub fn is_media_container(head: &[u8]) -> bool {
     let at = |offset: usize, magic: &[u8]| head.get(offset..offset + magic.len()) == Some(magic);
-    at(0, &[0x1A, 0x45, 0xDF, 0xA3]) // Matroska / WebM (EBML)
+    is_audio_container(head)
+        || at(0, &[0x1A, 0x45, 0xDF, 0xA3]) // Matroska / WebM (EBML)
         || [b"ftyp", b"moov", b"mdat", b"free", b"wide"].iter().any(|atom| at(4, *atom)) // MP4 / MOV
         || (at(0, b"RIFF") && at(8, b"AVI "))
         || at(0, &[0x30, 0x26, 0xB2, 0x75, 0x8E, 0x66, 0xCF, 0x11]) // ASF / WMV
         || at(0, &[0x00, 0x00, 0x01, 0xBA]) // MPEG program stream
         || is_transport_stream(head, 0, TS_PACKET)
         || is_transport_stream(head, 4, BDAV_PACKET)
+}
+
+/// M4A is MP4 and is covered there.
+fn is_audio_container(head: &[u8]) -> bool {
+    let at = |offset: usize, magic: &[u8]| head.get(offset..offset + magic.len()) == Some(magic);
+    at(0, b"fLaC")
+        || at(0, b"ID3") // MP3 with a tag before its first frame
+        || at(0, b"OggS") // Ogg Vorbis / Opus / FLAC
+        || (at(0, b"RIFF") && at(8, b"WAVE"))
+        || (at(0, b"FORM") && (at(8, b"AIFF") || at(8, b"AIFC")))
+        || at(0, b"DSD ")
+        || is_mpeg_audio_frame(head)
+}
+
+/// An untagged MP3 opens on a frame header: eleven set sync bits, then a
+/// version, layer, bitrate and sample rate that are not the reserved values,
+/// which rules out most noise that merely starts with 0xFF.
+fn is_mpeg_audio_frame(head: &[u8]) -> bool {
+    let [0xFF, b1, b2, ..] = head else {
+        return false;
+    };
+    let version = (b1 >> 3) & 0b11;
+    let layer = (b1 >> 1) & 0b11;
+    let bitrate = b2 >> 4;
+    let sample_rate = (b2 >> 2) & 0b11;
+    b1 & 0xE0 == 0xE0 && version != 0b01 && layer != 0 && bitrate != 0xF && sample_rate != 0b11
 }
 
 /// A lone 0x47 is common in any data, so a transport stream needs the sync
@@ -55,6 +83,18 @@ mod tests {
             ts[4 + n * BDAV_PACKET] = TS_SYNC;
         }
         assert!(is_media_container(&ts));
+    }
+
+    #[test]
+    fn audio_containers_are_media() {
+        assert!(is_media_container(&padded(b"fLaC\x00\x00\x00\x22")));
+        assert!(is_media_container(&padded(b"ID3\x04\x00\x00")));
+        assert!(is_media_container(&padded(b"OggS\x00\x02")));
+        assert!(is_media_container(&padded(b"RIFF\x24\x08\x00\x00WAVEfmt ")));
+        // MPEG-1 Layer III, 320 kbit/s, 44.1 kHz.
+        assert!(is_media_container(&padded(&[0xFF, 0xFB, 0xE0, 0x64])));
+        // Sync bits with a reserved bitrate are noise.
+        assert!(!is_media_container(&padded(&[0xFF, 0xFB, 0xF0, 0x64])));
     }
 
     // The heads below are what broken releases in a real library served.

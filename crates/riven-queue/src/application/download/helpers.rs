@@ -53,6 +53,47 @@ pub async fn handle_bitrate_failure(
 }
 
 const VALID_VIDEO_EXTENSIONS: &[&str] = &["mp4", "mkv", "avi", "mov", "wmv", "flv", "webm"];
+/// What Plex and Jellyfin play as music.
+const VALID_AUDIO_EXTENSIONS: &[&str] = &[
+    "flac", "mp3", "m4a", "aac", "ogg", "oga", "opus", "wav", "aif", "aiff", "dsf",
+];
+
+fn extension(filename: &str) -> String {
+    filename
+        .rsplit('.')
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase()
+}
+
+/// Audio files eligible for media persistence, samples excluded as for video.
+pub fn is_persistable_audio_file(filename: &str) -> bool {
+    VALID_AUDIO_EXTENSIONS.contains(&extension(filename).as_str()) && !is_sample_file(filename)
+}
+
+/// A track keeps its file's own extension: a music server reads the format
+/// from it, where a video player probes the container. The disc goes in the
+/// name rather than a folder of its own, so every track is the same depth
+/// below its album.
+pub fn track_vfs_path(
+    artist: &str,
+    album: &str,
+    year: Option<i32>,
+    disc: Option<i32>,
+    number: i32,
+    title: &str,
+    original_filename: &str,
+) -> String {
+    let year = year.map(|y| format!(" ({y})")).unwrap_or_default();
+    let disc = disc.map(|d| format!("{d}-")).unwrap_or_default();
+    format!(
+        "/music/{}/{}{year}/{disc}{number:02} - {}.{}",
+        path_component(artist),
+        path_component(album),
+        path_component(title),
+        extension(original_filename),
+    )
+}
 
 /// Returns true if the filename has a recognised video extension.
 pub fn is_video_file(filename: &str) -> bool {
@@ -124,14 +165,9 @@ pub fn parse_file_path(path: &str) -> riven_rank::ParsedData {
 ///
 /// `show` is sanitized: path separators and leading dots are replaced with `_` to prevent
 /// directory traversal or embedded path components.
-pub fn episode_vfs_path(
-    show: &str,
-    season: i32,
-    ep: i32,
-    part: Option<i32>,
-    path_tag: Option<&str>,
-) -> String {
-    let safe_show: String = show
+/// A name made safe to be one component of a VFS path.
+fn path_component(name: &str) -> String {
+    let safe: String = name
         .chars()
         .map(|c| {
             if c == '/' || c == '\\' || c == '\0' {
@@ -141,7 +177,17 @@ pub fn episode_vfs_path(
             }
         })
         .collect();
-    let safe_show = safe_show.trim_start_matches('.');
+    safe.trim_start_matches('.').to_owned()
+}
+
+pub fn episode_vfs_path(
+    show: &str,
+    season: i32,
+    ep: i32,
+    part: Option<i32>,
+    path_tag: Option<&str>,
+) -> String {
+    let safe_show = path_component(show);
     let part_suffix = part.map(|n| format!(".pt{n}")).unwrap_or_default();
     let tag_suffix = path_tag.map(|t| format!(" [{t}]")).unwrap_or_default();
     format!(
@@ -253,5 +299,33 @@ mod tests {
         assert!(is_persistable_video_file(
             "top.gear.s23e03.1080p.bluray.x264-ouija.mkv"
         ));
+    }
+
+    #[test]
+    fn a_track_sits_in_its_album_with_its_own_extension() {
+        assert_eq!(
+            super::track_vfs_path(
+                "AC/DC",
+                "Back in Black",
+                Some(1980),
+                None,
+                6,
+                "Back in Black",
+                "06.flac"
+            ),
+            "/music/AC_DC/Back in Black (1980)/06 - Back in Black.flac"
+        );
+        assert_eq!(
+            super::track_vfs_path(
+                "Radiohead",
+                "Kid A Mnesia",
+                None,
+                Some(3),
+                2,
+                "Fog",
+                "x.MP3"
+            ),
+            "/music/Radiohead/Kid A Mnesia/3-02 - Fog.mp3"
+        );
     }
 }
