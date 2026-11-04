@@ -205,6 +205,11 @@ impl Plugin for StremthruPlugin {
         req: &ScrapeRequest<'_>,
         ctx: &PluginContext,
     ) -> anyhow::Result<HookResponse> {
+        // StremThru's torznab search is by IMDb id and its Newznab search is
+        // in the film and TV categories; neither finds an album.
+        if req.item_type.is_music() {
+            return Ok(HookResponse::Empty);
+        }
         let base_url = base_url(&ctx.settings);
         let torz_enabled = ctx.settings.get_or("scrapenabled", "true") != "false";
         let newz_enabled = ctx.settings.get_or("newznabenabled", "false") != "false"

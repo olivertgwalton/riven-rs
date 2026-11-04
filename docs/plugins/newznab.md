@@ -41,5 +41,6 @@ Fields of each entry:
 | `url` | url | Yes | — | — |
 | `apikey` | secret | Yes | — | — |
 | `categories` | text | No | `2000,5000` | Comma-separated Newznab category IDs. 2000 = Movies, 5000 = TV. |
+| `music_categories` | text | No | `3000` | Comma-separated Newznab category IDs searched for albums. 3000 = Audio, 3010 = MP3, 3040 = Lossless. |
 <!-- END GENERATED -->
 
