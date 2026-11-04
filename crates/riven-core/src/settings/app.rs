@@ -127,7 +127,7 @@ impl Default for RivenSettings {
 }
 
 /// Plugins that are always enabled by default; required for core indexing flows.
-pub const PERMANENTLY_ENABLED_PLUGINS: &[&str] = &["tmdb", "tvdb"];
+pub const PERMANENTLY_ENABLED_PLUGINS: &[&str] = &["tmdb", "tvdb", "musicbrainz"];
 
 impl RivenSettings {
     /// Returns the default `enabled` flag for a plugin given the current

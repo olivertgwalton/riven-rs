@@ -35,8 +35,8 @@ the plugins you name run:
 RIVEN_SETTING__enabledPlugins=["tmdb","stremthru","torrentio","plex"]
 ```
 
-`tmdb` and `tvdb` are always enabled regardless of the allow-list; metadata resolution
-is not optional.
+`tmdb`, `tvdb` and `musicbrainz` are always enabled regardless of the allow-list;
+metadata resolution is not optional.
 
 ## A minimum working set
 
@@ -76,6 +76,7 @@ is not optional.
 | --- | --- | --- |
 | [tmdb](tmdb.md) | 1 | `apikey` |
 | [tvdb](tvdb.md) | 1 | `apikey` |
+| [musicbrainz](musicbrainz.md) | 1 | — |
 | [seerr](seerr.md) | 5 | `apikey` |
 | [listrr](listrr.md) | 3 | `apikey` |
 | [mdblist](mdblist.md) | 2 | `apikey` |

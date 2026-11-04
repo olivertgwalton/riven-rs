@@ -3272,6 +3272,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "plugin-musicbrainz"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "riven-core",
+ "serde",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
 name = "plugin-newznab"
 version = "0.1.0"
 dependencies = [
@@ -4019,6 +4032,7 @@ dependencies = [
  "plugin-emby-jellyfin",
  "plugin-listrr",
  "plugin-mdblist",
+ "plugin-musicbrainz",
  "plugin-newznab",
  "plugin-notifications",
  "plugin-plex",
