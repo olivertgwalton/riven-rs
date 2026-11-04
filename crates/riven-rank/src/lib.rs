@@ -1,6 +1,7 @@
 pub mod country;
 pub mod defaults;
 pub mod media_metadata;
+pub mod music;
 pub mod parse;
 pub mod rank;
 pub mod settings;
