@@ -42,6 +42,8 @@ macro_rules! sql_migrations {
                 migrations.push(Box::new(M039DropUserBanColumns));
                 migrations.push(Box::new(M040IndexerStats));
                 migrations.push(Box::new(M041SceneNumbering));
+                migrations.push(Box::new(M042MusicTypes));
+                migrations.push(Box::new(M043MusicColumns));
                 migrations
             }
         }
@@ -76,6 +78,14 @@ sql_migration!(
     M041SceneNumbering,
     "m041_scene_numbering",
     "041_scene_numbering.sql"
+);
+
+sql_migration!(M042MusicTypes, "m042_music_types", "042_music_types.sql");
+
+sql_migration!(
+    M043MusicColumns,
+    "m043_music_columns",
+    "043_music_columns.sql"
 );
 
 /// Authentication tables, generated from riven's own entities.

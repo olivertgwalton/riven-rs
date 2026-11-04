@@ -11,6 +11,7 @@ pub async fn apply_indexed_media_item(
     item: &MediaItem,
     indexed: &IndexedMediaItem,
     requested_seasons: Option<&[i32]>,
+    requested_albums: Option<&[String]>,
 ) -> Result<()> {
     repo::update_media_item_index(item.id, indexed).await?;
 
@@ -25,6 +26,30 @@ pub async fn apply_indexed_media_item(
     }
 
     if item.item_type == MediaItemType::Movie {
+        return Ok(());
+    }
+
+    if item.item_type == MediaItemType::Artist
+        && let Some(albums) = &indexed.albums
+    {
+        for album_data in albums {
+            let requested =
+                requested_albums.is_none_or(|albums| albums.contains(&album_data.musicbrainz_id));
+            if !requested {
+                continue;
+            }
+            let album = repo::create_album(item.id, album_data, item.item_request_id, true).await?;
+            for track_data in &album_data.tracks {
+                repo::create_track(
+                    album.id,
+                    track_data,
+                    album_data.aired_at,
+                    item.item_request_id,
+                    true,
+                )
+                .await?;
+            }
+        }
         return Ok(());
     }
 

@@ -14,7 +14,8 @@ use crate::entities::*;
 use crate::orm;
 
 /// Shared INSERT … ON CONFLICT … RETURNING * implementation for top-level items
-/// (movies and shows). `second_id_val` is the tmdb id for a movie, else the tvdb id.
+/// (movies, shows and artists). `second_id_val` is the tmdb id for a movie, the
+/// MusicBrainz id for an artist, else the tvdb id.
 async fn upsert_top_level_item(
     title: &str,
     imdb_id: Option<&str>,
@@ -23,11 +24,14 @@ async fn upsert_top_level_item(
     item_request_id: Option<i64>,
     is_requested: bool,
 ) -> Result<(MediaItem, bool)> {
-    let (tmdb_id, tvdb_id) = match type_val {
-        MediaItemType::Movie => (second_id_val, None),
-        _ => (None, second_id_val),
+    let (tmdb_id, tvdb_id, musicbrainz_id) = match type_val {
+        MediaItemType::Movie => (second_id_val, None, None),
+        MediaItemType::Artist => (None, None, second_id_val),
+        _ => (None, second_id_val, None),
     };
-    if let Some(existing) = find_existing_media_item(type_val, imdb_id, tmdb_id, tvdb_id).await? {
+    if let Some(existing) =
+        find_existing_media_item(type_val, imdb_id, tmdb_id, tvdb_id, musicbrainz_id).await?
+    {
         let needs_update = is_requested
             && (!existing.is_requested
                 || (item_request_id.is_some() && existing.item_request_id != item_request_id));
@@ -51,6 +55,7 @@ async fn upsert_top_level_item(
         imdb_id: Set(imdb_id.map(str::to_owned)),
         tmdb_id: Set(tmdb_id.map(str::to_owned)),
         tvdb_id: Set(tvdb_id.map(str::to_owned)),
+        musicbrainz_id: Set(musicbrainz_id.map(str::to_owned)),
         item_type: Set(type_val),
         state: Set(MediaItemState::Indexed),
         is_requested: Set(is_requested),
@@ -265,6 +270,7 @@ pub async fn find_existing_media_item(
     imdb_id: Option<&str>,
     tmdb_id: Option<&str>,
     tvdb_id: Option<&str>,
+    musicbrainz_id: Option<&str>,
 ) -> Result<Option<MediaItem>> {
     // Match any supplied external id. With none supplied there is nothing to
     // match (the old SQL's `= $n AND $n IS NOT NULL` collapsed to false).
@@ -277,6 +283,9 @@ pub async fn find_existing_media_item(
     }
     if let Some(tvdb_id) = tvdb_id {
         by_external_id = by_external_id.add(media_items::Column::TvdbId.eq(tvdb_id));
+    }
+    if let Some(musicbrainz_id) = musicbrainz_id {
+        by_external_id = by_external_id.add(media_items::Column::MusicbrainzId.eq(musicbrainz_id));
     }
     if by_external_id.is_empty() {
         return Ok(None);
@@ -325,6 +334,23 @@ pub async fn create_show(
     .await
 }
 
+/// Returns `(item, was_created)`. `was_created` is false when an existing item was found.
+pub async fn create_artist(
+    name: &str,
+    musicbrainz_id: &str,
+    item_request_id: Option<i64>,
+) -> Result<(MediaItem, bool)> {
+    upsert_top_level_item(
+        name,
+        None,
+        Some(musicbrainz_id),
+        MediaItemType::Artist,
+        item_request_id,
+        true,
+    )
+    .await
+}
+
 pub(crate) fn to_json<T: serde::Serialize>(v: &T) -> serde_json::Value {
     serde_json::to_value(v).unwrap_or_default()
 }
@@ -365,6 +391,7 @@ pub async fn update_media_item_index(
         show_status: indexed.status.map_or(NotSet, |v| Set(Some(v))),
         rating: indexed.rating.map_or(NotSet, |v| Set(Some(v))),
         network_timezone: opt_str(indexed.network_timezone.as_deref()),
+        musicbrainz_id: opt_str(indexed.musicbrainz_id.as_deref()),
         indexed_at: Set(Some(now)),
         updated_at: Set(Some(now)),
         failed_attempts: Set(0),

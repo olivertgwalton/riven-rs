@@ -75,7 +75,9 @@ pub async fn scrape(
         );
         return Ok(ScrapeResponse::new());
     };
-    let media_type = request_media_type(request.item_type);
+    let Some(media_type) = request_media_type(request.item_type) else {
+        return Ok(ScrapeResponse::new());
+    };
 
     let url = format!("{base_url}/api/v1/search");
 
@@ -171,10 +173,12 @@ pub async fn scrape(
     Ok(results)
 }
 
-fn request_media_type(item_type: MediaItemType) -> &'static str {
+/// AIOStreams searches Stremio addons, which serve only films and series.
+fn request_media_type(item_type: MediaItemType) -> Option<&'static str> {
     match item_type {
-        MediaItemType::Movie => "movie",
-        MediaItemType::Show | MediaItemType::Season | MediaItemType::Episode => "series",
+        MediaItemType::Movie => Some("movie"),
+        MediaItemType::Show | MediaItemType::Season | MediaItemType::Episode => Some("series"),
+        MediaItemType::Artist | MediaItemType::Album | MediaItemType::Track => None,
     }
 }
 
@@ -191,6 +195,7 @@ fn request_identifier(request: &ScrapeRequest<'_>) -> Option<String> {
                 request.episode_or_1()
             )
         }
+        MediaItemType::Artist | MediaItemType::Album | MediaItemType::Track => return None,
     })
 }
 

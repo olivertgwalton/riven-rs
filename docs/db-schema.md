@@ -22,6 +22,8 @@ erDiagram
         text imdb_id
         text tvdb_id
         text tmdb_id
+        text musicbrainz_id
+        text musicbrainz_release_id
         media_item_type item_type
         media_item_state state
         bigint parent_id FK
@@ -30,6 +32,8 @@ erDiagram
         int season_number
         int episode_number
         int absolute_number
+        int disc_number
+        int track_number
         date aired_at
         timestamptz aired_at_utc
         boolean is_anime
@@ -81,9 +85,11 @@ erDiagram
         text imdb_id UK
         text tmdb_id UK
         text tvdb_id UK
+        text musicbrainz_id UK
         item_request_type request_type
         item_request_state state
         jsonb seasons
+        jsonb albums
         boolean is_partial_request
         text requested_by
     }
@@ -136,12 +142,12 @@ erDiagram
 
 | Type | Values |
 |------|--------|
-| `media_item_type` | movie, show, season, episode |
+| `media_item_type` | movie, show, season, episode, artist, album, track |
 | `media_item_state` | indexed, unreleased, scraped, ongoing, partially_completed, completed, paused, failed |
 | `show_status` | continuing, ended |
 | `content_rating` | G, PG, PG-13, R, NC-17, TV-Y, TV-Y7, TV-G, TV-PG, TV-14, TV-MA |
 | `filesystem_entry_type` | media, subtitle |
-| `item_request_type` | movie, show |
+| `item_request_type` | movie, show, artist |
 | `item_request_state` | requested, completed, failed, ongoing, unreleased, requested_additional_seasons |
 
 > `seaql_migrations` (SeaORM migration bookkeeping) omitted from the diagram.

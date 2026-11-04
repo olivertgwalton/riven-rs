@@ -36,6 +36,7 @@ fn build_id_query(req: &ScrapeRequest<'_>) -> Option<(&'static str, Vec<(&'stati
                 ("ep", req.episode_or_1().to_string()),
             ],
         ),
+        MediaItemType::Artist | MediaItemType::Album | MediaItemType::Track => return None,
     })
 }
 

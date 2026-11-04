@@ -34,6 +34,10 @@ pub enum RivenEvent {
         imdb_id: Option<String>,
         tvdb_id: Option<String>,
         tmdb_id: Option<String>,
+        #[serde(default)]
+        musicbrainz_id: Option<String>,
+        #[serde(default)]
+        requested_albums: Option<Vec<String>>,
     },
     #[serde(rename = "riven.media-item.index.success")]
     MediaItemIndexSuccess {
@@ -55,6 +59,10 @@ pub enum RivenEvent {
         title: String,
         season: Option<i32>,
         episode: Option<i32>,
+        #[serde(default)]
+        artist: Option<String>,
+        #[serde(default)]
+        year: Option<i32>,
     },
     #[serde(rename = "riven.media-item.scrape.success")]
     MediaItemScrapeSuccess {

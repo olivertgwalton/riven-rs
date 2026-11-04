@@ -22,14 +22,14 @@ anything outside the markers survives regeneration. -->
 | Variable | Kind | Read at |
 | --- | --- | --- |
 | `RIVEN_SETTING__SETUP_COMPLETED` | variable | `crates/riven-api/src/schema/queries/settings.rs:111` |
-| `RIVEN_STATIC_DIR` | variable | `crates/riven-api/src/server.rs:140` |
+| `RIVEN_STATIC_DIR` | variable | `crates/riven-api/src/server.rs:145` |
 
 ### `riven-app`
 
 | Variable | Kind | Read at |
 | --- | --- | --- |
-| `ORIGIN` | variable | `crates/riven-app/src/main.rs:358`<br>`crates/riven-app/src/main.rs:376` |
-| `RIVEN_SETTING__API_KEY` | variable | `crates/riven-app/src/main.rs:543` |
+| `ORIGIN` | variable | `crates/riven-app/src/main.rs:359`<br>`crates/riven-app/src/main.rs:377` |
+| `RIVEN_SETTING__API_KEY` | variable | `crates/riven-app/src/main.rs:544` |
 | `RIVEN_SETTING__PUBLIC_URL` | variable | `crates/riven-app/src/main.rs:156` |
 | `RIVEN_USENET_AUTO_REPAIR` | variable | `crates/riven-app/src/usenet.rs:151` |
 | `RIVEN_USENET_DISABLE_META_COMPACTION` | variable | `crates/riven-app/src/usenet.rs:84` |

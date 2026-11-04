@@ -76,6 +76,14 @@ pub struct Model {
     pub scene_season_number: Option<i32>,
     #[graphql(skip)]
     pub scene_episode_number: Option<i32>,
+    /// Artist MBID, release group MBID or recording MBID, by item type.
+    #[sea_orm(column_type = "Text", nullable)]
+    pub musicbrainz_id: Option<String>,
+    /// The release of an album's release group that its tracks come from.
+    #[sea_orm(column_type = "Text", nullable)]
+    pub musicbrainz_release_id: Option<String>,
+    pub disc_number: Option<i32>,
+    pub track_number: Option<i32>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

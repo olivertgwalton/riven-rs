@@ -61,6 +61,8 @@ fn scrape_event(job: &ScrapeJob, (season, episode): (Option<i32>, Option<i32>)) 
         title: job.title.clone(),
         season,
         episode,
+        artist: job.artist.clone(),
+        year: job.year,
     }
 }
 

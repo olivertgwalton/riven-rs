@@ -4,17 +4,19 @@ use riven_core::types::*;
 
 use riven_db::repo;
 
-use crate::context::{load_media_item_or_log, load_requested_seasons};
+use crate::context::{load_media_item_or_log, load_requested_albums, load_requested_seasons};
 use crate::indexing::apply_indexed_media_item;
 use crate::{IndexJob, JobQueue};
 
-fn index_event(job: &IndexJob) -> RivenEvent {
+fn index_event(job: &IndexJob, requested_albums: Option<Vec<String>>) -> RivenEvent {
     RivenEvent::MediaItemIndexRequested {
         id: job.id,
         item_type: job.item_type,
         imdb_id: job.imdb_id.clone(),
         tvdb_id: job.tvdb_id.clone(),
         tmdb_id: job.tmdb_id.clone(),
+        musicbrainz_id: job.musicbrainz_id.clone(),
+        requested_albums,
     }
 }
 
@@ -32,7 +34,10 @@ pub async fn start(job: &IndexJob, queue: &JobQueue) {
         tmdb_id = job.tmdb_id.as_deref().unwrap_or("-"),
         "index: asking the metadata providers to describe this item"
     );
-    let outcomes = queue.fan_out_and_collect(&index_event(job)).await;
+    let requested_albums = load_requested_albums(&item).await;
+    let outcomes = queue
+        .fan_out_and_collect(&index_event(job, requested_albums.clone()))
+        .await;
     if outcomes.is_empty() {
         tracing::warn!(
             id,
@@ -107,7 +112,14 @@ pub async fn start(job: &IndexJob, queue: &JobQueue) {
             acc.merge(indexed)
         });
 
-    if let Err(e) = apply_indexed_media_item(&item, &merged, requested_seasons.as_deref()).await {
+    if let Err(e) = apply_indexed_media_item(
+        &item,
+        &merged,
+        requested_seasons.as_deref(),
+        requested_albums.as_deref(),
+    )
+    .await
+    {
         tracing::error!(
             id,
             title = %item.title,

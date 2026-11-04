@@ -231,6 +231,9 @@ pub async fn list_episodes(season_id: i64) -> Result<Vec<MediaItem>> {
 }
 
 pub async fn get_media_item_hierarchy(id: i64) -> Result<Option<MediaItemHierarchy>> {
+    // Music resolves the same way: an album stands where a season does and
+    // its artist where the show does.
+    //
     // `item.*` is followed by explicit `::text` aliases for every PG enum column
     // so the nested `MediaItem` projection (and the resolved_show enum) decode
     // through DeriveActiveEnum's text path. resolved_show_content_rating is the
@@ -259,14 +262,14 @@ pub async fn get_media_item_hierarchy(id: i64) -> Result<Option<MediaItemHierarc
            FROM media_items item
            LEFT JOIN media_items season
              ON (
-                    (item.item_type = 'episode' AND item.parent_id = season.id AND season.item_type = 'season')
-                 OR (item.item_type = 'season' AND item.id = season.id)
+                    (item.item_type IN ('episode', 'track') AND item.parent_id = season.id AND season.item_type IN ('season', 'album'))
+                 OR (item.item_type IN ('season', 'album') AND item.id = season.id)
                 )
            LEFT JOIN media_items show_item
              ON (
-                    (item.item_type = 'show' AND item.id = show_item.id)
-                 OR (item.item_type = 'season' AND item.parent_id = show_item.id AND show_item.item_type = 'show')
-                 OR (item.item_type = 'episode' AND season.parent_id = show_item.id AND show_item.item_type = 'show')
+                    (item.item_type IN ('show', 'artist') AND item.id = show_item.id)
+                 OR (item.item_type IN ('season', 'album') AND item.parent_id = show_item.id AND show_item.item_type IN ('show', 'artist'))
+                 OR (item.item_type IN ('episode', 'track') AND season.parent_id = show_item.id AND show_item.item_type IN ('show', 'artist'))
                 )
            WHERE item.id = $1"#;
     Ok(
@@ -421,6 +424,138 @@ pub async fn create_episode(
     .ok_or_else(|| anyhow::anyhow!("create_episode upsert returned no row"))?;
     super::state::recompute(&[item.id]).await?;
     Ok(item)
+}
+
+pub async fn create_album(
+    artist_id: i64,
+    album: &riven_core::types::IndexedAlbum,
+    item_request_id: Option<i64>,
+    is_requested: bool,
+) -> Result<MediaItem> {
+    use chrono::Datelike;
+    let genres = album.genres.as_ref().map(super::media::to_json);
+    // An album's own state is rolled up from its tracks; one dated in the
+    // future is unreleased until then, as a movie is.
+    let sql = r#"INSERT INTO media_items (title, musicbrainz_id, musicbrainz_release_id, item_type, state, parent_id, aired_at, year, poster_path, genres, is_requested, created_at, item_request_id)
+           VALUES ($1, $2, $3, 'album', 'indexed', $4, $5, $6, $7, $8, $9, $10, $11)
+           ON CONFLICT (parent_id, musicbrainz_id) WHERE item_type = 'album'
+           DO UPDATE SET
+               title                  = EXCLUDED.title,
+               musicbrainz_release_id = COALESCE(EXCLUDED.musicbrainz_release_id, media_items.musicbrainz_release_id),
+               aired_at               = COALESCE(EXCLUDED.aired_at, media_items.aired_at),
+               year                   = COALESCE(EXCLUDED.year, media_items.year),
+               poster_path            = COALESCE(EXCLUDED.poster_path, media_items.poster_path),
+               genres                 = COALESCE(EXCLUDED.genres, media_items.genres),
+               is_requested           = EXCLUDED.is_requested OR media_items.is_requested,
+               updated_at             = NOW()
+           RETURNING media_items.*,
+               media_items.content_rating::text AS content_rating,
+               media_items.state::text          AS state,
+               media_items.item_type::text      AS item_type,
+               media_items.show_status::text    AS show_status"#;
+    let item = MediaItem::find_by_statement(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        sql,
+        [
+            album.title.clone().into(),
+            album.musicbrainz_id.clone().into(),
+            album.release_id.clone().into(),
+            artist_id.into(),
+            album.aired_at.into(),
+            album.aired_at.map(|date| date.year()).into(),
+            album.poster_path.clone().into(),
+            genres.into(),
+            is_requested.into(),
+            Utc::now().into(),
+            item_request_id.into(),
+        ],
+    ))
+    .one(orm())
+    .await?
+    .ok_or_else(|| anyhow::anyhow!("create_album upsert returned no row"))?;
+    super::state::recompute(&[item.id]).await?;
+    Ok(item)
+}
+
+/// A track takes its album's release date, so an album announced for a later
+/// date has unreleased tracks until that day.
+pub async fn create_track(
+    album_id: i64,
+    track: &riven_core::types::IndexedTrack,
+    aired_at: Option<chrono::NaiveDate>,
+    item_request_id: Option<i64>,
+    is_requested: bool,
+) -> Result<MediaItem> {
+    let today = Utc::now().date_naive();
+    let state_text = match aired_at {
+        Some(date) if date > today => "unreleased",
+        _ => "indexed",
+    };
+    let sql = r#"INSERT INTO media_items (title, musicbrainz_id, item_type, state, disc_number, track_number, parent_id, aired_at, is_requested, created_at, item_request_id)
+           VALUES ($1, $2, 'track', $3::media_item_state, $4, $5, $6, $7, $8, $9, $10)
+           ON CONFLICT (parent_id, disc_number, track_number) WHERE item_type = 'track'
+           DO UPDATE SET
+               title          = EXCLUDED.title,
+               musicbrainz_id = COALESCE(EXCLUDED.musicbrainz_id, media_items.musicbrainz_id),
+               aired_at       = COALESCE(EXCLUDED.aired_at, media_items.aired_at),
+               is_requested   = EXCLUDED.is_requested OR media_items.is_requested,
+               state = CASE
+                   WHEN media_items.state = 'unreleased'
+                    AND (EXCLUDED.aired_at IS NULL OR EXCLUDED.aired_at <= CURRENT_DATE)
+                   THEN 'indexed'::media_item_state
+                   ELSE media_items.state
+               END,
+               updated_at = NOW()
+           RETURNING media_items.*,
+               media_items.content_rating::text AS content_rating,
+               media_items.state::text          AS state,
+               media_items.item_type::text      AS item_type,
+               media_items.show_status::text    AS show_status"#;
+    let item = MediaItem::find_by_statement(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        sql,
+        [
+            track.title.clone().into(),
+            track.musicbrainz_id.clone().into(),
+            state_text.into(),
+            track.disc_number.into(),
+            track.number.into(),
+            album_id.into(),
+            aired_at.into(),
+            is_requested.into(),
+            Utc::now().into(),
+            item_request_id.into(),
+        ],
+    ))
+    .one(orm())
+    .await?
+    .ok_or_else(|| anyhow::anyhow!("create_track upsert returned no row"))?;
+    super::state::recompute(&[item.id]).await?;
+    Ok(item)
+}
+
+/// Requested albums of an artist, with no state filtering.
+pub async fn get_requested_albums_for_artist(artist_id: i64) -> Result<Vec<MediaItem>> {
+    Ok(media_items::Entity::find()
+        .filter(media_items::Column::ParentId.eq(artist_id))
+        .filter(media_items::Column::ItemType.eq(MediaItemType::Album))
+        .filter(media_items::Column::IsRequested.eq(true))
+        .order_by_asc(media_items::Column::AiredAt)
+        .into_model::<MediaItem>()
+        .all(orm())
+        .await?)
+}
+
+/// An album's tracks in disc and track order.
+pub async fn list_tracks(album_id: i64) -> Result<Vec<MediaItem>> {
+    Ok(media_items::Entity::find()
+        .filter(media_items::Column::ParentId.eq(album_id))
+        .filter(media_items::Column::ItemType.eq(MediaItemType::Track))
+        .order_by_asc(media_items::Column::DiscNumber)
+        .order_by_asc(media_items::Column::TrackNumber)
+        .into_model::<MediaItem>()
+        .all(orm())
+        .await?)
 }
 
 /// Fetch incomplete (indexed/scraped/ongoing) episodes for a season.

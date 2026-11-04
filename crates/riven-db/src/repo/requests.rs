@@ -40,6 +40,15 @@ fn parse_request_seasons(request: &ItemRequest) -> Option<Vec<i32>> {
         .and_then(|value| serde_json::from_value(value.clone()).ok())
 }
 
+/// Release group MBIDs an artist request names; `None` follows the whole
+/// discography.
+pub fn parse_request_albums(request: &ItemRequest) -> Option<Vec<String>> {
+    request
+        .albums
+        .as_ref()
+        .and_then(|value| serde_json::from_value(value.clone()).ok())
+}
+
 /// Collect the non-null `external_request_id`s for the item_requests linked to
 /// the given media_item IDs.  Used to notify content services before deletion.
 pub async fn get_external_request_ids_for_items(media_item_ids: &[i64]) -> Result<Vec<String>> {
@@ -68,18 +77,24 @@ pub async fn get_item_request_by_id(id: i64) -> Result<Option<ItemRequest>> {
         .await?)
 }
 
-/// Fetch the top-level media item (movie or show) associated with an item request.
+/// Fetch the top-level media item (movie, show or artist) associated with an
+/// item request.
 pub async fn get_request_root_item(request_id: i64) -> Result<Option<MediaItem>> {
     // Prefer a movie over a show when both somehow exist for the same request,
     // matching the original `ORDER BY CASE item_type ...` ranking.
     Ok(media_items::Entity::find()
         .filter(media_items::Column::ItemRequestId.eq(request_id))
-        .filter(media_items::Column::ItemType.is_in([MediaItemType::Movie, MediaItemType::Show]))
+        .filter(media_items::Column::ItemType.is_in([
+            MediaItemType::Movie,
+            MediaItemType::Show,
+            MediaItemType::Artist,
+        ]))
         .order_by_asc(Expr::cust(
             "CASE item_type \
                  WHEN 'movie'::media_item_type THEN 0 \
                  WHEN 'show'::media_item_type THEN 1 \
-                 ELSE 2 END",
+                 WHEN 'artist'::media_item_type THEN 2 \
+                 ELSE 3 END",
         ))
         .into_model::<MediaItem>()
         .one(orm())
@@ -188,6 +203,87 @@ pub async fn create_item_request(
         requested_by: Set(requested_by.map(str::to_owned)),
         external_request_id: Set(external_request_id.map(str::to_owned)),
         seasons: Set(seasons_json),
+        state: Set(ItemRequestState::Requested),
+        ..Default::default()
+    }
+    .insert(orm())
+    .await?;
+    let request = get_item_request_by_id(inserted.id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("inserted item request {} not found", inserted.id))?;
+    Ok(UpsertedItemRequest {
+        request,
+        action: ItemRequestUpsertAction::Created,
+    })
+}
+
+/// Create or extend the request for an artist. Albums asked for later are
+/// added to the ones already asked for; a request for the whole discography
+/// covers every album, so it only ever widens to that.
+pub async fn create_artist_request(
+    musicbrainz_id: &str,
+    requested_by: Option<&str>,
+    albums: Option<&[String]>,
+) -> Result<UpsertedItemRequest> {
+    let desired = albums.map(|albums| {
+        let mut albums = albums.to_vec();
+        albums.sort_unstable();
+        albums.dedup();
+        albums
+    });
+
+    let existing = item_requests::Entity::find()
+        .filter(item_requests::Column::MusicbrainzId.eq(musicbrainz_id))
+        .into_model::<ItemRequest>()
+        .one(orm())
+        .await?;
+
+    if let Some(existing) = existing {
+        let merged = match (parse_request_albums(&existing), desired) {
+            (None, _) => None,
+            (Some(_), None) => Some(None),
+            (Some(current), Some(desired)) => {
+                let mut merged = current.clone();
+                merged.extend(desired);
+                merged.sort_unstable();
+                merged.dedup();
+                (merged != current).then_some(Some(merged))
+            }
+        };
+        let Some(albums) = merged else {
+            return Ok(UpsertedItemRequest {
+                request: existing,
+                action: ItemRequestUpsertAction::Unchanged,
+            });
+        };
+        let mut active = item_requests::ActiveModel {
+            id: Unchanged(existing.id),
+            is_partial_request: Set(albums.is_some()),
+            albums: Set(albums.map(|values| serde_json::to_value(values).unwrap_or_default())),
+            ..Default::default()
+        };
+        if matches!(
+            existing.state,
+            ItemRequestState::Completed | ItemRequestState::Ongoing | ItemRequestState::Unreleased
+        ) {
+            active.state = Set(ItemRequestState::RequestedAdditionalSeasons);
+        }
+        active.update(orm()).await?;
+        let updated = get_item_request_by_id(existing.id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("updated item request {} not found", existing.id))?;
+        return Ok(UpsertedItemRequest {
+            request: updated,
+            action: ItemRequestUpsertAction::Updated,
+        });
+    }
+
+    let inserted = item_requests::ActiveModel {
+        musicbrainz_id: Set(Some(musicbrainz_id.to_owned())),
+        request_type: Set(ItemRequestType::Artist),
+        requested_by: Set(requested_by.map(str::to_owned)),
+        is_partial_request: Set(desired.is_some()),
+        albums: Set(desired.map(|values| serde_json::to_value(values).unwrap_or_default())),
         state: Set(ItemRequestState::Requested),
         ..Default::default()
     }
@@ -316,7 +412,7 @@ pub async fn get_retryable_item_requests() -> Result<Vec<ItemRequest>> {
             "(state = 'failed' OR NOT EXISTS ( \
                  SELECT 1 FROM media_items mi \
                  WHERE mi.item_request_id = item_requests.id \
-                   AND mi.item_type = ANY(ARRAY['movie'::media_item_type, 'show'::media_item_type]) \
+                   AND mi.item_type = ANY(ARRAY['movie'::media_item_type, 'show'::media_item_type, 'artist'::media_item_type]) \
              ))",
         ))
         .order_by_asc(item_requests::Column::CreatedAt)
@@ -449,5 +545,46 @@ pub async fn derive_item_request_state_for_request(
                 Ok(ItemRequestState::Requested)
             }
         }
+        ItemRequestType::Artist => {
+            let Some(artist) = root_item else {
+                return Ok(ItemRequestState::Requested);
+            };
+            let follows_discography = parse_request_albums(request).is_none();
+            let album_states: Vec<MediaItemState> = media_items::Entity::find()
+                .filter(media_items::Column::ParentId.eq(artist.id))
+                .filter(media_items::Column::ItemType.eq(MediaItemType::Album))
+                .filter(media_items::Column::IsRequested.eq(true))
+                .select_only()
+                .column(media_items::Column::State)
+                .into_tuple()
+                .all(orm())
+                .await?;
+            Ok(artist_request_state(&album_states, follows_discography))
+        }
+    }
+}
+
+/// An artist request from the states of the albums it asked for. One that
+/// follows the discography stays ongoing once everything is in, as a request
+/// for a continuing show does: the artist may release another.
+pub fn artist_request_state(
+    album_states: &[MediaItemState],
+    follows_discography: bool,
+) -> ItemRequestState {
+    let all = |target: MediaItemState| album_states.iter().all(|state| *state == target);
+    if album_states.is_empty() {
+        ItemRequestState::Requested
+    } else if all(MediaItemState::Completed) {
+        if follows_discography {
+            ItemRequestState::Ongoing
+        } else {
+            ItemRequestState::Completed
+        }
+    } else if all(MediaItemState::Unreleased) {
+        ItemRequestState::Unreleased
+    } else if album_states.contains(&MediaItemState::Failed) {
+        ItemRequestState::Failed
+    } else {
+        ItemRequestState::Ongoing
     }
 }

@@ -91,6 +91,21 @@ pub async fn upsert_requested_show(
     })
 }
 
+pub async fn upsert_requested_artist(
+    name: &str,
+    musicbrainz_id: &str,
+    requested_by: Option<&str>,
+    albums: Option<&[String]>,
+) -> Result<RequestedItemOutcome> {
+    let request = repo::create_artist_request(musicbrainz_id, requested_by, albums).await?;
+    let (item, _) = repo::create_artist(name, musicbrainz_id, Some(request.request.id)).await?;
+    Ok(RequestedItemOutcome {
+        item,
+        request: request.request,
+        action: request.action,
+    })
+}
+
 pub async fn sync_item_request_state(item: &MediaItem) {
     let Some(request_id) = item.item_request_id else {
         return;
@@ -144,7 +159,18 @@ pub async fn enqueue_after_request_action(
             }
             ItemRequestUpsertAction::Unchanged => {}
         },
-        _ => {}
+        // More albums asked of an artist are only known once it is indexed
+        // again, which creates them.
+        MediaItemType::Artist => match action {
+            ItemRequestUpsertAction::Created | ItemRequestUpsertAction::Updated => {
+                queue.push_index(IndexJob::from_item(item)).await;
+            }
+            ItemRequestUpsertAction::Unchanged => {}
+        },
+        MediaItemType::Season
+        | MediaItemType::Episode
+        | MediaItemType::Album
+        | MediaItemType::Track => {}
     }
 }
 
@@ -155,6 +181,7 @@ pub async fn retry_item_request(queue: &JobQueue, request: &ItemRequest) {
             request.imdb_id.as_deref(),
             request.tmdb_id.as_deref(),
             None,
+            None,
         )
         .await
         .ok()
@@ -164,6 +191,17 @@ pub async fn retry_item_request(queue: &JobQueue, request: &ItemRequest) {
             request.imdb_id.as_deref(),
             None,
             request.tvdb_id.as_deref(),
+            None,
+        )
+        .await
+        .ok()
+        .flatten(),
+        ItemRequestType::Artist => repo::find_existing_media_item(
+            MediaItemType::Artist,
+            None,
+            None,
+            None,
+            request.musicbrainz_id.as_deref(),
         )
         .await
         .ok()

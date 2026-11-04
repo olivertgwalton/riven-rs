@@ -28,6 +28,12 @@ pub enum MediaItemType {
     Season,
     #[sea_orm(string_value = "episode")]
     Episode,
+    #[sea_orm(string_value = "artist")]
+    Artist,
+    #[sea_orm(string_value = "album")]
+    Album,
+    #[sea_orm(string_value = "track")]
+    Track,
 }
 
 #[derive(
@@ -192,6 +198,8 @@ pub enum ItemRequestType {
     Movie,
     #[sea_orm(string_value = "show")]
     Show,
+    #[sea_orm(string_value = "artist")]
+    Artist,
 }
 
 #[derive(
@@ -211,10 +219,11 @@ pub enum ItemRequestType {
 pub enum ItemRequestState {
     #[sea_orm(string_value = "requested")]
     Requested,
-    /// An existing request had additional seasons appended after it was
-    /// already completed/ongoing. Signals to the indexer that it should
-    /// re-process this show; the recompute pipeline will then transition it
-    /// back to its derived state (completed/ongoing/unreleased).
+    /// An existing request had additional seasons (or, for an artist,
+    /// albums) appended after it was already completed/ongoing. Signals to the
+    /// indexer that it should re-process the show or artist; the recompute
+    /// pipeline will then transition it back to its derived state
+    /// (completed/ongoing/unreleased).
     #[sea_orm(string_value = "requested_additional_seasons")]
     RequestedAdditionalSeasons,
     #[sea_orm(string_value = "completed")]

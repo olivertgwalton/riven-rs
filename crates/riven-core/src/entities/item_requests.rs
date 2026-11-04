@@ -37,6 +37,12 @@ pub struct Model {
     #[sea_orm(column_type = "JsonBinary", nullable)]
     pub seasons: Option<Json>,
     pub is_partial_request: bool,
+    #[sea_orm(column_type = "Text", nullable, unique)]
+    pub musicbrainz_id: Option<String>,
+    /// Release group MBIDs of the albums an artist request asks for; `None`
+    /// follows the whole discography.
+    #[sea_orm(column_type = "JsonBinary", nullable)]
+    pub albums: Option<Json>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

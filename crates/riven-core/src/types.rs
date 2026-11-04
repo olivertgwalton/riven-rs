@@ -14,7 +14,7 @@ pub use enums::{
     ContentRating, FileSystemEntryType, ItemRequestState, ItemRequestType, MediaItemState,
     MediaItemType, ShowStatus,
 };
-pub use index::{IndexedEpisode, IndexedMediaItem, IndexedSeason};
+pub use index::{IndexedAlbum, IndexedEpisode, IndexedMediaItem, IndexedSeason, IndexedTrack};
 pub use playback::{ActivePlaybackSession, PlaybackMethod, PlaybackState, artwork_path};
 pub use provider::{DebridUserInfo, ProviderInfo};
 pub use stream::StreamLinkResponse;

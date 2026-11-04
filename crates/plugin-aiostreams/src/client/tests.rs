@@ -11,6 +11,8 @@ fn request(
         imdb_id: Some("tt0944947"),
         tvdb_id: None,
         title: "Game of Thrones",
+        artist: None,
+        year: None,
         season,
         episode,
     }

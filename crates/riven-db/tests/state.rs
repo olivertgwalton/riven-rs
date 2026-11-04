@@ -441,3 +441,64 @@ fn leaf_episode_without_a_date_is_unreleased_though_never_indexed() {
         Unreleased
     );
 }
+
+/// MusicBrainz has releases with no date. Their tracks are as available as
+/// any other; reading the gap as `Unreleased` would never scrape them.
+#[test]
+fn leaf_track_without_a_date_is_not_unreleased() {
+    assert_eq!(
+        leaf_state(
+            MediaItemType::Track,
+            Indexed,
+            false,
+            false,
+            false,
+            0,
+            false,
+            false,
+            0,
+        ),
+        Indexed
+    );
+}
+
+#[test]
+fn leaf_track_with_a_file_is_completed() {
+    assert_eq!(
+        leaf_state(
+            MediaItemType::Track,
+            Scraped,
+            false,
+            true,
+            false,
+            0,
+            true,
+            true,
+            0,
+        ),
+        Completed
+    );
+}
+
+#[test]
+fn album_with_some_tracks_is_partially_completed() {
+    assert_eq!(
+        agg(MediaItemType::Album, Indexed, None, &[Completed, Indexed]),
+        Some(PartiallyCompleted)
+    );
+}
+
+/// An artist has no continuing status, so a finished discography is
+/// complete; following new releases is the request's business.
+#[test]
+fn artist_with_every_album_is_completed() {
+    assert_eq!(
+        agg(
+            MediaItemType::Artist,
+            Indexed,
+            None,
+            &[Completed, Completed]
+        ),
+        Some(Completed)
+    );
+}

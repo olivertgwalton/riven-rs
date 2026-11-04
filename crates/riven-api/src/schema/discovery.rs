@@ -36,6 +36,8 @@ pub async fn run_index_discovery(
         imdb_id: imdb_id.map(ToOwned::to_owned),
         tvdb_id: tvdb_id.map(ToOwned::to_owned),
         tmdb_id: tmdb_id.map(ToOwned::to_owned),
+        musicbrainz_id: None,
+        requested_albums: None,
     };
 
     let merged = registry
@@ -78,6 +80,8 @@ pub async fn run_scrape_discovery(
         title: title.to_string(),
         season,
         episode,
+        artist: None,
+        year: None,
     };
 
     registry
@@ -509,7 +513,7 @@ pub async fn ensure_show_target(
     if needs_index {
         let indexed =
             run_index_discovery(registry, MediaItemType::Show, imdb_id, None, tvdb_id).await?;
-        apply_indexed_media_item(&outcome.item, &indexed, Some(seasons))
+        apply_indexed_media_item(&outcome.item, &indexed, Some(seasons), None)
             .await
             .map_err(Error::from)?;
     }
@@ -540,7 +544,7 @@ pub async fn ensure_download_target(
                 let indexed =
                     run_index_discovery(registry, MediaItemType::Movie, imdb_id, tmdb_id, None)
                         .await?;
-                apply_indexed_media_item(&outcome.item, &indexed, None)
+                apply_indexed_media_item(&outcome.item, &indexed, None, None)
                     .await
                     .map_err(Error::from)?;
             }
@@ -574,7 +578,7 @@ pub async fn ensure_download_target(
                 let indexed =
                     run_index_discovery(registry, MediaItemType::Show, imdb_id, None, tvdb_id)
                         .await?;
-                apply_indexed_media_item(&outcome.item, &indexed, Some(&requested))
+                apply_indexed_media_item(&outcome.item, &indexed, Some(&requested), None)
                     .await
                     .map_err(Error::from)?;
             }

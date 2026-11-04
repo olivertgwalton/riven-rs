@@ -104,6 +104,9 @@ pub fn newznab_text_query(req: &ScrapeRequest<'_>) -> (&'static str, Vec<(&'stat
                 ("tvsearch", params)
             }
         }
+        MediaItemType::Artist | MediaItemType::Album | MediaItemType::Track => {
+            ("music", vec![("q", q)])
+        }
     }
 }
 
@@ -423,6 +426,8 @@ mod tests {
             imdb_id: None,
             tvdb_id: None,
             title,
+            artist: None,
+            year: None,
             season,
             episode,
         }

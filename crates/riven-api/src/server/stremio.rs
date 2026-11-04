@@ -161,6 +161,8 @@ async fn resolve_media_entries(
             Ok(riven_db::repo::get_media_entries(item.id).await?)
         }
         MediaItemType::Season => Ok(riven_db::repo::get_media_entries_recursive(item.id).await?),
+        // Refused by `kind_matches` above: Stremio has no music.
+        MediaItemType::Artist | MediaItemType::Album | MediaItemType::Track => Ok(Vec::new()),
         MediaItemType::Show => {
             let (Some(season_number), Some(episode_number)) = (season, episode) else {
                 // A bare show ID has no single playable file. Stremio only asks

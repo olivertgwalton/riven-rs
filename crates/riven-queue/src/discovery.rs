@@ -323,6 +323,7 @@ fn validate(ctx: &ParseContext, parsed: &riven_rank::ParsedData) -> Option<Strin
                 }
             }
         }
+        MediaItemType::Artist | MediaItemType::Album | MediaItemType::Track => {}
     }
 
     None
