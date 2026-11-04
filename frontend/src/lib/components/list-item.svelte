@@ -112,6 +112,10 @@
             return mediaPath(data.id, normalizedType, params.join("&"));
         }
 
+        if (indexer === "musicbrainz" && normalizedType === "artist") {
+            return resolve("/(protected)/details/artist/[id]", { id: String(data.id) });
+        }
+
         if (indexer === "anilist" && (normalizedType === "movie" || normalizedType === "tv")) {
             // There is no /details/anilist/... route — Anilist ids aren't
             // ones the details page understands at all. Resolve to the
